@@ -2208,8 +2208,8 @@ func TestApplyOpsDeletingAnOpenAskBlockByIDRetractsItsAsk(t *testing.T) {
 }
 
 // An empty with deletes the matched text on purpose. Where it empties a whole paragraph the block
-// and its id stay, holding nothing, whatever blocks are around it; where the text it leaves reads
-// back as another block, the replace is refused naming that text.
+// and its id stay, holding nothing, whatever blocks are around it; where the text it leaves would
+// read as block syntax at a line start, it is stored escaped and reads back as the characters.
 func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	for _, test := range []struct{ name, markdown string }{
 		{"before a list", "Intro.\n\nBody.\n\n- a\n"},
@@ -2261,22 +2261,31 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: " x", With: ""})
-	var invalid *ErrInvalidOp
-	if !errors.As(err, &invalid) || invalid.Field != "with" || !strings.Contains(invalid.Reason, `leaves "---"`) || !strings.Contains(invalid.Reason, `the line "---" reads as a horizontal rule`) {
-		t.Fatalf("replace leaving \"---\" = %v, want INVALID_OP on with naming the text it leaves", err)
+	next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: " x", With: ""})
+	if err != nil {
+		t.Fatalf("replace leaving \"---\" = %v, want the text stored escaped", err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Intro.\n\n\\---\n\nAfter.\n"; markdown != want {
+		t.Fatalf("replace leaving \"---\" stored %q, want %q", markdown, want)
+	}
+	if back, err := parseInput(markdown); err != nil || !back.Equal(next) {
+		t.Fatalf("replace leaving \"---\" stored %q, which does not read back as written (%v)", markdown, err)
 	}
 }
 
 // An emptied paragraph is not written, so a block holding one is judged for shape as the blocks
-// it writes: a later replace in that block that would read back as another block is refused as it
-// is in a block that never held one.
+// it writes: a later replace in that block writing block syntax stores it escaped, as it does in a
+// block that never held one, and the block reads back holding it as text.
 func TestApplyOperationReplaceJudgesABlockHoldingAnEmptiedParagraph(t *testing.T) {
-	for _, test := range []struct{ name, markdown, with string }{
-		{"a quote, dashes", "Intro.\n\n> Body.\n>\n> More.\n", "---"},
-		{"a quote, tildes", "Intro.\n\n> Body.\n>\n> More.\n\nAfter.\n", "~~~"},
-		{"a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\nMore.\n:::\n", "---"},
-		{"a list item", "Intro.\n\n- item\n\n  Body.\n\n  More.\n", "---"},
+	for _, test := range []struct{ name, markdown, with, escaped string }{
+		{"a quote, dashes", "Intro.\n\n> Body.\n>\n> More.\n", "---", "\n> \\---\n"},
+		{"a quote, tildes", "Intro.\n\n> Body.\n>\n> More.\n\nAfter.\n", "~~~", "\n> \\~~~\n"},
+		{"a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\nMore.\n:::\n", "---", "\n\\---\n:::\n"},
+		{"a list item", "Intro.\n\n- item\n\n  Body.\n\n  More.\n", "---", "\n  \\---\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.markdown)
@@ -2288,40 +2297,56 @@ func TestApplyOperationReplaceJudgesABlockHoldingAnEmptiedParagraph(t *testing.T
 			if err != nil {
 				t.Fatalf("emptying the first paragraph = %v", err)
 			}
-			_, err = applyOperation(emptied, model.EditOp{Op: "replace", Find: "More.", With: test.with})
-			var invalid *ErrInvalidOp
-			if !errors.As(err, &invalid) || invalid.Field != "with" {
-				t.Fatalf("replace with %q beside an emptied paragraph = %v, want INVALID_OP on with", test.with, err)
+			next, err := applyOperation(emptied, model.EditOp{Op: "replace", Find: "More.", With: test.with})
+			if err != nil {
+				t.Fatalf("replace with %q beside an emptied paragraph = %v, want it stored escaped", test.with, err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(markdown, test.escaped) {
+				t.Fatalf("replace with %q beside an emptied paragraph stored %q, want it to hold %q", test.with, markdown, test.escaped)
+			}
+			if err := pmdoc.BlockShapeError(next.Children[1]); err != nil {
+				t.Fatalf("replace with %q beside an emptied paragraph stored %q, which reads back as another block: %v", test.with, markdown, err)
+			}
+			back, err := parseInput(markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			kept := false
+			pmdoc.Walk(back.Children[1], func(node *pmdoc.Node) bool {
+				kept = kept || node.Type == "paragraph" && nodeText(node) == test.with
+				return true
+			})
+			if !kept {
+				t.Fatalf("replace with %q beside an emptied paragraph stored %q, which does not read back holding %q as text", test.with, markdown, test.with)
 			}
 		})
 	}
 }
 
-// A replace writes text. Text that reads back as another block where it lands - a line of dashes
-// becomes a horizontal rule, a line of colons a typed block's fence - is refused with that cause,
-// whatever the block around it, and the advice is the insert that adds the block the caller
-// probably meant, except in a footnote definition: the document reads a definition at its end, so
-// a block inserted beside one reads back ahead of it, and the advice there is only to keep the
-// characters as text. The reason names the block the text reads back as, read in place, not at a
-// document's start, where a `---` line would open front matter.
-func TestApplyOperationReplaceRefusesTextThatReadsBackAsAnotherBlock(t *testing.T) {
+// A replace writes text. Text that would read as block syntax at a line start - a line of dashes
+// as a horizontal rule, a line of colons as a typed block's fence - is stored escaped, so it reads
+// back as the characters, in a paragraph, a quote, a list item, a callout and a footnote
+// definition alike. The browser editor's parser reads those escaped lines as text too (the
+// escaped-block-markers fixture).
+func TestApplyOperationReplaceStoresBlockSyntaxEscaped(t *testing.T) {
 	const footnote = "x[^1]\n\n[^1]: Body.\n"
-	for _, test := range []struct {
-		name, markdown, with string
-		want                 []string
-		insert               bool
-	}{
-		{"a paragraph", "Intro.\n\nBody.\n\nAfter.\n", "---", []string{"a horizontal rule", `insert with markdown "***"`}, true},
-		{"a blockquote", "Intro.\n\n> Body.\n", "---", []string{"a horizontal rule"}, true},
-		{"a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "---", []string{"a horizontal rule"}, true},
-		{"a list item", "Intro.\n\n- Body.\n- two\n", "***", []string{"horizontal rule"}, true},
-		{"a callout, with colons", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", ":::", []string{"typed block's fence"}, true},
-		{"a paragraph, a colon line then text", "Intro.\n\nBody.\n\nAfter.\n", ":::\nb", []string{"typed block's fence"}, true},
-		{"a paragraph, after a hard break", "Intro.\n\nBody.\n\nAfter.\n", "x\\\n***", []string{"the document's end reads back as a horizontal rule"}, true},
-		{"a footnote definition", footnote, "---", []string{"horizontal rule", "other text on that line"}, false},
-		{"a footnote definition, with asterisks", footnote, "***", []string{"horizontal rule", "other text on that line"}, false},
-		{"a footnote definition, a colon line then text", footnote, ":::\nb", []string{"typed block's fence", "other text on that line"}, false},
-		{"a footnote definition's first paragraph of two", "x[^1]\n\n[^1]: Body.\n\n    More.\n", "---", []string{"a horizontal rule", "other text on that line"}, false},
+	const callout = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
+	for _, test := range []struct{ name, markdown, with, stored string }{
+		{"a paragraph", "Intro.\n\nBody.\n\nAfter.\n", "---", "Intro.\n\n\\---\n\nAfter.\n"},
+		{"a blockquote", "Intro.\n\n> Body.\n", "---", "Intro.\n\n> \\---\n"},
+		{"a callout", callout, "---", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\\---\n:::\n"},
+		{"a list item", "Intro.\n\n- Body.\n- two\n", "***", "Intro.\n\n- \\***\n- two\n"},
+		{"a callout, with colons", callout, ":::", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\\:::\n:::\n"},
+		{"a paragraph, a colon line then text", "Intro.\n\nBody.\n\nAfter.\n", ":::\nb", "Intro.\n\n\\::: b\n\nAfter.\n"},
+		{"a paragraph, after a hard break", "Intro.\n\nBody.\n\nAfter.\n", "x\\\n***", "Intro.\n\nx\\\n\\***\n\nAfter.\n"},
+		{"a footnote definition", footnote, "---", "x[^1]\n\n[^1]: \\---\n"},
+		{"a footnote definition, with asterisks", footnote, "***", "x[^1]\n\n[^1]: \\***\n"},
+		{"a footnote definition, a colon line then text", footnote, ":::\nb", "x[^1]\n\n[^1]: \\::: b\n"},
+		{"a footnote definition's first paragraph of two", "x[^1]\n\n[^1]: Body.\n\n    More.\n", "---", "x[^1]\n\n[^1]: \\---\n\n    More.\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput(test.markdown)
@@ -2329,51 +2354,21 @@ func TestApplyOperationReplaceRefusesTextThatReadsBackAsAnotherBlock(t *testing.
 				t.Fatal(err)
 			}
 			pmdoc.EnsureBlockIDs(tree)
-			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
-			var invalid *ErrInvalidOp
-			if !errors.As(err, &invalid) || invalid.Field != "with" {
-				t.Fatalf("replace with %q = %v, want INVALID_OP on with", test.with, err)
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatalf("replace with %q = %v, want it stored escaped", test.with, err)
 			}
-			for _, want := range test.want {
-				if !strings.Contains(invalid.Reason, want) {
-					t.Fatalf("reason %q lacks %q", invalid.Reason, want)
-				}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if strings.Contains(invalid.Reason, "requires block children") {
-				t.Fatalf("reason %q names the document-start reading", invalid.Reason)
+			if markdown != test.stored {
+				t.Fatalf("replace with %q stored %q, want %q", test.with, markdown, test.stored)
 			}
-			if offers := strings.Contains(invalid.Reason, "insert"); offers != test.insert {
-				t.Fatalf("reason %q offers an insert: %v, want %v", invalid.Reason, offers, test.insert)
-			}
-			if strings.Contains(invalid.Reason, "the a ") {
-				t.Fatalf("reason %q names a block twice over", invalid.Reason)
-			}
-			if strings.Contains(invalid.Reason, "Backlink") {
-				t.Fatalf("reason %q names the parser's node rather than the caller's footnote", invalid.Reason)
+			back, err := parseInput(markdown)
+			if err != nil || !back.Equal(next) {
+				t.Fatalf("replace with %q stored %q, which does not read back as written (%v)", test.with, markdown, err)
 			}
 		})
-	}
-	// The advised insert adds the rule beside the paragraph.
-	tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pmdoc.EnsureBlockIDs(tree)
-	next, err := applyOperation(tree, model.EditOp{Op: "insert", After: "Body.", Markdown: "***"})
-	if err != nil {
-		t.Fatalf("the advised insert = %v", err)
-	}
-	if len(next.Children) != 4 || next.Children[2].Type != "hr" {
-		markdown, _ := renderTree(next)
-		t.Fatalf("after the advised insert = %q, want a horizontal rule after the paragraph", markdown)
-	}
-	for _, with := range []string{"--- a note", "a --- b", "x :::"} {
-		tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: with}); err != nil {
-			t.Fatalf("replace with %q = %v, want it accepted", with, err)
-		}
 	}
 }

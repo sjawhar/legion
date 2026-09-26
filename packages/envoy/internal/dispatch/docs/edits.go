@@ -763,9 +763,6 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, invalidMarkdownOp("markdown", err)
 		}
-		if err := refuseDuplicateBlockIDs(tree, with); err != nil {
-			return nil, err
-		}
 		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
 			return out, err
 		}
@@ -1050,39 +1047,6 @@ func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdo
 		return pmdoc.Range{}, true, err
 	}
 	return r, true, nil
-}
-
-// refuseDuplicateBlockIDs refuses inserted markdown that carries a block id the document already
-// holds. Keeping the caller's id is how an edit of an existing typed block retains it, but a
-// second block with that id leaves the document with two, and the repair that follows awards it
-// to whichever comes first - so an inserted copy placed before the original takes the id, and the
-// original, with the comments and asks anchored to it, is the one renumbered.
-func refuseDuplicateBlockIDs(tree, inserted *pmdoc.Node) error {
-	held := map[string]bool{}
-	collectBlockIDs(tree, held)
-	carried := map[string]bool{}
-	collectBlockIDs(inserted, carried)
-	for id := range carried {
-		if held[id] {
-			return &ErrInvalidOp{Field: "markdown", Reason: fmt.Sprintf(
-				"block id %q is already in this document; omit the id or choose another to insert a new block, or, to put this block in that one's place, delete it earlier in the same batch and anchor the insert on the block before or after it",
-				id,
-			)}
-		}
-	}
-	return nil
-}
-
-func collectBlockIDs(node *pmdoc.Node, into map[string]bool) {
-	if node == nil {
-		return
-	}
-	if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
-		into[id] = true
-	}
-	for _, child := range node.Children {
-		collectBlockIDs(child, into)
-	}
 }
 
 // refuseUnreadableReplacement refuses a replace that makes the document-level block it lands in

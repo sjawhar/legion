@@ -152,10 +152,12 @@ the colons (`pmdoc.TypedFenceLine`), and finds nothing
 closing in a blockquote inside the typed block (`pmdoc.TypedFenceLineInCode`, held to the engine's
 own verdicts in `pmdoc/testdata/typed-fence-lines.json`, which the fixture generator writes for a
 callout at the top and inside a blockquote, list items and a footnote definition); the advice is
-four spaces, which no layout closes. A `replace` is also refused where its text reads back as
-another block - `---` over a paragraph becomes a horizontal rule - naming the block it reads back
-as and the `insert` that adds it, except in a footnote definition, which the document reads at its
-end, so a block inserted beside one reads back ahead of it (`refuseReshapedReplacement`). An empty
+four spaces, which no layout closes. Text a `replace` writes that would read as block syntax at a
+line start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::`
+over a paragraph is stored `\---` and so on (the renderer's line-start escapes). A `replace` whose
+text still reads back as another block is refused, naming the block it reads back as and the
+`insert` that adds it, except in a footnote definition, which the document reads at its end, so a
+block inserted beside one reads back ahead of it (`refuseReshapedReplacement`). An empty
 paragraph is not written, so the shape comparison (`pmdoc.BlockShapeError`) expects none back: an
 empty `with` that empties its paragraph changes no shape, a block holding an emptied paragraph is
 still judged for every later replace, and an empty `with` leaving text that reads back as another

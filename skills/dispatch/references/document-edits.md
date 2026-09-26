@@ -73,10 +73,9 @@ list item's code, do not survive the next read; and a line of three or more colo
 indented less than four columns from where the typed block's lines start, is `INVALID_OP`, since the browser editor
 ends the typed block there - indent it four or more spaces (a tab reaches only the next tab stop, which inside a list
 item or a blockquote can be two columns away), or move the code block out of the typed block. Text a `replace` writes
-that reads back as another block is `INVALID_OP` too: a line of only `-`, `*` or `_` is a horizontal rule, and a line
-of only colons a typed block's fence; to add that block, `insert` it beside the paragraph (`insert` with markdown
-`***` adds a rule), except in a footnote definition, which the document reads at its end, so a block inserted beside
-it reads back ahead of it - there, keep the characters as text with other text on that line. Use zero-based
+that would read as block syntax at a line start is stored escaped and reads back as the characters you sent: `---` over
+a paragraph is stored `\---`, not a rule, so to add a rule, `insert` it beside the paragraph (`insert` with markdown
+`***`). Use zero-based
 `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 
