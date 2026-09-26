@@ -84,8 +84,12 @@ func Parse(data []byte) (*Set, error) {
 	if err := dec.Decode(&f); err != nil {
 		return nil, fmt.Errorf("rules: %w", err)
 	}
-	var extra yaml.Node
-	if err := dec.Decode(&extra); err != io.EOF {
+	for {
+		var extra yaml.Node
+		err := dec.Decode(&extra)
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
 			return nil, fmt.Errorf("rules: %w", err)
 		}

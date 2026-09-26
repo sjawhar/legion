@@ -131,3 +131,10 @@ func TestMultiDocumentRefused(t *testing.T) {
 		t.Fatal("expected multi-document rules file to be refused")
 	}
 }
+
+func TestRealDocumentAfterEmptyExtraRefused(t *testing.T) {
+	data := []byte(singleDocBase + "---\n# empty second\n---\nfoo: bar\n")
+	if _, err := Parse(data); err == nil {
+		t.Fatal("expected a real third document, following an empty second one, to be refused")
+	}
+}
