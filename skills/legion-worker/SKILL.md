@@ -335,7 +335,8 @@ this proof.
   ```
 
   Resolve only when the newest comment is submitted, its `author { login }` equals the opener's,
-  and its `body` begins `Accepted:`. For each such thread:
+  and its `body`, after removing leading spaces, tabs, CR, and LF, begins `Accepted:`. For each
+  such thread:
 
   ```graphql
   mutation($threadId: ID!) {
