@@ -88,6 +88,7 @@ describe("cmdWorkspaceInit", () => {
       "clone",
       "https://github.com/acme/widgets",
       expect.stringContaining(`${cloneDir}.clone-`),
+      "--config=git.executable-path=git",
     ]);
     // The clone and the fetch run with the one provisioning environment `@legion/workspace`
     // builds for a pod, exactly: the pairs that reset the clone's credential-helper chain (the
@@ -97,6 +98,7 @@ describe("cmdWorkspaceInit", () => {
     const provisioningEnv = {
       GIT_ASKPASS: "",
       GIT_TERMINAL_PROMPT: "0",
+      GIT_ALLOW_PROTOCOL: "https",
       LEGION_PROVISIONING_TOKEN: "ghs_x",
       GIT_CONFIG_COUNT: "3",
       GIT_CONFIG_KEY_0: "credential.helper",
@@ -105,14 +107,19 @@ describe("cmdWorkspaceInit", () => {
       GIT_CONFIG_VALUE_1: expect.stringContaining(`${root}/`),
       GIT_CONFIG_KEY_2: "core.hooksPath",
       GIT_CONFIG_VALUE_2: "/dev/null",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_CONFIG_NOSYSTEM: "1",
     };
     expect(commands[0]?.opts?.env).toEqual(provisioningEnv);
     const fetchCommand = commands.find(
       (c) => c.cmd[0] === "jj" && c.cmd[1] === "git" && c.cmd[2] === "fetch"
     );
-    expect(fetchCommand?.cmd).toEqual(["jj", "git", "fetch", "-R", cloneDir]);
+    expect(fetchCommand?.cmd).toEqual([
+      "jj",
+      "git",
+      "fetch",
+      "-R",
+      cloneDir,
+      "--config=git.executable-path=git",
+    ]);
     expect(fetchCommand?.opts?.env).toEqual(provisioningEnv);
 
     expect(commands.map((c) => c.cmd)).toContainEqual([

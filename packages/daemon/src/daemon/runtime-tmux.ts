@@ -447,7 +447,6 @@ export class TmuxRuntime implements Runtime {
         provisioningToken: () => this.deps.provisioningToken(owner),
         credentialHelper: this.deps.credentialHelper,
         commandTimeoutMs: this.deps.slowCommandTimeoutMs,
-        isolateGitConfig: false,
         run: this.workspaceRun,
       })
     );

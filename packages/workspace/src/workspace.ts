@@ -49,12 +49,6 @@ export interface ProvisionIssueWorkspaceDeps {
    * config writes): each waits on the network or a credential helper, so the daemon passes its
    * `slow_command_timeout_seconds` here rather than the runner's generic default. */
   readonly commandTimeoutMs: number;
-  /** Whether provisioning's credentialed clone and fetch read no system or global git
-   * configuration: true in a pod's init container, whose git needs none. The tmux runtime passes
-   * false, since the daemon host's global configuration can carry the operator's own proxy. There
-   * the isolation would close nothing: a pane can write the shared clone's configuration, which
-   * the fetch reads whatever this says. */
-  readonly isolateGitConfig: boolean;
 }
 
 /** Neither kill is an ordinary `Command failed (exit N)`: the runner's own report is what the
@@ -104,6 +98,11 @@ const PROVISIONING_CREDENTIAL_HELPER = `#!/bin/sh
 printf 'username=x-access-token\npassword=%s\n' "$LEGION_PROVISIONING_TOKEN"
 `;
 
+/** The credentialed jj commands' own git: the one on PATH, whatever a repository's
+ * `git.executable-path` names, since jj reads that key from the clone a tree writes (the Go twin
+ * pins the git it resolved at boot). */
+const PINNED_GIT_EXECUTABLE = "--config=git.executable-path=git";
+
 interface ProvisioningCredential {
   readonly directory: string;
   readonly env: Readonly<Record<string, string>>;
@@ -121,14 +120,15 @@ interface ProvisioningCredential {
  * before it — the general entry and the URL-specific one alike, the operator's and the tree's.
  * `GIT_ASKPASS` is set empty, which git reads as no askpass at all, neither `core.askPass` nor
  * `SSH_ASKPASS`, and terminal prompts are off, so a host the helper does not answer gets nothing.
- * `core.hooksPath=/dev/null` runs no hook the shared clone, or any config git reads, names: a
- * tree writes the clone, and a hook would run with the token in its environment (the Go twin's
- * pinnedGitConfig). With `isolate`, git also reads no system or global configuration. The
- * persisted config is untouched. */
+ * A tree writes the clone, so nothing it names may run with the token in its environment:
+ * `core.hooksPath=/dev/null` runs no hook, and `GIT_ALLOW_PROTOCOL=https` refuses every transport
+ * but https, the only one https://github.com needs, so a rewrite to a local path (and its
+ * `uploadpack`), to ssh (and `core.sshCommand`) or to `ext::` runs no program (the Go twin's
+ * pinnedGitConfig and transportEnvironment). The commands themselves name jj's git
+ * (`PINNED_GIT_EXECUTABLE`). The persisted config is untouched. */
 async function createProvisioningCredential(
   stateDir: string,
-  token: string,
-  isolate: boolean
+  token: string
 ): Promise<ProvisioningCredential> {
   await mkdir(stateDir, { recursive: true });
   const directory = await mkdtemp(path.join(stateDir, "provisioning-credential-"));
@@ -140,6 +140,7 @@ async function createProvisioningCredential(
     env: {
       GIT_ASKPASS: "",
       GIT_TERMINAL_PROMPT: "0",
+      GIT_ALLOW_PROTOCOL: "https",
       [PROVISIONING_TOKEN_ENV]: token,
       GIT_CONFIG_COUNT: "3",
       GIT_CONFIG_KEY_0: "credential.helper",
@@ -148,7 +149,6 @@ async function createProvisioningCredential(
       GIT_CONFIG_VALUE_1: `!'${helper.replaceAll("'", "'\\''")}'`,
       GIT_CONFIG_KEY_2: "core.hooksPath",
       GIT_CONFIG_VALUE_2: "/dev/null",
-      ...(isolate ? { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } : {}),
     },
   };
 }
@@ -182,7 +182,9 @@ async function ensureRepoClone(
   const tempDir = await mkdtemp(`${repoCloneDir}.clone-`);
   try {
     const remote = `https://github.com/${owner}/${repo}`;
-    await runChecked(deps, ["jj", "git", "clone", remote, tempDir], { env: credentialEnv });
+    await runChecked(deps, ["jj", "git", "clone", remote, tempDir, PINNED_GIT_EXECUTABLE], {
+      env: credentialEnv,
+    });
     const tempJjDir = path.join(tempDir, ".jj");
     if (!existsSync(tempJjDir)) {
       throw new Error(`Incomplete Jujutsu clone at ${tempDir}: missing ${tempJjDir}`);
@@ -589,8 +591,7 @@ export async function provisionIssueWorkspace(
 
   const credential = await createProvisioningCredential(
     deps.stateDir,
-    await deps.provisioningToken(),
-    deps.isolateGitConfig
+    await deps.provisioningToken()
   );
   try {
     await ensureRepoClone(deps, repoCloneDir, owner, repo, credential.env);
@@ -624,7 +625,7 @@ export async function provisionIssueWorkspace(
         repoCloneDir,
       ]);
     }
-    await runChecked(deps, ["jj", "git", "fetch", "-R", repoCloneDir], {
+    await runChecked(deps, ["jj", "git", "fetch", "-R", repoCloneDir, PINNED_GIT_EXECUTABLE], {
       env: credential.env,
     });
   } finally {

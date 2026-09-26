@@ -63,14 +63,17 @@ GIT_CONFIG_KEY_2=core.hooksPath                        GIT_CONFIG_VALUE_2=/dev/n
 ```
 
 beside an empty `GIT_ASKPASS` (git reads it as no askpass program at all, not `core.askPass`
-either) and `GIT_TERMINAL_PROMPT=0`. The one-shot helper answers `get` with the installation
+either), `GIT_TERMINAL_PROMPT=0`, and `GIT_ALLOW_PROTOCOL=https`, which refuses every transport
+but the one github.com needs (so no rewrite reaches a program through a local path's
+`uploadpack`, `core.sshCommand` or `ext::`). The clone and the fetch also pass
+`--config=git.executable-path=git`, so a repository's `git.executable-path` never runs. The one-shot helper answers `get` with the installation
 token; git asks it for https://github.com alone, so a remote that a URL rewrite in the clone's
 config sends to another scheme, host or port is asked for nothing. That rewrite is the reason the
 helper is scoped: every agent of a tree writes the shared clone's config. The fix LEGION-178
 first shipped kept an askpass that answered every prompt, and re-enabled it with
 `credential.interactive=true`; that askpass handed the token to whatever host a rewrite named.
 
-Three git facts make that the whole fix:
+Three git facts make the helper reset work:
 
 - `GIT_CONFIG_*` pairs are **command scope**, read after the system, global, and repository
   files, so they win.
@@ -85,7 +88,8 @@ Three git facts make that the whole fix:
 Why **pairs, not `-c`**: jj, not our code, spawns the git that fetches. `jj git fetch -R <clone>`
 accepts no git flags, but jj's own config reader (gitoxide) honours `GIT_CONFIG_COUNT` and the
 subprocess inherits the environment — verified on jj 0.45.1 with an interposed `git` that
-recorded all eight names untouched. The same env reaches the pod through `legion
+recorded every variable of the provisioning environment untouched (eight names then; the set has
+grown since, by the same route). The same env reaches the pod through `legion
 workspace-init`'s `processEnvRunner` and the daemon host through `createDaemonRunner`; both lay it
 over the process environment with the caller's env winning.
 
