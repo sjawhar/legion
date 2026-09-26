@@ -45,6 +45,8 @@ import {
   tableRowSchema,
   tableSchema,
 } from '@milkdown/preset-gfm';
+import { codeBlockSchemaExt } from 'proof-sdk-upstream/src/editor/schema/code-block-ext';
+import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { ySyncPluginKey } from 'y-prosemirror';
 
 export const BLOCK_ID_ATTR = 'blockId';
@@ -140,10 +142,12 @@ function extend(schema: { extendSchema: (handler: (prev: SchemaFactory) => Schem
 }
 
 /**
- * The preset block schemas re-registered with `blockId`. `code_block` and
- * `frontmatter` are the fork's own schemas and extend themselves in their modules.
+ * Every block schema is re-registered with `blockId`, including the upstream
+ * code-block and frontmatter schemas the consumer imports.
  */
 export const blockIdSchemas = [
+  codeBlockSchemaExt,
+  frontmatterSchema,
   paragraphSchema,
   headingSchema,
   blockquoteSchema,
