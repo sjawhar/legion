@@ -16,4 +16,4 @@ package api
 // test and read by the plugin's, holds the two together. The TypeScript daemon's own contract,
 // `legion.daemonApiVersion` against `LEGION_DAEMON_API_VERSION`, is a separate number that moves on
 // its own until Stage 7 removes it.
-const GoDaemonAPIVersion = 6
+const GoDaemonAPIVersion = 7

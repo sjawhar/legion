@@ -97,7 +97,9 @@ const legionGoPhaseView = z.strictObject({
   rounds: z.number().int().nonnegative(),
 });
 
-/** `api.PullRequestView` — the pull request as the daemon observes it from GitHub. */
+/** `api.PullRequestView` — the pull request as the daemon observes it from GitHub.
+ * `reviewDecision` is the open review round's decision, the one the workflow ends the round on
+ * when the reviewer completes; absent until a review in the round decides. */
 const legionGoPullRequestView = z.strictObject({
   number: z.number().int().positive(),
   head: nonEmptyString,
@@ -141,6 +143,9 @@ const legionGoIssue = z.strictObject({
   generation: z.number().int().nonnegative(),
   phase: z.enum(LEGION_GO_PHASES),
   status: nonEmptyString,
+  /** Why a held issue is held, when its hold has one: `escalated` once its architect sent it to
+   * the controller. Absent while the issue's tree lingers or is closed, until it is re-admitted. */
+  holdReason: z.literal("escalated").optional(),
   architect: legionGoClaimView.optional(),
   workers: z.partialRecord(z.enum(LEGION_ROLES), legionGoPhaseView),
   pullRequest: legionGoPullRequestView.optional(),

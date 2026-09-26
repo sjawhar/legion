@@ -1,0 +1,61 @@
+diff --git a/lib/index.js b/lib/index.js
+index a1094153e619ca57d9a444896d85d0a840a0ec24..33020b3e6d1f16db1169dbe562ec1c0aa10897b4 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -1,6 +1,6 @@
+ import { editorViewOptionsCtx, parserCtx, schemaCtx, serializerCtx } from "@milkdown/core";
+ import { getNodeFromSchema, isTextOnlySlice } from "@milkdown/prose";
+-import { DOMParser, DOMSerializer } from "@milkdown/prose/model";
++import { DOMParser, DOMSerializer, Slice } from "@milkdown/prose/model";
+ import { Plugin, PluginKey, TextSelection } from "@milkdown/prose/state";
+ import { $prose } from "@milkdown/utils";
+ //#region src/__internal__/is-pure-text.ts
+@@ -24,6 +24,38 @@ function withMeta(plugin, meta) {
+ 	return plugin;
+ }
+ //#endregion
++//#region legion: a pasted plain-text slice keeps its isolating blocks closed where they fit
++function allowsType(parent, type) {
++	const seen = new Set();
++	const pending = [parent.contentMatch];
++	while (pending.length > 0) {
++		const match = pending.pop();
++		if (seen.has(match)) continue;
++		seen.add(match);
++		for (let i = 0; i < match.edgeCount; i++) {
++			const edge = match.edge(i);
++			if (edge.type === type) return true;
++			pending.push(edge.next);
++		}
++	}
++	return false;
++}
++function fitsBeforeIsolating($pos, type) {
++	for (let depth = $pos.parent.isTextblock ? $pos.depth - 1 : $pos.depth; depth >= 0; depth--) {
++		const parent = $pos.node(depth).type;
++		if (allowsType(parent, type)) return true;
++		if (parent.spec.isolating) return false;
++	}
++	return false;
++}
++function closedEdgesFit($pos, slice) {
++	let start = slice.content;
++	for (let i = 0; i < slice.openStart; i++) start = start.firstChild.content;
++	let end = slice.content;
++	for (let i = 0; i < slice.openEnd; i++) end = end.lastChild.content;
++	return [start.firstChild, end.lastChild].every((node) => !node?.type.spec.isolating || fitsBeforeIsolating($pos, node.type));
++}
++//#endregion
+ //#region src/index.ts
+ function dispatchPasteSlice(view, slice) {
+ 	const node = isTextOnlySlice(slice);
+@@ -84,6 +116,9 @@ var clipboard = $prose((ctx) => {
+ 					const slice = parser(text);
+ 					if (!slice || typeof slice === "string") return false;
+ 					dom = DOMSerializer.fromSchema(schema).serializeFragment(slice.content);
++					const opened = domParser.parseSlice(dom);
++					const closed = Slice.maxOpen(opened.content, false);
++					return dispatchPasteSlice(view, closedEdgesFit(view.state.selection.$from, closed) ? closed : opened);
+ 				} else {
+ 					const template = document.createElement("template");
+ 					template.innerHTML = html;

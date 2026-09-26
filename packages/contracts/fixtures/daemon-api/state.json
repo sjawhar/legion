@@ -86,6 +86,14 @@
         "index": 0,
         "admittedAt": "2026-09-21T18:42:11Z"
       }
+    },
+    "LEGION-210": {
+      "key": "LEGION-210",
+      "generation": 1,
+      "phase": "held",
+      "status": "in_progress",
+      "holdReason": "escalated",
+      "workers": {}
     }
   },
   "pendingStatusWrites": [],

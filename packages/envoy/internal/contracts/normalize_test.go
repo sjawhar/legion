@@ -1735,6 +1735,10 @@ func TestGithubSummary(t *testing.T) {
 func TestGithubPayloadFields(t *testing.T) {
 	longBody := strings.Repeat("a", 3000)
 	longBodyWithFooter := strings.Repeat("a", 3000) + `<!-- legion:{"session":"worker-1"} -->`
+	// A real subject line from this repository, well past the 70-rune push summary, which
+	// head_subject must carry whole.
+	realLongSubject := "fix(daemon-go, envoy, contracts): a dotted repository name is one subject segment" +
+		" and one key segment, and intake applies only its configured repositories (LEGION-208 4b) (#1421)"
 	tests := []struct {
 		name        string
 		event       string
@@ -1760,6 +1764,28 @@ func TestGithubPayloadFields(t *testing.T) {
 				"after": "2222222222222222", "before": "1111111111111111", "pusher": "pusher",
 				"head_subject": "Add actionable payloads", "commit_count": "2", "compare_url": "https://example-host/compare",
 			},
+		},
+		{
+			// The envelope must fit NATS's payload limit, so a head commit's first line is capped
+			// like the envelope's other text fields, however long a single-line message is.
+			name:  "push caps a head commit's first line at the envelope's text cap",
+			event: "push",
+			body: map[string]any{
+				"repository":  map[string]any{"full_name": "example-org/example-repo"},
+				"ref":         "refs/heads/main",
+				"head_commit": map[string]any{"message": strings.Repeat("s", 3000) + "\n\nBody"},
+			},
+			want: map[string]string{"head_subject": strings.Repeat("s", 2048) + "…"},
+		},
+		{
+			name:  "push keeps a long real subject line whole",
+			event: "push",
+			body: map[string]any{
+				"repository":  map[string]any{"full_name": "example-org/example-repo"},
+				"ref":         "refs/heads/main",
+				"head_commit": map[string]any{"message": realLongSubject + "\n\nBody"},
+			},
+			want: map[string]string{"head_subject": realLongSubject},
 		},
 		{
 			name:  "push lists unique changed paths across commits in first-seen order",
@@ -2015,6 +2041,78 @@ func TestGithubPayloadFields(t *testing.T) {
 			}
 			if tt.wantBodyLen != 0 && len([]rune(payload["body"])) != tt.wantBodyLen {
 				t.Fatalf("body has %d runes, want %d", len([]rune(payload["body"])), tt.wantBodyLen)
+			}
+		})
+	}
+}
+
+// TestEnvelopeTitlesAreCappedAtTheEnvelopeTextCap: every envelope carrying an issue or pull
+// request title keeps it under the envelope's text cap, because a publish past NATS's max
+// payload fails; a title GitHub itself allows (at most 256 characters) is copied whole.
+func TestEnvelopeTitlesAreCappedAtTheEnvelopeTextCap(t *testing.T) {
+	repository := map[string]any{"full_name": "example-org/example-repo"}
+	comment := map[string]any{"body": "noted", "user": map[string]any{"login": "commenter"}}
+	review := map[string]any{
+		"id": float64(7), "state": "approved", "body": "ok", "user": map[string]any{"login": "reviewer"},
+		"submitted_at": "2026-09-26T00:00:00Z",
+	}
+	bodies := map[string]func(title string) map[string]any{
+		"issue_comment": func(title string) map[string]any {
+			return map[string]any{"action": "created", "repository": repository, "comment": comment,
+				"issue": map[string]any{"number": float64(3), "title": title}}
+		},
+		"issues": func(title string) map[string]any {
+			return map[string]any{"action": "opened", "repository": repository,
+				"issue": map[string]any{"number": float64(3), "title": title}}
+		},
+		"pull_request": func(title string) map[string]any {
+			return map[string]any{"action": "opened", "repository": repository,
+				"pull_request": map[string]any{"number": float64(7), "title": title}}
+		},
+		"pull_request_review": func(title string) map[string]any {
+			return map[string]any{"action": "submitted", "repository": repository, "review": review,
+				"pull_request": map[string]any{"number": float64(7), "title": title}}
+		},
+		"pull_request_review_comment": func(title string) map[string]any {
+			return map[string]any{"action": "created", "repository": repository, "comment": comment,
+				"pull_request": map[string]any{"number": float64(7), "title": title}}
+		},
+	}
+	longestAllowed := strings.Repeat("t", 256)
+	for event, body := range bodies {
+		for _, tc := range []struct{ name, title, want string }{
+			{"a title past the cap is cut", strings.Repeat("t", 3000), strings.Repeat("t", 2048) + "…"},
+			{"GitHub's longest title is kept whole", longestAllowed, longestAllowed},
+			{"a title's own whitespace is kept", "  Fix the  listener\t", "  Fix the  listener\t"},
+		} {
+			t.Run(event+"/"+tc.name, func(t *testing.T) {
+				payload := decodePayload(t, GithubEnvelope(GithubEnvelopeInput{
+					Event: event, Delivery: "delivery", EventID: "event", TraceID: "trace", Body: body(tc.title),
+				}).Payload)
+				if got := payload["title"]; got != tc.want {
+					t.Fatalf("title has %d runes, want %d (%q...)", len([]rune(got)), len([]rune(tc.want)), first(got, 20))
+				}
+			})
+		}
+	}
+}
+
+func TestGhostWisprTitleIsCappedAtTheEnvelopeTextCap(t *testing.T) {
+	for _, tc := range []struct{ name, title, want string }{
+		{"a title past the cap is cut", strings.Repeat("g", 3000), strings.Repeat("g", 2048) + "…"},
+		{"a real session title is kept whole", "How are we gonna do the", "How are we gonna do the"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+				EventType: "summary_ready", Delivery: "gw-delivery", EventID: "e", TraceID: "t",
+				Body: map[string]any{
+					"event_type": "summary_ready",
+					"payload":    map[string]any{"session_id": "20260326041629", "title": tc.title, "type": "summary_ready"},
+					"created_at": "2026-03-26T04:17:03Z",
+				},
+			})
+			if got := decodePayload(t, item.Payload)["title"]; got != tc.want {
+				t.Fatalf("title has %d runes, want %d", len([]rune(got)), len([]rune(tc.want)))
 			}
 		})
 	}
