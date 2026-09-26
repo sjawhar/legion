@@ -883,10 +883,9 @@ for (const [target, spec, quote, pasted, stored] of [
   });
 }
 
-// Where nothing inside the caret's typed block can hold the pasted block, the paste is what it was
-// before blocks were kept closed. A callout pasted into an ask's question once split the ask: the
-// question stayed, the callout went after it, and the options moved to a new ask under an empty
-// question.
+// Where nothing inside the caret's typed block can hold the pasted block, the pasted text joins the
+// text at the caret. A callout pasted into an ask's question once split the ask: the question
+// stayed, the callout went after it, and the options moved to a new ask under an empty question.
 test("a lone callout pasted as plain text into an ask's question leaves the ask whole", async ({
   browser,
 }) => {
@@ -905,6 +904,95 @@ test("a lone callout pasted as plain text into an ask's question leaves the ask 
         withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
       )
       .toBe(":::ask{#q1}\nWhich here?Careful.\n\n- X\n- Y\n:::\n");
+    await expect
+      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.block_id))
+      .toEqual(["q1"]);
+  } finally {
+    await alice.close();
+  }
+});
+
+// Plain text pasted into a table cell lands in that one cell, with its blocks and line breaks
+// flattened to inline text joined by spaces, since a GFM cell holds one line. It once overwrote the
+// caret's cell and spread the other lines into new cells of the same row, past the header's column
+// count, where a GFM reader drops them.
+const table = "| alpha one | beta two |\n| --- | --- |\n| gamma three | delta four |\n";
+for (const [cell, quote, pasted, stored] of [
+  [
+    "a body cell",
+    "delta",
+    "First\n\nSecond\n",
+    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaFirst Second four |\n",
+  ],
+  [
+    "a header cell",
+    "alpha",
+    "First\n\nSecond\n",
+    "| alphaFirst Second one | beta two |\n| :--- | :--- |\n| gamma three | delta four |\n",
+  ],
+  [
+    "a body cell",
+    "delta",
+    loneAsk,
+    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaWhich one? A B four |\n",
+  ],
+  [
+    "a header cell",
+    "alpha",
+    loneAsk,
+    "| alphaWhich one? A B one | beta two |\n| :--- | :--- |\n| gamma three | delta four |\n",
+  ],
+  [
+    "a body cell",
+    "delta",
+    "First\nSecond",
+    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaFirst Second four |\n",
+  ],
+  [
+    "a body cell",
+    "delta",
+    "More words.",
+    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaMore words. four |\n",
+  ],
+] as const) {
+  test(`${JSON.stringify(pasted)} pasted as plain text into ${cell} stays in that cell`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } = await openWithCaret(browser, "Cell paste", table, quote, "end");
+    try {
+      await paste(page, { html: "", text: pasted });
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toBe(stored);
+      expect((await getIssue(issue.key)).open_asks).toEqual([]);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
+// A lone ask pasted into another ask's question has nowhere to be an ask, so its text joins the
+// question, as a callout's does. It once split the ask: the question took the pasted question and
+// options, and the ask's own options moved to a new ask under an empty question.
+test("a lone ask pasted as plain text into an ask's question joins the question", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openWithCaret(
+    browser,
+    "Ask into a question",
+    ':::ask{#q1 urgency="med" multiple="false"}\nWhich here?\n\n- X\n- Y\n:::\n',
+    "Which here?",
+    "end"
+  );
+  try {
+    await paste(page, { html: "", text: loneAsk });
+
+    await expect
+      .poll(async () =>
+        withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
+      )
+      .toBe(":::ask{#q1}\nWhich here?Which one? A B\n\n- X\n- Y\n:::\n");
     await expect
       .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.block_id))
       .toEqual(["q1"]);
