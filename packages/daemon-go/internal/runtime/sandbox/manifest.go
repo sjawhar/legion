@@ -125,7 +125,7 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if _, ok := spec.Secrets[provisionTokenKey]; ok {
 		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
-	if spec.Repository == "" {
+	if spec.Repository.IsZero() {
 		return launch{}, refuse("no repository: a pod's init container provisions the issue's workspace from one")
 	}
 	working, err := workspace.Location(TreeRoot, spec.Repository, spec.Issue)
@@ -202,7 +202,7 @@ func systemPrompt(parts runtime.PromptParts) (string, error) {
 // initSessionPath is where the workspace-init container sees a main-container session file: the
 // volume's sessions directory is mounted at Oh My Pi's sessions directory in the main container and
 // sits under TreeRoot in the workspace-init container. A session anywhere else is not on the volume, so no pod
-// can resume it (k8s-manifests.ts:168-181).
+// can resume it (initContainerSessionPath, k8s-manifests.ts).
 func initSessionPath(file string) (string, error) {
 	rest, ok := strings.CutPrefix(file, ompSessionsDir+"/")
 	if !ok || rest == "" || filepath.Clean(rest) != rest || strings.HasPrefix(rest, "../") {
@@ -305,7 +305,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 		InitContainers: []corev1.Container{{
 			Name:       fetchContainer,
 			Image:      r.image,
-			Command:    []string{legion, "workspace-init", "fetch", "--repo", l.spec.Repository, "--feed", FeedDir},
+			Command:    []string{legion, "workspace-init", "fetch", "--repo", l.spec.Repository.String(), "--feed", FeedDir},
 			Env:        fetchEnvironment(),
 			WorkingDir: FeedDir,
 			VolumeMounts: []corev1.VolumeMount{
@@ -319,7 +319,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 			Name:  initContainer,
 			Image: r.image,
 			Command: []string{
-				legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository, "--root", TreeRoot,
+				legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository.String(), "--root", TreeRoot,
 				"--credential-helper", helper, "--feed", FeedDir,
 			},
 			Env:        r.initEnvironment(l),
@@ -492,7 +492,7 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 // initWaitSeconds bounds a wait on another pod's workspace-init: ceil(boot timeout) × (intervals
 // + 1), the whole time the daemon tolerates a pod that is alive but unregistered, plus one
 // interval, so no wait gives up while the daemon would still allow the pod it waits on
-// (runtime-kubernetes.ts:390-399).
+// (KubernetesRuntime.workspaceInitLockWaitSeconds, runtime-kubernetes.ts).
 func (r *Runtime) initWaitSeconds() int64 {
 	return int64(math.Ceil(r.bootTimeout.Seconds())) * int64(r.bootIntervals+1)
 }
@@ -599,7 +599,7 @@ func (r *Runtime) affinity(tree string, colocate bool) *corev1.Affinity {
 }
 
 // restrictedContainer is the Pod Security "restricted" container context
-// (k8s-manifests.ts:44-48).
+// (RESTRICTED_CONTAINER_SECURITY_CONTEXT, k8s-manifests.ts).
 func restrictedContainer() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		AllowPrivilegeEscalation: new(false),

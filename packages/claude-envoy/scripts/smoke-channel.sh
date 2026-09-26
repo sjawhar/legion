@@ -6,7 +6,7 @@ set -euo pipefail
 readonly envoy_url="${ENVOY_URL:-http://127.0.0.1:9020}"
 readonly nats_url="${ENVOY_NATS_URL:?set ENVOY_NATS_URL to the live Envoy NATS listener}"
 readonly claude_bin="${CLAUDE_BIN:-claude}"
-readonly channel_entry="${CLAUDE_CHANNEL_ENTRY:?set CLAUDE_CHANNEL_ENTRY, e.g. plugin:claude-envoy-bridge@<marketplace>}"
+readonly channel_entry="${CLAUDE_CHANNEL_ENTRY:?set CLAUDE_CHANNEL_ENTRY, e.g. plugin:claude-envoy@<marketplace>}"
 # `--channels` only works for an entry the organization allowlists; on this fleet
 # that is the `legion-plugins` marketplace. Everything else (a dev marketplace, a
 # bare `server:` entry) needs the development bypass. Always overridable.
