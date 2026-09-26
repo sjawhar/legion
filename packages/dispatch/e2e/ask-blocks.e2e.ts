@@ -13,7 +13,7 @@ import {
   patchIssue,
   resolveAsk,
 } from "./api";
-import { documentEditor, selectEditorText } from "./editor";
+import { actionBar, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -699,6 +699,9 @@ test("a paste from Google Docs keeps the editor's own cleanup of its wrapper", a
     await page.goto(`/issues/${issue.key}`);
     await selectEditorText(page, "End.");
     await page.keyboard.press("ArrowRight");
+    // The selection has collapsed once the selection bar is gone; a paste before that replaces
+    // the selected text.
+    await expect(actionBar(page)).toBeHidden();
     await documentEditor(page).evaluate((root) => {
       const data = new DataTransfer();
       data.setData(
