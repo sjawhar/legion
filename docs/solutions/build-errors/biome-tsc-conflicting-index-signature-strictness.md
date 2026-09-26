@@ -14,12 +14,12 @@ problem_type: build_error
 component: tooling
 symptoms:
   - "CI fails Biome lint on packages/envoy-client/src/dispatch-execute.ts for bracket access on a literal key (useLiteralKeys wants args.urgency)"
-  - "CI fails claude-envoy-bridge's bunx tsc --noEmit on the same unmodified file for dot access on the same key (noPropertyAccessFromIndexSignature wants args['urgency'])"
+  - "CI fails claude-envoy's bunx tsc --noEmit on the same unmodified file for dot access on the same key (noPropertyAccessFromIndexSignature wants args['urgency'])"
   - "Neither package's own checks catch the conflict in isolation — only running both together does"
 root_cause: config_error
 resolution_type: code_fix
 related_components:
-  - claude-envoy-bridge
+  - claude-envoy
 severity: medium
 ---
 
@@ -27,33 +27,33 @@ severity: medium
 
 ## Problem
 
-`packages/claude-envoy-bridge` resolves `@legion/envoy-client`'s `bun` export condition
+`packages/claude-envoy` resolves `@legion/envoy-client`'s `bun` export condition
 straight to source (`packages/envoy-client/src/dispatch-execute.ts`, not a compiled
-`dist/*.js`), so the bridge's own `bunx tsc --noEmit` — which sets
-`noPropertyAccessFromIndexSignature: true` (`packages/claude-envoy-bridge/tsconfig.json:19`)
+`dist/*.js`), so claude-envoy's own `bunx tsc --noEmit` — which sets
+`noPropertyAccessFromIndexSignature: true` (`packages/claude-envoy/tsconfig.json:19`)
 — type-checks envoy-client's raw file. envoy-client's own `tsconfig.json` has no such flag.
 
 Before it was fixed in `sjawhar/legion#826`, `dispatch-execute.ts` typed its arguments and environment as bare
 index signatures (`args: Record<string, unknown>`, `env: Record<string, string | undefined>`)
 and read them with bracket access throughout (`args["urgency"]`, `env["LEGION_ISSUE"]`, …).
 Bracket access on an index-signature type is exactly what
-`noPropertyAccessFromIndexSignature` requires, so claude-envoy-bridge's `tsc` was fine with
+`noPropertyAccessFromIndexSignature` requires, so claude-envoy's `tsc` was fine with
 it. But Biome's `useLiteralKeys` rule is syntax-only — it does not resolve TypeScript's types
 — and flags any bracket access with a literal string key as "prefer `args.urgency`", entirely
 unaware that the type it is looking at only allows brackets. envoy-client's own Biome run
 (root `biome.json`'s `"recommended": true` ruleset, no local override) therefore failed lint
-on the identical lines that satisfied the bridge's `tsc`. Switching to dot notation to please
-Biome would have flipped the failure to `tsc`'s `TS4111` in the bridge.
+on the identical lines that satisfied claude-envoy's `tsc`. Switching to dot notation to please
+Biome would have flipped the failure to `tsc`'s `TS4111` in claude-envoy.
 
 ## What Didn't Work
 
 - Silencing either rule with a package-local override does not help: envoy-client's Biome
   config has no override (bracket access must stay flagged for `Record<string, unknown>`
   values that really are index-signature-only), and disabling
-  `noPropertyAccessFromIndexSignature` in claude-envoy-bridge would remove a real safety net
+  `noPropertyAccessFromIndexSignature` in claude-envoy would remove a real safety net
   for every other index-signature type it checks (`process.env`, `EnvoyEnvironment`, …) —
-  compare `packages/claude-envoy-bridge/biome.json:24`, which turns `useLiteralKeys` off
-  *locally* for the bridge's own files precisely because the bridge needs bracket access
+  compare `packages/claude-envoy/biome.json:26`, which turns `useLiteralKeys` off
+  *locally* for claude-envoy's own files precisely because claude-envoy needs bracket access
   elsewhere; that override does not reach envoy-client's source.
 
 ## Solution

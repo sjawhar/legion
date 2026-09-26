@@ -1,5 +1,5 @@
 ---
-title: "Provisioning touches the issue bookmark only when it creates the workspace: resolve it to one commit first, add by commit id, create it only when nothing resolved"
+title: "Provisioning touches the issue bookmark only when it creates the workspace: resolve it to one commit first, add by commit id, create it only when the workspace starts at main"
 category: legion
 tags:
   - jj
@@ -17,7 +17,7 @@ related_issues:
   - "sjawhar/legion#980"
 ---
 
-# Provisioning touches the issue bookmark only when it creates the workspace: resolve it to one commit first, add by commit id, create it only when nothing resolved
+# Provisioning touches the issue bookmark only when it creates the workspace: resolve it to one commit first, add by commit id, create it only when the workspace starts at main
 
 `provisionIssueWorkspace` (`packages/workspace/src/workspace.ts`) runs on every spawn and every
 resume of every role. Until #1023 it ended with `jj bookmark set legion/<KEY> --allow-backwards`
@@ -86,40 +86,66 @@ not exist. In order:
      <listed> to <now> while it was being tracked; workspace <dir> was not created. Provision
      again: the next provisioning starts at origin's branch as it is then.`).
 
-   The Go twin's printed ways out carry `--ignore-working-copy` (`jj bookmark set|delete|forget
-   … --ignore-working-copy -R <clone>`), so an operator running one from their shell takes no
-   snapshot of the shared clone and runs no working-copy filter a tree planted there; the
-   TypeScript twin, which no deployment runs, keeps the text without it. In Go, a local bookmark
-   conflicted with a deletion, whose origin row is tracked with no commit (GitHub deleted
-   the branch after the bookmark moved on without a push), is set aside instead of refused when no
-   commit in `<removed>..<added>` is described: main is resolved first (step 2), so a main that
-   does not resolve refuses before anything is set aside; then the local bookmark is deleted, one
-   line logs the set-aside ids (they stay visible, the clone never abandoning unreachable
-   commits), and the workspace starts at main. See the companion table in `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why this read and
-   not `bookmarks(exact:…)`, `present()`, a bare `jj bookmark list`, or any template that reads
-   `normal_target`.
+   The Go twin prints each way out as the argv its own clone commands use (`onClone`), every word
+   through `shellprefix.Word`: it carries `--ignore-working-copy`, so an operator running one from
+   their shell takes no snapshot of the shared clone and runs no working-copy filter a tree
+   planted there, and it names the clone as one shell word, so it runs as printed from a state
+   directory whose path holds a space. It also carries `--color=never`, and `@`, `=` and such a
+   path come out single-quoted: `jj bookmark track 'main@origin' --ignore-working-copy
+   '--color=never' -R <clone>`. The TypeScript twin (`packages/workspace/src/workspace.ts`) keeps
+   the text without the flag, and puts the clone path in unquoted, so its ways out fail as printed
+   under such a state directory. That is the shipped daemon's provisioning, not dead code:
+   `packages/daemon` stays the shipped daemon until the Stage 7 cutover deletes it (LEGION-223),
+   and LEGION-223 records the missing flag among the TypeScript twins of the Go provisioning fixes.
+
+   In Go, one conflicted state is set aside instead of refused. The local bookmark is conflicted
+   with a deletion, and origin's row is tracked with no commit: GitHub deleted the branch after the
+   bookmark moved on without a push. When that move added at least one commit beyond what it
+   removed (`<removed>..<added>`) and none of those commits is described, the move was never meant
+   to reach GitHub, since jj pushes no undescribed commit. Main is resolved first (step 2), so a
+   main that does not resolve refuses before anything is set aside. Then the local bookmark is
+   deleted, one line logs the set-aside ids oldest first (they stay visible, the clone never
+   abandoning unreachable commits), and the workspace starts at main with the bookmark created on
+   it (step 4). A move that added nothing, such as a bookmark moved backwards off its last push
+   whose branch GitHub then deleted, is not set aside: it gets the conflicted-bookmark refusal
+   above, with its ways out.
+
+   See the companion table in `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why this
+   read and not `bookmarks(exact:…)`, `present()`, a bare `jj bookmark list`, or any template
+   that reads `normal_target`.
 2. The add revision, as `jj workspace add … --revision <commit id>`, **the id, never the name**:
    - the local bookmark's commit when it has one;
    - with no local bookmark and an **untracked** origin row (a fresh clone tracks `main` alone,
      so a branch another clone pushed is only such a row), that row's commit, after
      `jj bookmark track legion/<KEY>@origin` and the read that confirms it;
-   - with neither (a brand-new issue, or a merged branch GitHub deleted), `main`: in Go, read with
-     the same template and added by its commit id, and refused by name when it does not resolve:
-     conflicted (keep origin's: `jj bookmark set main -r main@origin --allow-backwards
-     --ignore-working-copy -R <clone>`, since jj refuses a sideways move off two local moves);
-     deleted in the shared clone while `main@origin` is tracked (restore it: the same command
-     without `--allow-backwards`); or absent (a repository whose default branch is another).
+   - with neither (a brand-new issue, or a merged branch GitHub deleted), `main`. In Go it is read
+     with the same template and added by its commit id (`mainCommit`), and each state in which it
+     does not resolve is refused by name before anything is added:
+     - a conflicted `main`: keep origin's (`jj bookmark set main -r 'main@origin' --allow-backwards
+       --ignore-working-copy '--color=never' -R <clone>`, since jj refuses a sideways move off two
+       local moves);
+     - no local `main` and a conflicted `main@origin`, which concurrent fetches leave: provision
+       again, and the next provisioning's fetch sets the row to origin's `main`;
+     - `main` deleted in the shared clone while `main@origin` is tracked: restore it (the same
+       command without `--allow-backwards`);
+     - `main` forgotten (`jj bookmark forget main`, which leaves `main@origin` untracked): track it
+       (`jj bookmark track 'main@origin' --ignore-working-copy '--color=never' -R <clone>`);
+     - no `main` at all: a repository whose default branch is another, with no way out printed.
+
      TypeScript still adds `main` by name.
 3. `git worktree prune`, then the add. On `already registered|exists` (jj still registers the
    workspace but its directory is gone): `jj workspace forget <name> -R <clone>` (Go adds
    `--ignore-working-copy`), prune,
    the same add again at the same revision. A brand-new workspace and a forgotten registration
    start from the same resolution — the two paths no longer differ in where they start.
-4. `jj bookmark set legion/<KEY> -r @` in the new workspace **only when nothing resolved**; one
-   `console.error` line (`[legion] bookmark legion/<KEY> is gone (…); re-added the forgotten
-   workspace <dir> at main, creating the bookmark on its fresh working copy`) **only when nothing
-   resolved and the registration had to be forgotten** — a brand-new issue has no bookmark to miss
-   and logs nothing.
+4. `jj bookmark set legion/<KEY> -r @` in the new workspace **only when it starts at main**: when
+   nothing resolved, or, in Go, when the bookmark was set aside (step 1), where main resolved and
+   the bookmark is still created on the fresh working copy. In TypeScript, one `console.error` line
+   (`[legion] bookmark legion/<KEY> is gone (…); re-added the forgotten workspace <dir> at main,
+   creating the bookmark on its fresh working copy`) is printed **only when nothing resolved and
+   the registration had to be forgotten**; a brand-new issue has no bookmark to miss and logs
+   nothing. Go logs no line for a forgotten registration; its one provisioning log line is the
+   set-aside's.
 
 An existing workspace gets `update-stale`, the fetch, the credential config writes, and nothing
 with `bookmark` in it. The reactivation test's complete expected argv list is that check.

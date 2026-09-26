@@ -1,4 +1,4 @@
-# claude-envoy-bridge
+# claude-envoy
 
 Claude Code channel plugin for Legion's Envoy subsystem. One MCP stdio server consumes Envoy NATS
 events and sends them to the current Claude Code session as supported
@@ -10,6 +10,13 @@ events and sends them to the current Claude Code session as supported
   `bin/envoy-channel.ts`; see "The bundle" below). It declares the experimental `claude/channel`
   capability, so Claude Code accepts its event notifications; it also exposes Envoy messaging and
   native Dispatch tools through that same MCP server.
+- `.omp-plugin/plugin.json` declares an empty `mcpServers`, so Oh My Pi starts no server from this
+  plugin: the channel server needs Claude Code's session identity and exits without it, and an omp
+  session already gets Envoy and Dispatch from `@sjawhar/pi-legion-envoy`. omp reads that manifest
+  before `.claude-plugin/plugin.json` and a manifest `mcpServers` replaces `.mcp.json` instead of
+  merging with it; Claude Code reads only `.claude-plugin/plugin.json`, so it still launches the
+  server. Omitting the key would not work — omp would fall through to `.mcp.json`. Skills are
+  unaffected: both harnesses resolve them from `.claude-plugin/plugin.json`.
 - `hooks/hooks.json` runs `dist/open-asks-hook.js` on every `SessionStart` (startup, resume, clear,
   compact, fork). It records the current session id for the channel server and puts the session's
   open Dispatch asks into the model's context (`Dispatch authored-ask summary:`;
@@ -86,6 +93,19 @@ mutation follows its event topic; reads do not add a subscription.
 Dispatch asks remain on native Dispatch. Channel notifications are one-way ingress, not a remote
 human approval surface.
 
+## Skills
+
+The plugin ships two skills, `claude-envoy:envoy` and `claude-envoy:dispatch`, which teach the
+tools above. `skills/` holds one relative symlink per skill into the repository-root `skills/`,
+which stays their only source; Claude Code copies each target into the plugin cache at install.
+
+`envoy` and `dispatch` are the two a standalone Claude Code session uses. The other root skills
+stay out: they belong to Legion's roles (the architect, controller, oracle and retro skills, and the
+phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's `thermonuclear-*`
+pair, and those run on Oh My Pi (`skills/AGENTS.md`). The `thermonuclear-*` rubrics also ship in
+the sjawhar@sjawhar plugin (sjawhar/dotfiles marketplace). Link another root skill here only when
+a standalone Claude Code session needs it.
+
 ## The bundle
 
 The marketplace installs this package's git tree into Claude Code's plugin cache with no
@@ -114,20 +134,20 @@ user opts the plugin into each session with `--channels`:
 {
   "channelsEnabled": true,
   "allowedChannelPlugins": [
-    { "marketplace": "legion-plugins", "plugin": "claude-envoy-bridge" }
+    { "marketplace": "legion-plugins", "plugin": "claude-envoy" }
   ]
 }
 ```
 
 ```bash
-claude --channels plugin:claude-envoy-bridge@legion-plugins
+claude --channels plugin:claude-envoy@legion-plugins
 ```
 
 For a plugin outside the allowlist (a development marketplace, a bare `server:` entry) use
 `--dangerously-load-development-channels <entry>`; it bypasses the allowlist only, so
 `channelsEnabled` still applies. Do not combine it with a `--channels` entry that names the same
 plugin from another marketplace: Claude Code then skips the channel (`Channel notifications
-skipped: you asked for plugin:…@legion-plugins but the installed claude-envoy-bridge plugin is from
+skipped: you asked for plugin:…@legion-plugins but the installed claude-envoy plugin is from
 …`).
 
 The plugin needs `ENVOY_NATS_URL` and reaches the listener at `ENVOY_URL`, which defaults to
@@ -166,8 +186,8 @@ organization that enables channels, and an installed plugin entry:
 
 ```bash
 ENVOY_NATS_URL=nats://envoy-nats:4222 \
-  CLAUDE_CHANNEL_ENTRY=plugin:claude-envoy-bridge@legion-plugins \
-  bash -c 'cd packages/claude-envoy-bridge/scripts && ./smoke-channel.sh'
+  CLAUDE_CHANNEL_ENTRY=plugin:claude-envoy@legion-plugins \
+  bash -c 'cd packages/claude-envoy/scripts && ./smoke-channel.sh'
 ```
 
 `CLAUDE_CHANNEL_FLAG` defaults to `--channels` when the entry ends in `@legion-plugins` (the
@@ -180,15 +200,15 @@ source-tree diagnostics, pass a temporary bare-server config through `CLAUDE_MCP
 
 To exercise an unmerged checkout the way the marketplace would install it, register a development
 marketplace with a `command` source in copy mode whose command prints a staged copy of the package
-(without `node_modules`), install `claude-envoy-bridge@<dev-marketplace>`, and run the smoke against
+(without `node_modules`), install `claude-envoy@<dev-marketplace>`, and run the smoke against
 that entry. Never `claude plugin marketplace add sjawhar/legion#<branch>`: the marketplace name comes
 from the repository's `marketplace.json` and would replace the real `legion-plugins` registration.
 
 ## Local checks
 
 ```bash
-bun run --cwd packages/claude-envoy-bridge lint
-bun run --cwd packages/claude-envoy-bridge typecheck
-bun run --cwd packages/claude-envoy-bridge test
-bun run --cwd packages/claude-envoy-bridge check-dist
+bun run --cwd packages/claude-envoy lint
+bun run --cwd packages/claude-envoy typecheck
+bun run --cwd packages/claude-envoy test
+bun run --cwd packages/claude-envoy check-dist
 ```

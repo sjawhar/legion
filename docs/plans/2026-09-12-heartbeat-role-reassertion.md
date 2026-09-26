@@ -112,7 +112,7 @@ tag and digest above in the tester's E2E line. Note the deployed read path diffe
 open and one session TTL has not yet elapsed.
 
 Production NATS is not a container on this host: `envoy-nats` resolves via Tailscale to
-`100.127.163.46:4222` (`envoy-nats.tailb86685.ts.net`, NATS 2.10.29, confirmed live by a raw
+`<tailscale-ip>:4222` (`envoy-nats.<tailnet>.ts.net`, NATS 2.10.29, confirmed live by a raw
 `INFO` banner). No `nats` CLI is installed and `natsio/nats-box` could not be pulled, so
 `nats kv info envoy_roles` / `envoy_sessions` and NATS server logs were **not** inspected. Residual
 gap; nothing in the listener log points at NATS-side data loss (no bucket/stream recreation, only
