@@ -204,10 +204,10 @@ func (m *Machine) ApplyAnswer(ctx context.Context, id string, ask dispatch.Ask) 
 	}
 	defer tx.Rollback(ctx)
 	var enrollmentID, state string
-	var approver, recordedEdited *string
+	var approver, storedAskID, recordedEdited *string
 	var lifetime int
-	err = tx.QueryRow(ctx, `select enrollment_id, state, allowed_approver, ask_edited_at, lifetime_seconds from requests where id=$1 for update`, id).
-		Scan(&enrollmentID, &state, &approver, &recordedEdited, &lifetime)
+	err = tx.QueryRow(ctx, `select enrollment_id, state, allowed_approver, ask_id, ask_edited_at, lifetime_seconds from requests where id=$1 for update`, id).
+		Scan(&enrollmentID, &state, &approver, &storedAskID, &recordedEdited, &lifetime)
 	if err != nil {
 		return false, err
 	}
@@ -219,6 +219,8 @@ func (m *Machine) ApplyAnswer(ctx context.Context, id string, ask dispatch.Ask) 
 	}
 	next, detail := "denied", ""
 	switch {
+	case storedAskID == nil || *storedAskID != ask.ID:
+		detail = "ask id does not match the request's own ask"
 	case ask.State != "answered" || ask.Answer == nil:
 		detail = "ask was " + ask.State + " without an approval"
 	case !sameEdit(recordedEdited, ask.EditedAt):
@@ -278,23 +280,35 @@ func (m *Machine) Cancel(ctx context.Context, id, enrollmentID string) error {
 }
 
 func (m *Machine) ExpirePending(ctx context.Context, now time.Time) (int, error) {
-	rows, err := m.Store.Pool.Query(ctx, `update requests set state='expired', decided_at=$1, decision_detail='no answer before the request expired' where state='pending' and pending_expires_at < $1 returning id, enrollment_id`, now)
+	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
-	n := 0
-	for rows.Next() {
-		var id, enr string
-		if err := rows.Scan(&id, &enr); err != nil {
-			return n, err
-		}
-		if _, err := m.Store.Pool.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, actor) values ('request.expired',$1,$2,'broker')`, enr, id); err != nil {
-			return n, err
-		}
-		n++
+	defer tx.Rollback(ctx)
+	rows, err := tx.Query(ctx, `update requests set state='expired', decided_at=$1, decision_detail='no answer before the request expired' where state='pending' and pending_expires_at < $1 returning id, enrollment_id`, now)
+	if err != nil {
+		return 0, err
 	}
-	return n, rows.Err()
+	type expiredRow struct{ id, enrollmentID string }
+	var expired []expiredRow
+	for rows.Next() {
+		var r expiredRow
+		if err := rows.Scan(&r.id, &r.enrollmentID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		expired = append(expired, r)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	rows.Close()
+	for _, r := range expired {
+		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, actor) values ('request.expired',$1,$2,'broker')`, r.enrollmentID, r.id); err != nil {
+			return 0, err
+		}
+	}
+	return len(expired), tx.Commit(ctx)
 }
 
 // Values releases the inject-mode values of a live grant to its own enrollment. It re-checks the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -36,15 +37,18 @@ type openCall struct {
 	options                  []dispatch.Option
 }
 
-// fakeOpener is the machine's askOpener: it always opens successfully, returning the same open
-// ask, and records every call so a test can assert how many asks were opened and what they said.
+// fakeOpener is the machine's askOpener: it always opens successfully, returning a fresh open ask
+// with a unique id per call (ask-1, ask-2, ...), and records every call so a test can assert how
+// many asks were opened, what they said, and which request each one belongs to.
 type fakeOpener struct {
 	calls []openCall
+	next  int
 }
 
 func (f *fakeOpener) CreateAsk(_ context.Context, issue, question string, options []dispatch.Option, urgency string) (dispatch.Ask, error) {
+	f.next++
 	f.calls = append(f.calls, openCall{issue: issue, question: question, urgency: urgency, options: options})
-	return dispatch.Ask{ID: "ask-1", State: "open"}, nil
+	return dispatch.Ask{ID: fmt.Sprintf("ask-%d", f.next), State: "open"}, nil
 }
 
 // mintPodToken mints a projected service-account token bound to podUID, the shape
@@ -486,5 +490,101 @@ func TestRevokeStopsValues(t *testing.T) {
 	}
 	if _, _, _, err := m.Values(ctx, *req.GrantID, enrA.ID.String()); !errors.Is(err, ErrGrantNotLive) {
 		t.Fatalf("Values(after revoke) = %v, want ErrGrantNotLive", err)
+	}
+}
+
+// TestApplyAnswerRejectsAskFromAnotherRequest pins the ask_id binding ApplyAnswer enforces: an
+// otherwise-valid approval (same approver, matching nil edited_at) answered against a different
+// request's ask must never grant the request it's mistakenly applied to.
+func TestApplyAnswerRejectsAskFromAnotherRequest(t *testing.T) {
+	m, opener, _, enrA, enrB := newFixture(t)
+	ctx := context.Background()
+
+	reqA, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create(A): %v", err)
+	}
+	reqB, err := m.Create(ctx, enrB.ID.String(), []string{"DEEL_API_KEY"}, "need it too", "", "")
+	if err != nil {
+		t.Fatalf("Create(B): %v", err)
+	}
+	if len(opener.calls) != 2 {
+		t.Fatalf("opener called %d times, want 2 (one ask per request)", len(opener.calls))
+	}
+	askForB := "ask-2"
+
+	// An answer that would validly approve B (same approver, B's own nil edited_at) but is
+	// applied to A's request id: A must not be granted by B's ask.
+	changed, err := m.ApplyAnswer(ctx, reqA.ID, dispatch.Ask{
+		ID: askForB, State: "answered",
+		Answer: &dispatch.Answer{User: "sjawhar", Selected: []string{"Approve"}, At: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("ApplyAnswer(A, B's ask): %v", err)
+	}
+	if !changed {
+		t.Fatal("ApplyAnswer(A, B's ask) = unchanged, want it to resolve A (denied), not leave it pending")
+	}
+	gotA, err := m.Get(ctx, reqA.ID)
+	if err != nil {
+		t.Fatalf("Get(A): %v", err)
+	}
+	if gotA.State == "granted" || gotA.GrantID != nil {
+		t.Fatalf("A = %+v, must never be granted by an ask belonging to another request", gotA)
+	}
+
+	// B is untouched: still pending, its own ask still valid to approve.
+	gotB, err := m.Get(ctx, reqB.ID)
+	if err != nil {
+		t.Fatalf("Get(B): %v", err)
+	}
+	if gotB.State != "pending" {
+		t.Fatalf("B state = %q, want still pending (ApplyAnswer(A, ...) must not touch B)", gotB.State)
+	}
+}
+
+// TestExpirePendingAuditsEveryExpiredRequest pins that ExpirePending's state transition and its
+// audit row are atomic: after expiring several pending requests in one call, every one of them
+// has exactly one matching request.expired audit row, never zero (a lost event) or more than one.
+func TestExpirePendingAuditsEveryExpiredRequest(t *testing.T) {
+	m, _, _, enrA, enrB := newFixture(t)
+	ctx := context.Background()
+
+	reqA, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create(A): %v", err)
+	}
+	reqB, err := m.Create(ctx, enrB.ID.String(), []string{"DEEL_API_KEY"}, "need it too", "", "")
+	if err != nil {
+		t.Fatalf("Create(B): %v", err)
+	}
+	for _, id := range []string{reqA.ID, reqB.ID} {
+		if _, err := m.Store.Pool.Exec(ctx, `update requests set pending_expires_at = now() - interval '1 hour' where id=$1`, id); err != nil {
+			t.Fatalf("backdate %s: %v", id, err)
+		}
+	}
+
+	n, err := m.ExpirePending(ctx, time.Now())
+	if err != nil {
+		t.Fatalf("ExpirePending: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("ExpirePending = %d, want 2", n)
+	}
+	for _, id := range []string{reqA.ID, reqB.ID} {
+		got, err := m.Get(ctx, id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got.State != "expired" {
+			t.Fatalf("state(%s) = %q, want expired", id, got.State)
+		}
+		var auditCount int
+		if err := m.Store.Pool.QueryRow(ctx, `select count(*) from audit where kind='request.expired' and request_id=$1`, id).Scan(&auditCount); err != nil {
+			t.Fatalf("count audit(%s): %v", id, err)
+		}
+		if auditCount != 1 {
+			t.Fatalf("audit rows for %s = %d, want exactly 1 (state transition and audit must commit together)", id, auditCount)
+		}
 	}
 }
