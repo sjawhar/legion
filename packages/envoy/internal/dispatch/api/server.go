@@ -641,3 +641,10 @@ func canonicalRepo(owner, repo string) string {
 func externalURL(repo, number string) string {
 	return "https://github.com/" + repo + "/issues/" + number
 }
+
+func externalURLs(repo, number string) []string {
+	return []string{
+		externalURL(repo, number),
+		"https://github.com/" + repo + "/pull/" + number,
+	}
+}

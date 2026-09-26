@@ -567,6 +567,113 @@ func TestExternalIssueResolutionAndAutoCreation(t *testing.T) {
 	}
 }
 
+func TestExternalIssueReferenceResolvesBothGitHubURLShapes(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	create := func(title string) model.Issue {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": "TEST", "title": title, "force": true,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+	link := func(key, url string) {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]any{
+			"external_links": []map[string]string{{"url": url}},
+		}, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("link %s: status=%d body=%s", key, response.Code, response.Body.String())
+		}
+	}
+	issueLink := create("GitHub issue link")
+	pullLink := create("GitHub pull request link")
+	link(issueLink.Key, "https://github.com/owner/repo/issues/42")
+
+	resolvedIssue := dispatchRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/api/v1/issues/resolve?ref=owner/repo%2342",
+		nil,
+		"alice",
+	)
+	if resolvedIssue.Code != http.StatusOK {
+		t.Fatalf("resolve GitHub issue link: status=%d body=%s", resolvedIssue.Code, resolvedIssue.Body.String())
+	}
+	if got := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, resolvedIssue).Key; got != issueLink.Key {
+		t.Fatalf("resolved issue key = %q, want %q", got, issueLink.Key)
+	}
+
+	link(pullLink.Key, "https://github.com/owner/repo/pull/42")
+	resolvedPull := dispatchRequest(
+		t,
+		handler,
+		http.MethodGet,
+		"/api/v1/issues/resolve?ref=owner/repo%2342",
+		nil,
+		"alice",
+	)
+	if resolvedPull.Code != http.StatusBadRequest {
+		t.Fatalf("resolve ambiguous GitHub links: status=%d body=%s", resolvedPull.Code, resolvedPull.Body.String())
+	}
+	body := resolvedPull.Body.String()
+	if !strings.Contains(body, `"code":"AMBIGUOUS_ISSUE_REF"`) ||
+		!strings.Contains(body, issueLink.Key) ||
+		!strings.Contains(body, pullLink.Key) {
+		t.Fatalf("ambiguous response = %s, want AMBIGUOUS_ISSUE_REF naming %s and %s", body, issueLink.Key, pullLink.Key)
+	}
+}
+
+func TestExternalIssueCreationReusesPullRequestLink(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	existing := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Linked pull request",
+	}, "alice")
+	if existing.Code != http.StatusCreated {
+		t.Fatalf("create existing issue: status=%d body=%s", existing.Code, existing.Body.String())
+	}
+	issue := decodeBody[model.Issue](t, existing)
+	if linked := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"external_links": []map[string]string{{
+			"url": "https://github.com/owner/repo/pull/42",
+		}},
+	}, "alice"); linked.Code != http.StatusOK {
+		t.Fatalf("link pull request: status=%d body=%s", linked.Code, linked.Body.String())
+	}
+
+	reused := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"external": "owner/repo#42",
+	}, "alice")
+	if reused.Code != http.StatusOK {
+		t.Fatalf("reuse pull-request link: status=%d body=%s", reused.Code, reused.Body.String())
+	}
+	if got := decodeBody[model.Issue](t, reused).Key; got != issue.Key {
+		t.Fatalf("reused issue key = %q, want %q", got, issue.Key)
+	}
+	var issueCount int
+	if err := database.Pool.QueryRow(context.Background(), `select count(*) from issues`).Scan(&issueCount); err != nil {
+		t.Fatalf("count issues: %v", err)
+	}
+	if issueCount != 1 {
+		t.Fatalf("issue count = %d, want 1", issueCount)
+	}
+}
+
 func TestExternalIssueRejectsUnmappedProject(t *testing.T) {
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
