@@ -191,8 +191,6 @@ func markdownLines(text string) []string {
 	return strings.Split(string(lineEnds([]byte(text))), "\n")
 }
 
-// endsInLoneCarriageReturn reports whether the line a text run ends at stop ends in a carriage
-// return that no line feed follows, past the spaces and tabs before it.
 // insideImage reports whether node is part of an image's alt text.
 func insideImage(node ast.Node) bool {
 	for parent := node.Parent(); parent != nil; parent = parent.Parent() {
@@ -216,13 +214,6 @@ func lineEndingAfter(source []byte, stop int) string {
 		return "\r"
 	}
 	return "\n"
-}
-
-func endsInLoneCarriageReturn(source []byte, stop int) bool {
-	for stop < len(source) && (source[stop] == ' ' || source[stop] == '\t') {
-		stop++
-	}
-	return stop < len(source) && loneCarriageReturn(source, stop)
 }
 
 // parseFrontmatterBlock reads the front matter a document opens with in lined (lineEnds), as the

@@ -61,32 +61,29 @@ func Parse(markdown string) (*Node, error) {
 	return doc, nil
 }
 
-// inlineMarkdownParser knows only paragraphs, so a leading list marker, heading
-// marker, fence, or directive is text; the inline syntax is Parse's.
-var inlineMarkdownParser = parser.NewParser(
-	parser.WithBlockParsers(util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000)),
-	parser.WithInlineParsers(parser.DefaultInlineParsers()...),
-	parser.WithInlineParsers(
-		util.Prioritized(extension.NewStrikethroughParser(), 500),
-		util.Prioritized(extension.NewLinkifyParser(), 999),
-	),
-)
+// inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
+// list marker, heading marker, fence, or directive is text, and the inline syntax is Parse's.
+func inlineParserOptions() []parser.Option {
+	return []parser.Option{
+		parser.WithBlockParsers(util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000)),
+		parser.WithInlineParsers(parser.DefaultInlineParsers()...),
+		parser.WithInlineParsers(
+			util.Prioritized(extension.NewStrikethroughParser(), 500),
+			util.Prioritized(extension.NewLinkifyParser(), 999),
+		),
+	}
+}
+
+// inlineMarkdownParser reads inline markdown (inlineParserOptions).
+var inlineMarkdownParser = parser.NewParser(inlineParserOptions()...)
 
 // footnoteRunParser reads inline markdown as inlineMarkdownParser does, with footnote definitions
 // after it so that the references in it read as references (parseInlineWithDefinitions).
-var footnoteRunParser = parser.NewParser(
-	parser.WithBlockParsers(
-		util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999),
-		util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000),
-	),
-	parser.WithInlineParsers(parser.DefaultInlineParsers()...),
-	parser.WithInlineParsers(
-		util.Prioritized(extension.NewStrikethroughParser(), 500),
-		util.Prioritized(extension.NewLinkifyParser(), 999),
-		util.Prioritized(extension.NewFootnoteParser(), 101),
-	),
+var footnoteRunParser = parser.NewParser(append(inlineParserOptions(),
+	parser.WithBlockParsers(util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999)),
+	parser.WithInlineParsers(util.Prioritized(extension.NewFootnoteParser(), 101)),
 	parser.WithASTTransformers(util.Prioritized(extension.NewFootnoteASTTransformer(), 999)),
-)
+)...)
 
 // parseInlineWithDefinitions reads one textblock's inline markdown as ParseInline does, after a
 // definition for each of labels, the footnote labels it refers to. It is the renderer's read-back
@@ -656,7 +653,7 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 				switch {
 				case insideImage(current):
 					appendText(&children, lineEndingAfter(source, current.Segment.Stop), active)
-				case endsInLoneCarriageReturn(source, current.Segment.Stop):
+				case lineEndingAfter(source, current.Segment.Stop) == "\r":
 					appendText(&children, "\r", active)
 				default:
 					appendText(&children, " ", active)

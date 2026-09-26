@@ -26,6 +26,8 @@ type renderer struct {
 	footnoteLabel  string
 	// inFootnote reports whether the blocks being written are inside a footnote definition.
 	inFootnote bool
+	// asteriskRule makes the next rule written `***` rather than `---` (list).
+	asteriskRule bool
 	// footnoteLabels is every footnote label the document defines, lowercased: text shaped like a
 	// reference to one would read as that reference.
 	footnoteLabels map[string]bool
@@ -172,7 +174,12 @@ func (r *renderer) block(n *Node, prefix string) {
 		}
 		r.writeSyntax("\n" + prefix + fence)
 	case "hr":
-		r.writeSyntax("---")
+		if r.asteriskRule {
+			r.writeSyntax("***")
+			r.asteriskRule = false
+		} else {
+			r.writeSyntax("---")
+		}
 	case "frontmatter":
 		for _, child := range n.Children {
 			if child.Type != "text" {
@@ -260,11 +267,8 @@ func (r *renderer) list(n *Node, prefix string) {
 					r.writeSyntax("\n" + indent)
 				}
 			}
-			start := r.b.Len()
+			r.asteriskRule = child.Type == "hr" && afterParagraph && item.Attrs["spread"] != true
 			r.block(child, indent)
-			if child.Type == "hr" && afterParagraph && item.Attrs["spread"] != true {
-				copy(r.b.Bytes()[start:], "***")
-			}
 		}
 	}
 }
