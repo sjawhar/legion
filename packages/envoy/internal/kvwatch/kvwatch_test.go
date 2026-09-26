@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -71,14 +72,20 @@ func bucket(t *testing.T, uri string) (*natsgo.Conn, natsgo.KeyValue) {
 	return conn, kv
 }
 
-// waitingForTheApplyLock reports whether a watch is parked on applyMu: a goroutine in
-// (*Watcher).watch whose wait reason is sync.Mutex.Lock. A test that holds an apply open waits for
-// this before it releases the apply, so the watch is already queued for the lock the release frees.
+// lockedInWatch matches a sync.Mutex.Lock frame whose caller is watch itself. Inside watch that is
+// only applyMu: a wait on w.mu shows sync.(*RWMutex).Lock as the caller, and one on nats.go's
+// connection mutex, further down the call tree (streamCreated, WatchAll), shows nats.go frames.
+var lockedInWatch = regexp.MustCompile(`sync\.\(\*Mutex\)\.Lock\([^\n]*\n\t[^\n]*\n[^\n]*kvwatch\.\(\*Watcher\)\.watch\(`)
+
+// waitingForTheApplyLock reports whether a watch is parked on applyMu: a goroutine whose wait reason
+// is sync.Mutex.Lock and whose Lock frame (*Watcher).watch called. A test that holds an apply open
+// waits for this before it releases the apply, so the watch is already queued for the lock the
+// release frees.
 func waitingForTheApplyLock() bool {
 	buf := make([]byte, 1<<22)
 	buf = buf[:runtime.Stack(buf, true)]
 	for _, goroutine := range strings.Split(string(buf), "\n\n") {
-		if strings.Contains(goroutine, "[sync.Mutex.Lock") && strings.Contains(goroutine, "kvwatch.(*Watcher).watch(") {
+		if strings.Contains(goroutine, "[sync.Mutex.Lock") && lockedInWatch.MatchString(goroutine) {
 			return true
 		}
 	}
