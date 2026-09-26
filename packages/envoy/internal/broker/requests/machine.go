@@ -83,6 +83,11 @@ func (m *Machine) Create(ctx context.Context, enrollmentID string, names []strin
 	if err != nil {
 		return Request{}, err
 	}
+	if existing, ok, err := m.reuseLiveGrant(ctx, enrollmentID, names); err != nil {
+		return Request{}, err
+	} else if ok {
+		return existing, nil
+	}
 	set := m.Rules.Get()
 	requester := rules.Requester{Kind: enr.Kind}
 	if enr.Operator != nil {
@@ -483,6 +488,39 @@ func (m *Machine) coalesce(ctx context.Context, enrollmentID string, names []str
 	sortStrings(sorted)
 	rows, err := m.Store.Pool.Query(ctx, `select r.id, string_agg(s.name, ',' order by s.name) from requests r join request_secrets s on s.request_id=r.id
 		where r.enrollment_id=$1 and r.state='pending' group by r.id`, enrollmentID)
+	if err != nil {
+		return Request{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, joined string
+		if err := rows.Scan(&id, &joined); err != nil {
+			return Request{}, false, err
+		}
+		if joined == strings.Join(sorted, ",") {
+			rows.Close()
+			r, err := m.Get(ctx, id)
+			return r, err == nil, err
+		}
+	}
+	return Request{}, false, rows.Err()
+}
+
+// reuseLiveGrant answers Create's own "request (or reuse the live grant)" contract: an exact
+// name-set match (never a subset or superset — the same matching rule coalesce uses for pending
+// requests) against a still-live grant (not revoked, not expired) under this enrollment is
+// returned as-is, with no rules re-evaluation, no new request row, and no Dispatch ask — exactly
+// how Values() already treats a live grant as authoritative regardless of a later rules change.
+// Called before any policy evaluation in Create, so a caller that already holds a live grant for
+// these exact names never re-asks a human who already approved it once.
+func (m *Machine) reuseLiveGrant(ctx context.Context, enrollmentID string, names []string) (Request, bool, error) {
+	sorted := append([]string(nil), names...)
+	sortStrings(sorted)
+	rows, err := m.Store.Pool.Query(ctx, `select r.id, string_agg(s.name, ',' order by s.name) from requests r
+		join request_secrets s on s.request_id=r.id
+		join grants g on g.request_id=r.id
+		where r.enrollment_id=$1 and r.state='granted' and g.revoked_at is null and g.expires_at > now()
+		group by r.id`, enrollmentID)
 	if err != nil {
 		return Request{}, false, err
 	}

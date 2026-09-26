@@ -51,9 +51,10 @@ func (f Fake) Read(_ context.Context, source string) (string, error) {
 
 // FakeFromFile reads path as a local-development-only .env-style file — one NAME=value line,
 // blank lines and #-prefixed comments skipped, no quoting or escaping — into a Fake. A read
-// error or a line with no "=" is a loud error naming path (and, for a malformed line, its line
-// number), never a silently skipped line: production never calls this (BROKER_RULES_S3_URI
-// selects AWS instead), so a bad fixture must fail the boot that reads it, not start broken.
+// error or a line with no "=" is a loud error naming path and, for a malformed line, only its
+// line NUMBER, never the line's own content: this project's global rule against a secret value
+// ever reaching logs, audit, Dispatch text, proofs, or error messages carries no local-dev-only
+// carve-out, and a malformed line here could itself be (or contain) a secret value.
 func FakeFromFile(path string) (Fake, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -67,7 +68,7 @@ func FakeFromFile(path string) (Fake, error) {
 		}
 		name, value, ok := strings.Cut(trimmed, "=")
 		if !ok {
-			return nil, fmt.Errorf("%s:%d: not a NAME=value line: %q", path, i+1, line)
+			return nil, fmt.Errorf("%s: line %d is not a NAME=value pair", path, i+1)
 		}
 		fake[strings.TrimSpace(name)] = value
 	}

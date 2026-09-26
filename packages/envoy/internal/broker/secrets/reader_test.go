@@ -102,10 +102,14 @@ func TestFakeFromFileRejectsMissingFile(t *testing.T) {
 	}
 }
 
+// TestFakeFromFileRejectsLineWithNoEquals is also the regression for the review's Important
+// finding: a malformed line's own content — which could itself be or contain a secret value —
+// must never appear in the error, only the path and the line number.
 func TestFakeFromFileRejectsLineWithNoEquals(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "secrets.env")
-	if err := os.WriteFile(path, []byte("NOT_A_LINE\n"), 0o600); err != nil {
+	const sensitive = "sk-should-never-appear-in-any-error-message"
+	if err := os.WriteFile(path, []byte(sensitive+"\n"), 0o600); err != nil {
 		t.Fatalf("write fixture: %v", err)
 	}
 	_, err := FakeFromFile(path)
@@ -114,5 +118,8 @@ func TestFakeFromFileRejectsLineWithNoEquals(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "1") {
 		t.Fatalf("error %q should name the path and line number", err.Error())
+	}
+	if strings.Contains(err.Error(), sensitive) {
+		t.Fatalf("error %q must never quote the malformed line's own content", err.Error())
 	}
 }

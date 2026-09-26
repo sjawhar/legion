@@ -181,11 +181,11 @@ func sessionContext() (base, enrollmentID string, key *ecdsa.PrivateKey, err err
 	return base, enrollmentID, key, nil
 }
 
+// writeVerbatim writes exactly raw, nothing more and nothing less: --json's contract is "the
+// response body verbatim ... one JSON object on stdout and nothing else", so this must never
+// append a newline the broker's own response didn't already end with.
 func writeVerbatim(w io.Writer, raw []byte) {
 	w.Write(raw)
-	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
-		fmt.Fprintln(w)
-	}
 }
 
 func minDuration(a, b time.Duration) time.Duration {
@@ -741,32 +741,52 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return 1
 	}
+	var missing []string
+	for _, name := range names {
+		if _, ok := values.Values[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets: %s not released (proxy-delivery or otherwise unavailable)\n", strings.Join(missing, ", "))
+		return 1
+	}
 
 	path, err := exec.LookPath(command[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return 1
 	}
-	envp := filterAgentSecretsEnv(os.Environ())
-	for name, value := range values.Values {
-		envp = append(envp, name+"="+value)
-	}
-	if err := syscall.Exec(path, command, envp); err != nil {
+	if err := syscall.Exec(path, command, buildChildEnv(os.Environ(), values.Values)); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: exec %s: %v\n", command[0], err)
 		return 1
 	}
 	return 0 // unreachable: syscall.Exec replaces this process on success
 }
 
-// filterAgentSecretsEnv strips every AGENT_SECRETS_* variable from environ, so the child sees
-// only the secret values this invocation released, never this CLI's own configuration.
-func filterAgentSecretsEnv(environ []string) []string {
-	kept := make([]string, 0, len(environ))
+// buildChildEnv is the exec form's child environment: the inherited environment with every
+// AGENT_SECRETS_* variable stripped (this CLI's own configuration is never the child's business)
+// and, for every released secret name, its inherited entry ALSO stripped before that name's
+// granted value is appended. Without that second strip, a duplicate key from the inherited
+// environment could shadow the broker-released value under an execve implementation that keeps
+// the first occurrence of a repeated key rather than the last.
+func buildChildEnv(environ []string, values map[string]string) []string {
+	envp := make([]string, 0, len(environ)+len(values))
 	for _, e := range environ {
-		if strings.HasPrefix(e, "AGENT_SECRETS_") {
+		key, _, ok := strings.Cut(e, "=")
+		if !ok {
 			continue
 		}
-		kept = append(kept, e)
+		if strings.HasPrefix(key, "AGENT_SECRETS_") {
+			continue
+		}
+		if _, released := values[key]; released {
+			continue
+		}
+		envp = append(envp, e)
 	}
-	return kept
+	for name, value := range values {
+		envp = append(envp, name+"="+value)
+	}
+	return envp
 }

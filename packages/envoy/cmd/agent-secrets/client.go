@@ -181,11 +181,14 @@ func (c *client) CancelRequest(ctx context.Context, key *ecdsa.PrivateKey, enrol
 
 // --- POST /v1/grants/{id}/values, POST /v1/grants/{id}/revoke ---
 
-// GrantValues is POST /v1/grants/{id}/values's response shape, minus proxy_only: no
-// proxy-delivery secrets exist yet, so this task's client has no use for it.
+// GrantValues is POST /v1/grants/{id}/values's exact response shape. No proxy-delivery secrets
+// exist yet, so ProxyOnly is always empty in practice today; it is still decoded (never
+// dropped) so cmdExec can refuse to exec rather than silently omit a proxy-delivered name from
+// the child's environment.
 type GrantValues struct {
 	Values    map[string]string `json:"values"`
 	ExpiresAt time.Time         `json:"expires_at"`
+	ProxyOnly []string          `json:"proxy_only"`
 }
 
 func (c *client) GrantValues(ctx context.Context, key *ecdsa.PrivateKey, enrollmentID, grantID string) (GrantValues, error) {

@@ -595,7 +595,7 @@ func TestExpirePendingAuditsEveryExpiredRequest(t *testing.T) {
 // session_id override, one created without, and a request id that does not exist — every case
 // answers ("", nil) except the first.
 func TestMachineSessionID(t *testing.T) {
-	m, _, _, enrA, _ := newFixture(t)
+	m, _, _, enrA, enrB := newFixture(t)
 	ctx := context.Background()
 
 	withSession, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "session-abc")
@@ -606,7 +606,10 @@ func TestMachineSessionID(t *testing.T) {
 		t.Fatalf("SessionID(withSession) = %q, %v, want %q, nil", got, err, "session-abc")
 	}
 
-	noSession, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
+	// enrB, not enrA: reuseLiveGrant matches on (enrollment, exact name set), and the first
+	// Create above already left a live AUTO_TOKEN grant on enrA — a same-enrollment repeat would
+	// now legitimately return that same live grant (and its session id) instead of a fresh row.
+	noSession, err := m.Create(ctx, enrB.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
 	if err != nil {
 		t.Fatalf("Create(noSession): %v", err)
 	}
@@ -616,5 +619,112 @@ func TestMachineSessionID(t *testing.T) {
 
 	if got, err := m.SessionID(ctx, uuid.NewString()); err != nil || got != "" {
 		t.Fatalf("SessionID(nonexistent) = %q, %v, want empty, nil", got, err)
+	}
+}
+
+// TestCreateReusesLiveGrantForIdenticalNameSetWithoutNewAsk is the regression for the review's
+// Critical finding: Create's own "request (or reuse the live grant)" contract must answer a
+// repeat request for the exact same names with the already-live grant, not a fresh ask.
+func TestCreateReusesLiveGrantForIdenticalNameSetWithoutNewAsk(t *testing.T) {
+	m, opener, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+
+	req, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	approve := dispatch.Ask{
+		ID: "ask-1", State: "answered",
+		Answer: &dispatch.Answer{User: "sjawhar", Selected: []string{"Approve"}, At: time.Now()},
+	}
+	if _, err := m.ApplyAnswer(ctx, req.ID, approve); err != nil {
+		t.Fatalf("ApplyAnswer: %v", err)
+	}
+	granted, err := m.Get(ctx, req.ID)
+	if err != nil || granted.GrantID == nil {
+		t.Fatalf("Get(after approve) = %+v, %v, want a grant id", granted, err)
+	}
+	if len(opener.calls) != 1 {
+		t.Fatalf("opener called %d times, want 1", len(opener.calls))
+	}
+
+	reused, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it again", "", "")
+	if err != nil {
+		t.Fatalf("Create(again): %v", err)
+	}
+	if reused.ID != req.ID || reused.GrantID == nil || *reused.GrantID != *granted.GrantID {
+		t.Fatalf("reused = %+v, want the same request %q and grant %q", reused, req.ID, *granted.GrantID)
+	}
+	if len(opener.calls) != 1 {
+		t.Fatalf("opener called %d times after reuse, want still 1 (no new ask)", len(opener.calls))
+	}
+}
+
+// TestCreateDoesNotReuseLiveGrantForADifferentNameSet checks reuseLiveGrant's exact-match-only
+// rule: a superset of an already-granted name set must open its own fresh ask, never silently
+// widen the reused grant to cover names it never approved.
+func TestCreateDoesNotReuseLiveGrantForADifferentNameSet(t *testing.T) {
+	m, opener, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+
+	first, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	approve := dispatch.Ask{
+		ID: "ask-1", State: "answered",
+		Answer: &dispatch.Answer{User: "sjawhar", Selected: []string{"Approve"}, At: time.Now()},
+	}
+	if _, err := m.ApplyAnswer(ctx, first.ID, approve); err != nil {
+		t.Fatalf("ApplyAnswer: %v", err)
+	}
+
+	second, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY", "AUTO_TOKEN"}, "need more", "", "")
+	if err != nil {
+		t.Fatalf("Create(superset): %v", err)
+	}
+	if second.ID == first.ID {
+		t.Fatalf("Create(superset) reused the first request, want a fresh one")
+	}
+	if len(opener.calls) != 2 {
+		t.Fatalf("opener called %d times, want 2 (a fresh ask for the superset)", len(opener.calls))
+	}
+}
+
+// TestCreateDoesNotReuseAnExpiredOrRevokedGrant checks reuseLiveGrant's liveness rule: a grant
+// that has expired or been revoked must not be handed back, even though its request row is still
+// state='granted' — Create must fall through to a brand-new request and grant.
+func TestCreateDoesNotReuseAnExpiredOrRevokedGrant(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+
+	granted, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if granted.GrantID == nil {
+		t.Fatalf("Create(AUTO_TOKEN) = %+v, want a grant id", granted)
+	}
+	if _, err := m.Store.Pool.Exec(ctx, `update grants set expires_at = now() - interval '1 hour' where id=$1`, *granted.GrantID); err != nil {
+		t.Fatalf("backdate grant: %v", err)
+	}
+
+	fresh, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it again", "", "")
+	if err != nil {
+		t.Fatalf("Create(after expiry): %v", err)
+	}
+	if fresh.ID == granted.ID || fresh.GrantID == nil || *fresh.GrantID == *granted.GrantID {
+		t.Fatalf("fresh = %+v, want a brand-new request+grant, not the expired one %+v", fresh, granted)
+	}
+
+	if err := m.RevokeGrant(ctx, *fresh.GrantID, "test", nil); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+	again, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it a third time", "", "")
+	if err != nil {
+		t.Fatalf("Create(after revoke): %v", err)
+	}
+	if again.ID == fresh.ID || again.GrantID == nil || *again.GrantID == *fresh.GrantID {
+		t.Fatalf("again = %+v, want a brand-new request+grant, not the revoked one %+v", again, fresh)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,17 +40,29 @@ func buildAgentSecrets(t *testing.T) string {
 	return binary
 }
 
+// brokerCounters records how many times fakeBroker served each route, so a test can assert on
+// call counts (e.g. "no second ask", "never entered the polling loop") instead of only on the
+// final observable outcome.
+type brokerCounters struct {
+	createRequest int32
+	getRequest    int32
+}
+
 // fakeBroker serves just enough of the AGENTC-393 contract for the exec-form and --json tests:
-// POST /v1/requests routes on the requested secret name to a canned granted/pending/denied
-// response, GET /v1/requests/req-pending always answers pending (it never resolves, so the
-// pending-timeout path is exercised deterministically), POST /v1/grants/grant-granted/values
-// releases one canned value, and GET /v1/enrollments/self echoes testEnrollmentID. It does not
-// verify the Proof header or launcher bearer at all — proof.Verifier's own behavior is covered by
-// internal/broker/proof and internal/broker/api's test suites, not this package's.
-func fakeBroker(t *testing.T) *httptest.Server {
+// POST /v1/requests routes on the requested secret name to a canned granted/pending/denied/
+// proxy-only/no-trailing-newline response, GET /v1/requests/{id} answers the pending case's own
+// request id with the same never-resolving pending state (and 404s any other id, since a
+// granted-immediately response must never be polled), POST /v1/grants/{id}/values releases one
+// canned value (or, for the proxy-only case, none at all), and GET /v1/enrollments/self echoes
+// testEnrollmentID. It does not verify the Proof header or launcher bearer at all —
+// proof.Verifier's own behavior is covered by internal/broker/proof and internal/broker/api's
+// test suites, not this package's.
+func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	t.Helper()
+	counters := &brokerCounters{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/requests", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&counters.createRequest, 1)
 		var body struct {
 			Secrets []string `json:"secrets"`
 		}
@@ -76,16 +89,50 @@ func fakeBroker(t *testing.T) *httptest.Server {
 				"secrets":  []map[string]string{{"name": name, "decision": "deny", "delivery": "inject"}},
 				"grant_id": nil, "ask": nil,
 			})
+		case "PROXY_ME":
+			writeJSON(w, map[string]any{
+				"request_id": "req-proxy", "state": "granted",
+				"secrets":  []map[string]string{{"name": name, "decision": "automatic", "delivery": "proxy"}},
+				"grant_id": "grant-proxy", "ask": nil,
+			})
+		case "NONEWLINE_ME":
+			// Written with http.ResponseWriter.Write directly, with NO trailing newline, unlike
+			// every other case (which goes through writeJSON's json.Encoder, always "\n"
+			// terminated) — this is the fixture for the writeVerbatim byte-exact test.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic","delivery":"inject"}],"grant_id":"grant-nonewline","ask":null}`))
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 		}
 	})
-	mux.HandleFunc("GET /v1/requests/req-pending", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/requests/{id}", func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&counters.getRequest, 1)
+		if r.PathValue("id") != "req-pending" {
+			// A request the fake granted immediately must never be polled; failing loudly here
+			// (rather than serving it) is the reuse-transparency test's proof that cmdExec does
+			// not enter its pending-wait loop for an already-granted response.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		writeJSON(w, map[string]any{"state": "pending", "grant_id": nil, "decided_at": nil, "decision": nil})
 	})
 	mux.HandleFunc("POST /v1/grants/grant-granted/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
 			"values":     map[string]string{"GRANT_ME": "topsecretvalue123"},
+			"expires_at": time.Now().Add(time.Hour),
+			"proxy_only": []string{},
+		})
+	})
+	mux.HandleFunc("POST /v1/grants/grant-proxy/values", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"values":     map[string]string{},
+			"expires_at": time.Now().Add(time.Hour),
+			"proxy_only": []string{"PROXY_ME"},
+		})
+	})
+	mux.HandleFunc("POST /v1/grants/grant-nonewline/values", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, map[string]any{
+			"values":     map[string]string{"NONEWLINE_ME": "irrelevant"},
 			"expires_at": time.Now().Add(time.Hour),
 			"proxy_only": []string{},
 		})
@@ -96,7 +143,7 @@ func fakeBroker(t *testing.T) *httptest.Server {
 			"lease_expires_at": time.Now().Add(time.Hour), "grants": []any{},
 		})
 	})
-	return httptest.NewServer(mux)
+	return httptest.NewServer(mux), counters
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -130,11 +177,13 @@ func newKeyDir(t *testing.T) string {
 }
 
 // runAgentSecrets runs the built binary against broker and keyDir, returning its separate
-// stdout/stderr and exit code (0 for a clean exit).
-func runAgentSecrets(t *testing.T, binary, broker, keyDir string, args ...string) (stdout, stderr string, exitCode int) {
+// stdout/stderr and exit code (0 for a clean exit). extraEnv, when non-nil, is appended after the
+// fixed AGENT_SECRETS_* variables, so a test can set an inherited variable the CLI must not let
+// leak into (or shadow) a granted secret.
+func runAgentSecrets(t *testing.T, binary, broker, keyDir string, extraEnv []string, args ...string) (stdout, stderr string, exitCode int) {
 	t.Helper()
 	cmd := exec.Command(binary, args...)
-	cmd.Env = append(os.Environ(), "AGENT_SECRETS_URL="+broker, "AGENT_SECRETS_KEY_DIR="+keyDir)
+	cmd.Env = append(append(os.Environ(), "AGENT_SECRETS_URL="+broker, "AGENT_SECRETS_KEY_DIR="+keyDir), extraEnv...)
 	var out, errOut strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = &errOut
@@ -174,13 +223,25 @@ func keySet(m map[string]any) map[string]bool {
 	return keys
 }
 
+func mapsEqual(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if !b[k] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	binary := buildAgentSecrets(t)
-	broker := fakeBroker(t)
+	broker, _ := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir,
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
 		"GRANT_ME", "--", "sh", "-c", `echo -n "$GRANT_ME" | sha256sum`)
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
@@ -198,11 +259,11 @@ func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 
 func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 	binary := buildAgentSecrets(t)
-	broker := fakeBroker(t)
+	broker, _ := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir,
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
 		"PENDING_ME", "--wait", "200ms", "--", "sh", "-c", "echo ran-the-child")
 	if exit != exitPending {
 		t.Fatalf("exit = %d, want %d (pending): stdout=%q stderr=%q", exit, exitPending, stdout, stderr)
@@ -214,11 +275,11 @@ func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 
 func TestExecFormDeniedExitsSeventySevenWithNoChild(t *testing.T) {
 	binary := buildAgentSecrets(t)
-	broker := fakeBroker(t)
+	broker, _ := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir,
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
 		"DENY_ME", "--", "sh", "-c", "echo ran-the-child")
 	if exit != exitDenied {
 		t.Fatalf("exit = %d, want %d (denied): stdout=%q stderr=%q", exit, exitDenied, stdout, stderr)
@@ -230,11 +291,11 @@ func TestExecFormDeniedExitsSeventySevenWithNoChild(t *testing.T) {
 
 func TestExecFormRefusesWhenNoNameIsGiven(t *testing.T) {
 	binary := buildAgentSecrets(t)
-	broker := fakeBroker(t)
+	broker, _ := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	stdout, _, exit := runAgentSecrets(t, binary, broker.URL, keyDir, "--", "sh", "-c", "echo ran-the-child")
+	stdout, _, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "--", "sh", "-c", "echo ran-the-child")
 	if exit == 0 {
 		t.Fatalf("exit = 0, want a nonzero usage error when no NAME is given")
 	}
@@ -243,13 +304,91 @@ func TestExecFormRefusesWhenNoNameIsGiven(t *testing.T) {
 	}
 }
 
-func TestRequestJSONPrintsExactlyOneContractObject(t *testing.T) {
+// TestExecFormRefusesToRunWhenAGrantedNameIsProxyOnly is the regression for the review's
+// Important finding 3: a granted request whose delivery is "proxy" (or otherwise missing from
+// the grant's values) must never exec — a proxy-only secret has no value for the CLI to release
+// into the child's environment at all, and silently execing without it would be a silent partial
+// grant.
+func TestExecFormRefusesToRunWhenAGrantedNameIsProxyOnly(t *testing.T) {
 	binary := buildAgentSecrets(t)
-	broker := fakeBroker(t)
+	broker, _ := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, "request", "GRANT_ME", "--json")
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
+		"PROXY_ME", "--", "sh", "-c", "echo ran-the-child")
+	if exit == 0 {
+		t.Fatalf("exit = 0, want a nonzero refusal for a proxy-only grant: stdout=%q stderr=%q", stdout, stderr)
+	}
+	if exit == exitPending || exit == exitDenied {
+		t.Fatalf("exit = %d, want a plain operational refusal (not 75/76/77): stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if strings.Contains(stdout, "ran-the-child") {
+		t.Fatalf("child ran despite a proxy-only (unreleased) secret: stdout=%q", stdout)
+	}
+	if !strings.Contains(stderr, "PROXY_ME") {
+		t.Fatalf("stderr should name the missing secret PROXY_ME: %q", stderr)
+	}
+}
+
+// TestExecFormDoesNotLetInheritedEnvShadowAGrantedValue is the regression for the review's
+// Important finding 1: an inherited environment variable sharing a granted secret's exact name
+// must not survive into the child's environment alongside (and potentially before) the
+// broker-released value.
+func TestExecFormDoesNotLetInheritedEnvShadowAGrantedValue(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	keyDir := newKeyDir(t)
+
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir,
+		[]string{"GRANT_ME=attacker-controlled-stale-value"},
+		"GRANT_ME", "--", "sh", "-c", `echo -n "$GRANT_ME" | sha256sum`)
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	sum := sha256.Sum256([]byte("topsecretvalue123"))
+	want := hex.EncodeToString(sum[:])
+	fields := strings.Fields(stdout)
+	if len(fields) == 0 || fields[0] != want {
+		t.Fatalf("child GRANT_ME sha256 = %q, want %q (granted value, not the shadowing inherited one): stdout=%q", fields, want, stdout)
+	}
+}
+
+// TestExecFormSecondInvocationReusesGrantTransparently proves cmd/agent-secrets needs no
+// client-side change to benefit from Machine.Create's server-side grant reuse (the review's
+// Critical finding, fixed in requests/machine.go): running the exec form twice for the same
+// already-granted secret name must both times grant immediately, and — critically — must never
+// poll GET /v1/requests/{id} (proof that neither invocation ever entered the pending-wait loop,
+// whether the broker minted the grant fresh or handed back a reused one).
+func TestExecFormSecondInvocationReusesGrantTransparently(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, counters := fakeBroker(t)
+	defer broker.Close()
+	keyDir := newKeyDir(t)
+
+	for i := 0; i < 2; i++ {
+		stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil,
+			"GRANT_ME", "--", "sh", "-c", `echo -n "$GRANT_ME" | sha256sum`)
+		if exit != 0 {
+			t.Fatalf("invocation %d: exit = %d, want 0: stdout=%q stderr=%q", i, exit, stdout, stderr)
+		}
+	}
+	if got := atomic.LoadInt32(&counters.createRequest); got != 2 {
+		t.Fatalf("POST /v1/requests called %d times, want 2 (one per invocation)", got)
+	}
+	if got := atomic.LoadInt32(&counters.getRequest); got != 0 {
+		t.Fatalf("GET /v1/requests/{id} called %d times, want 0 (an immediately granted request must never be polled)", got)
+	}
+}
+
+func TestRequestJSONPrintsExactlyOneContractObject(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	keyDir := newKeyDir(t)
+
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "request", "GRANT_ME", "--json")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -263,13 +402,32 @@ func TestRequestJSONPrintsExactlyOneContractObject(t *testing.T) {
 	}
 }
 
-func TestSelfJSONPrintsExactlyOneContractObjectNamingTheIssuedEnrollment(t *testing.T) {
+// TestRequestJSONIsByteIdenticalToTheBrokerResponse is the regression for the review's Important
+// finding 2: --json must print the broker's exact bytes, never appending a newline (or anything
+// else) the response didn't already end with.
+func TestRequestJSONIsByteIdenticalToTheBrokerResponse(t *testing.T) {
 	binary := buildAgentSecrets(t)
-	broker := fakeBroker(t)
+	broker, _ := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, "self", "--json")
+	const wantExact = `{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic","delivery":"inject"}],"grant_id":"grant-nonewline","ask":null}`
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "request", "NONEWLINE_ME", "--json")
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if stdout != wantExact {
+		t.Fatalf("stdout = %q, want byte-identical to the broker's exact response %q", stdout, wantExact)
+	}
+}
+
+func TestSelfJSONPrintsExactlyOneContractObjectNamingTheIssuedEnrollment(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	keyDir := newKeyDir(t)
+
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "self", "--json")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -281,16 +439,4 @@ func TestSelfJSONPrintsExactlyOneContractObjectNamingTheIssuedEnrollment(t *test
 	if obj["enrollment_id"] != testEnrollmentID {
 		t.Fatalf("enrollment_id = %v, want %q (the id the fake issued)", obj["enrollment_id"], testEnrollmentID)
 	}
-}
-
-func mapsEqual(a, b map[string]bool) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k := range a {
-		if !b[k] {
-			return false
-		}
-	}
-	return true
 }
