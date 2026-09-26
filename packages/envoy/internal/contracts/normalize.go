@@ -351,6 +351,12 @@ func githubParentKind(event string, body map[string]any) string {
 	return ""
 }
 
+// GithubTopicKinds are the tokens that follow a GitHub topic's owner and name: every kind
+// githubKind returns, every parent kind githubParentKind returns, and `mention`, under which the
+// mention copies are published (push, workflow and checks topics begin `push`, `workflow` and
+// `pr`). A token there that is none of these belongs to a repository name spelled with its dot.
+var GithubTopicKinds = []string{"ci", "comment", "issue", "mention", "pr", "push", "review", "sub_issue", "workflow"}
+
 func githubKind(event string) string {
 	switch event {
 	case "pull_request":

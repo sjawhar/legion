@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -650,6 +651,51 @@ func TestGithubSubjectsWriteADottedOwnerOrNameAsOneSegment(t *testing.T) {
 	} {
 		if tc.got != tc.want {
 			t.Errorf("subject = %s, want %s", tc.got, tc.want)
+		}
+	}
+}
+
+// The listener reads GithubTopicKinds as where a repository name ends in a topic, so every token
+// Envoy publishes right after a repository's owner and name is one: every kind githubKind and
+// every parent kind githubParentKind return, the mention, push, workflow and checks topics, and
+// every golden envelope's topic.
+func TestGithubTopicKindsHoldEveryTokenAfterTheRepository(t *testing.T) {
+	const prefix = "notifications.github.example-org.example-repo."
+	topics := []string{
+		GithubSubject("example-org", "example-repo", "mention"),
+		GithubPushSubject("example-org", "example-repo", "branch", "main"),
+		GithubWorkflowSubject("example-org", "example-repo", "ci.yml", "completed"),
+		GithubSubject("example-org", "example-repo", "pr.7.checks"),
+	}
+	for _, event := range []string{"pull_request", "issues", "sub_issues", "push", "check_run", "check_suite", "workflow_run", "issue_comment", "pull_request_review", "pull_request_review_comment", "merge_group"} {
+		topics = append(topics, prefix+githubKind(event))
+		for _, body := range []map[string]any{{}, {"issue": map[string]any{"pull_request": map[string]any{}}}} {
+			if parent := githubParentKind(event, body); parent != "" {
+				topics = append(topics, prefix+parent)
+			}
+		}
+	}
+	goldens, err := filepath.Glob(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "*.json"))
+	if err != nil || len(goldens) == 0 {
+		t.Fatalf("golden envelopes: %v, %d found", err, len(goldens))
+	}
+	for _, path := range goldens {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var golden struct {
+			Topic string `json:"topic"`
+		}
+		if err := json.Unmarshal(raw, &golden); err != nil {
+			t.Fatal(err)
+		}
+		topics = append(topics, golden.Topic)
+	}
+	for _, topic := range topics {
+		parts := strings.Split(strings.TrimPrefix(topic, "notifications.github."), ".")
+		if len(parts) < 3 || !slices.Contains(GithubTopicKinds, parts[2]) {
+			t.Errorf("%s: token %q after the repository is not in GithubTopicKinds %v", topic, parts[min(2, len(parts)-1)], GithubTopicKinds)
 		}
 	}
 }

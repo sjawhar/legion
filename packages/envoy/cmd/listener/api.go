@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -885,6 +886,32 @@ func githubRepositoryTopic(topic string) (owner, repo string, ok bool) {
 	return parts[0], parts[1], true
 }
 
+// dottedRepositoryWarning is the warning for a GitHub topic that spells a repository name with its
+// dot, which receives nothing: Envoy writes each dot in a name as `_`, and the token after the name
+// is one of contracts.GithubTopicKinds. A topic whose token there is neither a kind nor a wildcard
+// carries the rest of a dotted name, which runs to the first token that is one, and the warning
+// names the spelling Envoy publishes.
+func dottedRepositoryWarning(topic string) string {
+	remainder, ok := strings.CutPrefix(topic, "notifications.github.")
+	if !ok {
+		return ""
+	}
+	parts := strings.Split(remainder, ".")
+	endsName := func(token string) bool {
+		return token == "*" || token == ">" || slices.Contains(contracts.GithubTopicKinds, token)
+	}
+	if len(parts) < 3 || endsName(parts[2]) {
+		return ""
+	}
+	end := 3
+	for end < len(parts) && !endsName(parts[end]) {
+		end++
+	}
+	spelled := append([]string{parts[0], strings.Join(parts[1:end], "_")}, parts[end:]...)
+	return fmt.Sprintf(`%s spells a repository name with a dot, and GitHub topics write each dot in a name as "_": subscribe to notifications.github.%s`,
+		topic, strings.Join(spelled, "."))
+}
+
 func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string, logger *logging.Logger) string {
 	owner, repo, ok := githubRepositoryTopic(topic)
 	if !ok {
@@ -968,6 +995,10 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 		warnings := make([]string, 0)
 		warnedRepositories := make(map[string]struct{})
 		for _, topic := range body.Topics {
+			if warning := dottedRepositoryWarning(topic); warning != "" {
+				warnings = append(warnings, warning)
+				continue
+			}
 			owner, repo, ok := githubRepositoryTopic(topic)
 			if !ok {
 				continue
