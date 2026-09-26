@@ -2314,10 +2314,11 @@ func TestApplyOperationEmptyingACalloutInAFootnoteAdvisesDeletingTheCallout(t *t
 	}
 }
 
-// A lone carriage return ends a line, as in the browser editor. A replace carrying one is taken
-// where the text after it reads back where it was written - lazily continuing a paragraph, or in
-// code, under the prefix and a fence written past it - and refused where the line it starts would
-// read back as another block: a heading, a list, or the end of a heading or a table row.
+// A lone carriage return ends a line, as in the browser editor. A replace carrying one is taken,
+// and the line it starts is written as any other line is: lazily continuing a paragraph, escaped
+// where its text would read as block syntax (a setext underline, a heading, list or quote marker),
+// or in code under the prefix and a fence written past it. It is refused only where it would end
+// its block: in a heading or a table cell, which are written on one line.
 func TestApplyOperationReplaceWithALoneCarriageReturn(t *testing.T) {
 	const callout = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n```\nBody.\n```\n:::\n\nAfter.\n"
 	for _, test := range []struct {
@@ -2330,9 +2331,15 @@ func TestApplyOperationReplaceWithALoneCarriageReturn(t *testing.T) {
 		{"in code", "Intro.\n\n```\nBody.\n```\n", "a\rb", true},
 		{"in a blockquote's code", "Intro.\n\n> ```\n> Body.\n> ```\n\nAfter.\n", "a\rb", true},
 		{"before a colon line in a callout's code", callout, "a\r:::", true},
-		{"before dashes", "Intro.\n\nBody.\n\nAfter.\n", "x\r---", false},
-		{"before a heading marker", "Intro.\n\nBody.\n\nAfter.\n", "x\r# y", false},
-		{"before a list marker", "Intro.\n\nBody.\n\nAfter.\n", "x\r- y", false},
+		{"before dashes", "Intro.\n\nBody.\n\nAfter.\n", "x\r---", true},
+		{"before a heading marker", "Intro.\n\nBody.\n\nAfter.\n", "x\r# y", true},
+		{"before a list marker", "Intro.\n\nBody.\n\nAfter.\n", "x\r- y", true},
+		{"before a quote marker in a quote", "Intro.\n\n> Body.\n\nAfter.\n", "x\r> y", true},
+		{"before dashes in a list item", "Intro.\n\n- Body.\n- two\n", "x\r---", true},
+		{"before a list marker in a quote", "Intro.\n\n> Body.\n\nAfter.\n", "x\r- y", true},
+		{"before an equals line", "Intro.\n\nBody.\n\nAfter.\n", "x\r===", true},
+		{"before a fence", "Intro.\n\nBody.\n\nAfter.\n", "x\r```", true},
+		{"before a colon line in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "x\r:::", true},
 		{"in a heading", "Intro.\n\n# Body.\n\nAfter.\n", "a\rb", false},
 		{"in a table cell", "Intro.\n\n| h |\n| --- |\n| Body. |\n", "a\rb", false},
 	} {

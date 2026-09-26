@@ -1,7 +1,6 @@
 package pmdoc
 
 import (
-	"bytes"
 	"fmt"
 	"slices"
 	"strings"
@@ -145,15 +144,16 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				label = r.labelBrackets
 			}
 			r.writeInlineText(n, &position, prefix, escapeContext{
-				tableCell:  escapePipes,
-				urlSchemes: !hasLink,
-				label:      label,
-				followed:   index+1 < len(nodes) || len(next) > 0,
-				delimiters: escapes,
-				heading:    context.heading,
-				marked:     len(next) > 0,
-				opener:     adjacentDelimiter(next[common:]),
-				closer:     adjacentDelimiter(next[sharedMarks(next, following):]),
+				lineFeedNext: index+1 < len(nodes) && strings.HasPrefix(nodes[index+1].Text, "\n"),
+				tableCell:    escapePipes,
+				urlSchemes:   !hasLink,
+				label:        label,
+				followed:     index+1 < len(nodes) || len(next) > 0,
+				delimiters:   escapes,
+				heading:      context.heading,
+				marked:       len(next) > 0,
+				opener:       adjacentDelimiter(next[common:]),
+				closer:       adjacentDelimiter(next[sharedMarks(next, following):]),
 			})
 		case "hardbreak":
 			r.closeMarks(active, escapePipes)
@@ -208,14 +208,18 @@ func (r *renderer) endLine() {
 	}
 	r.heldLineStart = nil
 	written := r.b.Bytes()
-	lineFrom := bytes.LastIndexByte(written[:candidate.at], '\n') + 1
+	lineFrom := markdownLineStart(written, candidate.at)
 	line := string(written[lineFrom:])
 	width := utf8.RuneLen(candidate.char)
 	escape := escaped(candidate.char)
 	if !candidate.atTypedPrefix || !closesTypedBlock(line, candidate.prefix) {
 		readFrom, before := lineFrom, ""
 		if candidate.afterLine && lineFrom > 0 {
-			readFrom = bytes.LastIndexByte(written[:lineFrom-1], '\n') + 1
+			lineBreak := lineFrom - 1
+			if lineBreak > 0 && written[lineBreak] == '\n' && written[lineBreak-1] == '\r' {
+				lineBreak--
+			}
+			readFrom = markdownLineStart(written, lineBreak)
 			before = string(written[readFrom:lineFrom])
 		}
 		var footnote string
@@ -313,22 +317,24 @@ func (r *renderer) writeText(value string) {
 
 func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix string, context escapeContext) {
 	if nodeHasMark(node, "inlineCode") {
-		// A code span's text is written as it is; a newline in it still ends a line.
+		// A code span's text is written as it is; a line feed or a lone carriage return in it
+		// still ends a line.
 		value := escapeTablePipes(node.Text, context.tableCell)
+		endsLine := false
 		for {
-			newline := strings.IndexByte(value, '\n')
-			if newline < 0 {
+			lineEnd := lineEndIn(value, context.lineFeedNext)
+			if lineEnd < 0 {
 				break
 			}
-			r.writeText(value[:newline])
+			r.writeText(value[:lineEnd])
 			r.endLine()
-			r.writeText("\n")
-			value = value[newline+1:]
+			r.writeText(value[lineEnd : lineEnd+1])
+			value = value[lineEnd+1:]
+			endsLine, position.afterLine = value == "", true
 		}
 		r.writeText(value)
-		position.atLineStart = strings.HasSuffix(node.Text, "\n")
+		position.atLineStart = endsLine
 		position.atTextStart = position.atLineStart
-		position.afterLine = position.afterLine || strings.Contains(node.Text, "\n")
 		return
 	}
 
@@ -367,18 +373,57 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			r.writeSyntax(textEscape(char))
 			segmentStart = byteOffset + width
 		}
-		if char == '\n' {
+		lineEnd := endsMarkdownLine(value, byteOffset, context.lineFeedNext)
+		if lineEnd {
 			r.writeText(value[segmentStart:byteOffset])
 			segmentStart = byteOffset
 			r.endLine()
 			lineStart, textLineStart = byteOffset+width, byteOffset+width
 			position.afterLine = true
 		}
-		position.atLineStart = char == '\n'
-		position.atTextStart = char == '\n'
+		position.atLineStart = lineEnd
+		position.atTextStart = lineEnd
 		position.afterMarker = false
 	}
 	r.writeText(value[segmentStart:])
+}
+
+// endsMarkdownLine reports whether the character at offset in value ends a markdown line: a line
+// feed, or a carriage return no line feed follows, in value or, at its end, at the start of the
+// next node (lineFeedNext).
+func endsMarkdownLine(value string, offset int, lineFeedNext bool) bool {
+	switch value[offset] {
+	case '\n':
+		return true
+	case '\r':
+		if offset+1 < len(value) {
+			return value[offset+1] != '\n'
+		}
+		return !lineFeedNext
+	}
+	return false
+}
+
+// lineEndIn is the offset of the first character in value that ends a markdown line
+// (endsMarkdownLine), or -1.
+func lineEndIn(value string, lineFeedNext bool) int {
+	for offset := 0; offset < len(value); offset++ {
+		if endsMarkdownLine(value, offset, lineFeedNext) {
+			return offset
+		}
+	}
+	return -1
+}
+
+// markdownLineStart is where the markdown line holding offset begins in written: after the last
+// line feed or lone carriage return before it.
+func markdownLineStart(written []byte, offset int) int {
+	for index := offset - 1; index >= 0; index-- {
+		if written[index] == '\n' || loneCarriageReturn(written, index) {
+			return index + 1
+		}
+	}
+	return 0
 }
 
 // holdLineStart writes the text before a line's first character and holds that character for

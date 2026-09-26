@@ -22,6 +22,9 @@ import (
 
 // escapeContext is what one character's escape depends on beyond the text itself.
 type escapeContext struct {
+	// lineFeedNext reports whether the next node's text begins with a line feed, so that a
+	// carriage return ending this text is half of a line break rather than one of its own.
+	lineFeedNext bool
 	// textLineStart is where the character's line of text begins inside this node, or -1 when it
 	// began in an earlier one: the writer's long-standing list, heading, quote and ordered-list
 	// escapes are judged here, in headings, cells and inside marks as well, so that the markdown

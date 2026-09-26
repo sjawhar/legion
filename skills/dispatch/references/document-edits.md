@@ -73,10 +73,9 @@ list item's code, do not survive the next read. A line of colons in code inside 
 that typed block's fence longer than any such line the browser editor would end it at. Text a `replace` writes that
 would read as block syntax at a line start is stored escaped and reads back as the characters you sent: `---` over a
 paragraph is stored `\---`, not a rule, so to add a rule, `insert` it beside the paragraph (`insert` with markdown
-`***`). A line that a carriage return with no line feed after it begins is not escaped, and where it would read back
-as another block (`x\r---` as a heading) the replace is `INVALID_OP`, naming that block and the `insert` that adds it,
-except in a footnote definition, which the document reads at its end - there, keep the characters as text with other
-text on that line. Use zero-based
+`***`). A carriage return with no line feed after it ends a line as a line feed does: the line it begins is escaped the
+same way (`x\r---` is stored `x\r\---`), and in a heading or a table cell, which are written on one line, the replace
+is `INVALID_OP`. Use zero-based
 `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 

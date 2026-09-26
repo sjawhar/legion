@@ -138,9 +138,9 @@ the typed block - so the renderer writes the typed block's fence longer than eve
 fixture generator writes for a callout at the top and inside a blockquote, list items, a footnote
 definition and another callout. Text a `replace` writes that would read as block syntax at a line
 start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::` over a
-paragraph is stored `\---` and so on (the renderer's line-start escapes). Where no escape reaches it
-- a line a lone carriage return begins - a `replace` whose text reads back as another block is
-refused, naming the block it reads back as and the `insert` that adds it, except in a footnote
+paragraph is stored `\---` and so on (the renderer's line-start escapes), on a line a lone
+carriage return begins as on any other. A `replace` whose text still reads back as another block
+is refused, naming the block it reads back as and the `insert` that adds it, except in a footnote
 definition, which the document reads at its end, so a block inserted beside one reads back ahead
 of it (`refuseReshapedReplacement`). An empty paragraph
 is not written, so the shape comparison (`pmdoc.BlockShapeError`) expects none back: an empty
@@ -486,8 +486,10 @@ its carriage return; a soft break a lone carriage return ends stays `\r` in the 
 browser editor keeps it. A code span keeps the whitespace that starts each of its later lines past the
 prefix of the containers around it, after a line feed or a lone carriage return, as the browser
 editor's parser reads it; goldmark's paragraph trims it (`lineRecordingParagraph`, `codeLineIndent`). The renderer writes a code line's prefix after a lone carriage return as
-after a line feed, and `closingColons` measures the line after one. A replace whose lone carriage
-return starts a line reading back as another block is refused by the shape check like any other.
+after a line feed, and `closingColons` measures the line after one. The inline writer ends a line
+at a lone carriage return as at a line feed (`endsMarkdownLine`), so the line it begins takes the
+line-start escapes; a replace carrying one is refused only in a heading or a table cell, which are
+written on one line.
 Two readings follow the browser editor rather than the line split: a line a lone carriage return
 begins is never refused as a malformed directive (`a\r::::` is text, since the browser editor refuses
 those line by line at line feeds), and a lazy continuation line - one that continues a paragraph in
