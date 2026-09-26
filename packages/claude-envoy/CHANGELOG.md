@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0]
 
 ### Added
 
@@ -14,6 +14,9 @@
 ### Fixed
 
 - Oh My Pi no longer launches the channel server. Every omp session that had this plugin installed opened with `Failed: claude-envoy-bridge:envoy [...]: MCP subprocess closed stdout before responding.`, because the server needs Claude Code's session identity and exits without it. A new `.omp-plugin/plugin.json` declares an empty `mcpServers`, which omp reads before `.claude-plugin/plugin.json` and applies instead of `.mcp.json`; Claude Code reads only `.claude-plugin/plugin.json` and still launches the server. omp gets Envoy and Dispatch from `@sjawhar/pi-legion-envoy`. Skills are unaffected in both harnesses.
+- After `/clear`, the session's registry entry no longer lists the pre-`/clear` id's direct subject. The server dropped that subject only after its first registration under the new id, and the listener merges registered topics without removing any, so the entry kept it for the life of the entry and `envoy_unsubscribe` could not remove it. Every registry write now runs one at a time and a registration reads the id and topics when it runs, so a registration that was in flight when `envoy_unsubscribe` or a human in Dispatch removed a topic, or when a handoff deregistered the old id, no longer writes it back, and a handoff that fails before the id switch no longer leaves the new id's direct subject in registrations under the old id.
+- `/clear` is adopted as soon as the SessionStart hook writes the handoff file instead of at the next heartbeat (up to two minutes), during which the session answered to the old id and a send to the new id was refused.
+- A handoff whose first registration under the new id fails takes the held role back on a later heartbeat instead of leaving it on the old id.
 
 ## [0.3.0]
 
