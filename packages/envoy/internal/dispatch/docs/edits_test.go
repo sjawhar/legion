@@ -2064,3 +2064,67 @@ func TestApplyOpsDeletingAnOpenAskBlockByIDRetractsItsAsk(t *testing.T) {
 		t.Fatalf("ask events after delete = %d, want opened and resolved", got)
 	}
 }
+
+// A replace writes text. Text that reads back as another block where it lands - a line of dashes
+// becomes a horizontal rule, a line of colons a typed block's fence - is refused with that cause,
+// whatever the block around it, and the advice is the insert that adds the block the caller
+// probably meant. The reason names the block the text reads back as, read in place, not at a
+// document's start, where a `---` line would open front matter.
+func TestApplyOperationReplaceRefusesTextThatReadsBackAsAnotherBlock(t *testing.T) {
+	for _, test := range []struct {
+		name, markdown, with string
+		want                 []string
+	}{
+		{"a paragraph", "Intro.\n\nBody.\n\nAfter.\n", "---", []string{"a horizontal rule", `insert with markdown "***"`}},
+		{"a blockquote", "Intro.\n\n> Body.\n", "---", []string{"a horizontal rule", "insert"}},
+		{"a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "---", []string{"a horizontal rule", "insert"}},
+		{"a list item", "Intro.\n\n- Body.\n- two\n", "***", []string{"horizontal rule", "insert"}},
+		{"a footnote definition", "x[^1]\n\n[^1]: Body.\n", "---", []string{"horizontal rule", "insert"}},
+		{"a callout, with colons", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", ":::", []string{"typed block's fence", "insert"}},
+		{"a paragraph, a colon line then text", "Intro.\n\nBody.\n\nAfter.\n", ":::\nb", []string{"typed block's fence", "insert"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "with" {
+				t.Fatalf("replace with %q = %v, want INVALID_OP on with", test.with, err)
+			}
+			for _, want := range test.want {
+				if !strings.Contains(invalid.Reason, want) {
+					t.Fatalf("reason %q lacks %q", invalid.Reason, want)
+				}
+			}
+			if strings.Contains(invalid.Reason, "requires block children") {
+				t.Fatalf("reason %q names the document-start reading", invalid.Reason)
+			}
+		})
+	}
+	// The advised insert adds the rule beside the paragraph.
+	tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pmdoc.EnsureBlockIDs(tree)
+	next, err := applyOperation(tree, model.EditOp{Op: "insert", After: "Body.", Markdown: "***"})
+	if err != nil {
+		t.Fatalf("the advised insert = %v", err)
+	}
+	if len(next.Children) != 4 || next.Children[2].Type != "hr" {
+		markdown, _ := renderTree(next)
+		t.Fatalf("after the advised insert = %q, want a horizontal rule after the paragraph", markdown)
+	}
+	for _, with := range []string{"--- a note", "a --- b", "x :::"} {
+		tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: with}); err != nil {
+			t.Fatalf("replace with %q = %v, want it accepted", with, err)
+		}
+	}
+}

@@ -1,0 +1,5302 @@
+[
+  {
+    "name": "bullet-item/0",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n:::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- item\n  ```\n  a\n  :::\n  b\n  ```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "bullet-item/1",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- item\n  ```\n  a\n   :::\n  b\n  ```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "bullet-item/2",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n  :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- item\n  ```\n  a\n    :::\n  b\n  ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "bullet-item/2-four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n  ::::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- item\n  ```\n  a\n    ::::\n  b\n  ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "bullet-item/3",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n   :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- item\n  ```\n  a\n     :::\n  b\n  ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "bullet-item/4",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n    :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- item\n  ```\n  a\n      :::\n  b\n  ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "bullet-item/6",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n      :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- item\n  ```\n  a\n        :::\n  b\n  ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "bullet-item/four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n::::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- item\n  ```\n  a\n  ::::\n  b\n  ```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "bullet-item/tab",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n\t:::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- item\n  ```\n  a\n  \t:::\n  b\n  ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "bullet-item/trailing-space",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n::: \nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- item\n  ```\n  a\n  ::: \n  b\n  ```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "direct/0",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n:::\nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n```\na\n:::\nb\n```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "direct/1",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n :::\nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n```\na\n :::\nb\n```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "direct/2",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n  :::\nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n```\na\n  :::\nb\n```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "direct/2-four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n  ::::\nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n```\na\n  ::::\nb\n```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "direct/3",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n   :::\nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n```\na\n   :::\nb\n```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "direct/4",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n    :::\nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n```\na\n    :::\nb\n```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "direct/6",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n      :::\nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n```\na\n      :::\nb\n```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "direct/four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n::::\nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n```\na\n::::\nb\n```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "direct/tab",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n\t:::\nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n```\na\n\t:::\nb\n```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "direct/trailing-space",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a\n::: \nb"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n```\na\n::: \nb\n```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "list-in-quote/0",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "checked": null,
+                        "label": "",
+                        "listType": "bullet",
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "item"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a\n:::\nb"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> - item\n>   ```\n>   a\n>   :::\n>   b\n>   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "list-in-quote/1",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "checked": null,
+                        "label": "",
+                        "listType": "bullet",
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "item"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a\n :::\nb"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> - item\n>   ```\n>   a\n>    :::\n>   b\n>   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "list-in-quote/2",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "checked": null,
+                        "label": "",
+                        "listType": "bullet",
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "item"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a\n  :::\nb"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> - item\n>   ```\n>   a\n>     :::\n>   b\n>   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "list-in-quote/2-four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "checked": null,
+                        "label": "",
+                        "listType": "bullet",
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "item"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a\n  ::::\nb"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> - item\n>   ```\n>   a\n>     ::::\n>   b\n>   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "list-in-quote/3",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "checked": null,
+                        "label": "",
+                        "listType": "bullet",
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "item"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a\n   :::\nb"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> - item\n>   ```\n>   a\n>      :::\n>   b\n>   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "list-in-quote/4",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "checked": null,
+                        "label": "",
+                        "listType": "bullet",
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "item"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a\n    :::\nb"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> - item\n>   ```\n>   a\n>       :::\n>   b\n>   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "list-in-quote/6",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "checked": null,
+                        "label": "",
+                        "listType": "bullet",
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "item"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a\n      :::\nb"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> - item\n>   ```\n>   a\n>         :::\n>   b\n>   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "list-in-quote/four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "checked": null,
+                        "label": "",
+                        "listType": "bullet",
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "item"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a\n::::\nb"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> - item\n>   ```\n>   a\n>   ::::\n>   b\n>   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "list-in-quote/tab",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "checked": null,
+                        "label": "",
+                        "listType": "bullet",
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "item"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a\n\t:::\nb"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> - item\n>   ```\n>   a\n>   \t:::\n>   b\n>   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "list-in-quote/trailing-space",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "checked": null,
+                        "label": "",
+                        "listType": "bullet",
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "item"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a\n::: \nb"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> - item\n>   ```\n>   a\n>   ::: \n>   b\n>   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "nested-list/0",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "checked": null,
+                            "label": "",
+                            "listType": "bullet",
+                            "spread": false
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a\n:::\nb"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- a\n  - b\n    ```\n    a\n    :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "nested-list/1",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "checked": null,
+                            "label": "",
+                            "listType": "bullet",
+                            "spread": false
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a\n :::\nb"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- a\n  - b\n    ```\n    a\n     :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "nested-list/2",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "checked": null,
+                            "label": "",
+                            "listType": "bullet",
+                            "spread": false
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a\n  :::\nb"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- a\n  - b\n    ```\n    a\n      :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "nested-list/2-four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "checked": null,
+                            "label": "",
+                            "listType": "bullet",
+                            "spread": false
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a\n  ::::\nb"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- a\n  - b\n    ```\n    a\n      ::::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "nested-list/3",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "checked": null,
+                            "label": "",
+                            "listType": "bullet",
+                            "spread": false
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a\n   :::\nb"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- a\n  - b\n    ```\n    a\n       :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "nested-list/4",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "checked": null,
+                            "label": "",
+                            "listType": "bullet",
+                            "spread": false
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a\n    :::\nb"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- a\n  - b\n    ```\n    a\n        :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "nested-list/6",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "checked": null,
+                            "label": "",
+                            "listType": "bullet",
+                            "spread": false
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a\n      :::\nb"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- a\n  - b\n    ```\n    a\n          :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "nested-list/four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "checked": null,
+                            "label": "",
+                            "listType": "bullet",
+                            "spread": false
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a\n::::\nb"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- a\n  - b\n    ```\n    a\n    ::::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "nested-list/tab",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "checked": null,
+                            "label": "",
+                            "listType": "bullet",
+                            "spread": false
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a\n\t:::\nb"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- a\n  - b\n    ```\n    a\n    \t:::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "nested-list/trailing-space",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "bullet",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "checked": null,
+                            "label": "",
+                            "listType": "bullet",
+                            "spread": false
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "code_block",
+                              "attrs": {
+                                "language": null
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a\n::: \nb"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n- a\n  - b\n    ```\n    a\n    ::: \n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-1/0",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n:::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1. item\n   ```\n   a\n   :::\n   b\n   ```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "ordered-1/1",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1. item\n   ```\n   a\n    :::\n   b\n   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-1/2",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n  :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1. item\n   ```\n   a\n     :::\n   b\n   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-1/2-four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n  ::::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1. item\n   ```\n   a\n     ::::\n   b\n   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-1/3",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n   :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1. item\n   ```\n   a\n      :::\n   b\n   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-1/4",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n    :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1. item\n   ```\n   a\n       :::\n   b\n   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-1/6",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n      :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1. item\n   ```\n   a\n         :::\n   b\n   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-1/four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n::::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1. item\n   ```\n   a\n   ::::\n   b\n   ```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "ordered-1/tab",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n\t:::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1. item\n   ```\n   a\n   \t:::\n   b\n   ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-1/trailing-space",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n::: \nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1. item\n   ```\n   a\n   ::: \n   b\n   ```\n:::\n\nAfter.\n",
+    "engine_closes": true
+  },
+  {
+    "name": "ordered-10/0",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 10,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n:::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n10. item\n    ```\n    a\n    :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-10/1",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 10,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n10. item\n    ```\n    a\n     :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-10/2",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 10,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n  :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n10. item\n    ```\n    a\n      :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-10/2-four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 10,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n  ::::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n10. item\n    ```\n    a\n      ::::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-10/3",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 10,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n   :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n10. item\n    ```\n    a\n       :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-10/4",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 10,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n    :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n10. item\n    ```\n    a\n        :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-10/6",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 10,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n      :::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n10. item\n    ```\n    a\n          :::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-10/four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 10,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n::::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n10. item\n    ```\n    a\n    ::::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-10/tab",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 10,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n\t:::\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n10. item\n    ```\n    a\n    \t:::\n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "ordered-10/trailing-space",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 10,
+                "spread": false
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "checked": null,
+                    "label": "",
+                    "listType": "ordered",
+                    "spread": false
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "item"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n::: \nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n10. item\n    ```\n    a\n    ::: \n    b\n    ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "quote/0",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n:::\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> ```\n> a\n> :::\n> b\n> ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "quote/1",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n :::\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> ```\n> a\n>  :::\n> b\n> ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "quote/2",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n  :::\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> ```\n> a\n>   :::\n> b\n> ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "quote/2-four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n  ::::\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> ```\n> a\n>   ::::\n> b\n> ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "quote/3",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n   :::\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> ```\n> a\n>    :::\n> b\n> ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "quote/4",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n    :::\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> ```\n> a\n>     :::\n> b\n> ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "quote/6",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n      :::\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> ```\n> a\n>       :::\n> b\n> ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "quote/four-colons",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n::::\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> ```\n> a\n> ::::\n> b\n> ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "quote/tab",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n\t:::\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> ```\n> a\n> \t:::\n> b\n> ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  },
+  {
+    "name": "quote/trailing-space",
+    "tree": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "Intro."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "blockId": "c1",
+            "kind": "note",
+            "title": ""
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n::: \nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "After."
+            }
+          ]
+        }
+      ]
+    },
+    "markdown": "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n> ```\n> a\n> ::: \n> b\n> ```\n:::\n\nAfter.\n",
+    "engine_closes": false
+  }
+]

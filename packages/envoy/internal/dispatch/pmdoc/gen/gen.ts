@@ -142,11 +142,31 @@ function quotePosition(doc: ProseMirrorNode, quote: string): number {
   if (result < 0) throw new Error(`quote not found: ${quote}`);
   return result;
 }
+// Where the browser editor's parser ends a typed block. Each case is a tree and the markdown the Go
+// renderer writes for it: a callout whose code holds a line of colons, inside the container the
+// case names. The
+// engine reads whether the callout keeps that code - the document still reading as the paragraph
+// before it, the callout and the paragraph after it - or ends at the line. pmdoc's
+// TypedFenceLineInCode is held to these verdicts (directive_test.go).
+const fenceOut = join(here, "..", "testdata", "typed-fence-lines.json");
+const fenceCases: { name: string; tree: unknown; markdown: string }[] = JSON.parse(readFileSync(fenceOut, "utf8"));
+const nextFences =
+  JSON.stringify(
+    fenceCases.map(({ name, tree, markdown }) => {
+      const doc = engine.parseMarkdown(markdown);
+      const keeps =
+        doc.childCount === 3 && doc.child(1).type.name === "callout" && doc.child(2).textContent === "After.";
+      return { name, tree, markdown, engine_closes: !keeps };
+    }),
+    null,
+    2
+  ) + "\n";
+
 const next = JSON.stringify(fixtures, null, 2) + "\n";
 if (check) {
   const current = readFileSync(out, "utf8");
   const currentSplices = readFileSync(spliceOut, "utf8");
-  if (current !== next || currentSplices !== nextSplices) {
+  if (current !== next || currentSplices !== nextSplices || readFileSync(fenceOut, "utf8") !== nextFences) {
     console.error("generated pmdoc fixtures are stale: run `bun run gen`");
     process.exit(1);
   }
@@ -154,6 +174,7 @@ if (check) {
 } else {
   writeFileSync(out, next);
   writeFileSync(spliceOut, nextSplices);
+  writeFileSync(fenceOut, nextFences);
   console.log(`wrote ${fixtures.length} documents and ${replaceRangeCases.length} splice cases`);
 }
 setBlockIdGenerator(null);

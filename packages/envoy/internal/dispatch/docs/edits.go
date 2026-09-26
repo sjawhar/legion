@@ -717,7 +717,10 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if code {
 			return next, refuseCodeThatEndsItsBlock(tree, next, r, at, "with", op.With)
 		}
-		return next, refuseUnreadableReplacement(tree, next, r, op.With)
+		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
+			return nil, err
+		}
+		return next, refuseReshapedReplacement(tree, next, r, op.With)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -1084,16 +1087,61 @@ func collectBlockIDs(node *pmdoc.Node, into map[string]bool) {
 // or another block that is, is no reason to refuse this replace. A replace stays inside its
 // textblock, so the block holds the same index before and after.
 func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	index, err := pmdoc.BlockIndex(before, match)
-	if err != nil {
+	unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
+	if err != nil || unreadable == nil {
 		return err
-	}
-	unreadable := pmdoc.BlockReadError(after.Children[index])
-	if unreadable == nil || pmdoc.BlockReadError(before.Children[index]) != nil {
-		return nil
 	}
 	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(before, after, match, with, unreadable)}
 }
+
+// refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
+// another kind where it lands - a paragraph whose new text is `---` reads back as a horizontal
+// rule - since a replace writes text and the document could not carry it back as text.
+func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	if err != nil || reshaped == nil {
+		return err
+	}
+	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+		"with %q is text the document reads back as another block where it lands (%v); %s",
+		with, reshaped, blockSyntaxAdvice(with),
+	)}
+}
+
+// replacementBroke is what check says of the document-level block holding the match after the
+// replace, when it said nothing of that block before: a block that already failed the check, or
+// another block that does, is no reason to refuse this replace. A replace stays inside its
+// textblock, so the block holds the same index before and after.
+func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (broke, err error) {
+	index, err := pmdoc.BlockIndex(before, match)
+	if err != nil {
+		return nil, err
+	}
+	if broke = check(after.Children[index]); broke == nil || check(before.Children[index]) != nil {
+		return nil, nil
+	}
+	return broke, nil
+}
+
+// blockSyntaxAdvice says what to do with text that reads as block syntax where it lands: a line
+// of only `-`, `*` or `_` is a horizontal rule and a line of only colons a typed block's fence,
+// and anything else is left to the reader of the reason before it.
+func blockSyntaxAdvice(with string) string {
+	for _, line := range strings.Split(strings.ReplaceAll(with, "\\\n", "\n"), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "  "))
+		switch {
+		case thematicBreakLine.MatchString(line):
+			return fmt.Sprintf("the line %q reads as a horizontal rule; to add a rule, insert it as its own block beside this one (insert with markdown %q), and to keep the characters as text, put other text on that line", line, "***")
+		case line != "" && strings.Trim(line, ":") == "" && len(line) >= 3:
+			return fmt.Sprintf("the line %q reads as a typed block's fence; to add a typed block, insert it as its own block beside this one, and to keep the characters as text, put other text on that line", line)
+		}
+	}
+	return "write it inside a line of text, or insert the block you mean as its own block"
+}
+
+// thematicBreakLine is a line CommonMark reads as a thematic break: three or more of one of
+// `-`, `*` or `_`, with spaces between them allowed.
+var thematicBreakLine = regexp.MustCompile(`^(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$`)
 
 // unreadableReason says why a replace left its block unreadable and what to do instead, by cause.
 // An emptied paragraph is one the block holding it cannot be written without. The advice is the
@@ -1141,7 +1189,7 @@ func unreadableReason(before, after *pmdoc.Node, match pmdoc.Range, with string,
 			with,
 		)
 	}
-	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v)", with, unreadable)
+	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); %s", with, unreadable, blockSyntaxAdvice(with))
 }
 
 // emptyTextblock reports whether a textblock holds no text but whitespace.
@@ -1268,24 +1316,44 @@ func inlineAware(markdown string, edges textEdges) (*pmdoc.Node, error) {
 // short on the next read, and the rest of the code and everything after it leave the callout. Code
 // that only reads back with different whitespace keeps its shape and is not refused.
 func refuseCodeThatEndsItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
-	index, err := pmdoc.BlockIndex(before, match)
-	if err != nil {
+	broke, err := replacementBroke(before, after, match, codeFenceOrShape)
+	if err != nil || broke == nil {
 		return err
 	}
-	if pmdoc.BlockKeepsItsShape(after.Children[index]) || !pmdoc.BlockKeepsItsShape(before.Children[index]) {
-		return nil
-	}
-	holder := after.Children[index].Type
+	holder := "block"
 	for _, ancestor := range at.Ancestors {
 		if pmdoc.IsTypedBlock(ancestor.Type) {
 			holder = ancestor.Type
 			break
 		}
 	}
+	var fence fenceLineInCode
+	if errors.As(broke, &fence) {
+		return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
+			"%s %q puts the line %q in code the %s around it reads as its closing fence: the browser editor ends a typed block at a line of three or more colons indented less than four spaces, even inside fenced code, so the %s would end there and the code after it would leave it; indent that line four or more spaces or a tab, or move the code block out of the %s",
+			field, with, fence.line, holder, holder, holder,
+		)}
+	}
 	return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
-		"%s %q puts a line in this code block that the %s around it reads as its closing `:::`, so on the next read the %s would end there and the code after it would leave the %s; indent that line, or move the code block out of the %s",
-		field, with, holder, holder, holder, holder,
+		"%s %q changes how the %s holding this code block reads back (%v); move the code block out of the %s",
+		field, with, holder, broke, holder,
 	)}
+}
+
+// fenceLineInCode is a line of code the browser editor's parser reads as a typed block's fence.
+type fenceLineInCode struct{ line string }
+
+func (f fenceLineInCode) Error() string {
+	return fmt.Sprintf("the code line %q reads as a typed block's closing fence", f.line)
+}
+
+// codeFenceOrShape is what keeps a block holding edited code from reading back as it was written:
+// a code line the browser editor ends a typed block at, or, failing that, another shape on read.
+func codeFenceOrShape(block *pmdoc.Node) error {
+	if line, ok := pmdoc.TypedFenceLineInCode(block); ok {
+		return fenceLineInCode{line: line}
+	}
+	return pmdoc.BlockShapeError(block)
 }
 
 // codeReplacement is what a replacement landing in a code block splices in: a code block's text

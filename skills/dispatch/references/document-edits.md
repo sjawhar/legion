@@ -68,9 +68,13 @@ renders to no text, which a line indented four spaces or a tab does (markdown re
 alone. An empty `with` deletes the matched text on purpose; where the block holding it cannot be written without that
 paragraph, the replace is `INVALID_OP`, and the refusal names the `delete` that removes it instead. Inside a code
 block none of this applies: `with` is the code's literal text, written as sent, whitespace, markdown syntax and
-references included, except that line breaks at the end of the code's text, and a line holding only a tab in a list
-item's code, do not survive the next read; and a line that is `:::` in code directly inside a typed block is
-`INVALID_OP`, since it would end the typed block there - indent it, or move the code block out. Use zero-based
+references included, except that line breaks at the end of the code's text, and a line holding only whitespace in a
+list item's code, do not survive the next read; and a line of three or more colons in code inside a typed block,
+indented less than four spaces where it is written, is `INVALID_OP`, since the browser editor ends the typed block
+there - indent it four or more spaces or a tab, or move the code block out of the typed block. Text a `replace` writes
+that reads back as another block is `INVALID_OP` too: a line of only `-`, `*` or `_` is a horizontal rule, and a line
+of only colons a typed block's fence; to add that block, `insert` it beside the paragraph (`insert` with markdown
+`***` adds a rule). Use zero-based
 `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 

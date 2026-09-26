@@ -126,10 +126,16 @@ Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOpera
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
 (`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
-breaks at the end of the code's text and a line holding only a tab in a list item's code read back
-without them; and a line that is `:::` in code directly inside a typed block is refused
-(`refuseCodeThatEndsItsBlock`), because the directive parser - the browser editor's as well as the
-server's - ends the typed block at it. Everywhere else `replace` is
+breaks at the end of the code's text and a line holding only whitespace in a list item's code read
+back without them; and a line of three or more colons in code inside a typed block, indented less
+than four columns from the typed block's prefix on the written line, is refused
+(`refuseCodeThatEndsItsBlock`), because the browser editor's parser ends the typed block at it even
+inside fenced code. That measure counts the width of the list markers around the code and a tab as
+four, and a line in a blockquote closes nothing (`pmdoc.TypedFenceLineInCode`, held to the engine's
+own verdicts in `pmdoc/testdata/typed-fence-lines.json`, which the fixture generator writes). A
+`replace` is also refused where its text reads back as another block - `---` over a paragraph
+becomes a horizontal rule - naming the block it reads back as and the `insert` that adds it
+(`refuseReshapedReplacement`). Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an

@@ -96,38 +96,72 @@ func BlockReadError(block *Node) error {
 	return err
 }
 
-// BlockKeepsItsShape reports whether a document-level block's markdown reads back as blocks of
-// the same kinds, nested the same way. What a textblock holds is not compared.
-func BlockKeepsItsShape(block *Node) bool {
+// BlockShapeError says what a document-level block's markdown reads back as when that is not
+// blocks of the same kinds nested the same way - the first block that reads back as another - or
+// is nil when it reads back so, or the parser's refusal of the markdown. What a textblock holds is
+// not compared.
+func BlockShapeError(block *Node) error {
 	doc := readAlone(block)
 	markdown, err := Render(doc)
 	if err != nil {
-		return false
+		return err
 	}
 	back, err := Parse(markdown)
-	return err == nil && blockShape(back) == blockShape(doc)
+	if err != nil {
+		return err
+	}
+	if want, got := shapeDifference(doc, back); want != "" {
+		return fmt.Errorf("%s reads back as %s", want, got)
+	}
+	return nil
 }
 
-// blockShape names a node's kind and, for a node that is not a textblock, its children's shapes.
-func blockShape(node *Node) string {
-	if isTextblock(node.Type) {
-		return node.Type
+// shapeDifference names the first block of want that got holds as another kind, or holds where
+// want has none, or lacks; both are empty when the two have the same shape.
+func shapeDifference(want, got *Node) (string, string) {
+	if want.Type != got.Type {
+		return blockName(want.Type), blockName(got.Type)
 	}
-	shape := node.Type + "("
-	for _, child := range node.Children {
-		shape += blockShape(child) + ","
+	if isTextblock(want.Type) {
+		return "", ""
 	}
-	return shape + ")"
+	for index := 0; index < max(len(want.Children), len(got.Children)); index++ {
+		switch {
+		case index >= len(want.Children):
+			return "the " + blockName(want.Type) + "'s end", blockName(got.Children[index].Type)
+		case index >= len(got.Children):
+			return blockName(want.Children[index].Type), "nothing"
+		}
+		if w, g := shapeDifference(want.Children[index], got.Children[index]); w != "" {
+			return w, g
+		}
+	}
+	return "", ""
 }
 
-// readAlone is the document a block is read in on its own: a footnote definition after a
-// reference to it, since the parser reads a definition only when something refers to it.
+// blockName is a block type as a reader names it.
+func blockName(nodeType string) string {
+	if nodeType == "hr" {
+		return "a horizontal rule"
+	}
+	return "a " + strings.ReplaceAll(nodeType, "_", " ")
+}
+
+// readAlone is the document a block is read in on its own. It follows a paragraph, as a block
+// holding a match does, since at a document's start a `---` line opens front matter; front matter
+// is read first, where it is written, and a footnote definition after a reference to it, since
+// the parser reads a definition only when something refers to it.
 func readAlone(block *Node) *Node {
-	if block.Type != "footnote_definition" {
+	switch block.Type {
+	case "frontmatter":
 		return &Node{Type: "doc", Children: []*Node{block}}
+	case "footnote_definition":
+		reference := &Node{Type: "footnote_reference", Attrs: Attrs{"label": block.Attrs["label"]}}
+		return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{reference}}, block}}
+	default:
+		lead := &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: "Before."}}}
+		return &Node{Type: "doc", Children: []*Node{lead, block}}
 	}
-	reference := &Node{Type: "footnote_reference", Attrs: Attrs{"label": block.Attrs["label"]}}
-	return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{reference}}, block}}
 }
 
 // textOutside is the first line of text after the paragraph's last line. The inline parser knows

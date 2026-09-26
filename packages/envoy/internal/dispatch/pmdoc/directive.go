@@ -82,6 +82,85 @@ func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ p
 
 func (p *typedDirectiveParser) Close(_ ast.Node, _ gmtext.Reader, _ parser.Context) {}
 
+// TypedFenceLineInCode returns a line of code inside a typed block that the browser editor's
+// parser reads as the typed block's closing fence, and false when block holds none. That parser
+// ends a typed block at a line of three or more colons indented at most three spaces from the
+// typed block's own prefix, even inside a fenced code block it holds, so a code line is measured
+// with the indentation the list items around it add, a tab counting four; a line in a blockquote
+// begins with its `>` and closes nothing outside it.
+func TypedFenceLineInCode(block *Node) (string, bool) {
+	const quoted = 1 << 20
+	var find func(node *Node, indent int, typed bool) (string, bool)
+	find = func(node *Node, indent int, typed bool) (string, bool) {
+		if _, ok := typedBlock(node.Type); ok {
+			indent, typed = 0, true
+		}
+		switch node.Type {
+		case "code_block":
+			if !typed {
+				return "", false
+			}
+			for _, text := range node.Children {
+				for _, line := range strings.Split(text.Text, "\n") {
+					if indent+leadingColumns(line) <= 3 && colonLine(strings.TrimSpace(line)) >= 3 {
+						return line, true
+					}
+				}
+			}
+			return "", false
+		case "blockquote":
+			indent = quoted
+		case "footnote_definition":
+			indent += 4
+		case "bullet_list", "ordered_list":
+			start := int(num(node.Attrs["order"], 1))
+			for index, item := range node.Children {
+				marker := 2
+				if node.Type == "ordered_list" {
+					marker = len(strconv.Itoa(start+index)) + 2
+				}
+				for _, child := range item.Children {
+					if line, ok := find(child, indent+marker, typed); ok {
+						return line, true
+					}
+				}
+			}
+			return "", false
+		}
+		for _, child := range node.Children {
+			if line, ok := find(child, indent, typed); ok {
+				return line, true
+			}
+		}
+		return "", false
+	}
+	return find(block, 0, false)
+}
+
+// leadingColumns is how far a line's text is indented, a tab counting four columns.
+func leadingColumns(line string) int {
+	columns := 0
+	for _, char := range line {
+		switch char {
+		case ' ':
+			columns++
+		case '\t':
+			columns += 4
+		default:
+			return columns
+		}
+	}
+	return columns
+}
+
+// colonLine is the length of line when it is colons alone, and 0 otherwise.
+func colonLine(line string) int {
+	if line == "" || strings.Trim(line, ":") != "" {
+		return 0
+	}
+	return len(line)
+}
+
 func (p *typedDirectiveParser) CanInterruptParagraph() bool {
 	return true
 }
