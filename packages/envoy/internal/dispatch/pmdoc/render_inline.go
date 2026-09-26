@@ -78,6 +78,10 @@ type lineCandidate struct {
 	// lazy reports whether the line is one a lone carriage return began inside a prefix, which the
 	// parser reads as a lazy continuation of the paragraph.
 	lazy bool
+	// underUnclosedOpener reports whether the line is one a lone carriage return began at the
+	// document's level, under a document-opening `---` nothing closes, where it opens no list,
+	// quote or footnote definition (unclosedOpenerGuard).
+	underUnclosedOpener bool
 }
 
 // inlineWithEscapes writes one textblock's inline nodes. Delimiters in text the escape rules leave
@@ -262,6 +266,9 @@ func (r *renderer) endLine(continues bool) {
 			var footnote string
 			if readFrom == r.footnoteLineAt && r.footnoteLabel != "" {
 				footnote = r.footnoteLabel
+			}
+			if candidate.underUnclosedOpener {
+				before = "---\n\n" + before
 			}
 			if lineReadsAsText(before, judged, rewritten, candidate.prefix, footnote) {
 				return
@@ -480,5 +487,7 @@ func (r *renderer) holdLineStart(before string, char rune, position *inlinePosit
 		atTypedPrefix: r.typedPrefix != nil && *r.typedPrefix == prefix,
 		prefix:        prefix,
 		lazy:          position.afterCarriageReturn && prefix != "",
+		underUnclosedOpener: r.unclosedOpener && position.afterCarriageReturn && prefix == "" &&
+			r.typedPrefix == nil && !r.inFootnote,
 	}
 }

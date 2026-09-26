@@ -159,8 +159,8 @@ paragraph it is written the same way, since an empty paragraph is not written. E
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
-empty `with` deletes the match on purpose, except where the block holding it cannot be written
-without that paragraph, which is refused naming the `delete` that removes it instead; refusing the rest is LEGION-280, since
+empty `with` deletes the match on purpose, and a container left holding only the emptied paragraph
+reads back holding it; refusing the rest is LEGION-280, since
 splicing nothing over the match silently deleted the caller's text), and a leading marker of a
 *different* kind from the matched block's own is
 literal escaped text. A `with` opening with a marker of the *same* kind as that block's own would
@@ -523,7 +523,16 @@ as front matter to the document's end, reads no list, quote or footnote definiti
 document's level in the rest. So the renderer writes a rule that opens a document as `***` where
 `---` would be misread - a later `---` line would close front matter, or the document holds a
 list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
-everywhere else.
+everywhere else. Under a `---` it writes, a line a lone carriage return begins at the document's
+level opens no container in either parser (`unclosedOpenerGuard`), as when this parser read a lone
+carriage return as text, so it takes no escape for one.
+
+A container that holds nothing is read as the browser editor's parser reads it, holding one empty
+paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
+definition, and a list item that opens with another block (`- # h`) holds an empty paragraph ahead
+of it. A table with no body row holds one empty row, which the renderer writes as nothing. The
+renderer writes a list item's empty first paragraph as nothing, with the next block on the
+marker's line.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

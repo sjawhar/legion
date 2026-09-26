@@ -28,6 +28,9 @@ type renderer struct {
 	inFootnote bool
 	// asteriskRule makes the next rule written `***` rather than `---` (list).
 	asteriskRule bool
+	// unclosedOpener reports whether the document opens with a rule written `---` that nothing
+	// closes, so a line a lone carriage return begins at its level opens no container.
+	unclosedOpener bool
 	// runStart is where the textblock being written began its text in the markdown.
 	runStart int
 	// footnoteLabels is every footnote label the document defines, lowercased: text shaped like a
@@ -83,20 +86,37 @@ func render(doc *Node) (*renderer, error) {
 	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
 		return &renderer{}, nil
 	}
-	r := &renderer{footnoteLabels: definedFootnoteLabels(doc)}
-	r.blocks(doc.Children, "")
-	if r.err != nil {
-		return nil, r.err
-	}
 	// A rule opening the document is written `---`, as it always was, except where that is
 	// misread; there it is `***`, the same length. A `---` there opens front matter: a later line
 	// that is `---` - a second rule, a code line - closes it and everything up to there reads as
 	// front matter, and with no such line the browser editor's parser, having tried the front
-	// matter to the document's end, reads no list, quote or footnote definition in the rest.
+	// matter to the document's end, reads no list, quote or footnote definition in the rest. The
+	// lines are written for the rule they follow, so a document written for `---` whose front
+	// matter then closes is written again for `***`.
+	opener := doc.Children[0].Type == "hr" && !holdsAContainerTheBrowserDrops(doc)
+	r, err := renderBlocks(doc, opener)
+	if err != nil {
+		return nil, err
+	}
 	if doc.Children[0].Type == "hr" {
-		if front, _ := parseFrontmatterBlock(lineEnds(r.b.Bytes())); front != nil || holdsAContainerTheBrowserDrops(doc) {
+		if front, _ := parseFrontmatterBlock(lineEnds(r.b.Bytes())); front != nil || !opener {
+			if opener {
+				if r, err = renderBlocks(doc, false); err != nil {
+					return nil, err
+				}
+			}
 			copy(r.b.Bytes(), "***")
 		}
+	}
+	return r, nil
+}
+
+// renderBlocks writes doc's blocks, for an unclosed `---` opener or not (unclosedOpener).
+func renderBlocks(doc *Node, unclosedOpener bool) (*renderer, error) {
+	r := &renderer{footnoteLabels: definedFootnoteLabels(doc), unclosedOpener: unclosedOpener}
+	r.blocks(doc.Children, "")
+	if r.err != nil {
+		return nil, r.err
 	}
 	return r, nil
 }
@@ -271,12 +291,19 @@ func (r *renderer) list(n *Node, prefix string) {
 			}
 		}
 		indent := prefix + strings.Repeat(" ", len(marker))
-		for childIndex, child := range item.Children {
+		// An empty first paragraph is written as nothing, with the next block on the marker's line:
+		// a blank line after an empty marker line would end the item, and both parsers read an item
+		// that opens with another block as holding an empty paragraph first (`- # h`).
+		children := item.Children
+		if len(children) > 1 && children[0].Type == "paragraph" && len(children[0].Children) == 0 {
+			children = children[1:]
+		}
+		for childIndex, child := range children {
 			// A tight item writes its blocks on consecutive lines, where a paragraph would run on
 			// into a paragraph after it and underline itself with a rule's `---`. The browser
 			// editor's writer puts a blank line between two paragraphs (the item then reads back
 			// spread) and writes a rule `***`, and so does this renderer.
-			afterParagraph := childIndex > 0 && item.Children[childIndex-1].Type == "paragraph"
+			afterParagraph := childIndex > 0 && children[childIndex-1].Type == "paragraph"
 			if childIndex > 0 {
 				if item.Attrs["spread"] == true || afterParagraph && child.Type == "paragraph" {
 					r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + indent)
@@ -306,6 +333,11 @@ func (r *renderer) table(table *Node, prefix string) {
 	}
 	r.writeSyntax(" |")
 	for _, row := range table.Children[1:] {
+		// A row with no cells is written as nothing: a table with only such rows reads back
+		// holding one, as the browser editor's parser reads a table with no body row.
+		if len(row.Children) == 0 {
+			continue
+		}
 		r.writeSyntax("\n" + prefix)
 		r.tableRow(row, false, prefix)
 	}

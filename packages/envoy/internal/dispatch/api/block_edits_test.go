@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -95,62 +94,70 @@ func TestDocumentEditsReplaceBesideAnUnreadableBlockIsAccepted(t *testing.T) {
 }
 
 // A replace that leaves its block unreadable is refused with advice for its cause: HTML that
-// opens a block keeps to a line; an emptied paragraph is removed by deleting its text where that
-// delete removes it, and by deleting the block that holds it where the delete would be refused -
-// a typed block, a footnote definition, a list item holding more than the paragraph. No refusal
-// names a Go type.
-func TestDocumentEditsRefuseAnUnreadableReplaceWithAdviceForItsCause(t *testing.T) {
+// opens a block keeps to a line. The refusal names no Go type.
+func TestDocumentEditsRefuseBlockHTMLWithAdviceToKeepItInsideALine(t *testing.T) {
 	handler := newTestHandler(t)
-	for index, test := range []struct {
-		name, spec, with string
-		advice, absent   []string
-	}{
-		{"block HTML", "Intro.\n\nBody.\n", "<div>x</div>", []string{"HTML", "inside a line"}, nil},
-		{"emptied list item", "- Body.\n- two\n", "", []string{"delete", "find"}, []string{"HTML"}},
-		{"emptied blockquote", "Intro.\n\n> Body.\n", "", []string{"delete", "find"}, []string{"HTML"}},
-		{"emptied typed block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
-		{"emptied list item holding more", "- Body.\n\n  ```\n  code\n  ```\n", "", []string{"delete {block:"}, []string{"find", "HTML"}},
-		{"emptied list, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n- Body.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
-		{"emptied blockquote, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n:::\n", "", []string{"delete {block:"}, []string{"HTML"}},
-		{"emptied first paragraph of a list item", "- Body.\n\n  more\n- two\n", "", []string{"remove the paragraph with delete {block:"}, []string{"holding it", "HTML"}},
-		{"emptied only option of an ask", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- Body.\n:::\n", "", []string{"delete"}, []string{"HTML"}},
+	issue := createInteractionIssue(t, handler, "TA", "block HTML", "Intro.\n\nBody.\n")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": "<div>x</div>"}},
+	}, "alice")
+	body := response.Body.String()
+	if response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) {
+		t.Fatalf("replace: status=%d body=%s", response.Code, body)
+	}
+	for _, want := range []string{"HTML", "inside a line"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("refusal %s lacks %q", body, want)
+		}
+	}
+	if strings.Contains(body, "*ast.") {
+		t.Fatalf("refusal %s names a Go type", body)
+	}
+}
+
+// An empty with that empties a container's paragraph is taken: a list item, a blockquote or a
+// typed block holding only an empty paragraph reads back holding it, as the browser editor's
+// parser reads it, and so does a list item whose first block is an emptied paragraph. An ask's
+// only option emptied is refused, since an option needs a label.
+func TestDocumentEditsEmptyingAContainersParagraphIsTaken(t *testing.T) {
+	handler := newTestHandler(t)
+	for index, test := range []struct{ name, spec string }{
+		{"a list item", "- Body.\n- two\n"},
+		{"a blockquote", "Intro.\n\n> Body.\n"},
+		{"a typed block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"},
+		{"a list item holding more", "- Body.\n\n  ```\n  code\n  ```\n"},
+		{"a list, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n- Body.\n:::\n"},
+		{"a blockquote, a callout's only block", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n:::\n"},
+		{"a list item's first paragraph of two", "- Body.\n\n  more\n- two\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			issue := createInteractionIssue(t, handler, "T"+string(rune('A'+index)), test.name, test.spec)
 			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": test.with}},
+				"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": ""}},
 			}, "alice")
-			body := response.Body.String()
-			if response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_OP"`) {
-				t.Fatalf("replace: status=%d body=%s", response.Code, body)
+			if response.Code != http.StatusOK {
+				t.Fatalf("replace: status=%d body=%s", response.Code, response.Body.String())
 			}
-			for _, want := range test.advice {
-				if !strings.Contains(body, want) {
-					t.Fatalf("refusal %s lacks %q", body, want)
-				}
+			markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+			back, err := pmdoc.Parse(markdown)
+			if err != nil {
+				t.Fatalf("stored %q does not read back: %v", markdown, err)
 			}
-			for _, unwanted := range append(test.absent, "*ast.") {
-				if strings.Contains(body, unwanted) {
-					t.Fatalf("refusal %s says %q", body, unwanted)
-				}
+			if strings.Contains(markdown, "Body.") {
+				t.Fatalf("stored %q still holds the emptied text", markdown)
 			}
-			// The advice is the caller's next call, so it has to be one the route accepts.
-			var advised map[string]any
-			if match := regexp.MustCompile(`delete \{block:\\"([^\\"]+)\\"\}`).FindStringSubmatch(body); match != nil {
-				advised = map[string]any{"op": "delete", "block": match[1]}
-			} else if strings.Contains(body, "delete and find") {
-				advised = map[string]any{"op": "delete", "find": "Body."}
-			}
-			if advised == nil {
-				return
-			}
-			followed := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-				"ops": []map[string]any{advised},
-			}, "alice")
-			if followed.Code != http.StatusOK {
-				t.Fatalf("the advised %v: status=%d body=%s", advised, followed.Code, followed.Body.String())
+			again, err := pmdoc.Render(back)
+			if err != nil || again != markdown {
+				t.Fatalf("stored %q reads back as %q (%v)", markdown, again, err)
 			}
 		})
+	}
+	issue := createInteractionIssue(t, handler, "TZ", "an ask's only option", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- Body.\n:::\n")
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]any{{"op": "replace", "find": "Body.", "with": ""}},
+	}, "alice")
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_ASK_BLOCK"`) {
+		t.Fatalf("emptying an ask's only option: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

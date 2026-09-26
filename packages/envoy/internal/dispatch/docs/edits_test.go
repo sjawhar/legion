@@ -2231,41 +2231,39 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	}
 }
 
-// Emptying the paragraph a callout holding only it in a footnote definition is refused, and the
-// advice is to delete the callout: the definition is then left holding an empty paragraph, which
-// reads back, so its reference stays a footnote reference rather than literal text.
-func TestApplyOperationEmptyingACalloutInAFootnoteAdvisesDeletingTheCallout(t *testing.T) {
+// Emptying the paragraph a callout holds in a footnote definition is taken: the callout reads back
+// holding one empty paragraph, as the browser editor's parser reads it, so the definition keeps
+// its callout and its reference stays a footnote reference rather than literal text.
+func TestApplyOperationEmptyingACalloutInAFootnoteKeepsTheCallout(t *testing.T) {
 	tree, err := parseInput("x[^1]\n\n[^1]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    Body.\n    :::\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	pmdoc.EnsureBlockIDs(tree)
-	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
-	var invalid *ErrInvalidOp
-	if !errors.As(err, &invalid) || !strings.Contains(invalid.Reason, `delete {block:"c1"}`) {
-		t.Fatalf("emptying the callout's paragraph = %v, want INVALID_OP advising delete {block:\"c1\"}", err)
-	}
-	next, err := applyOperation(tree, model.EditOp{Op: "delete", Block: "c1"})
+	next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
 	if err != nil {
-		t.Fatalf("the advised delete = %v", err)
+		t.Fatalf("emptying the callout's paragraph = %v, want it taken", err)
 	}
 	markdown, err := renderTree(next)
 	if err != nil {
 		t.Fatal(err)
 	}
 	back, err := parseInput(markdown)
-	if err != nil {
-		t.Fatalf("after the advised delete, %q does not read back: %v", markdown, err)
+	if err != nil || !back.Equal(next) {
+		t.Fatalf("after emptying, %q does not read back as written (%v)", markdown, err)
 	}
-	var references int
+	var references, callouts int
 	pmdoc.Walk(back, func(node *pmdoc.Node) bool {
-		if node.Type == "footnote_reference" {
+		switch node.Type {
+		case "footnote_reference":
 			references++
+		case "callout":
+			callouts++
 		}
 		return true
 	})
-	if references != 1 {
-		t.Fatalf("after the advised delete, %q holds %d footnote references, want 1", markdown, references)
+	if references != 1 || callouts != 1 {
+		t.Fatalf("after emptying, %q holds %d footnote references and %d callouts, want 1 and 1", markdown, references, callouts)
 	}
 }
 

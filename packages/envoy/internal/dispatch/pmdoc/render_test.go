@@ -895,7 +895,8 @@ func TestRenderKeepsBlankCodeLinesInFootnoteDefinitions(t *testing.T) {
 // underline or table row opens, after the text the line before holds past its container's
 // marker. Markdown main stored that both parsers read as text is written again byte for byte, and
 // text whose line would read as a block is escaped: in marked text as well, and a lazy line that
-// would close the typed block around it.
+// would close the typed block around it. Under a document-opening `---` that nothing closes, such a
+// line at the document's level opens no list, quote or footnote definition, so it needs no escape.
 func TestRenderJudgesALineALoneCarriageReturnBeginsByHowItReads(t *testing.T) {
 	for _, markdown := range []string{
 		"a\r2. b\n", "a\r10) b\n", "a\r0. b\n", "a\r2.\n", "a\r1.\n", "a\r*\n", "a\r+\n",
@@ -903,6 +904,7 @@ func TestRenderJudgesALineALoneCarriageReturnBeginsByHowItReads(t *testing.T) {
 		"- a\n\n  > a\r===\n", "- a\n\n  > a\r=\n", "- a\n\n  > a\r|-|\n", "> j\r|-|\n",
 		"x[a\r](https://u.test)* y\n",
 		"x[^1]\n\n[^1]: a\r:::\n", "x[^1]\n\n[^1]: a\r-\\\n", "x[^1]\n\n[^1]: a\r[ ] b\n",
+		"---\n\na\r1. b\n", "---\n\na\r- b\n", "---\n\na\r+ b\n", "---\n\na\r> b\n", "---\n\na\r>\n",
 	} {
 		t.Run("kept "+markdown, func(t *testing.T) {
 			doc, err := Parse(markdown)

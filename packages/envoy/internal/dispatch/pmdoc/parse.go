@@ -26,6 +26,21 @@ type markdownReader struct {
 }
 
 var blockReader = markdownReader{md: goldmark.New(
+	goldmark.WithParser(parser.NewParser(
+		parser.WithBlockParsers(
+			util.Prioritized(parser.NewSetextHeadingParser(), 100),
+			util.Prioritized(parser.NewThematicBreakParser(), 200),
+			util.Prioritized(unclosedOpenerGuard{parser.NewListParser()}, 300),
+			util.Prioritized(parser.NewListItemParser(), 400),
+			util.Prioritized(parser.NewCodeBlockParser(), 500),
+			util.Prioritized(parser.NewATXHeadingParser(), 600),
+			util.Prioritized(parser.NewFencedCodeBlockParser(), 700),
+			util.Prioritized(unclosedOpenerGuard{parser.NewBlockquoteParser()}, 800),
+			util.Prioritized(parser.NewHTMLBlockParser(), 900),
+		),
+		parser.WithInlineParsers(parser.DefaultInlineParsers()...),
+		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
+	)),
 	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
@@ -419,7 +434,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		if err != nil {
 			return nil, err
 		}
-		return &Node{Type: "blockquote", Children: children}, nil
+		return &Node{Type: "blockquote", Children: emptyParagraphFirst(children, false)}, nil
 	case *ast.List:
 		return parseList(current, source, footnotes)
 	case *ast.ListItem:
@@ -451,10 +466,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		if err != nil {
 			return nil, err
 		}
-		if len(children) == 0 {
-			children = []*Node{{Type: "paragraph"}}
-		}
-		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": string(current.Ref)}, Children: children}, nil
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": string(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
 	case *typedDirective:
 		return parseTypedDirective(current, source, footnotes)
 	case *unsupportedDirective:
@@ -521,7 +533,7 @@ func parseTypedDirective(directive *typedDirective, source []byte, footnotes map
 	if err != nil {
 		return nil, err
 	}
-	return &Node{Type: directive.Name, Attrs: attrs, Children: children}, nil
+	return &Node{Type: directive.Name, Attrs: attrs, Children: emptyParagraphFirst(children, false)}, nil
 }
 
 func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, error) {
@@ -561,7 +573,17 @@ func parseListItem(item *ast.ListItem, source []byte, footnotes map[int]string) 
 	if err != nil {
 		return nil, err
 	}
-	return &Node{Type: "list_item", Attrs: attrs, Children: children}, nil
+	return &Node{Type: "list_item", Attrs: attrs, Children: emptyParagraphFirst(children, true)}, nil
+}
+
+// emptyParagraphFirst is a container's blocks as the browser editor's parser reads them: a
+// container that holds nothing holds one empty paragraph, as does a list item that opens with
+// another block (firstParagraph), ahead of it (`- # h`). The Proof schema needs both.
+func emptyParagraphFirst(children []*Node, firstParagraph bool) []*Node {
+	if len(children) == 0 || firstParagraph && children[0].Type != "paragraph" {
+		return append([]*Node{{Type: "paragraph"}}, children...)
+	}
+	return children
 }
 
 func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
@@ -591,6 +613,10 @@ func parseTable(table *extensionast.Table, source []byte, footnotes map[int]stri
 		default:
 			return nil, fmt.Errorf("%w: unsupported table child %s", ErrSchema, child.Kind())
 		}
+	}
+	// A table with no body row holds one empty row, as the browser editor's parser reads it.
+	if len(children) == 1 {
+		children = append(children, &Node{Type: "table_row"})
 	}
 	return &Node{Type: "table", Children: children}, nil
 }

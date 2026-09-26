@@ -35,12 +35,47 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 // return began (lineEnds) from one a line feed began.
 var sourceKey = parser.NewContextKey()
 
+// unclosedOpenerKey holds whether the document opens with a `---` line nothing closes
+// (opensWithUnclosedRule).
+var unclosedOpenerKey = parser.NewContextKey()
+
 // parseLined parses lined, the source with its lone carriage returns as line feeds, with source
 // at hand for the block parsers.
 func (reader markdownReader) parseLined(lined, source []byte) ast.Node {
 	context := parser.NewContext()
 	context.Set(sourceKey, source)
+	context.Set(unclosedOpenerKey, opensWithUnclosedRule(lined))
 	return withLineStarts(reader.md.Parser(), lined, context)
+}
+
+// unclosedOpenerGuard is a block parser that opens nothing at the document's level on a line a
+// lone carriage return begins, in a document a `---` line nothing closes opens. The browser
+// editor's parser tries that line as front matter to the document's end and then opens no list,
+// quote or footnote definition at the document's level, so such a line continues the paragraph
+// before it, as it did when this parser read a lone carriage return as text. A line a line feed
+// begins keeps the block it opens: the renderer writes a rule opening a document that holds one
+// as `***`, which opens no front matter.
+type unclosedOpenerGuard struct{ parser.BlockParser }
+
+func (p unclosedOpenerGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	if parent.Kind() == ast.KindDocument && pc.Get(unclosedOpenerKey) == true && afterLoneCarriageReturn(reader, pc) {
+		return nil, parser.NoChildren
+	}
+	return p.BlockParser.Open(parent, reader, pc)
+}
+
+// opensWithUnclosedRule reports whether lined (lineEnds) opens with a `---` line, with any spaces
+// or tabs after it, that no later line closes as front matter (parseFrontmatterBlock).
+func opensWithUnclosedRule(lined []byte) bool {
+	first := lined
+	if end := bytes.IndexByte(lined, '\n'); end >= 0 {
+		first = lined[:end]
+	}
+	if strings.TrimRight(string(bytes.TrimSuffix(first, []byte("\r"))), " \t") != "---" {
+		return false
+	}
+	front, _ := parseFrontmatterBlock(lined)
+	return front == nil
 }
 
 // footnotes is goldmark's footnote extension with its definition parser taking every space and
@@ -59,7 +94,7 @@ func (footnotes) Extend(m goldmark.Markdown) {
 // goldmark's reference parser, and its transformer, which gathers the definitions at the end.
 func footnoteParserOptions() []parser.Option {
 	return []parser.Option{
-		parser.WithBlockParsers(util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999)),
+		parser.WithBlockParsers(util.Prioritized(footnoteDefinitionParser{unclosedOpenerGuard{extension.NewFootnoteBlockParser()}}, 999)),
 		parser.WithInlineParsers(util.Prioritized(extension.NewFootnoteParser(), 101)),
 		parser.WithASTTransformers(util.Prioritized(extension.NewFootnoteASTTransformer(), 999)),
 	}
