@@ -1761,7 +1761,18 @@ func TestGithubPayloadFields(t *testing.T) {
 			want: map[string]string{"forced": "true", "changed_paths": ".legion/review.json"},
 		},
 		{
-			name:  "a push that was not forced says so, as does one whose body leaves it out",
+			name:  "a push GitHub says was not forced says so",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"forced":     false,
+				"commits":    []any{},
+			},
+			want: map[string]string{"forced": "false"},
+		},
+		{
+			name:  "a push whose body leaves forced out says it was not forced",
 			event: "push",
 			body: map[string]any{
 				"repository": map[string]any{"full_name": "example-org/example-repo"},
@@ -1980,6 +1991,8 @@ func TestGithubPayloadPushChangedPathsFixture(t *testing.T) {
 		"commit_count":            "1",
 		"after":                   "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
 		"ref":                     "refs/heads/legion/LEGION-23",
+		// GitHub's own push carries "forced": false.
+		"forced": "false",
 	}
 	for key, value := range want {
 		if got := payload[key]; got != value {
