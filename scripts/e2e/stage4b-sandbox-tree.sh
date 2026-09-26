@@ -1971,7 +1971,9 @@ if ! pod_watch_verdict "$evidence/pod-watch.json" "$evidence/driver-actions.txt"
 fi
 pressure=$(jq -R -c 'fromjson? | select(.pressure? and (.pressure | index("MemoryPressure")))' "$evidence/node-memory.txt")
 [ -z "$pressure" ] || fail "a node of the run reported MemoryPressure: $(head -3 <<<"$pressure" | tr '\n' ' ')"
-note "no node of the run reported MemoryPressure ($(grep -c '"pressure"' "$evidence/node-memory.txt") samples)"
+# grep -c exits 1 on a count of 0, which under errtrace would fire the ERR trap inside the
+# substitution and print a check's FAIL in a passing run; `|| true` keeps the count.
+note "no node of the run reported MemoryPressure ($(grep -c '"pressure"' "$evidence/node-memory.txt" || true) samples)"
 jq -c 'select(.object.kind == "Pod") | .object' "$evidence/pod-watch.json" | tail -1 |
   jq -c '{kind: "Pod", object: (.status.containerStatuses[0].state = {terminated: {reason: "OOMKilled", exitCode: 137}})}' >"$work/injected.json"
 cat "$evidence/pod-watch.json" "$work/injected.json" >"$evidence/controls/pod-watch-with-oom.json"
@@ -1984,11 +1986,13 @@ begin hygiene
 stop_pid "$daemon_pid"
 daemon_pid=
 teardown
-namespace_clean
 delete_consumers
 left=$(nats_stream consumers "$nats_url" "$stream" "$consumers_prefix")
 [ -z "$left" ] || fail "the run's durable consumers remain on production NATS: $left"
 pass
+# namespace_clean is a checkpoint of its own (lib/namespace-rig.sh), so it runs once hygiene has
+# passed under its own name.
+namespace_clean
 
 begin production-audit
 audit_verdict_ok=
@@ -2034,7 +2038,7 @@ outcomes 1790000000 ok 'error answered 503: {"error":"overloaded"} ' 'error answ
   fail "a listener restart of 310 s passed the sample rule"
 [ "$(interests_unanswered "$evidence/controls/interests-outcomes-other-503.txt" | jq length)" = 1 ] ||
   fail "three 503s of another body in a row passed the sample rule"
-note "the unanswered-sample rule's controls: two failures in a row pass, three fail; a restart within ${restart_bound} s passes, one of 310 s and three 503s of another body fail; this run had $(grep -c ' error ' "$evidence/interests-outcomes.txt") unanswered samples of $(grep -c . "$evidence/interests-outcomes.txt")"
+note "the unanswered-sample rule's controls: two failures in a row pass, three fail; a restart within ${restart_bound} s passes, one of 310 s and three 503s of another body fail; this run had $(grep -c ' error ' "$evidence/interests-outcomes.txt" || true) unanswered samples of $(grep -c . "$evidence/interests-outcomes.txt" || true)"
 # The collector itself, on real data: an actor that did write outside LEGSMOKE during the run,
 # counted as one of the run's writers, must be found. Nothing is written for it.
 find_outside_writer
