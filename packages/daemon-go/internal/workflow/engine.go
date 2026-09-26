@@ -448,26 +448,16 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	byReviewApp := e.cfg.ReviewAppLogin != "" && fact.Pusher == e.cfg.ReviewAppLogin
 	classification := classify.ClassifyPush(classify.PushPayload{ChangedPaths: fact.ChangedPaths, ChangedPathsTruncated: fact.Truncated})
 	*pr = classify.ApplyPush(*pr, fact.After, classification, byReviewApp)
-	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil || classification.HandoffOnly {
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.voidApproval(ctx, tx, pr.Issue)
-}
-
-// voidApproval drops an open review's recorded approval once a head that may change more than
-// .legion/ replaces the one it approved: the reviewer never saw that code, so its completion must
-// not end the review on it. A request for changes stands whatever is pushed after it.
-func (e *Engine) voidApproval(ctx context.Context, tx pgx.Tx, key string) error {
-	issue, err := e.store.Issue(ctx, tx, key)
+	// A push classified after its head arrived can be what lets an approval of an earlier head
+	// stand, so an open review is asked again.
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
-		return err
+		return intake.Result{}, err
 	}
-	row, err := e.phaseRow(ctx, tx, key, claim.RoleReviewer)
-	if err != nil || row.Verdict != "approved" {
-		return err
-	}
-	row.Verdict, row.Reason = "", ""
-	return e.store.PutPhase(ctx, tx, row)
+	return intake.Result{}, e.advanceReview(ctx, tx, *issue, pr)
 }
 
 func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestChecks) (intake.Result, error) {
@@ -507,7 +497,8 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	*pr = classify.ApplyReview(*pr, strings.ToLower(fact.State), fact.CommitID)
+	state := strings.ToLower(fact.State)
+	*pr = classify.ApplyReview(*pr, state, fact.CommitID)
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
@@ -517,17 +508,19 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	}
 	// The decision belongs to this review round, not to the pull request's head: the reviewer's
 	// own handoff push is a new head, which resets every head-scoped reading, and the round must
-	// still know what its reviewer decided, and what the review said for the next round's
-	// implementer, when the reviewer completes. Entering reviewing clears both with the rest of
-	// the reviewer's round.
-	if pr.ReviewDecision != "changes_requested" && pr.ReviewDecision != "approved" {
+	// still know what its reviewer decided, on which head, and what the review said for the next
+	// round's implementer, when the reviewer completes. An approval is judged against the head it
+	// names when the review ends (classify.ApprovalStands), since the approval and the pushes after
+	// it arrive in no promised order. Entering reviewing clears all three with the rest of the
+	// reviewer's round.
+	if state != "changes_requested" && state != "approved" {
 		return intake.Result{}, nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	row.Verdict, row.Reason = pr.ReviewDecision, fact.Body
+	row.Verdict, row.Reason, row.ReviewedHead = state, fact.Body, fact.CommitID
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}
@@ -553,7 +546,7 @@ func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issu
 		}
 		return e.transition(ctx, tx, issue, TriggerReviewRejected, "", row, pr, row.Reason)
 	case "approved":
-		if pr == nil || pr.Verdict != "green" {
+		if pr == nil || pr.Verdict != "green" || !classify.ApprovalStands(*pr, row.ReviewedHead) {
 			return nil
 		}
 		return e.transition(ctx, tx, issue, TriggerReviewApproved, "", row, pr, "")

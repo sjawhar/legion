@@ -114,7 +114,7 @@ func scanIssue(row scanner) (*Issue, error) {
 }
 
 func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error) {
-	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, last_handoff, reason from phases
+	rows, err := tx.Query(ctx, `select issue, role, claim, handoff_commit, rounds, verdict, last_handoff, reason, reviewed_head from phases
 		where issue = $1 order by role`, issue)
 	if err != nil {
 		return nil, fmt.Errorf("list phases for %s: %w", issue, err)
@@ -135,13 +135,14 @@ func (s *Postgres) Phases(ctx context.Context, tx pgx.Tx, issue string) ([]Phase
 }
 
 func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error {
-	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, last_handoff, reason)
-		values ($1, $2, $3, $4, $5, $6, $7, $8)
+	_, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, last_handoff, reason,
+		reviewed_head)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		on conflict (issue, role) do update set claim = excluded.claim,
 		handoff_commit = excluded.handoff_commit, rounds = excluded.rounds, verdict = excluded.verdict,
-		last_handoff = excluded.last_handoff, reason = excluded.reason`,
+		last_handoff = excluded.last_handoff, reason = excluded.reason, reviewed_head = excluded.reviewed_head`,
 		phase.Issue, string(phase.Role), string(phase.Claim), phase.HandoffCommit, phase.Rounds, phase.Verdict, phase.LastHandoff,
-		phase.Reason,
+		phase.Reason, phase.ReviewedHead,
 	)
 	if err != nil {
 		return fmt.Errorf("put %s phase on %s: %w", phase.Role, phase.Issue, err)
@@ -152,7 +153,8 @@ func (s *Postgres) PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) erro
 func scanPhase(row scanner) (PhaseRow, error) {
 	var phase PhaseRow
 	var role, token string
-	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.LastHandoff, &phase.Reason); err != nil {
+	if err := row.Scan(&phase.Issue, &role, &token, &phase.HandoffCommit, &phase.Rounds, &phase.Verdict, &phase.LastHandoff, &phase.Reason,
+		&phase.ReviewedHead); err != nil {
 		return PhaseRow{}, err
 	}
 	phase.Role, phase.Claim = claim.Role(role), claim.Token(token)
@@ -161,7 +163,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
 	verdict, failing, failing_statuses, review_decision, fix_attempts, blocked_attempts, check_runs,
-	generation, snapshot, reconciled, pending_push, head_counted, planned_red, state`
+	generation, snapshot, reconciled, pending_push, head_counted, planned_red, state, code_heads`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
 	pr, err := scanPullRequest(tx.QueryRow(ctx, "select "+pullRequestColumns+" from pull_requests where issue = $1", issue))
@@ -212,6 +214,10 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: encode check runs: %w", pr.Issue, err)
 	}
+	codeHeads, err := json.Marshal(append([]string{}, pr.CodeHeads...))
+	if err != nil {
+		return fmt.Errorf("put pull request for %s: encode code heads: %w", pr.Issue, err)
+	}
 	var pendingPush []byte
 	if pr.PendingPush != nil {
 		pendingPush, err = json.Marshal(pr.PendingPush)
@@ -221,8 +227,9 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
 		head_updated_at_source, verdict, failing, failing_statuses, review_decision, fix_attempts,
-		blocked_attempts, check_runs, generation, snapshot, reconciled, pending_push, head_counted, planned_red, state)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+		blocked_attempts, check_runs, generation, snapshot, reconciled, pending_push, head_counted, planned_red, state,
+		code_heads)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		head_updated_at_source = excluded.head_updated_at_source, verdict = excluded.verdict,
@@ -231,10 +238,11 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
 		generation = excluded.generation, snapshot = excluded.snapshot, reconciled = excluded.reconciled,
 		pending_push = excluded.pending_push, head_counted = excluded.head_counted,
-		planned_red = excluded.planned_red, state = excluded.state`,
+		planned_red = excluded.planned_red, state = excluded.state, code_heads = excluded.code_heads`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt, pr.HeadUpdatedAtSource,
 		pr.Verdict, failing, failingStatuses, pr.ReviewDecision, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
 		pr.Generation, pr.Snapshot, pr.Reconciled, pendingPush, pr.HeadCounted, pr.PlannedRed, pr.State,
+		codeHeads,
 	)
 	if err != nil {
 		return fmt.Errorf("put pull request for %s: %w", pr.Issue, err)
@@ -285,11 +293,11 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where string, key string, d
 
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
-	var failing, failingStatuses, checkRuns, pendingPush []byte
+	var failing, failingStatuses, checkRuns, pendingPush, codeHeads []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&pr.HeadUpdatedAtSource, &pr.Verdict, &failing, &failingStatuses, &pr.ReviewDecision,
 		&pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot, &pr.Reconciled,
-		&pendingPush, &pr.HeadCounted, &pr.PlannedRed, &pr.State); err != nil {
+		&pendingPush, &pr.HeadCounted, &pr.PlannedRed, &pr.State, &codeHeads); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(failing, &pr.Failing); err != nil {
@@ -300,6 +308,9 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	}
 	if err := json.Unmarshal(checkRuns, &pr.CheckRuns); err != nil {
 		return nil, fmt.Errorf("decode check runs: %w", err)
+	}
+	if err := json.Unmarshal(codeHeads, &pr.CodeHeads); err != nil {
+		return nil, fmt.Errorf("decode code heads: %w", err)
 	}
 	if pendingPush != nil {
 		pr.PendingPush = &PendingPush{}

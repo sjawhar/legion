@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -118,41 +119,68 @@ func issuePhase(t *testing.T, pool *pgxpool.Pool) phase.Phase {
 	return phase.Phase(got)
 }
 
-// An approval is of the head it approved. The reviewer's own handoff push after it changes only
-// .legion/, so the approval stands for that head once its checks are green; any other push while
-// the review is open — or one whose paths are not known — is code the reviewer never approved, and
-// the reviewer's completion then ends nothing.
-func TestAnApprovalStandsOnlyForHeadsThatChangeNothingButTheHandoff(t *testing.T) {
+// An approval is of the code the head it names carries. The reviewer approves the head it was
+// shown - the tester's handoff head - and its own handoff push then replaces that head, while the
+// approval event and the push arrive by different webhook paths in no promised order. So an
+// approval stands for the current head when every push since the head it names changed only
+// .legion/, whichever of the approval, the new head and the push's paths is processed first. A
+// push that changes code, or whose changed paths are not known, starts again: an approval of any
+// earlier head then approves nothing. A pull request recorded before the daemon kept that chain
+// has none, so only an approval of its current head stands.
+func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
-		paths string
+		steps []string
 		want  phase.Phase
 	}{
-		{name: "the reviewer's handoff push", paths: ".legion/review.json", want: phase.Retro},
-		{name: "a push that changes code", paths: ".legion/review.json\nsrc/widget.go", want: phase.Reviewing},
+		{name: "approval, then the reviewer's handoff push", steps: []string{"approve head", "sync", "push handoff", "green", "complete"}, want: phase.Retro},
+		{name: "the reviewer's handoff push, then the approval", steps: []string{"sync", "push handoff", "green", "approve head", "complete"}, want: phase.Retro},
+		{name: "the push's paths arrive after the new head and the approval", steps: []string{"sync", "approve head", "green", "complete", "push handoff"}, want: phase.Retro},
+		{name: "the push's paths arrive before the new head", steps: []string{"push handoff", "approve head", "sync", "green", "complete"}, want: phase.Retro},
+		{name: "a new head whose push never arrives", steps: []string{"sync", "approve head", "green", "complete"}, want: phase.Reviewing},
+		{name: "a code push, then the approval of the head before it", steps: []string{"sync", "push code", "green", "approve head", "complete"}, want: phase.Reviewing},
+		{name: "the approval, then a code push", steps: []string{"approve head", "sync", "push code", "green", "complete"}, want: phase.Reviewing},
+		{name: "a push of unknown paths, then the approval of the head before it", steps: []string{"sync", "push unknown", "green", "approve head", "complete"}, want: phase.Reviewing},
+		{name: "recorded before the chain: an approval of the current head", steps: []string{"approve head", "complete"}, want: phase.Retro},
+		{name: "recorded before the chain: an approval of an earlier head", steps: []string{"approve older", "complete"}, want: phase.Reviewing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			ctx := context.Background()
 			seedReview(t, pool, "green")
 			engine := testEngine()
-			if _, err := intake.ApplyFact(ctx, pool, "github", "review", intake.PullRequestReview{
-				Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head"}, engine); err != nil {
-				t.Fatalf("apply the review: %v", err)
-			}
-			paths, truncated := tc.paths, "false"
-			if _, err := intake.ApplyFact(ctx, pool, "github", "push", intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208",
-				After: "head-2", ChangedPaths: &paths, Truncated: &truncated, Pusher: "legion-reviewer[bot]"}, engine); err != nil {
-				t.Fatalf("apply the push: %v", err)
-			}
-			if _, err := intake.ApplyFact(ctx, pool, "github", "checks-green", intake.PullRequestChecks{
-				Repo: "sjawhar/legion", Number: 42, HeadSHA: "head-2", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}},
-				Generation: 2, Snapshot: "green-2", Verdict: "green", Failing: []string{}}, engine); err != nil {
-				t.Fatalf("apply the checks: %v", err)
-			}
-			if result, err := intake.ApplyFact(ctx, pool, "api", "reviewer-handoff", intake.HandoffComplete{Generation: 1,
-				Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}, engine); err != nil || result.Refusal != nil {
-				t.Fatalf("the reviewer's completion = %+v, %v", result.Refusal, err)
+			for i, step := range tc.steps {
+				var fact intake.Fact
+				switch step {
+				case "approve head", "approve older":
+					commit := "head"
+					if step == "approve older" {
+						commit = "older"
+					}
+					fact = intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: commit}
+				case "sync":
+					fact = intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"}
+				case "push handoff", "push code", "push unknown":
+					paths, truncated := ".legion/review.json", "false"
+					switch step {
+					case "push code":
+						paths = ".legion/review.json\nsrc/widget.go"
+					case "push unknown":
+						truncated = "true"
+					}
+					fact = intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", After: "head-2",
+						ChangedPaths: &paths, Truncated: &truncated, Pusher: "legion-reviewer[bot]"}
+				case "green":
+					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head-2",
+						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 2, Snapshot: "green-2", Verdict: "green", Failing: []string{}}
+				case "complete":
+					fact = intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim",
+						Summary: "reviewed", Commit: "review-1"}
+				}
+				result, err := intake.ApplyFact(ctx, pool, "test", fmt.Sprintf("%d-%s", i, step), fact, engine)
+				if err != nil || result.Refusal != nil {
+					t.Fatalf("%s = %+v, %v", step, result.Refusal, err)
+				}
 			}
 			if got := issuePhase(t, pool); got != tc.want {
 				t.Fatalf("the issue is in %s, want %s", got, tc.want)

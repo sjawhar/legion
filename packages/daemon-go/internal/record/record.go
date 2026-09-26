@@ -59,6 +59,9 @@ type PhaseRow struct {
 	// Reason is what the decision in Verdict said - a review's body - kept until the round ends,
 	// since the reviewer's completion can come after the review it posted.
 	Reason string
+	// ReviewedHead is the head the decision in Verdict was made on: an approval approves the code
+	// that head carries (PullRequest.CodeHeads).
+	ReviewedHead string
 }
 
 // PullRequest is the daemon's latest GitHub observation for one issue's pull request.
@@ -85,7 +88,11 @@ type PullRequest struct {
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
-	State      PullRequestState
+	// CodeHeads is a run of consecutive heads, oldest first, each left by a push that changed only
+	// .legion/ since the one before, so all carry the same code. Ending at the current head, it
+	// says an approval of any head in it approves the current one (classify.ApprovalStands).
+	CodeHeads []string
+	State     PullRequestState
 }
 
 // PullRequestState is whether a pull request is open, merged, or closed unmerged.

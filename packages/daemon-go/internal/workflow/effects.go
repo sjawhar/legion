@@ -77,10 +77,10 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 		return nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue, role)
-	if err != nil || row.HandoffCommit == "" && row.Verdict == "" && row.Reason == "" {
+	if err != nil || row.HandoffCommit == "" && row.Verdict == "" && row.Reason == "" && row.ReviewedHead == "" {
 		return err
 	}
-	row.HandoffCommit, row.Verdict, row.Reason = "", "", ""
+	row.HandoffCommit, row.Verdict, row.Reason, row.ReviewedHead = "", "", "", ""
 	return e.store.PutPhase(ctx, tx, row)
 }
 

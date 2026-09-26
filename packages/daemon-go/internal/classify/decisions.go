@@ -7,11 +7,17 @@ import "github.com/sjawhar/legion/daemon/internal/record"
 // red tests) or the matching push was handoff-only or the review App's. A code-changing head
 // decides the planned mark (the review App's sets it, anyone else's clears it); a handoff-only
 // head, or one whose push has not arrived (ApplyPush settles it), carries it. All other
-// head-scoped state is reset regardless of its source.
+// head-scoped state is reset regardless of its source. The code chain (CodeHeads) grows by a
+// head whose push changed only .legion/; any other head, or one whose push is still to come,
+// leaves it ending at the head replaced, which is then no longer the current one.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	var pending *record.PendingPush
 	if pr.PendingPush != nil && pr.PendingPush.SHA == headSHA {
 		pending, pr.PendingPush = pr.PendingPush, nil
+	}
+	pr.CodeHeads = chainAt(pr.CodeHeads, pr.HeadSHA)
+	if pending != nil && pending.HandoffOnly {
+		pr.CodeHeads = append(pr.CodeHeads, headSHA)
 	}
 	if pr.Verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)) {
 		pr.FixAttempts++
@@ -41,6 +47,8 @@ func ApplyPush(pr record.PullRequest, after string, classification PushClassific
 	if pr.HeadSHA == after {
 		if !classification.HandoffOnly {
 			pr.PlannedRed = byReviewApp
+		} else if !holds(pr.CodeHeads, after) {
+			pr.CodeHeads = append(append([]string(nil), pr.CodeHeads...), after)
 		}
 		if (classification.HandoffOnly || byReviewApp) && pr.HeadCounted == after {
 			if pr.BlockedAttempts == pr.FixAttempts {
@@ -71,6 +79,43 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 	pr.FailingStatuses = append([]string(nil), outcome.FailingStatuses...)
 	pr.Reconciled = classification == SettlementRefresh
 	return pr, true
+}
+
+// chainAt is the code chain ending at head, the head a new one replaces: the recorded chain when
+// it already reaches head, else head alone - a head carries its own code, and nothing proves the
+// heads before it carried the same.
+func chainAt(heads []string, head string) []string {
+	if n := len(heads); n > 0 && heads[n-1] == head {
+		return append([]string(nil), heads...)
+	}
+	if head == "" {
+		return nil
+	}
+	return []string{head}
+}
+
+// ApprovalStands says whether an approval of reviewed approves the pull request's current head:
+// it names that head, or the code chain ends at the current head and holds reviewed, so every
+// push since reviewed changed only .legion/. A chain ending anywhere else says nothing: the pushes
+// after its end changed code, or have not been classified yet.
+func ApprovalStands(pr record.PullRequest, reviewed string) bool {
+	if reviewed == "" {
+		return false
+	}
+	if reviewed == pr.HeadSHA {
+		return true
+	}
+	n := len(pr.CodeHeads)
+	return n > 0 && pr.CodeHeads[n-1] == pr.HeadSHA && holds(pr.CodeHeads, reviewed)
+}
+
+func holds(heads []string, head string) bool {
+	for _, h := range heads {
+		if h == head {
+			return true
+		}
+	}
+	return false
 }
 
 // ApplyReview stores a changes-requested review from any reviewed head, or an approval only when
