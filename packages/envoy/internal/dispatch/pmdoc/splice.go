@@ -316,18 +316,6 @@ func sliceBoundaries(parent *Node, selection spliceSelection, path []int, r Rang
 }
 
 // fitContent applies the target parent's permitted Proof content shape.
-// rewritesBlock reports whether exactly one of source's blocks is block itself rewritten: its type
-// under its id.
-func rewritesBlock(source []*Node, block *Node) bool {
-	rewrites := 0
-	for _, node := range source {
-		if node.Type == block.Type && node.Attrs[BlockIDAttr] == block.Attrs[BlockIDAttr] {
-			rewrites++
-		}
-	}
-	return rewrites == 1
-}
-
 func fitContent(parent *Node, selection spliceSelection, path []int, r Range, with, openingItem *Node) (*Node, bool, error) {
 	before, after, err := sliceBoundaries(parent, selection, path, r)
 	if err != nil {
@@ -658,10 +646,11 @@ func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool
 		// block's content rule, which for an ask admits any block (validateTypedBlock), so a fit
 		// never climbs out of a typed block to replace it, as ProseMirror fits one into a callout.
 		// The one exception is a replacement holding exactly one block of the typed block's own
-		// type under its id: that is the block rewritten (the same id, new text), so the fit climbs
-		// and the rewrite replaces the block, with any other blocks of the replacement beside it
-		// where they stand, instead of nesting inside it under the same id. A block of the type
-		// under another id, or a minted one, is a different block and stays inside.
+		// type under its id, at any depth: that is the block rewritten (the same id, new text), so
+		// the fit climbs and the rewrite replaces the block, with the replacement's other blocks,
+		// and any it sits inside, where they stand, instead of nesting inside it under the same id.
+		// A block of the type under another id, or a minted one, is a different block and stays
+		// inside.
 		if _, typed := typedBlock(parent.Type); typed {
 			if rewritesBlock(source, parent) {
 				return nil, false
@@ -670,6 +659,22 @@ func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool
 		}
 		return nil, false
 	}
+}
+
+// rewritesBlock reports whether exactly one block of source, at any depth, is block itself
+// rewritten: its type under its id. A rewrite may sit inside another block of the replacement (a
+// blockquote, a list item, a typed block under another id), which the climb then places.
+func rewritesBlock(source []*Node, block *Node) bool {
+	rewrites := 0
+	for _, node := range source {
+		Walk(node, func(child *Node) bool {
+			if child.Type == block.Type && child.Attrs[BlockIDAttr] == block.Attrs[BlockIDAttr] {
+				rewrites++
+			}
+			return rewrites < 2
+		})
+	}
+	return rewrites == 1
 }
 
 func listItemAttrs(item *Node) Attrs {

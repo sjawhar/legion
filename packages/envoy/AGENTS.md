@@ -182,9 +182,10 @@ replaces the typed block it lands in: a callout takes what its content rule allo
 included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any block at this
 step, since `Validate` lets an ask hold other blocks while a browser edit passes through. The one
 exception is a replacement holding exactly one block of the typed block's own type under its id,
-which is that block rewritten: it replaces the block rather than nesting inside it, and the
-replacement's other blocks go beside it where they stand, as main stores them. The same type under
-another id, or under none, is a new block and lands inside like any other. The accept
+at any depth, which is that block rewritten: it replaces the block in place rather than nesting
+inside it, and the replacement's other blocks, and any it sits inside (a blockquote, a list item,
+a typed block under another id), go in the same parent, where they stand in the replacement. The same type under another id, or under none, is a new block and lands inside like
+any other. The accept
 then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`,
 `docs/marks.go` `refuseBrokenAsks`): an ask is unreadable when settlement's parse fails, when its
 children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph

@@ -466,6 +466,12 @@ func TestSuggestionAcceptRewritesATypedBlockInPlaceBesideOtherBlocks(t *testing.
 		{name: "an ask and a heading after it", spec: "Intro.\n\n" + ask, replaceWith: newAsk + "\n# Heading\n", want: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nReworded?\n:::\n\n# Heading\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 		{name: "an ask and another ask after it", spec: "Intro.\n\n" + ask,
 			replaceWith: newAsk + "\n:::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n", want: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nReworded?\n:::\n\n:::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nOther?\n:::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
+		{name: "a callout rewritten inside a blockquote", spec: "Intro.\n\n" + callout,
+			replaceWith: "> " + strings.ReplaceAll(strings.TrimSuffix(newNote, "\n"), "\n", "\n> ") + "\n", want: "Intro.\n\n> :::callout{#c1 kind=\"warning\" title=\"\"}\n> Reworded?\n> :::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
+		{name: "an ask rewritten inside a list item", spec: "Intro.\n\n" + ask,
+			replaceWith: "- item\n\n  " + strings.ReplaceAll(strings.TrimSuffix(newAsk, "\n"), "\n", "\n  ") + "\n", want: "Intro.\n\n- item\n\n  :::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n  Reworded?\n  :::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
+		{name: "an ask rewritten inside a callout under another id", spec: "Intro.\n\n" + ask,
+			replaceWith: ":::callout{#c9 kind=\"note\" title=\"\"}\n" + newAsk, want: "Intro.\n\n:::callout{#c9 kind=\"note\" title=\"\"}\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nReworded?\n:::\n:::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler, _ := blockAskHandler(t)
@@ -474,8 +480,10 @@ func TestSuggestionAcceptRewritesATypedBlockInPlaceBesideOtherBlocks(t *testing.
 				awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "a1", "Which one?")
 			}
 			var askID string
-			if test.answered {
+			if strings.Contains(test.spec, ":::ask") {
 				askID = blockAskID(t, handler, issue.Key, "a1")
+			}
+			if test.answered {
 				read := readBlockAsk(t, handler, askID)
 				if answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{
 					"selected": []string{}, "text": "Go.", "expected_edited_at": read.EditedAt,
@@ -501,6 +509,14 @@ func TestSuggestionAcceptRewritesATypedBlockInPlaceBesideOtherBlocks(t *testing.
 			got := answeredAt.ReplaceAllString(documentMarkdown(t, handler, issue.PrimaryArtifactID), `answered_at="<t>"`)
 			if got != test.want {
 				t.Fatalf("document after the accept = %q, want %q", got, test.want)
+			}
+			if askID != "" {
+				if held := blockAskID(t, handler, issue.Key, "a1"); held != askID {
+					t.Fatalf("block a1 holds ask %s after the accept, want %s", held, askID)
+				}
+				if ask := readBlockAsk(t, handler, askID); ask.Question != "Reworded?" {
+					t.Fatalf("the ask's question after the accept = %q, want %q", ask.Question, "Reworded?")
+				}
 			}
 			if test.answered {
 				if ask := readBlockAsk(t, handler, askID); ask.State != "answered" || ask.Answer == nil ||
