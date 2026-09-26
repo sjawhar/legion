@@ -830,9 +830,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Tokens:            tokens,
 		GitHubOwner:       githubOwner(cfg),
 		Grants:            grants,
-		// A controller claims its role a moment after it registers; what the outbox held for want
-		// of one is delivered then.
-		ControllerReady: workflow.controllerReady,
 	})
 
 	group, serving := errgroup.WithContext(ctx)
@@ -852,7 +849,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		group.Go(func() error { return workflow.run(serving) })
 	}
 	group.Go(func() error {
-		watchController(serving, st, cfg, p, s.log, workflow.controllerReady)
+		watchController(serving, st, cfg, p, s.log)
 		return nil
 	})
 	return group.Wait()
@@ -863,10 +860,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 // 2891-2904): every sweep interval it reads the project's controller record, and when no session
 // holds it, or the Envoy role registry says the session is gone, it says so and how to start one,
 // at most once per worker boot timeout. The Prober logs why each Gone or Unknown verdict was
-// reached; Unknown is never a death verdict, so it says nothing more. Each sweep that finds the
-// controller alive calls alive, which delivers what was held while no session held the role: the
-// role regained after its holder lapsed, or held by a controller a restarted daemon finds running.
-func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, log *slog.Logger, alive func()) {
+// reached; Unknown is never a death verdict, so it says nothing more.
+func watchController(ctx context.Context, st *store.Store, cfg config.Config, p plan, log *slog.Logger) {
 	prober := controller.NewProber(controller.ProberOptions{
 		EnvoyURL: cfg.EnvoyURL, EnvoyToken: p.secrets["ENVOY_TOKEN"], Project: p.project, BootTimeout: cfg.WorkerBootTimeout, Log: log,
 	})
@@ -888,7 +883,6 @@ func watchController(ctx context.Context, st *store.Store, cfg config.Config, p 
 		switch liveness {
 		case controller.Alive:
 			logged = time.Time{}
-			alive()
 		case controller.Gone:
 			if logged.IsZero() || time.Since(logged) >= cfg.WorkerBootTimeout {
 				log.Warn("controller not registered; run legion controller start", "project", cfg.Project)

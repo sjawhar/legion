@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -463,8 +464,8 @@ func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T
 
 // A tree's architect is who every notice of its tree reaches, so its own claim failing — its
 // launches or prompts ran out — would reach nobody unless the daemon says so: the failure is a
-// worker-died notice naming the architect and the phase the root is in, which the outbox also
-// sends the controller. Nothing is held: a phase is its worker's, and the root's planner here
+// worker-died notice naming the architect and the phase the root is in, told to the issue's topic
+// and to the controller. Nothing is held: a phase is its worker's, and the root's planner here
 // keeps its phase.
 func TestATreeArchitectsFailedClaimIsNoticedAndHoldsNoPhase(t *testing.T) {
 	pool := migratedPool(t)
@@ -482,18 +483,72 @@ func TestATreeArchitectsFailedClaimIsNoticedAndHoldsNoPhase(t *testing.T) {
 	if gotPhase != phase.Planning || heldFrom != nil {
 		t.Fatalf("root phase = %s held from %v, want planning and not held", gotPhase, heldFrom)
 	}
-	assertOutboxKinds(t, pool, []string{"notice"})
-	var payload []byte
-	if err := pool.QueryRow(ctx, "select payload from outbox where kind = 'notice'").Scan(&payload); err != nil {
-		t.Fatalf("read the notice: %v", err)
+	died := record.Notice{Kind: "worker-died", Role: claim.RoleArchitect, Phase: phase.Planning}
+	toController := died
+	toController.Controller = true
+	if got := outboxNotices(t, pool); !slices.Equal(got, []record.Notice{died, toController}) {
+		t.Fatalf("notices = %+v, want %+v to the issue and then to the controller", got, died)
 	}
-	var notice record.Notice
-	if err := json.Unmarshal(payload, &notice); err != nil {
-		t.Fatalf("decode notice %s: %v", payload, err)
+}
+
+// The controller is told every hold and the tree architect's own death, each in an outbox row of its
+// own after the issue's, so its publish retries apart from the architect's; the worker-died a phase
+// worker's hold comes with, and every other notice, stay the issue's alone.
+func TestTheControllerIsToldEveryHoldAndTheTreeArchitectsDeathInARowOfItsOwn(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		notice     record.Notice
+		controller bool
+	}{
+		{"a phase worker's budget ran out", record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, true},
+		{"the tree architect's claim failed", record.Notice{Kind: "worker-died", Role: claim.RoleArchitect, Phase: phase.Planning}, true},
+		{"a phase worker's claim failed", record.Notice{Kind: "worker-died", Role: claim.RolePlanner, Phase: phase.Planning}, false},
+		{"a phase finished", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			if err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
+				return testEngine().notice(t.Context(), tx, "LEGION-208", tc.notice)
+			}); err != nil {
+				t.Fatalf("notice %s: %v", tc.notice.Kind, err)
+			}
+			want := []record.Notice{tc.notice}
+			if tc.controller {
+				toController := tc.notice
+				toController.Controller = true
+				want = append(want, toController)
+			}
+			if got := outboxNotices(t, pool); !slices.Equal(got, want) {
+				t.Fatalf("notices = %+v, want %+v", got, want)
+			}
+		})
 	}
-	if want := (record.Notice{Kind: "worker-died", Role: claim.RoleArchitect, Phase: phase.Planning}); notice != want {
-		t.Fatalf("notice = %+v, want %+v", notice, want)
+}
+
+// outboxNotices is every notice row's payload, oldest first.
+func outboxNotices(t *testing.T, pool *pgxpool.Pool) []record.Notice {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), "select payload from outbox where kind = 'notice' order by id")
+	if err != nil {
+		t.Fatalf("read the notices: %v", err)
 	}
+	defer rows.Close()
+	notices := []record.Notice{}
+	for rows.Next() {
+		var payload []byte
+		if err := rows.Scan(&payload); err != nil {
+			t.Fatalf("scan a notice: %v", err)
+		}
+		var notice record.Notice
+		if err := json.Unmarshal(payload, &notice); err != nil {
+			t.Fatalf("decode notice %s: %v", payload, err)
+		}
+		notices = append(notices, notice)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate the notices: %v", err)
+	}
+	return notices
 }
 
 // Linger suspends, and its expiry stops, every claim the tree holds — the root architect admission

@@ -1,5 +1,10 @@
 import { messageFor } from "@legion/envoy-client/errors";
-import { legionNoticeSubject, type LegionRole } from "@legion/contracts";
+import {
+  controllerProject,
+  legionControllerNoticeSubject,
+  legionNoticeSubject,
+  type LegionRole,
+} from "@legion/contracts";
 import pkg from "../../package.json";
 import { classifySession, requiredEnvironment, requiredSecret } from "./classify";
 import type { ControllerDaemon } from "./controller-session";
@@ -96,14 +101,17 @@ async function callGoReadyWithRetry(label: string, call: () => Promise<void>): P
 /**
  * The Go daemon's controller: the session registers on the claim route with the capability `legion
  * controller start` fetched in place of a boot token, then claims the role token the registration
- * names (`legion-<project>-controller`). Its grants are minted with the registration's own secret,
- * which a later `legion controller start` revokes. The daemon's controller-kind notices arrive on
- * that role; one published while no session held it is kept and delivered after this registration,
- * or whenever the daemon's controller watch finds this session holding the role, so nothing re-runs
- * on a role regain and the Envoy heartbeat keeps the role itself. A refusal is logged and
- * propagates without exiting — the operator started this session and reads it; a refused capability
- * was replaced by a later start. The transcript is reported on every claim, a takeover's included,
- * because the route requires one; the Go daemon records only the session.
+ * names (`legion-<project>-controller`), then subscribes to that project's controller topic
+ * (`notifications.legion.<project>.controller`), where the daemon publishes every hold and a tree
+ * architect's failed claim. The subscription is a live wake only: an Oh My Pi session subscribes
+ * over core NATS, so a notice published while no controller runs never reaches one, and the
+ * controller skill reads `legion state` at boot for what it missed. Its grants are minted with the
+ * registration's own secret, which a later `legion controller start` revokes. Nothing re-runs on a
+ * role regain: the Go daemon holds nothing for a controller, and the Envoy heartbeat keeps the role
+ * itself. A refusal is logged and propagates without exiting — the operator started this session
+ * and reads it; a refused capability was replaced by a later start. The transcript is reported on
+ * every claim, a takeover's included, because the route requires one; the Go daemon records only
+ * the session.
  */
 export function goControllerDaemon(
   daemon: () => LegionGoDaemonClient,
@@ -131,10 +139,12 @@ export function goControllerDaemon(
           }
           throw error;
         });
-      await claimEnvoyRole(
+      const envoyContext = "setInterval" in context ? context : undefined;
+      await claimEnvoyRole(sessionID, registration.claimToken, envoyContext);
+      await subscribeLegionNotice(
         sessionID,
-        registration.claimToken,
-        "setInterval" in context ? context : undefined
+        legionControllerNoticeSubject(controllerProject(registration.claimToken)),
+        envoyContext
       );
       return () => client.controllerGrant({ sessionId: sessionID, secret: registration.secret });
     },

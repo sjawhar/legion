@@ -53,29 +53,23 @@ type Notice struct {
 	Summary string      `json:"summary,omitempty"`
 	Version int         `json:"version,omitempty"`
 	Reason  string      `json:"reason,omitempty"`
+	// Controller sends the row to the project's controller topic (notify.ControllerTopic) in place
+	// of the issue's. It routes the row and is never published: the controller reads the notice
+	// without it, as the issue's topic carries it.
+	Controller bool `json:"controller,omitempty"`
 }
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
 
-// ForController is whether the notice also goes to the project's controller, on its role topic,
-// beside the issue's own topic. Every hold does: the architect answers one with a retry or an
-// escalation to the controller, and the controller sees the hold either way. So does the tree
-// architect's own failed claim, since the architect is who every other notice of its tree reaches;
-// with it gone, nobody inside the tree can act. A phase worker's worker-died comes with its hold,
-// and stays the architect's.
+// ForController is whether the notice goes to the project's controller as well as to the issue's
+// topic, in an outbox row of its own (Controller), so a controller publish that fails retries
+// alone. Every hold does: the architect answers one with a retry or an escalation to the
+// controller, and the controller sees the hold either way. So does the tree architect's own failed
+// claim, since the architect is who every other notice of its tree reaches; with it gone, nobody
+// inside the tree can act. A phase worker's worker-died comes with its hold, and stays the
+// architect's.
 func (n Notice) ForController() bool {
 	return n.Kind == "held" || (n.Kind == "worker-died" && n.Role == claim.RoleArchitect)
-}
-
-// ControllerNotice is a notice for the controller that the listener refused because no session held
-// the controller role, kept until one does (0019_controller_notices). DedupeKey is the one its
-// outbox row published under, so a delivery repeated after an unrecorded one is the listener's to
-// drop.
-type ControllerNotice struct {
-	ID        int64
-	Issue     string
-	DedupeKey string
-	Notice    Notice
 }
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's

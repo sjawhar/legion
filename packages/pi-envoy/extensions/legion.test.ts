@@ -5623,6 +5623,18 @@ describe("the Go daemon's operator-launched controller (LEGION_DAEMON_API=go, LE
     expect(controller.tools.map((tool) => tool.name)).not.toContain("legion");
   });
 
+  test("subscribes to its project's controller topic, where the daemon publishes holds", async () => {
+    const controller = await goController({ sessionId: "ses_go_controller_notices" });
+    await controller.handlers.get("session_start")?.(
+      {},
+      controller.context("ses_go_controller_notices")
+    );
+
+    expect(natsConnections.flatMap((connection) => connection.subjects)).toContain(
+      "notifications.legion.omp.controller"
+    );
+  });
+
   test("mints a controller grant with its registration secret for every bash command", async () => {
     const controller = await goController({ sessionId: "ses_go_controller_grant" });
     const context = controller.context("ses_go_controller_grant");

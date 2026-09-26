@@ -52,7 +52,6 @@ type outbox struct {
 	records    record.Store
 	dispatch   dispatch.Client
 	notices    notify.Publisher
-	controller *controllerNotices
 	supervisor *supervisor
 	tokens     appauth.Tokens
 	handlers   []intake.Handler
@@ -68,12 +67,12 @@ type outbox struct {
 	remove          func(context.Context, workspace.Workspace) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, controller *controllerNotices, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
-		pool: pool, records: records, dispatch: client, notices: publisher, controller: controller, supervisor: supervisor, tokens: tokens,
+		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
 		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
 			return workspace.Provision(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), request)
@@ -287,9 +286,21 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 	return nil
 }
 
+// notice publishes a notice row. A controller row goes to the daemon's own project's controller
+// topic, the one its controller subscribes to, and to nothing else; any other row goes to its
+// issue's topic and, for a child, its tree root's.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
+	}
+	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
+	dedupeKey := fmt.Sprintf("legion-outbox:%d", row.ID)
+	if payload.Controller {
+		payload.Controller = false
+		if err := r.notices.Publish(ctx, notify.ControllerTopic(r.project), message, payload, dedupeKey); err != nil {
+			return fmt.Errorf("publish controller notice for %s: %w", row.Issue, err)
+		}
+		return nil
 	}
 	issue, err := r.issue(ctx, row.Issue)
 	if err != nil {
@@ -298,8 +309,6 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if issue.Tree == "" {
 		return fmt.Errorf("notice row %d issue %s has no tree root", row.ID, row.Issue)
 	}
-	message := noticeMessage(payload, row.Issue)
-	dedupeKey := fmt.Sprintf("legion-outbox:%d", row.ID)
 	token, err := claim.ProjectToken(issue.Project)
 	if err != nil {
 		return fmt.Errorf("the notice topic of %s: %w", row.Issue, err)
@@ -312,36 +321,7 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 			return fmt.Errorf("publish tree notice for %s: %w", row.Issue, err)
 		}
 	}
-	if !payload.ForController() {
-		return nil
-	}
-	err = r.notices.Publish(ctx, controllerTopic(token), message, payload, dedupeKey)
-	if !errors.Is(err, notify.ErrNoHolder) {
-		if err != nil {
-			return fmt.Errorf("publish controller notice for %s: %w", row.Issue, err)
-		}
-		return nil
-	}
-	// No session holds the controller role. The notice is kept and its row finished in one
-	// transaction, so it is neither dropped nor retried here: controllerNotices delivers it once a
-	// controller holds the role.
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		if err := r.records.HoldControllerNotice(ctx, tx, record.ControllerNotice{Issue: row.Issue, DedupeKey: dedupeKey, Notice: payload}); err != nil {
-			return err
-		}
-		return r.records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken)
-	}); err != nil {
-		return fmt.Errorf("hold the controller notice for %s: %w", row.Issue, err)
-	}
-	r.log.Info("controller notice held: no session holds the controller role; it is delivered once a controller does",
-		"issue", row.Issue, "kind", payload.Kind, "dedupeKey", dedupeKey)
-	r.controller.deliver()
 	return nil
-}
-
-// noticeMessage is a notice's one-line summary, the message every topic it goes on carries.
-func noticeMessage(notice record.Notice, issue string) string {
-	return fmt.Sprintf("%s on %s", notice.Kind, issue)
 }
 
 func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) error {

@@ -52,8 +52,6 @@ type workflowRuntime struct {
 	conn            *nats.Conn
 	consumers       *intake.Consumers
 	outbox          *outbox
-	// controllerNotices delivers the controller notices the outbox held for want of a holder.
-	controllerNotices *controllerNotices
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -259,20 +257,9 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role) (runtim
 
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
-	publisher := notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"])
-	w.controllerNotices = newControllerNotices(w.pool, w.records, publisher, w.projectID, w.dispatchProject, w.log)
-	w.outbox = newOutbox(w.pool, w.records, w.dispatch, publisher, w.controllerNotices, supervision.supervisor,
+	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
 		w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, supervision.plan.tools, w.log)
 	supervision.supervisor.OnTerminal(w.terminal)
-}
-
-// controllerReady asks for the held controller notices to be delivered: a controller registered,
-// or the controller watch found it holding its role. A daemon without the workflow holds none.
-func (w *workflowRuntime) controllerReady() {
-	if w == nil {
-		return
-	}
-	w.controllerNotices.deliver()
 }
 
 func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise.Claim) error {
@@ -327,10 +314,6 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	})
 	group.Go(func() error {
 		w.outbox.Run(running)
-		return nil
-	})
-	group.Go(func() error {
-		w.controllerNotices.run(running)
 		return nil
 	})
 	group.Go(func() error {

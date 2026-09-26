@@ -155,8 +155,15 @@ session goes through the controller session (`src/legion/controller-session.ts`)
 (`goControllerDaemon`, `go-bootstrap.ts`), not `bootstrapGoClaim`, and gets no Go `legion` tool:
 `claims/register` with the capability in place of a boot token, answered with
 `api.ControllerRegisterResponse` (`LegionGoControllerRegisterResponse`), then the Envoy role
-`legion-<project>-controller`, then a controller grant per credentialed tool call from the `/grants`
-controller-session form with the secret the registration was issued. A later
+`legion-<project>-controller`, then a subscription to the project's controller topic
+`notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project read back
+from the registration's claim token with `controllerProject`), then a controller grant per
+credentialed tool call from the `/grants` controller-session form with the secret the registration
+was issued. The Go daemon publishes every hold and a tree architect's failed claim on that topic.
+The subscription is a live wake and no part of either contract: no request, response or pane
+variable changes, a daemon publishes to the topic whether anyone listens, and a controller on an
+earlier release, which subscribes to nothing, still finds the same issues through `legion state`,
+which the controller skill reads at every start. A later
 `legion controller start` mints a new capability, so the earlier session's grants stop working.
 `legion status <issue> <status>` in that session reads the grant file; from an operator shell it
 takes `--operator-token-file`, which buys a controller grant over the operator's bearer and, like

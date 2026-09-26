@@ -488,58 +488,6 @@ func (s *Postgres) PendingStatusWrites(ctx context.Context, tx pgx.Tx, project s
 	return pending, nil
 }
 
-// HoldControllerNotice keeps a controller notice the listener refused because no session held the
-// controller role. A notice already kept under the same dedupe key stays as it is: an outbox row
-// that runs again, or two runners of one row, keep one.
-func (s *Postgres) HoldControllerNotice(ctx context.Context, tx pgx.Tx, held ControllerNotice) error {
-	notice, err := json.Marshal(held.Notice)
-	if err != nil {
-		return fmt.Errorf("encode the controller notice %s: %w", held.DedupeKey, err)
-	}
-	if _, err := tx.Exec(ctx, `insert into controller_notices (issue, dedupe_key, notice) values ($1, $2, $3)
-		on conflict (dedupe_key) do nothing`, held.Issue, held.DedupeKey, string(notice)); err != nil {
-		return fmt.Errorf("hold the controller notice %s for %s: %w", held.DedupeKey, held.Issue, err)
-	}
-	return nil
-}
-
-// ControllerNotices lists project's held controller notices, oldest first: the order the listener
-// refused them in. A project's rows are its issues', as ClaimDue scopes the outbox.
-func (s *Postgres) ControllerNotices(ctx context.Context, tx pgx.Tx, project string) ([]ControllerNotice, error) {
-	rows, err := tx.Query(ctx, `select id, issue, dedupe_key, notice from controller_notices
-		where split_part(issue, '-', 1) = $1 order by id`, project)
-	if err != nil {
-		return nil, fmt.Errorf("list held controller notices: %w", err)
-	}
-	defer rows.Close()
-	held := []ControllerNotice{}
-	for rows.Next() {
-		var notice ControllerNotice
-		var payload []byte
-		if err := rows.Scan(&notice.ID, &notice.Issue, &notice.DedupeKey, &payload); err != nil {
-			return nil, fmt.Errorf("list held controller notices: %w", err)
-		}
-		decoded, err := DecodeOutboxPayload(OutboxRow{ID: notice.ID, Kind: OutboxKindNotice, Payload: payload})
-		if err != nil {
-			return nil, fmt.Errorf("held controller notice %s: %w", notice.DedupeKey, err)
-		}
-		notice.Notice = decoded.(Notice)
-		held = append(held, notice)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list held controller notices: %w", err)
-	}
-	return held, nil
-}
-
-// DeliveredControllerNotice removes the held controller notice id once the listener took it.
-func (s *Postgres) DeliveredControllerNotice(ctx context.Context, tx pgx.Tx, id int64) error {
-	if _, err := tx.Exec(ctx, "delete from controller_notices where id = $1", id); err != nil {
-		return fmt.Errorf("remove delivered controller notice %d: %w", id, err)
-	}
-	return nil
-}
-
 func scanOutbox(row scanner) (OutboxRow, error) {
 	var out OutboxRow
 	var kind string

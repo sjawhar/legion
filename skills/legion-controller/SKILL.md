@@ -71,17 +71,26 @@ launcher, and started you with `LEGION_CONTROLLER=1` and the same environment a 
 carries, so nothing changes in how you handle wakes. Under the TypeScript daemon the extension
 claims the role and calls `/controller/ready` exactly as under tmux; under the Go daemon
 (`LEGION_DAEMON_API=go` in your environment) it registers on `/legion/v1/claims/register` with the
-secret, then claims the role; a Go daemon notice published while no session held the role (the
-two Go rows in the wake routing table) is kept and delivered to you once you hold it. The daemon
-records you as `controllerLocator: {runtime, external: true, sessionId, registeredAt}`, `runtime`
-being the daemon's own (`kubernetes`, or `tmux` under the Go daemon). The TypeScript daemon reads
-your liveness from the Envoy role registry (the holder of
+secret, claims the role, then subscribes to `notifications.legion.<project>.controller`, where the
+Go daemon publishes the two Go rows of the wake routing table. The daemon records you as
+`controllerLocator: {runtime, external: true, sessionId, registeredAt}`, `runtime` being the
+daemon's own (`kubernetes`, or `tmux` under the Go daemon). The TypeScript daemon reads your
+liveness from the Envoy role registry (the holder of
 `legion-<project>-controller` and its `last_seen`), not from a pane: keep the session running.
 Exiting it leaves the project without a controller until the operator runs the command again —
 the TypeScript daemon logs `controller not registered; run legion controller start` once per
 boot-timeout interval and launches nothing itself. `legion state` and `legion status <KEY>
 <status>` work here over `LEGION_DAEMON_URL`. A second `legion controller start` replaces you: it
 mints a new secret, so your grants stop working and the role moves to the new session.
+
+### What happened before you started (Go daemon)
+
+The Go daemon's controller topic is a wake for a session that is running when it is published.
+Envoy hands an Oh My Pi session no retained copy of a notice published before it subscribed, so a
+hold or a tree architect's failed claim from while no controller ran never arrives as a wake. At
+every start, before anything else, read `legion state --json` and handle each issue whose
+`issues.<KEY>.phase` is `held`, and each tree whose `issues.<KEY>.architect.state` is `failed`,
+exactly as the matching wake below. The issue record is the truth; the topic is the wake.
 
 ## Deployment instructions
 
@@ -119,7 +128,7 @@ quoted here.
 | READY packet seen on a Dispatch issue (via issue subscription) | READY line + gate facts | No action: a human merges; the merger has already notified the queue role if the project has one |
 | `worker-recovered` (role `architect`) from the daemon | issue, fromRef | A root architect's tree volume was lost; it restarted as a new session. Verify the tree is active in `legion state` and that the architect posts its next step on the issue within one resync interval; otherwise treat it as an anomaly. |
 | `held on <KEY>` from the Go daemon (payload `{kind: "held", phase, role?, reason?}`) | the held issue, the phase it left, and the role whose claim failed, or `reason: "escalated"` | Verify the hold in `legion state` (the issue's phase is `held`). Without `reason`, a phase worker's launches or prompts ran out and the tree's architect decides retry or escalate: no action. With `reason: "escalated"`, the architect sent it to you: handle it as an architect escalation below. Parking the tree is `legion status <root> backlog`; setting the root back to `todo` later re-admits it as a new generation, which starts again from its architect |
-| `worker-died on <KEY>` from the Go daemon with `role: "architect"` | the tree root whose architect's claim failed, and the phase the root was in | The tree's architect ran out of launches or prompts and the daemon relaunches nothing; every other notice of the tree goes to that architect, so nobody inside the tree can act. Verify in `legion state`, then re-admit the tree (`legion status <root> backlog`, then `todo`: a new generation, whose architect starts again with fresh budgets) or leave it parked and say why on the issue |
+| `worker-died on <KEY>` from the Go daemon with `role: "architect"` | the tree root whose architect's claim failed, and the phase the root was in | The tree's architect ran out of launches or prompts and the daemon relaunches nothing; every other notice of the tree goes to that architect, so nobody inside the tree can act. Verify in `legion state` (`issues.<KEY>.architect.state` is `failed`), then re-admit the tree (`legion status <root> backlog`, then `todo`: a new generation, whose architect starts again with fresh budgets) or leave it parked and say why on the issue |
 | Closed-tree activity (comment, review, CI on a closed tree) | issue, root, event summary | Read the artifact; if work should resume, `legion status <root> todo`; otherwise no action — the event is not held or redelivered |
 | Direct user message | — | Always first |
 

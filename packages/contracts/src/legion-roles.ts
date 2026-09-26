@@ -68,6 +68,14 @@ export function controllerToken(project: string): string {
   return `legion-${project}-controller`;
 }
 
+/** The project token whose controller role `token` is: `controllerToken`'s inverse. A token that
+ * `controllerToken` could not have made is refused. */
+export function controllerProject(token: string): string {
+  const project = /^legion-([a-z0-9]+)-controller$/.exec(token)?.[1];
+  if (project === undefined) throw new Error(`Not a Legion controller role token: ${token}`);
+  return project;
+}
+
 export function roleTopic(token: string): string {
   return `${ROLE_TOPIC_PREFIX}${token}`;
 }

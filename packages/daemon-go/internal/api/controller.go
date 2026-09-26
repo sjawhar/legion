@@ -114,9 +114,6 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 	token := claim.ControllerToken(s.project)
 	s.log.Info("api: controller registered", "claim", token, "generation", record.Generation,
 		"session", req.SessionID, "agent", req.AgentID)
-	if s.controllerReady != nil {
-		s.controllerReady()
-	}
 	writeJSON(w, http.StatusOK, ControllerRegisterResponse{
 		ClaimToken: token,
 		Role:       ControllerRole,
