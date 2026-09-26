@@ -815,9 +815,11 @@ func TestAKVCallInFlightAtAReconnectIsRetriedOnTheNewConnection(t *testing.T) {
 	}
 }
 
-// A server that stalls and then answers loses nothing: a KV call is waited for until the store is
-// rewatched, even past the write's budget. Here check-0's write is held for longer
-// than the budget and then let through.
+// A KV call is waited for until the store is rewatched, even past the write's budget, so a server
+// that stalls and then answers loses nothing of the attempt that spanned the stall. Here check-0's
+// write is held for longer than the budget and then let through. What the wait alone does not save
+// is an attempt whose compare-and-swap loses after the stall: its budget has run out by then and
+// it returns rather than reading again (write), which is the residual the PR body states.
 func TestASlowKVCallOnALiveConnectionIsWaitedFor(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()

@@ -87,13 +87,16 @@ var errKVRewatched = errors.New("cistore: store rewatched before the KV call was
 // retried on the new connection within the write's budget. Rewatch also runs when the listener's
 // self-health rebuilds a watcher on a live connection; a call given up on there may still have
 // been answered, and is retried like any other. Until the store is rewatched a call is waited for
-// as long as the server takes, up to the MaxWait: a server that stalls and then answers loses
-// nothing. A call given up on ends on its own, with its answer or at the MaxWait. A write it
-// carried is a compare-and-swap at the revision its attempt read, so if the server applies it
-// after the retry's write it conflicts, and if before, the retry's fresh read finds the batch's
-// observations already there and writes nothing. A call that panics re-panics in its caller, as it
-// would without the goroutine, so the batch fails (writeBatch); one that panics after its caller
-// has moved on is logged.
+// as long as the server takes, up to the MaxWait, so a server that stalls and then answers still
+// answers that call. The write is not saved by that alone: its budget can run out during the
+// stall, and an attempt whose compare-and-swap then loses returns rather than reading again (the
+// deadline above), so a stall of a few seconds can still fail a batch when another writer's
+// request was queued at the same server. A call given up on ends on its own, with its answer or at
+// the MaxWait. A write it carried is a compare-and-swap at the revision its attempt read, so if
+// the server applies it after the retry's write it conflicts, and if before, the retry's fresh
+// read finds the batch's observations already there and writes nothing. A call that panics
+// re-panics in its caller, as it would without the goroutine, so the batch fails (writeBatch); one
+// that panics after its caller has moved on is logged.
 func kvCall[T any](rewatched <-chan struct{}, call func() (T, error)) (T, error) {
 	type answer struct {
 		value    T
@@ -152,10 +155,12 @@ func (s *Store) nextRewatch() <-chan struct{} {
 //
 // No responders is transient because it cannot be told apart from a restart: a restarting server
 // answers it for as long as it is away, and a batch that should have been retried failed instead.
-// The trade is the case it also covers, a bucket deleted under a live handle, which answers no
-// responders like a key no stream serves: such a write now spends the whole budget before it
-// fails, rather than failing at once. It still fails, within the budget, and nothing is written
-// either way.
+// It is the read (kv.Get) that this decides: on the write side nats.go answers ErrNoStreamResponse
+// instead (js.go), which this never named as lasting. The trade is the case it also covers, a
+// bucket deleted under a live handle, which answers no responders like a key no stream serves:
+// such a write now spends the whole budget before it fails, rather than failing at once. It still
+// fails within the budget, and nothing is written either way; a caller queued behind that write
+// waits for its own write too, so it can wait two budgets (cistore.go).
 func kvErrorLasts(err error) bool {
 	if isCASConflict(err) {
 		return false
