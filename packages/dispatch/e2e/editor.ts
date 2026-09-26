@@ -1,6 +1,13 @@
-import { expect, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
+import {
+  type Browser,
+  expect,
+  type Locator,
+  type Page,
+  type WebSocketRoute,
+} from "@playwright/test";
 
-import { getArtifactText } from "./api";
+import { createIssue, createProject, getArtifactText } from "./api";
+import { asUser } from "./users";
 
 export function documentEditor(page: Page): Locator {
   return page.getByRole("textbox", { name: "Document editor" });
@@ -184,4 +191,42 @@ export async function documentTransport(
       }
     },
   };
+}
+
+export interface Clipboard {
+  html: string;
+  text: string;
+}
+
+/** Pastes clipboard contents at the caret, through the editor's own paste handler. */
+export async function paste(page: Page, clipboard: Clipboard): Promise<void> {
+  await documentEditor(page).evaluate((root, { html, text }) => {
+    const data = new DataTransfer();
+    data.setData("text/html", html);
+    data.setData("text/plain", text);
+    root.dispatchEvent(
+      new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data })
+    );
+  }, clipboard);
+}
+
+/** Opens `spec` as alice, with the caret collapsed at the start or the end of the text `quote`:
+ * the selection bar is gone once the selection collapses, and a paste before that replaces the
+ * selected text. */
+export async function openWithCaret(
+  browser: Browser,
+  title: string,
+  spec: string,
+  quote: string,
+  caret: "start" | "end"
+) {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title });
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  await page.goto(`/issues/${issue.key}`);
+  await selectEditorText(page, quote);
+  await page.keyboard.press(caret === "start" ? "ArrowLeft" : "ArrowRight");
+  await expect(actionBar(page)).toBeHidden();
+  return { alice, issue, page };
 }

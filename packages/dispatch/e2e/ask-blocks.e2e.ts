@@ -13,7 +13,7 @@ import {
   patchIssue,
   resolveAsk,
 } from "./api";
-import { actionBar, documentEditor, selectEditorText } from "./editor";
+import { type Clipboard, documentEditor, openWithCaret, paste, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -56,11 +56,6 @@ async function indexedBlockAsk(issueKey: string, blockId: string) {
   return blockAsk;
 }
 
-interface Clipboard {
-  html: string;
-  text: string;
-}
-
 /** Copies the whole document through the editor's own copy handler: ProseMirror serializes the
  * selection into the copy event's clipboardData, which is what a browser's clipboard receives. */
 async function copyWholeDocument(page: Page): Promise<Clipboard> {
@@ -74,18 +69,6 @@ async function copyWholeDocument(page: Page): Promise<Clipboard> {
     );
     return { html: data.getData("text/html"), text: data.getData("text/plain") };
   });
-}
-
-/** Pastes clipboard contents at the caret, through the editor's own paste handler. */
-async function paste(page: Page, clipboard: Clipboard): Promise<void> {
-  await documentEditor(page).evaluate((root, { html, text }) => {
-    const data = new DataTransfer();
-    data.setData("text/html", html);
-    data.setData("text/plain", text);
-    root.dispatchEvent(
-      new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data })
-    );
-  }, clipboard);
 }
 
 /** Pastes clipboard contents at the start of the text `quote`. */
@@ -114,27 +97,6 @@ async function openAnsweredDecision(browser: Browser) {
   const decision = documentEditor(page).locator('[data-dispatch-ask-block="decision"]');
   await expect((await expectHosted(decision)).getByText("Go A.")).toBeVisible();
   return { alice, blockAsk, issue, page };
-}
-
-/** Opens `spec` as alice, with the caret collapsed at the start or the end of the text `quote`:
- * the selection bar is gone once the selection collapses, and a paste before that replaces the
- * selected text. */
-async function openWithCaret(
-  browser: Browser,
-  title: string,
-  spec: string,
-  quote: string,
-  caret: "start" | "end"
-) {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", spec, title });
-  const alice = await asUser(browser, "alice");
-  const page = await alice.newPage();
-  await page.goto(`/issues/${issue.key}`);
-  await selectEditorText(page, quote);
-  await page.keyboard.press(caret === "start" ? "ArrowLeft" : "ArrowRight");
-  await expect(actionBar(page)).toBeHidden();
-  return { alice, issue, page };
 }
 
 /** Opens a spec holding only "End.", with the caret at its start or its end. */
@@ -911,66 +873,6 @@ test("a lone callout pasted as plain text into an ask's question leaves the ask 
     await alice.close();
   }
 });
-
-// Plain text pasted into a table cell lands in that one cell, with its blocks and line breaks
-// flattened to inline text joined by spaces, since a GFM cell holds one line. It once overwrote the
-// caret's cell and spread the other lines into new cells of the same row, past the header's column
-// count, where a GFM reader drops them.
-const table = "| alpha one | beta two |\n| --- | --- |\n| gamma three | delta four |\n";
-for (const [cell, quote, pasted, stored] of [
-  [
-    "a body cell",
-    "delta",
-    "First\n\nSecond\n",
-    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaFirst Second four |\n",
-  ],
-  [
-    "a header cell",
-    "alpha",
-    "First\n\nSecond\n",
-    "| alphaFirst Second one | beta two |\n| :--- | :--- |\n| gamma three | delta four |\n",
-  ],
-  [
-    "a body cell",
-    "delta",
-    loneAsk,
-    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaWhich one? A B four |\n",
-  ],
-  [
-    "a header cell",
-    "alpha",
-    loneAsk,
-    "| alphaWhich one? A B one | beta two |\n| :--- | :--- |\n| gamma three | delta four |\n",
-  ],
-  [
-    "a body cell",
-    "delta",
-    "First\nSecond",
-    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaFirst Second four |\n",
-  ],
-  [
-    "a body cell",
-    "delta",
-    "More words.",
-    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaMore words. four |\n",
-  ],
-] as const) {
-  test(`${JSON.stringify(pasted)} pasted as plain text into ${cell} stays in that cell`, async ({
-    browser,
-  }) => {
-    const { alice, issue, page } = await openWithCaret(browser, "Cell paste", table, quote, "end");
-    try {
-      await paste(page, { html: "", text: pasted });
-
-      await expect
-        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-        .toBe(stored);
-      expect((await getIssue(issue.key)).open_asks).toEqual([]);
-    } finally {
-      await alice.close();
-    }
-  });
-}
 
 // A lone ask pasted into another ask's question has nowhere to be an ask, so its text joins the
 // question, as a callout's does. It once split the ask: the question took the pasted question and
