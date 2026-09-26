@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -36,7 +38,9 @@ type envoyEnvelope struct {
 
 // decodeMessage decodes the Envoy envelope first, then the subject's source-specific payload.
 // project is the daemon's Dispatch project: another project's issue event is a nil Fact.
-func decodeMessage(subject, project string, data []byte) (decodedMessage, error) {
+// repositories are its configured repositories: a GitHub event whose payload names another
+// repository is a nil Fact, whatever subject carried it.
+func decodeMessage(subject, project string, repositories []ghrepo.Repository, data []byte) (decodedMessage, error) {
 	var envelope envoyEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return decodedMessage{}, fmt.Errorf("decode Envoy envelope: %w", err)
@@ -57,7 +61,7 @@ func decodeMessage(subject, project string, data []byte) (decodedMessage, error)
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
 		}
-		fact, err = decodeGitHubFact(subject, envelope.Payload, envelope.IssuedAt)
+		fact, err = decodeGitHubFact(subject, repositories, envelope.Payload, envelope.IssuedAt)
 	default:
 		return decodedMessage{}, fmt.Errorf("unsupported durable subject %q", subject)
 	}
@@ -210,9 +214,16 @@ func isJSONObject(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &item) == nil && item != nil
 }
 
-func decodeGitHubFact(subject, payload string, issuedAt int64) (Fact, error) {
+func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload string, issuedAt int64) (Fact, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil || raw == nil {
+		return nil, nil
+	}
+	// The payload names the event's repository; the subject's segments cannot, since a name may hold
+	// a dot. Only a configured repository's event is this daemon's, as in the shipped daemon, which
+	// registers a pull request only for its issue's repository (reducers.ts registerPrFenced).
+	repo, _ := rawString(raw, "repo")
+	if !slices.ContainsFunc(repositories, func(configured ghrepo.Repository) bool { return configured.String() == repo }) {
 		return nil, nil
 	}
 	kind, ok := rawString(raw, "kind")
