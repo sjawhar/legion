@@ -163,8 +163,8 @@ func TestStateOperatorClaimGolden(t *testing.T) {
 		Issues: map[string]Issue{
 			"AC91849371-900": {
 				Key:     "AC91849371-900",
-				Phase:   phase.Unrecorded,
-				Status:  string(phase.Unrecorded),
+				Phase:   Unrecorded,
+				Status:  string(Unrecorded),
 				Workers: map[claim.Role]PhaseView{},
 				Architect: &ClaimView{
 					Session: "01a0d71d-aace-7448-a0d4-e401d736438f",
