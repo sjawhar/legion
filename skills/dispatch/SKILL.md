@@ -603,7 +603,8 @@ dispatch_doc_read({ issue?, project?, artifact?, version?, ref? })
 ```
 It returns live or versioned markdown with open marks. A live read ends with a document token; `issue` with an
 omitted `artifact` reads the issue specification; a project needs `artifact`; and a
-`dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the id, slug, or filename.
+`dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the slug (an id or a
+filename resolves when no document has that slug).
 
 Editing one is [Editing a document](references/document-edits.md): the shape of `dispatch_doc_edit`,
 how to quote the text you mean, one `replace` per paragraph, preconditions against a stale edit, and
@@ -741,7 +742,9 @@ Exactly one of `path` and `content` is required. It returns issue or project-doc
 Uploading the same `name` creates its next version — so uploading `spec.md` **replaces the issue's own specification**
 with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [Editing a document](references/document-edits.md)). Address an existing
 artifact by the slug shown in the upload result or by its filename, and a project document by its artifact id, slug, or filename; the
-slug also arrives on `artifact.created` events.
+slug also arrives on `artifact.created` events. Dispatch suffixes a slug two documents would share, so one document's
+filename can be another's slug (`plan v2` takes `plan-v2`, then a document named `plan-v2` takes `plan-v2-2`): a bare
+`artifact` that names both is refused with each one's id, while a `dispatch://` reference's document part is always the slug.
 
 **Where a deliverable goes.** Text the human must read to decide — a draft message, a proposal,
 a summary — goes in the spec as a section: the spec is the one document they open. A separate

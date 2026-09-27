@@ -26,7 +26,8 @@ import {
   senderLabel,
 } from "@legion/envoy-client/delivery";
 import {
-  type DispatchConfigResolution,
+  type ActiveDispatchConfig,
+  activeDispatchConfig,
   resolveDispatchConfig,
 } from "@legion/envoy-client/dispatch-config";
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
@@ -305,11 +306,6 @@ function resolveSkillsDirectory(): string {
 }
 const SKILLS_DIRECTORY = resolveSkillsDirectory();
 
-type ActiveDispatchConfig = DispatchConfigResolution & {
-  readonly url: string;
-  readonly token: string;
-};
-
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
   const defaults = envoyDefaultsFromEnvironment(process.env);
@@ -321,14 +317,8 @@ export default function envoyExtension(pi: PiApi): void {
   // without /reload-plugins; a file that has since broken fails the call with
   // its own error instead of quietly using the stale endpoint.
   const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() });
-  const activeDispatchConfig = (): ActiveDispatchConfig | null => {
-    const fresh = resolveDispatchConfig(process.env, { cwd: process.cwd() });
-    if (fresh.error !== null) throw new Error(`dispatch config: ${fresh.error}`);
-    if (!fresh.enabled || fresh.url === null || fresh.token === null) return null;
-    return fresh as ActiveDispatchConfig;
-  };
   const currentDispatchConfig = (): ActiveDispatchConfig => {
-    const config = activeDispatchConfig();
+    const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
     if (config === null) {
       throw new Error("Dispatch is no longer configured (dispatch.serverUrl/token missing)");
     }
@@ -451,7 +441,7 @@ export default function envoyExtension(pi: PiApi): void {
     requestedSessionID: string,
     since?: string
   ): Promise<{ readonly snapshot: OpenAsksResponse; readonly url: string } | null> => {
-    const config = activeDispatchConfig();
+    const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
     if (config === null) return null;
     const snapshot = await new DispatchClient(
       config.url,
