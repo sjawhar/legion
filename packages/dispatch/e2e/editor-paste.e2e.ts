@@ -440,3 +440,102 @@ test("plain text pasted onto a selection of cells fills them line by line", asyn
     await alice.close();
   }
 });
+
+// A soft line break in pasted plain text is pasted as a hard break, since a pasted "alpha\nbeta"
+// keeps its line break (packages/proof-editor/src/lib.ts, where markdown import alone turns soft
+// breaks into spaces). The editor shows the break, and the stored backslash and newline read back as
+// that break. It was once pasted as a soft break, which the editor draws as a space while its stored
+// copy reads back as a line break. A markdown hard break, an HTML <br>, and a soft break in markdown
+// written through the API are the controls.
+for (const [shape, spec, quote, clipboard, stored, breaks] of [
+  [
+    "a soft line break into a paragraph",
+    "Intro end.\n",
+    "Intro",
+    { html: "", text: "First\nSecond" },
+    "IntroFirst\\\nSecond end.\n",
+    1,
+  ],
+  [
+    "a soft line break into a list item",
+    "- Intro end.\n",
+    "Intro",
+    { html: "", text: "First\nSecond" },
+    "- IntroFirst\\\n  Second end.\n",
+    1,
+  ],
+  [
+    "a soft line break into a quote",
+    "> Intro end.\n",
+    "Intro",
+    { html: "", text: "First\nSecond" },
+    "> IntroFirst\\\n> Second end.\n",
+    1,
+  ],
+  [
+    "a soft line break into a callout",
+    ':::callout{#k1 kind="note"}\nIntro end.\n:::\n',
+    "Intro",
+    { html: "", text: "First\nSecond" },
+    ':::callout{#k1 kind="note" title=""}\nIntroFirst\\\nSecond end.\n:::\n',
+    1,
+  ],
+  [
+    "a soft line break into an ask's question",
+    ':::ask{#q1 urgency="med" multiple="false"}\nWhich here?\n\n- X\n- Y\n:::\n',
+    "Which here?",
+    { html: "", text: "First\nSecond" },
+    ':::ask{#q1 urgency="med" multiple="false" state="open"}\nWhich here?First\\\nSecond\n\n- X\n- Y\n:::\n',
+    1,
+  ],
+  [
+    "a markdown hard break into a paragraph",
+    "Intro end.\n",
+    "Intro",
+    { html: "", text: "First\\\nSecond" },
+    "IntroFirst\\\nSecond end.\n",
+    1,
+  ],
+  [
+    "an HTML <br> into a paragraph",
+    "Intro end.\n",
+    "Intro",
+    { html: "<p>one<br>two</p>", text: "one\ntwo" },
+    "Introone\\\ntwo end.\n",
+    1,
+  ],
+] as const) {
+  test(`${shape} is stored as the break the editor shows`, async ({ browser }) => {
+    const { alice, issue, page } = await openWithCaret(
+      browser,
+      "Line break paste",
+      spec,
+      quote,
+      "end"
+    );
+    try {
+      await paste(page, clipboard);
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toBe(stored);
+      await expect(documentEditor(page).locator('br[data-type="hardbreak"]')).toHaveCount(breaks);
+      await expect(documentEditor(page).locator('span[data-type="hardbreak"]')).toHaveCount(0);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
+test("a soft line break in markdown written through the API is a space in the editor", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openIssue(browser, "Soft break import", "Intro\nend.\n");
+  try {
+    await expect(documentEditor(page)).toContainText("Intro end.");
+    await expect(documentEditor(page).locator('[data-type="hardbreak"]')).toHaveCount(0);
+    expect((await getArtifactText(issue.primary_artifact_id)).markdown).toBe("Intro end.\n");
+  } finally {
+    await alice.close();
+  }
+});
