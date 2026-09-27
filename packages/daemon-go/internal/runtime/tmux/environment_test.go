@@ -148,6 +148,9 @@ func TestPaneEnvironment(t *testing.T) {
 		"TMUX=/tmp/tmux-1000/default,1,0",
 		"OMP_SESSION_ID=01a0",
 		"ANTHROPIC_API_KEY=leaked",
+		// The daemon's own NATS seed, which no pane may hold (LEGION-279).
+		"NATS_DAEMON_NKEY_SEED=leaked",
+		"NATS_DAEMON_NKEY_SEED_FILE=/leaked/nats-daemon.seed",
 		// The operator's session bus, which the keyring behind their hawk login answers on: a
 		// tmux stage proof hands it to its model key command alone (scripts/e2e/lib/
 		// install-model-gateway.sh), never to a pane.
@@ -186,5 +189,36 @@ func TestPaneEnvironmentPutsWorkerBinAndTheLauncherFirstExactlyOnce(t *testing.T
 	}
 	if strings.Count(env["PATH"], workerBin) != 1 {
 		t.Fatalf("PATH = %q carries worker-bin more than once", env["PATH"])
+	}
+}
+
+// bun (measured: bun 1.3.14, LEGION-198) resolves its install cache at $BUN_INSTALL_CACHE_DIR if
+// set, else $BUN_INSTALL/install/cache if set, else $XDG_CACHE_HOME/.bun/install/cache if set,
+// else $HOME/.bun/install/cache — and bun hardlinks that cache's files into every worktree's
+// node_modules, so any two panes sharing one cache directory corrupt each other's node_modules on
+// a forced reinstall. Neither BUN_INSTALL nor BUN_INSTALL_CACHE_DIR is on paneEnvAllowList, and
+// PaneEnvironment always sets XDG_CACHE_HOME from stateDir (xdgDirectories), so every pane of one
+// deployment shares that deployment's own cache under its state dir — sharing within a deployment
+// is intended; the isolation this locks is between deployments — even when the daemon's own
+// environment, where an operator's interactive shell sets all three for their own use, carries
+// values that would otherwise point every deployment back at the operator's one shared
+// $HOME/.bun/install/cache.
+func TestPaneEnvironmentGivesEachDeploymentItsOwnBunCache(t *testing.T) {
+	stateDir := "/var/lib/legion"
+	environ := []string{
+		"HOME=/home/ubuntu",
+		"XDG_CACHE_HOME=/home/ubuntu/.cache",
+		"BUN_INSTALL=/home/ubuntu/.bun",
+		"BUN_INSTALL_CACHE_DIR=/home/ubuntu/.bun/install/cache",
+	}
+	env := PaneEnvironment(environ, stateDir)
+	if want := filepath.Join(stateDir, "home", ".cache"); env["XDG_CACHE_HOME"] != want {
+		t.Errorf("XDG_CACHE_HOME = %q, want %q (bun's cache dir, $XDG_CACHE_HOME/.bun/install/cache, must live under the state dir)",
+			env["XDG_CACHE_HOME"], want)
+	}
+	for _, name := range []string{"BUN_INSTALL", "BUN_INSTALL_CACHE_DIR"} {
+		if _, leaked := env[name]; leaked {
+			t.Errorf("%s leaked from the daemon's own environment into the pane; it is not on paneEnvAllowList and would send bun back to the operator's own cache", name)
+		}
 	}
 }

@@ -24,44 +24,51 @@ symptoms:
 
 Provisioning hands its clone and its fetch **one shared env object** (`credential.env` in
 `createProvisioningCredential`). A test that asserts both commands received it, with an
-asymmetric matcher for the path that differs per run, fails on the second assertion:
+asymmetric matcher for the one-shot helper's path (which differs per run), fails on the second
+assertion:
 
 ```ts
-const expected = () => ({ GIT_ASKPASS: expect.stringContaining(`${root}/`), GIT_CONFIG_COUNT: "2" });
+const expected = () => ({
+  GIT_CONFIG_VALUE_1: expect.stringMatching(/^!'.+\/provisioning-credential-[^/]+\/helper'$/),
+  GIT_CONFIG_COUNT: "3",
+});
 expect(clone.opts.env).toMatchObject(expected());   // passes
 expect(fetch.opts.env).toMatchObject(expected());   // fails: "- Expected - 0 / + Received + 0"
 ```
 
 Minimal reproduction on Bun 1.3.14 (`bun test v1.3.14 (0d9b296a)`): the same object reference
-matched twice with `toMatchObject` and `expect.stringContaining` fails the second time; with
+matched twice with `toMatchObject` and `expect.stringMatching` fails the second time; with
 plain values only it passes twice; a fresh `expected()` per call makes no difference — the
 **received** object's identity is what trips it. The reviewer reproduced the same on their run.
 
 ## The fix
 
 `toEqual` with the asymmetric matcher has no such quirk and asserts the exact shape, which is
-the contract anyway (an extra `GIT_CONFIG_KEY_2` without a bumped count is silently ignored by
+the contract anyway (an extra `GIT_CONFIG_KEY_3` without a bumped count is silently ignored by
 git, so an exact key set is a real assertion, not pedantry):
 
 ```ts
 const provisioningEnv = {
-  GIT_ASKPASS: expect.stringContaining(`${root}/`),
+  GIT_ASKPASS: "",
   GIT_TERMINAL_PROMPT: "0",
-  LEGION_PROVISIONING_TOKEN: "ghs_x",
-  GIT_CONFIG_COUNT: "2",
+  GIT_ALLOW_PROTOCOL: "https",
+  LEGION_PROVISIONING_TOKEN: "installation-token",
+  GIT_CONFIG_COUNT: "3",
   GIT_CONFIG_KEY_0: "credential.helper",
   GIT_CONFIG_VALUE_0: "",
-  GIT_CONFIG_KEY_1: "credential.interactive",
-  GIT_CONFIG_VALUE_1: "true",
+  GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+  GIT_CONFIG_VALUE_1: expect.stringMatching(/^!'.+\/provisioning-credential-[^/]+\/helper'$/),
+  GIT_CONFIG_KEY_2: "core.hooksPath",
+  GIT_CONFIG_VALUE_2: "/dev/null",
 };
 expect(commands[0]?.opts?.env).toEqual(provisioningEnv);
 expect(fetchCommand?.opts?.env).toEqual(provisioningEnv);
 ```
 
-This is the shape `processes.test.ts` already used for the same env (`toContainEqual` with
-`expect.stringMatching` on `GIT_ASKPASS`). The round-1 workaround — `toMatchObject` on plain
-values plus a separate `toStartWith` on `GIT_ASKPASS` — worked but split one contract over two
-assertions and lost the exact-key-set check; the review folded it into the `toEqual` above.
+This is the shape `packages/workspace/src/workspace.test.ts`'s `provisioningEnv` helper uses today.
+The round-1 workaround — `toMatchObject` on plain values plus a separate `toStartWith` on the
+helper path — worked but split one contract over two assertions and lost the exact-key-set check;
+the review folded it into the `toEqual` above.
 
 ## When you hit an empty-diff failure
 

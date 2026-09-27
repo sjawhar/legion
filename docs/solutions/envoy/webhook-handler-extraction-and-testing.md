@@ -45,20 +45,13 @@ func GhostWisprHandler(secret string, publisher Publisher) http.HandlerFunc {
 type Publisher interface {
     Publish(contracts.Envelope) error
 }
-
-type PublisherFunc func(contracts.Envelope) error
-
-func (f PublisherFunc) Publish(item contracts.Envelope) error {
-    return f(item)
-}
 ```
 
-This is the `http.HandlerFunc` pattern applied to publishing. In production, wrap the NATS client:
+In production the handler takes the listener's `*bus.Client`, which satisfies it directly, and
+the CI store (`*cistore.Store`) as its `CIRecorder`:
 
 ```go
-webhookPublisher := webhook.PublisherFunc(func(item contracts.Envelope) error {
-    return deps.Load().client.Publish(item)
-})
+webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, d.client, d.ciStore)
 ```
 
 In tests, use a mock that records calls:
@@ -78,15 +71,14 @@ func (m *mockPublisher) Publish(item contracts.Envelope) error {
 ## Config-gated route registration
 
 ```go
-if webhookCfg.GitHub != nil {
-    mux.Handle("/webhook/github", readinessGate(
-        func() bool { return deps.Load() != nil },
-        webhook.GitHubHandler(webhookCfg.GitHub.Secret, ...),
-    ))
+if github := cfg.GitHub; github != nil {
+    routes = append(routes, webhookRoute{"/webhook/github", func(client *bus.Client, ciStore *cistore.Store) http.Handler {
+        return webhook.GitHubHandler(github.Secret, github.MentionTrigger, github.ReviewerAppID, client, ciStore)
+    }})
 }
 ```
 
-`nil` pointer = provider disabled. No boolean flags, no separate "enabled" field. The config parser validates required secrets at startup — missing secret when provider is enabled = fail-fast.
+`webhookRoutes` (`cmd/listener/main.go`) lists the enabled routes. `nil` pointer = provider disabled. No boolean flags, no separate "enabled" field. The config parser validates required secrets at startup — missing secret when provider is enabled = fail-fast.
 
 ## Always `TrimSpace` env var reads
 
@@ -114,7 +106,7 @@ Table-driven tests with `httptest.NewRequest` + `httptest.NewRecorder`. Every ha
 | 7 | Invalid signature | 401 |
 | 8 | No secret configured | Skip verification, 200 |
 | 9 | Event/payload type mismatch | 400 |
-| 10 | Publish failure | 503 (provider will retry) |
+| 10 | Publish failure | 503 (Slack retries the delivery; GitHub does not redeliver a failed one on its own) |
 
 ### Provider-specific additions
 
@@ -144,6 +136,8 @@ ts := "1234567890"
 nowTS := strconv.FormatInt(time.Now().Unix(), 10)
 ```
 
-## readinessGate + deps.Load() interaction
+## Webhook routes during startup
 
-Webhook handlers need NATS to publish, but NATS connects asynchronously after startup. The `readinessGate` middleware returns 503 until `deps.Load() != nil`. The `PublisherFunc` closure evaluates `deps.Load()` at request time (not registration time), so it's always current. This is safe because `readinessGate` prevents requests from reaching the handler before deps is initialized.
+Webhook handlers need NATS to publish, but NATS connects asynchronously after startup. main registers every enabled webhook path on the webhook `startingGate` (`/v1` has its own) before the HTTP server starts, so a delivery before NATS and the CI store are open is answered `503 service starting`. GitHub records that delivery as failed and does not redeliver it on its own. Once NATS and the CI store are open (`openWebhooks`, `cmd/listener/main.go`), main builds each route's handler over the NATS client and the CI store, the only dependencies a webhook uses, and opens the webhook gate onto them, so a handler is only ever constructed with, and holds, dependencies that exist. The webhooks do not wait for the interest and session caches or the durable consumer's bind: during a rolling deploy that bind waits out the task being replaced, for as long as its deregistration and shutdown take, while the load balancer already sends the replacement webhooks.
+
+Legion (the TypeScript daemon) recovers part of what a lost GitHub delivery carried. Its resync (`packages/daemon/src/daemon/resync.ts`, `reconcilePrs`) re-reads the head and check rollup of every open pull request it has registered, so a missed checks settlement or head change is repaired on the next resync. A worker's catch-up (`catchup.ts`, `workerCatchup`) lists the pull request's comments, review comments and reviews newer than that role's own latest commit or comment, but only when the daemon resumes the worker after a delivery exception, a death or a lost workspace; an ordinary wake carries no catch-up, and the catch-up restores no daemon state. Nothing recovers the rest: a missed `opened` leaves the pull request unregistered until a later `synchronize` (its next push) registers it, and resync reads only registered ones; a missed review is never recorded, because only the review webhook sets `reviewDecision`, so a missed approval's `pr-ready` never fires and a missed `changes_requested` never returns the issue to `in_progress`; a missed close or merge is never applied, because resync skips a pull request GitHub reports closed (`resync.ts:102`); and no resync step re-reads a branch push. The Go daemon (`packages/daemon-go`) recovers none of it: it never reads pull request, check or review state from GitHub. That state comes only from the listener's events through its durable GitHub consumer (`intake.OpenConsumers`), which replays what reached NATS while the daemon was down but never sees a delivery the listener refused; its boot reconcile reads Dispatch only (`workflowRuntime.reconcile`, `internal/daemon/workflow.go`), and outside App token minting nothing but the `legion threads` and `legion gh` commands calls the GitHub API. So a missed `opened`, head change, checks settlement, close or merge stays missed, and so does a missed review: `review_decision` is set only by `classify.ApplyReview` (`internal/classify/decisions.go`) from a review event, so a lost approval leaves `Engine.advanceApproved` (`internal/workflow/engine.go`) waiting with the issue in review, and a lost `changes_requested` never sends it back to implementing.

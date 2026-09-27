@@ -14,7 +14,10 @@ const Stream = "ENVOY_NOTIFICATIONS"
 
 // streamDuplicateWindow covers the entire retained notification lifetime, so
 // an outbox retry after a crash before published_at is recorded cannot create a
-// second retained Dispatch event while the original remains observable.
+// second retained Dispatch event while the original remains observable, and a
+// webhook redelivery of an event the stream already holds adds no second copy.
+// GitHub redelivers only deliveries from the past three days, so its whole
+// redelivery horizon falls inside this window.
 //
 // It is the same window the dashboard gates its "retrying is safe" promise on: past it the
 // stream holds neither the message nor its MsgId, so a same-mode retry delivers a second time.
@@ -27,7 +30,9 @@ var streamSubjects = []string{
 	"notifications.dispatch.>",
 	"notifications.github.>",
 	"notifications.slack.>",
-	// The Go Legion daemon's per-issue workflow notices (notifications.legion.<project>.<issue>).
+	// The Go Legion daemon's notices for the project's controller
+	// (notifications.legion.<project>.controller); its workflow notices go to each owning
+	// architect's role topic.
 	"notifications.legion.>",
 	"notifications.ghostwispr.>",
 	"notifications.whatsapp.>",
@@ -125,10 +130,10 @@ func subjectsOverlap(a, b string) bool {
 
 // streamReconciliation is the subject list the stream carries once this binary has started, and
 // what that did to the deployed list: the list is the deployed one, then each of this binary's
-// subjects the deployed list lacks. Every bus.Connect caller ensures this one stream (the
-// listener, Dispatch, natstail and the MCP server, wherever they run), and they deploy
-// separately, so a deployed subject this binary does not know may be one another live deployment
-// still needs; start-up keeps it and names it in foreign. Two kinds of deployed subject go:
+// subjects the deployed list lacks. Every bus.ConnectOwningStream caller ensures this one stream
+// (the deployed listener and Dispatch's server, wherever they run), and they deploy separately,
+// so a deployed subject this binary does not know may be one another live deployment still
+// needs; start-up keeps it and names it in foreign. Two kinds of deployed subject go:
 //   - one that captures the role lanes, which travel over core NATS and must never be retained
 //     (migrateRoleLanesOffStream);
 //   - one that overlaps a subject of this binary's (a widened, narrowed or split subject), because

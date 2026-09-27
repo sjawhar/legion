@@ -1,12 +1,16 @@
 package contracts
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type GithubEnvelopeInput struct {
@@ -68,12 +72,12 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	if num != "" {
 		// notifications.github.owner.repo.pr.7706.mention
 		mention := item
-		mention.Topic = GithubSubject(owner, repo, base+"."+num+".mention")
+		mention.Topic = GithubSubject(owner, repo, base+"."+num+"."+githubMentionKind)
 		mentions = append(mentions, mention)
 	}
 	// Also publish repo-wide mention: notifications.github.owner.repo.mention
 	mention := item
-	mention.Topic = GithubSubject(owner, repo, "mention")
+	mention.Topic = GithubSubject(owner, repo, githubMentionKind)
 	mentions = append(mentions, mention)
 	return append(mentions, item)
 }
@@ -112,13 +116,18 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 		return nil
 	}
 	owner, repo := githubRepo(body)
+	// The listener writes an observation to its CI store with a publish, so each text it copies is
+	// capped like an envelope's.
+	text := func(path ...string) string {
+		return truncateWithEllipsis(nestedString(body, append([]string{key}, path...)...), maxEnvelopeTextRunes)
+	}
 	obs := CIObservation{
 		Owner:      owner,
 		Repo:       repo,
 		SHA:        sha,
 		AppID:      nestedNumberString(body, key, "app", "id"),
-		Status:     nestedString(body, key, "status"),
-		Conclusion: nestedString(body, key, "conclusion"),
+		Status:     text("status"),
+		Conclusion: text("conclusion"),
 	}
 	if event == "check_run" {
 		checkRunID := githubPositiveUint64(nested(body, key, "id"))
@@ -126,19 +135,19 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 			log.Printf("github ci check run skipped: invalid id=%v", nested(body, key, "id"))
 			return nil
 		}
-		obs.CheckName = nestedString(body, key, "name")
+		obs.CheckName = checkName(nestedString(body, key, "name"))
 		obs.CheckRunID = checkRunID
-		obs.URL = nestedString(body, key, "html_url")
-		obs.ObservedAt = nestedString(body, key, "completed_at")
+		obs.URL = text("html_url")
+		obs.ObservedAt = text("completed_at")
 		if obs.ObservedAt == "" {
-			obs.ObservedAt = nestedString(body, key, "started_at")
+			obs.ObservedAt = text("started_at")
 		}
 		if obs.CheckName == "" {
 			return nil
 		}
 	} else {
 		obs.SuiteID = nestedNumberString(body, key, "id")
-		obs.ObservedAt = nestedString(body, key, "updated_at")
+		obs.ObservedAt = text("updated_at")
 		if obs.SuiteID == "" {
 			return nil
 		}
@@ -149,6 +158,18 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 		out = append(out, obs)
 	}
 	return out
+}
+
+// checkName is a check's name as the CI store keys it: whole, or past maxEnvelopeTextRunes its first
+// maxEnvelopeTextRunes runes and an ellipsis followed by a digest of the whole name, so two names
+// that share the kept text stay two checks and one name keys the same entry every time. The name is
+// the one text a repository chooses in an observation (a workflow's job names it).
+func checkName(name string) string {
+	if utf8.RuneCountInString(name) <= maxEnvelopeTextRunes {
+		return name
+	}
+	digest := sha256.Sum256([]byte(name))
+	return truncateWithEllipsis(name, maxEnvelopeTextRunes) + " " + hex.EncodeToString(digest[:8])
 }
 
 func GithubIsBotSender(body map[string]any) bool {
@@ -335,45 +356,66 @@ func nestedNumberString(body map[string]any, keys ...string) string {
 // githubParentKind returns the entity type that owns the number.
 // For issue_comment, checks body["issue"]["pull_request"] to distinguish PR vs issue.
 func githubParentKind(event string, body map[string]any) string {
-	switch event {
-	case "pull_request", "pull_request_review", "pull_request_review_comment":
+	if event == "issue_comment" && nested(body, "issue", "pull_request") != nil {
 		return "pr"
-	case "issues":
-		return "issue"
-	case "sub_issues":
-		return "issue"
-	case "issue_comment":
-		if nested(body, "issue", "pull_request") != nil {
-			return "pr"
-		}
-		return "issue"
 	}
-	return ""
+	return githubEventParents[event]
+}
+
+// githubEventParents names the resource an event's number belongs to; an issue_comment on a pull
+// request belongs to the pull request instead (githubParentKind).
+var githubEventParents = map[string]string{
+	"pull_request":                "pr",
+	"pull_request_review":         "pr",
+	"pull_request_review_comment": "pr",
+	"issues":                      "issue",
+	"sub_issues":                  "issue",
+	"issue_comment":               "issue",
 }
 
 func githubKind(event string) string {
-	switch event {
-	case "pull_request":
-		return "pr"
-	case "issues":
-		return "issue"
-	case "sub_issues":
-		return "sub_issue"
-	case "push":
-		return "push"
-	case "check_run", "check_suite":
-		return "ci"
-	case "workflow_run":
-		return "workflow"
-	case "issue_comment":
-		return "comment"
-	case "pull_request_review":
-		return "review"
-	case "pull_request_review_comment":
-		return "comment"
-	default:
-		return "comment"
+	if kind, ok := githubEventKinds[event]; ok {
+		return kind
 	}
+	return githubDefaultKind
+}
+
+// githubEventKinds names each GitHub event's topic kind; any other event is githubDefaultKind.
+var githubEventKinds = map[string]string{
+	"pull_request":                "pr",
+	"issues":                      "issue",
+	"sub_issues":                  "sub_issue",
+	"push":                        "push",
+	"check_run":                   "ci",
+	"check_suite":                 "ci",
+	"workflow_run":                "workflow",
+	"issue_comment":               "comment",
+	"pull_request_review":         "review",
+	"pull_request_review_comment": "comment",
+}
+
+const githubDefaultKind = "comment"
+
+// githubMentionKind is the kind a mention copy is published under, after the repository or after
+// the mentioning resource.
+const githubMentionKind = "mention"
+
+// GithubTopicKinds are the tokens that follow a GitHub topic's owner and name, sorted: every kind
+// and parent kind the two tables name, githubDefaultKind, and githubMentionKind (the push, workflow
+// and checks topics begin `push`, `workflow` and `pr`). A token there that is none of these is not
+// a GitHub topic kind.
+var GithubTopicKinds = githubTopicKinds()
+
+func githubTopicKinds() []string {
+	kinds := []string{githubDefaultKind, githubMentionKind}
+	for _, kind := range githubEventKinds {
+		kinds = append(kinds, kind)
+	}
+	for _, parent := range githubEventParents {
+		kinds = append(kinds, parent)
+	}
+	slices.Sort(kinds)
+	return slices.Compact(kinds)
 }
 
 // GithubPRNumber returns a non-negative integer encoded as a JSON number or decimal-digit string.
@@ -676,8 +718,13 @@ func githubPayload(event string, body map[string]any) string {
 			"author":      nestedString(body, "review", "user", "login"),
 			"url":         nestedString(body, "review", "html_url"),
 			"state":       nestedString(body, "review", "state"),
-			"commit_id":   nestedString(body, "review", "commit_id"),
-			"head_sha":    nestedString(body, "pull_request", "head", "sha"),
+			// Consumers order reviews by submitted_at, then review_id, rather than by delivery. The id
+			// alone is not enough: GitHub assigns it when a review is created, and a pending review
+			// keeps it when it is submitted later.
+			"review_id":    GithubPRNumber(nested(body, "review", "id")),
+			"submitted_at": nestedString(body, "review", "submitted_at"),
+			"commit_id":    nestedString(body, "review", "commit_id"),
+			"head_sha":     nestedString(body, "pull_request", "head", "sha"),
 		}
 		markLegionFooter(data, reviewBody)
 		addCappedBody(data, reviewBody)
@@ -725,6 +772,10 @@ func githubPayload(event string, body map[string]any) string {
 			"compare_url":             stringValue(body["compare"]),
 			"changed_paths":           strings.Join(changedPaths, "\n"),
 			"changed_paths_truncated": strconv.FormatBool(truncated),
+			// forced is always "true" or "false": a force push's commits are listed from the merge
+			// base, so its changed paths do not describe what it did to the head it replaced, and a
+			// consumer tells an older listener, which sends no forced, from a push that was not forced.
+			"forced": strconv.FormatBool(boolValue(body["forced"])),
 		}
 	case "workflow_run":
 		headBranch := nestedString(body, "workflow_run", "head_branch")
@@ -995,16 +1046,24 @@ func slackFilesSuffix(files []any) string {
 	return fmt.Sprintf(" (%d file(s): %s)", len(files), first(label, 80))
 }
 
-// maxPushChangedPaths caps the unique paths a push payload lists. A push touching more sets
-// changed_paths_truncated so a consumer never mistakes a capped list for the whole change.
-const maxPushChangedPaths = 100
+// maxPushChangedPaths caps the unique paths a push payload lists, and maxPushChangedPathRunes caps
+// their text, newlines included: git bounds no path's length, and the envelope carries the list
+// whole, so a count alone does not keep it under NATS's max payload. A push past either sets
+// changed_paths_truncated so a consumer never mistakes a capped list for the whole change. The
+// budget lists a hundred paths of about 320 runes each.
+const (
+	maxPushChangedPaths     = 100
+	maxPushChangedPathRunes = 32 << 10
+)
 
 // githubPushChangedPaths collects the unique paths across every pushed commit's added, removed,
-// and modified lists, in first-seen order, capped at maxPushChangedPaths. truncated reports that
-// a further unique path was seen past the cap; repeats of an already-listed path never count.
-// Only commits[] is read — head_commit is one of them.
+// and modified lists, in first-seen order, capped at maxPushChangedPaths and
+// maxPushChangedPathRunes. A path is listed whole or not at all, so the list ends at the first
+// unique path past either cap, and truncated reports that one was seen; repeats of an
+// already-listed path never count. Only commits[] is read — head_commit is one of them.
 func githubPushChangedPaths(body map[string]any) (paths []string, truncated bool) {
 	seen := map[string]struct{}{}
+	runes := 0
 	for _, item := range sliceValue(body["commits"]) {
 		commit := mapValue(item)
 		for _, key := range [...]string{"added", "removed", "modified"} {
@@ -1016,21 +1075,33 @@ func githubPushChangedPaths(body map[string]any) (paths []string, truncated bool
 				if _, dup := seen[path]; dup {
 					continue
 				}
-				if len(paths) == maxPushChangedPaths {
+				size := utf8.RuneCountInString(path)
+				if len(paths) > 0 {
+					size++ // the newline that joins it to the list
+				}
+				if len(paths) == maxPushChangedPaths || runes+size > maxPushChangedPathRunes {
 					return paths, true
 				}
 				seen[path] = struct{}{}
 				paths = append(paths, path)
+				runes += size
 			}
 		}
 	}
 	return paths, false
 }
 
+// payloadJSON encodes a webhook payload without its empty fields. Every value is copied from the
+// webhook and the listener publishes the envelope whole, so each is capped at maxEnvelopeTextRunes
+// (a body, which says it was cut, caps itself first); only changed_paths, which
+// githubPushChangedPaths bounds by whole paths, runs longer.
 func payloadJSON(data map[string]string) string {
 	for key, value := range data {
-		if value == "" {
+		switch {
+		case value == "":
 			delete(data, key)
+		case key != "changed_paths":
+			data[key] = truncateWithEllipsis(value, maxEnvelopeTextRunes)
 		}
 	}
 	out, _ := json.Marshal(data)
@@ -1099,22 +1170,31 @@ func OneLineSummary(s string) string {
 }
 
 func truncateWithEllipsis(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
+	if utf8.RuneCountInString(s) <= maxRunes {
 		return s
 	}
 	if maxRunes <= 0 {
 		return "…"
 	}
-	return string(runes[:maxRunes]) + "…"
+	return string([]rune(s)[:maxRunes]) + "…"
 }
+
+// maxEnvelopeTextRunes caps each text an envelope copies from its webhook body, but for a push's
+// changed paths, which maxPushChangedPathRunes bounds as a list. The listener publishes an envelope
+// to NATS whole, and a publish larger than the server's max payload (1 MiB by default) fails, so no
+// field may grow with the webhook it came from. The listener checks a delivery's signature, not its
+// fields' lengths, so a field GitHub itself bounds (its interface stops a title at 256 characters)
+// is capped as well as one it does not (a ref, a path, a workflow name, a commit message). A comment
+// or review body, which GitHub allows up to 65,536 characters, is cut without an ellipsis and says
+// so in body_truncated.
+const maxEnvelopeTextRunes = 2048
 
 func capBody(s string) (string, bool) {
 	runes := []rune(s)
-	if len(runes) <= 2048 {
+	if len(runes) <= maxEnvelopeTextRunes {
 		return s, false
 	}
-	return string(runes[:2048]), true
+	return string(runes[:maxEnvelopeTextRunes]), true
 }
 
 func shortSHA(sha string) string {

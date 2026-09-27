@@ -19,6 +19,7 @@ import (
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/registry"
@@ -28,6 +29,11 @@ import (
 )
 
 const controllerUsage = "usage: legion controller start --config <controller.yaml> [--daemon-url <url>]"
+
+// controllerSecretVariable names the controller capability's secret: its file is written under it,
+// and the session finds that file through the variable with "_FILE" appended, as every pane finds
+// a secret file.
+const controllerSecretVariable = "LEGION_CONTROLLER_SECRET"
 
 func runController(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "start" {
@@ -54,10 +60,11 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 
 // controllerStart is `legion controller start`, the operator's side of a controller the daemon
 // cannot launch itself (LEGION-206 Requirement 11; the shipped cmdControllerStart,
-// packages/daemon/src/cli/controller-start.ts:262-384). In order, and nothing is kept, and nothing
+// packages/daemon/src/cli/controller-start.ts). In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
-// refuse an operator token file others can read, and a blank or unreadable Envoy or Dispatch token
-// file, a role-prompt bundle missing a file, an instructions file that is missing or blank, and an
+// refuse an operator token file others can read, a blank or unreadable Envoy or Dispatch token
+// file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, a role-prompt
+// bundle missing a file, an instructions file that is missing or blank, and an
 // Oh My Pi invocation that does not resolve; then probe that Oh My Pi as the controller will run it
 // — the launch prefix, the invocation, the controller's whole environment, in
 // `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
@@ -83,7 +90,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, err
 	}
-	operatorToken, err := config.ReadOperatorTokenFile("operator_token_file", cfg.OperatorTokenFile)
+	operatorToken, err := config.ReadPrivateSecretPointer("operator_token_file", cfg.OperatorTokenFile)
 	if err != nil {
 		return 0, err
 	}
@@ -93,6 +100,11 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// a failure found here never cuts the running controller off for nothing.
 	if cfg.EnvoyTokenFile != "" {
 		if _, err := config.ReadSecretPointer("envoy_token_file", cfg.EnvoyTokenFile); err != nil {
+			return 0, err
+		}
+	}
+	if cfg.NatsNkeySeedFile != "" {
+		if _, err := natsauth.SeedFile(cfg.NatsNkeySeedFile); err != nil {
 			return 0, err
 		}
 	}
@@ -125,8 +137,12 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	controllerDir := filepath.Join(stateDir, "controller")
 	token := string(legionclaim.ControllerToken(cfg.Project))
 	// One environment, probed and then launched: the operator's own with the controller's set on
-	// top, later pairs replacing inherited values of the same name.
+	// top, later pairs replacing inherited values of the same name. The controller is pane-side, so
+	// the daemon's own NATS seed, which an operator shell that also runs a daemon may export, is
+	// dropped by value and by pointer; its pane seed pointer is the controller's set's.
 	env := processEnvironment()
+	delete(env, natsauth.DaemonSeedVariable)
+	delete(env, natsauth.DaemonSeedFileVariable)
 	for _, pair := range controllerEnvironment(cfg, stateDir, token, runtime.SecretFilePath(stateDir, token)) {
 		env[pair[0]] = pair[1]
 	}
@@ -145,7 +161,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		return 0, err
 	}
 
-	if _, err := runtime.WriteSecretFile(stateDir, token, "LEGION_CONTROLLER_SECRET", secret); err != nil {
+	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
 	executable, err := os.Executable()
@@ -219,9 +235,12 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 	if cfg.DispatchURL != "" {
 		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL}, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})
 	}
-	env = append(env, [2]string{"LEGION_CONTROLLER_SECRET_FILE", secretFile})
+	env = append(env, [2]string{controllerSecretVariable + "_FILE", secretFile})
 	if cfg.EnvoyTokenFile != "" {
 		env = append(env, [2]string{"ENVOY_TOKEN_FILE", cfg.EnvoyTokenFile})
+	}
+	if cfg.NatsNkeySeedFile != "" {
+		env = append(env, [2]string{natsauth.SeedFileVariable, cfg.NatsNkeySeedFile})
 	}
 	return env
 }
@@ -261,7 +280,8 @@ func removeDirs(created []string) {
 
 // fetchControllerSecret is `POST /legion/v1/controller/secret` with the operator token as a
 // bearer. A failed request names the daemon URL and never tries another address; a refusal
-// quotes the daemon's `error` (packages/daemon/src/cli/controller-start.ts:214-260).
+// quotes the daemon's `error` (the shipped fetchControllerSecret,
+// packages/daemon/src/cli/controller-start.ts).
 func fetchControllerSecret(ctx context.Context, daemonURL, operatorToken string) (string, error) {
 	const route = "/legion/v1/controller/secret"
 	status, body, err := operator{base: daemonURL, bearer: operatorToken}.do(ctx, http.MethodPost, route, struct{}{})

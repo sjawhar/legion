@@ -56,7 +56,21 @@ func (s *server) getArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	`, r.PathValue("key")))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source configured for "+r.PathValue("key"))
+			// Whether a project has a source is a property of the project, and most projects do
+			// not have one. Answering that question with a 404 made the expected answer an
+			// error: every issue and project page logged a failed request for a read that
+			// worked, and every caller had to tell that 404 apart from a real one.
+			//
+			// No row means two things, though, and only one of them is that answer. A project
+			// that does not exist is still a 404 - the same check `putArchitectureSource` makes
+			// before it writes - so a mistyped key is reported rather than read as "no model".
+			if err := s.deps.Store.Pool.QueryRow(r.Context(),
+				"select key from projects where key = $1", r.PathValue("key"),
+			).Scan(new(string)); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			WriteJSON(w, http.StatusOK, nil)
 			return
 		}
 		s.writeHandlerError(w, err)

@@ -48,7 +48,7 @@ a {
     scroll-padding-bottom: 5rem;
   }
   button,
-  a,
+  a:not(.prose a):not(.dispatch-inline-link),
   input:not([type="checkbox"]):not([type="radio"]),
   select,
   textarea {
@@ -57,9 +57,24 @@ a {
   }
 
   button,
-  a:not(.prose a) {
+  a:not(.prose a):not(.dispatch-inline-link) {
     display: inline-flex;
     align-items: center;
+  }
+
+  /* An anchor inside a sentence keeps its line box: a 44px control box there is blank space in
+     the middle of a line. Vertical padding grows its hit box instead, at no layout cost,
+     because padding on an inline element does not move the line. The two values are the two
+     line pitches: a body's links sit on 24px lines, where 3px is the most that does not reach
+     the text of a link on the line above, and Dispatch's own inline links (`view`, a
+     components line, a backlink) sit on their own row at 12px, where 6px is what reaches the
+     24px of WCAG 2.5.8. Both 2.5.8 and 2.5.5 exempt a link inside a sentence in any case. */
+  .prose a {
+    padding-block: 3px;
+  }
+
+  .dispatch-inline-link {
+    padding-block: 6px;
   }
 
   label:has(input[type="checkbox"]),
@@ -144,6 +159,29 @@ a {
   max-width: none;
 }
 
+/* A document's own headings are content, not the page's identity. `@legion/proof-editor` sizes
+   `h1` at 2em, so an issue specification that opens with a heading repeating the issue title
+   printed that title twice, the second time at nearly twice the size of the page title 40px
+   above it, and wrapped it over three lines on a phone before a reader met a sentence of the
+   document. The scale starts one step below the page title's own 22px and descends from
+   there, so the page's identity outranks its document's heading rather than tying with it. The
+   library's stylesheet is unlayered, so the override has to outrank `.milkdown h1` (0,1,1);
+   `.dispatch-doc .milkdown h1` (0,2,1) does. */
+.dispatch-doc .milkdown h1 {
+  font-size: 1.25rem;
+  line-height: 1.3;
+}
+
+.dispatch-doc .milkdown h2 {
+  font-size: 1.125rem;
+  line-height: 1.4;
+}
+
+.dispatch-doc .milkdown h3 {
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
 .dispatch-doc .dispatch-mark-active,
 .dispatch-doc .dispatch-block-active {
   box-shadow: inset 0 -2px 0 #0084d1; /* sky-600 */
@@ -188,6 +226,87 @@ a {
   display: none;
 }
 
+/* A typed block's header is a label, not a dump. No stylesheet targeted it, so the block's
+   name and its attributes rendered as bare prose lines down the page (#1434/#1452, LEGION-67).
+   The name is the eyebrow role, a `kind` is a badge beside it, a `title` is the header's text,
+   and any remaining author-written attribute is a quiet inline pair. The selectors sit under
+   `.dispatch-doc` so they outrank the unlayered library typography the way the decision block's
+   own rules below do. Colours are the palette swatches their comments name; the pin test holds
+   them to it. */
+.dispatch-doc [data-proof-block-summary] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.dispatch-doc [data-proof-block-name] {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1rem;
+  letter-spacing: 0.025em;
+  text-transform: uppercase;
+  color: #62748e; /* slate-500 */
+}
+
+.dispatch-doc [data-proof-block-badge] {
+  border-radius: 9999px;
+  padding: 0 0.5rem;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25rem;
+  background-color: #f1f5f9; /* slate-100 */
+  color: #45556c; /* slate-600 */
+}
+
+/* The block's own leading text, so it takes the primary-body role: 15px medium, the same as
+   an ask's question and the document's prose, rather than a size of its own. */
+.dispatch-doc [data-proof-block-title] {
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.625;
+  color: #0f172b; /* slate-900 */
+}
+
+.dispatch-doc [data-proof-block-attributes] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.5rem;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1rem;
+  color: #62748e; /* slate-500 */
+}
+
+.dispatch-doc [data-proof-block-attributes] dt {
+  font-weight: 600;
+}
+
+.dispatch-doc [data-proof-block-attributes] dt::after {
+  content: ":";
+}
+
+.dispatch-doc [data-proof-block-attributes] dd {
+  margin: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .dispatch-doc [data-proof-block-name],
+  .dispatch-doc [data-proof-block-attributes] {
+    color: #90a1b9; /* slate-400 */
+  }
+
+  .dispatch-doc [data-proof-block-badge] {
+    background-color: #1d293d; /* slate-800 */
+    color: #90a1b9; /* slate-400 */
+  }
+
+  .dispatch-doc [data-proof-block-title] {
+    color: #f1f5f9; /* slate-100 */
+  }
+}
+
 /* A decision block is a card inside prose. Its first/last child would otherwise carry the
    prose paragraph margins into the card (a 20px gap under a 12px header). */
 .dispatch-doc .proof-typed-block-ask [data-proof-block-content] > :first-child {
@@ -199,7 +318,7 @@ a {
 }
 
 /* The block's header and footer slots hold the app's own ask card (`features/doc/AskBlockCard.tsx`
-   hosts `AskCard` there), which sets its type with utilities. `@sjawhar/proof-editor`'s stylesheet
+   hosts `AskCard` there), which sets its type with utilities. `@legion/proof-editor`'s stylesheet
    is unlayered, so its element typography (`.milkdown h1-h3 / p / ul, ol / li / code / pre /
    blockquote / a / hr`, written for the document's content) reaches the slots and outranks every
    layered utility there — Tailwind's `space-y-*` is a `margin-block-end` on each child, which

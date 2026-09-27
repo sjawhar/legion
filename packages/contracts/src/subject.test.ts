@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { legionNoticeSubject } from "./subject";
+import { legionControllerNoticeSubject } from "./subject";
 
-test("builds the persisted Go Legion notice topic from project and issue", () => {
-  expect(legionNoticeSubject("omp", "LEGION-208")).toBe("notifications.legion.omp.LEGION-208");
+test("builds the Go daemon's controller notice topic, byte for byte notify.ControllerTopic", () => {
+  expect(legionControllerNoticeSubject("legion")).toBe("notifications.legion.legion.controller");
 });

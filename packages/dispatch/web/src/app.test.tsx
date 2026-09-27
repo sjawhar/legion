@@ -100,9 +100,7 @@ test("project routes render the project page and a project document route", asyn
   ]);
   const listProjectArtifacts = spyOn(api, "listProjectArtifacts").mockResolvedValue([]);
   // No architecture source: the bare project path opens on Issues.
-  const getArchitectureSource = spyOn(api, "getArchitectureSource").mockRejectedValue(
-    new ApiError(404, { code: "SOURCE_NOT_FOUND" })
-  );
+  const getArchitectureSource = spyOn(api, "getArchitectureSource").mockResolvedValue(null);
   const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue({
     created_at: "2026-09-10T00:00:00Z",
     created_by: { id: "alice", kind: "user" },
@@ -247,8 +245,10 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
+  // An issue route: the shell's margin controls only exist where the route has a margin, and
+  // this test is about the collapse preferences surviving a remount, not about the Inbox.
   const first = render(
-    <MemoryRouter initialEntries={["/"]}>
+    <MemoryRouter initialEntries={["/issues/CORE-1"]}>
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
       >
@@ -279,7 +279,7 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
   }
 
   const second = render(
-    <MemoryRouter initialEntries={["/"]}>
+    <MemoryRouter initialEntries={["/issues/CORE-1"]}>
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
       >

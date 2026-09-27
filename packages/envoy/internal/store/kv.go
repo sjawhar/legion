@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/routing"
@@ -45,7 +46,7 @@ type Registry struct {
 	// kvMu guards roleKV, which Rewatch moves to a replacement connection. The interest bucket's
 	// handle is the watcher's (kvwatch.Watcher.KV).
 	kvMu                  sync.RWMutex
-	roleKV                nats.KeyValue
+	roleKV                bus.KeyValue
 	now                   func() time.Time
 	openedAt              time.Time
 	restoredRoleRevisions map[string]uint64
@@ -92,11 +93,11 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := openBucket(js, opts.interestBucket, opts.replicas)
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: opts.interestBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}
-	roleKV, err := openBucket(js, opts.roleBucket, opts.replicas)
+	roleKV, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: opts.roleBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}
@@ -145,25 +146,21 @@ func (r *Registry) StopWatch() {
 	r.watcher.Stop()
 }
 
-func (r *Registry) interests() nats.KeyValue {
+func (r *Registry) interests() bus.KeyValue {
 	return r.watcher.KV()
 }
 
-func (r *Registry) roles() nats.KeyValue {
+func (r *Registry) roles() bus.KeyValue {
 	r.kvMu.RLock()
 	defer r.kvMu.RUnlock()
 	return r.roleKV
 }
 
-func openBucket(js nats.JetStreamContext, bucket string, replicas int) (nats.KeyValue, error) {
-	kv, err := js.KeyValue(bucket)
-	if errors.Is(err, nats.ErrBucketNotFound) {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{Bucket: bucket, Replicas: replicas, Storage: nats.FileStorage})
-	}
-	return kv, err
-}
-
-func roleRevisions(kv nats.KeyValue) (map[string]uint64, error) {
+// roleRevisions reads the revision of every role claim kv holds, for the grace a restored claim's
+// holder gets to register again. A claim whose key this build cannot read (bus.ErrRefused: an
+// earlier build stored it past what a read of it may send) gets none, since nothing can resolve
+// it; the role reaper deletes it.
+func roleRevisions(kv bus.KeyValue) (map[string]uint64, error) {
 	revisions := map[string]uint64{}
 	keys, err := kv.Keys()
 	if errors.Is(err, nats.ErrNoKeysFound) {
@@ -175,6 +172,10 @@ func roleRevisions(kv nats.KeyValue) (map[string]uint64, error) {
 	for _, role := range keys {
 		entry, err := kv.Get(role)
 		if errors.Is(err, nats.ErrKeyNotFound) {
+			continue
+		}
+		if errors.Is(err, bus.ErrRefused) {
+			slog.Warn("role registry skipped a stored claim it cannot read", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
 			continue
 		}
 		if err != nil {
@@ -216,21 +217,14 @@ func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) 
 	r.cacheRevisions[sessionID] = revision
 }
 
+// deleteInterest deletes sessionID's interest at the revision it reads (bus.KeyValue.DeleteAtRead).
 func (r *Registry) deleteInterest(sessionID string) error {
 	revision := r.cachedRevision(sessionID)
-	entry, err := r.interests().Get(sessionID)
-	deleteOpts := []nats.DeleteOpt{}
-	if err == nil {
-		if entry.Revision() > revision {
-			revision = entry.Revision()
-		}
-		deleteOpts = append(deleteOpts, nats.LastRevision(entry.Revision()))
-	} else if !errors.Is(err, nats.ErrKeyNotFound) {
+	read, err := r.interests().DeleteAtRead(sessionID)
+	if err != nil {
 		return err
 	}
-	if err := r.interests().Delete(sessionID, deleteOpts...); err != nil {
-		return err
-	}
+	revision = max(revision, read)
 
 	entries, err := r.interests().History(sessionID)
 	if err == nil && len(entries) > 0 {
@@ -278,14 +272,11 @@ func (r *Registry) deleteInterest(sessionID string) error {
 func (r *Registry) Rewatch(conn *nats.Conn) error {
 	// The role bucket opens first, so a failure leaves both handles on the previous connection
 	// rather than the interests on conn and the roles behind.
-	if conn == nil {
-		return errors.New("interest registry: no connection")
-	}
 	js, err := conn.JetStream(nats.MaxWait(10 * time.Second))
 	if err != nil {
 		return fmt.Errorf("open role registry JetStream: %w", err)
 	}
-	roleKV, err := js.KeyValue(r.roles().Bucket())
+	roleKV, err := bus.OpenKeyValue(js, r.roles().Bucket())
 	if err != nil {
 		return fmt.Errorf("open role KV bucket: %w", err)
 	}
@@ -443,8 +434,15 @@ func (r *Registry) releaseRoleClaims(sessionID string, topics []string) error {
 	return nil
 }
 
+// releaseRoleClaim deletes role's claim when sessionID holds it. A claim this build cannot read
+// (bus.ErrRefused) has a holder nothing can tell, so it is left to the role reaper, which deletes
+// it.
 func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 	claim, entry, err := r.roleClaim(role)
+	if errors.Is(err, bus.ErrRefused) {
+		slog.Warn("role registry left a stored claim it cannot read to the role reaper", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -639,7 +637,17 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 	}
 
 	if oldSessionID != "" && oldSessionID != sessionID {
-		if err := r.removeInterestTopics(oldSessionID, []string{roleTopic}); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+		err := r.removeInterestTopics(oldSessionID, []string{roleTopic})
+		if errors.Is(err, bus.ErrRefused) {
+			// The old holder is a session an earlier build registered under an id this one cannot
+			// write. The claim is written and the caller named nothing too long, so it succeeds; the
+			// interest reaper removes the old holder's interest once its session is gone.
+			slog.Warn("registry role claim left an old holder's interest it cannot write to the reaper",
+				slog.String("role", role),
+				slog.Int("key_bytes", len(oldSessionID)),
+				slog.String("error", err.Error()),
+			)
+		} else if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 			slog.Warn("registry role claim old holder cleanup failed",
 				slog.String("role", role),
 				slog.String("old_session_id", oldSessionID),
@@ -758,17 +766,27 @@ func (r *Registry) Reap(isAlive func(string) bool, graceWindow time.Duration) (i
 	}
 	r.mu.RUnlock()
 
+	reaped := 0
 	for _, sid := range stale {
-		if err := r.deleteInterest(sid); err != nil {
+		err := r.deleteInterest(sid)
+		if errors.Is(err, bus.ErrRefused) {
+			slog.Warn("reaper skipped an interest it cannot delete", slog.Int("key_bytes", len(sid)), slog.String("error", err.Error()))
+			continue
+		}
+		if err != nil {
 			return 0, err
 		}
+		reaped++
 	}
-	return len(stale), nil
+	return reaped, nil
 }
 
 // ReapRoleClaims removes claims whose holders did not re-register before the
 // session TTL elapsed. It is intentionally separate from Reap: the interest
-// reaper must not tear down a role during a listener restart grace window.
+// reaper must not tear down a role during a listener restart grace window. A
+// claim this build cannot read (bus.ErrRefused: an earlier build stored it past
+// what a read of it may send) no build can resolve or write again, so it is
+// deleted too; one it cannot delete either is skipped, and the sweep goes on.
 func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Duration) (int, error) {
 	roles, err := r.roles().Keys()
 	if errors.Is(err, nats.ErrNoKeysFound) {
@@ -780,6 +798,18 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 	reaped := 0
 	for _, role := range roles {
 		claim, err := r.RoleClaim(role)
+		if errors.Is(err, bus.ErrRefused) {
+			switch err := r.roles().Delete(role); {
+			case err == nil:
+				slog.Warn("role reaper deleted a claim it cannot read", slog.Int("key_bytes", len(role)))
+				reaped++
+			case errors.Is(err, bus.ErrRefused):
+				slog.Warn("role reaper skipped a claim it cannot delete", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
+			default:
+				return 0, err
+			}
+			continue
+		}
 		if err != nil {
 			return 0, err
 		}

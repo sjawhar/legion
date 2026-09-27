@@ -17,6 +17,7 @@ import {
   documentTransport,
   openDocumentSockets,
   openSpecAndAwaitHeadingIds,
+  placeCaret,
   selectEditorText,
   typeAtEnd,
 } from "./editor";
@@ -195,7 +196,9 @@ test("two users edit the same spec, see each other's text and cursor, and settle
     await expect(aliceEditor).toContainText("hello from bob");
 
     if (testInfo.project.name === "chromium") {
-      await bobEditor.click();
+      // Somewhere other than Alice's caret: a peer's caret on the focused local caret is not
+      // drawn, and a bare click can land at the end of her line.
+      await placeCaret(bobPage, "after", "Use SQLite");
       await expect(cursorLabel(alicePage, "bob")).toBeVisible();
       await expect(cursorLabel(bobPage, "alice")).toBeVisible();
     }
@@ -668,7 +671,7 @@ test("clicking a Markdown dispatch:// link in the live editor navigates in-app w
     await page.goto(`/issues/${source.key}/spec`);
 
     const editor = documentEditor(page);
-    // The live editor keeps the author's own link text (`@sjawhar/proof-editor` exposes no
+    // The live editor keeps the author's own link text (`@legion/proof-editor` exposes no
     // decoration hook to safely replace a live editable mark's rendered text) and surfaces the
     // resolved target in the hover card instead.
     const link = editor.getByRole("link", { name: "the other issue" });

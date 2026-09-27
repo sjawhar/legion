@@ -42,6 +42,65 @@ func TestTypedBlockDirectiveRoundTrips(t *testing.T) {
 	}
 }
 
+// A typed block is closed by a line of exactly its fence's colons here and, in the browser editor,
+// by a line of at least as many indented at most three columns, even inside fenced code, so its
+// fence outgrows every such line: a nested typed block's fence, or a line of code, measured with the
+// width of the list markers around it; a line in a blockquote closes nothing.
+func TestTypedBlockFenceOutgrowsTheColonLinesItHolds(t *testing.T) {
+	callout := func(id string, children ...*Node) *Node {
+		return &Node{Type: "callout", Attrs: Attrs{BlockIDAttr: id, "kind": "note", "title": ""}, Children: children}
+	}
+	paragraph := func(text string) *Node {
+		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
+	}
+	code := func(text string) *Node {
+		return &Node{Type: "code_block", Attrs: Attrs{"language": nil}, Children: []*Node{{Type: "text", Text: text}}}
+	}
+	listItem := func(children ...*Node) *Node {
+		return &Node{Type: "bullet_list", Attrs: Attrs{"spread": false}, Children: []*Node{
+			{Type: "list_item", Attrs: Attrs{"checked": nil, "label": "•", "listType": "bullet", "spread": false}, Children: children},
+		}}
+	}
+	for _, test := range []struct {
+		name  string
+		tree  *Node
+		fence string
+	}{
+		{"a callout in a callout", callout("c1", callout("c2", paragraph("x"))), "::::callout"},
+		{"a callout in a callout, then a paragraph", callout("c1", callout("c2", paragraph("x")), paragraph("y")), "::::callout"},
+		{"a paragraph, then a callout in a callout", callout("c1", paragraph("y"), callout("c2", paragraph("x"))), "::::callout"},
+		{"a rule first", callout("c1", &Node{Type: "hr"}, paragraph("y")), ":::callout"},
+		{"a rule alone", callout("c1", &Node{Type: "hr"}), ":::callout"},
+		{"three deep", callout("c1", callout("c2", callout("c3", paragraph("x")))), ":::::callout"},
+		{"code holding a closing line", callout("c1", code("a\n:::\nb")), "::::callout"},
+		{"code holding a longer line", callout("c1", paragraph("Intro."), code(":::::  ")), "::::::callout"},
+		{"code holding a line indented three spaces", callout("c1", code("   :::")), "::::callout"},
+		{"code holding a line indented four spaces", callout("c1", code("    :::")), ":::callout"},
+		{"a list item's code, two columns in", callout("c1", listItem(paragraph("item"), code(":::"))), "::::callout"},
+		{"a list item's code, four columns in", callout("c1", listItem(paragraph("item"), code("  :::"))), ":::callout"},
+		{"a blockquote's code", callout("c1", &Node{Type: "blockquote", Children: []*Node{code(":::")}}), ":::callout"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: []*Node{test.tree, paragraph("After.")}}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasPrefix(markdown, test.fence+"{") {
+				t.Fatalf("Render() = %q, want it to open with %s", markdown, test.fence)
+			}
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("Parse(%q) = %v", markdown, err)
+			}
+			if !back.Equal(doc) {
+				got, _ := back.JSON()
+				t.Fatalf("Parse(%q) = %s", markdown, got)
+			}
+		})
+	}
+}
+
 func TestAskDirectiveRoundTripsOpenAndAnsweredState(t *testing.T) {
 	next := 0
 	SetBlockIDGenerator(func() string {
@@ -457,5 +516,45 @@ func TestParseMintsAnOmittedTypedBlockID(t *testing.T) {
 	callout := doc.Children[0]
 	if got := callout.Attrs[BlockIDAttr]; got != "generated-id" {
 		t.Fatalf("generated typed block id = %#v, want generated-id", got)
+	}
+}
+
+// A refused ask is named by the opening words of its question as well as its block id, which the
+// parser makes up when the markdown gives none.
+func TestAskContentErrorNamesTheAskByItsQuestion(t *testing.T) {
+	doc, err := Parse("Intro.\n\n:::ask{urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich transport should we expose to the partners first?\n\n```\ncode\n```\n:::\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AskContentError(doc); err == nil || !strings.Contains(err.Error(), `"Which transport should we expose to the…"`) {
+		t.Fatalf("AskContentError = %v, want it to name the question's opening words", err)
+	}
+	broken, err := Parse("Intro.\n\n:::ask{urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we\\\nship this?\n\n```\ncode\n```\n:::\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := AskContentError(broken); err == nil || !strings.Contains(err.Error(), `"Should we ship this?"`) {
+		t.Fatalf("AskContentError = %v, want a hard break in the question read as a space", err)
+	}
+}
+
+// An ask holding a block its content rule does not allow is refused naming that block as a
+// reader would, with its article.
+func TestAskContentErrorNamesTheBlockThatBreaksTheRule(t *testing.T) {
+	paragraph := func(text string) *Node {
+		return &Node{Type: "paragraph", Children: []*Node{{Type: "text", Text: text}}}
+	}
+	for _, test := range []struct {
+		child *Node
+		want  string
+	}{
+		{&Node{Type: "ordered_list", Attrs: Attrs{"order": float64(1), "spread": false}, Children: []*Node{{Type: "list_item", Children: []*Node{paragraph("one")}}}}, "holds an ordered list"},
+		{&Node{Type: "hr"}, "holds a horizontal rule"},
+		{&Node{Type: "code_block", Attrs: Attrs{"language": nil}, Children: []*Node{{Type: "text", Text: "x"}}}, "holds a code block"},
+	} {
+		ask := &Node{Type: "ask", Attrs: Attrs{BlockIDAttr: "a1"}, Children: []*Node{paragraph("Which?"), test.child}}
+		if err := AskContentError(&Node{Type: "doc", Children: []*Node{ask}}); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("AskContentError = %v, want it to say %q", err, test.want)
+		}
 	}
 }

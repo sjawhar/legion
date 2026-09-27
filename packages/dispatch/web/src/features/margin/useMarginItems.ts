@@ -360,7 +360,7 @@ export function useMarginItems(
     () => [...needsYou.map((ask) => ({ ask, kind: "ask" as const })), ...items],
     [items, needsYou]
   );
-  const { actionErrorId, mutateItem, pendingActionIds, retryItem } = useCommentActionQueue<{
+  const { actionFailure, mutateItem, pendingActionIds, retryItem } = useCommentActionQueue<{
     previous: Comment[] | undefined;
   }>({
     onError: (_error, _input, context) => {
@@ -413,7 +413,7 @@ export function useMarginItems(
     answeredAskError === undefined ? undefined : () => void answeredAskError.refetch();
 
   return {
-    actionErrorId,
+    actionFailure,
     answeredAsksPending: answeredAsks.pending,
     asksPending: asks.isPending,
     commentsError: comments.isError,

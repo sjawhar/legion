@@ -5,8 +5,8 @@ import * as Y from "yjs";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { prosemirrorToYXmlFragment } from "y-prosemirror";
 import { Transform } from "prosemirror-transform";
-import { setBlockIdGenerator } from "@sjawhar/proof-editor";
-import { createHeadlessProof, type HeadlessProofEditor } from "@sjawhar/proof-editor/headless";
+import { setBlockIdGenerator } from "@legion/proof-editor";
+import { createHeadlessProof, type HeadlessProofEditor } from "@legion/proof-editor/headless";
 
 const here = import.meta.dir;
 const corpus = join(here, "..", "testdata", "corpus");
@@ -88,6 +88,13 @@ const replaceRangeCases: ReplaceRangeCase[] = [
   { name: "insert-block-after-heading-textblock", markdown: "# Title\n\nBody.\n", at: "Title", point: "after-textblock", replacement: "Intro.\n" },
   { name: "insert-block-before-heading-textblock", markdown: "# Title\n\nBody.\n", at: "Title", point: "before-textblock", replacement: "Lead.\n" },
   { name: "insert-paragraph-after-list-item-textblock", markdown: "- one\n- two\n", at: "one", point: "after-textblock", replacement: "extra\n" },
+  { name: "callout-paragraph-and-code", markdown: "Intro.\n\n:::callout{#c1}\nWhich one?\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
+  { name: "callout-paragraph-and-list", markdown: ":::callout{#c1}\nWhich one?\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n- X\n- Y\n" },
+  { name: "callout-paragraph-and-heading", markdown: ":::callout{#c1}\nWhich one?\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n## Heading\n" },
+  { name: "callout-in-list-item-code", markdown: "- item\n\n  :::callout{#c1}\n  Which one?\n  :::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
+  { name: "callout-in-blockquote-code", markdown: "> :::callout{#c1}\n> Which one?\n> :::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
+  { name: "nested-callout-code", markdown: ":::callout{#outer}\nOuter.\n\n:::callout{#inner}\nWhich one?\n:::\n", from: "Which", to: "one?", replacement: "Which?\n\n```\ncode\n```\n" },
+  { name: "callout-across-paragraphs-code", markdown: ":::callout{#c1}\nFirst tail.\n\nhead second.\n:::\n", from: "tail", to: "head", replacement: "X\n\n```\ncode\n```\n" },
 ].map(({ name, markdown, from, to, at, point, replacement, inline = false }) => {
   const doc = engine.parseMarkdown(markdown);
   const inserted = engine.parseMarkdown(replacement);
@@ -142,11 +149,49 @@ function quotePosition(doc: ProseMirrorNode, quote: string): number {
   if (result < 0) throw new Error(`quote not found: ${quote}`);
   return result;
 }
+// Where the browser editor's parser ends a typed block. Each case is a tree and the markdown the Go
+// renderer writes for it: a callout, alone or inside a blockquote, a list item, a footnote
+// definition or another callout, whose code holds a line of colons, inside the container the case
+// names. The engine reads whether the markdown keeps the tree's blocks - the callout holding its
+// code - or ends a typed block at the line. The renderer's fences are held to keeping every case
+// whole (directive_fence_test.go).
+type TreeJSON = { type: string; content?: TreeJSON[]; text?: string };
+const treeShape = (node: TreeJSON): string =>
+  node.type === "code_block"
+    ? `code_block${JSON.stringify((node.content ?? []).map((child) => child.text ?? "").join(""))}`
+    : node.type === "text" || node.type === "hardbreak" || node.type === "footnote_reference"
+      ? ""
+      : `${node.type}(${(node.content ?? []).map(treeShape).filter(Boolean).join(",")})`;
+const docShape = (node: ProseMirrorNode): string => {
+  if (node.type.name === "code_block") return `code_block${JSON.stringify(node.textContent)}`;
+  if (node.isInline) return "";
+  const children: string[] = [];
+  node.forEach((child) => {
+    const shape = docShape(child);
+    if (shape) children.push(shape);
+  });
+  return `${node.type.name}(${children.join(",")})`;
+};
+const fenceOut = join(here, "..", "testdata", "typed-fence-lines.json");
+const fenceCases: { name: string; tree: TreeJSON; markdown: string }[] = JSON.parse(readFileSync(fenceOut, "utf8"));
+// One case per line, so a changed verdict is one changed line.
+const nextFences = `[\n${fenceCases
+  .map(({ name, tree, markdown }) =>
+    JSON.stringify({
+      name,
+      tree,
+      markdown,
+      engine_closes: docShape(engine.parseMarkdown(markdown)) !== treeShape(tree),
+    })
+  )
+  .map((line) => `  ${line}`)
+  .join(",\n")}\n]\n`;
+
 const next = JSON.stringify(fixtures, null, 2) + "\n";
 if (check) {
   const current = readFileSync(out, "utf8");
   const currentSplices = readFileSync(spliceOut, "utf8");
-  if (current !== next || currentSplices !== nextSplices) {
+  if (current !== next || currentSplices !== nextSplices || readFileSync(fenceOut, "utf8") !== nextFences) {
     console.error("generated pmdoc fixtures are stale: run `bun run gen`");
     process.exit(1);
   }
@@ -154,6 +199,7 @@ if (check) {
 } else {
   writeFileSync(out, next);
   writeFileSync(spliceOut, nextSplices);
+  writeFileSync(fenceOut, nextFences);
   console.log(`wrote ${fixtures.length} documents and ${replaceRangeCases.length} splice cases`);
 }
 setBlockIdGenerator(null);

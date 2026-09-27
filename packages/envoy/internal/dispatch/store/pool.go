@@ -144,8 +144,8 @@ const sharedPoolSize = 16
 const roomsPoolSize = 4
 
 // healthPoolSize bounds the connections the health probe uses. The probe answers one question -
-// is Postgres reachable - and asks it on a connection nothing else can take, so one is not a
-// ration but the whole design.
+// is Postgres reachable, and at which schema - and asks it on a connection nothing else can take,
+// so one is not a ration but the whole design.
 const healthPoolSize = 1
 
 // healthProbeTimeout bounds the health probe's own wait, dial and query together, and owns the
@@ -181,21 +181,30 @@ func (p *Pool) Rooms() (*pgxpool.Pool, error) {
 	return p.separate(&p.rooms, roomsPoolSize, "document rooms")
 }
 
-// Healthy reports whether Postgres is reachable, within healthProbeTimeout, on a connection of
-// a pool nothing else uses. /healthz asks it, and it must never queue behind a writer: proving
-// the shared pool has a free connection is the wrong question, because during a busy period it
-// legitimately has none. Like the rooms pool this one is outside the nested-acquire guard,
-// because a separate pool cannot close the cycle the guard prevents.
-func (p *Pool) Healthy(ctx context.Context) error {
+// Healthy reports the highest schema migration Postgres has applied, read within
+// healthProbeTimeout on a connection of a pool nothing else uses; the read is the reachability
+// probe too, so an error means the database did not answer. /healthz asks it, and it must never
+// queue behind a writer: proving the shared pool has a free connection is the wrong question,
+// because during a busy period it legitimately has none. Like the rooms pool this one is outside
+// the nested-acquire guard, because a separate pool cannot close the cycle the guard prevents.
+//
+// The version is read from schema_migrations on every call rather than remembered from this
+// process's own Migrate, so it reports what the database holds: a deploy check compares it with
+// the highest migration in the commit the image was built from.
+func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	health, err := p.separate(&p.health, healthPoolSize, "health probe")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	// Derived from the caller's context, so a request the client already gave up on ends with
 	// it instead of holding the probe's one connection for the full bound.
 	ctx, cancel := context.WithTimeout(ctx, healthProbeTimeout)
 	defer cancel()
-	return health.Ping(ctx)
+	var version int
+	if err := health.QueryRow(ctx, "select coalesce(max(version), 0) from schema_migrations").Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
 }
 
 // separate opens the pool held at field on demand, sized at size and copied from the shared

@@ -6,6 +6,7 @@
 package routes
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -23,6 +24,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -60,25 +62,31 @@ type AppContext struct {
 // after deciding which storage / config sources to use. The router takes
 // what it's given; selection logic stays in cmd/dispatch/main.go.
 type AppContextOptions struct {
-	SigningKey       string
-	WebDistDir       string
-	Users            auth.UserStore
-	Sessions         auth.SessionStore
-	Identity         identity.Identity
-	AllowedLogins    map[string]struct{}
-	Store            *store.Store
-	AgentToken       string
-	RepoProjects     string
-	DefaultProject   string
-	ServerURL        string
-	EnvoyURL         string
-	Docs             docs.API
-	Events           *events.Broker
-	App              *auth.AppConfig
-	AppSource        string
-	GitHubAPIBase    string
-	OIDC             *oidc.Verifier
-	TestHooksEnabled bool
+	SigningKey     string
+	WebDistDir     string
+	Users          auth.UserStore
+	Sessions       auth.SessionStore
+	Identity       identity.Identity
+	AllowedLogins  map[string]struct{}
+	Store          *store.Store
+	AgentToken     string
+	RepoProjects   string
+	DefaultProject string
+	ServerURL      string
+	EnvoyURL       string
+	Docs           docs.API
+	Events         *events.Broker
+	App            *auth.AppConfig
+	AppSource      string
+	GitHubAPIBase  string
+	OIDC           *oidc.Verifier
+	AgentStream    agentstream.Source
+	Lifetime       context.Context
+	// AgentSecretsURL/AgentSecretsToken configure the credential-request UI's secrets broker
+	// client; empty URL means the feature is off. See api.DepsInput.
+	AgentSecretsURL   string
+	AgentSecretsToken string
+	TestHooksEnabled  bool
 }
 
 // BuildAppContext bundles the shared HTTP-handler state.
@@ -93,20 +101,24 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
 	}
 	apiDeps, err := api.NewDeps(api.DepsInput{
-		Store:            opts.Store,
-		Identity:         opts.Identity,
-		AllowedLogins:    opts.AllowedLogins,
-		AgentToken:       opts.AgentToken,
-		RepoProjectsRaw:  opts.RepoProjects,
-		DefaultProject:   opts.DefaultProject,
-		ServerURL:        opts.ServerURL,
-		EnvoyURL:         opts.EnvoyURL,
-		Docs:             opts.Docs,
-		Events:           opts.Events,
-		App:              opts.App,
-		GitHubAPIBase:    opts.GitHubAPIBase,
-		OIDC:             opts.OIDC,
-		TestHooksEnabled: opts.TestHooksEnabled,
+		Store:             opts.Store,
+		Identity:          opts.Identity,
+		AllowedLogins:     opts.AllowedLogins,
+		AgentToken:        opts.AgentToken,
+		RepoProjectsRaw:   opts.RepoProjects,
+		DefaultProject:    opts.DefaultProject,
+		ServerURL:         opts.ServerURL,
+		EnvoyURL:          opts.EnvoyURL,
+		Docs:              opts.Docs,
+		Events:            opts.Events,
+		App:               opts.App,
+		GitHubAPIBase:     opts.GitHubAPIBase,
+		OIDC:              opts.OIDC,
+		AgentStream:       opts.AgentStream,
+		Lifetime:          opts.Lifetime,
+		AgentSecretsURL:   opts.AgentSecretsURL,
+		AgentSecretsToken: opts.AgentSecretsToken,
+		TestHooksEnabled:  opts.TestHooksEnabled,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)

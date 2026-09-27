@@ -22,7 +22,6 @@ import {
 import {
   type DaemonConfig,
   type LoadConfigFileOptions,
-  type LoadedConfigFile,
   loadConfigFromFile,
   resolveDaemonConfig,
 } from "../daemon/config";
@@ -469,7 +468,7 @@ export function loadStartConfig(
   env: NodeJS.ProcessEnv,
   options: LoadConfigFileOptions = {}
 ): DaemonConfig {
-  let configFile: LoadedConfigFile | undefined;
+  let configFile: Record<string, unknown> | undefined;
   if (configPath) {
     // Relative `state_dir`/`instructions` values resolve against the config file's own directory
     // (`loadConfigFromFile`'s `configDir`), never the cwd the daemon happened to start from.

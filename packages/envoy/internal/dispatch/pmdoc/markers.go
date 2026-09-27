@@ -3,7 +3,6 @@ package pmdoc
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -19,11 +18,14 @@ const (
 )
 
 // BlockMarker is one block marker. Level carries a heading's level; Number carries an ordered
-// item's own number, the one the renderer writes before its text.
+// item's own number, the one the renderer writes before its text; Other reports a list item
+// written with its list kind's other marker (`*`, `)`), as a list beside a list of its kind is
+// (otherListMarkers).
 type BlockMarker struct {
 	Kind   MarkerKind
 	Level  int
 	Number int
+	Other  bool
 }
 
 // Markdown renders the marker the way the document renderer writes it, for error text.
@@ -32,9 +34,9 @@ func (m BlockMarker) Markdown() string {
 	case MarkerHeading:
 		return strings.Repeat("#", max(m.Level, 1)) + " "
 	case MarkerOrdered:
-		return strconv.Itoa(max(m.Number, 1)) + ". "
+		return listItemMarker(true, m.Number, m.Other)
 	case MarkerBullet:
-		return "- "
+		return listItemMarker(false, 0, m.Other)
 	default:
 		return ""
 	}
@@ -98,13 +100,49 @@ func textblockMarker(doc, node *Node, path []int) BlockMarker {
 	}
 	item := path[len(path)-2]
 	list := nodeAtPath(doc, path[:len(path)-2])
+	other := otherListMarkers(nodeAtPath(doc, path[:len(path)-3]).Children)[path[len(path)-3]]
 	switch list.Type {
 	case "ordered_list":
-		return BlockMarker{Kind: MarkerOrdered, Number: int(num(list.Attrs["order"], 1)) + item}
+		return BlockMarker{Kind: MarkerOrdered, Number: int(num(list.Attrs["order"], 1)) + item, Other: other}
 	case "bullet_list":
-		return BlockMarker{Kind: MarkerBullet}
+		return BlockMarker{Kind: MarkerBullet, Other: other}
 	}
 	return BlockMarker{}
+}
+
+// TextblockAt is the textblock whose content holds a position.
+type TextblockAt struct {
+	Node *Node
+	// Ancestors are the nodes around it, the nearest first and the document last.
+	Ancestors []*Node
+	// Content is the range its content covers.
+	Content Range
+}
+
+// ContainingTextblock returns the textblock whose content holds position, and reports false when
+// position is in none.
+func ContainingTextblock(doc *Node, position int) (TextblockAt, bool) {
+	var at TextblockAt
+	found := false
+	walk(doc, func(node *Node, path []int, pos, end int) bool {
+		if !isTextblock(node.Type) || position < pos+1 || position > end-1 {
+			return true
+		}
+		at = TextblockAt{Node: node, Content: Range{From: pos + 1, To: end - 1}}
+		for depth := len(path) - 1; depth >= 0; depth-- {
+			at.Ancestors = append(at.Ancestors, nodeAtPath(doc, path[:depth]))
+		}
+		found = true
+		return false
+	})
+	return at, found
+}
+
+// OneLine reports whether the textblock is written on one markdown line - a heading, or a table
+// cell's paragraph - where a hard break would end the block.
+func (at TextblockAt) OneLine() bool {
+	parent := at.Ancestors[0]
+	return at.Node.Type == "heading" || parent.Type == "table_cell" || parent.Type == "table_header"
 }
 
 // SetHeadingLevel returns a copy of doc with the level of the heading whose own text begins at

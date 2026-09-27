@@ -5200,12 +5200,17 @@ export class ProcessManager {
 
   /** The secrets every process receives beyond its own boot token or controller secret, name →
    * value, from config: `ENVOY_TOKEN` when the daemon has an Envoy bearer (a listener bound off
-   * loopback requires one from every publisher, the pi-envoy extension included). Delivered
-   * through `SpawnSpec.secrets` — never `env` — so each runtime writes it as a `<NAME>_FILE`
-   * pointer exactly like the boot token. */
+   * loopback requires one from every publisher, the pi-envoy extension included), and
+   * `NATS_NKEY_SEED` when it has the `legion-pane` nkey seed (a NATS server that requires nkey
+   * users refuses the pi-envoy connections without one). Delivered through `SpawnSpec.secrets` —
+   * never `env` — so each runtime writes each as a `<NAME>_FILE` pointer exactly like the boot
+   * token. */
   private sharedProcessSecrets(): Partial<Record<SharedSecretName, string>> {
-    const envoyToken = this.deps.config.envoyToken;
-    return envoyToken === undefined ? {} : { ENVOY_TOKEN: envoyToken };
+    const { envoyToken, natsNkeySeed } = this.deps.config;
+    return {
+      ...(envoyToken === undefined ? {} : { ENVOY_TOKEN: envoyToken }),
+      ...(natsNkeySeed === undefined ? {} : { NATS_NKEY_SEED: natsNkeySeed }),
+    };
   }
 
   /** Tracks every file a pane's role token names (`processSecretNames`: its own secret, one file

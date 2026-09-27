@@ -17,6 +17,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/agentsecrets"
+	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -65,7 +67,19 @@ type Deps struct {
 	// OIDC verifies a JWT-shaped bearer as a Kubernetes pod's projected
 	// service-account token; nil is the unconfigured deployment, where a
 	// JWT-shaped bearer is only ever an unknown personal token.
-	OIDC             *oidc.Verifier
+	OIDC *oidc.Verifier
+	// AgentStream relays a live session's own conversation to a human watching it; nil is a
+	// deployment with no NATS, where the viewer route answers 503 rather than hanging.
+	AgentStream agentstream.Source
+	// AgentSecrets relays the credential-request UI to the secrets broker; nil (the broker URL
+	// is unconfigured) means the feature is off, and every handler that needs it answers
+	// 404 FEATURE_OFF.
+	AgentSecrets *agentsecrets.Client
+	// Lifetime bounds work a handler starts and does not wait for: it is the process's own
+	// context, cancelled when the server is shutting down, so a deploy stops a broadcast's
+	// remaining deliveries instead of leaving goroutines behind. Nil means unbounded, which
+	// is what a test gets.
+	Lifetime         context.Context
 	TestHooksEnabled bool
 }
 
@@ -84,12 +98,20 @@ type DepsInput struct {
 	EnvoyTimeout time.Duration
 	Docs         docs.API
 	Events       *events.Broker
+	// Lifetime is the process context background work runs on; see Deps.Lifetime.
+	Lifetime context.Context
 	// App is the loaded GitHub App credentials (nil when unconfigured);
 	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
-	App              *auth.AppConfig
-	GitHubAPIBase    string
-	OIDC             *oidc.Verifier
-	TestHooksEnabled bool
+	App           *auth.AppConfig
+	GitHubAPIBase string
+	OIDC          *oidc.Verifier
+	// AgentStream is the live agent conversation relay; nil where the deployment has no NATS.
+	AgentStream agentstream.Source
+	// AgentSecretsURL is the secrets broker's UI-bearer API base URL (DISPATCH_AGENT_SECRETS_URL);
+	// empty means the feature is off. AgentSecretsToken is the resolved UI bearer.
+	AgentSecretsURL   string
+	AgentSecretsToken string
+	TestHooksEnabled  bool
 }
 
 // NewDeps parses boot configuration once and returns API dependencies.
@@ -125,6 +147,10 @@ func NewDeps(input DepsInput) (Deps, error) {
 	if err != nil {
 		return Deps{}, err
 	}
+	var agentSecretsClient *agentsecrets.Client
+	if url := strings.TrimSpace(input.AgentSecretsURL); url != "" {
+		agentSecretsClient = agentsecrets.New(url, input.AgentSecretsToken)
+	}
 	return Deps{
 		Store:            input.Store,
 		Identity:         input.Identity,
@@ -138,6 +164,9 @@ func NewDeps(input DepsInput) (Deps, error) {
 		GitHub:           github,
 		Architecture:     architecture.NewImporter(input.Store, github, input.Events),
 		OIDC:             input.OIDC,
+		AgentStream:      input.AgentStream,
+		AgentSecrets:     agentSecretsClient,
+		Lifetime:         input.Lifetime,
 		TestHooksEnabled: input.TestHooksEnabled,
 	}, nil
 }
@@ -254,6 +283,24 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 			"current":    map[string]any{"document": preconditionFailed.CurrentDocument, "blocks": currentBlocks},
 			"mismatches": preconditionFailed.Mismatches,
 		})
+		return
+	}
+	// A write whose text a concurrent browser change removed before the write could be versioned
+	// (LEGION-269). Nothing was written, so this reads like PRECONDITION_FAILED: re-read the
+	// document and decide again.
+	var lostEdit *docs.ErrEditLost
+	if errors.As(err, &lostEdit) {
+		body := map[string]any{
+			"error":        lostEdit.Error(),
+			"code":         "EDIT_LOST_TO_CONCURRENT_CHANGE",
+			"participants": participantsOrEmpty(lostEdit.Participants),
+		}
+		if lostEdit.Suggestion != "" {
+			body["suggestion"] = lostEdit.Suggestion
+		} else {
+			body["lost_ops"] = lostEdit.Ops
+		}
+		WriteJSON(w, http.StatusConflict, body)
 		return
 	}
 	var invalidPrecondition *docs.ErrInvalidPrecondition
@@ -640,4 +687,11 @@ func canonicalRepo(owner, repo string) string {
 
 func externalURL(repo, number string) string {
 	return "https://github.com/" + repo + "/issues/" + number
+}
+
+func externalURLs(repo, number string) []string {
+	return []string{
+		externalURL(repo, number),
+		"https://github.com/" + repo + "/pull/" + number,
+	}
 }

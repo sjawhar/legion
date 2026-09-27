@@ -158,7 +158,9 @@ function ArtifactRow({
         >
           {artifact.name}
         </Link>
-        <p className={`truncate text-xs ${textMutedOnSurface}`}>
+        {/* The name truncates; its details wrap. Truncating them hid the update time on a row
+            with room to spare. */}
+        <p className={`text-xs ${textMutedOnSurface}`}>
           {artifact.kind} · {versions.length} {versions.length === 1 ? "version" : "versions"} ·
           Updated <Timestamp at={latestVersion?.created_at ?? artifact.created_at} />
         </p>
@@ -248,19 +250,22 @@ export function ArtifactsTab(): ReactNode {
 
   return (
     <div className="space-y-3 pt-3">
-      <ArtifactUploadRow upload={upload} />
+      {/* One control strip: what narrows the list on the left, what adds to it on the right. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="block min-w-48 flex-1">
+          <span className="sr-only">Filter artifacts</span>
+          <input
+            aria-label="Filter artifacts"
+            className={`block min-h-11 w-full rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`}
+            onChange={(event) => setFilter(event.target.value)}
+            placeholder="Filter artifacts"
+            type="search"
+            value={filter}
+          />
+        </label>
+        <ArtifactUploadRow upload={upload} />
+      </div>
       {references.data === undefined ? null : <References references={references.data} />}
-      <label className="block">
-        <span className="sr-only">Filter artifacts</span>
-        <input
-          aria-label="Filter artifacts"
-          className={`block min-h-11 w-full rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`}
-          onChange={(event) => setFilter(event.target.value)}
-          placeholder="Filter artifacts"
-          type="search"
-          value={filter}
-        />
-      </label>
       <ArtifactDropZone upload={upload}>
         {visibleArtifacts.length === 0 ? (
           <p className={`text-sm ${textMutedOnSurface}`}>

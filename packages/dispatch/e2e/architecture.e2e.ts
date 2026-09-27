@@ -317,3 +317,36 @@ test("Refresh with a broken model keeps the last model up behind an error banner
     await context.close();
   }
 });
+
+test("a project with no architecture source answers the read, so its pages make no failed request", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "No model here" });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    const failures: string[] = [];
+    page.on("response", (response) => {
+      if (response.status() >= 400) {
+        failures.push(`${response.status()} ${new URL(response.url()).pathname}`);
+      }
+    });
+
+    // The read itself: having no source is an answer, not a refusal.
+    const read = await page.request.get("/api/v1/projects/CORE/architecture-source");
+    expect(read.status()).toBe(200);
+    expect(await read.json()).toBeNull();
+
+    // Both surfaces that ask the question on every visit.
+    await page.goto(`/issues/${issue.key}`);
+    await expect(page.getByTestId("issue-metadata-rail")).toBeVisible();
+    await page.goto("/projects/CORE");
+    await expect(page).toHaveURL("/projects/CORE/issues");
+    await expect(page.getByRole("tab", { name: "Architecture" })).toHaveCount(0);
+    expect(failures).toEqual([]);
+  } finally {
+    await context.close();
+  }
+});

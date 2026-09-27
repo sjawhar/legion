@@ -31,17 +31,33 @@ type Adoption struct {
 // Conn is one agent's connection as a double: it records what was asked of the agent and answers
 // what the test told it to. The zero value is not usable; call NewConn.
 type Conn struct {
-	mu        sync.Mutex
-	prompts   []Prompt
-	adoptions []Adoption
-	shutdowns int
-	state     runtime.ConnState
-	failures  map[string]error
+	seq         uint64
+	mu          sync.Mutex
+	prompts     []Prompt
+	adoptions   []Adoption
+	enrollments []string
+	shutdowns   int
+	state       runtime.ConnState
+	failures    map[string]error
 }
 
 // NewConn is a connection that accepts everything and reports no turn in flight.
 func NewConn() *Conn {
 	return &Conn{failures: map[string]error{}}
+}
+
+// Sequence is the order the connection was registered in (Conns.Register), zero before it is.
+func (c *Conn) Sequence() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.seq
+}
+
+// registered stamps the connection with its registration order.
+func (c *Conn) registered(seq uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.seq = seq
 }
 
 func (c *Conn) Prompt(_ context.Context, deliveryID, message string) error {
@@ -74,6 +90,14 @@ func (c *Conn) AdoptWorkingCopy(_ context.Context, id runtime.GitIdentity, timeo
 	return c.failures["AdoptWorkingCopy"]
 }
 
+// AgentSecretsEnrollment records the enrollment id the daemon asked the agent's shim to keep.
+func (c *Conn) AgentSecretsEnrollment(_ context.Context, enrollmentID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.enrollments = append(c.enrollments, enrollmentID)
+	return c.failures["AgentSecretsEnrollment"]
+}
+
 // Prompts is every prompt frame sent over this connection, in order.
 func (c *Conn) Prompts() []Prompt {
 	c.mu.Lock()
@@ -86,6 +110,13 @@ func (c *Conn) Adoptions() []Adoption {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]Adoption(nil), c.adoptions...)
+}
+
+// Enrollments is every enrollment id asked over this connection, in order.
+func (c *Conn) Enrollments() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.enrollments...)
 }
 
 // Shutdowns is how many times the agent was asked to end itself.
@@ -131,6 +162,9 @@ func (c *Conn) fail(method string, err error) {
 type Conns struct {
 	mu    sync.Mutex
 	conns map[claim.Token]runtime.Conn
+	// registrations numbers the connections in the order they are registered, as the listener
+	// does, so a connection registered later is newer (runtime.Conn.Sequence).
+	registrations uint64
 }
 
 // NewConns is an empty directory: no claim has connected yet.
@@ -145,10 +179,15 @@ func (c *Conns) Conn(token claim.Token) (runtime.Conn, bool) {
 	return conn, ok
 }
 
-// Register is a claim's agent connecting.
+// Register is conn connecting for the claim. A fake connection, or one that embeds it, is
+// numbered newer than every connection registered before it.
 func (c *Conns) Register(token claim.Token, conn runtime.Conn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.registrations++
+	if numbered, ok := conn.(interface{ registered(uint64) }); ok {
+		numbered.registered(c.registrations)
+	}
 	c.conns[token] = conn
 }
 

@@ -1,16 +1,16 @@
 # legion controller start --config controller.yaml [--daemon-url http://127.0.0.1:13370]
-# The operator-side file: the same key names as legion.yaml, only the twelve keys the controller
+# The operator-side file: the same key names as legion.yaml, only the thirteen keys the controller
 # needs; any other key is refused naming it. Relative paths resolve against this file's directory
 # (no ~ expansion).
 # The daemon's project, exactly as its legion.yaml writes it: `sjawhar/legion` and `sjawharlegion`
 # both name the same instance — the value is sanitized like the daemon's (lowercased, every
 # non-alphanumeric dropped) before it names the controller token and LEGION_PROJECT.
 project: demo
-# The in-cluster daemon. Reach it through a port-forward, then either set this to the forwarded
-# address or pass --daemon-url:  kubectl -n legion port-forward svc/legion-daemon-demo 13370:13370
+# The daemon's API. From another machine, reach it through a port-forward or a tunnel, then either
+# set this to the forwarded address or pass --daemon-url.
 daemon_url: http://127.0.0.1:13370
-# The value of the cluster Secret legion-demo-operator's OPERATOR_TOKEN, in a file only you can read
-# (chmod 0600); a group- or world-readable file is refused before anything is fetched.
+# The daemon's operator token (the value its own operator_token_file holds), in a file only you can
+# read (chmod 0600); a group- or world-readable file is refused before anything is fetched.
 operator_token_file: ./operator-token
 # The Envoy listener and NATS the controller talks to, and the listener's bearer (the providers
 # Secret's ENVOY_TOKEN). envoy_token_file is optional for a loopback dev listener.
@@ -18,6 +18,13 @@ envoy_url: http://envoy-listener.example:9020
 envoy_token_file: ./envoy-token
 nats_urls:
   - nats://nats.example:4222
+# The NATS nkey user seed the controller's Envoy connection authenticates as (the providers
+# Secret's NATS_NKEY_SEED, the legion-pane user), in a file only you can read (chmod 0600): the
+# controller's Oh My Pi reads it through NATS_NKEY_SEED_FILE. Optional; the Go `legion controller
+# start` alone reads it (the TypeScript CLI refuses the key), and refuses a blank or unreadable
+# file, one its group or others can read, or one holding no nkey user seed, before it asks the
+# daemon for anything.
+# nats_nkey_seed_file: ./nats-seed
 # Dispatch, for the controller's native tools (both keys or neither).
 dispatch_url: https://dispatch.example
 dispatch_token_file: ./dispatch-token
@@ -30,7 +37,10 @@ instructions: ./instructions.md
 # The Go `legion controller start` runs the prefix twice: once to probe the plugin Oh My Pi loads,
 # before it asks the daemon for a capability, and once to launch. Both run at your terminal, as its
 # foreground job, so a prefix that asks for a PIN or a touch asks there, each time: `secrets` asks
-# once and the launch reuses its terminal-scoped grant.
+# once and the launch reuses its terminal-scoped grant. The prefix must run its command in that
+# same job: one that gives it a foreground process group of its own (`sudo` under `use_pty`,
+# anything with job control) takes a Ctrl-C during the probe away from legion, and the probe then
+# passes on a Ctrl-C it should refuse. `secrets` execs its command, which is fine.
 # omp_launch_prefix: [secrets, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, --]
 # Where the controller's secret, gh shim, legion launcher, and instructions live
 # (default: $XDG_STATE_HOME/legion/<project>-controller, i.e. ~/.local/state/legion/demo-controller).

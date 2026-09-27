@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,18 +32,18 @@ var issueStatusCase = issueStatusOrderSQL()
 // where state = 'open' index instead of forcing a sequential scan of asks.
 // The components lateral yields one row per issue, so grouping by its columns
 // with the key adds no rows. listPinnedIssuesQuery is the same query joined
-// to the caller's pinned rows ($7 is the login).
+// to the caller's pinned rows ($9 is the login).
 var listIssuesQuery = issueSummaryHead + issueSummaryTail
 
 var listPinnedIssuesQuery = issueSummaryHead + `
-	join user_issue_state s on s.issue_key = i.key and s.login = $7 and s.pinned` + issueSummaryTail
+	join user_issue_state s on s.issue_key = i.key and s.login = $9 and s.pinned` + issueSummaryTail
 
 // issueClaimColumns is the claim half of an issue select, named once like
 // issueComponentsColumns so every read scans the two columns in one order.
 const issueClaimColumns = `i.claimed_by, i.claimed_at`
 
 const issueSummaryHead = `
-	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.updated_at, i.last_seq,
+	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.route, i.updated_at, i.last_seq,
 	       ` + issueClaimColumns + `,
 	       count(a.id) filter (where i.closed_at is null),
 	       ` + issueComponentsColumns + `
@@ -57,6 +58,9 @@ var issueSummaryTail = `
 	  and ($4::timestamptz is null or i.updated_at >= $4)
 	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
 	  and (not $6::boolean or i.closed_at is null)
+	  and ((cardinality($7::smallint[]) = 0 and not $8::boolean)
+	       or i.priority = any($7::smallint[])
+	       or ($8::boolean and i.priority is null))
 	group by i.key, ` + issueComponentsColumns + `
 	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
 `
@@ -64,7 +68,29 @@ var issueSummaryTail = `
 const (
 	maxIssueLabels  = 20
 	maxIssueLabel16 = 40
+	// unsetPriorityFilter is the `priority` query value that matches an issue with no priority.
+	unsetPriorityFilter = "none"
 )
+
+// parsePriorityFilter reads the repeated `priority` query parameter: each value is 0..3, or
+// "none" for an issue with no priority. No values means no priority filter.
+func parsePriorityFilter(values []string) (priorities []int16, unset bool, err error) {
+	priorities = []int16{}
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == unsetPriorityFilter {
+			unset = true
+			continue
+		}
+		switch value {
+		case "0", "1", "2", "3":
+			priorities = append(priorities, int16(value[0]-'0'))
+		default:
+			return nil, false, errorf(http.StatusBadRequest, "INVALID_PRIORITY", "priority filter values must be 0 to 3 or %s, got %q", unsetPriorityFilter, raw)
+		}
+	}
+	return priorities, unset, nil
+}
 
 // claimScan reads an issue's two claim columns as one nullable claim. A row has both or
 // neither (the issues_claim_complete constraint), so either absent means unclaimed.
@@ -140,17 +166,55 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		}
 		updatedSince = &parsed
 	}
+	priorities, unsetPriority, err := parsePriorityFilter(query["priority"])
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	routeStatus, err := parseRouteStatusFilter(query.Get("route_status"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	listQuery := listIssuesQuery
-	open := query.Get("open") == "true"
-	arguments := []any{project, status, parent, updatedSince, labels, open}
+	// A route matters only while there is work to reach, so the route_status filter reads open
+	// issues alone: the owner audit is every open issue whose route reaches nobody.
+	open := query.Get("open") == "true" || routeStatus != ""
+	arguments := []any{project, status, parent, updatedSince, labels, open, priorities, unsetPriority}
 	if pinned {
 		listQuery = listPinnedIssuesQuery
 		arguments = append(arguments, login)
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), listQuery, arguments...)
+	issues, err := s.scanIssueSummaries(r.Context(), listQuery, arguments)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	if routed := slices.ContainsFunc(issues, func(issue model.IssueSummary) bool { return issue.Route != nil }); routed {
+		roster := s.readRouteRoster(r.Context())
+		if routeStatus != "" && routeStatus != model.RouteUnknown && !roster.answered {
+			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable,
+				"the Envoy listener did not answer, so Dispatch cannot tell which routes reach a live session; route_status=unknown lists the routed issues")
+			return
+		}
+		for index := range issues {
+			issues[index].IssueRouteReach = roster.reach(issues[index].Route)
+		}
+	}
+	if routeStatus != "" {
+		issues = slices.DeleteFunc(issues, func(issue model.IssueSummary) bool {
+			return issue.RouteStatus == nil || *issue.RouteStatus != routeStatus
+		})
+	}
+	WriteJSON(w, http.StatusOK, issues)
+}
+
+// scanIssueSummaries runs a list query and returns its rows with the pooled connection already
+// released, so the listener read that follows holds nothing.
+func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, arguments []any) ([]model.IssueSummary, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, listQuery, arguments...)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	issues := []model.IssueSummary{}
@@ -158,27 +222,21 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		var issue model.IssueSummary
 		var components componentsScan
 		var claim claimScan
-		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.Assignee, &issue.UpdatedAt, &issue.LastSeq}
+		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.Assignee, &issue.Route, &issue.UpdatedAt, &issue.LastSeq}
 		targets = append(targets, claim.targets()...)
 		targets = append(targets, &issue.OpenAsks)
 		if err := rows.Scan(append(targets, components.targets()...)...); err != nil {
-			s.writeHandlerError(w, err)
-			return
+			return nil, err
 		}
 		resolved, err := claim.resolve(issue.Key)
 		if err != nil {
-			s.writeHandlerError(w, err)
-			return
+			return nil, err
 		}
 		issue.Claim = resolved
 		issue.Components = components.resolve(issue.Key)
 		issues = append(issues, issue)
 	}
-	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	WriteJSON(w, http.StatusOK, issues)
+	return issues, rows.Err()
 }
 
 func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
@@ -210,8 +268,13 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	var reach model.IssueRouteReach
+	if issue.Route != nil {
+		reach = s.readRouteRoster(r.Context()).reach(issue.Route)
+	}
 	WriteJSON(w, http.StatusOK, struct {
 		model.Issue
+		model.IssueRouteReach
 		Artifacts []model.Artifact   `json:"artifacts"`
 		OpenAsks  []issueOpenAsk     `json:"open_asks"`
 		Children  []model.IssueChild `json:"children"`
@@ -221,6 +284,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		ReferencedByCount int `json:"referenced_by_count"`
 	}{
 		Issue:             issue,
+		IssueRouteReach:   reach,
 		Artifacts:         artifacts,
 		OpenAsks:          openAsks,
 		Children:          children,

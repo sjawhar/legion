@@ -37,6 +37,7 @@ operator_token_file: operator-token
 envoy_url: http://envoy.test:9020
 envoy_token_file: ./envoy-token
 nats_urls: [nats://a:4222, nats://b:4222, nats://a:4222]
+nats_nkey_seed_file: secrets/legion-pane.nk
 dispatch_url: https://d.test/
 dispatch_token_file: ~/dispatch-token
 instructions: ./instructions.md
@@ -57,6 +58,7 @@ state_dir: ./state
 		EnvoyURL:          "http://envoy.test:9020",
 		EnvoyTokenFile:    filepath.Join(dir, "envoy-token"),
 		NatsURLs:          []string{"nats://a:4222", "nats://b:4222"},
+		NatsNkeySeedFile:  filepath.Join(dir, "secrets", "legion-pane.nk"),
 		DispatchURL:       "https://d.test",
 		DispatchTokenFile: filepath.Join(dir, "~", "dispatch-token"),
 		InstructionsPath:  filepath.Join(dir, "instructions.md"),
@@ -112,7 +114,7 @@ func TestLoadControllerRefuses(t *testing.T) {
 	}{
 		{"a file that is not a mapping", "- a\n- b\n", "controller.yaml must be a mapping"},
 		{"an unknown key", requiredControllerKeys + "runtime: kubernetes\n",
-			`unknown key "runtime" in the controller configuration; legion controller start reads only project, daemon_url, operator_token_file, envoy_url, envoy_token_file, nats_urls, dispatch_url, dispatch_token_file, instructions, omp_invocation, omp_launch_prefix, state_dir — see deploy/kubernetes/daemon/controller.yaml.example`},
+			`unknown key "runtime" in the controller configuration; legion controller start reads only project, daemon_url, operator_token_file, envoy_url, envoy_token_file, nats_urls, nats_nkey_seed_file, dispatch_url, dispatch_token_file, instructions, omp_invocation, omp_launch_prefix, state_dir — see deploy/kubernetes/daemon/controller.yaml.example`},
 		{"no project", without("project"), "project is required in the controller configuration"},
 		{"no daemon_url", without("daemon_url"), "daemon_url is required in the controller configuration"},
 		{"no operator_token_file", without("operator_token_file"), "operator_token_file is required in the controller configuration"},

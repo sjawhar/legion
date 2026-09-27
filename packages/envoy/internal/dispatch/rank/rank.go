@@ -4,9 +4,11 @@ package rank
 const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 // Between returns a base-62 key that sorts strictly after prev and strictly
-// before next. An empty bound is unbounded. Repeated insertions at either end
-// remain possible because the key space extends by a digit when adjacent keys
-// leave no midpoint digit.
+// before next. An empty bound is unbounded. When a byte-order midpoint digit
+// exists between prev and next, Between picks it directly; otherwise Between
+// defers to after (an append, or adjacent digits: increment the first
+// non-maximal digit) or before (a prepend, or prev a prefix of next); see
+// each for its growth rate.
 func Between(prev, next string) string {
 	if prev != "" && next != "" && prev >= next {
 		panic("rank bounds must be ordered")
@@ -15,7 +17,7 @@ func Between(prev, next string) string {
 		return before(next)
 	}
 	if next == "" {
-		return prev + "U"
+		return after(prev)
 	}
 
 	common := 0
@@ -30,6 +32,19 @@ func Between(prev, next string) string {
 	nextDigit := digit(next[common])
 	if nextDigit-prevDigit > 1 {
 		return prev[:common] + string(alphabet[(prevDigit+nextDigit)/2])
+	}
+	return prev[:common+1] + after(prev[common+1:])
+}
+
+// after returns a key that sorts strictly after prev: it increments the first
+// digit below the alphabet's largest, so a key grows by a digit only once
+// every 32 appends — the span a fresh digit ("U", index 30) takes to reach
+// the alphabet's largest ("z", index 61) and roll over into a new digit.
+func after(prev string) string {
+	for i := range len(prev) {
+		if d := digit(prev[i]); d < len(alphabet)-1 {
+			return prev[:i] + string(alphabet[d+1])
+		}
 	}
 	return prev + "U"
 }

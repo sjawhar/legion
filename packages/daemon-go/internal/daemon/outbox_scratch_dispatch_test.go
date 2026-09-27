@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -66,6 +67,62 @@ func TestOutboxMessageCrashRecoveryPostsOnceAgainstScratchDispatch(t *testing.T)
 	}
 	if markers != 1 {
 		t.Fatalf("outbox-marked messages = %d in %#v, want one post across crash recovery", markers, bodies)
+	}
+}
+
+// The runner posts a message as its body, then its outbox marker, and Dispatch counts the whole of
+// it against its cap. record.MessagePostLimit leaves room for the marker at its longest, a row id of
+// math.MaxInt64: a body at the limit posts from that row, and a body one unit longer is refused by
+// Dispatch and stays queued, so the limit is exactly what Dispatch takes. The body counts UTF-16
+// units, as Dispatch does, so it opens with a character outside the Basic Multilingual Plane.
+func TestOutboxPostsABodyAtThePostLimitWithTheLongestMarkerAgainstScratchDispatch(t *testing.T) {
+	baseURL, token := startScratchDispatch(t)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := createScratchDispatchIssue(t, baseURL)
+	now := time.Now().UTC()
+	runner := &outbox{
+		dispatchProject: "LEGION", log: quietLogger(),
+		pool: pool, records: records, dispatch: dispatch.New(baseURL, token),
+		now: func() time.Time { return now },
+	}
+	const emoji = "\U0001F600"
+	// deliver enqueues body as the row math.MaxInt64 and runs it once.
+	deliver := func(body string) {
+		t.Helper()
+		if _, err := pool.Exec(context.Background(), "select setval('outbox_id_seq', $1)", int64(math.MaxInt64-1)); err != nil {
+			t.Fatalf("set the outbox row id: %v", err)
+		}
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, issue, record.MessagePost{Body: body}, now))
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("run the outbox: %v", err)
+		}
+	}
+
+	deliver(emoji + strings.Repeat("x", record.MessagePostLimit-1))
+	var id int64
+	var lastError string
+	if err := pool.QueryRow(context.Background(), "select id, last_error from outbox").Scan(&id, &lastError); err != nil {
+		t.Fatalf("read the queued row: %v", err)
+	}
+	if id != math.MaxInt64 || !strings.Contains(lastError, "CAP_EXCEEDED") {
+		t.Fatalf("row one unit over the limit = %d, %q; want row %d queued with Dispatch's CAP_EXCEEDED", id, lastError, int64(math.MaxInt64))
+	}
+	if _, err := pool.Exec(context.Background(), "delete from outbox"); err != nil {
+		t.Fatalf("drop the refused row: %v", err)
+	}
+
+	atLimit := record.MessagePost{Body: emoji + strings.Repeat("x", record.MessagePostLimit-2)}
+	deliver(atLimit.Body)
+	if remaining := outboxRows(t, pool); remaining != 0 {
+		t.Fatalf("outbox rows after posting the body at the limit = %d, want it posted and finished", remaining)
+	}
+	bodies, err := dispatch.New(baseURL, token).MessageBodiesSince(context.Background(), issue, now.Add(-time.Second))
+	if err != nil {
+		t.Fatalf("read real Dispatch messages: %v", err)
+	}
+	if want := atLimit.Posted(math.MaxInt64); len(bodies) != 1 || bodies[0] != want || dispatch.MessageBodyLength(want) != dispatch.MessageBodyLimit {
+		t.Fatalf("Dispatch messages = %d, want the body at the limit posted once with row %d's marker, %d units", len(bodies), int64(math.MaxInt64), dispatch.MessageBodyLimit)
 	}
 }
 

@@ -218,7 +218,10 @@ test("resolve, reopen, then edit leaves one comment turn in its final state", as
     await expect(threadCard(alicePage, root.id)).toHaveCount(0);
     await expect(threadCard(bobPage, root.id)).toHaveCount(0);
 
-    await bobPage.getByRole("button", { name: "Resolved (1)" }).click();
+    await bobPage
+      .getByRole("tabpanel", { name: "Conversation" })
+      .getByRole("button", { name: "Resolved (1)" })
+      .click();
     const resolvedThread = await expandedThread(bobPage, root.id);
     await expect(resolvedThread).toContainText(/Resolved by alice/);
     await resolvedThread.getByRole("button", { name: "Reopen" }).click();
@@ -685,7 +688,9 @@ test("a failed queued Conversation comment action clears later clicks and retrie
     await firstThread.getByRole("button", { name: "Resolve" }).click();
     await secondThread.getByRole("button", { name: "Resolve" }).click();
     resolveFirst?.();
-    await expect(firstThread.getByText("Could not save this action.")).toBeVisible();
+    // A 500 with no body is still an answer from the API, so the card shows what the client made
+    // of it, as the header, settings and composer do.
+    await expect(firstThread.getByText("Dispatch request failed (500)")).toBeVisible();
     await expect.poll(() => requests).toBe(1);
     await firstThread.getByRole("button", { name: "Retry" }).click();
     await expect.poll(() => requests).toBe(2);

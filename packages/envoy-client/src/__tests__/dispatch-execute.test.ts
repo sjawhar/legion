@@ -2,10 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { dispatchToolSpecs, type IssueComponents, zodSchemaApi } from "@legion/contracts";
+import {
+  type Artifact,
+  dispatchToolSpecs,
+  type IssueComponents,
+  zodSchemaApi,
+} from "@legion/contracts";
 import { z } from "zod";
 import type { ExecFn } from "../dispatch-cwd";
-import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
+import {
+  type DispatchToolResult,
+  executeDispatchTool,
+  resolveIssueDocumentId,
+} from "../dispatch-execute";
+import { DispatchClient } from "../dispatch-http";
 import { dispatchFollowNotice } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 
@@ -59,8 +69,25 @@ const createdIssueLine =
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
+/** A project with no architecture source, as a current server answers it: `200 null`. */
+function sourceNull(): Response {
+  return new Response("null", { headers: { "Content-Type": "application/json" } });
+}
+
+/** The same project as an older server answers it, which a client still meets mid-rollout. */
 function sourceNotFound(): Response {
-  return new Response(JSON.stringify({ code: "SOURCE_NOT_FOUND", error: "source not found" }), {
+  return new Response(
+    JSON.stringify({
+      code: "SOURCE_NOT_FOUND",
+      error: "no architecture source configured for LEGION",
+    }),
+    { status: 404, headers: { "Content-Type": "application/json" } }
+  );
+}
+
+/** A 404 that is not the no-source answer: a project the server does not know. */
+function projectNotFound(): Response {
+  return new Response(JSON.stringify({ code: "NOT_FOUND", error: "project LEGION not found" }), {
     status: 404,
     headers: { "Content-Type": "application/json" },
   });
@@ -89,7 +116,12 @@ function issueComponents(
   return { mode, ids, unknown, reason, inherited_from: inheritedFrom };
 }
 
-type ArchitectureSourceState = "exists" | "absent" | "fails";
+type ArchitectureSourceState =
+  | "exists"
+  | "null"
+  | "source-not-found"
+  | "project-not-found"
+  | "fails";
 
 async function createIssueWithComponents(
   components: IssueComponents,
@@ -111,7 +143,9 @@ async function createIssueWithComponents(
       if (source === "exists") {
         return response(architectureSource("LEGION"));
       }
-      if (source === "absent") return sourceNotFound();
+      if (source === "null") return sourceNull();
+      if (source === "source-not-found") return sourceNotFound();
+      if (source === "project-not-found") return projectNotFound();
       throw new Error("architecture source network error");
     }
     throw new Error(`unexpected request: ${target.pathname}`);
@@ -526,6 +560,7 @@ describe("executeDispatchTool", () => {
             slug: artifact,
           });
         }
+        if (/^\/api\/v1\/projects\/[^/]+\/artifacts$/.test(target.pathname)) return response([]);
         if (target.pathname.endsWith("/asks")) {
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
           request = { body, path: target.pathname };
@@ -1439,6 +1474,9 @@ describe("executeDispatchTool", () => {
             actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
             at: "2026-09-13T01:00:00Z",
           },
+          route: "role:sre",
+          route_status: "no_holder",
+          route_holder: null,
         },
       ]);
     };
@@ -1450,7 +1488,9 @@ describe("executeDispatchTool", () => {
         status: "todo",
         parent: "AGENTC-9",
         label: "bug",
+        priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
+        route_status: "no_holder",
       },
       cwd: "/workspace",
       host: "omp",
@@ -1464,13 +1504,21 @@ describe("executeDispatchTool", () => {
       "/api/v1/issues",
       "/api/v1/agents",
     ]);
-    expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
-      project: "AGENTC",
-      status: "todo",
-      parent: "AGENTC-9",
-      label: "bug",
-      updated_since: "2026-09-01T00:00:00Z",
-    });
+    // Each priority repeats as its own parameter, and null asks for issues with no priority.
+    expect([...(requests[0]?.searchParams ?? [])]).toEqual([
+      ["project", "AGENTC"],
+      ["status", "todo"],
+      ["parent", "AGENTC-9"],
+      ["label", "bug"],
+      ["priority", "0"],
+      ["priority", "1"],
+      ["priority", "none"],
+      ["updated_since", "2026-09-01T00:00:00Z"],
+      ["route_status", "no_holder"],
+    ]);
+    // A route that reaches nobody is what the owner audit reads, so the row says so.
+    expect(result.text).toContain("AGENTC-1 [todo] P1 First · 2 open asks · claimed by ");
+    expect(result.text).toContain(" · route role:sre (nobody holds it right now)");
     expect(result.details).toEqual({
       issues: [
         {
@@ -1485,10 +1533,85 @@ describe("executeDispatchTool", () => {
           },
           labels: ["bug"],
           open_asks: 2,
+          route: "role:sre",
+          route_status: "no_holder",
+          route_holder: null,
           updated_at: "2026-09-13T00:00:00Z",
         },
       ],
     });
+  });
+
+  test("dispatch_read says whether the issue's route reaches anyone", async () => {
+    const read = async (reach: Record<string, unknown>) => {
+      const agentCalls: string[] = [];
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const pathname = new URL(String(url)).pathname;
+        if (pathname === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            title: "Dispatch issue",
+            status: "todo",
+            priority: 2,
+            assignee: null,
+            claim: null,
+            components: {
+              mode: "inherit",
+              ids: [],
+              unknown: [],
+              reason: null,
+              inherited_from: null,
+            },
+            open_asks: [],
+            last_seq: 0,
+            labels: [],
+            ...reach,
+          });
+        }
+        if (pathname === "/api/v1/agents") {
+          agentCalls.push(pathname);
+          return response([{ session_id: "ses-sre", title: "SRE on call" }]);
+        }
+        if (pathname === "/api/v1/issues/DSP-42/events") return response([]);
+        if (pathname === "/api/v1/issues/DSP-42/references" || pathname === "/api/v1/references") {
+          return response({ node: { kind: "issue", id: "DSP-42" }, edges: [], members: [] });
+        }
+        throw new Error(`unexpected request: ${pathname}`);
+      };
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { issue: "DSP-42" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return { text: result.text, agentCalls: agentCalls.length };
+    };
+
+    const unheld = await read({ route: "role:sre", route_status: "no_holder", route_holder: null });
+    expect(unheld.text).toContain("Route: role:sre (nobody holds it right now)\n");
+    expect(unheld.agentCalls).toBe(0);
+    const gone = await read({
+      route: "session:ses-gone",
+      route_status: "no_holder",
+      route_holder: null,
+    });
+    expect(gone.text).toContain(
+      "Route: session:ses-gone (that session is not running right now)\n"
+    );
+    const blind = await read({ route: "role:sre", route_status: "unknown", route_holder: null });
+    expect(blind.text).toContain(
+      "Route: role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)\n"
+    );
+    // A held role names its holder the way a claim does: by the live registry's title.
+    const held = await read({ route: "role:sre", route_status: "live", route_holder: "ses-sre" });
+    expect(held.text).toContain("Route: role:sre (held by SRE on call)\n");
+    expect(held.agentCalls).toBe(1);
+    const unrouted = await read({ route: null, route_status: null, route_holder: null });
+    expect(unrouted.text).toContain("Route: none\n");
   });
 
   test("dispatch_issues omits absent optional filters and clamps the row count to limit", async () => {
@@ -1573,7 +1696,7 @@ describe("executeDispatchTool", () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNotFound();
+        return sourceNull();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -1692,10 +1815,15 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
-  test("does not guide an unassigned new issue when its project has no architecture source", async () => {
+  // A rollout mixes servers and clients, so both answers a server gives for a project with no
+  // source mean no source: a current server's 200 null and an older one's 404 SOURCE_NOT_FOUND.
+  test.each([
+    ["200 null", "null"],
+    ["404 SOURCE_NOT_FOUND", "source-not-found"],
+  ] as const)("does not guide an unassigned new issue when the source read answers %s", async (_answer, source) => {
     const { result, requests } = await createIssueWithComponents(
       issueComponents("inherit", []),
-      "absent"
+      source
     );
 
     expect(result.text).toBe(createdIssueLine);
@@ -1703,6 +1831,20 @@ describe("executeDispatchTool", () => {
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-source",
     ]);
+  });
+
+  test("reports a 404 other than SOURCE_NOT_FOUND as a source it could not check", async () => {
+    const { result } = await createIssueWithComponents(
+      issueComponents("inherit", []),
+      "project-not-found"
+    );
+
+    expect(result.text).toBe(
+      [
+        createdIssueLine,
+        'Could not check whether project LEGION has an architecture model: project LEGION not found. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.',
+      ].join("\n")
+    );
   });
 
   test("does not guide a child whose live component attachment comes from its parent", async () => {
@@ -1761,7 +1903,7 @@ describe("executeDispatchTool", () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNotFound();
+        return sourceNull();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -1792,7 +1934,7 @@ describe("executeDispatchTool", () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNotFound();
+        return sourceNull();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -1821,7 +1963,7 @@ describe("executeDispatchTool", () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNotFound();
+        return sourceNull();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -2022,7 +2164,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", status: "done" },
+        args: { issue: "AGENTC-175", status: "testing" },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2082,6 +2224,178 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(/Issue update requires at least one field besides issue/);
+  });
+
+  test("dispatch_issue_update refuses status done without a reason before any request", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    for (const args of [
+      { issue: "AGENTC-175", status: "done" },
+      { issue: "AGENTC-175", status: "done", reason: " " },
+    ]) {
+      await expect(
+        executeDispatchTool({
+          tool: "dispatch_issue_update",
+          args,
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl,
+        })
+      ).rejects.toThrow(
+        /status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts/
+      );
+    }
+  });
+
+  /** Records every request; the messages route and the PATCH answer with the given responses. */
+  function closingServer(answers: { message: () => Response; patch: () => Response }) {
+    const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      const method = init?.method ?? "GET";
+      requests.push({
+        method,
+        pathname,
+        ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
+      });
+      if (pathname === "/api/v1/issues/AGENTC-175/messages") return answers.message();
+      if (pathname !== "/api/v1/issues/AGENTC-175") {
+        throw new Error(`unexpected request: ${method} ${pathname}`);
+      }
+      if (method === "GET") {
+        return response({
+          key: "AGENTC-175",
+          title: "x",
+          status: "retro",
+          labels: [],
+          route: null,
+          external_links: [],
+        });
+      }
+      return answers.patch();
+    };
+    return { requests, fetchImpl: fetchImpl as typeof fetch };
+  }
+
+  const refusal = (status: number, code: string, error: string) =>
+    new Response(JSON.stringify({ code, error }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  const closeCall = (fetchImpl: typeof fetch) =>
+    executeDispatchTool({
+      tool: "dispatch_issue_update",
+      args: { issue: "AGENTC-175", status: "done", reason: "Shipped in owner/repo#7." },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+  test("dispatch_issue_update posts the reason as a message, then closes the issue", async () => {
+    const server = closingServer({
+      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      patch: () =>
+        response({
+          key: "AGENTC-175",
+          title: "x",
+          status: "done",
+          labels: [],
+          route: null,
+          external_links: [],
+        }),
+    });
+
+    const result = await closeCall(server.fetchImpl);
+
+    expect(server.requests.map(({ method, pathname }) => `${method} ${pathname}`)).toEqual([
+      "GET /api/v1/issues/AGENTC-175",
+      "POST /api/v1/issues/AGENTC-175/messages",
+      "PATCH /api/v1/issues/AGENTC-175",
+    ]);
+    expect(server.requests[1]?.body).toMatchObject({
+      body: "Shipped in owner/repo#7.",
+      actor: { kind: "session", id: "session-42" },
+    });
+    expect(server.requests[2]?.body).toMatchObject({ status: "done" });
+    expect(server.requests[2]?.body).not.toHaveProperty("reason");
+    expect(result.text).toStartWith(
+      "AGENTC-175: reason posted as message message-7 (dispatch://AGENTC-175/message/message-7); status retro -> done"
+    );
+    expect(result.details).toMatchObject({
+      issue: "AGENTC-175",
+      status: "done",
+      message: "message-7",
+    });
+  });
+
+  test("dispatch_issue_update leaves the issue open when the reason cannot be posted", async () => {
+    const server = closingServer({
+      message: () => refusal(409, "ISSUE_CLOSED", "issue is closed"),
+      patch: () => {
+        throw new Error("the close must not be sent");
+      },
+    });
+
+    await expect(closeCall(server.fetchImpl)).rejects.toThrow(
+      "ISSUE_CLOSED: issue is closed; the reason was not posted, so the close was not sent"
+    );
+    expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+  });
+
+  test("dispatch_issue_update names the posted reason when the close fails after it", async () => {
+    const server = closingServer({
+      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      patch: () => refusal(409, "ISSUE_CLAIMED", "claimed by session other"),
+    });
+
+    await expect(closeCall(server.fetchImpl)).rejects.toThrow(
+      "ISSUE_CLAIMED: claimed by session other; the reason already landed as message message-7 " +
+        "(dispatch://AGENTC-175/message/message-7) but the issue did not close. Retrying this call " +
+        "posts its reason again, so fix what refused the close, then retry with a reason that " +
+        "points at message message-7"
+    );
+    expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+  });
+
+  // A timeout, a transport error, or a 5xx gives no proof the issue stayed open, so the error
+  // must not say it did: an agent that believed it would retry and post its reason twice.
+  test("dispatch_issue_update says the close is unknown when the PATCH times out or 5xxes after the post", async () => {
+    const unknown =
+      "; the reason already landed as message message-7 (dispatch://AGENTC-175/message/message-7), " +
+      "and the close may or may not have taken effect. Read the issue's status before retrying: " +
+      "done means it closed; otherwise retry with a reason that points at message message-7, " +
+      "since retrying this call posts its reason again";
+    for (const [patch, head] of [
+      [
+        (): Response => {
+          throw new DOMException("The operation timed out.", "TimeoutError");
+        },
+        "The operation timed out.",
+      ],
+      [() => refusal(502, "HTTP_502", "Bad Gateway"), "HTTP_502: Bad Gateway"],
+    ] as const) {
+      const server = closingServer({
+        message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+        patch,
+      });
+
+      const failure = await closeCall(server.fetchImpl).catch((error: unknown) => error);
+
+      if (!(failure instanceof Error)) throw new Error(`expected an Error, got ${String(failure)}`);
+      expect(failure.message).toBe(`${head}${unknown}`);
+      expect(failure.message).not.toContain("did not close");
+      expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+    }
   });
 
   test("dispatch_issue_update sets the parent and reports the move", async () => {
@@ -2372,23 +2686,23 @@ describe("executeDispatchTool", () => {
     const start = (name: string) => {
       started.push(name);
     };
+    const notes = {
+      id: "artifact-42",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/notes",
+      slug: "notes",
+      name: "notes.md",
+      kind: "doc",
+      primary: false,
+      created_by: { kind: "session", id: "session-1" },
+      created_at: "2026-09-18T00:00:00Z",
+      versions: [],
+    };
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
-      if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") {
-        return response({
-          id: "artifact-42",
-          issue_key: null,
-          project: "CORE",
-          ref_key: "CORE/notes",
-          slug: "notes",
-          name: "notes.md",
-          kind: "doc",
-          primary: false,
-          created_by: { kind: "session", id: "session-1" },
-          created_at: "2026-09-18T00:00:00Z",
-          versions: [],
-        });
-      }
+      if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") return response(notes);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([notes]);
       if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
         start("document");
         documentRequested.resolve();
@@ -2843,6 +3157,210 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  // Dispatch suffixes a slug two documents would share: "plan v2" takes plan-v2, so a document
+  // named "plan-v2" takes plan-v2-2, and plan-v2 is then one document's slug and the other's
+  // filename.
+  const projectDocument = (id: string, slug: string, name: string): Artifact => ({
+    id,
+    issue_key: null,
+    project: "GREF",
+    ref_key: `GREF/${slug}`,
+    slug,
+    name,
+    kind: "doc",
+    primary: false,
+    created_by: { kind: "user", id: "alice" },
+    created_at: "2026-09-27T00:00:00Z",
+    versions: [],
+  });
+  /** Dispatch's project routes over `documents`: the slug route answers a slug, then a filename
+   * no other document shares, and the unlinked list is every document. `requests` records each
+   * call as its method and path. */
+  const projectDispatch = (documents: readonly Artifact[], requests: string[]) =>
+    (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = new URL(String(url));
+      requests.push(`${init?.method ?? "GET"} ${request.pathname}${request.search}`);
+      if (request.pathname === "/api/v1/projects/GREF/artifacts") return response(documents);
+      const routed = request.pathname.match(/^\/api\/v1\/projects\/GREF\/artifacts\/([^/]+)$/);
+      if (routed?.[1] !== undefined) {
+        const reference = decodeURIComponent(routed[1]);
+        const named = documents.filter((document) => document.name === reference);
+        const hit =
+          documents.find((document) => document.slug === reference) ??
+          (named.length === 1 ? named[0] : undefined);
+        return hit === undefined
+          ? new Response(JSON.stringify({ code: "ARTIFACT_NOT_FOUND", error: "not found" }), {
+              status: 404,
+              headers: { "Content-Type": "application/json" },
+            })
+          : response(hit);
+      }
+      const text = request.pathname.match(/^\/api\/v1\/artifacts\/([^/]+)\/text$/);
+      if (text?.[1] !== undefined) return response({ markdown: `# ${text[1]}`, version: 1 });
+      if (request.pathname.endsWith("/asks") || request.pathname.endsWith("/comments")) {
+        return response([]);
+      }
+      throw new Error(`unexpected request: ${request.pathname}`);
+    }) as typeof fetch;
+  /** Dispatch's issue route for DSP-42, whose primary document is `spec` and which carries
+   * `artifacts` besides, and the text and comment reads a document read makes. */
+  const issueDispatch = (artifacts: readonly Pick<Artifact, "id" | "slug" | "name" | "kind">[]) =>
+    (async (url: RequestInfo | URL): Promise<Response> => {
+      const request = new URL(String(url));
+      if (request.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-spec",
+          artifacts: [
+            { id: "artifact-spec", slug: "spec", name: "spec.md", kind: "doc", primary: true },
+            ...artifacts.map((artifact) => ({ ...artifact, primary: false })),
+          ],
+        });
+      }
+      const text = request.pathname.match(/^\/api\/v1\/artifacts\/([^/]+)\/text$/);
+      if (text?.[1] !== undefined) return response({ markdown: `# ${text[1]}`, version: 1 });
+      if (request.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+      throw new Error(`unexpected request: ${request.pathname}`);
+    }) as typeof fetch;
+  const readDocument = (args: Record<string, unknown>, fetchImpl: typeof fetch) =>
+    executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args,
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+  test("a bare project reference that is one document's slug and another's filename is refused", async () => {
+    const documents = [
+      projectDocument("artifact-v2", "plan-v2", "plan v2"),
+      projectDocument("artifact-v2-2", "plan-v2-2", "plan-v2"),
+    ];
+    const requests: string[] = [];
+    const fetchImpl = projectDispatch(documents, requests);
+    const refusal =
+      '"plan-v2" names 2 documents on this project; use the id: artifact-v2 (plan-v2, plan v2), artifact-v2-2 (plan-v2-2, plan-v2)';
+    await expect(readDocument({ project: "GREF", artifact: "plan-v2" }, fetchImpl)).rejects.toThrow(
+      refusal
+    );
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { project: "GREF", artifact: "plan-v2", body: "Looks good." },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(refusal);
+    expect(requests.filter((request) => !request.startsWith("GET "))).toEqual([]);
+    for (const [reference, id] of [
+      ["plan v2", "artifact-v2"],
+      ["plan-v2-2", "artifact-v2-2"],
+      ["artifact-v2", "artifact-v2"],
+    ] as const) {
+      const result = await readDocument({ project: "GREF", artifact: reference }, fetchImpl);
+      expect(result.text).toBe(`# ${id}`);
+    }
+  });
+
+  test("a bare project reference that is one document's id and another's slug resolves as the id", async () => {
+    const documents = [
+      projectDocument("shared-reference", "notes", "notes.md"),
+      projectDocument("artifact-other", "shared-reference", "other.md"),
+    ];
+    const result = await readDocument(
+      { project: "GREF", artifact: "shared-reference" },
+      projectDispatch(documents, [])
+    );
+    expect(result.text).toBe("# shared-reference");
+  });
+
+  // Only documents answer to a filename (Dispatch's own filename fallback reads documents alone),
+  // so an image or file whose filename is a document's slug names no second document.
+  test("a document slug that an image's or file's filename repeats resolves to the document", async () => {
+    const project = await readDocument(
+      { project: "GREF", artifact: "diagram" },
+      projectDispatch(
+        [
+          projectDocument("artifact-doc", "diagram", "Diagram notes"),
+          { ...projectDocument("artifact-image", "diagram-2", "diagram"), kind: "image" },
+          { ...projectDocument("artifact-file", "diagram-3", "diagram"), kind: "file" },
+        ],
+        []
+      )
+    );
+    expect(project.text).toBe("# artifact-doc");
+
+    const issue = await readDocument(
+      { issue: "DSP-42", artifact: "diagram" },
+      issueDispatch([
+        { id: "artifact-doc", slug: "diagram", name: "Diagram notes", kind: "doc" },
+        { id: "artifact-image", slug: "diagram-2", name: "diagram", kind: "image" },
+      ])
+    );
+    expect(issue.text).toBe("# artifact-doc");
+  });
+
+  test("a bare project reference fails with the route read's error, and with the list read's after a route hit", async () => {
+    const documents = [projectDocument("artifact-v2", "plan-v2", "plan v2")];
+    const failing = (target: string) =>
+      (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const request = new URL(String(url));
+        if (request.pathname + request.search === target) {
+          return new Response(JSON.stringify({ code: "UNAVAILABLE", error: `${target} failed` }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return projectDispatch(documents, [])(url, init);
+      }) as typeof fetch;
+    for (const target of [
+      "/api/v1/projects/GREF/artifacts/plan-v2",
+      "/api/v1/projects/GREF/artifacts?unlinked=true",
+    ]) {
+      await expect(
+        readDocument({ project: "GREF", artifact: "plan-v2" }, failing(target))
+      ).rejects.toThrow(`${target} failed`);
+    }
+  });
+
+  // A dispatch:// reference's document part is a slug, the address the dashboard and Dispatch's
+  // own routes use, so it names one document even where the same text is another's filename.
+  test("a dispatch:// document reference resolves by slug, never refused for a filename clash", async () => {
+    const requests: string[] = [];
+    const documents = [
+      projectDocument("artifact-v2", "plan-v2", "plan v2"),
+      projectDocument("artifact-v2-2", "plan-v2-2", "plan-v2"),
+    ];
+    const project = await readDocument(
+      { ref: "dispatch://GREF/artifact/plan-v2" },
+      projectDispatch(documents, requests)
+    );
+    expect(project.text).toBe("# artifact-v2");
+    expect(requests).not.toContain("GET /api/v1/projects/GREF/artifacts?unlinked=true");
+
+    const clashing = issueDispatch([
+      { id: "artifact-v2", slug: "spec-v2", name: "spec v2", kind: "doc" },
+      { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", kind: "doc" },
+    ]);
+    for (const ref of [
+      "dispatch://DSP-42/artifact/spec-v2",
+      "http://dispatch.test/issues/DSP-42/artifacts/spec-v2",
+    ]) {
+      const issue = await readDocument({ ref }, clashing);
+      expect(issue.text).toBe("# artifact-v2");
+    }
+    await expect(readDocument({ issue: "DSP-42", artifact: "spec-v2" }, clashing)).rejects.toThrow(
+      '"spec-v2" names 2 documents on this issue; use the id'
+    );
+  });
+
   test("renders a no-new-version document edit and forwards its summary and precondition", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -2864,7 +3382,7 @@ describe("executeDispatchTool", () => {
         });
       }
       if (path === "/api/v1/artifacts/artifact-42/edits") {
-        return response({ applied: 2, version: null });
+        return response({ applied: 2, version: null, token: "sha256:after-edit" });
       }
       throw new Error(`unexpected request: ${path}`);
     };
@@ -2888,8 +3406,10 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text: "Applied 2 ops (no new version) (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)",
-      details: { issue: "DSP-42", applied: 2 },
+      text:
+        "Applied 2 ops (no new version) (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)\n" +
+        "Document token: sha256:after-edit",
+      details: { issue: "DSP-42", applied: 2, token: "sha256:after-edit" },
     });
     expect(JSON.parse(requests[1]?.init.body as string)).toMatchObject({
       ops: [{ op: "replace", find: "draft", with: "final" }],
@@ -2909,7 +3429,13 @@ describe("executeDispatchTool", () => {
         });
       }
       if (path === "/api/v1/artifacts/artifact-42/edits") {
-        return response({ applied: 2, version: null, changed: false, unchanged_ops: [0, 1] });
+        return response({
+          applied: 2,
+          version: null,
+          changed: false,
+          unchanged_ops: [0, 1],
+          token: "sha256:unchanged",
+        });
       }
       throw new Error(`unexpected request: ${path}`);
     };
@@ -2936,9 +3462,122 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe(
       "Applied 2 ops; nothing changed (no new version); operations 0, 1 changed nothing" +
-        " (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)"
+        " (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)\n" +
+        "Document token: sha256:unchanged"
     );
-    expect(result.details).toEqual({ issue: "DSP-42", applied: 2, changed: false });
+    expect(result.details).toEqual({
+      issue: "DSP-42",
+      applied: 2,
+      changed: false,
+      token: "sha256:unchanged",
+    });
+  });
+
+  // A concurrent browser deletion that lands after the version is written is past undoing, so the
+  // edit reports it: the version records text the live document no longer has (LEGION-269). An
+  // edit that survives reads exactly as it always did.
+  test("names the operations whose text the live document no longer has", async () => {
+    const editResponse = (body: Record<string, unknown>) => {
+      return async (url: RequestInfo | URL): Promise<Response> => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            primary_artifact_id: "artifact-42",
+            artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          });
+        }
+        if (path === "/api/v1/artifacts/artifact-42/edits") return response(body);
+        throw new Error(`unexpected request: ${path}`);
+      };
+    };
+    const edit = async (body: Record<string, unknown>) =>
+      await executeDispatchTool({
+        tool: "dispatch_doc_edit",
+        args: {
+          issue: "DSP-42",
+          artifact: "spec",
+          ops: [{ op: "replace", find: "draft", with: "final" }],
+        },
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-42",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: editResponse(body) as typeof fetch,
+      });
+
+    const lost = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: [0],
+    });
+    expect(lost.text).toContain(
+      "; version 7 carries text the live document no longer has: a concurrent change removed what operation 0 wrote — re-read the document"
+    );
+    expect(lost.details).toMatchObject({ lost_ops: [0] });
+
+    const survived = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: [],
+    });
+    expect(survived.text).toContain("Applied 1 ops (version 7)");
+    expect(survived.text).not.toContain("no longer has");
+
+    const undetermined = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: null,
+    });
+    expect(undetermined.text).toContain(
+      "; could not confirm this edit survived, because the live document is being reloaded — re-read it"
+    );
+  });
+
+  // A Dispatch server predating the edit token returns none, and the result reads as it always
+  // did: no trailer to mistake for a token, and nothing in details to pass as a precondition.
+  test("omits the document token when the server returns none", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+        });
+      }
+      if (path === "/api/v1/artifacts/artifact-42/edits") {
+        return response({ applied: 1, version: null });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_edit",
+      args: {
+        issue: "DSP-42",
+        artifact: "spec",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).not.toContain("Document token:");
+    expect(result.details).toEqual({ issue: "DSP-42", applied: 1 });
   });
 
   test("names the issue's document slugs and display names when the requested one is missing", async () => {
@@ -3082,7 +3721,9 @@ describe("executeDispatchTool", () => {
         return response(artifact);
       }
       if (request.pathname === "/api/v1/projects/CORE/artifacts") {
-        return response({ artifact, version: { number: 1 } });
+        return request.search === "?unlinked=true"
+          ? response([artifact])
+          : response({ artifact, version: { number: 1 } });
       }
       if (request.pathname.endsWith("/text"))
         return response({ markdown: "# Runbook", version: 1 });
@@ -3431,84 +4072,84 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow("Exactly one of path or content is required.");
   });
 
-  test("creates an unlinked external issue once, then resolves it for later tool calls", async () => {
+  for (const input of [
+    {
+      tool: "dispatch_message" as const,
+      args: { issue: "owner/repo#999", body: "Proceed" },
+    },
+    {
+      tool: "dispatch_read" as const,
+      args: { issue: "owner/repo#999" },
+    },
+  ]) {
+    test(`${input.tool} refuses an unlinked external reference without creating an issue`, async () => {
+      const requests: Array<{ url: string; init: RequestInit }> = [];
+      const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const request = { url: String(url), init: init ?? {} };
+        requests.push(request);
+        const target = new URL(request.url);
+        if (target.pathname === "/api/v1/issues/resolve") {
+          return new Response(JSON.stringify({ code: "NOT_FOUND", error: "issue not found" }), {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (target.pathname === "/api/v1/issues") return response({ key: "DSP-42" });
+        if (target.pathname === "/api/v1/issues/DSP-42/messages") {
+          return response({ id: "message-42", issue_key: "DSP-42" });
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+
+      await expect(
+        executeDispatchTool({
+          tool: input.tool,
+          args: input.args,
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        })
+      ).rejects.toThrow('dispatch_issue({ external: "owner/repo#999", ... })');
+      expect(
+        requests.filter(
+          (request) =>
+            request.init.method === "POST" && new URL(request.url).pathname === "/api/v1/issues"
+        )
+      ).toEqual([]);
+    });
+  }
+
+  test("dispatch_issue creates an issue from an external reference", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
-    let resolves = 0;
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const request = { url: String(url), init: init ?? {} };
       requests.push(request);
       const target = new URL(request.url);
-      if (target.pathname === "/api/v1/issues/resolve") {
-        resolves += 1;
-        return resolves === 1
-          ? new Response(JSON.stringify({ code: "NOT_FOUND", error: "issue not found" }), {
-              status: 404,
-              headers: { "Content-Type": "application/json" },
-            })
-          : response({ key: "DSP-42" });
-      }
-      if (target.pathname === "/api/v1/issues") return response({ key: "DSP-42" });
-      if (target.pathname === "/api/v1/issues/DSP-42/messages") {
-        return response({ id: `message-${resolves}`, issue_key: "DSP-42" });
-      }
-      throw new Error(`unexpected request: ${target.pathname}`);
-    };
-    const input = {
-      tool: "dispatch_message",
-      args: { issue: "owner/repo#42", body: "Proceed" },
-      cwd: "/workspace",
-      host: "omp" as const,
-      sessionId: "session-42",
-      config,
-      env: {},
-      exec: repoExec("owner/repo"),
-      fetchImpl: fetchImpl as typeof fetch,
-    };
-
-    await executeDispatchTool(input);
-    await executeDispatchTool(input);
-
-    expect(
-      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
-    ).toEqual([
-      "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
-      "/api/v1/issues",
-      "/api/v1/issues/DSP-42/messages",
-      "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
-      "/api/v1/issues/DSP-42/messages",
-    ]);
-    expect(JSON.parse(requests[1]?.init.body as string)).toMatchObject({
-      external: "owner/repo#42",
-      actor: { kind: "session", id: "session-42" },
-    });
-  });
-
-  test("names the unmapped external repository and both project env vars", async () => {
-    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
-      const path = new URL(String(url)).pathname;
-      if (path === "/api/v1/issues/resolve") {
-        return new Response(JSON.stringify({ code: "NOT_FOUND", error: "issue not found" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
+      if (target.pathname === "/api/v1/issues") {
+        return response({
+          key: "TEST-1",
+          title: "External issue",
+          project: "TEST",
+          components: issueComponents("inherit", []),
         });
       }
-      if (path === "/api/v1/issues") {
-        return new Response(
-          JSON.stringify({
-            code: "PROJECT_UNMAPPED",
-            error:
-              "repository is not mapped in repository settings and DISPATCH_DEFAULT_PROJECT is not configured",
-          }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        );
+      if (target.pathname === "/api/v1/projects/TEST/architecture-source") {
+        return sourceNull();
       }
-      throw new Error(`unexpected request: ${path}`);
+      throw new Error(`unexpected request: ${target.pathname}`);
     };
 
     await expect(
       executeDispatchTool({
-        tool: "dispatch_message",
-        args: { issue: "owner/repo#42", body: "Proceed" },
+        tool: "dispatch_issue",
+        args: {
+          project: "TEST",
+          title: "External issue",
+          external: "owner/repo#999",
+        },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -3516,9 +4157,15 @@ describe("executeDispatchTool", () => {
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
       })
-    ).rejects.toThrow(
-      "repository owner/repo is not mapped in repository settings and no DISPATCH_DEFAULT_PROJECT is configured"
-    );
+    ).resolves.toMatchObject({ details: { issue: "TEST-1" } });
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual(["/api/v1/issues", "/api/v1/projects/TEST/architecture-source"]);
+    expect(JSON.parse(requests[0]?.init.body as string)).toMatchObject({
+      project: "TEST",
+      title: "External issue",
+      external: "owner/repo#999",
+    });
   });
 
   test("does not send a blank body when posting a suggestion without a rationale", async () => {
@@ -5674,3 +6321,63 @@ for (const { tool, args, writes } of askWriteTools) {
     expect(requests).toEqual([...writes]);
   });
 }
+
+// resolveIssueDocumentId takes the reference the Dispatch tools take for an issue's document: `spec`
+// for its primary document, its id, its slug, or its filename; one that names no document throws.
+test("an issue document reference resolves to the document's id as the Dispatch tools resolve it", async () => {
+  const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+    const target = new URL(String(url));
+    if (target.pathname !== "/api/v1/issues/DSP-42")
+      throw new Error(`unexpected request: ${target.pathname}`);
+    return response({
+      key: "DSP-42",
+      primary_artifact_id: "artifact-42",
+      artifacts: [
+        { id: "artifact-42", slug: "spec-md", name: "spec.md", primary: true },
+        { id: "artifact-43", slug: "notes-md", name: "notes.md", primary: false },
+      ],
+    });
+  };
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  for (const [reference, id] of [
+    ["spec", "artifact-42"],
+    ["spec-md", "artifact-42"],
+    ["spec.md", "artifact-42"],
+    ["artifact-43", "artifact-43"],
+    ["notes-md", "artifact-43"],
+    ["notes.md", "artifact-43"],
+  ] as const) {
+    expect(await resolveIssueDocumentId(client, "DSP-42", reference)).toBe(id);
+  }
+  await expect(resolveIssueDocumentId(client, "DSP-42", "plan.md")).rejects.toThrow(/plan\.md/);
+});
+
+// Dispatch suffixes a slug two documents would share, so on one issue a document's filename can be
+// another's slug: `spec v2` has slug `spec-v2`, and a document named `spec-v2` gets `spec-v2-2`.
+// Such a reference names two documents, so it is refused rather than taken by slug, and the hint
+// names each document's id. A reference only one document answers to still resolves.
+test("a reference that is one document's slug and another's filename is refused as ambiguous", async () => {
+  const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+    response({
+      key: "DSP-42",
+      primary_artifact_id: "artifact-spec",
+      artifacts: [
+        { id: "artifact-spec", slug: "spec", name: "spec.md", primary: true },
+        { id: "artifact-notes", slug: "notes-md", name: "notes.md", primary: false },
+        { id: "artifact-v2", slug: "spec-v2", name: "spec v2", kind: "doc", primary: false },
+        { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", kind: "doc", primary: false },
+      ],
+    });
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  await expect(resolveIssueDocumentId(client, "DSP-42", "spec-v2")).rejects.toThrow(
+    '"spec-v2" names 2 documents on this issue; use the id: artifact-v2 (spec-v2, spec v2), artifact-v2-2 (spec-v2-2, spec-v2)'
+  );
+  for (const [reference, id] of [
+    ["spec v2", "artifact-v2"],
+    ["spec-v2-2", "artifact-v2-2"],
+    ["artifact-v2-2", "artifact-v2-2"],
+    ["spec", "artifact-spec"],
+  ] as const) {
+    expect(await resolveIssueDocumentId(client, "DSP-42", reference)).toBe(id);
+  }
+});

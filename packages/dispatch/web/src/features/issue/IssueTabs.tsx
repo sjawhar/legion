@@ -16,8 +16,8 @@ function tabs(artifactCount: number): readonly TabDefinition<IssueTab>[] {
 }
 
 /** The IssuePage tablist keeps its active view in the canonical issue route. `artifactCount` is
- *  the number of artifacts uploaded to the issue besides its spec, shown on the Artifacts tab so a
- *  reader knows there is something to open without visiting it. */
+ *  how many rows the Artifacts tab lists - every artifact the issue has, its primary document
+ *  included - so the badge and the list a reader checks it against say the same number. */
 export function IssueTabs({
   activeTab,
   artifactCount,

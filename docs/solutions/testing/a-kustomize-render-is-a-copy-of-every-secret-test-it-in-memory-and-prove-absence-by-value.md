@@ -24,6 +24,8 @@ related_issues:
 
 # A kustomize render is a base64 copy of every Secret
 
+> `scripts/kind-smoke/` and the in-cluster manifests under `deploy/kubernetes/daemon/` were removed with the TypeScript daemon's Kubernetes mode (LEGION-286); the paths below are as they stood at `4fdd9646`.
+
 `kubectl kustomize <overlay>` on `deploy/kubernetes/daemon/overlays/kind` emits the providers
 Secret (every provider key, the Dispatch and Envoy tokens) and the GitHub App PEMs, base64-encoded,
 in one document. The first heads of the kind smoke wrote that render to `<state>/rendered.yaml` to

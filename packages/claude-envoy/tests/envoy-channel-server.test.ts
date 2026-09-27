@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
 import plugin from "../.claude-plugin/plugin.json" with { type: "json" }
+import ompPlugin from "../.omp-plugin/plugin.json" with { type: "json" }
 import pkg from "../package.json" with { type: "json" }
 import type {
   ChannelBrokerMessage,
@@ -27,6 +28,9 @@ import {
   sessionHandoffFile,
   writeSessionHandoff,
 } from "../src/session-identity"
+import { isolatePaneEnvironment } from "./pane-environment"
+
+isolatePaneEnvironment()
 
 interface Queue {
   readonly subject: string
@@ -493,7 +497,16 @@ test("drops local topics named by a human Dispatch subscription removal", async 
 
 test("the plugin manifest, package, and MCP server all report one version", () => {
   expect(plugin.version).toBe(pkg.version)
+  expect(ompPlugin.version).toBe(pkg.version)
   expect(MCP_SERVER_INFO).toEqual({ name: "envoy", version: pkg.version })
+})
+
+test("the Oh My Pi manifest declares no MCP server", () => {
+  // Oh My Pi reads .omp-plugin/plugin.json before .claude-plugin/plugin.json and a manifest
+  // mcpServers replaces .mcp.json outright, so an empty map is what keeps omp from launching a
+  // channel server that exits without Claude Code's session identity. Dropping the key falls
+  // through to .mcp.json and starts it again.
+  expect(ompPlugin.mcpServers).toEqual({})
 })
 
 test("follows the session id its Claude process hands off: new subject first, then re-register, unfollow, and role transfer", async () => {

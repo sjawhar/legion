@@ -99,6 +99,215 @@ func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
 	}
 }
 
+// A spec's decisions are ask blocks, and the write that adds one already carries its words into
+// a version: indexing it afterwards is bookkeeping over the same document. Settlement recording
+// that bookkeeping as a version of its own wrote a byte-identical version credited to nobody,
+// which stales the approval pinned to the version the agent wrote - and Legion's design gate,
+// open exactly while the approved version is the latest, closes with nothing in the event stream
+// to explain it (LEGION-273).
+func TestSettlementIndexingAnAskBlockTheEditVersionedWritesNoVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	seedServiceText(t, service, artifactID, "# Spec\n\nContext\n")
+	snapshotAndCommitVersion(t, service, artifactID, agent)
+
+	written := agentEditVersion(t, service, artifactID, agent, []model.EditOp{{
+		Op: "insert", After: "end", Markdown: ":::ask{#decision urgency=\"high\" multiple=\"false\"}\n" +
+			"Which transport?\n\n- REST: Matches the platform\n- gRPC: Adds streaming\n:::\n",
+	}})
+	settleCurrentGeneration(t, service, artifactID)
+
+	// The settlement ran: it indexed the block the edit wrote.
+	var state string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select state from asks where block_artifact_id = $1 and block_id = 'decision'
+	`, artifactID).Scan(&state); err != nil {
+		t.Fatalf("read the ask settlement indexed: %v", err)
+	}
+	if state != "open" {
+		t.Fatalf("indexed ask state = %q, want open", state)
+	}
+	var latest, count int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select coalesce(max(number), 0), count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&latest, &count); err != nil {
+		t.Fatalf("read document versions: %v", err)
+	}
+	if latest != written.Number || count != written.Number {
+		t.Fatalf("after settlement the document is at version %d of %d, want the edit's %d alone",
+			latest, count, written.Number)
+	}
+}
+
+// agentEditVersion applies ops as an agent and versions the result, the way
+// POST /api/v1/artifacts/{id}/edits does: one transaction, the edit then the snapshot.
+func agentEditVersion(t *testing.T, service *Service, artifactID string, actor model.Actor, ops []model.EditOp) model.Version {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin agent edit: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	editCtx, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	edit, err := service.ApplyOps(editCtx, artifactID, ops, actor, nil)
+	if err != nil {
+		t.Fatalf("agent edit: %v", err)
+	}
+	if !edit.Changed {
+		t.Fatalf("agent edit changed nothing: %#v", edit)
+	}
+	written, err := service.SnapshotVersion(editCtx, artifactID, actor)
+	if err != nil {
+		t.Fatalf("version the agent edit: %v", err)
+	}
+	if !written.Wrote {
+		t.Fatalf("agent edit wrote no version: %#v", written)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit agent edit: %v", err)
+	}
+	return written.Version
+}
+
+// The same defect from the other producer: settlement stamps a legacy document's missing block
+// ids and records that as a content change, because the stored Proof state really did move. The
+// rendered markdown did not - a paragraph's block id is not in it - so a version for the repair
+// repeats the version before it on a document nobody edited (LEGION-229 requirement 2).
+func TestSettlementStampingBlockIDsWritesNoVersion(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+
+	settleCurrentGeneration(t, service, artifactID)
+
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs != 0 {
+		t.Fatalf("settlement left %d unstamped blocks, so it never ran its repair", repairs)
+	}
+	var versions int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count document versions: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("document versions = %d, want the one the repair did not change", versions)
+	}
+}
+
+// A settlement that writes no version moves no version cursor, so the row its closure appended
+// stays past that cursor for good. The row therefore has to say what the closure actually
+// rendered: one that claimed a content change it never made would leave `contentChanged` true on
+// every later settlement of that document, and the first one after a renderer change - opening
+// the document schedules one - would version a document nobody had touched, credited to nobody,
+// staling its approval all over again.
+func TestSettlementRepairThatRendersTheSameMarkdownRecordsNoContentChange(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "snake_case here")
+	seedUnidentifiedProofDocument(t, database, artifactID, "snake_case here")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	alignLatestVersionWithUpdates(t, service, artifactID)
+
+	settleCurrentGeneration(t, service, artifactID)
+
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs != 0 {
+		t.Fatalf("settlement left %d unstamped blocks, so it never ran its repair", repairs)
+	}
+	if rows := contentRowsPastLatestVersion(t, database, artifactID); rows != 0 {
+		t.Fatalf("the repair left %d content-class rows past the latest version's cursor; a block id no rendering carries changed no text", rows)
+	}
+
+	// A deployed renderer change, as the stored version sees it: the document now renders
+	// differently from the markdown the version holds, and nobody has touched it.
+	if _, err := database.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, artifactID, "snake\\_case here\n"); err != nil {
+		t.Fatalf("store the older rendering on the latest version: %v", err)
+	}
+
+	settleCurrentGeneration(t, service, artifactID)
+
+	var versions int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count document versions: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("settling an untouched document under a changed rendering wrote %d versions, want the one it found", versions)
+	}
+}
+
+// contentRowsPastLatestVersion is how many content-class document updates lie past the cursor of
+// the document's latest version - what `contentChangedSinceVersion` asks the next settlement.
+func contentRowsPastLatestVersion(t *testing.T, database *store.Store, artifactID string) int {
+	t.Helper()
+	var rows int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from doc_updates
+		where artifact_id = $1 and content_changed and version > (
+			select doc_update_version from artifact_versions
+			where artifact_id = $1 order by number desc limit 1
+		)
+	`, artifactID).Scan(&rows); err != nil {
+		t.Fatalf("count content updates past the latest version: %v", err)
+	}
+	return rows
+}
+
+// A settlement that writes no version leaves the document at the version it found, and the
+// events that name one - here `block.invalid`, whose `invalid` attribute no rendering carries -
+// have to say that number rather than the one the settlement would have written.
+func TestSettlementWritingNoVersionNamesTheOneItLeavesTheDocumentAt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
+	service.settleRoom(artifactID, 0)
+	waitForDocumentVersion(t, service.store, artifactID, 2)
+
+	// A browser leaves an option without a label, which settlement cannot parse, and a human
+	// anchoring a comment versions that document before the settlement sees it.
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children[1].Children[0].Children[0].Children = nil
+		return tree
+	})
+	snapshotAndCommitVersion(t, service, artifactID, model.Actor{Kind: "user", ID: "alice"})
+	settleCurrentGeneration(t, service, artifactID)
+
+	var latest int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select max(number) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&latest); err != nil {
+		t.Fatalf("read document versions: %v", err)
+	}
+	if latest != 3 {
+		t.Fatalf("document is at version %d, want the human's 3: flagging a block invalid renders no markdown", latest)
+	}
+	var blockID, version string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select payload->>'block_id', payload->>'version'
+		from events where type = 'block.invalid' order by id desc limit 1
+	`).Scan(&blockID, &version); err != nil {
+		t.Fatalf("load malformed-block event: %v", err)
+	}
+	if blockID != "ask-block" || version != "3" {
+		t.Fatalf("malformed-block event = block=%q version=%q, want ask-block at version 3", blockID, version)
+	}
+}
+
 func TestSettlementRepairsServerOwnedAskAttributesOncePerVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -274,11 +483,12 @@ func TestSettlementRecordsMalformedAskAndRepairsIt(t *testing.T) {
 	}
 }
 
+// A browser edit can put a block an ask's body does not allow into it; settlement keeps the block
+// and flags it instead of indexing it.
 func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
 	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, ":::ask{#ask-heading urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n## Not an option\n:::\n")
-	service.settleRoom(artifactID, 0)
+	seedServiceText(t, service, artifactID, ":::ask{#ask-heading urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n:::\n")
+	editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2)}, Children: []*pmdoc.Node{{Type: "text", Text: "Not an option"}}}))
 
 	waitForDocumentVersion(t, service.store, artifactID, 2)
 	const reason = `ask block "ask-heading" has unsupported body node "heading"`
@@ -293,6 +503,190 @@ func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
 	}
 	if asks != 0 {
 		t.Fatalf("unsupported ask rows = %d, want none", asks)
+	}
+}
+
+// firstAsk is the document's first top-level ask.
+func firstAsk(tree *pmdoc.Node) *pmdoc.Node {
+	for _, child := range tree.Children {
+		if child.Type == "ask" {
+			return child
+		}
+	}
+	panic("the document holds no ask")
+}
+
+// setAskAttrs sets attributes on the document's first ask, as settlement or an answer does.
+func setAskAttrs(attrs pmdoc.Attrs) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		for name, value := range attrs {
+			firstAsk(tree).Attrs[name] = value
+		}
+		return tree
+	}
+}
+
+// appendToAsk adds a block to the end of the document's first ask, as a browser edit can.
+func appendToAsk(block *pmdoc.Node) func(*pmdoc.Node) *pmdoc.Node {
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		ask := firstAsk(tree)
+		ask.Children = append(ask.Children, block)
+		return tree
+	}
+}
+
+func codeBlockNode(text string) *pmdoc.Node {
+	return &pmdoc.Node{Type: "code_block", Attrs: pmdoc.Attrs{"language": nil}, Children: []*pmdoc.Node{{Type: "text", Text: text}}}
+}
+
+// A version's markdown carries what a rendering writes, and an upload's server-owned ask
+// attributes are discarded for the ask row's, so an unreadable ask it carries through unchanged is
+// taken whatever the live ask holds besides: a comment's anchor mark in its text, the id a
+// reader's browser derives for a heading in it, or the answer or resolution the ask was given.
+func TestReplaceCarriesAnUnreadableAskWithWhatNoRenderingWrites(t *testing.T) {
+	const ask = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship this week?\n:::\n"
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	for _, test := range []struct {
+		name  string
+		setup func(t *testing.T, service *Service, artifactID string)
+	}{
+		{"a comment anchored in its question", func(t *testing.T, service *Service, artifactID string) {
+			if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: actor}, "this week", nil); err != nil {
+				t.Fatal(err)
+			}
+			editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+		}},
+		{"a heading with the id a browser derived", func(t *testing.T, service *Service, artifactID string) {
+			editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2), "id": "decision"}, Children: []*pmdoc.Node{{Type: "text", Text: "Decision"}}}))
+		}},
+		{"an answered ask", func(t *testing.T, service *Service, artifactID string) {
+			editLiveTree(t, service, artifactID, setAskAttrs(pmdoc.Attrs{"state": "answered", "answered_by": "alice", "answered_at": "2026-09-12T13:20:00Z", "selected": []string{"Ship"}, "answer": "Ship it."}))
+			editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+		}},
+		{"a resolved ask", func(t *testing.T, service *Service, artifactID string) {
+			editLiveTree(t, service, artifactID, setAskAttrs(pmdoc.Attrs{"state": "resolved"}))
+			editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, ask)
+			test.setup(t, service, artifactID)
+			current, err := service.Text(context.Background(), artifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.ReplaceText(context.Background(), artifactID, strings.Replace(current, "Intro.", "Introduction.", 1), actor); err != nil {
+				t.Fatalf("ReplaceText carrying the unreadable ask = %v, want it taken", err)
+			}
+		})
+	}
+}
+
+// A refused seed leaves no room behind. A room leaves the service only when it is evicted, and every
+// room counts toward the live-room limit, so a room made for a document that was never written
+// would hold a slot for good.
+func TestARefusedSeedLeavesNoRoom(t *testing.T) {
+	for _, test := range []struct{ name, markdown string }{
+		{"an ask breaking its content rule", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n```\ncode\n```\n:::\n"},
+		{"markdown outside the schema", "<div>\nblock html\n</div>\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			tx, err := service.store.Pool.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(context.Background())
+			seedCtx, ledger := service.Join(context.Background(), tx)
+			defer ledger.Discard()
+			if _, err := service.SeedText(seedCtx, artifactID, test.markdown, model.Actor{Kind: "user", ID: "alice"}); err == nil {
+				t.Fatal("SeedText took the markdown, want it refused")
+			}
+			if _, ok := service.rooms.Load(artifactID); ok {
+				t.Fatal("the refused seed left a room for the document")
+			}
+		})
+	}
+}
+
+// An ask body the schema does not allow - `paragraph+ bullet_list?` - is refused where markdown
+// enters a document, as the browser editor's parser refuses to build the block; a replace of the
+// document refuses it the same way and leaves the document as it was.
+func TestSeedAndReplaceRefuseAnAskBodyTheSchemaDoesNotAllow(t *testing.T) {
+	const withCode = "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n```\ncode\n```\n:::\n"
+	service, artifactID := newTestService(t)
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedCtx, ledger := service.Join(context.Background(), tx)
+	_, err = service.SeedText(seedCtx, artifactID, withCode, model.Actor{Kind: "user", ID: "seed"})
+	ledger.Discard()
+	_ = tx.Rollback(context.Background())
+	var invalid *ErrInvalidAskBlock
+	if !errors.As(err, &invalid) || !strings.Contains(err.Error(), "a code block") || !strings.Contains(err.Error(), "paragraph+ bullet_list?") {
+		t.Fatalf("SeedText(ask holding code) = %v, want ErrInvalidAskBlock naming the code block and the rule", err)
+	}
+
+	seedServiceText(t, service, artifactID, "Intro.\n")
+	if _, err := service.ReplaceText(context.Background(), artifactID, withCode, model.Actor{Kind: "user", ID: "alice"}); !errors.As(err, &invalid) {
+		t.Fatalf("ReplaceText(ask holding code) = %v, want ErrInvalidAskBlock", err)
+	}
+	if markdown, err := service.Text(context.Background(), artifactID); err != nil || markdown != "Intro.\n" {
+		t.Fatalf("after a refused replace = %q (%v), want it unchanged", markdown, err)
+	}
+}
+
+// A new version that carries an ask a browser edit left unreadable through unchanged is taken, as
+// an edit beside it is; one that writes into it, or writes another ask breaking the rule, is not.
+func TestReplaceCarriesAnAskTheBrowserLeftUnreadable(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n:::\n")
+	editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+	current, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := service.ReplaceText(context.Background(), artifactID, current+"\nMore.\n", actor); err != nil {
+		t.Fatalf("ReplaceText carrying the unreadable ask = %v, want it taken", err)
+	}
+	var invalid *ErrInvalidAskBlock
+	changed := strings.Replace(current, "Should we ship?", "Ship now?", 1)
+	if _, err := service.ReplaceText(context.Background(), artifactID, changed, actor); !errors.As(err, &invalid) {
+		t.Fatalf("ReplaceText changing the unreadable ask = %v, want ErrInvalidAskBlock", err)
+	}
+}
+
+// An ask a browser edit left unreadable is the browser's to repair; an edit elsewhere in the
+// document is accepted beside it, while an edit that writes into it, or writes another unreadable
+// ask, is refused.
+func TestEditsBesideAnAskTheBrowserLeftUnreadableAreAccepted(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n:::\n\nAfter.\n")
+	editLiveTree(t, service, artifactID, appendToAsk(codeBlockNode("code")))
+	actor := model.Actor{Kind: "user", ID: "alice"}
+
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "After.", With: "Later."}}, actor, nil); err != nil {
+		t.Fatalf("replace beside the unreadable ask = %v, want it accepted", err)
+	}
+	var invalid *ErrInvalidAskBlock
+	for name, op := range map[string]model.EditOp{
+		"into the unreadable ask":                   {Op: "replace", Find: "Should we ship?", With: "Ship now?"},
+		"another unreadable ask":                    {Op: "insert", After: "end", Markdown: ":::ask{#a2 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n> quoted\n:::\n"},
+		"an ask with a paragraph after its options": {Op: "insert", After: "end", Markdown: ":::ask{#a3 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- A\n- B\n\nAn afterthought.\n:::\n"},
+	} {
+		if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{op}, actor, nil); !errors.As(err, &invalid) {
+			t.Fatalf("%s = %v, want ErrInvalidAskBlock", name, err)
+		}
+	}
+	markdown, err := service.Text(context.Background(), artifactID)
+	if err != nil || !strings.Contains(markdown, "Should we ship?") || !strings.Contains(markdown, "Later.") || strings.Contains(markdown, "a2") {
+		t.Fatalf("document = %q (%v), want only the accepted replace applied", markdown, err)
 	}
 }
 
@@ -1058,7 +1452,7 @@ func TestUnlinkedDocumentIsAlwaysOpen(t *testing.T) {
 	if !open {
 		t.Fatal("unlinked document is closed")
 	}
-	namedResult, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"})
+	namedResult, err := namedVersion(t, service, artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"})
 	version := namedResult.Version
 	if err != nil {
 		t.Fatalf("name unlinked document version: %v", err)
@@ -1408,7 +1802,7 @@ func TestShutdownDrainsPendingUpdateBeforeSettling(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write document before shutdown: %v", err)
 	}
-	if _, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := namedVersion(t, service, artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write named version before shutdown: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -1535,12 +1929,15 @@ func TestShutdownBoundsAdvisoryLockedAppendAndPreservesUpdate(t *testing.T) {
 	if _, err := locker.Exec(context.Background(), `select pg_advisory_xact_lock(hashtext($1))`, artifactID); err != nil {
 		t.Fatalf("lock document append: %v", err)
 	}
-	editDone := make(chan error, 1)
-	go func() {
-		_, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"})
-		editDone <- err
-	}()
-	waitFor(t, time.Second, "durable append blocked", func() bool { return service.hasDurableAppend(artifactID) })
+	// ReplaceText returns once the room has applied the edit, and the room's update observer
+	// counts the durable append before that; the append itself cannot finish while the lock is
+	// held, so the count is still up here.
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write delayed document: %v", err)
+	}
+	if !service.hasDurableAppend(artifactID) {
+		t.Fatal("durable append finished while its advisory lock was held")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	if err := service.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -1549,10 +1946,7 @@ func TestShutdownBoundsAdvisoryLockedAppendAndPreservesUpdate(t *testing.T) {
 	if err := locker.Commit(context.Background()); err != nil {
 		t.Fatalf("release append lock: %v", err)
 	}
-	if err := <-editDone; err != nil {
-		t.Fatalf("persist delayed update: %v", err)
-	}
-	waitFor(t, time.Second, "delayed durable append commit", func() bool { return !service.hasDurableAppend(artifactID) })
+	waitForPersistedUpdates(t, service, artifactID, 2)
 	reloaded := New(Deps{Store: service.store, Events: events.NewBroker(), Settle: time.Hour})
 	defer reloaded.Shutdown(context.Background())
 	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {
@@ -1862,6 +2256,30 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit seed text: %v", err)
 	}
+}
+
+// namedVersion names a version the way every caller does: inside a transaction joined with
+// Service.Join, whose commit credits the version's authors and publishes its events. It
+// returns NamedVersion's own error, which several tests assert on, and commits only without
+// one.
+func namedVersion(t *testing.T, service *Service, artifactID, summary string, actor model.Actor) (VersionResult, error) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin named version: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	result, err := service.NamedVersion(joined, artifactID, summary, actor)
+	if err != nil {
+		return VersionResult{}, err
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit named version: %v", err)
+	}
+	return result, nil
 }
 
 func alignLatestVersionWithUpdates(t *testing.T, service *Service, artifactID string) {
@@ -2284,4 +2702,45 @@ func assertTableCellPipeVersionAndEventCounts(t *testing.T, database *store.Stor
 	if versions != wantVersions || events != wantEvents {
 		t.Fatalf("document counts = versions:%d events:%d, want versions:%d events:%d", versions, events, wantVersions, wantEvents)
 	}
+}
+
+// Quiesce is what lets the browser-test harness truncate its database between scenarios: it
+// leaves the server with no live document and no settlement of its own to run. It has to flush
+// each room before it closes it, or an edit that had only reached the room would be lost, and
+// it has to leave the service able to load the document again afterwards.
+func TestQuiesceFlushesEveryLiveDocumentAndLeavesTheServiceUsable(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+
+	if err := service.Quiesce(context.Background()); err != nil {
+		t.Fatalf("quiesce document service: %v", err)
+	}
+	if _, live := service.rooms.Load(artifactID); live {
+		t.Fatal("a document room outlived the quiesce")
+	}
+
+	// The room is gone, so this text is what the store holds: the edit reached it.
+	text, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read document after quiesce: %v", err)
+	}
+	if !strings.Contains(text, "after") {
+		t.Fatalf("document text after quiesce = %q, want the edit", text)
+	}
+
+	// And the service schedules its own settlements again: an edit after the quiesce arms the
+	// room's timer. A quiesce that never lifted its hold would leave that timer unarmed and
+	// every later edit unsettled, which settling this room by hand below cannot show.
+	editLiveTree(t, service, artifactID, replaceRun("after", "later"))
+	state := service.room(artifactID)
+	state.mu.Lock()
+	armed := service.isSettleTimerArmed(state.settle)
+	state.mu.Unlock()
+	if !armed {
+		t.Fatal("no settlement was scheduled for the edit after the quiesce")
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	waitForDocumentVersion(t, service.store, artifactID, 2)
 }

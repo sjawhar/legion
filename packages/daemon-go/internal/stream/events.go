@@ -13,12 +13,21 @@ import (
 // prompt is the one that learns it was taken (B4).
 type Event interface{ isEvent() }
 
+// AgentSecretsIdentity is the pod's session identity a hello2 carried (shimwire.AgentSecretsHello):
+// the thumbprint of the key the pod generated and its projected token for the secrets broker's
+// audience. Nil for a pane, or a pod whose runtime does not enroll.
+type AgentSecretsIdentity struct {
+	Thumbprint, PodToken string
+}
+
 // Hello is a shim's hello accepted: the claim's connection is registered, at the generation its
-// boot token was minted for. Under always-dial the shim says hello before it spawns Oh My Pi, so
-// a Hello says the pane's bridge is up, not that the agent is.
+// boot token was minted for, with the identity the hello carried, if any. Under always-dial the
+// shim says hello before it spawns Oh My Pi, so a Hello says the pane's bridge is up, not that the
+// agent is.
 type Hello struct {
-	Claim      claim.Token
-	Generation uint64
+	Claim        claim.Token
+	Generation   uint64
+	AgentSecrets *AgentSecretsIdentity
 }
 
 // TurnStart is OMP's agent_start. DeliveryID is set only when the frame carried one — the shim's
@@ -38,12 +47,21 @@ type TurnEnd struct {
 // `{success:true}` — "Agent is already processing…" once it finds a turn it did not start, and
 // whatever a prompt that failed before any turn began says
 // (worker-rpc.ts:359-368). DeliveryID is the delivery that prompt carried, so a delivery the
-// supervisor counted as started by a turn that was never its own can be taken back. Error is
-// OMP's reason, verbatim.
+// supervisor counted as started by a turn that was never its own can be taken back. A refusal OMP
+// gave while no daemon was connected reaches the next connection from the shim's backlog; the
+// prompt's request id names its delivery, so it is a LateRefusal there too. Error is OMP's reason,
+// verbatim.
 type LateRefusal struct {
 	Claim      claim.Token
 	DeliveryID string
 	Error      string
+	// Replayed is a refusal for a prompt this connection did not send, read from the shim's
+	// backlog: it answers a prompt an earlier connection sent.
+	Replayed bool
+	// ConnSequence is the registration sequence of the connection the refusal arrived on
+	// (Conn.Sequence): the supervisor compares it with the newest connection it sent the delivery
+	// through.
+	ConnSequence uint64
 }
 
 // Closed is a registered connection gone, whichever side ended it. It is emitted exactly once

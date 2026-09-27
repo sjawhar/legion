@@ -46,5 +46,19 @@
     "parser": {
       "tailwindDirectives": true
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "packages/proof-editor/src/**",
+        "!packages/proof-editor/src/tests/harness.ts",
+        "!packages/proof-editor/src/collab-cursor-plugin.ts",
+        "!packages/proof-editor/src/trailing-newline-input.ts",
+        "packages/proof-editor/upstream/**"
+      ],
+      "assist": { "enabled": false },
+      "formatter": { "enabled": false },
+      "linter": { "enabled": false }
+    }
+  ]
 }
