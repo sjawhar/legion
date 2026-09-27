@@ -9,8 +9,8 @@ reject a stale edit.
 dispatch_doc_edit({ issue?, project?, artifact, ops, precondition?, summary? })
 ```
 It returns issue or project-document owner details plus `applied`, optional `version`, `changed`,
-`unchanged_ops`, and the document token this edit produced, rendered as a `Document token: <token>`
-line. `ops` is an array of this exact `EditOp` shape:
+`unchanged_ops`, `lost_ops`, and the document token this edit produced, rendered as a
+`Document token: <token>` line. `ops` is an array of this exact `EditOp` shape:
 
 ```ts
 type EditOp = {
@@ -159,6 +159,17 @@ changes the relevant token. A stale guard returns `409 PRECONDITION_FAILED` with
 token; Dispatch applies no part of that batch. It is the hashline `#TAG` property applied to stable block ids,
 not line numbers: canonical Markdown lines shift under concurrent edits and rendering changes, while block ids
 survive moves and retyping.
+
+A browser editing the same document while your edit is in flight never makes your edit a silent
+no-op. The two changes merge, and a human's deletion of the paragraph you are rewriting wins — but
+you are told. `409 EDIT_LOST_TO_CONCURRENT_CHANGE` means the whole batch was refused and nothing
+was written: re-read the document and decide again, as with `PRECONDITION_FAILED`. A success whose
+`lost_ops` names operations means the version was written and the live document already lacks what
+those operations wrote, because the deletion landed after the version: re-read before building on
+it. `lost_ops: []` is the ordinary outcome, and a result that says it could not confirm the edit
+survived means the room is reloading — re-read. An operation that only removes text (`delete`,
+`delete_row`, `delete_column`, a `replace` that shortens) is never reported lost: a concurrent
+deletion cannot undo a removal.
 
 `retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when
