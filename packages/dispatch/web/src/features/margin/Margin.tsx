@@ -9,7 +9,7 @@ import {
   railHoverBg,
   railText,
 } from "../../theme/classes";
-import { parseIssuePath, parseProjectPath } from "../refs/routes";
+import { routeHasMargin } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { MarginSheet } from "./MarginSheet";
 import { useMarginSheet } from "./useMarginSheet";
@@ -56,12 +56,8 @@ export function Margin({
   // project, Settings, Agents - the desktop column used to spend 384 px, a third of a 1280 px
   // viewport, saying so in a sentence. It now takes no width at all, and the reader's own
   // collapse preference is untouched, so it returns as they left it on the next issue or
-  // document. The route decides rather than `useMarginOwner`, whose document owner only
-  // resolves once the artifact query lands: keying on it would open the column a beat late.
-  const routeHasMargin =
-    parseIssuePath(pathname, search) !== undefined ||
-    parseProjectPath(pathname, search)?.kind === "document";
-  if (!isCompactViewport && !routeHasMargin) {
+  // document. `routeHasMargin` is the one answer the shell reserves its gutter from too.
+  if (!isCompactViewport && !routeHasMargin(pathname, search)) {
     return null;
   }
 
