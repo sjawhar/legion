@@ -14,7 +14,7 @@ For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Up
 
 ## Workspace restrictions
 
-Do not change another phase's bookmark. Make only path-scoped logical commits with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Each red test you write goes in the repository's own test suite as its own commit, and the `evidence` of its `failures` entry names the test and the command that shows it failing. Push your own commits — the red tests and your handoff commit — as `skill://legion-worker` shows.
+Do not change another phase's bookmark. Make only path-scoped logical commits with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Each red test you write goes in the repository's own test suite as its own commit, and the `evidence` of its `failures` entry names the test and the command that shows it failing. Push your own commits — the red tests and your handoff commit — as `skill://legion-worker` shows. Under the Go daemon, push with `legion push` from bash instead: it runs that procedure and decides whether the push skips CI.
 
 ## GitHub attribution
 

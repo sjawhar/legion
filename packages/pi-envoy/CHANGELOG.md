@@ -4,6 +4,11 @@
 
 ### Added
 
+- The planner, tester, reviewer and implementer role texts each say that under the Go daemon the
+  issue branch is pushed with `legion push`, which runs the worker skill's push procedure and
+  decides whether the push skips CI. Before, only the Go worker prompt said so, and a tester that
+  followed its own role text pushed every handoff with the skill's commands, so each ran full CI
+  (LEGION-208).
 - The session publishes its own conversation for Dispatch's agent conversation view (LEGION-232):
   every turn, tool call and streamed update becomes a frame on `agentstream.<session id>.frames`
   over core NATS, a subject family the notification stream does not capture, so the bus retains
