@@ -729,12 +729,14 @@ var ErrTooLarge error = refusal("too large to publish whole")
 // that would have made it.
 var ErrInvalidSubject error = refusal("not a subject NATS accepts")
 
-// maxSubjectBytes bounds a subject the bus publishes on. The server closes a connection whose
-// protocol line runs past its max control line (4 KiB by default) and nats.go does not check it,
-// so a longer subject would close the connection every subscription and watcher of the client runs
-// on, a core publish reporting success first. The line carries a reply inbox and two lengths
-// besides, which 128 bytes covers.
-const maxSubjectBytes = 4<<10 - 128
+// maxSubjectBytes bounds a subject the bus publishes on, or a KV call builds from a key. The server
+// closes a connection whose protocol line runs past its max control line (4 KiB by default) and
+// nats.go does not check it, so a longer subject would close the connection every subscription and
+// watcher of the client runs on, a core publish reporting success first. Besides the subject, the
+// longest line nats.go sends here, `HPUB <subject> <reply> <header size> <total size>`, holds a
+// 38-byte reply inbox (`_INBOX.<nuid>.<token>`), two sizes of at most seven digits (the 1 MiB max
+// payload), its verb, spaces and line ending: 62 bytes, which 64 covers.
+const maxSubjectBytes = 4<<10 - 64
 
 // checkSubject refuses, before anything is sent, a subject the server would close the connection
 // over (ErrTooLarge) and one NATS does not accept (ErrInvalidSubject).

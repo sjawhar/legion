@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -14,7 +15,11 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // During a rolling deploy the replacement listener cannot bind its durable consumer until the task
@@ -103,6 +108,73 @@ func TestAWebhookIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		t.Fatalf("release the durable as the old task: %v", err)
 	}
 	listener.waitHealthy(t)
+}
+
+// A listener built before the KV key check stored role claims, interests, sessions and CI records
+// under keys this one refuses to write (testnats.LegacyKeys), and every listener on that NATS reads
+// those buckets as it starts. It must start healthy over them and serve the ordinary keys beside
+// them: one stored role must not keep every listener from starting.
+func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect bus: %v", err)
+	}
+	t.Cleanup(client.Close)
+	resetListenerTestState(t, client.Conn)
+	t.Cleanup(func() { resetListenerTestState(t, client.Conn); clearKVBucket(t, client.Conn, cistore.Bucket) })
+	bucket := func(name string, ttl time.Duration) natsgo.KeyValue {
+		t.Helper()
+		kv, err := client.JS().KeyValue(name)
+		if errors.Is(err, natsgo.ErrBucketNotFound) {
+			kv, err = client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: name, TTL: ttl, Storage: natsgo.FileStorage})
+		}
+		if err != nil {
+			t.Fatalf("open bucket %s: %v", name, err)
+		}
+		return kv
+	}
+	put := func(kv natsgo.KeyValue, key string, value any) {
+		t.Helper()
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("encode %s value: %v", kv.Bucket(), err)
+		}
+		if _, err := kv.Put(key, data); err != nil {
+			t.Fatalf("store the %d-byte %s key: %v", len(key), kv.Bucket(), err)
+		}
+	}
+	now := time.Now().UnixMilli()
+	roles, interests := bucket(store.RoleBucket, 0), bucket(store.Bucket, 0)
+	sessions, records := bucket(session.SessionBucket, 5*time.Minute), bucket(cistore.Bucket, 0)
+	put(roles, "reviewer", store.RoleClaim{HolderSessionID: "ses_live", ClaimedAt: now})
+	put(interests, "ses_live", store.Interest{SessionID: "ses_live", MachineID: "startup-legacy", Topics: []string{contracts.AgentSubject("ses_live")}, UpdatedAt: now})
+	put(sessions, "ses_live", session.SessionEntry{Port: 1, MachineID: "startup-legacy", UpdatedAt: now})
+	for _, kv := range []natsgo.KeyValue{roles, interests, sessions, records} {
+		readable, unreadable := testnats.LegacyKeys(kv.Bucket(), "k")
+		for _, key := range []string{readable, unreadable} {
+			switch kv {
+			case roles:
+				put(kv, key, store.RoleClaim{HolderSessionID: "ses_gone", ClaimedAt: now})
+			case interests:
+				put(kv, key, store.Interest{SessionID: key, MachineID: "earlier", UpdatedAt: now})
+			case sessions:
+				put(kv, key, session.SessionEntry{Port: 2, MachineID: "earlier", UpdatedAt: now})
+			default:
+				put(kv, key, cistore.State{Owner: "acme", Repo: "widgets", Number: "7", SHA: strings.Repeat("c", 40)})
+			}
+		}
+	}
+
+	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "startup-legacy")
+	listener.waitHealthy(t)
+	request, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/v1/roles/reviewer", nil)
+	if err != nil {
+		t.Fatalf("role request: %v", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+listenerTestToken)
+	if status, answer := do(t, request); status != http.StatusOK || !strings.Contains(answer, `"holder":"ses_live"`) {
+		t.Fatalf("GET /v1/roles/reviewer beside the earlier listener's keys: status %d %q, want 200 naming ses_live\n%s", status, answer, listener.output.String())
+	}
 }
 
 // do sends request and returns its status and body.

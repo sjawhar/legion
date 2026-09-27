@@ -14,8 +14,8 @@ import (
 // hold. A key long enough to take the subject past the server's protocol line would close the
 // connection every subscription and watcher of the client runs on, and one holding an empty token
 // (`a..b`, which nats.go allows) names a subject no stream matches. The handle a bucket opens with
-// refuses both as the ErrRefused they are, before sending anything, whichever call carries the key,
-// whether the open created the bucket or found it.
+// refuses both as the ErrRefused they are, before sending anything, on every call that builds a
+// subject from its key, whether the open created the bucket or found it.
 func TestAKeyValueHandleRefusesAKeyNATSWouldRefuse(t *testing.T) {
 	client, err := Connect([]string{testnats.URL(t)})
 	if err != nil {
@@ -53,15 +53,14 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 	t.Helper()
 
 	calls := map[string]func(key string) error{
-		"Get":         func(key string) error { _, err := kv.Get(key); return err },
-		"GetRevision": func(key string) error { _, err := kv.GetRevision(key, 1); return err },
-		"Put":         func(key string) error { _, err := kv.Put(key, []byte("v")); return err },
-		"PutString":   func(key string) error { _, err := kv.PutString(key, "v"); return err },
-		"Create":      func(key string) error { _, err := kv.Create(key, []byte("v")); return err },
-		"Update":      func(key string) error { _, err := kv.Update(key, []byte("v"), 1); return err },
-		"Delete":      func(key string) error { return kv.Delete(key) },
-		"Purge":       func(key string) error { return kv.Purge(key) },
-		"History":     func(key string) error { _, err := kv.History(key); return err },
+		"Get":       func(key string) error { _, err := kv.Get(key); return err },
+		"Put":       func(key string) error { _, err := kv.Put(key, []byte("v")); return err },
+		"PutString": func(key string) error { _, err := kv.PutString(key, "v"); return err },
+		"Create":    func(key string) error { _, err := kv.Create(key, []byte("v")); return err },
+		"Update":    func(key string) error { _, err := kv.Update(key, []byte("v"), 1); return err },
+		"Delete":    func(key string) error { return kv.Delete(key) },
+		"Purge":     func(key string) error { return kv.Purge(key) },
+		"History":   func(key string) error { _, err := kv.History(key); return err },
 		"Watch": func(key string) error {
 			watcher, err := kv.Watch(key)
 			if err == nil {
@@ -102,7 +101,7 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 		}
 	}
 	// The control: the same handle still takes a key that fits, the longest one included.
-	longest := strings.Repeat(letter, maxSubjectBytes-kvKeyOverhead("kv_key_check"))
+	longest := strings.Repeat(letter, maxSubjectBytes-watchOverhead("kv_key_check"))
 	for _, key := range []string{"fits-" + letter, longest} {
 		if _, err := kv.Put(key, []byte("v")); err != nil {
 			t.Fatalf("put %d-byte key: %v", len(key), err)
@@ -117,5 +116,65 @@ func requireKeysChecked(t *testing.T, client *Client, kv nats.KeyValue, letter s
 	}
 	if !client.Conn.IsConnected() {
 		t.Fatalf("the longest accepted key left the connection %v, want it connected", client.Conn.Status())
+	}
+}
+
+// A key already in a bucket stays usable whatever this build would now refuse to write: a listener
+// built before the key check stored keys up to the length its own direct get could read. A write
+// of such a key is refused, since a key written now must stay readable and watchable; a read is
+// refused only where the read's own subject would be too long, and every such key still lists and
+// deletes, so a store can serve it or skip it, and a reaper can remove it, rather than fail.
+func TestAKeyAnEarlierListenerStoredStaysListableAndDeletable(t *testing.T) {
+	client, err := Connect([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	js, err := client.Conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	raw, err := js.CreateKeyValue(&nats.KeyValueConfig{Bucket: "kv_legacy", Storage: nats.MemoryStorage})
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	t.Cleanup(func() { _ = js.DeleteKeyValue("kv_legacy") })
+	readable, unreadable := testnats.LegacyKeys("kv_legacy", "l")
+	for _, key := range []string{readable, unreadable} {
+		if _, err := raw.Put(key, []byte("legacy")); err != nil {
+			t.Fatalf("store the %d-byte key as an earlier listener did: %v", len(key), err)
+		}
+	}
+	kv, err := OpenKeyValue(js, "kv_legacy")
+	if err != nil {
+		t.Fatalf("open bucket: %v", err)
+	}
+
+	for _, key := range []string{readable, unreadable} {
+		if _, err := kv.Put(key, []byte("again")); !errors.Is(err, ErrTooLarge) {
+			t.Fatalf("put of the stored %d-byte key = %v, want ErrTooLarge", len(key), err)
+		}
+	}
+	entry, err := kv.Get(readable)
+	if err != nil || string(entry.Value()) != "legacy" {
+		t.Fatalf("get of the stored %d-byte key = %v, want its value", len(readable), err)
+	}
+	if _, err := kv.Get(unreadable); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("get of the stored %d-byte key = %v, want ErrTooLarge", len(unreadable), err)
+	}
+	keys, err := kv.Keys()
+	if err != nil || len(keys) != 2 {
+		t.Fatalf("keys = %d, %v; want both stored keys", len(keys), err)
+	}
+	for _, key := range []string{unreadable, readable} {
+		if err := kv.Delete(key); err != nil {
+			t.Fatalf("delete of the stored %d-byte key: %v", len(key), err)
+		}
+	}
+	if keys, err := kv.Keys(); !errors.Is(err, nats.ErrNoKeysFound) {
+		t.Fatalf("keys after both deletes = %d, %v; want none", len(keys), err)
+	}
+	if !client.Conn.IsConnected() {
+		t.Fatalf("the stored keys left the connection %v, want it connected", client.Conn.Status())
 	}
 }

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
@@ -590,7 +591,7 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
 	r := &Registry{roleKV: roleKV, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
-	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
 	return r, kv
 }
 
@@ -1601,7 +1602,7 @@ func TestWatcherEvictsMalformedValue(t *testing.T) {
 func useKV(t *testing.T, r *Registry, kv natsgo.KeyValue) {
 	t.Helper()
 	r.watcher.Stop()
-	r.watcher = kvwatch.New("interest registry", kv, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
 	r.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

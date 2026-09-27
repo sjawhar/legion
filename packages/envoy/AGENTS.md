@@ -892,7 +892,11 @@ the synchronous listener call records the sent or failed attempt instead of blin
   (`bus.ErrInvalidSubject`). Every KV bucket is opened through `bus.EnsureKeyValue` or
   `bus.OpenKeyValue`, whose handle checks its keys the same way, since a KV call builds its subjects
   from the key: a key that would take one past the protocol line, or holding an empty token, is
-  refused before anything is sent. The webhook is answered 422, which Dispatch's redelivery sweep
+  refused before anything is sent. A write is held to the longest subject its key makes (a watcher's
+  create request), so a key written now stays readable, watchable and deletable; any other call only
+  to its own subject, so a key an earlier build stored past that bound still lists and deletes. The
+  stores skip such a key where they cannot read it, with a WARN, rather than fail a start or a
+  sweep, and the reapers delete it. The webhook is answered 422, which Dispatch's redelivery sweep
   takes as terminal, and logged `<source> publish refused` (or `github ci record refused`); any
   other failure stays a 503 logged `<source> publish failed`. A head's CI record is bounded at 384
   KiB (`maxRecordBytes`, about 1,300 checks) and its settlement at 960 KiB (`maxSettlementBytes`; a

@@ -34,12 +34,12 @@ type Watcher struct {
 	applyMu sync.Mutex
 
 	// first is the handle Start watches.
-	first nats.KeyValue
+	first bus.KeyValue
 
 	mu sync.RWMutex
 	// kv is the handle the store reads and writes through: first, until a watch moves it together
 	// with the watcher, so the store writes through the connection its cache reads.
-	kv         nats.KeyValue
+	kv         bus.KeyValue
 	watcher    nats.KeyWatcher
 	generation uint64
 	stopped    bool
@@ -54,9 +54,10 @@ type Watcher struct {
 // one at a time; an entry from a watcher already replaced is dropped rather than applied. reset
 // empties the cache and its revision fence: a recreated bucket numbers its revisions from 1
 // again, so the old fence would drop every entry the new bucket delivers. New watches nothing
-// until Start. kv is the handle bus.EnsureKeyValue opened, and each Rewatch opens its replacement
-// with bus.OpenKeyValue, so every handle the store reads and writes through checks its keys.
-func New(name string, kv nats.KeyValue, apply func(nats.KeyValueEntry), reset func()) *Watcher {
+// until Start. kv is a bus.KeyValue, the handle bus.EnsureKeyValue opens, and each Rewatch opens its
+// replacement with bus.OpenKeyValue, so every handle the store reads and writes through checks its
+// keys.
+func New(name string, kv bus.KeyValue, apply func(nats.KeyValueEntry), reset func()) *Watcher {
 	return &Watcher{
 		name:   name,
 		bucket: kv.Bucket(),
@@ -114,7 +115,7 @@ func (w *Watcher) Rewatch(conn *nats.Conn) error {
 }
 
 // KV is the bucket handle the store reads and writes through.
-func (w *Watcher) KV() nats.KeyValue {
+func (w *Watcher) KV() bus.KeyValue {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
 	return w.kv
@@ -200,7 +201,7 @@ func (w *Watcher) Stop() {
 // newer watch has switched to a recreated bucket: a watch whose stream is older than a running,
 // healthy watcher's is discarded, and that watcher stays. After Stop it arms nothing and only
 // moves the handle.
-func (w *Watcher) watch(kv nats.KeyValue) error {
+func (w *Watcher) watch(kv bus.KeyValue) error {
 	w.mu.Lock()
 	stopped := w.stopped
 	if stopped {

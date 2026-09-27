@@ -281,12 +281,17 @@ func (r *SessionRegistry) Delete(sessionID string) error {
 	kv := r.watcher.KV()
 	entry, err := kv.Get(sessionID)
 	opts := []nats.DeleteOpt{}
-	if err == nil {
+	switch {
+	case err == nil:
 		if entry.Revision() > revision {
 			revision = entry.Revision()
 		}
 		opts = append(opts, nats.LastRevision(entry.Revision()))
-	} else if !errors.Is(err, nats.ErrKeyNotFound) {
+	case errors.Is(err, nats.ErrKeyNotFound), errors.Is(err, bus.ErrRefused):
+		// A key this build cannot read (an earlier build stored it past what a read of it may
+		// send) it cannot write either, so nothing can land before the delete: it goes without a
+		// revision.
+	default:
 		return err
 	}
 	if err := kv.Delete(sessionID, opts...); err != nil {

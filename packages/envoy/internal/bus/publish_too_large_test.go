@@ -45,6 +45,7 @@ func TestPublishRefusesAnEnvelopeNATSCannotTakeWhole(t *testing.T) {
 		says     string
 	}{
 		{"a subject past the server's protocol line", envelope(push+strings.Repeat("r", 5000), "{}"), ErrTooLarge, "a subject of 5046 bytes"},
+		{"a subject one byte past the bound", envelope(push+strings.Repeat("r", maxSubjectBytes-len(push)+1), "{}"), ErrTooLarge, "a subject of 4033 bytes, past 4032"},
 		{"a payload past the server's max payload", envelope(push+"main", strings.Repeat("p", 1<<20)), ErrTooLarge, "max payload of 1048576 bytes"},
 		{"a core subject past the server's protocol line", envelope(contracts.RoleTopicPrefix+strings.Repeat("r", 5000), "{}"), ErrTooLarge, "a subject of 5019 bytes"},
 		{"a subject holding a space", envelope(push+"ci yml", "{}"), ErrInvalidSubject, `"notifications.github.acme.widgets.push.branch.ci yml"`},
@@ -68,5 +69,12 @@ func TestPublishRefusesAnEnvelopeNATSCannotTakeWhole(t *testing.T) {
 				t.Fatalf("publish after the refusal: %v", err)
 			}
 		})
+	}
+	// The bound itself publishes: its line, reply inbox and sizes included, is within the server's.
+	if err := client.Publish(envelope(push+strings.Repeat("r", maxSubjectBytes-len(push)), "{}")); err != nil {
+		t.Fatalf("publish on a subject of %d bytes: %v", maxSubjectBytes, err)
+	}
+	if !client.Conn.IsConnected() {
+		t.Fatalf("a subject at the bound left the connection %v, want it connected", client.Conn.Status())
 	}
 }
