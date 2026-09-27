@@ -164,9 +164,18 @@ back without them, and an accepted suggestion writes its code as it reads back (
 in a list item's code, a line it leaves holding only spaces and tabs, CommonMark's blank line, is
 written empty, the spaces and tabs that line keeps around it included, while any other character,
 a no-break space or a form feed among them, is kept, as both readers keep it; then, where only
-line breaks follow it, its text loses the line breaks that end it. A suggestion that runs past the
-code into the next block is written as sent, the rest of that block joining it. Code on other
-lines stays as it was. A line of colons in code inside a typed block is kept: the browser editor's
+line breaks follow it, its text loses the line breaks that end it. A suggestion can run past the
+code into the blocks after it. One that takes all of the text of the textblock it ends in leaves
+nothing after its own text, as at the code's end, so both rules apply. One that ends inside that
+text is written as sent, and the rest of that text joins the code after it, so a line of spaces
+and tabs it leaves in a list item's code reads back empty and the accept is refused. Code on other
+lines stays as it was. An accept whose code changes how a block around it reads back is refused,
+advising rejecting the suggestion (`refuseAcceptedCodeThatReshapes`). It names the typed block
+holding the code when the document-level block that reads back otherwise is the one holding the
+code, and otherwise names that block, such as the list of a task item the suggestion empties ahead
+of its nested list. The edit route's
+refusal of the same shape advises moving the code out of the typed block instead, and a reject in
+code, like any reject, is not read back. A line of colons in code inside a typed block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
 them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -
@@ -181,7 +190,26 @@ paragraph is stored `\---` and so on (the renderer's line-start escapes). Beside
 paragraph it is written the same way, since an empty paragraph is not written. Accepting a
 suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`, its checks in
 `docs/accept.go`) writes blocks, so it stores what reads back as the live document, and refuses
-what cannot, naming `replace_with`. It first settles the blocks it changed (`settleAccepted`,
+what cannot, naming `replace_with`. A table the splice cut is padded to its width as the browser
+editor's table plugin pads it (`padCutTables`, `pmdoc.PadTables`), where the browser's accept
+writes the replacement where `Splice` does (`padsLikeTheBrowser`): inline text, code's literal
+text, an empty replacement (which deletes the matched text, by this accept's own rule, where the
+browser's accept of an empty suggestion only clears its mark), or block content over exactly the
+two textblocks the browser's accept replaces whole (`pmdoc.MultiblockRange`, which reads each
+textblock one position short of its end as the editor does), the first of them a document-level
+block. Other block content over a table, such as a list over one cell's whole text, or one
+running from a paragraph in a callout, a quote or a list item, or from one character into a
+paragraph or heading, is not padded. Nor is anything running from one table into the next, or
+from one body row into another (`joinsTwo`), which the browser can join into one table or row,
+even where the browser's result would read as the padded one would; the reject refuses a join of two tables the same way. A range from the
+header row into the first body row is padded, since those rows cannot join. An accept that is not
+padded is judged as the splice left it, and the checks below refuse one that cut a table. Block
+content the browser takes whose range ends short of the last textblock's end, within the editor's
+tolerance (`- a` over `abc Next` with the cell holding `Next e`), keeps the rest of that textblock
+(` e`), which the browser's accept drops with the textblock; the cell keeps text, so nothing there
+is cut or padded. `pmdoc/multiblock_test.go`'s table is all that pins `pmdoc.MultiblockRange` to
+the editor, so a proof-sdk pin bump that changes `resolveStructuralMultiblockRange` re-checks it.
+It then settles the blocks it changed (`settleAccepted`,
 `pmdoc.AgreeWithReadBack`): the empty halves a block replacement leaves of the textblock it lands
 in, which carry no block id, go where the renderer does not write them, and each list and list
 item takes the spread its markdown reads back with, paired as far down as the read-back check
@@ -324,10 +352,43 @@ block-id check (`400 INVALID_MARKDOWN`, the block-id paragraph above). An id the
 (a browser edit can leave one, and an upload can carry it on) does not refuse an accept, whether the
 accept leaves that ask alone or writes into it, unless the accept adds a second ask under it: an id
 that gains an ask is refused whatever it held, since the id repair would hand the held ask's row
-and answer to whichever comes first. A reject's asks (`POST /api/v1/comments/{id}/reject`,
-the same `applySuggestion`) are never checked, since removing the text a browser insert added gives
-back the document the insert started from. A replacement no level of the document can hold where
-the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
+and answer to whichever comes first. A reject (`POST /api/v1/comments/{id}/reject`, the same
+`applySuggestion`) is never checked, its asks included, since removing the text a browser insert
+added gives back the document the insert started from. It deletes that text as the browser editor's
+reject does (`rejectedInsert`): the insert's runs that meet across a block boundary, nothing but
+the boundary between them, are one range (`pmdoc.MarkSpans`), so the blocks join, which undoes the
+split an insert made (Enter typed while suggesting), and a table the range cuts is padded to its
+width as the editor's table plugin pads it (`pmdoc.PadTables`, after prosemirror-tables'
+`fixTables`). A removal the
+document cannot hold, one the schema refuses or the renderer cannot write, is refused, `400
+INVALID_OP` on `anchor`, advising accepting the suggestion or editing the document
+(`rejectSpliceRefusal`), with the document unchanged and the suggestion open. A reject is not read
+back. Where it stores otherwise than the browser's reject, or refuses what the browser stores:
+- Text without the insert's mark between two of its runs is kept, each run deleted on its own; the
+  browser deletes that text too, and the editor leaves it when someone suggests inside another
+  person's insert or pastes into it outside suggestion mode.
+- An insert running into an ask or callout from the text before it is refused; the browser drops
+  the emptied ask or callout.
+- One running from one table into the next is refused; the browser joins the tables.
+- One over a header cell and the body cell below it (`| QQ |\n| --- |\n| ZZ |`) is refused; the
+  browser stores the emptied cells.
+- `# HelloQQ` then `## ZZ world.` keeps two headings (`# Hello`, `## &#32;world.`); the browser's
+  delete joins them, and `Splice`, which makes ProseMirror's replace, keeps headings of two levels
+  apart.
+- A cell at a row's end into the next row's first cell keeps the rows apart and pads the next row,
+  whose remaining cells move one column left keeping their own alignment, so each reads back with
+  its new column's; the browser joins the rows and widens the table.
+- One into a one-column table's only header cell stores one empty header cell; the browser leaves
+  the header row empty and adds a row, which the schema cannot hold.
+- A padded cell takes its column's alignment, where `fixTables` makes it left, so the column reads
+  back as it was.
+- A paragraph's end into a footnote definition stores the reference reading back as literal text,
+  and a paragraph's end into code turns the code's line break into a soft break.
+- Since a reject is not read back, it can store a document that reads back otherwise: a table
+  column's alignment, an emptied paragraph beside other blocks (which is not written), a task item
+  emptied to `- [ ]` (which reads back as a plain item), and nested lists or footnote blocks.
+
+An accepted replacement no level of the document can hold where the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
 `replace_with` (`pmdoc.ErrReplacementDoesNotFit`), and inline text over a range that runs into an
 ask or callout from the text before it, at any depth (inside a blockquote, a list item or another
 callout too), is `400 INVALID_OP` on `anchor` (`pmdoc.ErrJoinEmptiesTypedBlock`): ProseMirror's

@@ -655,34 +655,56 @@ func distance(left, right int) int {
 	return left - right
 }
 
-// FindMark finds the first document-contiguous range covered by a mark identity.
-func FindMark(doc *Node, markType, id string) (Range, string, bool) {
-	var quote strings.Builder
-	var marked Range
-	found := false
+// MarkSpans is the text a mark identity covers as ranges, in document order: its text runs, each
+// joined to the next when no text without the mark lies between them, so a run at a textblock's
+// end and one at the next textblock's start are one span across the boundary between them, as the
+// browser editor takes them, while text without the mark ends a span.
+func MarkSpans(doc *Node, markType, id string) []Range {
+	var spans []Range
+	between := false
 	walk(doc, func(node *Node, _ []int, pos, end int) bool {
 		if node.Type != "text" {
 			return true
 		}
 		if nodeMarkID(node, markType) != id {
-			return !found
-		}
-		if !found {
-			found = true
-			marked = Range{From: pos, To: end}
-			quote.WriteString(node.Text)
+			between = true
 			return true
 		}
-		if pos != marked.To {
-			quote.WriteByte(' ')
+		if last := len(spans) - 1; last >= 0 && !between {
+			spans[last].To = end
+		} else {
+			spans = append(spans, Range{From: pos, To: end})
 		}
-		marked.To = end
-		quote.WriteString(node.Text)
+		between = false
 		return true
 	})
-	if !found {
+	return spans
+}
+
+// FindMark finds the first document-contiguous range covered by a mark identity, the first of
+// its MarkSpans, and its text, the runs joined with a space where a block boundary lies between.
+func FindMark(doc *Node, markType, id string) (Range, string, bool) {
+	spans := MarkSpans(doc, markType, id)
+	if len(spans) == 0 {
 		return Range{}, "", false
 	}
+	marked := spans[0]
+	var quote strings.Builder
+	last := -1
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if pos >= marked.To {
+			return false
+		}
+		if node.Type != "text" || pos < marked.From {
+			return true
+		}
+		if last >= 0 && pos != last {
+			quote.WriteByte(' ')
+		}
+		quote.WriteString(node.Text)
+		last = end
+		return true
+	})
 	return marked, quote.String(), true
 }
 
