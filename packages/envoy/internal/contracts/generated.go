@@ -193,6 +193,21 @@ func GhostWisprSubject(sessionId string, kind string) string {
 	return GhostWisprTopicPrefix + sessionId + "." + kind
 }
 
+// AgentStreamSubjectPrefix roots the live agent conversation stream. Generated from
+// AGENT_STREAM_SUBJECT_PREFIX in packages/contracts so the session that publishes its own turns
+// and the Dispatch relay that forwards them to a browser cannot drift apart. It sits outside
+// "notifications." deliberately: that family is what the notification stream captures, so every
+// frame travels over core NATS and the bus retains none of it.
+const AgentStreamSubjectPrefix = "agentstream."
+
+func AgentStreamFramesSubject(sessionID string) string {
+	return AgentStreamSubjectPrefix + sessionID + ".frames"
+}
+
+func AgentStreamControlSubject(sessionID string) string {
+	return AgentStreamSubjectPrefix + sessionID + ".control"
+}
+
 func WhatsappSubject(phone, jid, kind string) string {
 	return "notifications.whatsapp." + phone + "." + jid + "." + kind
 }

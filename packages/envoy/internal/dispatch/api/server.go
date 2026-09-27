@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -65,7 +66,10 @@ type Deps struct {
 	// OIDC verifies a JWT-shaped bearer as a Kubernetes pod's projected
 	// service-account token; nil is the unconfigured deployment, where a
 	// JWT-shaped bearer is only ever an unknown personal token.
-	OIDC             *oidc.Verifier
+	OIDC *oidc.Verifier
+	// AgentStream relays a live session's own conversation to a human watching it; nil is a
+	// deployment with no NATS, where the viewer route answers 503 rather than hanging.
+	AgentStream      agentstream.Source
 	TestHooksEnabled bool
 }
 
@@ -86,9 +90,11 @@ type DepsInput struct {
 	Events       *events.Broker
 	// App is the loaded GitHub App credentials (nil when unconfigured);
 	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
-	App              *auth.AppConfig
-	GitHubAPIBase    string
-	OIDC             *oidc.Verifier
+	App           *auth.AppConfig
+	GitHubAPIBase string
+	OIDC          *oidc.Verifier
+	// AgentStream is the live agent conversation relay; nil where the deployment has no NATS.
+	AgentStream      agentstream.Source
 	TestHooksEnabled bool
 }
 
@@ -138,6 +144,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		GitHub:           github,
 		Architecture:     architecture.NewImporter(input.Store, github, input.Events),
 		OIDC:             input.OIDC,
+		AgentStream:      input.AgentStream,
 		TestHooksEnabled: input.TestHooksEnabled,
 	}, nil
 }
