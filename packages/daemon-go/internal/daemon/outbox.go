@@ -314,8 +314,13 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if earlier := earlierNoticeFor(tree, architect, runs); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
-	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
-	published := r.notices.Publish(ctx, roleTopicPrefix+string(architect), message, payload, fmt.Sprintf("legion-outbox:%d", row.ID))
+	key := record.OutboxKey(row.ID)
+	if payload.ResendOf != 0 {
+		key = record.OutboxKey(payload.ResendOf)
+	}
+	notice := payload
+	notice.ResendOf = 0
+	published := r.notices.Publish(ctx, roleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	switch {
 	case published == nil:
 		return nil
@@ -339,7 +344,7 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
 	}
-	err := r.notices.Publish(ctx, roleTopicPrefix+payload.Role, payload.Packet, payload.Packet, fmt.Sprintf("legion-outbox:%d", row.ID))
+	err := r.notices.Publish(ctx, roleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
 	if errors.Is(err, notify.ErrNoHolder) {
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
 	}
@@ -356,8 +361,7 @@ func (r *outbox) controllerNotice(ctx context.Context, row record.OutboxRow, pay
 	if r.notices == nil {
 		return errors.New("controller notice executor has no Envoy publisher")
 	}
-	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
-	if err := r.notices.Publish(ctx, notify.ControllerTopic(r.project), message, record.Notice(payload), fmt.Sprintf("legion-outbox:%d", row.ID)); err != nil {
+	if err := r.notices.Publish(ctx, notify.ControllerTopic(r.project), noticeSummary(payload.Kind, row.Issue), record.Notice(payload), record.OutboxKey(row.ID)); err != nil {
 		return fmt.Errorf("publish controller notice for %s: %w", row.Issue, err)
 	}
 	return nil

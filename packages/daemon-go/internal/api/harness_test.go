@@ -216,7 +216,7 @@ func newHarness(t *testing.T) *harness {
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
 		Pool: st.Pool(), Record: record.NewStore(),
-		ClaimReady: func(_ context.Context, c supervise.Claim) { *readied = append(*readied, c) },
+		ClaimReady: func(c supervise.Claim) { *readied = append(*readied, c) },
 	})
 	return &harness{t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler, readied: readied}
 }

@@ -824,7 +824,7 @@ func (m *Machine) forgetSend() {
 // teardown. A confirmation and a retire write the claim together with the delivery they change,
 // each in one transaction, and every write hands the store the same shape (stored).
 func (m *Machine) persist(ctx context.Context) error {
-	if !HoldsCapability(m.claim.State) {
+	if !holdsCapability(m.claim.State) {
 		m.claim.CapabilityHash = nil
 	}
 	return m.deps.Store.PutClaim(ctx, m.stored())
@@ -836,15 +836,14 @@ func (m *Machine) persist(ctx context.Context) error {
 func (m *Machine) stored() Claim {
 	c := m.claim
 	c.Pending = nil
-	if !HoldsCapability(c.State) {
+	if !holdsCapability(c.State) {
 		c.CapabilityHash = nil
 	}
 	return c
 }
 
-// HoldsCapability says whether a claim in state has a registered agent with a running process:
-// its session is up and can take a delivery.
-func HoldsCapability(state ClaimState) bool {
+// holdsCapability says whether a claim in state has a registered agent with a running process.
+func holdsCapability(state ClaimState) bool {
 	switch state {
 	case StateRegistered, StateReady, StateWorking, StateIdle:
 		return true

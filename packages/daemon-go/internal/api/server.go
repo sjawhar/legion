@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"log/slog"
@@ -59,8 +58,9 @@ type Options struct {
 	Dispatch dispatch.Client
 	// ClaimReady is told of each claim whose agent's ready the claim took, on the session it
 	// registered: a launched or relaunched agent once it took its Envoy role, or a live one that
-	// took the role back. A ready the claim refuses tells no one. Nil tells no one.
-	ClaimReady func(ctx context.Context, c supervise.Claim)
+	// took the role back. A ready the claim refuses tells no one. Nil tells no one. It is called
+	// before the route answers the agent, so it returns at once.
+	ClaimReady func(c supervise.Claim)
 }
 
 type server struct {
@@ -82,7 +82,7 @@ type server struct {
 	handlers     []intake.Handler
 	records      record.Store
 	dispatch     dispatch.Client
-	claimReady   func(ctx context.Context, c supervise.Claim)
+	claimReady   func(c supervise.Claim)
 	log          *slog.Logger
 }
 

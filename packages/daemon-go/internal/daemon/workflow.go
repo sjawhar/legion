@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -57,7 +60,18 @@ type workflowRuntime struct {
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
 	failed chan error
+	// readied is the architects claimReady recorded whose waiting notices releaseReadied has not
+	// released yet; readyWake, holding at most one wake, tells it there are some.
+	readyMu   sync.Mutex
+	readied   map[claim.Token]bool
+	readyWake chan struct{}
 }
+
+// readyReleaseTimeout bounds one release of ready architects' waiting notices
+// (outbox.releaseWaiting): a read of a project's waiting notices and their trees, then one update,
+// each well under a second. A release that runs this long holds a database that stopped answering;
+// it is logged, and the notices it would have released still go on their schedule.
+const readyReleaseTimeout = 30 * time.Second
 
 // appMintAttempt bounds one attempt at the boot's App tokens, both Apps' mints: installation
 // discovery, the exchange and the bot identity lookups each answer in well under a second, so an
@@ -133,7 +147,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		pool: st.Pool(), records: records, engine: engine, admission: admission,
 		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
-		failed: make(chan error, 1),
+		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -321,6 +335,10 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		return nil
 	})
 	group.Go(func() error {
+		w.releaseReadied(running)
+		return nil
+	})
+	group.Go(func() error {
 		// A notice the listener accepted but could not forward is queued again (outbox.rehold).
 		sub, err := subscribeNoticeExceptions(w.conn, func(data []byte) {
 			if err := w.outbox.rehold(running, data); err != nil {
@@ -344,15 +362,45 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	return group.Wait()
 }
 
-// claimReady releases the notices waiting for a later attempt for an architect whose claim is
-// ready (outbox.releaseWaiting): a relaunched architect is told what it missed at once, ahead of
-// what follows.
-func (w *workflowRuntime) claimReady(ctx context.Context, c supervise.Claim) {
+// claimReady records an architect whose claim is ready, for releaseReadied to release the notices
+// waiting for a later attempt that it owns (outbox.releaseWaiting): a relaunched architect is told
+// what it missed at once, ahead of what follows. The ready route calls it before it answers the
+// agent, so it only records the claim and wakes the release.
+func (w *workflowRuntime) claimReady(c supervise.Claim) {
 	if c.Role != claim.RoleArchitect {
 		return
 	}
-	if err := w.outbox.releaseWaiting(ctx, c.Token); err != nil {
-		w.log.Error("release the notices waiting for an architect", "claim", c.Token, "error", err)
+	w.readyMu.Lock()
+	w.readied[c.Token] = true
+	w.readyMu.Unlock()
+	select {
+	case w.readyWake <- struct{}{}:
+	default:
+	}
+}
+
+// releaseReadied releases, until ctx ends, the waiting notices of the architects claimReady
+// recorded: each wake takes every architect recorded since the last one, in one release.
+func (w *workflowRuntime) releaseReadied(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.readyWake:
+		}
+		w.readyMu.Lock()
+		architects := slices.Collect(maps.Keys(w.readied))
+		clear(w.readied)
+		w.readyMu.Unlock()
+		if len(architects) == 0 {
+			continue
+		}
+		release, cancel := context.WithTimeout(ctx, readyReleaseTimeout)
+		err := w.outbox.releaseWaiting(release, architects...)
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			w.log.Error("release the notices waiting for ready architects", "architects", architects, "error", err)
+		}
 	}
 }
 

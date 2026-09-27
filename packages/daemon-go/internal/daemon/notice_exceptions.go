@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -49,10 +49,6 @@ const (
 // nothing.
 var noticeReholdDelays = [...]time.Duration{30 * time.Second, pluginHeartbeat, max(listenerSessionTTL, listenerClaimStale) + time.Minute}
 
-// outboxDedupeKey is the dedupe key the outbox publishes every row under (notice), which names
-// the row: a report carrying another key is not about a notice of this daemon.
-var outboxDedupeKey = regexp.MustCompile(`^legion-outbox:[0-9]+$`)
-
 // errNoticeException is a report the listener sent that cannot be read as the failed forward of
 // a notice.
 var errNoticeException = errors.New("malformed role-lane exception")
@@ -83,22 +79,31 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // architect's session failed after the publish was accepted: the forward failed
 // (`delivery_failed`), the holder lapsed between the two (`no_holder`), or the session the
 // listener forwarded to did not confirm it in time (`receipt_timeout`) and is not the claim's own
-// live session. A session that stopped running but is still registered produces that last one:
-// the listener forwards to it and waits for a receipt that never comes. So does the relaunch
-// window, where the claim's new session has registered with the daemon but its plugin has not yet
-// taken the Envoy role back from the stopped one. A late receipt from the claim's own live session
-// (its agent registered and running, supervise.HoldsCapability) is a slow holder that has the
-// notice, as the TypeScript daemon reads it (processes.ts, handleException), so it is logged and
-// nothing is queued.
+// session with its role taken. A session that stopped running but is still registered produces
+// that last one: the listener forwards to it and waits for a receipt that never comes. So does the
+// relaunch window, until the claim's agent has taken the Envoy role back. A late receipt from the
+// claim's own session once its agent took the role and said it is ready (claimTookRole) is a slow
+// holder that has the notice, as the TypeScript daemon reads it (processes.ts, handleException),
+// so it is logged and nothing is queued. A registered claim has not taken the role yet, so a
+// report from its session is queued: a copy the session may already have beats a notice lost.
 //
-// The notice goes back through the executor as a new row of its issue, due after the next of
-// noticeReholdDelays and counted in its Resends, so it is routed, fenced and held as any notice
-// is. It is queued again once per delay; the report of its last copy is logged and queues
-// nothing. A report about another daemon's publish, another project, a role that is not an
-// architect, or anything but a notice changes nothing. The exception lane has no redelivery, so a
-// report that cannot be read is logged here and dropped. One published copy of a row is queued
-// again once, keyed by the row's dedupe key: a publish whose 200 was lost is retried under the
-// same key, and the listener reports each failed forward under a fresh event id.
+// The notice goes back through the executor as a new row of its issue, counted in its Resends,
+// so it is routed, fenced and held as any notice is, and it is published under the dedupe key of
+// the row it copies (Notice.ResendOf), so a session that did get the forward recognises the copy.
+// It is due after the next of noticeReholdDelays, or at once when the architect's agent has
+// already taken its role on a session other than the one the forward went to: that ready has
+// passed, so no release (releaseWaiting) would make the copy due, and every later notice to the
+// architect would wait behind it. It is queued again once per delay; the report of its last copy
+// is logged and queues nothing. A report about another daemon's publish, another project, a role
+// that is not an architect, or anything but a notice changes nothing. The exception lane has no
+// redelivery, so a report that cannot be read is logged here and dropped. Each published copy of a
+// row is queued again once, keyed by the row's dedupe key and the copy's count: a publish whose
+// 200 was lost is retried under the same key, and the listener reports each failed forward under a
+// fresh event id.
+//
+// The row finishes when the listener accepts the publish, and the listener reports a failed
+// forward only after its receipt window (two seconds). A notice to the same architect published in
+// that window is not held behind the failed one, so it can arrive before the copy.
 func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if r.supervisor == nil {
 		return errors.New("notice re-hold has no claim supervisor")
@@ -118,19 +123,20 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if err := json.Unmarshal([]byte(envelope.Payload), &exception); err != nil {
 		return fmt.Errorf("%w: decode exception %s: %w", errNoticeException, envelope.EventID, err)
 	}
-	issue, notice, ok := r.exceptionNotice(exception)
+	issue, notice, original, ok := r.exceptionNotice(exception)
 	if !ok {
 		return nil
 	}
+	var held supervise.Claim
+	if machine, ok := r.supervisor.Machine(claim.Token(strings.TrimPrefix(exception.OriginalTopic, roleTopicPrefix))); ok {
+		held = machine.Claim()
+	}
 	switch exception.Reason {
 	case "receipt_timeout":
-		architect := claim.Token(strings.TrimPrefix(exception.OriginalTopic, roleTopicPrefix))
-		if machine, ok := r.supervisor.Machine(architect); ok {
-			if c := machine.Claim(); exception.RecipientSession != "" && exception.RecipientSession == c.Session && supervise.HoldsCapability(c.State) {
-				r.log.Info("outbox notice receipt was late; its architect's session is live, so nothing is re-sent",
-					"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "session", c.Session)
-				return nil
-			}
+		if exception.RecipientSession != "" && exception.RecipientSession == held.Session && claimTookRole(held.State) {
+			r.log.Info("outbox notice receipt was late; its architect's session is live, so nothing is re-sent",
+				"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "session", held.Session)
+			return nil
 		}
 	case "delivery_failed", "no_holder":
 	default:
@@ -141,15 +147,20 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "resends", notice.Resends)
 		return nil
 	}
-	delay := noticeReholdDelays[notice.Resends]
+	due := r.now().Add(noticeReholdDelays[notice.Resends])
+	if claimTookRole(held.State) && held.Session != exception.RecipientSession {
+		due = r.now()
+	}
+	mark := fmt.Sprintf("%s#%d", exception.DedupeKey, notice.Resends)
 	notice.Resends++
-	row, err := record.NewOutboxRow(issue, notice, r.now().Add(delay))
+	notice.ResendOf = original
+	row, err := record.NewOutboxRow(issue, notice, due)
 	if err != nil {
 		return fmt.Errorf("%w: exception %s carries a notice the outbox refuses: %w", errNoticeException, envelope.EventID, err)
 	}
 	queued := false
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		fresh, err := r.records.MarkProcessed(ctx, tx, "envoy-exception", exception.DedupeKey)
+		fresh, err := r.records.MarkProcessed(ctx, tx, "envoy-exception", mark)
 		if err != nil || !fresh {
 			return err
 		}
@@ -169,68 +180,72 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 // dedupe key names a row) to the role topic of an architect of this project, whose summary is the
 // executor's own "<kind> on <issue>" for an issue of this project and whose payload is that
 // notice. ok is false for a report about anything else.
-func (r *outbox) exceptionNotice(exception roleLaneException) (string, record.Notice, bool) {
-	if !outboxDedupeKey.MatchString(exception.DedupeKey) {
-		return "", record.Notice{}, false
+func (r *outbox) exceptionNotice(exception roleLaneException) (string, record.Notice, int64, bool) {
+	original, ok := record.ParseOutboxKey(exception.DedupeKey)
+	if !ok {
+		return "", record.Notice{}, 0, false
 	}
 	token, isRole := strings.CutPrefix(exception.OriginalTopic, roleTopicPrefix)
 	if !isRole || !strings.HasPrefix(token, "legion-"+r.project+"-") || !strings.HasSuffix(token, "-"+string(claim.RoleArchitect)) {
-		return "", record.Notice{}, false
+		return "", record.Notice{}, 0, false
 	}
 	var notice record.Notice
 	decoder := json.NewDecoder(strings.NewReader(exception.Payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&notice); err != nil {
-		return "", record.Notice{}, false
+		return "", record.Notice{}, 0, false
 	}
-	kind, issue, found := strings.Cut(exception.PayloadSummary, " on ")
-	if !found || record.NoticeKind(kind) != notice.Kind || !claim.IsIssueKey(issue) || !strings.HasPrefix(issue, r.dispatchProject+"-") {
-		return "", record.Notice{}, false
+	kind, issue, found := parseNoticeSummary(exception.PayloadSummary)
+	if !found || kind != notice.Kind || !claim.IsIssueKey(issue) || !strings.HasPrefix(issue, r.dispatchProject+"-") {
+		return "", record.Notice{}, 0, false
 	}
-	return issue, notice, true
+	return issue, notice, original, true
 }
 
-// releaseWaiting makes due at once every notice waiting for a later attempt that architect now
-// owns, once architect's claim is ready: its agent took its Envoy role, or took it back, and said
+// releaseWaiting makes due at once every notice waiting for a later attempt that one of architects
+// now owns, once their claims are ready: each agent took its Envoy role, or took it back, and said
 // it can be prompted, so a notice sent now reaches it. That covers a copy waiting out its re-send
 // delay, whichever session it failed on (a Go relaunch resumes the claim's session file, so the
 // relaunched agent registers the very session id the stopped one had), and a notice held on the
 // outbox's backoff while nobody held the role. A copy waiting minutes for a stopped session's
 // registration to lapse would otherwise hold back every later notice to that architect behind the
 // fence, after the architect is back. Released, the notices go in the order they were written,
-// ahead of the ones behind them.
-func (r *outbox) releaseWaiting(ctx context.Context, architect claim.Token) error {
+// ahead of the ones behind them. The waiting notices and their trees are one repeatable read, each
+// tree read once; the fence is not read, since a release only makes a notice due and its send
+// still passes the fence.
+func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) error {
 	now := r.now()
-	var waiting []record.OutboxRow
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		var err error
-		waiting, err = r.records.WaitingNotices(ctx, tx, r.dispatchProject, now)
-		return err
-	}); err != nil {
-		return fmt.Errorf("release the notices waiting for %s: %w", architect, err)
-	}
 	runs := func(token claim.Token) bool { return claimRuns(r.claimState(token)) }
 	released := []int64{}
-	for _, row := range waiting {
-		payload, err := record.DecodeOutboxPayload(row)
-		if err != nil {
-			return fmt.Errorf("decode waiting notice row %d: %w", row.ID, err)
-		}
-		notice, ok := payload.(record.Notice)
-		if !ok {
-			continue
-		}
-		issue, tree, err := r.readNoticeTree(ctx, row)
-		if errors.Is(err, errNoticeUnroutable) {
-			continue
-		}
+	if err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		waiting, err := r.records.WaitingNotices(ctx, tx, r.dispatchProject, now)
 		if err != nil {
 			return err
 		}
-		if owner, err := owningArchitect(tree.project, tree.issues, issue, notice.Kind, runs); err != nil || owner != architect {
-			continue
+		routes := map[string]noticeRoute{}
+		for _, row := range waiting {
+			payload, err := record.DecodeOutboxPayload(row)
+			if err != nil {
+				return fmt.Errorf("decode waiting notice row %d: %w", row.ID, err)
+			}
+			notice, ok := payload.(record.Notice)
+			if !ok {
+				continue
+			}
+			issue, route, err := r.readNoticeRoute(ctx, tx, row.Issue, routes)
+			if errors.Is(err, errNoticeUnroutable) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if owner, err := owningArchitect(route.project, route.issues, issue, notice.Kind, runs); err == nil && slices.Contains(architects, owner) {
+				released = append(released, row.ID)
+			}
 		}
-		released = append(released, row.ID)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("read the notices waiting for %v: %w", architects, err)
 	}
 	if len(released) == 0 {
 		return nil
@@ -243,8 +258,8 @@ func (r *outbox) releaseWaiting(ctx context.Context, architect claim.Token) erro
 		}
 		return nil
 	}); err != nil {
-		return fmt.Errorf("release the notices waiting for %s: %w", architect, err)
+		return fmt.Errorf("release the notices waiting for %v: %w", architects, err)
 	}
-	r.log.Info("outbox notices released: their architect is ready", "architect", architect, "rows", released)
+	r.log.Info("outbox notices released: their architect is ready", "architects", architects, "rows", released)
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -66,6 +67,22 @@ func MessageMarker(id int64) string {
 	return messageMarkerOpen + strconv.FormatInt(id, 10) + messageMarkerClose
 }
 
+// outboxKeyPrefix begins the dedupe key the runner publishes a row under.
+const outboxKeyPrefix = "legion-outbox:"
+
+// OutboxKey is the dedupe key the runner publishes outbox row id under, so the listener and the
+// plugin recognise a retried publish of the row as the same message.
+func OutboxKey(id int64) string {
+	return outboxKeyPrefix + strconv.FormatInt(id, 10)
+}
+
+// ParseOutboxKey is the row id OutboxKey names, and whether key is a key OutboxKey writes.
+func ParseOutboxKey(key string) (int64, bool) {
+	digits, found := strings.CutPrefix(key, outboxKeyPrefix)
+	id, err := strconv.ParseInt(digits, 10, 64)
+	return id, found && err == nil && id > 0 && OutboxKey(id) == key
+}
+
 // Posted is the message the runner posts for row id: the body, then the row's marker.
 func (m MessagePost) Posted(id int64) string {
 	return m.Body + messageSeparator + MessageMarker(id)
@@ -87,6 +104,10 @@ type Notice struct {
 	// Resends counts the times the notice was queued again after the listener could not forward
 	// it to its architect's session (the daemon's rehold), which stops at a cap.
 	Resends int `json:"resends,omitempty"`
+	// ResendOf is the outbox row a re-held copy copies. The copy is published under that row's
+	// dedupe key (OutboxKey), so a session that already has the notice recognises the copy. The
+	// row is the daemon's own bookkeeping: the executor publishes the notice without it.
+	ResendOf int64 `json:"resend_of,omitempty"`
 }
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }

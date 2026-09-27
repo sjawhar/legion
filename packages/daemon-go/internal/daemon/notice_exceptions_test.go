@@ -76,24 +76,26 @@ func queuedNotices(t *testing.T, pool *pgxpool.Pool) []string {
 	return got
 }
 
-// A notice the listener accepted but could not forward to the owning architect's session is
-// queued again as a row of its issue, due after the re-hold delay and counted as one re-send: the
-// forward failed (delivery_failed), the registration lapsed between the publish and the forward
-// (no_holder), or the receipt never came from a session that is not the claim's live one
-// (receipt_timeout). That last covers a session that stopped running while still registered, and
-// the relaunch window, where the claim's new session registered with the daemon before its plugin
-// took the Envoy role back from the stopped one. Once it is due and a session holds the role, the
-// executor delivers it to the owner.
+// A notice the listener accepted but could not forward to the owning architect's session is queued
+// again, counted as one re-send and published under the key of the row it copies, so a session that
+// did get the forward recognises the copy. The copy waits the first re-send delay, or is due at once
+// when the architect's agent has already taken its role on another session, since that ready will
+// not come again to release it. A registered claim has not taken its role, so a late receipt from
+// its own session is queued too.
 func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 	for _, tc := range []struct {
 		name, reason       string
 		architect          supervise.ClaimState
 		session, recipient string
+		due                time.Duration
 	}{
-		{"a failed forward", "delivery_failed", supervise.StateWorking, "ses_live", "ses_live"},
-		{"a holder that lapsed", "no_holder", supervise.StateWorking, "ses_live", ""},
-		{"a late receipt while the claim relaunches", "receipt_timeout", supervise.StateLaunching, "", "ses_stopped"},
-		{"a late receipt from the stopped session after the new one registered", "receipt_timeout", supervise.StateRegistered, "ses_new", "ses_stopped"},
+		{"a failed forward", "delivery_failed", supervise.StateWorking, "ses_live", "ses_live", noticeReholdDelays[0]},
+		{"a holder that lapsed, the role taken since", "no_holder", supervise.StateWorking, "ses_live", "", 0},
+		{"a holder that lapsed, the claim relaunching", "no_holder", supervise.StateLaunching, "", "", noticeReholdDelays[0]},
+		{"a late receipt while the claim relaunches", "receipt_timeout", supervise.StateLaunching, "", "ses_stopped", noticeReholdDelays[0]},
+		{"a late receipt from the stopped session after the new one registered", "receipt_timeout", supervise.StateRegistered, "ses_new", "ses_stopped", noticeReholdDelays[0]},
+		{"a late receipt from the stopped session after the new one is ready", "receipt_timeout", supervise.StateReady, "ses_new", "ses_stopped", 0},
+		{"a late receipt from a resumed session before it takes its role", "receipt_timeout", supervise.StateRegistered, "ses_arch", "ses_arch", noticeReholdDelays[0]},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -115,26 +117,61 @@ func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 			if err := pool.QueryRow(context.Background(), "select next_at from outbox where kind = 'notice'").Scan(&nextAt); err != nil {
 				t.Fatalf("read the re-held row: %v", err)
 			}
-			want := `LEGION-2 {"kind": "pr-blocked", "role": "architect", "reason": "max_fix_attempts", "resends": 1}`
-			if got := queuedNotices(t, pool); len(got) != 1 || got[0] != want ||
-				!nextAt.Equal(clock.Add(noticeReholdDelays[0]).Truncate(time.Microsecond)) {
-				t.Fatalf("queued %v due %s; want %s, counted as one re-send, due %s", got, nextAt, want, clock.Add(noticeReholdDelays[0]))
+			want := `LEGION-2 {"kind": "pr-blocked", "role": "architect", "reason": "max_fix_attempts", "resends": 1, "resend_of": 7}`
+			if got := queuedNotices(t, pool); len(got) != 1 || got[0] != want || !nextAt.Equal(clock.Add(tc.due).Truncate(time.Microsecond)) {
+				t.Fatalf("queued %v due %s; want %s, counted as one re-send, copying row 7, due %s", got, nextAt, want, clock.Add(tc.due))
 			}
 
-			if err := runner.RunOnce(context.Background()); err != nil {
-				t.Fatalf("run before it is due: %v", err)
+			if tc.due > 0 {
+				if err := runner.RunOnce(context.Background()); err != nil {
+					t.Fatalf("run before it is due: %v", err)
+				}
+				if _, delivered := publisher.snapshot(); len(delivered) != 0 {
+					t.Fatalf("delivered %+v before the re-hold delay passed", delivered)
+				}
+				clock = clock.Add(tc.due)
 			}
-			if _, delivered := publisher.snapshot(); len(delivered) != 0 {
-				t.Fatalf("delivered %+v before the re-hold delay passed", delivered)
-			}
-			clock = clock.Add(noticeReholdDelays[0])
 			if err := runner.RunOnce(context.Background()); err != nil {
 				t.Fatalf("run once due: %v", err)
 			}
-			if _, delivered := publisher.snapshot(); fmt.Sprint(deliveredKinds(t, delivered)) != "[pr-blocked to LEGION-1]" || outboxRows(t, pool) != 0 {
+			_, delivered := publisher.snapshot()
+			if fmt.Sprint(deliveredKinds(t, delivered)) != "[pr-blocked to LEGION-1]" || outboxRows(t, pool) != 0 {
 				t.Fatalf("delivered %v with %d rows left, want the re-held notice at the root architect", deliveredKinds(t, delivered), outboxRows(t, pool))
 			}
+			if sent := delivered[0]; sent.key != "legion-outbox:7" || sent.payload.(record.Notice).ResendOf != 0 {
+				t.Fatalf("the copy went out under key %q with payload %+v; want the key of row 7, and the notice without the row it copies", sent.key, sent.payload)
+			}
 		})
+	}
+}
+
+// The listener's report echoes the summary and dedupe key the executor published the notice with,
+// and the re-hold reads both back: a report of the executor's own publish is queued again.
+func TestAReportOfTheExecutorsOwnPublishIsQueuedAgain(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaimOn(t, sup, "LEGION-1", supervise.StateWorking, "ses_live")
+	publisher := &holderPublisher{}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion", now: time.Now}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, time.Now()))
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("publish the notice: %v", err)
+	}
+	_, delivered := publisher.snapshot()
+	if len(delivered) != 1 {
+		t.Fatalf("published %+v; want the one notice", delivered)
+	}
+	sent := delivered[0]
+	report := laneReport{"evt-exception", "delivery_failed", sent.topic, sent.message, sent.payload, sent.key, "ses_live"}
+	if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+		t.Fatalf("rehold: %v", err)
+	}
+	published, _ := record.ParseOutboxKey(sent.key)
+	want := fmt.Sprintf(`LEGION-2 {"kind": "pr-blocked", "role": "architect", "reason": "max_fix_attempts", "resends": 1, "resend_of": %d}`, published)
+	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != want {
+		t.Fatalf("after a report of the publish %+v, queued %v; want %s", sent, got, want)
 	}
 }
 
@@ -177,7 +214,8 @@ func TestAReportThatIsNotAFailedNoticeForwardChangesNothing(t *testing.T) {
 
 // One published copy of a row is queued again once, however many reports name it: a publish whose
 // 200 was lost is retried under the same row key, and the listener reports each failed forward
-// with a fresh event id. A report that cannot be read is refused.
+// with a fresh event id. A copy is published under the key of the row it copies, so the report of
+// the copy is queued again too. A report that cannot be read is refused.
 func TestARowCopyIsQueuedOnceAndAnUnreadableReportIsRefused(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
@@ -192,13 +230,22 @@ func TestARowCopyIsQueuedOnceAndAnUnreadableReportIsRefused(t *testing.T) {
 	if got := queuedNotices(t, pool); len(got) != 1 {
 		t.Fatalf("queued %v after three reports of one row copy, want one row", got)
 	}
+	copied := notice
+	copied.Resends = 1
+	report := laneReport{"evt-copy-forward", "delivery_failed", "notifications.role.legion-legion-legion-1-architect", "pr-blocked on LEGION-2", copied, "legion-outbox:7", "ses_live"}
+	if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+		t.Fatalf("rehold the copy: %v", err)
+	}
+	if got := queuedNotices(t, pool); len(got) != 2 {
+		t.Fatalf("queued %v after a report of the copy, want its copy too", got)
+	}
 	for _, malformed := range [][]byte{[]byte("not json"), []byte(`{"event_id":"evt-2","source":"agent","payload":"{}"}`), []byte(`{"event_id":"evt-3","source":"envoy","payload":"not json"}`)} {
 		if err := runner.rehold(context.Background(), malformed); err == nil {
 			t.Fatalf("rehold(%s) = nil, want a refusal", malformed)
 		}
 	}
-	if got := queuedNotices(t, pool); len(got) != 1 {
-		t.Fatalf("queued %v after the malformed reports, want still one row", got)
+	if got := queuedNotices(t, pool); len(got) != 2 {
+		t.Fatalf("queued %v after the malformed reports, want still two rows", got)
 	}
 }
 
@@ -211,14 +258,14 @@ func TestANoticeIsQueuedAgainAtMostThreeTimes(t *testing.T) {
 	var logged bytes.Buffer
 	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: record.NewStore(), supervisor: sup, project: "legion", now: time.Now}
 	topic := "notifications.role.legion-legion-legion-1-architect"
-	second := laneReport{"evt-second", "delivery_failed", topic, "pr-blocked on LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: 2}, "legion-outbox:8", "ses_live"}
+	second := laneReport{"evt-second", "delivery_failed", topic, "pr-blocked on LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: 2}, "legion-outbox:7", "ses_live"}
 	if err := runner.rehold(context.Background(), second.envelope(t)); err != nil {
 		t.Fatalf("rehold the second copy: %v", err)
 	}
-	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-2 {"kind": "pr-blocked", "role": "architect", "resends": 3}` {
+	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-2 {"kind": "pr-blocked", "role": "architect", "resends": 3, "resend_of": 7}` {
 		t.Fatalf("queued %v, want the third copy", got)
 	}
-	third := laneReport{"evt-third", "delivery_failed", topic, "pr-blocked on LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: 3}, "legion-outbox:9", "ses_live"}
+	third := laneReport{"evt-third", "delivery_failed", topic, "pr-blocked on LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: 3}, "legion-outbox:7", "ses_live"}
 	if err := runner.rehold(context.Background(), third.envelope(t)); err != nil {
 		t.Fatalf("rehold the third copy: %v", err)
 	}
@@ -263,7 +310,7 @@ func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-1 {"kind": "design-approved", "resends": 1, "version": 3}` {
+	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-1 {"kind": "design-approved", "resends": 1, "version": 3, "resend_of": 9}` {
 		t.Fatalf("queued %v, want the design-approved notice of LEGION-1", got)
 	}
 }
@@ -305,7 +352,7 @@ func TestANoticeReachesAnArchitectThatTakesMinutesToRelaunch(t *testing.T) {
 				for _, copy := range delivered[taken:] {
 					if clock.Before(relaunched) {
 						// The stopped session's registration takes the copy, and the listener reports it.
-						report := laneReport{fmt.Sprintf("evt-%s", copy.key), "receipt_timeout", copy.topic, "pr-blocked on LEGION-2", copy.payload, copy.key, "ses_stopped"}
+						report := laneReport{fmt.Sprintf("evt-%s", copy.key), "receipt_timeout", copy.topic, copy.message, copy.payload, copy.key, "ses_stopped"}
 						if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
 							t.Fatalf("rehold at %s: %v", clock.Sub(start), err)
 						}
@@ -369,7 +416,7 @@ func TestANoticeWrittenAfterTheRelaunchIsNotHeldBehindAWaitingCopy(t *testing.T)
 				_, delivered := publisher.snapshot()
 				for _, copy := range delivered[taken:] {
 					if clock.Before(relaunched) {
-						report := laneReport{fmt.Sprintf("evt-%s", copy.key), "receipt_timeout", copy.topic, "pr-blocked on LEGION-2", copy.payload, copy.key, tc.stopped}
+						report := laneReport{fmt.Sprintf("evt-%s", copy.key), "receipt_timeout", copy.topic, copy.message, copy.payload, copy.key, tc.stopped}
 						if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
 							t.Fatalf("rehold at %s: %v", clock.Sub(start), err)
 						}
@@ -399,14 +446,16 @@ func architectTopicToken(t *testing.T, issue string) claim.Token {
 
 // A ready releases every notice its architect owns now that waits for a later attempt, a re-held
 // copy or one held on the outbox's backoff; a notice owned by another architect of the tree keeps
-// its time.
+// its time. One release serves every architect that became ready, each in its own tree.
 func TestAReadyArchitectReleasesOnlyItsOwnNotices(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	noticeTree(t, pool, records, false)
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-9", Project: "LEGION", Tree: "LEGION-9", Title: "Another root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	architectClaimOn(t, sup, "LEGION-1", supervise.StateRegistered, "ses_arch")
 	architectClaimOn(t, sup, "LEGION-2", supervise.StateWorking, "ses_sub")
+	architectClaimOn(t, sup, "LEGION-9", supervise.StateReady, "ses_other")
 	now := time.Now()
 	later := now.Add(noticeReholdDelays[1])
 	for _, c := range []struct {
@@ -416,11 +465,12 @@ func TestAReadyArchitectReleasesOnlyItsOwnNotices(t *testing.T) {
 		{"LEGION-1", 1}, // a re-held copy of the root's
 		{"LEGION-1", 0}, // the root's, held on backoff
 		{"LEGION-3", 1}, // the sub-architect's: LEGION-3 is under LEGION-2, whose sub-architect runs
+		{"LEGION-9", 1}, // another tree's root's
 	} {
 		enqueueOutbox(t, pool, records, mustOutboxRow(t, c.issue, record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: c.resends}, later))
 	}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", now: func() time.Time { return now }}
-	if err := runner.releaseWaiting(context.Background(), architectTopicToken(t, "LEGION-1")); err != nil {
+	if err := runner.releaseWaiting(context.Background(), architectTopicToken(t, "LEGION-1"), architectTopicToken(t, "LEGION-9")); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	rows, err := pool.Query(context.Background(), "select issue, next_at <= $1 from outbox order by id", now)
@@ -437,7 +487,48 @@ func TestAReadyArchitectReleasesOnlyItsOwnNotices(t *testing.T) {
 		}
 		got = append(got, fmt.Sprintf("%s due=%t", issue, due))
 	}
-	if fmt.Sprint(got) != "[LEGION-1 due=true LEGION-1 due=true LEGION-3 due=false]" {
-		t.Fatalf("notices %v; want the root's two due now and the sub-architect's kept", got)
+	if fmt.Sprint(got) != "[LEGION-1 due=true LEGION-1 due=true LEGION-3 due=false LEGION-9 due=true]" {
+		t.Fatalf("notices %v; want the roots' three due now and the sub-architect's kept", got)
+	}
+}
+
+// The ready route's hook only records a ready architect, so the agent's ready is answered without
+// waiting on a release; the workflow's release loop then releases the architect's waiting notice.
+func TestAReadyArchitectsNoticesAreReleasedOffTheReadyRoute(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaimOn(t, sup, "LEGION-1", supervise.StateRegistered, "ses_arch")
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: 1}, time.Now().Add(noticeReholdDelays[1])))
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", now: time.Now}
+	w := &workflowRuntime{outbox: runner, log: quietLogger(), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1)}
+	due := func() bool {
+		t.Helper()
+		var due bool
+		if err := pool.QueryRow(context.Background(), "select next_at <= $1 from outbox", time.Now()).Scan(&due); err != nil {
+			t.Fatalf("read the waiting notice: %v", err)
+		}
+		return due
+	}
+
+	w.claimReady(supervise.Claim{Token: architectTopicToken(t, "LEGION-1"), Role: claim.RoleArchitect})
+	if due() {
+		t.Fatalf("the hook released the notice itself, so the ready route waited on the release")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	go func() {
+		w.releaseReadied(ctx)
+		close(stopped)
+	}()
+	defer func() {
+		cancel()
+		<-stopped
+	}()
+	for deadline := time.Now().Add(5 * time.Second); !due(); time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the release loop left the ready architect's notice waiting")
+		}
 	}
 }
