@@ -1,4 +1,5 @@
-// packages/envoy/cmd/broker/main.go
+// Command broker is the AGENTC-833 secrets broker: it enrolls agent sessions and pods, decides
+// their secret requests by policy or through Dispatch asks, and releases granted values.
 package main
 
 import (
@@ -60,10 +61,12 @@ func main() {
 		fatal(errors.New("BROKER_RULES_FILE needs BROKER_FAKE_SECRETS_FILE for local runs; production uses BROKER_RULES_S3_URI and Secrets Manager"))
 	}
 	var pod enroll.PodVerifier
-	if cfg.K8sOIDCIssuer != "" {
-		v, err := oidc.New(ctx, cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience)
-		fatal(err)
-		pod = enroll.K8sPodVerifier{Verifier: v}
+	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
+	// boot instead of hanging it with no health endpoint serving.
+	verifier, err := oidc.Discover(ctx, cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, oidc.DiscoveryTimeout)
+	fatal(err)
+	if verifier != nil {
+		pod = enroll.K8sPodVerifier{Verifier: verifier}
 	}
 	dc := dispatch.New(cfg.DispatchURL, cfg.DispatchToken, &http.Client{Timeout: 30 * time.Second})
 	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod}

@@ -9,6 +9,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 type Config struct {
@@ -66,9 +68,11 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.RulesS3URI != "" && !strings.HasPrefix(cfg.RulesS3URI, "s3://") {
 		return Config{}, fmt.Errorf("BROKER_RULES_S3_URI must be s3://<bucket>/<key>, got %q", cfg.RulesS3URI)
 	}
-	if (cfg.K8sOIDCIssuer == "") != (cfg.K8sOIDCAudience == "") {
-		return Config{}, fmt.Errorf("BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE must be set together")
+	issuer, audience, err := oidc.ConfigFromEnv(getenv, "BROKER_K8S_OIDC_ISSUER", "BROKER_K8S_OIDC_AUDIENCE")
+	if err != nil {
+		return Config{}, err
 	}
+	cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience = issuer, audience
 	token, err := secretValue(getenv, "BROKER_DISPATCH_TOKEN")
 	if err != nil {
 		return Config{}, err

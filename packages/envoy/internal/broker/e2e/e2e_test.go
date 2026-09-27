@@ -988,4 +988,30 @@ func TestSpikeContract(t *testing.T) {
 			t.Fatalf("P's original enrollment must remain live and untouched, got %v", err)
 		}
 	})
+
+	t.Run("Pod_RealCLIEnrollsAPodEndToEnd", func(t *testing.T) {
+		t.Log("RAN: Pod CLI - the real agent-secrets binary enrolls a pod through a service launcher credential and then authenticates as it")
+		keyDir := t.TempDir()
+		thumbOut, stderr, exit := runAgentSecrets(t, agentSecretsBin, env2.srv.URL, keyDir, "keygen", "--out", keyDir)
+		if exit != 0 {
+			t.Fatalf("keygen exit %d: %s", exit, stderr)
+		}
+		files := t.TempDir()
+		launcherFile, podTokenFile := filepath.Join(files, "launcher"), filepath.Join(files, "pod-token")
+		if err := os.WriteFile(launcherFile, []byte(serviceLauncherToken+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(podTokenFile, []byte(mintPodToken(t, issuer, oidcKey, "system:serviceaccount:default:agent-cli", "pod-cli")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, stderr, exit = runAgentSecrets(t, agentSecretsBin, env2.srv.URL, keyDir, "enroll", "--launcher-token-file", launcherFile, "--kind", "pod",
+			"--runtime-id", "pod-cli", "--pod-token-file", podTokenFile, "--approver-issue", "AGENTC-1", "--thumbprint", strings.TrimSpace(thumbOut))
+		if exit != 0 {
+			t.Fatalf("enroll --kind pod exit %d: %s", exit, stderr)
+		}
+		stdout, stderr, exit := runAgentSecrets(t, agentSecretsBin, env2.srv.URL, keyDir, "self", "--json")
+		if exit != 0 || !strings.Contains(stdout, `"kind":"pod"`) {
+			t.Fatalf("self after the CLI pod enrollment: exit %d stdout=%q stderr=%q, want kind pod", exit, stdout, stderr)
+		}
+	})
 }

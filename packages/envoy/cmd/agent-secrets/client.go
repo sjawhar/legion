@@ -160,6 +160,7 @@ type RequestStatus struct {
 	GrantID   *string          `json:"grant_id"`
 	DecidedAt *time.Time       `json:"decided_at"`
 	Decision  *requestDecision `json:"decision"`
+	Detail    *string          `json:"detail"`
 }
 
 func (c *client) GetRequest(ctx context.Context, key *ecdsa.PrivateKey, enrollmentID, id string) (RequestStatus, []byte, error) {

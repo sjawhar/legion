@@ -3,7 +3,8 @@
 // requests one or more secrets and execs a command with them in its environment.
 //
 //	agent-secrets keygen --out <dir>
-//	agent-secrets enroll --launcher-token-file <path> --kind box|pod --runtime-id <id> --operator <login> --thumbprint <tp> [--approver-issue <KEY>] [--session-id <id>] [--pod-token-file <path>]
+//	agent-secrets enroll --launcher-token-file <path> --kind box|host --runtime-id <id> --operator <login> --thumbprint <tp> [--approver-issue <KEY>] [--session-id <id>]
+//	agent-secrets enroll --launcher-token-file <path> --kind pod --runtime-id <pod uid> --pod-token-file <path> --approver-issue <KEY> --thumbprint <tp> [--session-id <id>]
 //	agent-secrets unenroll --launcher-token-file <path> --enrollment <id>
 //	agent-secrets launcher login --operator <login> --host <name> [--service <name>] --out <path>
 //	agent-secrets renew
@@ -86,7 +87,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 func usage() string {
 	return `usage:
   agent-secrets keygen --out <dir>
-  agent-secrets enroll --launcher-token-file <path> --kind box|pod --runtime-id <id> --operator <login> --thumbprint <tp> [--approver-issue <KEY>] [--session-id <id>] [--pod-token-file <path>]
+  agent-secrets enroll --launcher-token-file <path> --kind box|host --runtime-id <id> --operator <login> --thumbprint <tp> [--approver-issue <KEY>] [--session-id <id>]
+  agent-secrets enroll --launcher-token-file <path> --kind pod --runtime-id <pod uid> --pod-token-file <path> --approver-issue <KEY> --thumbprint <tp> [--session-id <id>]
   agent-secrets unenroll --launcher-token-file <path> --enrollment <id>
   agent-secrets launcher login --operator <login> --host <name> [--service <name>] --out <path>
   agent-secrets renew
@@ -268,7 +270,7 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("agent-secrets enroll", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	launcherTokenFile := flags.String("launcher-token-file", "", "path to the launcher bearer token")
-	kind := flags.String("kind", "", `"box" or "pod"`)
+	kind := flags.String("kind", "", `"box", "host" or "pod"`)
 	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
 	operator := flags.String("operator", "", "the operator's GitHub login")
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
@@ -278,12 +280,25 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
-	if *launcherTokenFile == "" || *kind == "" || *runtimeID == "" || *operator == "" || *thumbprint == "" {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --launcher-token-file, --kind, --runtime-id, --operator and --thumbprint are required")
+	if *launcherTokenFile == "" || *kind == "" || *runtimeID == "" || *thumbprint == "" {
+		fmt.Fprintln(stderr, "agent-secrets enroll: --launcher-token-file, --kind, --runtime-id and --thumbprint are required")
 		return exitUsageError
 	}
-	if *kind != "box" && *kind != "pod" {
-		fmt.Fprintln(stderr, `agent-secrets enroll: --kind must be "box" or "pod"`)
+	switch *kind {
+	case "box", "host":
+		if *operator == "" || *podTokenFile != "" {
+			fmt.Fprintf(stderr, "agent-secrets enroll: --kind %s needs --operator and takes no --pod-token-file\n", *kind)
+			return exitUsageError
+		}
+	case "pod":
+		// A pod has no operator: its service launcher enrolls it with its projected token, and an
+		// issue's assignee approves its requests.
+		if *operator != "" || *podTokenFile == "" || *approverIssue == "" {
+			fmt.Fprintln(stderr, "agent-secrets enroll: --kind pod needs --pod-token-file and --approver-issue and takes no --operator")
+			return exitUsageError
+		}
+	default:
+		fmt.Fprintln(stderr, `agent-secrets enroll: --kind must be "box", "host" or "pod"`)
 		return exitUsageError
 	}
 	base := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
@@ -301,7 +316,10 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
 		return 1
 	}
-	body := EnrollBody{Kind: *kind, RuntimeID: *runtimeID, Operator: operator, Thumbprint: *thumbprint, Approver: approverBody{Kind: "operator"}}
+	body := EnrollBody{Kind: *kind, RuntimeID: *runtimeID, Thumbprint: *thumbprint, Approver: approverBody{Kind: "operator"}}
+	if *operator != "" {
+		body.Operator = operator
+	}
 	if *approverIssue != "" {
 		body.Approver = approverBody{Kind: "issue_assignee", Issue: approverIssue}
 	}
@@ -466,15 +484,31 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	c := newClient(base)
+	backoff := 2 * time.Second
 	for {
 		expires, err := c.RenewEnrollment(ctx, key, enrollmentID)
 		if err != nil {
 			if ctx.Err() != nil {
 				return 0
 			}
-			fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
-			return 1
+			// The broker answering with a refusal (401 PROOF_INVALID: the enrollment is gone) is
+			// final; anything else — a restart, a network blip, a 5xx — is retried until the lease
+			// would be lost anyway.
+			var refused *apiError
+			if errors.As(err, &refused) && refused.Status/100 == 4 {
+				fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(stderr, "agent-secrets renew: %v; retrying in %s\n", err, backoff)
+			select {
+			case <-ctx.Done():
+				return 0
+			case <-time.After(backoff):
+			}
+			backoff = nextBackoff(backoff)
+			continue
 		}
+		backoff = 2 * time.Second
 		lease := time.Until(expires)
 		if lease <= 0 {
 			lease = time.Second
@@ -714,6 +748,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	}
 
 	state, grantID, requestID := result.State, result.GrantID, result.RequestID
+	var detail *string
 	if state == "pending" {
 		deadline := time.Now().Add(*wait)
 		backoff := 2 * time.Second
@@ -728,18 +763,36 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 				return 1
 			}
-			state, grantID = status.State, status.GrantID
+			state, grantID, detail = status.State, status.GrantID, status.Detail
 			backoff = nextBackoff(backoff)
 		}
 	}
+	if state != "pending" && state != "granted" && detail == nil {
+		if status, _, err := c.GetRequest(ctx, key, enrollmentID, requestID); err == nil {
+			detail = status.Detail
+		}
+	}
+	why := "no reason recorded"
+	if detail != nil {
+		why = *detail
+	}
 	switch state {
+	case "granted":
 	case "pending":
+		fmt.Fprintf(stderr, "agent-secrets: request %s is still waiting for approval; nothing was run. Check it with: agent-secrets status %s\n", requestID, requestID)
 		return exitPending
 	case "denied":
+		fmt.Fprintf(stderr, "agent-secrets: request %s was denied: %s\n", requestID, why)
 		return exitDenied
+	case "cancelled", "expired":
+		fmt.Fprintf(stderr, "agent-secrets: request %s was %s: %s\n", requestID, state, why)
+		return 1
+	default:
+		fmt.Fprintf(stderr, "agent-secrets: request %s is in unexpected state %q\n", requestID, state)
+		return 1
 	}
 	if grantID == nil {
-		fmt.Fprintln(stderr, "agent-secrets: request granted with no grant id")
+		fmt.Fprintf(stderr, "agent-secrets: request %s was granted but its grant is no longer live; request it again\n", requestID)
 		return 1
 	}
 

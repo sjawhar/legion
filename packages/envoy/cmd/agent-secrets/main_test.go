@@ -107,6 +107,10 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	})
 	mux.HandleFunc("GET /v1/requests/{id}", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&counters.getRequest, 1)
+		if r.PathValue("id") == "req-denied" {
+			writeJSON(w, map[string]any{"state": "denied", "grant_id": nil, "decided_at": time.Now(), "decision": nil, "detail": "policy denies at least one requested secret"})
+			return
+		}
 		if r.PathValue("id") != "req-pending" {
 			// A request the fake granted immediately must never be polled; failing loudly here
 			// (rather than serving it) is the reuse-transparency test's proof that cmdExec does
@@ -280,6 +284,9 @@ func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 	if strings.Contains(stdout, "ran-the-child") {
 		t.Fatalf("child ran while request was still pending: stdout=%q", stdout)
 	}
+	if !strings.Contains(stderr, "agent-secrets status req-pending") {
+		t.Fatalf("stderr = %q, want the request id and the status command to check it", stderr)
+	}
 }
 
 func TestExecFormDeniedExitsSeventySevenWithNoChild(t *testing.T) {
@@ -295,6 +302,9 @@ func TestExecFormDeniedExitsSeventySevenWithNoChild(t *testing.T) {
 	}
 	if strings.Contains(stdout, "ran-the-child") {
 		t.Fatalf("child ran for a denied request: stdout=%q", stdout)
+	}
+	if !strings.Contains(stderr, "req-denied was denied: policy denies at least one requested secret") {
+		t.Fatalf("stderr = %q, want the denial's reason", stderr)
 	}
 }
 
@@ -509,5 +519,40 @@ func TestLauncherLoginRefusesAnAlreadyCollectedToken(t *testing.T) {
 	}
 	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("token file stat = %v, want no file written", err)
+	}
+}
+
+// TestEnrollPodSendsNoOperator pins the pod path of enroll: it sends no operator (the broker
+// refuses a pod enrollment carrying one), sends the projected token and the approving issue, and
+// refuses --operator for a pod outright.
+func TestEnrollPodSendsNoOperator(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	var got map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, map[string]any{"enrollment_id": "enr-pod-1", "lease_expires_at": time.Now().Add(time.Hour)})
+	})
+	broker := httptest.NewServer(mux)
+	defer broker.Close()
+	dir := t.TempDir()
+	tokenFile, podTokenFile := filepath.Join(dir, "launcher"), filepath.Join(dir, "pod-token")
+	os.WriteFile(tokenFile, []byte("launcher-token\n"), 0o600)
+	os.WriteFile(podTokenFile, []byte("projected.jwt.value\n"), 0o600)
+	keyDir := t.TempDir()
+
+	_, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "enroll", "--launcher-token-file", tokenFile, "--kind", "pod",
+		"--runtime-id", "pod-uid-1", "--pod-token-file", podTokenFile, "--approver-issue", "LEGION-9", "--thumbprint", "tp-pod")
+	if exit != 0 {
+		t.Fatalf("enroll --kind pod exit = %d: %s", exit, stderr)
+	}
+	approver, _ := got["approver"].(map[string]any)
+	if op, present := got["operator"]; !present || op != nil || got["pod_token"] != "projected.jwt.value" || approver["kind"] != "issue_assignee" || approver["issue"] != "LEGION-9" {
+		t.Fatalf("enrollment body = %v, want operator null, the pod token, and issue_assignee LEGION-9", got)
+	}
+	if _, _, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "enroll", "--launcher-token-file", tokenFile, "--kind", "pod",
+		"--runtime-id", "pod-uid-1", "--pod-token-file", podTokenFile, "--approver-issue", "LEGION-9", "--thumbprint", "tp-pod", "--operator", "sjawhar"); exit != exitUsageError {
+		t.Fatalf("enroll --kind pod --operator exit = %d, want a usage error", exit)
 	}
 }
