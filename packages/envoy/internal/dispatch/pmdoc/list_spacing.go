@@ -336,16 +336,7 @@ func endsWithList(item ast.Node) bool {
 // the blank lines after a list an item holds, before a quote, a list or a footnote definition, are
 // that list's.
 func blankBetweenBlocksPastListsBeforeContainers(item ast.Node) bool {
-	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
-		_, afterList := child.PreviousSibling().(*ast.List)
-		if child != item.FirstChild() && blankBefore(child) && !(afterList && startsContainer(child)) {
-			return true
-		}
-		if _, definition := child.(*extensionast.Footnote); definition && blankBetweenBlocks(child) {
-			return true
-		}
-	}
-	return false
+	return blankBetweenBlocksBut(item, startsContainer)
 }
 
 func setSpread(list *ast.List, spread bool, itemSpread func(ast.Node) bool) {
@@ -360,22 +351,21 @@ func spreadsNothing(ast.Node) bool { return false }
 // blankBetweenBlocks reports whether a blank line separates two of item's blocks, or two blocks of
 // a footnote definition it holds, which the browser editor's parser reads as the item's lines.
 func blankBetweenBlocks(item ast.Node) bool {
-	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
-		if child != item.FirstChild() && blankBefore(child) {
-			return true
-		}
-		if _, definition := child.(*extensionast.Footnote); definition && blankBetweenBlocks(child) {
-			return true
-		}
-	}
-	return false
+	return blankBetweenBlocksBut(item, nil)
 }
 
 // blankBetweenBlocksPastLists is blankBetweenBlocks in a quote, where the blank lines after a list
 // an item holds are that list's.
 func blankBetweenBlocksPastLists(item ast.Node) bool {
+	return blankBetweenBlocksBut(item, func(ast.Node) bool { return true })
+}
+
+// blankBetweenBlocksBut is blankBetweenBlocks leaving to a list the blank lines after it before a
+// block listHolds accepts, or before none when listHolds is nil.
+func blankBetweenBlocksBut(item ast.Node, listHolds func(ast.Node) bool) bool {
 	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
-		if _, afterList := child.PreviousSibling().(*ast.List); child != item.FirstChild() && blankBefore(child) && !afterList {
+		_, afterList := child.PreviousSibling().(*ast.List)
+		if child != item.FirstChild() && blankBefore(child) && !(afterList && listHolds != nil && listHolds(child)) {
 			return true
 		}
 		if _, definition := child.(*extensionast.Footnote); definition && blankBetweenBlocks(child) {

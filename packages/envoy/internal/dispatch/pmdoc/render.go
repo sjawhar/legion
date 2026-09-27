@@ -406,8 +406,12 @@ func (r *renderer) block(n *Node, prefix string) {
 		// as the browser editor also writes it.
 		switch level {
 		case 1, 2:
+			underline := "---"
+			if level == 1 {
+				underline = "==="
+			}
 			r.inline(n.Children, prefix)
-			r.writeSyntax("\n" + prefix + map[int]string{1: "===", 2: "---"}[level])
+			r.writeSyntax("\n" + prefix + underline)
 		default:
 			r.writeSyntax(strings.Repeat("#", level) + " ")
 			r.headingInline(hardBreaksAsSpaces(n.Children), prefix)
@@ -460,7 +464,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
 		outer, outerQuotes := r.inFootnote, r.footnoteQuotes
 		r.inFootnote, r.footnoteQuotes = true, strings.Count(prefix, ">")
-		r.blocksNoTrailing(n.Children, prefix+"    ")
+		r.blocksNoTrailing(n.Children, prefix+definitionIndent)
 		r.inFootnote, r.footnoteQuotes = outer, outerQuotes
 	default:
 		typ, typed := typedBlock(n.Type)

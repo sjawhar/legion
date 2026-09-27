@@ -149,10 +149,11 @@ func (p footnoteReferenceParser) Parse(parent ast.Node, block gmtext.Reader, pc 
 		return nil
 	}
 	label := line[start+1 : start+1+closure]
+	key := footnoteLabelKey(string(label))
 	slots, _ := pc.Get(footnoteSlotsKey).([]*footnoteSlot)
 	for _, slot := range slots {
 		definition, ok := slot.definition.(*extensionast.Footnote)
-		if !ok || footnoteLabelKey(string(definition.Ref)) != footnoteLabelKey(string(label)) {
+		if !ok || footnoteLabelKey(string(definition.Ref)) != key {
 			continue
 		}
 		list, ok := definition.Parent().(*extensionast.FootnoteList)
