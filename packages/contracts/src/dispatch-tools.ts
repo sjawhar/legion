@@ -226,7 +226,11 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_issue_update",
-    example: { issue: "DSP-1", status: "in_progress" },
+    example: {
+      issue: "DSP-1",
+      status: "done",
+      reason: "Shipped in owner/repo#7; verified on the production dashboard.",
+    },
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " +
       "its priority, link a URL (the pull request that delivers it, a run, a document), set its " +
@@ -234,15 +238,24 @@ export const dispatchToolSpecs = [
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. external_links are " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
-      "keeps every earlier link. components replaces the issue's own attachment. A closed issue " +
-      "takes only rank, components, and a reopening status (any status but done); everything " +
-      "else, priority included, waits for the reopen. " +
+      "keeps every earlier link. components replaces the issue's own attachment. Closing an issue " +
+      "(status done) requires reason, the note that says why: it is posted on the issue as a " +
+      "message, then the issue closes, because a closed issue refuses messages, comments, and " +
+      "artifacts; reason goes only with status done. A closed issue takes only rank, components, " +
+      "and a reopening status (any status but done); everything else, priority included, waits " +
+      "for the reopen. " +
       "priority is yours to set and a human overrides it; rank, the board's own order, is not " +
       "settable here. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       status: z.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
+      reason: z
+        .string({ max: 2000 })
+        .describe(
+          "Required with status done, and only with it: why the issue is closing, at most 2,000 characters. Posted on the issue as a message before it closes."
+        )
+        .optional(),
       title: z.string({ min: 1 }).describe("Replacement title.").optional(),
       labels: z
         .array(z.string({ min: 1, max: 40 }), { max: 20 })
@@ -277,6 +290,7 @@ export const dispatchToolSpecs = [
       check: (value) => {
         const input = value as {
           readonly status?: unknown;
+          readonly reason?: unknown;
           readonly title?: unknown;
           readonly labels?: unknown;
           readonly priority?: unknown;
@@ -285,20 +299,26 @@ export const dispatchToolSpecs = [
           readonly parent?: unknown;
           readonly components?: unknown;
         };
+        const reasonFits =
+          input.status === "done"
+            ? typeof input.reason === "string" && input.reason.trim() !== ""
+            : input.reason === undefined;
         return (
-          typeof input.status === "string" ||
-          typeof input.title === "string" ||
-          Array.isArray(input.labels) ||
-          typeof input.priority === "number" ||
-          input.priority === null ||
-          Array.isArray(input.external_links) ||
-          typeof input.route === "string" ||
-          typeof input.parent === "string" ||
-          (typeof input.components === "object" && input.components !== null)
+          reasonFits &&
+          (typeof input.status === "string" ||
+            typeof input.title === "string" ||
+            Array.isArray(input.labels) ||
+            typeof input.priority === "number" ||
+            input.priority === null ||
+            Array.isArray(input.external_links) ||
+            typeof input.route === "string" ||
+            typeof input.parent === "string" ||
+            (typeof input.components === "object" && input.components !== null))
         );
       },
       message:
-        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components.",
+        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components. " +
+        "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done.",
     },
     strict: true,
   },

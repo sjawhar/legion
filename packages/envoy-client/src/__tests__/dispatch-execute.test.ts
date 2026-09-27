@@ -2022,7 +2022,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", status: "done" },
+        args: { issue: "AGENTC-175", status: "testing" },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2082,6 +2082,147 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(/Issue update requires at least one field besides issue/);
+  });
+
+  test("dispatch_issue_update refuses status done without a reason before any request", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    for (const args of [
+      { issue: "AGENTC-175", status: "done" },
+      { issue: "AGENTC-175", status: "done", reason: " " },
+    ]) {
+      await expect(
+        executeDispatchTool({
+          tool: "dispatch_issue_update",
+          args,
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl,
+        })
+      ).rejects.toThrow(
+        /status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts/
+      );
+    }
+  });
+
+  /** Records every request; the messages route and the PATCH answer with the given responses. */
+  function closingServer(answers: { message: () => Response; patch: () => Response }) {
+    const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      const method = init?.method ?? "GET";
+      requests.push({
+        method,
+        pathname,
+        ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
+      });
+      if (pathname === "/api/v1/issues/AGENTC-175/messages") return answers.message();
+      if (pathname !== "/api/v1/issues/AGENTC-175") {
+        throw new Error(`unexpected request: ${method} ${pathname}`);
+      }
+      if (method === "GET") {
+        return response({
+          key: "AGENTC-175",
+          title: "x",
+          status: "retro",
+          labels: [],
+          route: null,
+          external_links: [],
+        });
+      }
+      return answers.patch();
+    };
+    return { requests, fetchImpl: fetchImpl as typeof fetch };
+  }
+
+  const refusal = (status: number, code: string, error: string) =>
+    new Response(JSON.stringify({ code, error }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  const closeCall = (fetchImpl: typeof fetch) =>
+    executeDispatchTool({
+      tool: "dispatch_issue_update",
+      args: { issue: "AGENTC-175", status: "done", reason: "Shipped in owner/repo#7." },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+  test("dispatch_issue_update posts the reason as a message, then closes the issue", async () => {
+    const server = closingServer({
+      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      patch: () =>
+        response({
+          key: "AGENTC-175",
+          title: "x",
+          status: "done",
+          labels: [],
+          route: null,
+          external_links: [],
+        }),
+    });
+
+    const result = await closeCall(server.fetchImpl);
+
+    expect(server.requests.map(({ method, pathname }) => `${method} ${pathname}`)).toEqual([
+      "GET /api/v1/issues/AGENTC-175",
+      "POST /api/v1/issues/AGENTC-175/messages",
+      "PATCH /api/v1/issues/AGENTC-175",
+    ]);
+    expect(server.requests[1]?.body).toMatchObject({
+      body: "Shipped in owner/repo#7.",
+      actor: { kind: "session", id: "session-42" },
+    });
+    expect(server.requests[2]?.body).toMatchObject({ status: "done" });
+    expect(server.requests[2]?.body).not.toHaveProperty("reason");
+    expect(result.text).toStartWith(
+      "AGENTC-175: reason posted as message message-7 (dispatch://AGENTC-175/message/message-7); status retro -> done"
+    );
+    expect(result.details).toMatchObject({
+      issue: "AGENTC-175",
+      status: "done",
+      message: "message-7",
+    });
+  });
+
+  test("dispatch_issue_update leaves the issue open when the reason cannot be posted", async () => {
+    const server = closingServer({
+      message: () => refusal(409, "ISSUE_CLOSED", "issue is closed"),
+      patch: () => {
+        throw new Error("the close must not be sent");
+      },
+    });
+
+    await expect(closeCall(server.fetchImpl)).rejects.toThrow(
+      "ISSUE_CLOSED: issue is closed; the reason was not posted, so the close was not sent"
+    );
+    expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+  });
+
+  test("dispatch_issue_update names the posted reason when the close fails after it", async () => {
+    const server = closingServer({
+      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      patch: () => refusal(409, "ISSUE_CLAIMED", "claimed by session other"),
+    });
+
+    await expect(closeCall(server.fetchImpl)).rejects.toThrow(
+      "ISSUE_CLAIMED: claimed by session other; the reason already landed as message message-7 " +
+        "(dispatch://AGENTC-175/message/message-7) but the issue did not close. Retrying this call " +
+        "posts its reason again, so fix what refused the close, then retry with a reason that " +
+        "points at message message-7"
+    );
+    expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
   });
 
   test("dispatch_issue_update sets the parent and reports the move", async () => {
