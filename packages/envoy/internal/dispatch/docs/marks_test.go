@@ -140,6 +140,21 @@ func TestAcceptSuggestionReplacesMarkedTextAndRemovesTheMark(t *testing.T) {
 	}
 }
 
+// Rejecting a browser insert in code gives back the code the insert started from, in a typed block
+// as anywhere: a reject is not read back.
+func TestRejectSuggestionInCodeGivesBackTheCode(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::callout{#c1 kind=\"note\" title=\"T\"}\n```\nabc added\n```\n:::\n")
+	browserMarkWithAttrs(t, service, artifactID, "proofSuggestion", " added", pmdoc.Attrs{
+		"id": "ins", "by": "user:bob", "kind": "insert",
+	})
+	if err := service.RejectSuggestion(context.Background(), artifactID, "ins", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	waitForDocumentText(t, service, artifactID, ":::callout{#c1 kind=\"note\" title=\"T\"}\n```\nabc\n```\n:::\n")
+}
+
 func TestRejectSuggestionIsKindAware(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
