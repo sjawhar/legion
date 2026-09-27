@@ -465,7 +465,7 @@ func TestPollHoldReleaseWarnsWhenAHoldPersistsPastItsBound(t *testing.T) {
 	<-done
 
 	msg := logBuf.String()
-	if !strings.Contains(msg, "target=5") || !strings.Contains(msg, "ack_floor=0") || !strings.Contains(msg, "stuck_seq=1") {
-		t.Fatalf("warn log = %q, want it to name the target, the ack floor, and the stuck stream sequence", msg)
+	if !strings.Contains(msg, "target=5") || !strings.Contains(msg, "ack_floor=0") {
+		t.Fatalf("warn log = %q, want it to name the target and the ack floor", msg)
 	}
 }

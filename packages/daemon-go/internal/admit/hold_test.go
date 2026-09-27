@@ -48,12 +48,14 @@ func TestReconcileLeavesAnIssueTheStreamHoldsNewerEventsFor(t *testing.T) {
 	}
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ACTIVE", Index: 0, AdmittedAt: fixedNow}})
 
-	// The same issue once the record has caught up with Dispatch's log: nothing newer is coming.
-	reconcile(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-ACTIVE", Title: "active", Status: "done", Rank: "A", LastSeq: 10},
-	})
+	// The same issue once the Dispatch consumer has actually caught up to the same event: nothing
+	// newer is coming, so the summary — genuinely newer than the record's own sequence — applies
+	// through the engine (B5/D: level with what is already recorded would instead leave it alone).
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-ACTIVE", Title: "active", Status: "done", Rank: "A", LastSeq: 11},
+	}, 11, 11, true)
 	if got := issue(t, pool, "LEGION-ACTIVE"); got.Status != "done" {
-		t.Fatalf("reconciled status = %q, want done once the record has caught up", got.Status)
+		t.Fatalf("reconciled status = %q, want done once the consumer has caught up", got.Status)
 	}
 	assertSlots(t, pool, nil)
 }
@@ -284,12 +286,13 @@ func TestReconcileHoldsAnUnrecordedKeyBehindTheStreamWhateverItsListedStatus(t *
 	assertSlots(t, pool, nil)
 }
 
-// P2, thread 4114574427: while a key is held, Apply dropped every event for it, including ones
-// newer than the summary it is held on — so an owner labeling the root after boot could never
-// reach the record, and the stale unlabeled listing snapshot applied at release was the last word
-// forever. Only a replay at or behind the held summary's own sequence is stale; a newer event is
-// recorded normally — promote still holds the candidate back until release, and applySummary
-// leaves a record already past its summary alone.
+// P2, thread 4114574427, and N6's later collapse: while a key is held, Apply used to drop every
+// event for it, including ones newer than the summary it is held on — so an owner labeling the
+// root after boot could never reach either the record or the held summary, and the stale unlabeled
+// listing snapshot applied at release was the last word forever. A held unrecorded key now only
+// refreshes its own pending summary on a newer event — release, not this call, decides everything
+// for it — so the label-adding event here never reaches the record while held; release admits it
+// from the refreshed summary once the consumer catches up.
 func TestALabelAddedWhileAKeyIsHeldReachesTheRecordAndIsAdmittedAfterRelease(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -301,10 +304,11 @@ func TestALabelAddedWhileAKeyIsHeldReachesTheRecordAndIsAdmittedAfterRelease(t *
 		t.Fatal("Held() = false after seeding an unlabeled behind record, want it held")
 	}
 
-	// The label-adding event, newer than the held summary, arrives while LEGION-8 is still held.
+	// The label-adding event, newer than the held summary, arrives while LEGION-8 is still held:
+	// it only refreshes the pending summary, and release decides.
 	apply(t, pool, admission, "label-added", intake.DispatchIssue{Key: "LEGION-8", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-8", Rank: "A", HandedOver: true}, engineStub{})
-	if got := issue(t, pool, "LEGION-8"); !got.HandedOver || got.Status != "todo" {
-		t.Fatalf("LEGION-8 while held = %#v, want the newer label-adding event recorded (todo, handed over)", got)
+	if got := maybeIssue(t, pool, "LEGION-8"); got != nil {
+		t.Fatalf("LEGION-8 recorded while held = %#v, want none: a held key only refreshes its summary, release decides", got)
 	}
 	assertSlots(t, pool, nil)
 

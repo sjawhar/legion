@@ -847,12 +847,18 @@ func TestReconcileFillsRaisedCapInRankOrderAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// B5/D: a status change applies through Reconcile only when the summary's own sequence is
+// genuinely newer than the record's, and the consumer has caught up to it — otherwise it is either
+// deferred (behind) or, level with what is already recorded, left alone (see hold_test.go's
+// TestReconcileLeavesAnIssueTheStreamHoldsNewerEventsFor and applySummary).
 func TestReconcileReleasesSlotWhoseDispatchStatusLeftActiveSet(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	seedSlotted(t, pool, "LEGION-ACTIVE", "A")
 
-	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-ACTIVE", Title: "active", Status: "done", Rank: "A"}})
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-ACTIVE", Title: "active", Status: "done", Rank: "A", LastSeq: 1},
+	}, 1, 1, true)
 	assertSlots(t, pool, nil)
 	if got := issue(t, pool, "LEGION-ACTIVE"); got.Status != "done" {
 		t.Fatalf("reconciled status = %q, want done", got.Status)

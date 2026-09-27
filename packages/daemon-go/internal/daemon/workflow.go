@@ -447,12 +447,13 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 		}
 		// This never releases on the strength of the timer — only a Reached position does that,
 		// through the ApplyFact below — so a stuck hold stays stuck, but an operator now sees why:
-		// the target it is waiting for, its current ack floor, and the stream sequence stuck
-		// behind that floor.
+		// the target it is waiting for and its current ack floor. Not the stream sequence stuck
+		// behind that floor: the notification stream also carries GitHub subjects interleaved with
+		// Dispatch's, so ack_floor+1 can name a message that has nothing to do with this hold.
 		if waiting := time.Since(heldSince); waiting >= warnAfter && time.Since(warnedAt) >= warnEvery {
 			warnedAt = time.Now()
 			w.log.Warn("admission: a hold has not released", "waiting", waiting.Round(time.Second),
-				"target", w.admission.Target(), "ack_floor", position.AckFloorStream, "stuck_seq", position.AckFloorStream+1)
+				"target", w.admission.Target(), "ack_floor", position.AckFloorStream)
 		}
 		if haveLast && position == last {
 			continue

@@ -103,33 +103,25 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 				return intake.Result{}, err
 			}
 		}
+		// A held unrecorded key has no record yet to fence a live event against, so this event
+		// never records or admits anything itself; release decides everything for it from
+		// whatever summary it holds. This just keeps that summary current — replacing it when the
+		// event is newer, a no-op (refreshHeldSummary's own check) when it is a stale replay, a
+		// nak's redelivery or the outbox's own publish backoff.
+		a.mu.Lock()
+		_, held := a.pending[observation.Key]
+		a.mu.Unlock()
+		if held {
+			a.refreshHeldSummary(observation)
+			return intake.Result{}, nil
+		}
 		// An unrecorded todo issue without the label is someone else's work in a project Legion may
 		// share with humans and other agents: Legion records nothing of it until it is handed over.
-		// Neither exit records anything, but each still refreshes a held key's own pending summary:
-		// an event moving the key out of todo, or taking its label off, is real information about
-		// what Dispatch shows now, and leaving the held summary as Reconcile's stale boot listing
-		// found it would have release admit on that stale information instead.
 		if observation.Status != "todo" {
-			a.refreshHeldSummary(observation)
 			return intake.Result{}, nil
 		}
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
-			a.refreshHeldSummary(observation)
-			return intake.Result{}, nil
-		}
-		a.mu.Lock()
-		summary, held := a.pending[observation.Key]
-		a.mu.Unlock()
-		if held && observation.Seq <= summary.LastSeq {
-			// Reconcile already holds this key on the listing's own summary because it found it
-			// behind the stream: an unrecorded key has no record to fence a live event against, so
-			// a replay at or behind that summary's own sequence — a nak's redelivery, the outbox's
-			// own publish backoff — decides nothing. release applies that summary once the
-			// consumer catches up. A newer event, past the sequence the summary was taken at, is
-			// not a stale replay: it is recorded normally below, and promote's own pending
-			// membership check — not this one — is what still holds the candidate back from a
-			// slot until release.
 			return intake.Result{}, nil
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
@@ -265,19 +257,26 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 	if summary.LastSeq > seq {
 		seq = summary.LastSeq
 	}
-	if record.OutOfWorkflow(summary.Status) && summary.Status != stored.Status {
-		// A snapshot that moves a recorded issue out of the workflow (backlog, icebox, triage, or
-		// done) is the fact a live Dispatch event of the same move would carry, so it runs through
-		// the engine's own leave/beginLinger first — arming a root's linger, or parking a child and
-		// telling its architect — exactly as that event would. Left to recordObservation alone, the
-		// record would move to the snapshot's status with no suspend and no linger, and the
-		// record's LastDispatchSeq would reach the snapshot's own sequence, so the real event, once
-		// it finally arrives, would be dropped by Engine.dispatchIssue's sequence check — nothing
-		// would ever run the transition this snapshot stands in for. A snapshot showing "todo" is
-		// not this case: Reconcile's own readmit and recordObservation already own a root's or a
-		// live tree's child's return to todo below, unchanged. Re-read afterward: the engine's own
-		// write (phase, hold, linger) must not be clobbered by recordObservation writing back the
-		// stale copy this call fetched before the engine ran.
+	status := stored.Status
+	if summary.Status != stored.Status && summary.LastSeq > stored.LastDispatchSeq {
+		// A snapshot that changes a recorded issue's status, strictly newer than what is stored, is
+		// the fact a live Dispatch event of the same change would carry, so it runs through the
+		// engine's own transition table first — leave/beginLinger out of the workflow, or
+		// ReenterChild for a live tree's child moved back to todo — exactly as that event would.
+		// Engine.dispatchIssue already makes this same newer-or-not decision on its own sequence
+		// fence (fact.Seq <= issue.LastDispatchSeq); pre-filtering by status here to
+		// OutOfWorkflow alone left a parked child's own re-entry unreached, stranding it recorded
+		// todo at phase done under a live tree. Left to recordObservation alone, the record would
+		// move to the snapshot's status with no suspend and no linger, and the record's
+		// LastDispatchSeq would reach the snapshot's own sequence, so the real event, once it
+		// finally arrives, would be dropped by that same sequence fence — nothing would ever run
+		// the transition this snapshot stands in for. A snapshot no newer than the record — an
+		// agent's own status write the daemon already recorded through agentStatusWrite, echoed
+		// back by a boot listing taken before the daemon's own reassert landed — is level, not a
+		// change to apply: status stays what recordObservation below already knows, an admitted
+		// root's or a live tree's own state, not the record it briefly showed on Dispatch. Re-read
+		// afterward: the engine's own write (phase, hold, linger) must not be clobbered by
+		// recordObservation writing back the stale copy this call fetched before the engine ran.
 		if _, err := a.engine.Apply(ctx, tx, intake.DispatchIssue{
 			Key: summary.Key, Seq: summary.LastSeq, Status: summary.Status, Title: summary.Title,
 			Parent: deref(summary.Parent), Rank: summary.Rank, HandedOver: handed,
@@ -288,7 +287,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		if err != nil {
 			return fmt.Errorf("re-read %s after its engine transition: %w", summary.Key, err)
 		}
-		stored = refreshed
+		stored, status = refreshed, summary.Status
 	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
 		return a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, seq)
@@ -300,7 +299,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 	}
 	return a.recordObservation(ctx, tx, *stored, observed{
 		Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
-		Status: summary.Status, HandedOver: handed, Seq: seq,
+		Status: status, HandedOver: handed, Seq: seq,
 	})
 }
 

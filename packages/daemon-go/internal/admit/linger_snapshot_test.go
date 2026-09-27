@@ -108,3 +108,65 @@ func TestReconcileAppliesASnapshotThatLeavesTheWorkflowThroughTheEngineWhenTheCo
 		t.Fatal("no linger_close queued for the reconciled LEGION-PARK2, want the tree's own linger deadline armed")
 	}
 }
+
+// Quality review B5: routing a snapshot's status change through the engine only for
+// record.OutOfWorkflow statuses pre-filtered a decision Engine.dispatchIssue already makes on its
+// own sequence fence, which also re-enters a child set back to todo (ReenterChild). A parked
+// child — recorded todo at phase done under a live tree because its own live todo event never
+// arrived (the recreated-consumer case) — was left stranded: recordObservation wrote its status to
+// todo with no generation bump and no re-entry. The condition is now sequence-based
+// (summary.LastSeq > stored.LastDispatchSeq), not status-based, so this reaches the engine too.
+func TestReconcileReentersAParkedChildSetBackToTodoInABootSummary(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seedSlotted(t, pool, "LEGION-ROOT", "A")
+	parent := "LEGION-ROOT"
+	putIssue(t, pool, record.Issue{
+		Key: "LEGION-CHILD", Tree: "LEGION-ROOT", Project: testProject, Title: "child", Parent: &parent,
+		Phase: phase.Done, Generation: 1, Status: "done", Rank: "B", LastDispatchSeq: 1,
+	})
+
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-CHILD", Title: "child", Status: "todo", Parent: &parent, Rank: "B", LastSeq: 5},
+	}, 10, 10, true)
+
+	got := issue(t, pool, "LEGION-CHILD")
+	if got.Generation != 2 || got.Phase != phase.Admitted || got.Status != "todo" {
+		t.Fatalf("reconciled parked child = %#v, want re-entered at generation 2, phase admitted, status todo — not stranded todo at phase done", got)
+	}
+}
+
+// Deep review D, sharpened by Review1456: an agent writes an issue's Dispatch status directly
+// (agentStatusWrite records it, LastDispatchSeq included, but never changes issue.Status — the
+// daemon reasserts its own through the outbox instead). A boot listing taken before that reassert
+// lands still shows the agent's own out-of-workflow write, level with what the daemon already
+// recorded (same sequence): not a change to apply, since the daemon's reassert — not the
+// snapshot — is the record's own truth. Before this fix, recordObservation wrote it anyway,
+// releaseInactiveSlots freed the slot, and the next waiting root was admitted alongside the first
+// tree, which kept running unslotted: two trees at cap 1.
+func TestReconcileLeavesSlotStateUnchangedWhenALevelSnapshotEchoesAnAgentsOutOfWorkflowWrite(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	putIssue(t, pool, record.Issue{
+		Key: "LEGION-AGENT", Project: testProject, Title: "agent", Tree: "LEGION-AGENT", Phase: phase.Implementing,
+		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 5,
+	})
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutSlot(context.Background(), tx, record.Slot{Issue: "LEGION-AGENT", Index: 0, AdmittedAt: fixedNow}); err != nil {
+			t.Fatalf("seed slot: %v", err)
+		}
+	})
+	seedWaiting(t, pool, "LEGION-NEXT", "B")
+
+	// The boot listing shows the agent's own out-of-workflow write, no newer than what the daemon
+	// already recorded (its own reassert already landed at this same sequence).
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-AGENT", Title: "agent", Status: "done", Rank: "A", HandedOver: true, LastSeq: 5},
+	}, 10, 10, true)
+
+	got := issue(t, pool, "LEGION-AGENT")
+	if got.Status != "in_progress" || got.Phase != phase.Implementing || got.LingerUntil != nil {
+		t.Fatalf("reconciled LEGION-AGENT = %#v, want its slot state unchanged: the engine never applied this level-sequence status", got)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-AGENT", Index: 0, AdmittedAt: fixedNow}})
+}
