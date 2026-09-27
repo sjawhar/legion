@@ -277,6 +277,10 @@ start with the issue key; standalone project-document hit lines start with
 
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
+The check compares title words only (shared stemmed terms), never meaning: "four tests that fail a
+merge" pairs with "four CI gates that cannot fail a merge". So when you force past a candidate, give
+the new issue a title that names what differs where you can, and open its spec's Summary with the
+distinction from the named issue, citing it (`dispatch://KEY`), for whoever reads the next pairing.
 
 ## Reading a project's backlog
 
