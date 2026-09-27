@@ -476,7 +476,7 @@ func (r *renderer) list(n *Node, prefix string) {
 		// be written so: its marker's line would carry the next block as the task's text, and the
 		// browser editor reads no other form of it as a task.
 		children := item.Children
-		skipped := len(children) > 1 && children[0].Type == "paragraph" && len(children[0].Children) == 0
+		skipped := opensWithUnwrittenParagraph(item)
 		if skipped {
 			if _, task := item.Attrs["checked"].(bool); task {
 				r.err = fmt.Errorf("%w: a task item whose first paragraph is empty cannot hold another block after it; the browser editor reads no such item as a task", ErrSchema)
@@ -502,6 +502,13 @@ func spreadElsewhere(blocks []*Node) bool {
 		}
 	}
 	return false
+}
+
+// opensWithUnwrittenParagraph reports whether item's first block is an empty paragraph with another
+// block after it, which the renderer writes as nothing, the next block on the marker's line.
+func opensWithUnwrittenParagraph(item *Node) bool {
+	children := item.Children
+	return len(children) > 1 && children[0].Type == "paragraph" && len(children[0].Children) == 0
 }
 
 // itemBlocks writes blocks the browser editor's parser reads as a list item's lines - the item's

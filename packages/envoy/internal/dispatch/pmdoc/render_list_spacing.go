@@ -103,15 +103,25 @@ func (r *renderer) inQuotedTypedBlock() bool {
 }
 
 // spreadByItsOwnLines reports whether a spread list or list item is written spread without a blank
-// line after it: an item by a blank line between two of its blocks, and a list in a quote outside
-// footnote definitions (quoted) by one after an item that neither ends in a list nor, in a list
-// item (nested), is empty (writesBlankAfterItem).
+// line after it: an item by a blank line between two of the blocks it writes, which an empty first
+// paragraph is not (opensWithUnwrittenParagraph), or, where the one block it writes is a footnote
+// definition, by one the definition writes between its blocks after a block that is neither a list
+// nor a definition (spreadElsewhere); and a list in a quote outside footnote definitions (quoted)
+// by one after an item that neither ends in a list nor, in a list item (nested), is empty
+// (writesBlankAfterItem).
 func spreadByItsOwnLines(spaced *Node, quoted, nested bool) bool {
 	if spaced.Attrs["spread"] != true {
 		return false
 	}
 	if spaced.Type == "list_item" {
-		return len(spaced.Children) > 1
+		written := spaced.Children
+		if opensWithUnwrittenParagraph(spaced) {
+			written = written[1:]
+		}
+		if len(written) == 1 && written[0].Type == "footnote_definition" {
+			return spreadElsewhere(written[0].Children)
+		}
+		return len(written) > 1
 	}
 	if !quoted {
 		return false
