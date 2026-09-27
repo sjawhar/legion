@@ -151,12 +151,13 @@ func TestAnAcceptRewritingATypedBlockUnderItsOwnIDIsTaken(t *testing.T) {
 
 // A block replacement anchored inside a paragraph splits it, and the splice gives both halves the
 // paragraph's id until settlement's repair re-mints the second. That id is the document's, not
-// one the caller wrote, so the accept is taken and stores what main does.
+// one the caller wrote, so the accept is taken. Each half keeps the space the split left at its
+// edge, written as a reference so it reads back.
 func TestABlockReplacementInsideAParagraphIsTaken(t *testing.T) {
 	for _, test := range []struct{ name, replaceWith, want string }{
-		{name: "two paragraphs", replaceWith: "one\n\ntwo\n", want: "Alpha \n\none\n\ntwo\n\n gamma.\n"},
+		{name: "two paragraphs", replaceWith: "one\n\ntwo\n", want: "Alpha&#32;\n\none\n\ntwo\n\n&#32;gamma.\n"},
 		{name: "a callout", replaceWith: ":::callout{kind=\"note\"}\nA note.\n:::\n",
-			want: "Alpha \n\n:::callout{#<minted> kind=\"note\" title=\"\"}\nA note.\n:::\n\n gamma.\n"},
+			want: "Alpha&#32;\n\n:::callout{#<minted> kind=\"note\" title=\"\"}\nA note.\n:::\n\n&#32;gamma.\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler, _ := blockAskHandler(t)

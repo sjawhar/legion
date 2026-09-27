@@ -1,10 +1,9 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 import { $remark } from '@milkdown/kit/utils';
 import { directiveFromMarkdown, directiveToMarkdown } from 'mdast-util-directive';
 import { directive } from 'micromark-extension-directive';
 import type { Construct, Extension } from 'micromark-util-types';
-import type { Processor } from 'unified';
+import type { Root } from '@milkdown/kit/transformer';
+import type { Processor, Transformer } from 'unified';
 
 import { remarkTypedBlocks, type BlockSchema } from './block-schema.js';
 
@@ -42,5 +41,5 @@ export function remarkContainerDirectives(this: Processor): void {
 export const libraryRemarkDirectivePlugin = $remark('remarkDirective', () => remarkContainerDirectives);
 
 export function typedBlockRemarkPlugin(schema: BlockSchema) {
-  return $remark('remarkTypedBlocks', () => () => remarkTypedBlocks(schema));
+  return $remark('remarkTypedBlocks', () => () => remarkTypedBlocks(schema) as unknown as Transformer<Root, Root>);
 }

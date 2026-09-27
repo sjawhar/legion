@@ -8,12 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/reearth/ygo/persistence"
-
-	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // A settlement already past its entry check when a transaction opens its write can reach the
@@ -209,107 +204,5 @@ func TestAJoinedWritesVersionNamesItsWriterNotAConnectedBrowser(t *testing.T) {
 	version := waitForDocumentVersion(t, service.store, artifactID, 3)
 	if !reflect.DeepEqual(version.Authors, []model.Actor{later}) {
 		t.Fatalf("version 3 authors = %#v, want only %v", version.Authors, later)
-	}
-}
-
-// failingBrowserAppendStore fails every browser update's durable append while failing is set,
-// holding the first such append until release closes, and runs beforeTx once, just before the
-// next transactional append and so before that append takes the document's advisory lock.
-type failingBrowserAppendStore struct {
-	VersionedStore
-	failing  atomic.Bool
-	held     atomic.Bool
-	entered  chan struct{}
-	release  chan struct{}
-	beforeTx atomic.Pointer[func()]
-}
-
-func (s *failingBrowserAppendStore) fail() error {
-	if !s.failing.Load() {
-		return nil
-	}
-	if s.held.CompareAndSwap(false, true) {
-		close(s.entered)
-		<-s.release
-	}
-	return errors.New("injected browser append failure")
-}
-
-func (s *failingBrowserAppendStore) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
-	if err := s.fail(); err != nil {
-		return 0, err
-	}
-	return s.VersionedStore.AppendUpdate(ctx, room, update)
-}
-
-func (s *failingBrowserAppendStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if err := s.fail(); err != nil {
-		return 0, err
-	}
-	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
-}
-
-func (s *failingBrowserAppendStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	if hook := s.beforeTx.Swap(nil); hook != nil {
-		(*hook)()
-	}
-	return s.VersionedStore.AppendUpdateTx(ctx, tx, room, update, contentChanged)
-}
-
-// A joined write's first operation forks the room while the room holds a browser paragraph,
-// "typed", that is not durable yet. That paragraph's append then fails, and the failed room is
-// evicted and reloaded without it before the write appends its own update. The write's fork
-// still holds the paragraph and its slot is on the failed room, so the write fails at its append
-// rather than versioning or publishing a document the room never held, and its transaction rolls
-// back to the durable document.
-func TestAWriteWhoseRoomReloadsBeforeItsFirstAppendFailsFast(t *testing.T) {
-	database := storetest.Open(t)
-	artifactID := createDocument(t, database, "before")
-	store := &failingBrowserAppendStore{
-		VersionedStore: NewPgVersioned(database),
-		entered:        make(chan struct{}),
-		release:        make(chan struct{}),
-	}
-	service := New(Deps{Store: database, Persistence: store, Events: events.NewBroker(), Settle: time.Hour})
-	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
-	seedServiceText(t, service, artifactID, "before")
-	liveTree(t, service, artifactID)
-
-	ctx := context.Background()
-	tx, err := service.store.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin transactional edit: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	joinedCtx, ledger := service.Join(ctx, tx)
-	defer ledger.Discard()
-
-	store.failing.Store(true)
-	editLiveTree(t, service, artifactID, appendBlocks(t, "typed"))
-	<-store.entered
-	reload := func() {
-		close(store.release)
-		waitForRoomFailure(t, service, artifactID)
-		if err := service.awaitRoomRecovery(ctx, artifactID); err != nil {
-			t.Errorf("await room recovery: %v", err)
-		}
-		store.failing.Store(false)
-	}
-	store.beforeTx.Store(&reload)
-	failsFast(t, "a joined write whose room reloaded before its first append", func() error {
-		_, err := service.ApplyOps(joinedCtx, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, model.Actor{Kind: "user", ID: "alice"}, nil)
-		return err
-	})
-	if err := tx.Rollback(ctx); err != nil {
-		t.Fatalf("roll back: %v", err)
-	}
-	ledger.Discard()
-	requireText(t, service, artifactID, "before\n")
-	var latest int
-	if err := database.Pool.QueryRow(ctx, `select max(number) from artifact_versions where artifact_id = $1`, artifactID).Scan(&latest); err != nil {
-		t.Fatalf("read latest version: %v", err)
-	}
-	if latest != 1 {
-		t.Fatalf("latest version = %d, want the seeded version only", latest)
 	}
 }

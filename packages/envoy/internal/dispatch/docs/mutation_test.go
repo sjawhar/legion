@@ -259,7 +259,7 @@ func TestClosedIssueRejectsLiveEditsAndNamedVersions(t *testing.T) {
 	if !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("edit closed document error = %v, want ErrIssueClosed", err)
 	}
-	if _, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", actor); !errors.Is(err, ErrIssueClosed) {
+	if _, err := namedVersion(t, service, artifactID, "checkpoint", actor); !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("version closed document error = %v, want ErrIssueClosed", err)
 	}
 	waitForDocumentText(t, service, artifactID, "before\n")
@@ -271,7 +271,7 @@ func TestNamedVersionIncludesTrackedActorsAndResetsRoom(t *testing.T) {
 	connected := model.Actor{Kind: "user", ID: "alice"}
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	service.recordActor(artifactID, connected)
-	namedResult, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", actor)
+	namedResult, err := namedVersion(t, service, artifactID, "checkpoint", actor)
 	version := namedResult.Version
 	if err != nil {
 		t.Fatalf("name document version: %v", err)
@@ -570,7 +570,7 @@ func TestNamedVersionIndexesDocumentReferences(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "See dispatch://DOC-1/artifact/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace document text: %v", err)
 	}
-	if _, err := service.NamedVersion(context.Background(), artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := namedVersion(t, service, artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write named version: %v", err)
 	}
 	var references int
@@ -592,7 +592,7 @@ func TestNamedVersionIndexesServerURLDocumentReferences(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "See https://dispatch.example/issues/DOC-1/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace document text: %v", err)
 	}
-	if _, err := service.NamedVersion(context.Background(), artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := namedVersion(t, service, artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write named version: %v", err)
 	}
 	var references int
@@ -702,7 +702,7 @@ func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 	}, actor, nil); err != nil {
 		t.Fatalf("apply the second citing edit: %v", err)
 	}
-	named, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", actor)
+	named, err := namedVersion(t, service, artifactID, "checkpoint", actor)
 	if err != nil {
 		t.Fatalf("name version: %v", err)
 	}

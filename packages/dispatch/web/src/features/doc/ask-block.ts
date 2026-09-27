@@ -64,27 +64,6 @@ function typedBlockView(node: ProseMirrorNode, document: Document): NodeView {
   return { contentDOM, dom };
 }
 
-/** The header `renderTypedBlock` draws inside a typed block's section. */
-const typedBlockHeader = "section[data-proof-block-type] > header[data-proof-block-summary]";
-
-/**
- * Pasted HTML without the attribute header `renderTypedBlock` draws, which a tab on an older build
- * copies: a typed block's parse rule reads every child of its section as content, so a pasted
- * header would come back as the block's first paragraphs.
- */
-function withoutTypedBlockHeaders(html: string, document: Document): string {
-  const template = document.createElement("template");
-  template.innerHTML = html;
-  const headers = template.content.querySelectorAll(typedBlockHeader);
-  if (headers.length === 0) {
-    return html;
-  }
-  for (const header of headers) {
-    header.remove();
-  }
-  return template.innerHTML;
-}
-
 /** What an `ask` node says about itself, read once per render from its attributes and content. */
 export interface AskBlockFacts {
   readonly answerText: string;
@@ -304,17 +283,15 @@ export const askBlockEditingPlugin = new Plugin({
 });
 
 /** Installs the document's typed blocks in the editor: `AskBlockView` for every `ask` node,
- * reporting the live set of hosts (in document order) whenever it changes, and
- * `renderTypedBlock`'s node view for every other type in the block schema, keeping the library's
- * other node views; `askBlockEditingPlugin`; and the removal of `renderTypedBlock`'s header from
- * pasted HTML, after the editor's own cleanup of it (a Google Docs wrapper, for one). Call once
- * per editor, right after it is created. */
+ * reporting the live set of hosts (in document order) whenever it changes,
+ * `renderTypedBlock`'s node view for every other type in the block schema while keeping the
+ * library's other node views, and `askBlockEditingPlugin`. Call once per editor, right after it
+ * is created. */
 export function installTypedBlocks(
   view: EditorView,
   blockSchema: BlockSchema,
   onHostsChange: (hosts: readonly AskBlockHost[]) => void
 ): void {
-  const previousTransform = view.props.transformPastedHTML;
   const registry = new Map<number, AskBlockHost>();
   const publish = () => {
     onHostsChange(
@@ -339,10 +316,5 @@ export function installTypedBlocks(
       ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
     },
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],
-    transformPastedHTML: (pasted, pastedView) =>
-      withoutTypedBlockHeaders(
-        previousTransform ? previousTransform(pasted, pastedView) : pasted,
-        view.dom.ownerDocument
-      ),
   });
 }

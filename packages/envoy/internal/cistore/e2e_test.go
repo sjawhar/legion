@@ -27,7 +27,7 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 	ctx := context.Background()
 	_, uri := testnats.Start(t)
 
-	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("bus connect: %v", err)
 	}

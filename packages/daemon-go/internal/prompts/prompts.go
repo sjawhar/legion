@@ -2,6 +2,7 @@
 package prompts
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
 	"os"
@@ -102,8 +103,13 @@ func CheckRolePrompts(rolesDir string) error {
 }
 
 // New validates the complete shared role bundle (CheckRolePrompts), then writes each embedded
-// Go-specific prompt once below stateDir. The caller constructs it during daemon boot; retaining
-// the generated files gives a resumed pane the same prompt even after a restart.
+// Go-specific prompt below stateDir wherever the file there does not already hold it. The caller
+// constructs it during daemon boot. The files stay across restarts, since a resumed pane reads its
+// prompt from the same path, and they hold the running daemon's words: a state directory outlives
+// the binary that wrote it, and a part an older daemon wrote would tell agents what that daemon
+// did (who posts READY, which operations exist). The daemon owns these files; an operator's own
+// text is the deployment `instructions`. A part already holding the embedded content is not
+// written, so an ordinary restart changes nothing.
 func New(rolesDir, stateDir string) (*Composer, error) {
 	if err := CheckRolePrompts(rolesDir); err != nil {
 		return nil, err
@@ -113,16 +119,22 @@ func New(rolesDir, stateDir string) (*Composer, error) {
 	if err := os.MkdirAll(goDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create Go daemon prompt directory %s: %w", goDir, err)
 	}
-	for _, name := range []string{"architect-root.md", "architect.md", "planner.md", "implementer.md", "tester.md", "reviewer.md", "merger.md"} {
-		path := filepath.Join(goDir, name)
-		if _, err := os.Lstat(path); err == nil {
-			continue
-		} else if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("inspect Go daemon prompt %s: %w", path, err)
-		}
+	entries, err := goParts.ReadDir("go")
+	if err != nil {
+		return nil, fmt.Errorf("list embedded Go daemon prompts: %w", err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
 		body, err := goParts.ReadFile(filepath.Join("go", name))
 		if err != nil {
 			return nil, fmt.Errorf("read embedded Go daemon prompt %s: %w", name, err)
+		}
+		path := filepath.Join(goDir, name)
+		written, err := os.ReadFile(path)
+		if err == nil && bytes.Equal(written, body) {
+			continue
+		} else if err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("inspect Go daemon prompt %s: %w", path, err)
 		}
 		if err := os.WriteFile(path, body, 0o600); err != nil {
 			return nil, fmt.Errorf("write Go daemon prompt %s: %w", path, err)
@@ -131,35 +143,38 @@ func New(rolesDir, stateDir string) (*Composer, error) {
 	return &Composer{rolesDir: rolesDir, goDir: goDir}, nil
 }
 
-// Compose returns the shipped daemon's shared role parts followed by this daemon's role-specific
-// override. The runtime appends addressing and deployment instructions after these paths.
+// Compose returns the shipped daemon's shared role parts followed by this daemon's parts: the
+// role's own, then the text every architect (architect-common.md) or every phase worker
+// (worker-common.md) shares. The runtime appends addressing and deployment instructions after
+// these paths.
 func (c *Composer) Compose(role claim.Role, isRoot bool) (Parts, error) {
 	if c == nil {
 		return Parts{}, fmt.Errorf("compose role prompt: nil composer")
 	}
-	var shared []string
-	var goPart string
+	var shared, daemonParts []string
 	switch role {
 	case claim.RoleArchitect:
+		name := "architect.md"
 		if isRoot {
-			shared, goPart = []string{"architect-root.md"}, "architect-root.md"
-		} else {
-			shared, goPart = []string{"architect.md"}, "architect.md"
+			name = "architect-root.md"
 		}
+		shared, daemonParts = []string{name}, []string{name, "architect-common.md"}
 	case claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer:
 		name := string(role)
 		shared = []string{"core/common.md", filepath.Join("core", name+".md"), "mechanics/headless.md", name + ".md"}
-		goPart = name + ".md"
+		daemonParts = []string{name + ".md", "worker-common.md"}
 	case claim.RoleMerger:
-		shared, goPart = []string{"mechanics/headless.md", "merger.md"}, "merger.md"
+		shared, daemonParts = []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}
 	default:
 		return Parts{}, fmt.Errorf("compose role prompt: unsupported role %q", role)
 	}
 
-	paths := make([]string, 0, len(shared)+1)
+	paths := make([]string, 0, len(shared)+len(daemonParts))
 	for _, part := range shared {
 		paths = append(paths, filepath.Join(c.rolesDir, part))
 	}
-	paths = append(paths, filepath.Join(c.goDir, goPart))
+	for _, part := range daemonParts {
+		paths = append(paths, filepath.Join(c.goDir, part))
+	}
 	return Parts{RolePromptPaths: slices.Clone(paths)}, nil
 }

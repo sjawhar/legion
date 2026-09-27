@@ -25,9 +25,57 @@ type askBlock struct {
 	urgency  string
 }
 
+// settlementReconciliation is what one settlement's pass over the ask blocks found. Everything
+// that names a version number - a repair, an invalid block, the retraction of an ask whose block
+// left - is left for nameVersion, since settlement knows the number only once it has rendered
+// the reconciled tree: a settlement whose markdown repeats the latest version writes no version
+// and leaves the document at the one it found.
 type settlementReconciliation struct {
-	changed bool
-	events  []model.Event
+	changed   bool
+	events    []model.Event
+	retracted []model.Ask
+}
+
+// nameVersion completes the reconciliation at the version the settled document is at, writing
+// the retractions whose reason names it and stamping it into every event that carries one.
+func (r *settlementReconciliation) nameVersion(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	owner artifactOwner,
+	version int,
+) error {
+	for index, event := range r.events {
+		switch payload := event.Payload.(type) {
+		case model.BlockRepairedEventPayload:
+			payload.Version = version
+			r.events[index].Payload = payload
+		case model.BlockInvalidEventPayload:
+			payload.Version = version
+			r.events[index].Payload = payload
+		}
+	}
+	for _, ask := range r.retracted {
+		resolution := model.AskResolution{
+			Kind:   "retracted",
+			Reason: fmt.Sprintf("%s %d", SettlementRetractionReason, version),
+			Actor:  SettlementActor,
+			At:     time.Now().UTC(),
+		}
+		encoded, err := json.Marshal(resolution)
+		if err != nil {
+			return fmt.Errorf("encode ask retraction: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, encoded); err != nil {
+			return fmt.Errorf("retract deleted ask block: %w", err)
+		}
+		ask.State = "resolved"
+		ask.Resolution = &resolution
+		r.events = append(r.events, documentAskEvent(
+			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+		))
+	}
+	return nil
 }
 
 // ErrInvalidAskBlock refuses a write that would leave an ask it writes or changes unreadable: an
@@ -70,7 +118,6 @@ func (s *Service) reconcileAskBlocks(
 	owner artifactOwner,
 	tree *pmdoc.Node,
 	actor model.Actor,
-	version int,
 ) (settlementReconciliation, error) {
 	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
 	if err != nil {
@@ -93,7 +140,6 @@ func (s *Service) reconcileAskBlocks(
 				actor,
 				model.BlockInvalidEventPayload{
 					BlockID:     invalid.id,
-					Version:     version,
 					Reason:      invalid.reason.Error(),
 					DisturbedBy: actor,
 				},
@@ -181,7 +227,7 @@ func (s *Service) reconcileAskBlocks(
 				artifactID,
 				"block.repaired",
 				actor,
-				model.BlockRepairedEventPayload{BlockID: block.id, Version: version, DisturbedBy: actor},
+				model.BlockRepairedEventPayload{BlockID: block.id, DisturbedBy: actor},
 			))
 		}
 	}
@@ -193,24 +239,7 @@ func (s *Service) reconcileAskBlocks(
 		if ask.State != "open" {
 			continue
 		}
-		resolution := model.AskResolution{
-			Kind:   "retracted",
-			Reason: fmt.Sprintf("%s %d", SettlementRetractionReason, version),
-			Actor:  SettlementActor,
-			At:     time.Now().UTC(),
-		}
-		encoded, err := json.Marshal(resolution)
-		if err != nil {
-			return settlementReconciliation{}, fmt.Errorf("encode ask retraction: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, encoded); err != nil {
-			return settlementReconciliation{}, fmt.Errorf("retract deleted ask block: %w", err)
-		}
-		ask.State = "resolved"
-		ask.Resolution = &resolution
-		reconciled.events = append(reconciled.events, documentAskEvent(
-			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-		))
+		reconciled.retracted = append(reconciled.retracted, ask)
 	}
 	return reconciled, nil
 }

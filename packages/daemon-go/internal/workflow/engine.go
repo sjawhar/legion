@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
@@ -20,13 +19,15 @@ import (
 )
 
 // Config supplies the project-scoped workflow limits and the clock used only to stamp durable
-// outbox deadlines. Zero limits take their shipped defaults.
+// outbox deadlines. Zero limits take their shipped defaults. MergeQueueRole is the project's
+// `merge_queue_role`, the role the merger's READY is published to; empty, it is posted only.
 type Config struct {
 	Project        string
 	DesignGate     config.DesignGate
 	ReviewRoundCap int
 	MaxFixAttempts int
 	Linger         time.Duration
+	MergeQueueRole string
 	Clock          func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned. Empty matches no push.
@@ -305,6 +306,15 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if RoleFor(issue.Phase) != fact.Role {
 		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
 	}
+	// A worker still in its turn when its tree's root closed can yet complete; linger holds the
+	// member where it stood (record.TreeLingers), so the completion records nothing.
+	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if lingers {
+		return refusedLingering(*issue, fmt.Sprintf("the %s's completion of phase %s", fact.Role, issue.Phase)), nil
+	}
 	if issue.Phase == phase.Merging && !fact.Ready {
 		return refused("READY_REQUIRED", "the merger's completion is READY: call the legion tool's handoff_complete with ready: true; this completion changed nothing"), nil
 	}
@@ -318,7 +328,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		}
 		row.LastHandoff = fact.Commit
 	}
-	row.Claim, row.HandoffCommit, row.Verdict = fact.Claim, fact.Commit, fact.Verdict
+	row.Claim, row.HandoffCommit, row.Verdict, row.Summary = fact.Claim, fact.Commit, fact.Verdict, fact.Summary
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}
@@ -494,6 +504,18 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if !blocked {
 		return intake.Result{}, e.advanceOpenReview(ctx, tx, pr)
 	}
+	// Linger holds a member of a closed tree where it stood (record.TreeLingers): the exhausted
+	// count is recorded on the pull request, and nothing is posted on the issue or told to its
+	// architect.
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if issue != nil {
+		if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+			return intake.Result{}, err
+		}
+	}
 	message := fmt.Sprintf("Pull request #%d reached max_fix_attempts=%d.", pr.Number, e.cfg.MaxFixAttempts)
 	if err := e.enqueue(ctx, tx, pr.Issue, record.MessagePost{Body: message}); err != nil {
 		return intake.Result{}, err
@@ -574,6 +596,9 @@ func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issu
 	}
 	switch row.Decision.State {
 	case "changes_requested":
+		if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+			return err
+		}
 		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
 			return err
 		}
@@ -588,10 +613,15 @@ func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issu
 }
 
 // merged records the pull request merged, whatever the issue's phase, and advances an issue that
-// awaited the merge.
+// awaited the merge. A merge before awaiting_merge is the architect's to act on, as the shipped
+// daemon routes it: it is told, and the issue moves on to the production check once it reaches
+// awaiting_merge (transition). A redelivered merge changes nothing. A merge is the one fact GitHub
+// never sends again, so one that lands while the tree lingers still moves the issue on to its
+// production check, and starts nobody: re-admission starts its implementer there
+// (admit's startMidPhaseChildren), as it does for every mid-phase child.
 func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMerged) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil {
+	if err != nil || pr == nil || pr.State == record.PullRequestMerged {
 		return intake.Result{}, err
 	}
 	pr.State = record.PullRequestMerged
@@ -599,35 +629,70 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 		return intake.Result{}, err
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.AwaitingMerge {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+	if issue.Phase == phase.AwaitingMerge {
+		lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		if !lingers {
+			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+		}
+		row, ok := e.row(issue.Phase, TriggerPullRequestMerged, "", Snapshot{Phase: issue.Phase, HasPR: true})
+		if !ok {
+			return intake.Result{}, nil
+		}
+		issue.Phase = row.To
+		if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, e.clearHandoff(ctx, tx, issue.Key, RoleFor(row.To))
+	}
+	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
+		Reason: fmt.Sprintf("pull request #%d merged while %s was in %s, not awaiting_merge", pr.Number, issue.Key, issue.Phase)})
 }
 
-// closed records the pull request closed unmerged; a re-admitted generation drops it. It records
-// the head the close carries, which every synchronize before it left, and keeps the close's clock
-// when it is the later one, so a reopen or a synchronize older than the close, redelivered late,
-// changes nothing.
+// closed records the pull request closed unmerged, which a re-admitted generation drops, and tells
+// the architect, whose decision it is whether the work is reopened, reassigned, or cancelled, as the
+// shipped daemon routes it. It records the head the close carries, which every synchronize before
+// it left, and keeps the close's clock when it is the later one, so a reopen or a synchronize older
+// than the close, redelivered late, changes nothing. A close that finds the pull request already
+// closed records its head and clock too. When it is newer than the record, it is a second close
+// whose reopen has not been delivered yet, and the architect is told; at the record's clock or with
+// no clock it is a redelivery, and it tells the architect nothing more. A close of a merged pull
+// request changes nothing: GitHub never closes one, so the close is older than the merge, which
+// carries no clock to fence it.
 func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestClosed) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
+	if err != nil || pr == nil || pr.State == record.PullRequestMerged || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
+	already := pr.State == record.PullRequestClosed && !fact.UpdatedAt.After(pr.HeadUpdatedAt)
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}
 	pr.State = record.PullRequestClosed
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
-	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil || already {
+		return intake.Result{}, err
+	}
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil || issue == nil {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-closed-unmerged", Role: claim.RoleArchitect,
+		Reason: fmt.Sprintf("pull request #%d closed without merging while %s was in %s", pr.Number, issue.Key, issue.Phase)})
 }
 
 // claimFailed holds the issue whose phase worker's claim failed — a budget ran out — and tells the
 // architect and the controller of the hold; the worker-died that comes with it is the architect's
 // alone. The tree's architect failing holds nothing, since a phase is its worker's; it is told as a
-// worker-died of the architect, and the controller hears it from a row of its own, because every
-// other notice of the tree reaches that architect and nobody inside the tree is left to act on its
-// own. The row sent to the architect's own role finishes undelivered once its claim has failed
+// worker-died of the architect, lingering or not, and the controller hears it from a row of its
+// own, because every other notice of the tree reaches that architect and nobody inside the tree is
+// left to act on its own. That is why the architect's branch comes before the lingering tree's
+// guard. The row sent to the architect's own role finishes undelivered once its claim has failed
 // (the daemon's notice executor).
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
@@ -639,6 +704,9 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	}
 	if issue.Phase == phase.Held || RoleFor(issue.Phase) != fact.Role {
 		return intake.Result{}, nil
+	}
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+		return intake.Result{}, err
 	}
 	from := issue.Phase
 	issue.Phase, issue.Hold = phase.Held, &record.Hold{From: from}
@@ -667,6 +735,9 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	}
 	if fact.Decision != intake.RetryDecision {
 		return intake.Result{}, nil
+	}
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+		return intake.Result{}, err
 	}
 	from := issue.Hold.From
 	issue.Phase, issue.Hold = from, nil
@@ -700,6 +771,13 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	if RoleFor(issue.Phase) == "" || RoleFor(issue.Phase) != fact.Requester || phaseIndex(fact.To) >= phaseIndex(issue.Phase) || phaseIndex(fact.To) < 0 {
 		return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: "BACKWARD_REFUSED", Message: "backward moves require the current role and an earlier workflow phase"}}, nil
 	}
+	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if lingers {
+		return refusedLingering(*issue, fmt.Sprintf("the %s's backward move to %s", fact.Requester, fact.To)), nil
+	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, fact.Requester)
 	if err != nil {
 		return intake.Result{}, err
@@ -731,30 +809,13 @@ func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (i
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerSignOff, "", record.PhaseRow{}, nil, "")
 }
 
-func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.LingerExpired) (intake.Result, error) {
-	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil || issue.Generation != fact.Generation || issue.LingerUntil == nil {
-		return intake.Result{}, err
-	}
-	members, err := e.treeMembers(ctx, tx, *issue)
-	if err != nil {
-		return intake.Result{}, err
-	}
-	for _, member := range members {
-		if err := e.everyClaim(ctx, tx, member, "tree_close"); err != nil {
-			return intake.Result{}, err
-		}
-		if err := e.enqueue(ctx, tx, member.Key, record.WorkspaceRemove{Generation: member.Generation}); err != nil {
-			return intake.Result{}, err
-		}
-	}
-	return intake.Result{}, nil
-}
-
 func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, trigger TriggerKind, target phase.Phase, handoff record.PhaseRow, pr *record.PullRequest, reason string) error {
 	row, ok := e.row(issue.Phase, trigger, target, Snapshot{Phase: issue.Phase, HasPR: pr != nil})
 	if !ok {
 		return nil
+	}
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+		return err
 	}
 	if err := e.status(ctx, tx, issue, row.Status); err != nil {
 		return err
@@ -764,7 +825,9 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if row.Status != "" {
 		issue.Status = row.Status
 	}
-	if trigger == TriggerReady {
+	// A READY the gate refused belongs to the merging phase it was sent in: leaving that phase by
+	// any trigger voids it, so a later approval never advances the next merger's phase on it.
+	if from == phase.Merging {
 		issue.ReadyPendingVersion = nil
 	}
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
@@ -787,8 +850,16 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason)); err != nil {
 		return err
 	}
-	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Verdict}); err != nil {
+	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Summary, Verdict: handoff.Verdict}); err != nil {
 		return err
+	}
+	if row.To == phase.AwaitingMerge {
+		// A pull request that merged before the issue reached awaiting_merge leaves nothing to merge:
+		// the issue moves on to the production check at once, and no READY asks a human to merge it.
+		if pr != nil && pr.State == record.PullRequestMerged {
+			return e.transition(ctx, tx, issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
+		}
+		return e.ready(ctx, tx, issue, handoff.Summary)
 	}
 	if row.To == phase.Done {
 		return e.leave(ctx, tx, issue, "done")
@@ -821,90 +892,6 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 		}
 	}
 	return nil
-}
-
-// advancePendingReady advances every merger in the tree whose READY was refused while the gate was
-// closed, now that a human approved the gate's current version. That version may be later than
-// the one the refusal named: the READY stands until the gate reopens, whatever the human revised
-// in between.
-func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gate record.DesignGate) error {
-	if !classify.DesignGateOpen(gate) {
-		return nil
-	}
-	issues, err := e.store.Issues(ctx, tx)
-	if err != nil {
-		return err
-	}
-	for _, issue := range issues {
-		if issue.Tree != rootKey || issue.Phase != phase.Merging || issue.ReadyPendingVersion == nil || *issue.ReadyPendingVersion > gate.LatestVersion {
-			continue
-		}
-		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
-		if err != nil {
-			return err
-		}
-		pr, err := e.store.PullRequest(ctx, tx, issue.Key)
-		if err != nil {
-			return err
-		}
-		if err := e.transition(ctx, tx, issue, TriggerReady, "", row, pr, "approved design gate"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// leave is an issue leaving the workflow for status (done, backlog, icebox, or triage). A root
-// takes its tree with it into linger. A child ends only itself: it leaves the table, its phase
-// parked in done and every one of its claims suspended, so no transition or status write follows
-// the human's move; the tree's architect is told, and decides what the rest of its tree does, as
-// the shipped daemon routes a child's close to the architect. A later todo re-enters the child.
-func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
-	if claim.IsTreeRoot(issue.Key, issue.Tree) {
-		return e.beginLinger(ctx, tx, issue)
-	}
-	if issue.Phase != phase.Done {
-		issue.Phase, issue.Hold, issue.ReadyPendingVersion = phase.Done, nil, nil
-		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
-			return err
-		}
-	}
-	if err := e.everyClaim(ctx, tx, issue, "suspend"); err != nil {
-		return err
-	}
-	kind := record.NoticeKind("child-status")
-	if status == "done" {
-		kind = "child-closed"
-	}
-	return e.notice(ctx, tx, issue.Key, record.Notice{Kind: kind, Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is %s", issue.Key, status)})
-}
-
-// beginLinger suspends the root's whole tree and arms its linger deadline, ending the root's hold
-// if it has one, as a child's leave does; a second call while it lingers changes nothing.
-func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) error {
-	if root.LingerUntil != nil {
-		return nil
-	}
-	until := e.lingerAt()
-	root.LingerUntil = &until
-	root.Phase, root.Hold = phase.Done, nil
-	if err := e.store.PutIssue(ctx, tx, root); err != nil {
-		return err
-	}
-	members, err := e.treeMembers(ctx, tx, root)
-	if err != nil {
-		return err
-	}
-	for _, member := range members {
-		if err := e.everyClaim(ctx, tx, member, "suspend"); err != nil {
-			return err
-		}
-	}
-	row, err := record.NewOutboxRow(root.Key, record.LingerClose{Generation: root.Generation}, until)
-	if err != nil {
-		return err
-	}
-	return e.store.Enqueue(ctx, tx, row)
 }
 
 // everyClaim enqueues op for every claim an issue can hold: its architect, which admission or the
@@ -975,24 +962,6 @@ func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) 
 		}
 	}
 	return members, nil
-}
-
-func (e *Engine) liveTree(ctx context.Context, tx pgx.Tx, root record.Issue) (bool, error) {
-	if root.LingerUntil != nil {
-		return false, nil
-	}
-	slots, err := e.store.Slots(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	if slices.ContainsFunc(slots, func(slot record.Slot) bool { return slot.Issue == root.Key }) {
-		return true, nil
-	}
-	issues, err := e.store.Issues(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	return slices.ContainsFunc(record.Waiting(issues, slots), func(waiting record.Issue) bool { return waiting.Key == root.Key }), nil
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {

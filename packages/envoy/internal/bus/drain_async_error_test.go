@@ -23,7 +23,7 @@ func TestADrainThatFindsItsConsumerGoneWarns(t *testing.T) {
 	_, uri := testnats.Start(t)
 	logs := captureBusLogs(t)
 
-	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

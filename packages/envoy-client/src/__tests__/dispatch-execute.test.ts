@@ -2955,6 +2955,75 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  // A concurrent browser deletion that lands after the version is written is past undoing, so the
+  // edit reports it: the version records text the live document no longer has (LEGION-269). An
+  // edit that survives reads exactly as it always did.
+  test("names the operations whose text the live document no longer has", async () => {
+    const editResponse = (body: Record<string, unknown>) => {
+      return async (url: RequestInfo | URL): Promise<Response> => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            primary_artifact_id: "artifact-42",
+            artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          });
+        }
+        if (path === "/api/v1/artifacts/artifact-42/edits") return response(body);
+        throw new Error(`unexpected request: ${path}`);
+      };
+    };
+    const edit = async (body: Record<string, unknown>) =>
+      await executeDispatchTool({
+        tool: "dispatch_doc_edit",
+        args: {
+          issue: "DSP-42",
+          artifact: "spec",
+          ops: [{ op: "replace", find: "draft", with: "final" }],
+        },
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-42",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: editResponse(body) as typeof fetch,
+      });
+
+    const lost = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: [0],
+    });
+    expect(lost.text).toContain(
+      "; version 7 carries text the live document no longer has: a concurrent change removed what operation 0 wrote — re-read the document"
+    );
+    expect(lost.details).toMatchObject({ lost_ops: [0] });
+
+    const survived = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: [],
+    });
+    expect(survived.text).toContain("Applied 1 ops (version 7)");
+    expect(survived.text).not.toContain("no longer has");
+
+    const undetermined = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: null,
+    });
+    expect(undetermined.text).toContain(
+      "; could not confirm this edit survived, because the live document is being reloaded — re-read it"
+    );
+  });
+
   // A Dispatch server predating the edit token returns none, and the result reads as it always
   // did: no trailer to mistake for a token, and nothing in details to pass as a precondition.
   test("omits the document token when the server returns none", async () => {

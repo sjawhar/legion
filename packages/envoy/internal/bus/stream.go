@@ -130,10 +130,10 @@ func subjectsOverlap(a, b string) bool {
 
 // streamReconciliation is the subject list the stream carries once this binary has started, and
 // what that did to the deployed list: the list is the deployed one, then each of this binary's
-// subjects the deployed list lacks. Every bus.Connect caller ensures this one stream (the
-// listener, Dispatch, natstail and the MCP server, wherever they run), and they deploy
-// separately, so a deployed subject this binary does not know may be one another live deployment
-// still needs; start-up keeps it and names it in foreign. Two kinds of deployed subject go:
+// subjects the deployed list lacks. Every bus.ConnectOwningStream caller ensures this one stream
+// (the deployed listener and Dispatch's server, wherever they run), and they deploy separately,
+// so a deployed subject this binary does not know may be one another live deployment still
+// needs; start-up keeps it and names it in foreign. Two kinds of deployed subject go:
 //   - one that captures the role lanes, which travel over core NATS and must never be retained
 //     (migrateRoleLanesOffStream);
 //   - one that overlaps a subject of this binary's (a widened, narrowed or split subject), because
