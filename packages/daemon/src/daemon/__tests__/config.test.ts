@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1497,111 +1498,209 @@ describe("daemon config", () => {
     });
   });
 
-  describe("nats_nkey_seed_file / NATS_NKEY_SEED_FILE / NATS_NKEY_SEED", () => {
-    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-config-nats-seed-"));
-    const newSeed = (kind: "createUser" | "createAccount") => {
-      const pair: { getSeed(): Uint8Array } = nkeys[kind]();
+  // The pane seed and the daemon's own seed resolve by one rule under their own names.
+  for (const seed of [
+    {
+      field: "natsNkeySeed",
+      fileKey: "nats_nkey_seed_file",
+      fileVariable: "NATS_NKEY_SEED_FILE",
+      variable: "NATS_NKEY_SEED",
+    },
+    {
+      field: "natsDaemonNkeySeed",
+      fileKey: "nats_daemon_nkey_seed_file",
+      fileVariable: "NATS_DAEMON_NKEY_SEED_FILE",
+      variable: "NATS_DAEMON_NKEY_SEED",
+    },
+  ] as const) {
+    describe(`${seed.fileKey} / ${seed.fileVariable} / ${seed.variable}`, () => {
+      const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-config-nats-seed-"));
+      const newSeed = (kind: "createUser" | "createAccount") => {
+        const pair: { getSeed(): Uint8Array } = nkeys[kind]();
+        return new TextDecoder().decode(pair.getSeed());
+      };
+      const userSeed = newSeed("createUser");
+      const otherSeed = newSeed("createUser");
+      fs.writeFileSync(path.join(configDir, "seed"), `  ${userSeed}\n`, { mode: 0o600 });
+      fs.writeFileSync(path.join(configDir, "other"), `${otherSeed}\n`, { mode: 0o600 });
+      fs.writeFileSync(path.join(configDir, "blank"), " \n", { mode: 0o600 });
+      fs.writeFileSync(path.join(configDir, "account"), newSeed("createAccount"), { mode: 0o600 });
+      fs.writeFileSync(path.join(configDir, "garbage"), "SUNOTASEED", { mode: 0o600 });
+      // Written, then chmodded past the umask: one its group may read, one others may read.
+      for (const [name, mode] of [
+        ["shared", 0o640],
+        ["world", 0o604],
+        ["wide", 0o644],
+      ] as const) {
+        fs.writeFileSync(path.join(configDir, name), `${userSeed}\n`);
+        fs.chmodSync(path.join(configDir, name), mode);
+      }
+      // A symlink is judged by its target, 0644 here: a reader that judged the link itself (lstat,
+      // O_NOFOLLOW) would refuse it as not a regular file or as unopenable, not by its target's mode.
+      fs.symlinkSync("wide", path.join(configDir, "wide-link"));
+      // A FIFO nobody writes: a reader that opened it blocking, or read it before checking what it
+      // is, would hang here instead of refusing it.
+      execFileSync("mkfifo", ["-m", "0644", path.join(configDir, "fifo")]);
+      fs.symlinkSync("gone", path.join(configDir, "dangling"));
+      fs.writeFileSync(path.join(configDir, "locked"), `${userSeed}\n`, { mode: 0o000 });
+      fs.chmodSync(path.join(configDir, "locked"), 0o000);
+      const tmuxYaml = (...lines: string[]) =>
+        loadConfigFromFile(
+          ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
+          configDir
+        );
+      const seedFor = (
+        configFile: Record<string, unknown> | undefined,
+        env: Record<string, string>
+      ) =>
+        resolveDaemonConfig({
+          ...(configFile === undefined ? {} : { configFile }),
+          env: { ...requiredEnv, ...env },
+          cliOverrides: overrides,
+        }).config[seed.field];
+
+      it(`is optional: nothing set leaves ${seed.field} undefined`, () => {
+        expect(seedFor(undefined, {})).toBeUndefined();
+      });
+
+      it(`lets the file key beat ${seed.fileVariable}, and ${seed.fileVariable} beat ${seed.variable}`, () => {
+        const other = path.join(configDir, "other");
+        expect(
+          seedFor(tmuxYaml(`${seed.fileKey}: ./seed`), {
+            [seed.fileVariable]: other,
+            [seed.variable]: otherSeed,
+          })
+        ).toBe(userSeed);
+        expect(seedFor(tmuxYaml(), { [seed.fileVariable]: other, [seed.variable]: userSeed })).toBe(
+          otherSeed
+        );
+        expect(seedFor(tmuxYaml(), { [seed.variable]: ` ${userSeed} ` })).toBe(userSeed);
+      });
+
+      it("refuses an unusable seed naming its key and path, never falling back or carrying the seed", () => {
+        const at = (name: string) => path.join(configDir, name);
+        const cases: [Record<string, unknown> | undefined, Record<string, string>, string][] = [
+          [
+            tmuxYaml(`${seed.fileKey}: ./nope`),
+            { [seed.variable]: userSeed },
+            `${seed.fileKey} names ${at("nope")}, which could not be read: ENOENT`,
+          ],
+          [
+            undefined,
+            { [seed.fileVariable]: at("nope"), [seed.variable]: userSeed },
+            `${seed.fileVariable} names ${at("nope")}, which could not be read: ENOENT`,
+          ],
+          [
+            undefined,
+            { [seed.fileVariable]: at("blank") },
+            `${seed.fileVariable} names ${at("blank")}, which is empty`,
+          ],
+          [undefined, { [seed.fileVariable]: "" }, `${seed.fileVariable} is set but empty`],
+          [
+            undefined,
+            { [seed.fileVariable]: at("garbage") },
+            `${seed.fileVariable} (${at("garbage")}) does not hold a valid nkey seed`,
+          ],
+          [
+            tmuxYaml(`${seed.fileKey}: ./account`),
+            {},
+            `${seed.fileKey} (${at("account")}) holds an nkey seed that is not a user's`,
+          ],
+          [undefined, { [seed.variable]: "  " }, `${seed.variable} is set but empty`],
+          [
+            undefined,
+            { [seed.variable]: "hunter2" },
+            `${seed.variable} does not hold a valid nkey seed`,
+          ],
+          [
+            tmuxYaml(`${seed.fileKey}: ./shared`),
+            { [seed.variable]: userSeed },
+            `${seed.fileKey} ${at("shared")} is readable by its group or others (mode 0640); chmod 0600 it`,
+          ],
+          [
+            undefined,
+            { [seed.fileVariable]: at("world") },
+            `${seed.fileVariable} ${at("world")} is readable by its group or others (mode 0604); chmod 0600 it`,
+          ],
+          [
+            tmuxYaml(`${seed.fileKey}: ./fifo`),
+            { [seed.variable]: userSeed },
+            `${seed.fileKey} names ${at("fifo")}, which is not a regular file`,
+          ],
+          [
+            tmuxYaml(`${seed.fileKey}: ./wide-link`),
+            {},
+            `${seed.fileKey} ${at("wide-link")} is readable by its group or others (mode 0644); chmod 0600 it`,
+          ],
+        ];
+        for (const [configFile, env, message] of cases) {
+          let thrown: unknown;
+          try {
+            seedFor(configFile, env);
+          } catch (error) {
+            thrown = error;
+          }
+          if (!(thrown instanceof Error)) throw new Error(`accepted ${JSON.stringify(env)}`);
+          expect(thrown.message).toContain(message);
+          expect(thrown.message).not.toContain(userSeed);
+          expect(thrown.message).not.toContain("hunter2");
+        }
+      });
+
+      it("under --check-config (resolveSecrets: false) never reads the file, but refuses whatever boot refuses about it", () => {
+        const load = (line: string, resolveSecrets: boolean) => {
+          try {
+            return resolveDaemonConfig({
+              configFile: tmuxYaml(line),
+              env: requiredEnv,
+              cliOverrides: overrides,
+              resolveSecrets,
+            }).config[seed.field];
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        };
+        // Missing, a dangling symlink, one it may not open (root opens a 0000 file), one its group
+        // may read, and a FIFO: boot refuses each, and --check-config the same way, word for word.
+        const refused = ["nope", "dangling", "shared", "fifo"];
+        if (process.getuid?.() !== 0) refused.push("locked");
+        for (const name of refused) {
+          const line = `${seed.fileKey}: ./${name}`;
+          const refusal = load(line, true);
+          expect(refusal).toStartWith(`${seed.fileKey} `);
+          expect(load(line, false)).toBe(refusal);
+        }
+        // A file it may open is never read: garbage boot would refuse passes the check.
+        expect(load(`${seed.fileKey}: ./garbage`, false)).toBe("(not executed)");
+        expect(load(`${seed.fileKey}: ./seed`, false)).toBe("(not executed)");
+      });
+    });
+  }
+
+  it("resolves the daemon seed and the pane seed independently: neither falls back to the other", () => {
+    const seedOf = () => {
+      const pair: { getSeed(): Uint8Array } = nkeys.createUser();
       return new TextDecoder().decode(pair.getSeed());
     };
-    const userSeed = newSeed("createUser");
-    const otherSeed = newSeed("createUser");
-    fs.writeFileSync(path.join(configDir, "seed"), `  ${userSeed}\n`, { mode: 0o600 });
-    fs.writeFileSync(path.join(configDir, "other"), `${otherSeed}\n`, { mode: 0o600 });
-    fs.writeFileSync(path.join(configDir, "blank"), " \n", { mode: 0o600 });
-    fs.writeFileSync(path.join(configDir, "account"), newSeed("createAccount"), { mode: 0o600 });
-    fs.writeFileSync(path.join(configDir, "garbage"), "SUNOTASEED", { mode: 0o600 });
-    const tmuxYaml = (...lines: string[]) =>
-      loadConfigFromFile(
-        ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
-        configDir
-      );
-    const seedFor = (
-      configFile: Record<string, unknown> | undefined,
-      env: Record<string, string>
-    ) =>
-      resolveDaemonConfig({
-        ...(configFile === undefined ? {} : { configFile }),
-        env: { ...requiredEnv, ...env },
-        cliOverrides: overrides,
-      }).config.natsNkeySeed;
-
-    it("is optional: nothing set leaves natsNkeySeed undefined", () => {
-      expect(seedFor(undefined, {})).toBeUndefined();
+    const pane = seedOf();
+    const daemon = seedOf();
+    const resolve = (env: Record<string, string>) =>
+      resolveDaemonConfig({ env: { ...requiredEnv, ...env }, cliOverrides: overrides }).config;
+    expect(resolve({ NATS_NKEY_SEED: pane })).toMatchObject({
+      natsNkeySeed: pane,
+      natsDaemonNkeySeed: undefined,
     });
-
-    it("lets the file key beat NATS_NKEY_SEED_FILE, and NATS_NKEY_SEED_FILE beat NATS_NKEY_SEED", () => {
-      const other = path.join(configDir, "other");
-      expect(
-        seedFor(tmuxYaml("nats_nkey_seed_file: ./seed"), {
-          NATS_NKEY_SEED_FILE: other,
-          NATS_NKEY_SEED: otherSeed,
-        })
-      ).toBe(userSeed);
-      expect(seedFor(tmuxYaml(), { NATS_NKEY_SEED_FILE: other, NATS_NKEY_SEED: userSeed })).toBe(
-        otherSeed
-      );
-      expect(seedFor(tmuxYaml(), { NATS_NKEY_SEED: ` ${userSeed} ` })).toBe(userSeed);
+    expect(resolve({ NATS_DAEMON_NKEY_SEED: daemon })).toMatchObject({
+      natsNkeySeed: undefined,
+      natsDaemonNkeySeed: daemon,
     });
-
-    it("refuses an unusable seed naming its key and path, never falling back or carrying the seed", () => {
-      const at = (name: string) => path.join(configDir, name);
-      const cases: [Record<string, unknown> | undefined, Record<string, string>, string][] = [
-        [
-          tmuxYaml("nats_nkey_seed_file: ./nope"),
-          { NATS_NKEY_SEED: userSeed },
-          `nats_nkey_seed_file names ${at("nope")}, which could not be read: ENOENT`,
-        ],
-        [
-          undefined,
-          { NATS_NKEY_SEED_FILE: at("nope"), NATS_NKEY_SEED: userSeed },
-          `NATS_NKEY_SEED_FILE names ${at("nope")}, which could not be read: ENOENT`,
-        ],
-        [
-          undefined,
-          { NATS_NKEY_SEED_FILE: at("blank") },
-          `NATS_NKEY_SEED_FILE names ${at("blank")}, which is empty`,
-        ],
-        [undefined, { NATS_NKEY_SEED_FILE: "" }, "NATS_NKEY_SEED_FILE is set but empty"],
-        [
-          undefined,
-          { NATS_NKEY_SEED_FILE: at("garbage") },
-          `NATS_NKEY_SEED_FILE (${at("garbage")}) does not hold a valid nkey seed`,
-        ],
-        [
-          tmuxYaml("nats_nkey_seed_file: ./account"),
-          {},
-          `nats_nkey_seed_file (${at("account")}) holds an nkey seed that is not a user's`,
-        ],
-        [undefined, { NATS_NKEY_SEED: "  " }, "NATS_NKEY_SEED is set but empty"],
-        [
-          undefined,
-          { NATS_NKEY_SEED: "hunter2" },
-          "NATS_NKEY_SEED does not hold a valid nkey seed",
-        ],
-      ];
-      for (const [configFile, env, message] of cases) {
-        let thrown: unknown;
-        try {
-          seedFor(configFile, env);
-        } catch (error) {
-          thrown = error;
-        }
-        if (!(thrown instanceof Error)) throw new Error(`accepted ${JSON.stringify(env)}`);
-        expect(thrown.message).toContain(message);
-        expect(thrown.message).not.toContain(userSeed);
-        expect(thrown.message).not.toContain("hunter2");
-      }
+    expect(resolve({ NATS_NKEY_SEED: pane, NATS_DAEMON_NKEY_SEED: daemon })).toMatchObject({
+      natsNkeySeed: pane,
+      natsDaemonNkeySeed: daemon,
     });
-
-    it("under --check-config (resolveSecrets: false) never reads the file", () => {
-      const { config } = resolveDaemonConfig({
-        configFile: tmuxYaml("nats_nkey_seed_file: ./nope"),
-        env: requiredEnv,
-        cliOverrides: overrides,
-        resolveSecrets: false,
-      });
-      expect(config.natsNkeySeed).toBe("(not executed)");
-    });
+    expect(() => resolve({ NATS_NKEY_SEED: pane, NATS_DAEMON_NKEY_SEED_FILE: "" })).toThrow(
+      "NATS_DAEMON_NKEY_SEED_FILE is set but empty"
+    );
   });
 
   describe("operator_token_file", () => {

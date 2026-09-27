@@ -22,16 +22,24 @@ async function docker(...args: string[]): Promise<{ stdout: string; stderr: stri
   return { stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
-/** Runs a NATS server container of its own, uniquely named, with JetStream; `nkeyUser`, when
- * given, is the public key of the only nkey user it admits. `stop` removes the container. */
-export async function startNatsServer(nkeyUser?: string): Promise<NatsServer> {
+/** One nkey user a test server admits: its public key and, optionally, the server's
+ * `permissions` block for it (`{ subscribe: { deny: [...] } }`); none grants everything. */
+export interface NatsUser {
+  nkey: string;
+  permissions?: Record<string, unknown>;
+}
+
+/** Runs a NATS server container of its own, uniquely named, with JetStream; `users`, when given,
+ * are the only nkey users it admits, each with its permissions. `stop` removes the container. */
+export async function startNatsServer(users: NatsUser[] = []): Promise<NatsServer> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "nats-server-"));
   const config = path.join(dir, "nats.conf");
+  // The server's configuration format accepts JSON values.
   writeFileSync(
     config,
-    nkeyUser === undefined
+    users.length === 0
       ? "jetstream {}\n"
-      : `jetstream {}\nauthorization {\n  users = [ { nkey: ${JSON.stringify(nkeyUser)} } ]\n}\n`,
+      : `jetstream {}\nauthorization {\n  users = ${JSON.stringify(users)}\n}\n`,
     { mode: 0o644 }
   );
   const name = `legion-nats-test-${crypto.randomUUID()}`;
