@@ -15,15 +15,9 @@ const engine = await createHeadlessProof({ blockSchema });
 const tables: string[][][] = [];
 engine.parseMarkdown(readFileSync(0, "utf8")).descendants((node) => {
   if (node.type.name !== "table") return true;
-  const rows: string[][] = [];
-  node.forEach((row) => {
-    const cells: string[] = [];
-    row.forEach((cell) => {
-      cells.push(cell.textContent);
-    });
-    rows.push(cells);
-  });
-  tables.push(rows);
+  tables.push(
+    node.content.content.map((row) => row.content.content.map((cell) => cell.textContent))
+  );
   return false;
 });
 process.stdout.write(JSON.stringify(tables));

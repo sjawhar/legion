@@ -607,25 +607,25 @@ test("a soft line break in markdown written through the API is a space in the ed
 // body cells, which Milkdown's header row can't hold, so ProseMirror fitted them as a new row and
 // fixTables ran again, forever. With an empty last row, preset-gfm's paste rule counted the table's
 // columns in that row, found none, and replaced the table with an empty paragraph.
-const tableRows = (header: string, body: string, indent = "") =>
-  [header, "| :--- | :--- |", body].map((line) => `${indent}${line}\n`).join("");
+const tableRows = (header: readonly string[], body: readonly string[], indent = "") =>
+  [header, [":---", ":---"], body].map((cells) => `${indent}| ${cells.join(" | ")} |\n`).join("");
 for (const [row, html, header, body] of [
   ["first", "<table><tr></tr><tr><td>a</td><td>b</td></tr></table>", ["", ""], ["a", "b"]],
   ["last", "<table><tr><td>a</td><td>b</td></tr><tr></tr></table>", ["a", "b"], ["", ""]],
 ] as const) {
-  const lines = [header, body].map((cells) => `| ${cells.join(" | ")} |`);
+  const rows = tableRows(header, body);
   for (const [context, spec, stored] of [
-    ["a paragraph", "Intro end.\n", `Intro\n\n${tableRows(lines[0], lines[1])}\n&#32;end.\n`],
+    ["a paragraph", "Intro end.\n", `Intro\n\n${rows}\n&#32;end.\n`],
     [
       "a callout",
       ':::callout{#k1 kind="note"}\nIntro end.\n:::\n',
-      `:::callout{#k1 kind="note" title=""}\nIntro\n\n${tableRows(lines[0], lines[1])}\n&#32;end.\n:::\n`,
+      `:::callout{#k1 kind="note" title=""}\nIntro\n\n${rows}\n&#32;end.\n:::\n`,
     ],
-    ["a heading", "# Intro end\n", `# Intro\n\n${tableRows(lines[0], lines[1])}\n# &#32;end\n`],
+    ["a heading", "# Intro end\n", `# Intro\n\n${rows}\n# &#32;end\n`],
     [
       "a nested list",
       "- top\n  - Intro end\n",
-      `- top\n  - Intro\n${tableRows(lines[0], lines[1], "    ")}    &#32;end\n`,
+      `- top\n  - Intro\n${tableRows(header, body, "    ")}    &#32;end\n`,
     ],
   ] as const) {
     test(`a table whose ${row} row is empty, pasted into ${context}, keeps its cells`, async ({
@@ -650,7 +650,7 @@ for (const [row, html, header, body] of [
           // table reads back as one more table row, in Go as in the engine. That writer defect is
           // the pmdoc lane's follow-up after #1464. The table's own rows still read back.
           expect(table.slice(0, 2)).toEqual([header, body]);
-          expect(await goReadBack(stored)).toContain(tableRows(lines[0], lines[1], "    "));
+          expect(await goReadBack(stored)).toContain(tableRows(header, body, "    "));
         } else {
           expect(table).toEqual([header, body]);
           expect(await goReadBack(stored)).toBe(stored);
