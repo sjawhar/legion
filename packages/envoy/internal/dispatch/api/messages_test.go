@@ -656,8 +656,10 @@ func TestTargetedMessageResolvesRolesAndEnforcesReplyBoundaries(t *testing.T) {
 	}
 	answer := decodeBody[model.Message](t, answered)
 	before := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	// The same answer again is a retry. Other text is a follow-up, threaded under this answer
+	// (TestSessionFollowUpToADirectMessageThreadsUnderItsFirstReply).
 	repeated := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/reply", map[string]any{
-		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "A different retry body.",
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "Ship it.",
 	})
 	if repeated.Code != http.StatusOK || decodeBody[model.Message](t, repeated).ID != answer.ID {
 		t.Fatalf("repeated reply: status=%d body=%s", repeated.Code, repeated.Body.String())

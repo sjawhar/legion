@@ -454,23 +454,54 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "message") {
 		return
 	}
-	message, err := s.loadMessage(r.Context(), s.deps.Store.Pool, r.PathValue("key"), r.PathValue("id"))
+	read, err := s.readMessage(r.Context(), r.PathValue("key"), r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	deliveries, err := s.loadMessageDeliveries(r.Context(), s.deps.Store.Pool, []string{message.ID})
+	WriteJSON(w, http.StatusOK, read)
+}
+
+// getMessageThread reads the conversation a message belongs to by the id of any message in it:
+// the thread root with its deliveries, and every reply, oldest first. It takes no issue, so it
+// is how a session reads back a human's direct message and its own replies to it, which belong
+// to no issue.
+func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "message") {
+		return
+	}
+	var rootID string
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), messageThreadCTE+`
+		select id::text from thread where in_reply_to is null
+	`, r.PathValue("id")).Scan(&rootID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	read, err := s.readMessage(r.Context(), "", rootID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	WriteJSON(w, http.StatusOK, read)
+}
+
+// readMessage is one message, on issueKey when it is not empty, with its deliveries and every
+// message transitively replying to it.
+func (s *server) readMessage(ctx context.Context, issueKey, id string) (messageRead, error) {
+	message, err := s.loadMessage(ctx, s.deps.Store.Pool, issueKey, id)
+	if err != nil {
+		return messageRead{}, err
+	}
+	deliveries, err := s.loadMessageDeliveries(ctx, s.deps.Store.Pool, []string{message.ID})
+	if err != nil {
+		return messageRead{}, err
 	}
 	message.Deliveries = deliveries[message.ID]
-	replies, err := s.loadMessageReplyChains(r.Context(), s.deps.Store.Pool, []string{message.ID})
+	replies, err := s.loadMessageReplyChains(ctx, s.deps.Store.Pool, []string{message.ID})
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return messageRead{}, err
 	}
-	WriteJSON(w, http.StatusOK, messageRead{Message: message, Replies: replies[message.ID]})
+	return messageRead{Message: message, Replies: replies[message.ID]}, nil
 }
 
 func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -155,47 +156,122 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, value)
 }
 
-// userAgentState is a viewer's Clear on one agent's conversation: the Agents page hides every
-// exchange whose newest message is at or before cleared_before, for this login only.
+// userAgentState is one viewer's state for one agent's conversation. The Agents page hides every
+// exchange whose newest message is at or before cleared_before (the viewer's Clear); read_through
+// is how far the viewer has read; unread_replies counts the session's replies to messages this
+// viewer sent that are newer than both, which is how the dashboard says an agent answered.
 type userAgentState struct {
-	ClearedBefore string `json:"cleared_before"`
+	ClearedBefore *string `json:"cleared_before,omitempty"`
+	ReadThrough   *string `json:"read_through,omitempty"`
+	UnreadReplies int     `json:"unread_replies"`
 }
 
-// clearedBeforeSkew is how far ahead of the server clock a Clear may land. The client stamps
-// the cutoff with its own clock, and a browser a few seconds fast must not be refused.
+// clearedBeforeSkew is how far ahead of the server clock a Clear or a read mark may land. The
+// client stamps the cutoff with its own clock, and a browser a few seconds fast must not be
+// refused.
 const clearedBeforeSkew = time.Minute
+
+// userAgentStatesQuery reads a viewer's per-session state ($1 is the login), narrowed to one
+// session when $2 is not null: every stored row, and every session with a reply the viewer has
+// not read. A reply is unread when a session wrote it anywhere under a direct message this
+// viewer sent that session (an issue-less message targeted at it, a broadcast's copy included)
+// and it is newer than the viewer's read mark and Clear, whichever is later.
+const userAgentStatesQuery = `
+	with recursive roots as (
+		select id, substr(target, length('session:') + 1) as session_id
+		from messages
+		where issue_key is null and in_reply_to is null and target like 'session:%'
+		  and author->>'kind' = 'user' and author->>'id' = $1
+		  and ($2::text is null or target = 'session:' || $2::text)
+	),
+	replies as (
+		select m.id, m.author, m.created_at, roots.session_id
+		from messages m join roots on m.in_reply_to = roots.id
+		union all
+		select m.id, m.author, m.created_at, replies.session_id
+		from messages m join replies on m.in_reply_to = replies.id
+	),
+	state as (
+		select session_id, cleared_before, read_through
+		from user_agent_state
+		where login = $1 and ($2::text is null or session_id = $2::text)
+	),
+	unread as (
+		select replies.session_id, count(*)::int as unread
+		from replies left join state on state.session_id = replies.session_id
+		where replies.author->>'kind' = 'session'
+		  and replies.created_at > coalesce(greatest(state.read_through, state.cleared_before), '-infinity')
+		group by replies.session_id
+	)
+	select coalesce(state.session_id, unread.session_id), state.cleared_before, state.read_through,
+	       coalesce(unread.unread, 0)
+	from state full join unread on unread.session_id = state.session_id
+	order by 1
+`
+
+// loadUserAgentStates runs userAgentStatesQuery for login, narrowed to sessionID when it is
+// not nil.
+func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionID *string) (map[string]userAgentState, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, login, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := map[string]userAgentState{}
+	for rows.Next() {
+		var session string
+		var clearedBefore, readThrough *time.Time
+		var state userAgentState
+		if err := rows.Scan(&session, &clearedBefore, &readThrough, &state.UnreadReplies); err != nil {
+			return nil, err
+		}
+		state.ClearedBefore = optionalTimestamp(clearedBefore)
+		state.ReadThrough = optionalTimestamp(readThrough)
+		states[session] = state
+	}
+	return states, rows.Err()
+}
+
+func optionalTimestamp(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	formatted := timestampValue(*value)
+	return &formatted
+}
 
 func (s *server) getUserAgentState(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select session_id, cleared_before
-		from user_agent_state where login = $1 order by session_id
-	`, actor.ID)
+	states, err := s.loadUserAgentStates(r.Context(), actor.ID, nil)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	defer rows.Close()
-	state := map[string]userAgentState{}
-	for rows.Next() {
-		var sessionID string
-		var clearedBefore time.Time
-		if err := rows.Scan(&sessionID, &clearedBefore); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		state[sessionID] = userAgentState{ClearedBefore: timestampValue(clearedBefore)}
-	}
-	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	WriteJSON(w, http.StatusOK, state)
+	WriteJSON(w, http.StatusOK, states)
 }
 
+// parseAgentStateCutoff reads one optional cutoff of a PUT: absent is nil, anything else must
+// be an RFC3339 timestamp no further ahead of the server clock than clearedBeforeSkew.
+func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
+	if value == nil {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, *value)
+	if err != nil {
+		return nil, errorf(http.StatusBadRequest, "INVALID_STATE", "%s must be an RFC3339 timestamp", name)
+	}
+	if parsed.After(time.Now().Add(clearedBeforeSkew)) {
+		return nil, errorf(http.StatusBadRequest, "INVALID_STATE", "%s must not be in the future", name)
+	}
+	return &parsed, nil
+}
+
+// putUserAgentState records a Clear (cleared_before, which replaces the previous one) and/or a
+// read mark (read_through, which only ever moves forward, so a tab that read less a moment ago
+// cannot make a reply unread again), and answers with the session's whole state.
 func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -203,33 +279,41 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct {
 		ClearedBefore *string `json:"cleared_before"`
+		ReadThrough   *string `json:"read_through"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if input.ClearedBefore == nil {
-		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before is required")
+	if input.ClearedBefore == nil && input.ReadThrough == nil {
+		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before or read_through is required")
 		return
 	}
-	clearedBefore, err := time.Parse(time.RFC3339, *input.ClearedBefore)
+	clearedBefore, err := parseAgentStateCutoff("cleared_before", input.ClearedBefore)
 	if err != nil {
-		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before must be an RFC3339 timestamp")
-		return
-	}
-	if clearedBefore.After(time.Now().Add(clearedBeforeSkew)) {
-		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before must not be in the future")
-		return
-	}
-	var stored time.Time
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
-		insert into user_agent_state (login, session_id, cleared_before)
-		values ($1, $2, $3)
-		on conflict (login, session_id) do update set cleared_before = excluded.cleared_before
-		returning cleared_before
-	`, actor.ID, r.PathValue("session_id"), clearedBefore).Scan(&stored); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, userAgentState{ClearedBefore: timestampValue(stored)})
+	readThrough, err := parseAgentStateCutoff("read_through", input.ReadThrough)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	sessionID := r.PathValue("session_id")
+	if _, err := s.deps.Store.Pool.Exec(r.Context(), `
+		insert into user_agent_state (login, session_id, cleared_before, read_through)
+		values ($1, $2, $3, $4)
+		on conflict (login, session_id) do update set
+			cleared_before = coalesce(excluded.cleared_before, user_agent_state.cleared_before),
+			read_through = greatest(user_agent_state.read_through, excluded.read_through)
+	`, actor.ID, sessionID, clearedBefore, readThrough); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	states, err := s.loadUserAgentStates(r.Context(), actor.ID, &sessionID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, states[sessionID])
 }
