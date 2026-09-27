@@ -344,8 +344,8 @@ test("an inline link keeps its line and grows its hit box without covering its n
       );
       return {
         lineHeight: (view.parentElement ?? view).getBoundingClientRect().height,
-        // How far the lower link's padding box starts below the upper link's own text: the
-        // reviewer measured -1 at 6px and +2 at 3px on this surface.
+        // How far the lower link's padding box starts below the upper link's own text.
+        // Negative is padding sitting on letters a reader is trying to tap.
         lowerClearance: lower.getBoundingClientRect().y - upperText.bottom,
         onUpperTextBottom:
           node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link"),
