@@ -224,7 +224,10 @@ function InboxItem({
             <InboxRowChip ask={ask} />
           </span>
         </div>
-        <div className="flex shrink-0 flex-wrap items-center gap-1">
+        {/* `max-w-full` bounds the group to the row: `shrink-0` alone lets a server's own
+            refusal reason - `snoozed_until must be in the future`, or anything longer - set the
+            group's width and widen the whole document past the viewport on a phone. */}
+        <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
           {ask.issue_key === null ? null : (
             <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
           )}

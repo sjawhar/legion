@@ -982,3 +982,59 @@ test("a stale Inbox body landing inside the debounce seeds a later card's thread
     await alice.close();
   }
 });
+
+// A refused snooze or assignment is the row's widest content, and the server writes the reason:
+// `snoozed_until must be in the future` is the handler's own, and a future one may be longer.
+// Left to set its own width it pushed the row - and the whole document - past a phone viewport,
+// so the reader scrolled sideways to reach Retry. The control group is bounded to the row and
+// the alert wraps inside it; this covers both the handler's refusal and a long one.
+for (const refusal of [
+  { label: "the handler's own reason", reason: "snoozed_until must be in the future" },
+  {
+    label: "a long reason",
+    reason:
+      "snoozed_until must be in the future, and this deployment refuses a moment more than one year ahead of the request it arrived on",
+  },
+]) {
+  test(`a refused snooze wraps inside the row and never widens the page: ${refusal.label}`, async ({
+    browser,
+  }) => {
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({ project: "CORE", title: "Deal with it later" });
+    const ask = await createAsk(issue.key, { question: "Which approach?" }, session);
+
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const viewport = page.viewportSize()?.width ?? 0;
+      expect(viewport).toBeGreaterThan(0);
+      await page.route(`**/api/v1/me/asks/${ask.id}/snooze`, (route) =>
+        route.fulfill({
+          body: JSON.stringify({ code: "INVALID_SNOOZE", error: refusal.reason }),
+          contentType: "application/json",
+          status: 400,
+        })
+      );
+      await page.goto("/");
+      const row = page.getByRole("listitem").filter({ has: page.getByTestId(`ask-${ask.id}`) });
+      await expect(row).toBeVisible();
+      await row.getByLabel(`Snooze ${issue.key}`).selectOption("tomorrow");
+
+      const retry = row.getByRole("button", { name: "Retry" });
+      await expect(retry).toBeVisible();
+      await expect(retry).toBeInViewport();
+      // The document never grows past the viewport: no sideways scroll to reach the refusal.
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        viewport
+      );
+      // The refusal sits below the issue key, never over it.
+      const key = await page.locator("[data-inbox-owner]").first().boundingBox();
+      const alert = await retry.boundingBox();
+      expect(key).not.toBeNull();
+      expect(alert).not.toBeNull();
+      expect((alert?.y ?? 0) >= (key?.y ?? 0) + (key?.height ?? 0)).toBe(true);
+    } finally {
+      await alice.close();
+    }
+  });
+}
