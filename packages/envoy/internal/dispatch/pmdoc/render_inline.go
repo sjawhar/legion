@@ -65,9 +65,10 @@ type lineCandidate struct {
 	// afterLine reports whether the line continues its textblock, so the line before is read
 	// with it.
 	afterLine bool
-	// closesTyped reports whether a lone `:::` line of the textblock would close the typed block
-	// around it: the textblock is written less than four columns past the typed block's own lines,
-	// with no quote marker between (typedFenceReach).
+	// closesTyped reports whether a lone `:::` line of the textblock is escaped as one that could
+	// close the typed block around it: the textblock is written at the typed block's own prefix, or,
+	// in a block fenced with three colons, less than four columns past it with no quote marker
+	// between (typedFenceReach).
 	closesTyped bool
 	// prefix is the prefix the textblock's lines are written at.
 	prefix string
@@ -413,7 +414,7 @@ func (r *renderer) holdLineStart(before string, char rune, position *inlinePosit
 		at:          r.b.Len(),
 		char:        char,
 		afterLine:   position.afterLine,
-		closesTyped: r.typedPrefix != nil && typedFenceReach(*r.typedPrefix, prefix),
+		closesTyped: r.typedPrefix != nil && (*r.typedPrefix == prefix || r.typedColons == 3 && typedFenceReach(*r.typedPrefix, prefix)),
 		prefix:      prefix,
 	}
 }

@@ -877,8 +877,10 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"> - a\n>\n>   ---\n> - -b\n",
 		"- a\\\n  <br>\n- <- x\n",
 		// A lone `:::` inside a blockquote within a typed block, or on a list marker's line, cannot
-		// close it.
+		// close it, and nor can one in a list item inside a typed block written with a longer fence.
 		":::callout{#c1 kind=\"note\" title=\"T\"}\n> :::\n:::\n",
+		"::::callout{#c1 kind=\"note\" title=\"T\"}\n- a\\\n  :::\n\n```\n:::\n```\n::::\n",
+		"::::callout{#c1 kind=\"note\" title=\"T\"}\n1. a\\\n   :::\n\n```\n:::\n```\n::::\n",
 		":::callout{#c1 kind=\"note\" title=\"T\"}\n- :::\n:::\n",
 		":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- first\n- :::\n:::\n",
 		":::callout{#c1 kind=\"note\" title=\"T\"}\n1. :::\n:::\n",

@@ -16,9 +16,11 @@ type renderer struct {
 	// sibling node of the same link.
 	labelBrackets labelBrackets
 	// typedPrefix is the prefix the innermost typed block's lines are written at, or nil outside
-	// one. A lone `:::` closes the block as a line less than four columns past that prefix
-	// (typedFenceReach), which a paragraph written there can produce.
+	// one, and typedColons is how many colons its fence has. A lone `:::` closes a three-colon block
+	// as a line less than four columns past that prefix (typedFenceReach), which a paragraph written
+	// there can produce.
 	typedPrefix *string
+	typedColons int
 	// heldLineStart is the current line's first text character, held until the line is written.
 	heldLineStart *lineCandidate
 	// footnoteLineAt is where the last footnote definition's first line begins in the markdown,
@@ -463,13 +465,14 @@ func (r *renderer) block(n *Node, prefix string) {
 			r.err = err
 			return
 		}
-		fence := strings.Repeat(":", typedFence(n, len(prefix)))
+		colons := typedFence(n, len(prefix))
+		fence := strings.Repeat(":", colons)
 		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
-		outer := r.typedPrefix
-		r.typedPrefix = &prefix
+		outer, outerColons := r.typedPrefix, r.typedColons
+		r.typedPrefix, r.typedColons = &prefix, colons
 		r.blocksNoTrailing(n.Children, prefix)
 		r.blanksEndingQuotedList(n.Children, prefix)
-		r.typedPrefix = outer
+		r.typedPrefix, r.typedColons = outer, outerColons
 		r.writeSyntax("\n" + prefix + fence)
 	}
 }
