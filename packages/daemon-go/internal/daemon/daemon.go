@@ -241,7 +241,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		// The durable consumers exist before the listing is read: a consumer created now delivers
 		// only what is published after it, so everything earlier is the listing's, and what the
 		// listing misses (a move published while it is read) the consumer delivers.
-		if err := workflow.connect(boot, cfg, plan.secrets[natsauth.SeedVariable]); err != nil {
+		if err := workflow.connect(boot, cfg, plan.natsSeed, plan.secrets[natsauth.SeedVariable]); err != nil {
 			s.stop()
 			listener.Close()
 			workflow.stop()
@@ -318,7 +318,10 @@ type plan struct {
 	project       string
 	operatorToken string
 	secrets       map[string]string
-	instructions  string
+	// natsSeed is the daemon's own NATS nkey seed (natsauth.DaemonSeed), "" when it has none; no
+	// launch carries it.
+	natsSeed     string
+	instructions string
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
 	prompts       *prompts.Composer
@@ -350,6 +353,7 @@ type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string
 type bootReads struct {
 	project, operatorToken, dispatchToken, rolesDir string
 	secrets                                         map[string]string
+	natsSeed                                        string // the daemon's own NATS nkey seed (natsauth.DaemonSeed), "" for none
 	instructions                                    []byte // nil when the configuration names none
 	roleReferences                                  promptrefs.Names
 	invocation                                      string            // tmux, on the host's Oh My Pi: the OMP invocation
@@ -360,7 +364,8 @@ type bootReads struct {
 // readBoot is every refusal boot makes from the configuration, the daemon's environment (lookup,
 // and getenv for the OMP invocation) and the files they name, writing nothing: the project token,
 // the operator bearer's file, operator configuration colliding with Legion's own
-// (checkOperatorConfig), the launch secrets (readLaunchSecrets), the instructions file, the
+// (checkOperatorConfig), the launch secrets (readLaunchSecrets), the daemon's own NATS nkey seed
+// (natsauth.DaemonSeed), the instructions file, the
 // Dispatch bearer's file, the role prompts, and the runtime's own reads — under tmux the OMP
 // invocation (whose one command is `mise where`, a read; skipped when getenv is nil, a runtime a
 // test replaced) and the host's gh, git and jj, under kubernetes the kubeconfig and the Options
@@ -384,6 +389,9 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 		return bootReads{}, err
 	}
 	if r.secrets, err = readLaunchSecrets(cfg, lookup); err != nil {
+		return bootReads{}, err
+	}
+	if r.natsSeed, err = natsauth.DaemonSeed(cfg.NatsDaemonNkeySeedFile, lookup); err != nil {
 		return bootReads{}, err
 	}
 	if cfg.InstructionsPath != "" {
@@ -427,17 +435,24 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 
 // CheckStart is `legion start --check-config`'s reading of what boot reads before it writes
 // anything (readBoot), over the daemon's environment (lookup): nil when boot would get past every
-// such refusal, and the public key of the NATS nkey seed's user when the daemon has one, never the
-// seed.
-func CheckStart(cfg config.Config, lookup func(string) (string, bool)) (natsUser string, err error) {
+// such refusal, and the public keys of the pane seed's user and the daemon seed's user, each "" when
+// the daemon has no such seed, never a seed.
+func CheckStart(cfg config.Config, lookup func(string) (string, bool)) (natsUser, daemonNatsUser string, err error) {
 	r, err := readBoot(cfg, lookup, os.Getenv, slog.New(slog.DiscardHandler))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if seed := r.secrets[natsauth.SeedVariable]; seed != "" {
-		return natsauth.PublicKey(seed)
+		if natsUser, err = natsauth.PublicKey(seed); err != nil {
+			return "", "", err
+		}
 	}
-	return "", nil
+	if r.natsSeed != "" {
+		if daemonNatsUser, err = natsauth.PublicKey(r.natsSeed); err != nil {
+			return "", "", err
+		}
+	}
+	return natsUser, daemonNatsUser, nil
 }
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
@@ -473,7 +488,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		orphanSweep = orphanSweepInterval
 	}
 	p := plan{
-		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, instructions: instructions,
+		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, natsSeed: reads.natsSeed, instructions: instructions,
 		dispatchToken: reads.dispatchToken, rolesDir: reads.rolesDir, roleReferences: reads.roleReferences,
 		tools: reads.tools, clock: clock, orphanSweep: orphanSweep,
 	}

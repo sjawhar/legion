@@ -80,6 +80,22 @@ func TestRunRefusesAConfigurationItCannotSuperviseUnder(t *testing.T) {
 		{"NATS_NKEY_SEED holding no seed", func(_ *config.Config, o *overrides) {
 			o.environ = []string{"NATS_NKEY_SEED=hunter2"}
 		}, "NATS_NKEY_SEED does not hold a valid nkey seed"},
+		{"a daemon NATS nkey seed file that is not there, beside a usable pane seed", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
+			c.NatsDaemonNkeySeedFile = filepath.Join(c.StateDir, "absent")
+		}, "nats_daemon_nkey_seed_file names {state}/absent, which could not be read"},
+		{"a daemon NATS nkey seed file holding an account's seed", func(c *config.Config, _ *overrides) {
+			c.NatsDaemonNkeySeedFile = filepath.Join(c.StateDir, "daemon.seed")
+			if err := os.WriteFile(c.NatsDaemonNkeySeedFile, []byte(testnats.Account(t)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "nats_daemon_nkey_seed_file ({state}/daemon.seed) holds an nkey seed that is not a user's"},
+		{"NATS_DAEMON_NKEY_SEED_FILE set but empty", func(_ *config.Config, o *overrides) {
+			o.environ = []string{"NATS_DAEMON_NKEY_SEED_FILE=", "NATS_DAEMON_NKEY_SEED=" + testnats.UserSeed(t)}
+		}, "NATS_DAEMON_NKEY_SEED_FILE is set but empty"},
+		{"NATS_DAEMON_NKEY_SEED holding no seed", func(_ *config.Config, o *overrides) {
+			o.environ = []string{"NATS_DAEMON_NKEY_SEED=hunter2"}
+		}, "NATS_DAEMON_NKEY_SEED does not hold a valid nkey seed"},
 		{"no omp_invocation and no LEGION_OMP_PATH", func(c *config.Config, o *overrides) {
 			c.OmpInvocation = ""
 			o.runtime = nil
@@ -216,6 +232,43 @@ func TestEveryLaunchCarriesTheNatsSeedTheDaemonResolved(t *testing.T) {
 				got, carried := spec.Secrets["NATS_NKEY_SEED"]
 				if carried != (tc.want != "") || got != tc.want {
 					t.Errorf("the %s launch's NATS_NKEY_SEED secret is %q (carried: %t), want %q", kind, got, carried, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// The daemon's own seed reaches no launch: with both seeds configured, a root's and a worker's
+// launch carry the pane seed as NATS_NKEY_SEED and nothing of the daemon seed, in no secret, no
+// variable, and no other field of the spec.
+func TestNoLaunchCarriesTheDaemonSeed(t *testing.T) {
+	daemonSeed, paneSeed := testnats.UserSeed(t), testnats.UserSeed(t)
+	for _, tc := range []struct {
+		name    string
+		key     string
+		environ []string
+	}{
+		{"nats_daemon_nkey_seed_file", testnats.SeedFile(t, daemonSeed), nil},
+		{"NATS_DAEMON_NKEY_SEED_FILE", "", []string{"NATS_DAEMON_NKEY_SEED_FILE=" + testnats.SeedFile(t, daemonSeed)}},
+		{"NATS_DAEMON_NKEY_SEED", "", []string{"NATS_DAEMON_NKEY_SEED=" + daemonSeed}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.NatsNkeySeedFile = testnats.SeedFile(t, paneSeed)
+			cfg.NatsDaemonNkeySeedFile = tc.key
+			rt := fake.NewRuntime()
+			o := fakeRuntime(rt, &built{})
+			o.environ = tc.environ
+			d := startDaemon(t, cfg, o)
+
+			root := lastLaunch(t, rt, d.spawn(architect()))
+			worker := lastLaunch(t, rt, d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Wait."}))
+			for kind, spec := range map[string]runtime.SpawnSpec{"root": root, "worker": worker} {
+				if got := spec.Secrets["NATS_NKEY_SEED"]; got != paneSeed {
+					t.Errorf("the %s launch's NATS_NKEY_SEED secret is %q, want the pane seed", kind, got)
+				}
+				if dump := fmt.Sprintf("%#v", spec); strings.Contains(dump, daemonSeed) || strings.Contains(dump, "NATS_DAEMON") {
+					t.Errorf("the %s launch carries the daemon seed or its name: %s", kind, dump)
 				}
 			}
 		})

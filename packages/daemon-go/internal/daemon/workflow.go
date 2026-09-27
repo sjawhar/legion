@@ -156,10 +156,15 @@ func (w *workflowRuntime) bind(url, token string) {
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
 // notification stream refuses boot rather than leaving a daemon that reads no events. Boot runs it
 // before reconcile, whose Dispatch listing covers only what precedes a consumer created now. It
-// connects as the NATS user seed is the nkey seed of — the one boot resolved and every pane
-// receives (launchSecrets) — or with no credential when seed is "".
-func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, seed string) error {
-	conn, err := natsauth.Connect(cfg.NatsURLs, seed)
+// connects as natsUser's user — the daemon's own seed, else the pane seed every pane receives
+// (launchSecrets), else no credential — and logs every permission the server refuses it at error
+// (natsauth.LogPermissionViolations).
+func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, daemonSeed, paneSeed string) error {
+	seed, err := natsUser(w.log, daemonSeed, paneSeed)
+	if err != nil {
+		return err
+	}
+	conn, err := natsauth.Connect(cfg.NatsURLs, seed, natsauth.LogPermissionViolations(w.log))
 	if err != nil {
 		return fmt.Errorf("connect Envoy NATS: %w", err)
 	}
@@ -173,6 +178,34 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, seed s
 		Project: cfg.Project, Repositories: []ghrepo.Repository{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 	})
 	return err
+}
+
+// natsUser is the seed the daemon's own NATS connection authenticates with — daemonSeed when the
+// daemon has one, else paneSeed, else "" for no credential — after logging, once, the user it
+// connects as by public key and whether that is the pane user. Neither seed is logged.
+func natsUser(log *slog.Logger, daemonSeed, paneSeed string) (string, error) {
+	paneUser := ""
+	if paneSeed != "" {
+		var err error
+		if paneUser, err = natsauth.PublicKey(paneSeed); err != nil {
+			return "", err
+		}
+	}
+	switch {
+	case daemonSeed != "":
+		user, err := natsauth.PublicKey(daemonSeed)
+		if err != nil {
+			return "", err
+		}
+		log.Info("legion daemon connects to NATS", "user", user, "paneUser", user == paneUser, "seed", "daemon")
+		return daemonSeed, nil
+	case paneSeed != "":
+		log.Info("legion daemon connects to NATS", "user", paneUser, "paneUser", true, "seed", "pane")
+		return paneSeed, nil
+	default:
+		log.Info("legion daemon connects to NATS", "user", "", "paneUser", false, "seed", "none")
+		return "", nil
+	}
 }
 
 // phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task carries the phase

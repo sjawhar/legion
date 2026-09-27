@@ -331,11 +331,11 @@ func TestProbeImageHoldsTheProvidersSecretToTheDaemonsSeed(t *testing.T) {
 	}{
 		{"the daemon's user", bootprobe.NATSUserLine(daemons) + "\n" + okLine(3), nil},
 		{"no user", okLine(3), []string{
-			"pod " + probeSandboxName + " named no nkey user, where the daemon's own seed is user " + daemons +
+			"pod " + probeSandboxName + " named no nkey user, where the pane seed the daemon hands every pod is user " + daemons +
 				": its legion CLI predates the probe's nats-nkey-user line: build the image from this daemon's commit — log tail: ",
 		}},
 		{"another user", bootprobe.NATSUserLine(other) + "\n" + okLine(3),
-			[]string{"read nkey user " + other + " through its NATS_NKEY_SEED_FILE, the providers Secret legion-" + testProject + "-providers's NATS_NKEY_SEED", "where the daemon's own seed is user " + daemons}},
+			[]string{"read nkey user " + other + " through its NATS_NKEY_SEED_FILE, the providers Secret legion-" + testProject + "-providers's NATS_NKEY_SEED", "where the pane seed the daemon hands every pod is user " + daemons}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			g := newProbeRig(t, nil, withOptions(func(o *Options) {

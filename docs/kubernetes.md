@@ -364,7 +364,8 @@ image probe.
 
 The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
 directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
-`legion-pane` user the daemon's own NATS connection authenticates as. A set source that is empty,
+`legion-pane` user every pod connects as, and the user the daemon's own NATS connection
+authenticates as when it has no seed of its own (below). A set source that is empty,
 missing, unreadable, blank, readable by more than its owner, or not an nkey user seed refuses boot,
 naming the key and the path. One exception: when another uid owns the file, its group may read it,
 since a daemon running as a non-root uid in a pod reads a mounted Secret — root's — only through the
@@ -376,7 +377,7 @@ seed as boot does, and its OK line then names the seed's user by public key
 `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`,
 whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same
 seed in the providers Secret under that key. The image probe refuses boot when the kubelet cannot
-mount the key, when it holds no user seed, and when its user is not the daemon's own seed's (the
+mount the key, when it holds no user seed, and when its user is not the pane seed's (the
 probe reports the user's public key, never the seed); it reads the key by the daemon's rule above.
 A probe that reports no user at all is an image whose `legion probe-image` predates the report, and
 the refusal says to build the image from the daemon's commit: a current one exits 1 on a blank or
@@ -385,6 +386,33 @@ names it, so the seed is never a variable of Oh My Pi or the tools it runs. With
 carries no pointer and mounts no such key. While the daemon has a seed, `provider_keys` may neither
 name `NATS_NKEY_SEED` (on either runtime) nor read the Secret's `NATS_NKEY_SEED` key under another
 name, and `pod.env` may not set `NATS_NKEY_SEED_FILE`.
+
+The daemon's own NATS seed is optional too, and no pod ever gets it: `nats_daemon_nkey_seed_file`
+(relative to `legion.yaml`'s directory), else `NATS_DAEMON_NKEY_SEED_FILE`, else
+`NATS_DAEMON_NKEY_SEED` in the daemon's environment, is the `legion-daemon` user the daemon's
+connection authenticates as, whose grants (the daemon's JetStream consumers, the exceptions lane,
+role publishes) `legion-pane` does not hold. It is read by the same rule and refusals as the pane
+seed, the group-readable mount included, and neither seed falls back to the other: an unusable
+daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane
+seed, and with neither, with no credential. Keep it out of the providers Secret, which every pod
+mounts: in-cluster, put it in a Secret of its own, mounted into the daemon's pod alone with
+`defaultMode: 0440` (on a host, a 0600 file the daemon's uid owns), and name that file in
+`nats_daemon_nkey_seed_file`. No launch carries it, and a tmux pane's environment drops its
+variables with every other credential-shaped name. At boot the daemon logs, once, `legion daemon
+connects to NATS` with `user=U…` (the public key, never the seed), `paneUser=true|false`, and
+`seed=daemon|pane|none`. `legion start --check-config` reads it as boot does and adds
+`nats-daemon-nkey-user=U…` to its OK line. Every permission the server refuses the daemon's
+connection, a subscription or a publish (its JetStream consumers' API requests included), is logged
+at error as `NATS refused the daemon a permission: its NATS user lacks that grant` with its
+`operation` and `subject`: the server reports a refusal asynchronously, so a missing grant would
+otherwise be silent.
+
+Rollout order when the server gains the `legion-daemon` user (AGENTC-759): the server admits
+`legion-daemon`, with the daemon's grants, first; then the daemon gets its seed and restarts, and
+its boot line must read `paneUser=false`; only then does the server stop granting the daemon's
+subjects to `legion-pane`. Reversed, the daemon still connects as `legion-pane`, and each subject
+the server stops granting logs the error line above (a refused consumer or subscription never
+delivers).
 
 ### Anatomy of a Sandbox pod
 
@@ -1069,7 +1097,7 @@ deploy/kubernetes/daemon/controller.yaml.example`); `nats_urls` is required; `di
 `dispatch_token_file` go together; and relative paths resolve against the file's own directory, with
 no `~`. The operator token and the NATS nkey seed each sit in a file only you can read (mode 0600):
 a group- or world-readable one is refused naming the path and mode (`… is readable by its group or
-others (mode 0640); chmod 0600 it`). The daemon's own seed read holds a file it owns to the same
+others (mode 0640); chmod 0600 it`). The daemon's read of either of its seeds holds a file it owns to the same
 rule, and lets the group read only a file another uid owns, as a pod's kubelet-mounted Secret is
 ([Configuration](#configuration)).
 

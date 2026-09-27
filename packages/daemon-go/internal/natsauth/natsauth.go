@@ -3,7 +3,10 @@
 package natsauth
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
+	"regexp"
 	"strings"
 
 	"github.com/nats-io/nats.go"
@@ -23,10 +26,29 @@ const (
 	SeedVariable     = "NATS_NKEY_SEED"
 )
 
+// DaemonSeedFileKey, DaemonSeedFileVariable and DaemonSeedVariable name the seed the daemon's own
+// connection authenticates with, the same three ways: a `legion.yaml` key, a variable naming a file,
+// and a variable holding the seed. No pane is ever handed it; unset, the daemon connects as the pane
+// seed.
+const (
+	DaemonSeedFileKey      = "nats_daemon_nkey_seed_file"
+	DaemonSeedFileVariable = "NATS_DAEMON_NKEY_SEED_FILE"
+	DaemonSeedVariable     = "NATS_DAEMON_NKEY_SEED"
+)
+
+// names are the three names one seed is read under: the configuration key naming its file, the
+// variable naming its file, and the variable holding it.
+type names struct{ fileKey, fileVariable, variable string }
+
+var (
+	paneSeed   = names{SeedFileKey, SeedFileVariable, SeedVariable}
+	daemonSeed = names{DaemonSeedFileKey, DaemonSeedFileVariable, DaemonSeedVariable}
+)
+
 // Configured reports whether Seed reads a seed at all: file (the SeedFileKey's, "" when the
 // configuration names none) is set, or either variable is, whatever it holds.
 func Configured(file string, lookup func(string) (string, bool)) bool {
-	_, ok := resolve(file, lookup, nil)
+	_, ok := resolve(paneSeed, file, lookup, nil)
 	return ok
 }
 
@@ -45,7 +67,19 @@ func Configured(file string, lookup func(string) (string, bool)) bool {
 // the no_auth_user fallback); a server with no users sends no nonce, and nats.go then refuses the
 // nkey ("nats: nkeys not supported by the server") rather than connecting without it.
 func Seed(file string, lookup func(string) (string, bool)) (string, error) {
-	src, ok := resolve(file, lookup, config.ReadGroupSecretPointer)
+	src, ok := resolve(paneSeed, file, lookup, config.ReadGroupSecretPointer)
+	if !ok {
+		return "", nil
+	}
+	return src.seed()
+}
+
+// DaemonSeed is Seed of the daemon's own seed, under its own names: the file the configuration's
+// DaemonSeedFileKey names ("" when it names none), else the file NATS_DAEMON_NKEY_SEED_FILE names,
+// else NATS_DAEMON_NKEY_SEED, with Seed's refusals and file mode rule. None set is "": the daemon
+// then connects as the pane seed. It never falls back to the pane seed's names, nor they to it.
+func DaemonSeed(file string, lookup func(string) (string, bool)) (string, error) {
+	src, ok := resolve(daemonSeed, file, lookup, config.ReadGroupSecretPointer)
 	if !ok {
 		return "", nil
 	}
@@ -56,7 +90,7 @@ func Seed(file string, lookup func(string) (string, bool)) (string, error) {
 // or others can read it (config.ReadPrivateSecretPointer): what `legion controller start` checks,
 // on the operator's own machine, before handing its Oh My Pi that file.
 func SeedFile(file string) (string, error) {
-	return fileSource(SeedFileKey, file, config.ReadPrivateSecretPointer).seed()
+	return fileSource(paneSeed.fileKey, file, config.ReadPrivateSecretPointer).seed()
 }
 
 // source is one place a seed is read from: its name, which every refusal carries, and read, which
@@ -66,27 +100,28 @@ type source struct {
 	read func() (string, error)
 }
 
-// resolve is the one precedence every reader of a seed shares: file when the configuration names
-// one, else NATS_NKEY_SEED_FILE when set, else NATS_NKEY_SEED when set, whatever each holds; ok is
-// false when none is. read reads a file source (the key or variable naming it, and its path).
-func resolve(file string, lookup func(string) (string, bool), read func(key, path string) (string, error)) (source, bool) {
+// resolve is the one precedence every reader of a seed shares, under n's names: file when the
+// configuration names one, else the file variable when set, else the seed variable when set,
+// whatever each holds; ok is false when none is. read reads a file source (the key or variable
+// naming it, and its path).
+func resolve(n names, file string, lookup func(string) (string, bool), read func(key, path string) (string, error)) (source, bool) {
 	if file != "" {
-		return fileSource(SeedFileKey, file, read), true
+		return fileSource(n.fileKey, file, read), true
 	}
-	if path, set := lookup(SeedFileVariable); set {
+	if path, set := lookup(n.fileVariable); set {
 		if path == "" {
-			return source{SeedFileVariable, func() (string, error) {
-				return "", fmt.Errorf("%s is set but empty", SeedFileVariable)
+			return source{n.fileVariable, func() (string, error) {
+				return "", fmt.Errorf("%s is set but empty", n.fileVariable)
 			}}, true
 		}
-		return fileSource(SeedFileVariable, path, read), true
+		return fileSource(n.fileVariable, path, read), true
 	}
-	if value, set := lookup(SeedVariable); set {
-		return source{SeedVariable, func() (string, error) {
+	if value, set := lookup(n.variable); set {
+		return source{n.variable, func() (string, error) {
 			if seed := strings.TrimSpace(value); seed != "" {
 				return seed, nil
 			}
-			return "", fmt.Errorf("%s is set but empty", SeedVariable)
+			return "", fmt.Errorf("%s is set but empty", n.variable)
 		}}, true
 	}
 	return source{}, false
@@ -124,6 +159,28 @@ func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, er
 		options = append(options, nats.Nkey(public, user.Sign))
 	}
 	return nats.Connect(strings.Join(urls, ","), options...)
+}
+
+// permissionRefusal is the operation and subject a server's permissions violation names
+// (`Permissions Violation for Subscription to "<subject>"`, or `… Publish to …`).
+var permissionRefusal = regexp.MustCompile(`(?i)(publish|subscription) to "([^"]+)"`)
+
+// LogPermissionViolations is the connection option that logs, at error, every permission the
+// server refuses the connection: a subscription or a publish, the JetStream API requests a consumer
+// makes included. The server answers a refusal asynchronously, so without it a missing grant is
+// silent. Every other asynchronous error is logged at warn.
+func LogPermissionViolations(log *slog.Logger) nats.Option {
+	return nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
+		if !errors.Is(err, nats.ErrPermissionViolation) {
+			log.Warn("NATS reported an asynchronous error", "error", err)
+			return
+		}
+		operation, subject := "", ""
+		if m := permissionRefusal.FindStringSubmatch(err.Error()); m != nil {
+			operation, subject = strings.ToLower(m[1]), m[2]
+		}
+		log.Error("NATS refused the daemon a permission: its NATS user lacks that grant", "operation", operation, "subject", subject, "error", err)
+	})
 }
 
 // PublicKey is the public key of the nkey user seed is the seed of, a seed Seed answered: what a
