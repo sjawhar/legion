@@ -98,6 +98,10 @@ record=$work/sandboxes
 pg_container=legion-e2e4b-pg-$$
 profile=legion-e2e4b-$$-$(date +%s)
 state=$work/state
+# The HOME the controller's Oh My Pi runs under, so its profile lives in the work directory
+# (make_omp_home, lib/omp-home.sh).
+omp_home=$work/omp-home
+profile_agent=$omp_home/.omp/profiles/$profile/agent
 daemon_log=$evidence/logs/daemon.log
 check=setup
 ok=
@@ -163,6 +167,8 @@ blocked() {
 }
 # shellcheck source-path=SCRIPTDIR source=lib/rig.sh
 . "$root/scripts/e2e/lib/rig.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
+. "$root/scripts/e2e/lib/omp-home.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
 . "$root/scripts/e2e/lib/workflow.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/namespace-rig.sh
@@ -952,9 +958,9 @@ collect_transcripts() {
     op exec "$pod" -c worker -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
       tar -C "$evidence/transcripts" -xf - 2>/dev/null || true
   done
-  if [ -d "$HOME/.omp/profiles/$profile/agent/sessions" ]; then
+  if [ -d "$profile_agent/sessions" ]; then
     mkdir -p "$evidence/transcripts/controller"
-    cp -R "$HOME/.omp/profiles/$profile/agent/sessions/." "$evidence/transcripts/controller/"
+    cp -R "$profile_agent/sessions/." "$evidence/transcripts/controller/"
   fi
 }
 cleanup() {
@@ -992,7 +998,7 @@ cleanup() {
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$pg_container" >/dev/null 2>&1
-  rm -rf "$HOME/.omp/profiles/$profile" "$work"
+  rm -rf "$work"
   [ -n "$ok" ] || echo "stage 4b e2e: FAIL (check $check)"
   echo "evidence: $evidence (transcript.log, logs/daemon.log, pod-watch.json, pods/, transcripts/, the namespace snapshots)"
   exit "$status"
@@ -1702,8 +1708,9 @@ take_out "$tree3"
 skipped "STAGE4B_SKIP_CONTROLLER: a development run; tree 3 was only taken out"
 else
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --dest "$work/plugin" >/dev/null
-bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
+make_omp_home "$omp_home"
+bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin" >/dev/null
+bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
   blocked "the controller's model route could not be installed (lib/install-model-gateway.sh)"
 pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
 cat >"$work/controller.yaml" <<EOF
@@ -1720,7 +1727,7 @@ omp_invocation: mise x $pin -- omp
 state_dir: $work/controller-state
 EOF
 tmux -L "legion-e2e4b-$$" new-session -d -s controller -x 200 -y 50 \
-  "cd '$work' && OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$evidence/logs/controller.stderr'; sleep 3600"
+  "cd '$work' && HOME='$omp_home' OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$evidence/logs/controller.stderr'; sleep 3600"
 until_true 300 "controllerLocator in the state" sh -c "'$work/legion' state --json --config '$work/legion.yaml' | jq -e '.controllerLocator.sessionId != null' >/dev/null"
 controller_session=$(daemon_state | jq -r .controllerLocator.sessionId)
 note "controllerLocator $(daemon_state | jq -c .controllerLocator)"
@@ -1788,7 +1795,7 @@ note "the daemon failed $planner_claim because $why ($counts, bound $launch_fail
 # The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
 controller_notice() {
   local file
-  for file in "$HOME/.omp/profiles/$profile/agent/sessions"/*/*.jsonl; do
+  for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
     grep -F '"customType":"envoy-message"' "$file" | grep -qF "$(notice_needle held "$tree3")" && return 0
   done
@@ -1796,6 +1803,10 @@ controller_notice() {
 }
 until_true 300 "the held notice for $tree3 to reach the controller session $controller_session" controller_notice
 note "the controller session $controller_session received the held notice for $tree3"
+# That session is under the run's own home, and the operator's profile root holds none of the
+# controller's profile (make_omp_home, lib/omp-home.sh).
+[ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
+note "the controller's session is under $profile_agent/sessions; $HOME/.omp/profiles/$profile does not exist"
 interests_sample "$check"
 before_status=$(dispatch_get "issues/$tree3" | jq -r .status)
 out=$("$work/legion" status "$tree3" backlog --operator-token-file "$work/operator-token" --config "$work/legion.yaml" 2>&1) || fail "legion status $tree3 backlog from the operator shell: $out"
