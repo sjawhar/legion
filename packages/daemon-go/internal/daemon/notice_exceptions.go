@@ -101,9 +101,11 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // forward only after its receipt window (two seconds, longer while forwards queue behind others on
 // its role lane). A notice to the same architect written before the report arrives is not held
 // behind the failed one, so it can arrive before the copy. A catch-up a newer one superseded
-// (catchUpSuperseded) is not queued again: its copy would arrive after the fresh catch-up. That
-// check reads the claim from memory, outside ApplyFact's lock, which the ready handler holds, so a
-// copy can still lose the race to a ready; the notice executor checks again when it runs the row.
+// (catchUpSuperseded) is not queued again: its copy would arrive after the fresh catch-up. Nor is
+// a notice whose architect stopped with its finished tree (stoppedWithTree): nothing of the close
+// is sent to it. Those checks read the claim from memory, outside ApplyFact's lock, which the
+// ready handler holds, so a copy can still lose the race to a ready; the notice executor checks
+// again when it runs the row.
 func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if r.supervisor == nil {
 		return errors.New("notice re-hold has no claim supervisor")
@@ -133,13 +135,25 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	default:
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}
+	held := r.supervisedClaim(reported.architect)
+	if !claimRuns(held.State) {
+		lingers, err := r.issueTreeLingers(ctx, issue)
+		if err != nil {
+			return fmt.Errorf("re-hold the notice of exception %s: %w", envelope.EventID, err)
+		}
+		if stoppedWithTree(lingers, held.State) {
+			r.log.Info("outbox notice not re-held: its architect stopped with its finished tree",
+				"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "state", held.State)
+			return nil
+		}
+	}
 	if notice.Resends >= len(noticeReholdDelays) {
 		r.log.Warn("outbox notice not re-held again: it was queued again the most times a notice is",
 			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "resends", notice.Resends)
 		return nil
 	}
 	due := r.now().Add(noticeReholdDelays[notice.Resends])
-	if copyDueAtOnce(r.supervisedClaim(reported.architect), notice.Resends, exception.RecipientSession) {
+	if copyDueAtOnce(held, notice.Resends, exception.RecipientSession) {
 		due = r.now()
 	}
 	mark := fmt.Sprintf("%s#%d", exception.DedupeKey, notice.Resends)
@@ -156,7 +170,7 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 			if err != nil {
 				return err
 			}
-			if superseded = catchUpSuperseded(*notice.CatchUp, r.supervisedClaim(reported.architect), root); superseded {
+			if superseded = catchUpSuperseded(*notice.CatchUp, held, root); superseded {
 				return nil
 			}
 		}
@@ -178,6 +192,24 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason)
 	}
 	return nil
+}
+
+// issueTreeLingers says whether the tree of issue, as recorded, lingers or has closed. An issue
+// that is not recorded has no tree to finish.
+func (r *outbox) issueTreeLingers(ctx context.Context, issue string) (bool, error) {
+	lingers := false
+	err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		recorded, err := r.records.Issue(ctx, tx, issue)
+		if err != nil || recorded == nil {
+			return err
+		}
+		lingers, err = record.TreeLingers(ctx, r.records, tx, recorded.Tree)
+		return err
+	})
+	if err != nil {
+		return false, fmt.Errorf("read the tree of %s: %w", issue, err)
+	}
+	return lingers, nil
 }
 
 // catchUpSuperseded says whether a newer catch-up than catchUp exists for its architect: held, the

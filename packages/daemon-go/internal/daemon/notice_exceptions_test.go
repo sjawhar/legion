@@ -275,6 +275,58 @@ func TestANoticeIsQueuedAgainAtMostThreeTimes(t *testing.T) {
 	}
 }
 
+// A finished tree spends no copies on its architect: the close suspended it, or its claim failed
+// or retired, and re-admission starts it with the tree's record rather than the notices of its
+// close. The stopped session's Envoy registration can outlive its process, so the listener
+// accepts a publish it then cannot forward. A report of such a forward queues no copy, and a copy
+// queued before the close finishes without publishing when it runs. Each says so in one line
+// naming the notice, and neither reports a forwarding failure.
+func TestANoticeToAnArchitectStoppedWithItsFinishedTreeIsNotSentAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state supervise.ClaimState
+	}{
+		{"the close suspended the architect", supervise.StateSuspended},
+		{"the architect's claim retired", supervise.StateRetired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			noticeTree(t, pool, records, true)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			architectClaimOn(t, sup, "LEGION-1", tc.state, "ses_arch")
+			var logged bytes.Buffer
+			publisher := &holderPublisher{}
+			runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
+				project: "legion", now: time.Now}
+			notice := record.Notice{Kind: "phase-finished", Role: claim.RoleImplementer, Phase: phase.ProductionCheck, Summary: "checked in production"}
+			report := laneReport{"evt-exception", "delivery_failed", architectTopic(t, "LEGION-1"), "phase-finished on LEGION-2", notice, "legion-outbox:78", "ses_arch"}
+
+			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+				t.Fatalf("rehold: %v", err)
+			}
+			if got := queuedNotices(t, pool); len(got) != 0 {
+				t.Fatalf("queued %v for an architect stopped with its finished tree, want no copy", got)
+			}
+			copied := notice
+			copied.Resends, copied.ResendOf = 1, 78
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", copied, time.Now()))
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("run the copy queued before the close: %v", err)
+			}
+			_, delivered := publisher.snapshot()
+			lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
+			named := func(line string) bool {
+				return strings.Contains(line, "kind=phase-finished") && strings.Contains(line, "issue=LEGION-2") && !strings.Contains(line, "could not forward")
+			}
+			if len(delivered) != 0 || outboxRows(t, pool) != 0 || len(lines) != 2 || !named(lines[0]) || !named(lines[1]) {
+				t.Fatalf("delivered %+v, %d rows left, log %q; want nothing sent, the copy finished, and one line for each naming phase-finished on LEGION-2 and no forwarding failure",
+					delivered, outboxRows(t, pool), logged.String())
+			}
+		})
+	}
+}
+
 // The report arrives over core NATS on the original role topic's exceptions subject; the
 // subscription hears it there and queues the notice again.
 func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {

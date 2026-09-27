@@ -338,6 +338,11 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if err != nil {
 		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
 	}
+	if state := r.claimState(architect); stoppedWithTree(tree.root.Lingers(), state) {
+		r.log.Info("outbox notice finished undelivered: its architect stopped with its finished tree",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", state)
+		return nil
+	}
 	if earlier := earlierNoticeFor(tree, architect, runs); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
