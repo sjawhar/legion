@@ -158,13 +158,14 @@ fills legacy anchors only when their cached quote has one current match.
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
-(`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
-breaks at the end of the code's text and a line holding only whitespace in a list item's code read
-back without them, and an accepted suggestion writes its code as it reads back (`acceptedCode`):
-in a list item's code, a line it leaves holding only spaces and tabs, CommonMark's blank line, is
-written empty, the spaces and tabs that line keeps around it included, while any other character,
-a no-break space or a form feed among them, is kept, as both readers keep it; then, where only
-line breaks follow it, its text loses the line breaks that end it. A suggestion that runs past the
+(`codeReplacement`), and none of the rules below apply. Markdown cannot carry line breaks at the
+end of the code's text, which read back without them, and an accepted suggestion writes its code
+as it reads back (`acceptedCode`): where only line breaks follow it, its text loses the line breaks
+that end it. A line holding only spaces and tabs is written as sent: a list item takes no more
+than its own columns from a blank line, as the browser editor's parser does (`listItemColumns`),
+so both readers keep what the line holds past them. A footnote definition takes none, and a blank
+code line inside one is written without the definition's indentation (`writeCodeLinePrefix`). A
+suggestion that runs past the
 code into the next block is written as sent, the rest of that block joining it. Code on other
 lines stays as it was. A line of colons in code inside a typed block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around

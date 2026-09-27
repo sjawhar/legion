@@ -31,76 +31,26 @@ func settleAccepted(before, after *pmdoc.Node, match pmdoc.Range, with string) (
 	return pmdoc.AgreeWithReadBack(before, after, first, lastAfter, with != ""), nil
 }
 
-// acceptedCode is the code text an accepted suggestion writes in the code block at, and the range
-// it writes it over, match or the lines around it, as that code reads back, so the accept stores
-// what reads back and changes nothing but the lines it writes: in a list item's code, the lines it
-// leaves blank (blankListItemLines); then, markdown dropping the line breaks that end code, where
-// only line breaks follow the match, the text's own ending breaks, a blank line it ends with
-// included. A match that runs past the code into the next block is written as sent, since what
-// follows the text there is the rest of that block, which the splice joins to it.
-func acceptedCode(with string, at pmdoc.TextblockAt, match pmdoc.Range) (string, pmdoc.Range) {
+// acceptedCode is the code text an accepted suggestion writes over match in the code block at, as
+// that code reads back, so the accept stores what reads back: markdown drops the line breaks that
+// end code, so where only line breaks follow the match, the text loses its own ending breaks, a
+// blank line it ends with included. A match that runs past the code into the next block is written
+// as sent, since what follows the text there is the rest of that block, which the splice joins to
+// it.
+func acceptedCode(with string, at pmdoc.TextblockAt, match pmdoc.Range) string {
 	var text strings.Builder
 	for _, child := range at.Node.Children {
 		text.WriteString(child.Text)
 	}
 	code := utf16.Encode([]rune(text.String()))
-	from, to := match.From-at.Content.From, match.To-at.Content.From
+	to := match.To - at.Content.From
 	if to > len(code) {
-		return with, match
-	}
-	if insideListItem(at) {
-		with, from, to = blankListItemLines(code, with, from, to)
+		return with
 	}
 	if !slices.ContainsFunc(code[to:], func(unit uint16) bool { return unit != '\n' }) {
 		with = strings.TrimRight(with, "\n")
 	}
-	return with, pmdoc.Range{From: at.Content.From + from, To: at.Content.From + to}
-}
-
-// blankListItemLines writes empty each line that with, written over code from to to, leaves
-// holding only spaces and tabs, the spaces and tabs the line keeps around the match included, and
-// widens from and to over those. A list item's code reads such a line, CommonMark's blank line,
-// back empty; any other character, a no-break space or a form feed among them, is kept, as both
-// readers keep it.
-func blankListItemLines(code []uint16, with string, from, to int) (string, int, int) {
-	lineStart, lineEnd := from, to
-	for lineStart > 0 && code[lineStart-1] != '\n' {
-		lineStart--
-	}
-	for lineEnd < len(code) && code[lineEnd] != '\n' {
-		lineEnd++
-	}
-	lines := strings.Split(with, "\n")
-	last := len(lines) - 1
-	for index := range lines {
-		line := lines[index]
-		if index == 0 {
-			line = string(utf16.Decode(code[lineStart:from])) + line
-		}
-		if index == last {
-			line += string(utf16.Decode(code[to:lineEnd]))
-		}
-		if strings.Trim(line, " \t") != "" {
-			continue
-		}
-		lines[index] = ""
-		if index == 0 {
-			from = lineStart
-		}
-		if index == last {
-			to = lineEnd
-		}
-	}
-	return strings.Join(lines, "\n"), from, to
-}
-
-func insideListItem(at pmdoc.TextblockAt) bool {
-	for _, ancestor := range at.Ancestors {
-		if ancestor.Type == "list_item" {
-			return true
-		}
-	}
-	return false
+	return with
 }
 
 // insideAsk reports whether an accepted suggestion lands in an ask. refuseBrokenAsks is the ask

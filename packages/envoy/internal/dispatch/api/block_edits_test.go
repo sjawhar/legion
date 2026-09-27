@@ -447,16 +447,16 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 		// accept stores its code without them, as it reads back.
 		{"code text ending in a backslash and a line break", code, "x\\\n", "Intro.\n\n```\nx\\\n```\n"},
 		{"code text ending in spaces and a line break", code, "x  \n", "Intro.\n\n```\nx  \n```\n"},
-		// A line holding only whitespace in a list item's code reads back empty, so an accept
-		// writes the line it brings so.
-		{"a whitespace line in a list item's code", "- ```\n  Body.\n  ```\n", " ", "- ```\n  \n  ```\n"},
+		// A line holding only whitespace in a list item's code reads back holding what it holds past
+		// the item's own columns, so an accept writes the line as it brings it.
+		{"a whitespace line in a list item's code", "- ```\n  Body.\n  ```\n", " ", "- ```\n   \n  ```\n"},
 		{"a form-feed line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\f", "- ```\n  a\n  \f\n  b\n  ```\n"},
 		{"a no-break space line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\u00a0", "- ```\n  a\n  \u00a0\n  b\n  ```\n"},
 		{"a vertical tab line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\v", "- ```\n  a\n  \v\n  b\n  ```\n"},
 		{"an ideographic space line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\u3000", "- ```\n  a\n  \u3000\n  b\n  ```\n"},
 		{"nothing between no-break spaces on a line of a list item's code", "- ```\n  \u00a0Body.\u00a0\n  ```\n", "", "- ```\n  \u00a0\u00a0\n  ```\n"},
-		{"text ending in a whitespace line at the end of a list item's code", "- ```\n  Body.\n  ```\n", "x\n  ", "- ```\n  x\n  ```\n"},
-		{"nothing over an indented line of a list item's code", "- item\n\n  ```\n    Body.\n  ```\n", "", "- item\n\n  ```\n  \n  ```\n"},
+		{"text ending in a whitespace line at the end of a list item's code", "- ```\n  Body.\n  ```\n", "x\n  ", "- ```\n  x\n    \n  ```\n"},
+		{"nothing over an indented line of a list item's code", "- item\n\n  ```\n    Body.\n  ```\n", "", "- item\n\n  ```\n    \n  ```\n"},
 		{"two paragraphs beside an item holding a nested list", "- Body.\n- two\n  - nested\n", "x\n\ny", "- x\n\n  y\n- two\n  - nested\n"},
 		{"two paragraphs beside an item holding a quote, in an ordered list", "1. Body.\n2. two\n   > q\n", "x\n\ny", "1. x\n\n   y\n2. two\n   > q\n"},
 		// An emptied footnote definition holds one empty paragraph, which reads back as the

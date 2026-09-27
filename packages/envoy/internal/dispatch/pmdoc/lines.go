@@ -302,6 +302,23 @@ func (p listItemColumns) Open(parent ast.Node, reader gmtext.Reader, pc parser.C
 	return node, state
 }
 
+// Continue takes no more than the item's own columns from a blank line, as the browser editor's
+// parser does, and leaves the rest of the line to the blocks inside the item. Goldmark takes the
+// whole line, so a fenced or indented code block in a list item lost what a blank line held past
+// the item's indentation: `- a\n\n  ```\n  c\n    \n  ```` holds the code `c\n  `.
+func (p listItemColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	line, _ := reader.PeekLine()
+	if !util.IsBlank(line) {
+		return p.BlockParser.Continue(node, reader, pc)
+	}
+	if position, padding := util.IndentPosition(line, reader.LineOffset(), node.(*ast.ListItem).Offset); position >= 0 {
+		reader.AdvanceAndSetPadding(position, padding)
+	} else {
+		reader.AdvanceToEOL()
+	}
+	return parser.Continue | parser.HasChildren
+}
+
 // fenceClosure is goldmark's fenced code parser recording on a block whether a closing fence closed
 // it (fenceClosedAttr), which the browser editor's parser reads its trailing blank line by
 // (fencedCodeText).

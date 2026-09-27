@@ -26,10 +26,12 @@ type renderer struct {
 	// and footnoteLabel is its label as written, so that the line is read after a reference to it.
 	footnoteLineAt int
 	footnoteLabel  string
-	// inFootnote reports whether the blocks being written are inside a footnote definition, and
-	// footnoteQuotes is how many quotes stand around that definition.
-	inFootnote     bool
-	footnoteQuotes int
+	// inFootnote reports whether the blocks being written are inside a footnote definition,
+	// footnoteQuotes is how many quotes stand around that definition, and footnoteIndentAt is
+	// where its indentation starts in the prefix of every line written inside it.
+	inFootnote       bool
+	footnoteQuotes   int
+	footnoteIndentAt int
 	// itemDepth is how many list items the blocks being written stand in, and quoteDepth how many
 	// quotes, each a quote marker on their lines' prefix.
 	itemDepth  int
@@ -295,8 +297,8 @@ func (r *renderer) block(n *Node, prefix string) {
 		label, _ := n.Attrs["label"].(string)
 		r.footnoteLineAt, r.footnoteLabel = r.b.Len(), escapeFootnoteLabel(label)
 		r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
-		outer, outerQuotes := r.inFootnote, r.footnoteQuotes
-		r.inFootnote, r.footnoteQuotes = true, r.quoteDepth
+		outer, outerQuotes, outerIndentAt := r.inFootnote, r.footnoteQuotes, r.footnoteIndentAt
+		r.inFootnote, r.footnoteQuotes, r.footnoteIndentAt = true, r.quoteDepth, len(prefix)
 		// The browser editor's parser reads the lines of a definition a list item holds as the
 		// item's, so in a tight item a blank line between two of its blocks would spread the item.
 		tightItem := len(r.containers) > 0 && r.containers[len(r.containers)-1].Type == "list_item" && r.containers[len(r.containers)-1].Attrs["spread"] != true
@@ -307,7 +309,7 @@ func (r *renderer) block(n *Node, prefix string) {
 			r.blocksNoTrailing(n.Children, prefix+definitionIndent)
 		}
 		r.leave()
-		r.inFootnote, r.footnoteQuotes = outer, outerQuotes
+		r.inFootnote, r.footnoteQuotes, r.footnoteIndentAt = outer, outerQuotes, outerIndentAt
 	default:
 		typ, typed := typedBlock(n.Type)
 		if !typed {
@@ -637,16 +639,20 @@ func (r *renderer) writeCodeText(node *Node, prefix string) {
 }
 
 // writeCodeLinePrefix writes prefix ahead of a code line, the first of rest. A blank line does not
-// take a footnote definition's indentation, and both parsers keep what it holds as the code's, so a
-// blank code line there, where no quote stands inside the definition to carry its marker after
-// that indentation, is written with the prefix only through its last quote marker (`> `), since
-// every container around the code goes on across a blank line without its indentation - the
-// code's first line as well as a later one.
+// take a footnote definition's indentation, and both parsers keep what it holds as the code's, while
+// every other container around the code takes its own columns from it, a list item no more than its
+// width. So a blank code line there, where no quote stands inside the definition to carry its
+// marker after that indentation, is written without the definition's indentation, and one holding
+// nothing with no indentation after the prefix's last quote marker (`> `) - the code's first line
+// as well as a later one.
 func (r *renderer) writeCodeLinePrefix(rest, prefix string) {
 	if r.inFootnote && r.quoteDepth == r.footnoteQuotes && blankLineAhead(rest) {
-		if marker := strings.LastIndex(prefix, "> "); marker >= 0 {
+		switch marker := strings.LastIndex(prefix, "> "); {
+		case rest != "" && rest[0] != '\n':
+			prefix = prefix[:r.footnoteIndentAt] + prefix[r.footnoteIndentAt+len(definitionIndent):]
+		case marker >= 0:
 			prefix = prefix[:marker+len("> ")]
-		} else {
+		default:
 			prefix = ""
 		}
 	}
