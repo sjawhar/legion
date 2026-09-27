@@ -316,6 +316,13 @@ every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` th
 fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
 loop before Stage 7, so the reviewer, as its Go prompt says and with no approval sent by the proof, approves a head that still carries `.legion/`, and
 without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
+From the proof's merge until that cleanup passes, the run holds the smoke `main`: an exclusive
+`flock` on `/tmp/legion-e2e-smoke-main.<owner>-<repo>.lock`, shared by every Stage 3 and Stage 4b
+run on the box (`hold_smoke_main` in `lib/workflow.sh`). Another run's merge inside that window
+adds the same `.legion/` paths and GitHub refuses it as unmergeable. A run that finds the lock
+held names the holder, says every minute how long it has waited, and fails after 45 minutes
+naming it. The lock is on an open descriptor, so a holder that dies or is killed frees it with no
+stale lock left behind.
 Each check is named in the transcript;
 seven negative controls demonstrate that the status-actor, held-worker, re-closed-gate, idle-read
 and worker-notice assertions reject deliberately corrupted observations before the captured
