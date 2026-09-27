@@ -948,6 +948,122 @@ func TestEndToEnd(t *testing.T) {
 	})
 }
 
+// TestReloadRefusedForWrongOriginLeavesKeySetUnchanged pins the merge-gate fix wave's ordering
+// fix (commit aea942e745c6): onReload must check the rules file's declared origin against the
+// broker's configured origin BEFORE calling approversSvc.Reconcile, never after — Reconcile
+// commits its own transaction unconditionally on success, so checking the origin second would
+// let an origin-mismatched file's key-set changes land permanently even though the reload is
+// reported (and logged) as refused. This writes a wrong-origin file that ALSO endorses a second,
+// genuinely valid key — a change Reconcile would apply if it ran — and confirms the persisted key
+// set is untouched after several live reload cycles; then, to rule out "the endorsement itself
+// was broken so nothing would have happened anyway," it rewrites the identical key content under
+// the CORRECT origin and confirms Reconcile now does add the second key, exactly as it should.
+func TestReloadRefusedForWrongOriginLeavesKeySetUnchanged(t *testing.T) {
+	ca := webauthntest.NewCA(t)
+	key1Auth := ca.NewAuthenticator(t, uuid.MustParse(testAAGUID))
+	nonce1 := randomNonceHex(t)
+	key1Challenge := record.RegisterChallenge("sjawhar", nonce1)
+	key1Entry := approvers.KeyEntry{
+		CredentialID:   base64.RawURLEncoding.EncodeToString(key1Auth.CredentialID),
+		ChallengeNonce: nonce1,
+		Registration:   key1Auth.Register(t, testRPID, testOrigin, key1Challenge[:]),
+		Seed:           true,
+	}
+	ts := newE2EServer(t, ca, key1Entry)
+
+	readKeys := func(t *testing.T) []wireKeyInfo {
+		t.Helper()
+		status, body := ts.ui(t, http.MethodGet, "/v1/approvers/sjawhar/keys", nil)
+		if status != http.StatusOK {
+			t.Fatalf("GET keys = %d: %s", status, body)
+		}
+		return decode[struct {
+			Keys []wireKeyInfo `json:"keys"`
+		}](t, body).Keys
+	}
+	if keys := readKeys(t); len(keys) != 1 || keys[0].CredentialID != key1Entry.CredentialID || keys[0].State != "active" {
+		t.Fatalf("keys before rewrite = %+v, want exactly key1 active", keys)
+	}
+
+	// Register and endorse a second key through the real UI ceremonies, exactly as step 8 of
+	// TestEndToEnd does — a genuinely valid endorsed key, not a synthetic placeholder, so applying
+	// it is a real, detectable Reconcile side effect.
+	status, body := ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/register/begin", nil)
+	if status != http.StatusOK {
+		t.Fatalf("register/begin = %d: %s", status, body)
+	}
+	begin := decode[struct {
+		CeremonyID string `json:"ceremony_id"`
+		PublicKey  struct {
+			Challenge string `json:"challenge"`
+		} `json:"publicKey"`
+	}](t, body)
+	key2Auth := ca.NewAuthenticator(t, uuid.MustParse(testAAGUID))
+	registration := key2Auth.Register(t, testRPID, testOrigin, decodeChallenge(t, begin.PublicKey.Challenge))
+	status, body = ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/register/finish",
+		map[string]any{"ceremony_id": begin.CeremonyID, "response": json.RawMessage(registration)})
+	if status != http.StatusOK {
+		t.Fatalf("register/finish = %d: %s", status, body)
+	}
+	finished := decode[struct {
+		YAML string `json:"yaml"`
+	}](t, body)
+	key2CredentialID, key2Nonce, key2Registration := extractRegistration(t, finished.YAML, "sjawhar")
+
+	keyHash2 := sha256.Sum256(key2Auth.CredentialID)
+	status, body = ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/endorse/begin",
+		map[string]any{"credential_id": key1Entry.CredentialID, "key_hash": hex.EncodeToString(keyHash2[:])})
+	if status != http.StatusOK {
+		t.Fatalf("endorse/begin = %d: %s", status, body)
+	}
+	endorseBegin := decode[struct {
+		CeremonyID string `json:"ceremony_id"`
+		PublicKey  struct {
+			Challenge string `json:"challenge"`
+		} `json:"publicKey"`
+	}](t, body)
+	endorseAssertion := key1Auth.Assert(t, testRPID, testOrigin, decodeChallenge(t, endorseBegin.PublicKey.Challenge))
+	status, body = ts.ui(t, http.MethodPost, "/v1/approvers/sjawhar/keys/endorse/finish",
+		map[string]any{"ceremony_id": endorseBegin.CeremonyID, "response": json.RawMessage(endorseAssertion)})
+	if status != http.StatusOK {
+		t.Fatalf("endorse/finish = %d: %s", status, body)
+	}
+	endorseFinished := decode[struct {
+		YAML string `json:"yaml"`
+	}](t, body)
+	endorsedBy, endorsementAssertion := extractEndorsement(t, endorseFinished.YAML)
+	key2Entry := approvers.KeyEntry{
+		CredentialID:   key2CredentialID,
+		ChallengeNonce: key2Nonce,
+		Registration:   key2Registration,
+		Endorsement:    &approvers.Endorsement{By: endorsedBy, Assertion: endorsementAssertion},
+	}
+
+	// Same two-key content, wrong declared origin. If onReload's ordering regressed (Reconcile
+	// before the origin check), key2 would be added despite the reload being refused.
+	twoKeyFile := renderRulesYAML([]approvers.KeyEntry{key1Entry, key2Entry})
+	wrongOrigin := strings.Replace(twoKeyFile, "origin: "+testOrigin, "origin: https://evil.example", 1)
+	if wrongOrigin == twoKeyFile {
+		t.Fatalf("wrong-origin substitution matched nothing; rendered file = %s", twoKeyFile)
+	}
+	writeRulesFile(t, ts.RulesPath, wrongOrigin)
+
+	// Give the live reload ticker (reloadInterval = 40ms) many cycles to prove this isn't a race
+	// won by chance, then confirm the key set is exactly as it was before the rewrite.
+	time.Sleep(reloadTimeout)
+	if keys := readKeys(t); len(keys) != 1 || keys[0].CredentialID != key1Entry.CredentialID || keys[0].State != "active" {
+		t.Fatalf("keys after wrong-origin rewrite = %+v, want key1 unchanged and key2 never added "+
+			"(onReload's origin check must refuse before Reconcile ever runs)", keys)
+	}
+
+	// Same content, correct origin: confirms the endorsement itself was valid all along, so the
+	// prior non-application was genuinely the origin refusal, not a broken test fixture.
+	writeRulesFile(t, ts.RulesPath, twoKeyFile)
+	waitUntil(t, reloadTimeout, "both keys reconciled once the origin is correct", func() bool {
+		return len(readKeys(t)) == 2
+	})
+}
+
 // TestRulesTestdataFixturesParse proves the rewritten v9-shaped fixtures under testdata/ are
 // exactly what the task's "full rewrite for v9" calls for: no issue_assignee reference remains,
 // and rules.Parse accepts the well-formed one while still refusing the ambiguous one exactly as

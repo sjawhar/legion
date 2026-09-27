@@ -1315,5 +1315,8 @@ sanctioned exception, since it exists to test the CLI binary's own request-build
 response-parsing logic, not broker behavior. `packages/envoy/scripts/dev-broker.sh` and
 `cmd/agent-secrets-devkey` (a software-key driver standing in for a real WebAuthn authenticator) run
 a whole local broker stack by hand for manual smoke testing; neither ships in `docker/Dockerfile`,
-which builds exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`.
+which builds exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`. Each
+`dev-broker.sh` run creates and drops its own isolated database on the shared `dispatch-pg`
+container, so concurrent instances never evict each other's approver keys via `Reconcile`'s
+tombstone-on-absence behavior.
 

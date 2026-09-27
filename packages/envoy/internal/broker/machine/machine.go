@@ -213,12 +213,12 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return "", "", ErrCodeMismatch
 	}
 
-	body, err := record.ParseBody(canonical)
+	body, err := record.VerifyBodyReproducesID(canonical, recordID)
 	if err != nil {
+		if errors.Is(err, record.ErrBodyIDMismatch) {
+			return "", "", fmt.Errorf("%w: stored body does not reproduce its own id", record.ErrRequestInvalid)
+		}
 		return "", "", err
-	}
-	if body.ID() != recordID {
-		return "", "", fmt.Errorf("%w: stored body does not reproduce its own id", record.ErrRequestInvalid)
 	}
 
 	event, challenge := "denied", record.DenyChallenge(recordID)

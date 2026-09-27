@@ -70,12 +70,12 @@ func (c *ChainVerifier) Verify(ctx context.Context, recordID string) (Body, erro
 	if !found {
 		return Body{}, fmt.Errorf("%w: no such record", ErrChainBroken)
 	}
-	body, err := ParseBody(canonical)
+	body, err := VerifyBodyReproducesID(canonical, recordID)
 	if err != nil {
+		if errors.Is(err, ErrBodyIDMismatch) {
+			return Body{}, fmt.Errorf("%w: stored body does not reproduce its own id", ErrChainBroken)
+		}
 		return Body{}, fmt.Errorf("%w: stored body does not parse: %s", ErrChainBroken, err)
-	}
-	if body.ID() != recordID {
-		return Body{}, fmt.Errorf("%w: stored body does not reproduce its own id", ErrChainBroken)
 	}
 	if _, err := VerifyRequestObject(body.Request, c.Audience, c.Skew, createdAt); err != nil {
 		return Body{}, fmt.Errorf("%w: request object: %s", ErrChainBroken, err)

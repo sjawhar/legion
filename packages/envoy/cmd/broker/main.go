@@ -52,10 +52,28 @@ func main() {
 	devAttestationRoot := flag.String("dev-attestation-root", "",
 		"development only: trust exactly this PEM certificate as the sole approver attestation "+
 			"root instead of the embedded Yubico roots; refused together with BROKER_RULES_S3_URI")
+	migrateOnly := flag.Bool("migrate-only", false,
+		"development only: open BROKER_DATABASE_URL, apply pending schema migrations, and exit "+
+			"without starting the HTTP server or loading rules/approvers — lets a caller create the "+
+			"break-glass approver_key_seeds row before the broker's own first rules load runs "+
+			"Reconcile, whose seed-key check would otherwise fail boot against an unmigrated database")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *migrateOnly {
+		databaseURL := os.Getenv("BROKER_DATABASE_URL")
+		if databaseURL == "" {
+			fatal(errors.New("-migrate-only requires BROKER_DATABASE_URL"))
+		}
+		st, err := store.Open(ctx, databaseURL)
+		fatal(err)
+		fatal(st.Migrate(ctx))
+		fmt.Println("broker: migrations applied")
+		return
+	}
+
 	cfg, err := config.Load(os.Getenv)
 	fatal(err)
 	fatal(refuseDevAttestationRootInProduction(*devAttestationRoot, cfg.RulesS3URI))
