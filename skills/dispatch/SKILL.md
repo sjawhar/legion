@@ -299,21 +299,24 @@ This is not search: it matches no text. Use `dispatch_search` for a keyword or p
 
 ### The owner audit
 
-As the owner of a surface, list your area's P0 and P1 issues and staff or close each one that is
-not in progress:
+As the owner of a surface, list your area's P0 and P1 issues and staff or close each one nobody
+has started:
 ```ts
 dispatch_issues({ project, priority: [0, 1], limit: 250 })
 ```
-Every open row outside `in_progress` is a decision: someone takes it and builds it, or it closes.
-A todo with a finished spec reads as queued work that nobody is doing (LEGION-173 sat in todo for
-two weeks with a complete spec; AGENTC-1010's v4 plan sat in backlog with nobody building it).
+Every unclaimed row in `triage`, `icebox`, `backlog` or `todo` is a decision: someone takes it and
+builds it, or it closes. A row in `in_progress`, `testing`, `needs_review` or `retro`, or one that
+carries a claim, is work under way ([Issue status is yours to move](#issue-status-is-yours-to-move))
+and is not re-staffed. A todo with a finished spec reads as queued work that nobody is doing
+(LEGION-173 sat in todo for two weeks with a complete spec; AGENTC-1010's v4 plan sat in backlog
+with nobody building it).
 
 The audit finds three shapes:
 
 - **Unstaffed work.** A plan or measurement exists, and no one is building it.
-- **Unrecorded delivery.** An issue not in `testing` or `done` has a merged PR naming it. Check the
-  change live, then move the issue (AGENTC-1033 sat at `triage` after its fix, agent-c #20367,
-  merged).
+- **Unrecorded delivery.** An issue not yet in `testing` or `done`, claimed or not, has a merged PR
+  naming it. Check the change live, then move the issue (AGENTC-1033 sat at `triage` after its fix,
+  agent-c #20367, merged).
 - **Unrecorded practice.** Someone does the issue's work by hand, more than once, while the issue
   sits in backlog (OPS-132, done by hand on every migration merge). It leaves no plan and no PR to
   find; the tell is your own messages. Doing something by hand more than once means an issue is
