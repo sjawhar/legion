@@ -63,6 +63,7 @@ import { IssueComponentsLine } from "./IssueComponentsLine";
 import { IssueLabels } from "./IssueLabels";
 import { PriorityControl } from "./PriorityControl";
 import { stateForIssue } from "./pins";
+import { UnreachableRouteMarker } from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
 
@@ -392,6 +393,24 @@ export function IssueHeader({
               variant="header"
             />
           )}
+          {/* Whether the route reaches anyone is state about who is working this, like the
+              claim, and it sits in this wrapping row for the same reason: the metadata rail
+              clips at every width, and a warning past its edge is no warning. It speaks for the
+              saved route only, so a route being saved hides it until the next read judges it. */}
+          {drafts.route === (issue.route ?? "") ? (
+            <>
+              <UnreachableRouteMarker issue={issue} showRoute />
+              {issue.route !== null && issue.route_status === "unknown" ? (
+                <span
+                  className={`shrink-0 text-xs ${textMutedOnSurface}`}
+                  data-testid="issue-route-unknown"
+                  title="The Envoy listener did not answer, so Dispatch cannot tell whether anyone receives this route."
+                >
+                  Route reach unknown
+                </span>
+              ) : null}
+            </>
+          ) : null}
           {issue.claim === null ? null : (
             <>
               {/* A claim is state — who is working this, since when — so it sits with the

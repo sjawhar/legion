@@ -3,6 +3,7 @@ import type {
   ASK_URGENCIES,
   DOC_EDIT_OPS,
   ISSUE_COMPONENTS_MODES,
+  ISSUE_ROUTE_STATUSES,
   IssueStatus,
 } from "./dispatch-tools";
 
@@ -232,21 +233,42 @@ export interface Issue {
   readonly last_seq: number;
 }
 
+/**
+ * Whether an issue's route reaches a running session right now: `live` when a live session
+ * holds the role or the routed session is live, `no_holder` when nobody live holds the role (it
+ * is unclaimed or its holder's session lapsed) or the session is not live, `unknown` when the
+ * Envoy listener did not answer (never read as live).
+ */
+export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
+
+/**
+ * Every issue read (the detail, the list, the pinned list) resolves this from one listener read
+ * per request. It is stored nowhere and is never on an event payload, which is why it is not a
+ * field of `Issue`. Both are null when the issue has no route.
+ */
+export interface IssueRouteReach {
+  readonly route_status: IssueRouteStatus | null;
+  /** The live session the route reaches; set only when `route_status` is `live`. */
+  readonly route_holder: string | null;
+}
+
 export interface IssueSummary
   extends Pick<
-    Issue,
-    | "key"
-    | "title"
-    | "status"
-    | "priority"
-    | "rank"
-    | "parent"
-    | "assignee"
-    | "claim"
-    | "components"
-    | "updated_at"
-    | "last_seq"
-  > {
+      Issue,
+      | "key"
+      | "title"
+      | "status"
+      | "priority"
+      | "rank"
+      | "parent"
+      | "assignee"
+      | "claim"
+      | "components"
+      | "route"
+      | "updated_at"
+      | "last_seq"
+    >,
+    IssueRouteReach {
   readonly labels?: string[];
   readonly open_asks: number;
 }
@@ -1530,7 +1552,7 @@ export interface EditArtifactInput {
   readonly actor?: Actor;
 }
 
-export interface IssueDetails extends Issue {
+export interface IssueDetails extends Issue, IssueRouteReach {
   readonly artifacts: Artifact[];
   readonly open_asks: Ask[];
   readonly children: IssueChild[];

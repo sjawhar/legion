@@ -95,6 +95,7 @@ export type {
   IssueRankInput,
   IssueRead,
   IssueReferences,
+  IssueRouteReach,
   IssueSummary,
   ListUsersResponse,
   Message,
