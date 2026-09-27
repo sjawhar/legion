@@ -6,13 +6,17 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/dispatch"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
@@ -944,5 +948,217 @@ func TestHumanRevokeByAnotherOperatorIsRefused(t *testing.T) {
 	var actor string
 	if err := machine.Store.Pool.QueryRow(context.Background(), `select actor from audit where kind='grant.revoked' and grant_id=$1`, grantID).Scan(&actor); err != nil || actor != "human:sjawhar" {
 		t.Fatalf("grant.revoked actor = %q, %v, want human:sjawhar", actor, err)
+	}
+}
+
+// proofCall sends one proof-authenticated request as enr and decodes the JSON response.
+func proofCall(t *testing.T, srv *httptest.Server, enr enrolledAgent, method, path, body string) (int, map[string]any) {
+	t.Helper()
+	url := srv.URL + path
+	var reader *strings.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	} else {
+		reader = strings.NewReader("")
+	}
+	req, err := http.NewRequest(method, url, reader)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Proof", signProof(t, enr, method, url))
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	if resp.StatusCode != http.StatusNoContent {
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+	}
+	return resp.StatusCode, out
+}
+
+// TestMalformedPathIDsAreRefusedAs400 pins that a path id that is not a UUID is a 400 naming the
+// kind of id, never a Postgres type error surfacing as a 500.
+func TestMalformedPathIDsAreRefusedAs400(t *testing.T) {
+	srv, enrA, _, launcherToken, _, _ := fixture(t)
+	for _, c := range []struct{ method, path, code string }{
+		{http.MethodGet, "/v1/requests/not-a-uuid", "REQUEST_ID_INPUT"},
+		{http.MethodPost, "/v1/requests/not-a-uuid/cancel", "REQUEST_ID_INPUT"},
+		{http.MethodPost, "/v1/grants/not-a-uuid/values", "GRANT_ID_INPUT"},
+		{http.MethodPost, "/v1/grants/not-a-uuid/revoke", "GRANT_ID_INPUT"},
+	} {
+		if status, out := proofCall(t, srv, enrA, c.method, c.path, ""); status != http.StatusBadRequest || out["code"] != c.code {
+			t.Errorf("%s %s = %d %v, want 400 %s", c.method, c.path, status, out, c.code)
+		}
+	}
+	req, _ := http.NewRequest(http.MethodDelete, srv.URL+"/v1/enrollments/not-a-uuid", nil)
+	req.Header.Set("Authorization", "Bearer "+launcherToken)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("DELETE: %v", err)
+	}
+	var out map[string]any
+	decodeJSON(t, resp, &out)
+	if resp.StatusCode != http.StatusBadRequest || out["code"] != "ENROLLMENT_ID_INPUT" {
+		t.Fatalf("DELETE /v1/enrollments/not-a-uuid = %d %v, want 400 ENROLLMENT_ID_INPUT", resp.StatusCode, out)
+	}
+}
+
+// TestCreateRequestValidatesItsBody pins the POST /v1/requests boundary checks: at least one
+// secret, no empty or control-character names, no name twice, and an issue that is a Dispatch
+// issue key (so nothing a caller writes can steer the broker's own Dispatch URL).
+func TestCreateRequestValidatesItsBody(t *testing.T) {
+	srv, enrA, _, _, _, _ := fixture(t)
+	for body, code := range map[string]string{
+		`{"secrets":[],"reason":"r"}`:                                        "SECRETS_REQUIRED",
+		`{"reason":"r"}`:                                                     "SECRETS_REQUIRED",
+		`{"secrets":["AUTO_TOKEN","AUTO_TOKEN"],"reason":"r"}`:               "DUPLICATE_SECRET",
+		`{"secrets":[""],"reason":"r"}`:                                      "SECRET_NAME_INPUT",
+		`{"secrets":["BAD\u0000NAME"],"reason":"r"}`:                         "SECRET_NAME_INPUT",
+		`{"secrets":["DEEL_API_KEY"],"reason":"r","issue":"AGENTC-1/x?y=1"}`: "ISSUE_INPUT",
+		`{"secrets":["DEEL_API_KEY"],"reason":"r","issue":"../../whoami"}`:   "ISSUE_INPUT",
+	} {
+		if status, out := proofCall(t, srv, enrA, http.MethodPost, "/v1/requests", body); status != http.StatusBadRequest || out["code"] != code {
+			t.Errorf("POST /v1/requests %s = %d %v, want 400 %s", body, status, out, code)
+		}
+	}
+}
+
+// TestPodEnrollmentRefusesAnOperatorApprover pins that a pod, which has no operator, can only be
+// enrolled with its requests approved by an issue's assignee.
+func TestPodEnrollmentRefusesAnOperatorApprover(t *testing.T) {
+	srv, _, _, launcherToken, _, _ := fixture(t)
+	for body, code := range map[string]string{
+		`{"kind":"pod","runtime_id":"pod-1","operator":null,"approver":{"kind":"operator"},"thumbprint":"tp"}`:                          "INVALID_APPROVER",
+		`{"kind":"box","runtime_id":"box-1","operator":"sjawhar","approver":{"kind":"issue_assignee","issue":"x/y"},"thumbprint":"tp"}`: "ISSUE_INPUT",
+	} {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/enrollments", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+launcherToken)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		var out map[string]any
+		decodeJSON(t, resp, &out)
+		if resp.StatusCode != http.StatusBadRequest || out["code"] != code {
+			t.Errorf("POST /v1/enrollments %s = %d %v, want 400 %s", body, resp.StatusCode, out, code)
+		}
+	}
+}
+
+// captureLogs sends the default logger's output to a buffer for the rest of t.
+func captureLogs(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	var mu sync.Mutex
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.Write(p)
+	}), nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &buf
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// TestDispatchOutageAndInternalFailuresAreNamedAndLogged pins the failure mapping: an approval
+// request while Dispatch is unreachable is 503 DISPATCH_UNAVAILABLE (an automatic one still
+// succeeds), a Dispatch refusal is 502 DISPATCH_ERROR, and a failure of the broker's own is a
+// logged 500 — every one of them written to the broker's log with its cause.
+func TestDispatchOutageAndInternalFailuresAreNamedAndLogged(t *testing.T) {
+	srv, enrA, _, _, machine, _ := fixture(t)
+	logs := captureLogs(t)
+	machine.StandingIssue = func(context.Context, string) (string, error) {
+		return "", &dispatch.Error{Method: "GET", Path: "/api/v1/issues", Err: errors.New("dial tcp: connection refused")}
+	}
+	if status, out := proofCall(t, srv, enrA, http.MethodPost, "/v1/requests", `{"secrets":["DEEL_API_KEY"],"reason":"r"}`); status != http.StatusServiceUnavailable || out["code"] != "DISPATCH_UNAVAILABLE" {
+		t.Fatalf("approval request with Dispatch down = %d %v, want 503 DISPATCH_UNAVAILABLE", status, out)
+	}
+	if status, out := proofCall(t, srv, enrA, http.MethodPost, "/v1/requests", `{"secrets":["AUTO_TOKEN"],"reason":"r"}`); status != http.StatusOK || out["state"] != "granted" {
+		t.Fatalf("automatic request with Dispatch down = %d %v, want 200 granted", status, out)
+	}
+	machine.StandingIssue = func(context.Context, string) (string, error) {
+		return "", &dispatch.Error{Method: "POST", Path: "/api/v1/issues", Status: 400, Code: "INVALID_ISSUE", Message: `{"code":"INVALID_ISSUE","error":"project and title are required"}`}
+	}
+	if status, out := proofCall(t, srv, enrA, http.MethodPost, "/v1/requests", `{"secrets":["DEEL_API_KEY"],"reason":"r"}`); status != http.StatusBadGateway || out["code"] != "DISPATCH_ERROR" {
+		t.Fatalf("approval request Dispatch refuses = %d %v, want 502 DISPATCH_ERROR", status, out)
+	}
+	machine.StandingIssue = func(context.Context, string) (string, error) { return "", errors.New("standing issue lookup exploded") }
+	if status, out := proofCall(t, srv, enrA, http.MethodPost, "/v1/requests", `{"secrets":["DEEL_API_KEY"],"reason":"r"}`); status != http.StatusInternalServerError || out["code"] != "INTERNAL" {
+		t.Fatalf("approval request with a broken lookup = %d %v, want 500 INTERNAL", status, out)
+	}
+	for _, want := range []string{"connection refused", "INVALID_ISSUE", "standing issue lookup exploded"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("broker log does not record %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+// TestBackendOutageDuringAuthenticationIs503 pins that a store or Dispatch that cannot answer
+// while authenticating a caller is reported as that outage, never as a bad credential.
+func TestBackendOutageDuringAuthenticationIs503(t *testing.T) {
+	_, enrA, _, _, machine, enr := fixture(t)
+	captureLogs(t)
+	dead := httptest.NewServer(http.NotFoundHandler())
+	dead.Close()
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	Register(mux, Deps{
+		PublicURL: srv.URL,
+		Enroll:    enr,
+		Machine:   machine,
+		Proof:     &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, Replay: enr.Replay},
+		Dispatch:  dispatch.New(dead.URL, "broker-token", http.DefaultClient),
+	})
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/grants/"+uuid.NewString()+"/revoke", nil)
+	req.Header.Set("Authorization", "Bearer sjawhar-token")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	var out map[string]any
+	decodeJSON(t, resp, &out)
+	if resp.StatusCode != http.StatusServiceUnavailable || out["code"] != "DISPATCH_UNAVAILABLE" {
+		t.Fatalf("human revoke with Dispatch unreachable = %d %v, want 503 DISPATCH_UNAVAILABLE", resp.StatusCode, out)
+	}
+
+	machine.Store.Pool.Close()
+	if status, out := proofCall(t, srv, enrA, http.MethodGet, "/v1/enrollments/self", ""); status != http.StatusServiceUnavailable || out["code"] != "DATABASE_UNAVAILABLE" {
+		t.Fatalf("proof check with Postgres gone = %d %v, want 503 DATABASE_UNAVAILABLE", status, out)
+	}
+}
+
+// TestRequestStatusCarriesTheDecisionDetail pins that GET /v1/requests/{id} says why a request
+// ended as it did.
+func TestRequestStatusCarriesTheDecisionDetail(t *testing.T) {
+	srv, enrA, _, _, _, _ := fixture(t)
+	status, created := proofCall(t, srv, enrA, http.MethodPost, "/v1/requests", `{"secrets":["DENIED_KEY"],"reason":"r"}`)
+	if status != http.StatusOK || created["state"] != "denied" {
+		t.Fatalf("create = %d %v, want denied", status, created)
+	}
+	status, got := proofCall(t, srv, enrA, http.MethodGet, "/v1/requests/"+created["request_id"].(string), "")
+	if status != http.StatusOK || got["detail"] != "policy denies at least one requested secret" {
+		t.Fatalf("GET = %d %v, want the denial's detail", status, got)
+	}
+}
+
+// TestGrantValuesNamesASecretMissingFromTheStore pins 404 SECRET_NOT_IN_STORE naming the secret.
+func TestGrantValuesNamesASecretMissingFromTheStore(t *testing.T) {
+	srv, enrA, _, _, machine, _ := fixture(t)
+	status, created := proofCall(t, srv, enrA, http.MethodPost, "/v1/requests", `{"secrets":["AUTO_TOKEN"],"reason":"r"}`)
+	if status != http.StatusOK || created["grant_id"] == nil {
+		t.Fatalf("create = %d %v", status, created)
+	}
+	machine.Secrets = secrets.Fake{}
+	status, out := proofCall(t, srv, enrA, http.MethodPost, "/v1/grants/"+created["grant_id"].(string)+"/values", "")
+	if status != http.StatusNotFound || out["code"] != "SECRET_NOT_IN_STORE" || !strings.Contains(out["error"].(string), "AUTO_TOKEN") {
+		t.Fatalf("values = %d %v, want 404 SECRET_NOT_IN_STORE naming AUTO_TOKEN", status, out)
 	}
 }

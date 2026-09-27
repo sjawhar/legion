@@ -1,10 +1,10 @@
-// packages/envoy/internal/broker/api/handlers_requests.go
 package api
 
 import (
 	"errors"
 	"net/http"
 	"time"
+	"unicode"
 
 	"github.com/jackc/pgx/v5"
 
@@ -31,16 +31,19 @@ type createRequestResponse struct {
 	AskRef    *string                   `json:"ask"`
 }
 
-// createRequest reads the enrollment id from ctx (the proof-verified caller), never from the
-// request body: a session may only ever request secrets for itself.
-func (s *server) createRequest(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	enrollmentID := ctx.Value(ctxEnrollment).(string)
+// createRequest requests secrets for the proof-verified caller, never for an enrollment named in
+// the body: a session may only ever request secrets for itself.
+func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
 	var body createRequestBody
-	if !readJSON(w, r, &body, "INVALID_REQUEST") {
+	if !readJSON(w, r, &body, "INVALID_REQUEST") || !validSecretNames(w, body.Secrets) {
 		return
 	}
-	req, err := s.deps.Machine.Create(ctx, enrollmentID, body.Secrets, body.Reason, derefOr(body.Issue, ""), derefOr(body.SessionID, ""))
+	issue := derefOr(body.Issue, "")
+	if issue != "" && !issueKey.MatchString(issue) {
+		writeError(w, http.StatusBadRequest, "ISSUE_INPUT", "issue must be a Dispatch issue key like PROJ-12")
+		return
+	}
+	req, err := s.deps.Machine.Create(r.Context(), enrollmentID, body.Secrets, body.Reason, issue, derefOr(body.SessionID, ""))
 	switch {
 	case errors.Is(err, requests.ErrReasonTooLong):
 		writeError(w, http.StatusBadRequest, "REASON_TOO_LONG", err.Error())
@@ -58,7 +61,7 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "enrollment is not live")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "create request failed")
+		writeDispatchFailure(w, "create request", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, createRequestResponse{
@@ -70,10 +73,38 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// validSecretNames refuses, with a 400 naming the problem, a request that names no secret, a name
+// that is empty or carries control characters, or the same name twice.
+func validSecretNames(w http.ResponseWriter, names []string) bool {
+	if len(names) == 0 {
+		writeError(w, http.StatusBadRequest, "SECRETS_REQUIRED", "secrets must name at least one secret")
+		return false
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		for _, c := range name {
+			if unicode.IsControl(c) {
+				writeError(w, http.StatusBadRequest, "SECRET_NAME_INPUT", "secret names may not contain control characters")
+				return false
+			}
+		}
+		switch {
+		case name == "":
+			writeError(w, http.StatusBadRequest, "SECRET_NAME_INPUT", "secret names may not be empty")
+			return false
+		case seen[name]:
+			writeError(w, http.StatusBadRequest, "DUPLICATE_SECRET", "secret "+name+" is named more than once")
+			return false
+		}
+		seen[name] = true
+	}
+	return true
+}
+
 // requestDecision is GET /v1/requests/{id}'s nested "decision" object: who decided the request
 // and when. requestStatusResponse reshapes requests.Request, whose own JSON tags carry
 // decided_by/detail at the top level for POST /v1/requests's response — a different shape than
-// this route's contract, which nests them here and omits detail entirely.
+// this route's contract, which nests who and when here.
 type requestDecision struct {
 	By string    `json:"by"`
 	At time.Time `json:"at"`
@@ -84,20 +115,23 @@ type requestStatusResponse struct {
 	GrantID   *string          `json:"grant_id"`
 	DecidedAt *time.Time       `json:"decided_at"`
 	Decision  *requestDecision `json:"decision"`
+	// Detail says why a decided request ended as it did (a denial's reason, a cancellation's).
+	Detail *string `json:"detail"`
 }
 
-func (s *server) readRequest(w http.ResponseWriter, r *http.Request) {
+func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
 	ctx := r.Context()
-	enrollmentID := ctx.Value(ctxEnrollment).(string)
-	id := r.PathValue("id")
-
+	id, ok := pathUUID(w, r, "id", "REQUEST_ID_INPUT", "request")
+	if !ok {
+		return
+	}
 	owner, err := s.deps.Machine.OwnerOf(ctx, id)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such request")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "read request failed")
+		writeInternal(w, "read request owner", err)
 		return
 	}
 	if owner != enrollmentID {
@@ -107,22 +141,22 @@ func (s *server) readRequest(w http.ResponseWriter, r *http.Request) {
 
 	req, err := s.deps.Machine.Get(ctx, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "read request failed")
+		writeInternal(w, "read request", err)
 		return
 	}
-	resp := requestStatusResponse{State: req.State, GrantID: req.GrantID, DecidedAt: req.DecidedAt}
+	resp := requestStatusResponse{State: req.State, GrantID: req.GrantID, DecidedAt: req.DecidedAt, Detail: req.Detail}
 	if req.DecidedBy != nil && req.DecidedAt != nil {
 		resp.Decision = &requestDecision{By: *req.DecidedBy, At: *req.DecidedAt}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-func (s *server) cancelRequest(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	enrollmentID := ctx.Value(ctxEnrollment).(string)
-	id := r.PathValue("id")
-
-	err := s.deps.Machine.Cancel(ctx, id, enrollmentID)
+func (s *server) cancelRequest(w http.ResponseWriter, r *http.Request, enrollmentID string) {
+	id, ok := pathUUID(w, r, "id", "REQUEST_ID_INPUT", "request")
+	if !ok {
+		return
+	}
+	err := s.deps.Machine.Cancel(r.Context(), id, enrollmentID)
 	switch {
 	case errors.Is(err, requests.ErrNotYours):
 		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
@@ -134,18 +168,18 @@ func (s *server) cancelRequest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such request")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "cancel request failed")
+		writeInternal(w, "cancel request", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"state": "cancelled"})
 }
 
-func (s *server) grantValues(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	enrollmentID := ctx.Value(ctxEnrollment).(string)
-	id := r.PathValue("id")
-
-	values, proxyOnly, expires, err := s.deps.Machine.Values(ctx, id, enrollmentID)
+func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentID string) {
+	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
+	if !ok {
+		return
+	}
+	values, proxyOnly, expires, err := s.deps.Machine.Values(r.Context(), id, enrollmentID)
 	switch {
 	case errors.Is(err, requests.ErrNotYours):
 		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
@@ -153,8 +187,11 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, requests.ErrGrantNotLive):
 		writeError(w, http.StatusForbidden, "GRANT_NOT_LIVE", err.Error())
 		return
+	case errors.Is(err, requests.ErrSecretNotInStore):
+		writeError(w, http.StatusNotFound, "SECRET_NOT_IN_STORE", err.Error())
+		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "read grant values failed")
+		writeInternal(w, "read grant values", err)
 		return
 	}
 	if values == nil {
@@ -170,25 +207,15 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// revokeGrant is authHumanOrProof: server.authenticate has already put exactly one of ctxEnrollment
-// (a session revoking its own grant through its proof) or ctxHuman (a Dispatch-authenticated
-// human's canonical login) on ctx. A session may end only its own grants; a human only a grant
-// they approved or one whose enrollment they operate.
-func (s *server) revokeGrant(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	id := r.PathValue("id")
-
-	var by requests.Revoker
-	if enrollmentID, ok := ctx.Value(ctxEnrollment).(string); ok {
-		by.EnrollmentID = enrollmentID
-	} else if human, ok := ctx.Value(ctxHuman).(string); ok {
-		by.Login = human
-	} else {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "no authenticated actor")
+// revokeGrant ends a grant for either its own session (by proof) or a Dispatch-authenticated
+// human: a session may end only its own grants; a human only a grant they approved or one whose
+// enrollment they operate.
+func (s *server) revokeGrant(w http.ResponseWriter, r *http.Request, by requests.Revoker) {
+	id, ok := pathUUID(w, r, "id", "GRANT_ID_INPUT", "grant")
+	if !ok {
 		return
 	}
-
-	err := s.deps.Machine.RevokeGrant(ctx, id, by)
+	err := s.deps.Machine.RevokeGrant(r.Context(), id, by)
 	switch {
 	case errors.Is(err, requests.ErrNotYours):
 		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
@@ -200,7 +227,7 @@ func (s *server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such grant")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "revoke grant failed")
+		writeInternal(w, "revoke grant", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"state": "revoked"})

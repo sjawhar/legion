@@ -43,19 +43,12 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 const testAudience = "broker"
-
-func testDatabaseURL(t *testing.T) string {
-	url := os.Getenv("BROKER_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("BROKER_TEST_DATABASE_URL must be set to run Postgres e2e tests")
-	}
-	return url
-}
 
 func str(s string) *string { return &s }
 
@@ -224,17 +217,17 @@ type fakeAsk struct {
 	id       string
 	issue    string
 	question string
-	state    string // "open" or "answered"
+	state    string // "open", "answered" or "resolved"
 	editedAt *string
 	answer   *dispatch.Answer
 }
 
 // fakeDispatch is a real Dispatch httptest.Server double: it stores asks in memory and serves the
-// three routes the broker's dispatch.Client actually calls (POST .../asks, GET /asks/{id}, GET
-// /whoami), plus a fake-only POST /asks/{id}/answer that always refuses a bearer with 403
-// HUMAN_ONLY — modeling the real constraint that answering an ask needs a human, never a bearer.
-// approve() is a Go-level test hook standing in for a human clicking Approve in Dispatch's own
-// UI: it mutates an ask's state directly, with no second HTTP round trip.
+// routes the broker's dispatch.Client calls here, in Dispatch's own wire shapes (POST .../asks,
+// GET /asks/{id}, POST /asks/{id}/resolve, GET /whoami), plus POST /asks/{id}/answer, which always
+// refuses a bearer with 403 HUMAN_ONLY — modeling the real constraint that answering an ask needs
+// a human, never a bearer. approve() is a Go-level test hook standing in for a human's answer
+// arriving: it mutates an ask's state directly, with no second HTTP round trip.
 type fakeDispatch struct {
 	mu    sync.Mutex
 	asks  map[string]*fakeAsk
@@ -258,14 +251,8 @@ func (f *fakeDispatch) server(token string) *httptest.Server {
 			return
 		}
 		f.mu.Lock()
-		// A uuid, not a small sequential id: this suite's Postgres is shared with every other
-		// package's own tests, whose requests table rows also carry an "ask_id" column with no
-		// per-test scoping at all — requests.Poller.RunOnce processes every pending row in the
-		// whole table. A small sequential id can collide with another concurrently running
-		// package's own fake ask ids, letting that package's Poller resolve and apply ITS OWN
-		// unrelated answer to one of this suite's rows. A uuid can never collide with anything
-		// another package mints.
-		id := uuid.NewString()
+		id := uuid.NewString() // Dispatch's own ask ids are uuids
+
 		f.asks[id] = &fakeAsk{id: id, issue: r.PathValue("key"), question: body.Question, state: "open"}
 		f.order = append(f.order, id)
 		f.mu.Unlock()
@@ -294,6 +281,25 @@ func (f *fakeDispatch) server(token string) *httptest.Server {
 			"edits":     []any{},
 			"followers": []any{},
 		})
+	})
+	mux.HandleFunc("POST /api/v1/asks/{id}/resolve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		a, ok := f.asks[r.PathValue("id")]
+		switch {
+		case !ok:
+			w.WriteHeader(http.StatusNotFound)
+		case a.state != "open":
+			w.WriteHeader(http.StatusConflict)
+		default:
+			a.state = "resolved"
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(dispatch.Ask{ID: a.id, State: a.state})
+		}
 	})
 	mux.HandleFunc("GET /api/v1/whoami", func(w http.ResponseWriter, r *http.Request) {
 		login := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -324,6 +330,12 @@ func (f *fakeDispatch) approve(id, user string) {
 	}
 	a.state = "answered"
 	a.answer = &dispatch.Answer{User: user, Selected: []string{"Approve"}, At: time.Now().UTC()}
+}
+
+func (f *fakeDispatch) state(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.asks[id].state
 }
 
 func (f *fakeDispatch) lastAskID() string {
@@ -460,7 +472,7 @@ func TestSpikeContract(t *testing.T) {
 	outer := t // t.Run subtests below shadow this parameter; use outer.Cleanup for anything
 	// that must outlive one subtest (env2's server, its store), never the subtest's own t.Cleanup.
 	ctx := context.Background()
-	dbURL := testDatabaseURL(t)
+	dbURL := storetest.URL(t)
 
 	// A fake Dispatch server that outlives both broker "boots" in C09, exactly as real Dispatch —
 	// an external service — would.
@@ -540,7 +552,7 @@ func TestSpikeContract(t *testing.T) {
 	validPodToken := mintPodToken(t, issuer, oidcKey, "system:serviceaccount:default:agent-p", "pod-1")
 	status, podOut := createEnrollmentHTTP(t, env1.srv, serviceLauncherToken, map[string]any{
 		"kind": "pod", "runtime_id": "pod-1", "operator": nil,
-		"approver":   map[string]any{"kind": "operator"},
+		"approver":   map[string]any{"kind": "issue_assignee", "issue": "AGENTC-1"},
 		"thumbprint": podThumb, "session_id": nil, "pod_token": validPodToken,
 	})
 	if status != http.StatusCreated {
@@ -724,7 +736,7 @@ func TestSpikeContract(t *testing.T) {
 	})
 
 	t.Run("C07_ExpiredPendingStaysExpiredEvenIfApprovedAfterward", func(t *testing.T) {
-		t.Log("RAN: C07 - a pending request past its own deadline expires, and a later approval never grants it")
+		t.Log("RAN: C07 - a pending request past its own deadline expires, its ask is retracted, and a later approval never grants it")
 		_, out, _ := createRequest(t, env1.srv, enrB, []string{"DEEL_API_KEY"}, "will expire")
 		reqID, _ := out["request_id"].(string)
 		askID := askIDFromRef(out["ask"].(string))
@@ -740,7 +752,11 @@ func TestSpikeContract(t *testing.T) {
 		if status != http.StatusOK || got["state"] != "expired" {
 			t.Fatalf("want expired, got %d %v", status, got)
 		}
+		if state := fd.state(askID); state != "resolved" {
+			t.Fatalf("the expired request's ask is %q, want it retracted (resolved)", state)
+		}
 
+		// An answer racing the retraction still never grants the expired request.
 		fd.approve(askID, "sjawhar")
 		if err := env1.poller.RunOnce(ctx); err != nil {
 			t.Fatalf("poller.RunOnce: %v", err)
@@ -791,11 +807,6 @@ func TestSpikeContract(t *testing.T) {
 			t.Fatalf("delete enrollment A: want 204, got %d", status)
 		}
 		var combinedReqID, combinedGrantID string
-		// Scoped by enrollment_id, not ask_id alone: enrA.id is a fresh uuid this run alone
-		// minted, and combinedAskID is itself a globally unique uuid (fakeDispatch mints one via
-		// uuid.NewString() per ask, never a small reused string), so either one alone already
-		// identifies this run's own row in this shared, never-truncated Postgres instance; the
-		// pair together makes that explicit rather than relying on just one of them.
 		if err := env1.machine.Store.Pool.QueryRow(ctx, `select id from requests where ask_id=$1 and enrollment_id=$2`, combinedAskID, enrA.id).Scan(&combinedReqID); err != nil {
 			t.Fatalf("look up C06's combined request: %v", err)
 		}
@@ -967,7 +978,7 @@ func TestSpikeContract(t *testing.T) {
 		mismatchToken := mintPodToken(t, issuer, oidcKey, "system:serviceaccount:default:agent-p2", "pod-2")
 		status, out := createEnrollmentHTTP(t, env2.srv, serviceLauncherToken, map[string]any{
 			"kind": "pod", "runtime_id": "pod-1", "operator": nil,
-			"approver":   map[string]any{"kind": "operator"},
+			"approver":   map[string]any{"kind": "issue_assignee", "issue": "AGENTC-1"},
 			"thumbprint": podThumb, "session_id": nil, "pod_token": mismatchToken,
 		})
 		if status != http.StatusForbidden || out["code"] != "POD_IDENTITY_MISMATCH" {

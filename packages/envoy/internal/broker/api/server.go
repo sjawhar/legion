@@ -1,14 +1,18 @@
-// packages/envoy/internal/broker/api/server.go
+// Package api is the broker's HTTP surface: routes_table.go lists every route with the
+// authentication it needs, and this file authenticates callers and writes responses.
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/dispatch"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
@@ -33,88 +37,96 @@ type server struct {
 	launcherLimiter *launcherLimiter
 }
 
-type ctxKey int
-
-const (
-	ctxEnrollment ctxKey = iota
-	ctxLauncher
-	ctxHuman
-)
-
 func Register(mux *http.ServeMux, deps Deps) {
 	limits := DefaultLauncherLimits
 	if deps.LauncherLimits != nil {
 		limits = *deps.LauncherLimits
 	}
 	s := &server{deps: deps, launcherLimiter: newLauncherLimiter(limits)}
-	for _, r := range routes() {
-		r := r
-		mux.HandleFunc(r.Method+" "+r.Pattern, func(w http.ResponseWriter, req *http.Request) {
-			ctx, ok := s.authenticate(w, req, r.Auth)
+	for _, route := range routes() {
+		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
+			who, ok := s.authenticate(w, r, route.Handler.auth)
 			if !ok {
 				return
 			}
-			r.Handler(s, w, req.WithContext(ctx))
+			route.Handler.serve(s, w, r, who)
 		})
 	}
 }
 
-func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth routeAuth) (context.Context, bool) {
-	ctx := r.Context()
+// authenticate proves who r comes from, as auth requires, or writes the refusal. A bad or missing
+// credential is a 401; a store or Dispatch that cannot answer is a 503 naming it, never mistaken
+// for a bad credential.
+func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth routeAuth) (caller, bool) {
 	switch auth {
 	case authNone:
-		return ctx, true
+		return caller{}, true
 	case authLauncher:
-		cred, err := s.deps.Enroll.AuthenticateLauncher(ctx, bearer(r))
-		if err != nil {
+		cred, err := s.deps.Enroll.AuthenticateLauncher(r.Context(), bearer(r))
+		switch {
+		case errors.Is(err, enroll.ErrUnauthenticated):
 			writeError(w, http.StatusUnauthorized, "LAUNCHER_INVALID", "the launcher credential is not valid")
-			return nil, false
+			return caller{}, false
+		case err != nil:
+			writeUnavailable(w, "DATABASE_UNAVAILABLE", "authenticate launcher credential", err)
+			return caller{}, false
 		}
-		return context.WithValue(ctx, ctxLauncher, cred), true
+		return caller{launcher: cred}, true
 	case authProof:
 		id, ok := s.proof(w, r)
-		if !ok {
-			return nil, false
-		}
-		return context.WithValue(ctx, ctxEnrollment, id), true
+		return caller{enrollment: id}, ok
 	case authHumanOrProof:
 		if r.Header.Get("Proof") != "" {
 			id, ok := s.proof(w, r)
-			if !ok {
-				return nil, false
-			}
-			return context.WithValue(ctx, ctxEnrollment, id), true
+			return caller{enrollment: id}, ok
 		}
-		who, err := s.deps.Dispatch.Whoami(ctx, bearer(r))
-		if err != nil {
-			writeError(w, http.StatusUnauthorized, "HUMAN_INVALID", "the Dispatch bearer did not identify a human")
-			return nil, false
-		}
-		login := who.Login
-		if who.Kind == "agent" && who.Owner != nil {
-			login = *who.Owner
-		}
-		login = dispatch.CanonicalLogin(login)
-		if login == "" {
-			writeError(w, http.StatusForbidden, "HUMAN_REQUIRED", "this route needs a human identity")
-			return nil, false
-		}
-		return context.WithValue(ctx, ctxHuman, login), true
+		login, ok := s.human(w, r)
+		return caller{human: login}, ok
 	}
-	return nil, false
+	writeInternal(w, "authenticate", fmt.Errorf("route has unknown authentication %d", auth))
+	return caller{}, false
 }
 
 func (s *server) proof(w http.ResponseWriter, r *http.Request) (string, bool) {
 	id, err := s.deps.Proof.Verify(r.Context(), r.Header.Get("Proof"), r.Method, s.deps.PublicURL+r.URL.Path, time.Now())
-	if errors.Is(err, proof.ErrInvalid) {
+	switch {
+	case errors.Is(err, proof.ErrInvalid):
 		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", err.Error())
 		return "", false
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "proof lookup failed")
+	case err != nil:
+		writeUnavailable(w, "DATABASE_UNAVAILABLE", "verify proof", err)
 		return "", false
 	}
 	return id, true
+}
+
+// human resolves the Dispatch bearer on r to the canonical login of the human it acts for: a
+// signed-in user, or the owner of a personal agent token.
+func (s *server) human(w http.ResponseWriter, r *http.Request) (string, bool) {
+	token := bearer(r)
+	if token == "" {
+		writeError(w, http.StatusUnauthorized, "HUMAN_INVALID", "this route needs a proof or a Dispatch bearer")
+		return "", false
+	}
+	who, err := s.deps.Dispatch.Whoami(r.Context(), token)
+	if dispatchErr, ok := dispatch.AsError(err); ok && (dispatchErr.Status == http.StatusUnauthorized || dispatchErr.Status == http.StatusForbidden) {
+		writeError(w, http.StatusUnauthorized, "HUMAN_INVALID", "the Dispatch bearer did not identify a human")
+		return "", false
+	}
+	if err != nil {
+		writeDispatchFailure(w, "resolve the Dispatch bearer", err)
+		return "", false
+	}
+	login := who.Login
+	if who.Kind == "agent" && who.Owner != nil {
+		login = *who.Owner
+	}
+	login = dispatch.CanonicalLogin(login)
+	if login == "" {
+		writeError(w, http.StatusForbidden, "HUMAN_REQUIRED", "this route needs a human identity")
+		return "", false
+	}
+	return login, true
 }
 
 func bearer(r *http.Request) string {
@@ -147,10 +159,56 @@ func readJSON(w http.ResponseWriter, r *http.Request, v any, invalidCode string)
 	return false
 }
 
+// pathUUID reads the {name} path segment as a UUID, or refuses it with 400 code: an id that is not
+// a UUID names nothing, and must never reach a uuid column as a Postgres type error.
+func pathUUID(w http.ResponseWriter, r *http.Request, name, code, what string) (string, bool) {
+	id := r.PathValue(name)
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, http.StatusBadRequest, code, what+" ids are UUIDs")
+		return "", false
+	}
+	return id, true
+}
+
+// issueKey is a Dispatch issue key (internal/dispatch/api's issueKeyPattern). Every key the broker
+// puts into a Dispatch URL path from a request body is checked against it first.
+var issueKey = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[0-9]+$`)
+
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"code": code, "error": msg})
+}
+
+// writeInternal logs a failed operation with its error and answers 500 INTERNAL naming the
+// operation. Errors on these paths carry no secret values; the log line is the only place the
+// cause of a 500 is recorded.
+func writeInternal(w http.ResponseWriter, op string, err error) {
+	slog.Error("broker: "+op+" failed", "error", err)
+	writeError(w, http.StatusInternalServerError, "INTERNAL", op+" failed")
+}
+
+// writeUnavailable logs a dependency that could not answer and answers 503 with code naming it.
+func writeUnavailable(w http.ResponseWriter, code, op string, err error) {
+	slog.Error("broker: "+op+" failed", "error", err)
+	writeError(w, http.StatusServiceUnavailable, code, op+" failed: a dependency the broker needs is unavailable")
+}
+
+// writeDispatchFailure answers a failed Dispatch call: 503 DISPATCH_UNAVAILABLE when Dispatch
+// could not answer at all, 502 DISPATCH_ERROR when it answered with a refusal. Any other error is
+// the broker's own and answers 500.
+func writeDispatchFailure(w http.ResponseWriter, op string, err error) {
+	dispatchErr, ok := dispatch.AsError(err)
+	switch {
+	case !ok:
+		writeInternal(w, op, err)
+	case dispatchErr.Unavailable():
+		slog.Error("broker: "+op+" failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, "DISPATCH_UNAVAILABLE", op+" failed: Dispatch could not be reached")
+	default:
+		slog.Error("broker: "+op+" failed", "error", err)
+		writeError(w, http.StatusBadGateway, "DISPATCH_ERROR", fmt.Sprintf("%s failed: Dispatch answered %d %s", op, dispatchErr.Status, dispatchErr.Code))
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -161,7 +219,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 	if err := s.deps.Enroll.Store.Pool.Ping(r.Context()); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "DATABASE", "postgres unreachable")
+		writeUnavailable(w, "DATABASE", "ping Postgres", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

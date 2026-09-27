@@ -39,7 +39,7 @@ func (s *server) requestLauncherCredential(w http.ResponseWriter, r *http.Reques
 	}
 	pending, err := s.deps.Launcher.Request(r.Context(), body.Operator, body.Host, body.Service)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "open launcher credential request failed")
+		writeDispatchFailure(w, "open launcher credential request", err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, requestLauncherCredentialResponse{PendingID: pending.ID, ConfirmationCode: pending.ConfirmationCode})
@@ -61,7 +61,7 @@ func (s *server) readLauncherCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such launcher credential request")
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "read launcher credential request failed")
+		writeInternal(w, "read launcher credential request", err)
 		return
 	}
 	resp := readLauncherCredentialResponse{State: state}

@@ -1,4 +1,3 @@
-// packages/envoy/internal/broker/api/handlers_enroll.go
 package api
 
 import (
@@ -24,7 +23,7 @@ type createEnrollmentBody struct {
 	PodToken   *string      `json:"pod_token"`
 }
 
-func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request) {
+func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	var body createEnrollmentBody
 	if !readJSON(w, r, &body, "INVALID_ENROLLMENT") {
 		return
@@ -36,9 +35,17 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 	var approverIssue *string
 	switch body.Approver.Kind {
 	case "operator":
+		if body.Kind == "pod" {
+			writeError(w, http.StatusBadRequest, "INVALID_APPROVER", `a pod has no operator to approve its requests; approver.kind must be "issue_assignee"`)
+			return
+		}
 	case "issue_assignee":
 		if body.Approver.Issue == nil || *body.Approver.Issue == "" {
 			writeError(w, http.StatusBadRequest, "INVALID_APPROVER", `approver.issue is required when approver.kind is "issue_assignee"`)
+			return
+		}
+		if !issueKey.MatchString(*body.Approver.Issue) {
+			writeError(w, http.StatusBadRequest, "ISSUE_INPUT", "approver.issue must be a Dispatch issue key like PROJ-12")
 			return
 		}
 		approverIssue = body.Approver.Issue
@@ -47,7 +54,6 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cred, _ := r.Context().Value(ctxLauncher).(enroll.Credential)
 	result, err := s.deps.Enroll.Create(r.Context(), cred, enroll.Enrollment{
 		Kind:          body.Kind,
 		RuntimeID:     body.RuntimeID,
@@ -69,7 +75,7 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
 		return
 	case err != nil:
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "create enrollment failed")
+		writeInternal(w, "create enrollment", err)
 		return
 	}
 
@@ -91,57 +97,61 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 // operator (or, for a service credential, any pod enrollment) — the same trust boundary
 // enroll.Service.Create enforces when creating one — so a mismatch is always 403
 // OPERATOR_MISMATCH, never a no-op 204, regardless of whether the target enrollment is live.
-func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request) {
-	cred, _ := r.Context().Value(ctxLauncher).(enroll.Credential)
-	err := s.deps.Enroll.Revoke(r.Context(), cred, r.PathValue("id"), "launcher:"+cred.ID.String())
+func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
+	id, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
+	if !ok {
+		return
+	}
+	err := s.deps.Enroll.Revoke(r.Context(), cred, id, "launcher:"+cred.ID.String())
 	if errors.Is(err, enroll.ErrOperatorMismatch) {
 		writeError(w, http.StatusForbidden, "OPERATOR_MISMATCH", err.Error())
 		return
 	}
 	if err != nil && !errors.Is(err, enroll.ErrNotLive) {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "revoke enrollment failed")
+		writeInternal(w, "revoke enrollment", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// renewEnrollment renews the caller's own enrollment. The proof-verified ctx enrollment id is
+// renewEnrollment renews the caller's own enrollment. The proof-verified enrollment id is
 // authoritative — a session can only ever act as itself — so a URL {id} that names a different
 // enrollment is refused rather than silently honored or silently ignored.
-func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	id := ctx.Value(ctxEnrollment).(string)
-	if urlID := r.PathValue("id"); urlID != id {
+func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id string) {
+	urlID, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
+	if !ok {
+		return
+	}
+	if urlID != id {
 		writeError(w, http.StatusForbidden, "NOT_YOURS", "a session may only renew its own enrollment")
 		return
 	}
-	expires, err := s.deps.Enroll.Renew(ctx, id)
+	expires, err := s.deps.Enroll.Renew(r.Context(), id)
 	if errors.Is(err, enroll.ErrNotLive) {
 		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "enrollment is not live")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "renew enrollment failed")
+		writeInternal(w, "renew enrollment", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"lease_expires_at": expires})
 }
 
-func (s *server) readSelf(w http.ResponseWriter, r *http.Request) {
+func (s *server) readSelf(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
-	id := ctx.Value(ctxEnrollment).(string)
 	enr, err := s.deps.Enroll.Get(ctx, id)
 	if errors.Is(err, enroll.ErrNotLive) {
 		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "enrollment is not live")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "read enrollment failed")
+		writeInternal(w, "read enrollment", err)
 		return
 	}
 	grants, err := s.deps.Machine.LiveGrants(ctx, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "INTERNAL", "read grants failed")
+		writeInternal(w, "read live grants", err)
 		return
 	}
 	if grants == nil {
