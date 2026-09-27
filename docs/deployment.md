@@ -22,9 +22,11 @@ parser and resolves each target as bash would: through `$HOME`, `~`, variables s
 same command, `$(mktemp -d)`, `cd`, braces, command substitutions, and the scripts the command
 runs (`bash <file>`, `sh -c`, `source`, a heredoc fed to a shell, a script run by path,
 python/node/bun scripts); a target it cannot resolve, and a command the parser reports as malformed,
-are refused. `pkill`, `killall`, `fuser -k`, and `tmux kill-*` are refused outright, and `kill`
-only reaches a pid that `/proc` shows descending from the pane's own Oh My Pi process. Every refusal
-names the target, where it resolved, and the rule, so the agent can rewrite the command.
+are refused. `pkill`, `killall`, and `fuser -k` are refused outright. For `tmux kill-*`, the guard
+resolves the socket as tmux does (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`, then `$TMUX`, then
+the default socket) and refuses a resolved path outside the pane roots. `kill` only reaches a pid
+that `/proc` shows descending from the pane's own Oh My Pi process. Every refusal names the target,
+where it resolved, and the rule, so the agent can rewrite the command.
 
 The guard reads text before it runs, so it cannot see what is only decided at run time: a compiled
 program or anything a command runs without naming it on the command line (a `make` target, a test
@@ -33,9 +35,11 @@ runner, `npm run`), a program whose name is itself a variable or a command's out
 evaluate (the `eval` tool's kernels included), commands outside the families above that overwrite
 a destination (`cp`, `rsync`, `dd`, `ln -f`, `install`), a directory reached through a `cd` that
 failed, and the `write` and `edit` tools. It also cannot distinguish one pane's allowed `/tmp`
-directory from another's. The pane itself still runs as the daemon's user, so a refusal is a guard
-against mistakes, not a sandbox; running panes as a separate user is LEGION-122, and the Kubernetes
-runtime's pod boundary is the hard one.
+directory from another's. The documented residuals are `git -C <path> clean`, Python loop values,
+an aliased CommonJS `require`, an `eval` trap whose outer exit timing is not modeled, and a `TMUX`
+value that begins with a comma and therefore names no socket path. The pane itself still runs as
+the daemon's user, so a refusal is a guard against mistakes, not a sandbox; running panes as a
+separate user is LEGION-122, and the Kubernetes runtime's pod boundary is the hard one.
 
 ## Current decision for the LEGION deployment
 

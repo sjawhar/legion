@@ -123,7 +123,7 @@ interface FunctionDefinition {
 interface Trap {
   readonly text: string;
   readonly site: Site;
-  readonly source: string;
+  readonly file: string;
 }
 
 /** What a refusal names: the simple command it came from, where that command sits, and the
@@ -133,7 +133,8 @@ class Refusal extends Error {
   constructor(
     readonly snippet: string,
     readonly line: number,
-    readonly detail: string
+    readonly detail: string,
+    readonly file?: string
   ) {
     super(detail);
   }
@@ -910,13 +911,18 @@ function walkScript(script: ParsedScript, st: State, ctx: Ctx, runTraps = true):
   for (const statement of script.commands) walkNode(statement, st, ctx, false);
   if (!runTraps) return;
   for (const trap of st.traps) {
-    runText(
-      trap.text,
-      "the EXIT trap",
-      { ...clone(st), source: trap.source, traps: [] },
-      ctx,
-      trap.site
-    );
+    try {
+      runText(
+        trap.text,
+        "the EXIT trap",
+        { ...clone(st), source: trap.file, traps: [] },
+        ctx,
+        trap.site
+      );
+    } catch (error) {
+      if (!(error instanceof Refusal)) throw error;
+      throw new Refusal(error.snippet, error.line, error.detail, trap.file);
+    }
   }
 }
 
@@ -1579,7 +1585,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       if (text === "-") {
         outer.traps = [];
       } else if (text !== undefined && !text.startsWith("-")) {
-        outer.traps = [...outer.traps, { text, site, source: outer.source }];
+        outer.traps = [...outer.traps, { text, site, file: outer.script ?? outer.source }];
       }
       return;
     }
@@ -2330,10 +2336,12 @@ function runFile(
     } else checkCode(language, content, st, ctx);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
+    const source = error.file ?? label;
     throw new Refusal(
       site.snippet,
       site.line,
-      `line ${error.line} of ${label}, \`${error.snippet}\`: ${error.detail}`
+      `line ${error.line} of ${source}, \`${error.snippet}\`: ${error.detail}`,
+      source
     );
   }
 }

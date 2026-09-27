@@ -267,6 +267,17 @@ describe("scripts a command runs", () => {
     expect(reason).not.toContain(`line 3 of ${sourced}`);
   });
 
+  test("attributes an EXIT trap declared by a sourced file to that file", () => {
+    const sourced = script(
+      "source-trap-declaring-file.sh",
+      'p=$(pgrep x)\ncleanup() { kill "$p"; }\ntrap cleanup EXIT\n'
+    );
+    const parent = script("source-trap-includer.sh", `. ${sourced}\n`);
+    const reason = bash(`bash ${parent}`);
+    expect(reason).toContain(`line 3 of ${sourced}`);
+    expect(reason).not.toContain(`line 3 of ${parent}`);
+  });
+
   test("uses a shell function's echoed path in a command substitution", () => {
     const generated = script(
       "function-output.sh",
