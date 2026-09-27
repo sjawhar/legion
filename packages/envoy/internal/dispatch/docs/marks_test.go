@@ -181,6 +181,8 @@ func TestRejectSuggestionDeletesTheInsertsText(t *testing.T) {
 		{"a heading split by the insert", "# HelloQQ\n\n# ZZ world.\n", []string{"QQ", "ZZ"}, "# Hello world.\n"},
 		{"a heading into a paragraph", "# HelloQQ\n\nZZ world.\n", []string{"QQ", "ZZ"}, "# Hello world.\n"},
 		{"two runs in one paragraph, text between them", "keep QQ this ZZ drop\n", []string{"QQ", "ZZ"}, "keep  this  drop\n"},
+		{"a paragraph into a one-column table's header cell", "Intro QQ\n\n| ZZNext |\n| --- |\n| c |\n", []string{"QQ", "ZZ"}, "Intro Next\n\n|  |\n| :--- |\n| c |\n"},
+		{"a paragraph into an aligned table's first header cell", "abcQQ\n\n| ZZa | b | e |\n| :---: | :--- | ---: |\n| c | d | f |\n", []string{"QQ", "ZZ"}, "abca\n\n|  | b | e |\n| :---: | :--- | ---: |\n| c | d | f |\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := newTestService(t)
@@ -203,6 +205,45 @@ func TestRejectSuggestionDeletesTheInsertsText(t *testing.T) {
 			}
 			if len(pmdoc.ListMarks(live)) != 0 {
 				t.Fatal("the insert's mark survived the reject")
+			}
+		})
+	}
+}
+
+// A reject whose removal would join blocks the document cannot hold together is refused in the
+// words of a reject, naming the suggestion's anchor, and the document stays as it was: an insert
+// running from the text before into a callout or an ask, which the join would leave empty, and one
+// running from one table into the next, which the browser joins into one table.
+func TestRejectSuggestionRefusesARemovalTheDocumentCannotHold(t *testing.T) {
+	const callout = ":::callout{#c1 kind=\"note\" title=\"T\"}\nZZ world.\n:::\n"
+	for _, test := range []struct{ name, spec, says string }{
+		{"a paragraph into a callout", "HelloQQ\n\n" + callout, "runs into an ask or callout"},
+		{"a list item into a callout in it", "- HelloQQ\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  ZZ world.\n  :::\n", "runs into an ask or callout"},
+		{"a paragraph into an ask", "HelloQQ\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nZZ Which?\n:::\n", "runs into an ask or callout"},
+		{"a callout into a callout", ":::callout{#c0 kind=\"note\" title=\"U\"}\nHelloQQ\n:::\n\n" + callout, "runs into an ask or callout"},
+		{"code into a callout", "```\nabcQQ\n```\n\n" + callout, "runs into an ask or callout"},
+		{"one table into the next", "| a |\n| --- |\n| bQQ |\n\n| ZZc |\n| --- |\n| d |\n", "from one table into the next"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, test.spec)
+			for _, run := range []string{"QQ", "ZZ"} {
+				browserMarkWithAttrs(t, service, artifactID, "proofSuggestion", run, pmdoc.Attrs{
+					"id": "ins", "by": "user:bob", "kind": "insert",
+				})
+			}
+			before, err := service.Text(context.Background(), artifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = service.RejectSuggestion(context.Background(), artifactID, "ins", model.Actor{Kind: "user", ID: "alice"})
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != "anchor" || !strings.Contains(invalid.Reason, test.says) || !strings.Contains(invalid.Reason, "accept the suggestion") {
+				t.Fatalf("reject: %v, want an invalid anchor saying %q and offering to accept the suggestion", err, test.says)
+			}
+			if after, err := service.Text(context.Background(), artifactID); err != nil || after != before {
+				t.Fatalf("after the refused reject = %q (%v), want unchanged %q", after, err, before)
 			}
 		})
 	}
