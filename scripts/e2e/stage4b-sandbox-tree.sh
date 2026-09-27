@@ -1884,6 +1884,9 @@ begin "done"
 wait_for_worker "$tree1" merger
 send_agent "$tree1" merger "Stage 4b proof READY operation: verify pull request #$pr_number is ready to merge and call the legion tool's handoff_complete with ready true."
 wait_for_phase "$tree1" awaiting_merge 900
+# The hold is an open descriptor (hold_smoke_main): start no background child before
+# release_smoke_main below, or it inherits the descriptor and holds the smoke main past this run's
+# window. `9>&- 7>&-` does not close it: its number is allocated at runtime, not fixed.
 hold_smoke_main
 gh -R "$repo" pr merge "$pr_number" --squash --delete-branch
 wait_for_phase "$tree1" production_check 600

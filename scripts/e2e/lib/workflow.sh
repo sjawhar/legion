@@ -255,17 +255,32 @@ approve_as_reviewer() {
 # descriptor, so it goes with the process: a run that dies or is killed without releasing it frees
 # it, and no stale lock file can hold the next run. A child started while the lock is held
 # inherits the descriptor and holds it until that child exits; between the merge and the clean the
-# run starts none that outlives its step (gh, jq, sleep). A run that finds the lock held names the holder
-# and says every minute how long it has waited, up to 45 minutes (a holder's window spans the
-# production check and the sign-off), then fails naming the holder.
+# run starts none that outlives its step (gh, jq, sleep). A run that finds the lock held names the
+# holder and says every minute how long it has waited, up to 45 minutes (a holder's window spans the
+# production check and the sign-off), then fails. Each line reads the holder from the lock file when
+# it is written, so after a handoff it names the run that holds the lock then, not the one that held
+# it when the wait began.
 smoke_main_lock="/tmp/legion-e2e-smoke-main.${repo//\//-}.lock"
-hold_smoke_main() {
+smoke_main_holder() {
   local holder
+  holder=$(cat "$smoke_main_lock" 2>/dev/null) || true
+  printf '%s' "${holder:-a holder that has not named itself}"
+}
+hold_smoke_main() {
+  local started=$SECONDS beat=$SECONDS
   exec {smoke_main_fd}>>"$smoke_main_lock"
   if ! flock -n "$smoke_main_fd"; then
-    holder=$(cat "$smoke_main_lock" 2>/dev/null) || true
-    note "another proof holds $repo main from its merge until its main is clean: ${holder:-a holder that has not named itself}"
-    until_true 2700 "the smoke main lock $smoke_main_lock, held by ${holder:-a holder that has not named itself}" flock -n "$smoke_main_fd"
+    note "another proof holds $repo main from its merge until its main is clean: $(smoke_main_holder); waiting up to 2700s for $smoke_main_lock"
+    until flock -n "$smoke_main_fd"; do
+      [ ! -s "$evidence/pane-endpoint-violation.txt" ] || fail "ABORT: $(cat "$evidence/pane-endpoint-violation.txt")"
+      ((SECONDS - started < 2700)) ||
+        fail "timed out after $((SECONDS - started))s waiting for the smoke main lock $smoke_main_lock, now held by $(smoke_main_holder)"
+      if ((SECONDS - beat >= 60)); then
+        beat=$SECONDS
+        note "still waiting for the smoke main lock $smoke_main_lock, now held by $(smoke_main_holder): $((SECONDS - started))s of 2700s"
+      fi
+      sleep 0.5
+    done
   fi
   printf '%s, project %s, pid %s, since %s\n' "${0##*/}" "${project:-unknown}" "$$" "$(date -u +%FT%TZ)" >"$smoke_main_lock"
   note "holding $repo main ($smoke_main_lock) from the merge until it is clean"
