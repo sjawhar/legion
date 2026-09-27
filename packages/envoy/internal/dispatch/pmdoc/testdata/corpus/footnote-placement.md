@@ -32,3 +32,20 @@ Between.
     > In the quote.
 
 [^c]: C.
+
+Items holding definitions[^li] that end in a quote[^lj].
+
+- [^li]: - a
+      - b
+
+      > q
+  tail
+- [^lj]: - a
+
+      c
+
+In a quote, an item holding a definition[^lq] whose list a paragraph follows:
+
+> - [^lq]: - a
+>
+>       tail

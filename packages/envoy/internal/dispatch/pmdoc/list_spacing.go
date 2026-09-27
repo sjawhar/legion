@@ -371,7 +371,10 @@ func blankBetweenBlocksBut(item ast.Node, listHolds func(ast.Node) bool) bool {
 		if child != item.FirstChild() && blankBefore(child) && !(afterList && listHolds(child)) {
 			return true
 		}
-		if _, definition := child.(*extensionast.Footnote); definition && blankBetweenBlocksBut(child, spreadsNothing) {
+		// In a footnote definition the item holds, blank lines after a list are that list's where
+		// they are in the item's own blocks, and before a quote, a list or a footnote definition, as
+		// in any footnote definition.
+		if _, definition := child.(*extensionast.Footnote); definition && blankBetweenBlocksBut(child, func(block ast.Node) bool { return listHolds(block) || startsContainer(block) }) {
 			return true
 		}
 	}
