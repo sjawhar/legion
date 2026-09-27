@@ -173,8 +173,10 @@ export function ArtifactHeader({
             ) : null}
             {toolbar === undefined ? null : (
               // The dot says whether this page is live on the document these actions write to,
-              // so it wraps with them as one group and never onto a line of its own.
-              <div className="flex items-center gap-3">
+              // so it wraps with them as one group and never onto a line of its own. The group
+              // itself may wrap (a 320 px version view is narrower than both buttons and the
+              // dot); the dot then travels with the action beside it.
+              <div className="flex flex-wrap items-center gap-3">
                 <button
                   className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
                   disabled={isClosed || toolbar.isNamingVersion}
@@ -183,16 +185,18 @@ export function ArtifactHeader({
                 >
                   Name version
                 </button>
-                {version === undefined ? null : (
-                  <button
-                    className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-                    onClick={() => onShowDiffChange?.(!showDiff)}
-                    type="button"
-                  >
-                    {showDiff ? "Show version" : "Diff vs current"}
-                  </button>
-                )}
-                <ConnectionDot connection={toolbar.connection} />
+                <div className="flex items-center gap-3">
+                  {version === undefined ? null : (
+                    <button
+                      className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+                      onClick={() => onShowDiffChange?.(!showDiff)}
+                      type="button"
+                    >
+                      {showDiff ? "Show version" : "Diff vs current"}
+                    </button>
+                  )}
+                  <ConnectionDot connection={toolbar.connection} />
+                </div>
               </div>
             )}
           </div>

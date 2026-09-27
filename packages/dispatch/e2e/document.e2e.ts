@@ -205,7 +205,25 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
 
 // The connection dot belongs to the version actions it sits after. At 390 px the Version picker,
 // Name version and the dot are 8 px wider than the header card, and the dot alone would wrap onto a
-// line of its own under the picker.
+// line of its own under the picker; at 320 px a version view's two buttons and the dot are wider
+// than the card, and a group that could not wrap pushed the dot past its edge.
+async function expectDotBeside(page: Page, neighbour: string): Promise<void> {
+  const header = page.getByTestId("artifact-header");
+  const dot = header.getByRole("status", { name: "connected" });
+  await expect(dot).toHaveText("connected");
+  const beside = await header.getByRole("button", { name: neighbour }).boundingBox();
+  const dotBox = await dot.boundingBox();
+  const card = await header.boundingBox();
+  if (beside === null || dotBox === null || card === null) {
+    throw new Error("the version actions are not visible");
+  }
+  const dotMiddle = dotBox.y + dotBox.height / 2;
+  expect(dotMiddle).toBeGreaterThan(beside.y);
+  expect(dotMiddle).toBeLessThan(beside.y + beside.height);
+  expect(dotBox.x).toBeGreaterThan(beside.x + beside.width);
+  expect(dotBox.x + dotBox.width).toBeLessThanOrEqual(card.x + card.width);
+}
+
 test("a document's connection dot stays on the line with its version actions", async ({
   browser,
 }, testInfo) => {
@@ -216,23 +234,20 @@ test("a document's connection dot stays on the line with its version actions", a
   });
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  if (testInfo.project.name === "chromium") {
-    await page.setViewportSize({ height: 900, width: 1280 });
-  }
+  const path = "/projects/CORE/documents/ask-blocks-design-md";
   try {
-    await page.goto("/projects/CORE/documents/ask-blocks-design-md");
-    const header = page.getByTestId("artifact-header");
-    const dot = header.getByRole("status", { name: "connected" });
-    await expect(dot).toHaveText("connected");
-    const nameVersion = await header.getByRole("button", { name: "Name version" }).boundingBox();
-    const dotBox = await dot.boundingBox();
-    if (nameVersion === null || dotBox === null) {
-      throw new Error("the version actions are not visible");
+    if (testInfo.project.name === "chromium") {
+      await page.setViewportSize({ height: 900, width: 1280 });
+      await page.goto(path);
+      await expectDotBeside(page, "Name version");
+      return;
     }
-    const dotMiddle = dotBox.y + dotBox.height / 2;
-    expect(dotMiddle).toBeGreaterThan(nameVersion.y);
-    expect(dotMiddle).toBeLessThan(nameVersion.y + nameVersion.height);
-    expect(dotBox.x).toBeGreaterThan(nameVersion.x + nameVersion.width);
+    await page.goto(path);
+    await expectDotBeside(page, "Name version");
+    await page.setViewportSize({ height: 800, width: 320 });
+    await expectDotBeside(page, "Name version");
+    await page.goto(`${path}?version=1`);
+    await expectDotBeside(page, "Diff vs current");
   } finally {
     await context.close();
   }
