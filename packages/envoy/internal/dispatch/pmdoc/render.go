@@ -296,7 +296,11 @@ func (r *renderer) block(n *Node, prefix string) {
 	case "footnote_definition":
 		label, _ := n.Attrs["label"].(string)
 		r.footnoteLineAt, r.footnoteLabel = r.b.Len(), escapeFootnoteLabel(label)
-		r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
+		if r.definitionOpensOnALaterLine() {
+			r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]:\n" + prefix + definitionIndent)
+		} else {
+			r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
+		}
 		outer, outerQuotes, outerIndentAt := r.inFootnote, r.footnoteQuotes, r.footnoteIndentAt
 		r.inFootnote, r.footnoteQuotes, r.footnoteIndentAt = true, r.quoteDepth, len(prefix)
 		// The browser editor's parser reads the lines of a definition a list item holds as the
@@ -354,6 +358,20 @@ type typedScope struct {
 func (r *renderer) enter(container *Node) { r.containers = append(r.containers, container) }
 
 func (r *renderer) leave() { r.containers = r.containers[:len(r.containers)-1] }
+
+// definitionOpensOnALaterLine reports whether the footnote definition being written opens with
+// nothing past its `]:` and its first block on the next line, which the browser editor's parser
+// reads as a blank line of the list item holding the definition, spreading it. It is written so
+// where the definition is the only block a spread item writes and nothing else spreads the item:
+// no blank line between two of the definition's own blocks (spreadByItsOwnLines), and no quote
+// around the item, where the blank lines after it are the definition's (blanksAfterDefinitionItem).
+func (r *renderer) definitionOpensOnALaterLine() bool {
+	if len(r.containers) == 0 || r.quoteDepth > 0 || r.inFootnote {
+		return false
+	}
+	item := r.containers[len(r.containers)-1]
+	return item.Type == "list_item" && item.Attrs["spread"] == true && !spreadByItsOwnLines(item, false, false)
+}
 
 // inItemBelowQuotes reports whether the blocks being written stand in a list item with no quote
 // between: a line holding only their prefix is a blank line in the item, which the browser editor

@@ -275,7 +275,7 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		// between, is spread by nothing: a blank line at or after it in a typed block in a
 		// definition is refused above, and a definition in a typed block is refused where the tree
 		// is read (parseBlocks).
-		setSpread(list, false, spreadsNothing)
+		setSpread(list, false, spreadsNothing, lines)
 	case quoted && footnoted:
 		spread, lastSpread, reason := footnotedQuoteListSpread(list, quote, definition, lines)
 		if reason != "" {
@@ -287,7 +287,7 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 				return blankBetweenBlocksBut(item, anyBlock, spreadsNothing) || blankBefore(next) && !endsWithList(item)
 			}
 			return blankBetweenBlocksBut(item, anyBlock, spreadsNothing) || lastSpread
-		})
+		}, lines)
 	case quoted:
 		// The browser editor spaces a list in a typed block inside a quote by one blank line,
 		// whether the list's own quote holds the typed block or stands inside it.
@@ -302,17 +302,17 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		definitionHolds := definitionBlanksInQuote(list, lines)
 		setSpread(list, spread, func(item ast.Node) bool {
 			return blankBetweenBlocksBut(item, anyBlock, definitionHolds) || definitionEndSpreadsItem(item, list, quote, lines)
-		})
+		}, lines)
 	case footnoted:
 		setSpread(list, false, func(item ast.Node) bool {
 			return blankBetweenBlocksBut(item, startsContainer, spreadsNothing) || blankAfterItem(item, definition)
-		})
+		}, lines)
 	default:
 		spread := false
 		for item := list.FirstChild().NextSibling(); item != nil; item = item.NextSibling() {
 			spread = spread || blankBefore(item)
 		}
-		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, spreadsNothing, spreadsNothing) })
+		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, spreadsNothing, spreadsNothing) }, lines)
 	}
 	return ""
 }
@@ -522,11 +522,28 @@ func holdsTypedBlockWithBlankLine(container ast.Node, lines sourceLines) bool {
 	return false
 }
 
-func setSpread(list *ast.List, spread bool, itemSpread func(ast.Node) bool) {
+// setSpread records list's spread and each item's, itemSpread's or, where the item holds a footnote
+// definition whose first line holds nothing, spread (holdsDefinitionOpeningOnALaterLine).
+func setSpread(list *ast.List, spread bool, itemSpread func(ast.Node) bool, lines sourceLines) {
 	list.SetAttribute(browserSpreadAttr, spread)
 	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
-		item.SetAttribute(browserSpreadAttr, itemSpread(item))
+		item.SetAttribute(browserSpreadAttr, itemSpread(item) || holdsDefinitionOpeningOnALaterLine(item, lines))
 	}
+}
+
+// holdsDefinitionOpeningOnALaterLine reports whether item holds, as one of its own blocks, a
+// footnote definition whose first line holds nothing past its `]:` and whose first block starts on
+// a later line: the browser editor's parser reads that first line as a blank line of the item,
+// which spreads it. An empty definition, and one inside a quote in the item, spread nothing.
+func holdsDefinitionOpeningOnALaterLine(item ast.Node, lines sourceLines) bool {
+	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
+		if definition, ok := child.(*extensionast.Footnote); ok {
+			if first := definition.FirstChild(); first != nil && first.Type() == ast.TypeBlock && lines.lineOf(startOf(first)) > lines.lineOf(definition.Pos()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func spreadsNothing(ast.Node) bool { return false }

@@ -103,8 +103,8 @@ func TestFixturesAreWithinSchema(t *testing.T) {
 		"adjacent-lists", "ask-answered", "ask", "bare-url", "blockquote", "browser-list-spacing", "callout-blocks", "callout-nested", "callout", "code-directive-example", "code-fence",
 		"code-span-line-ends", "code", "directive-like-text", "emphasis", "empty-containers", "empty", "escaped-block-markers", "escapes", "explicit-url-space",
 		"explicit-url-title",
-		"footnote-block-indents", "footnote-ending-in-a-block-in-an-item", "footnote-ending-in-a-block", "footnote-placement", "footnote-spread-inside-a-quoted-item", "footnote-unreferenced", "footnote", "frontmatter-empty", "frontmatter-fence-whitespace", "frontmatter-long-fence", "frontmatter", "heading-line-breaks", "headings", "hr", "html", "image-alt-line-ends", "image-delimiters", "image",
-		"indented-code-tab-lines", "inline-code-backticks", "inline-code-spaces", "link-delimiters", "links", "list-item-code-blank-lines", "list-spacing-in-containers", "lists", "long",
+		"footnote-block-indents", "footnote-ending-in-a-block-in-an-item", "footnote-ending-in-a-block", "footnote-opening-on-a-later-line", "footnote-placement", "footnote-spread-inside-a-quoted-item", "footnote-unreferenced", "footnote", "frontmatter-empty", "frontmatter-fence-whitespace", "frontmatter-long-fence", "frontmatter", "heading-line-breaks", "headings", "hr", "html", "image-alt-line-ends", "image-delimiters", "image",
+		"indented-code-tab-lines", "inline-code-backticks", "inline-code-spaces", "item-opening-with-an-empty-definition-line", "link-delimiters", "links", "list-item-code-blank-lines", "list-spacing-in-containers", "lists", "long",
 		"marks", "nested-code", "nested-empty-items", "ordered-list-prefixes", "paragraphs", "quoted-definition-first-items", "quoted-definition-items", "quoted-definitions-ending-in-lists", "softbreak", "tab-indented-list-markers", "table", "task-markers", "tasks",
 		"unicode",
 	}
