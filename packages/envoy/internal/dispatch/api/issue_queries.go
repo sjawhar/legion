@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,7 +43,7 @@ var listPinnedIssuesQuery = issueSummaryHead + `
 const issueClaimColumns = `i.claimed_by, i.claimed_at`
 
 const issueSummaryHead = `
-	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.updated_at, i.last_seq,
+	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.route, i.updated_at, i.last_seq,
 	       ` + issueClaimColumns + `,
 	       count(a.id) filter (where i.closed_at is null),
 	       ` + issueComponentsColumns + `
@@ -170,17 +171,50 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	routeStatus, err := parseRouteStatusFilter(query.Get("route_status"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	listQuery := listIssuesQuery
-	open := query.Get("open") == "true"
+	// A route matters only while there is work to reach, so the route_status filter reads open
+	// issues alone: the owner audit is every open issue whose route reaches nobody.
+	open := query.Get("open") == "true" || routeStatus != ""
 	arguments := []any{project, status, parent, updatedSince, labels, open, priorities, unsetPriority}
 	if pinned {
 		listQuery = listPinnedIssuesQuery
 		arguments = append(arguments, login)
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), listQuery, arguments...)
+	issues, err := s.scanIssueSummaries(r.Context(), listQuery, arguments)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	if routed := slices.ContainsFunc(issues, func(issue model.IssueSummary) bool { return issue.Route != nil }); routed {
+		roster := s.readRouteRoster(r.Context())
+		if routeStatus != "" && routeStatus != model.RouteUnknown && !roster.answered {
+			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable,
+				"the Envoy listener did not answer, so Dispatch cannot tell which routes reach a live session; route_status=unknown lists the routed issues")
+			return
+		}
+		for index := range issues {
+			issues[index].IssueRouteReach = roster.reach(issues[index].Route)
+		}
+	}
+	if routeStatus != "" {
+		issues = slices.DeleteFunc(issues, func(issue model.IssueSummary) bool {
+			return issue.RouteStatus == nil || *issue.RouteStatus != routeStatus
+		})
+	}
+	WriteJSON(w, http.StatusOK, issues)
+}
+
+// scanIssueSummaries runs a list query and returns its rows with the pooled connection already
+// released, so the listener read that follows holds nothing.
+func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, arguments []any) ([]model.IssueSummary, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, listQuery, arguments...)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
 	issues := []model.IssueSummary{}
@@ -188,27 +222,21 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		var issue model.IssueSummary
 		var components componentsScan
 		var claim claimScan
-		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.Assignee, &issue.UpdatedAt, &issue.LastSeq}
+		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.Assignee, &issue.Route, &issue.UpdatedAt, &issue.LastSeq}
 		targets = append(targets, claim.targets()...)
 		targets = append(targets, &issue.OpenAsks)
 		if err := rows.Scan(append(targets, components.targets()...)...); err != nil {
-			s.writeHandlerError(w, err)
-			return
+			return nil, err
 		}
 		resolved, err := claim.resolve(issue.Key)
 		if err != nil {
-			s.writeHandlerError(w, err)
-			return
+			return nil, err
 		}
 		issue.Claim = resolved
 		issue.Components = components.resolve(issue.Key)
 		issues = append(issues, issue)
 	}
-	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	WriteJSON(w, http.StatusOK, issues)
+	return issues, rows.Err()
 }
 
 func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
@@ -240,8 +268,13 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	var reach model.IssueRouteReach
+	if issue.Route != nil {
+		reach = s.readRouteRoster(r.Context()).reach(issue.Route)
+	}
 	WriteJSON(w, http.StatusOK, struct {
 		model.Issue
+		model.IssueRouteReach
 		Artifacts []model.Artifact   `json:"artifacts"`
 		OpenAsks  []issueOpenAsk     `json:"open_asks"`
 		Children  []model.IssueChild `json:"children"`
@@ -251,6 +284,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		ReferencedByCount int `json:"referenced_by_count"`
 	}{
 		Issue:             issue,
+		IssueRouteReach:   reach,
 		Artifacts:         artifacts,
 		OpenAsks:          openAsks,
 		Children:          children,
