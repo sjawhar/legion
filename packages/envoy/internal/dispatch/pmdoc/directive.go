@@ -1,8 +1,10 @@
 package pmdoc
 
 import (
+	"bytes"
 	"fmt"
 	"html"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -361,13 +363,67 @@ func directiveNameByte(char byte) bool {
 	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-'
 }
 
+// paragraphDirectiveReason is the browser editor's refusal of a paragraph a line of which opens
+// with directive syntax: that parser takes the paragraph's source from where its text starts to
+// where it ends, and each line of it with the whitespace it opens with trimmed, so a line
+// continuing the paragraph refuses it however far in it stands, while a quote's marker opening the
+// line keeps it text. A line that could open a block is refused as it is read
+// (unsupportedDirectiveParser).
+func paragraphDirectiveReason(lines *gmtext.Segments, source []byte) (string, bool) {
+	if lines.Len() == 0 {
+		return "", false
+	}
+	text := source[lines.At(0).Start:lines.At(lines.Len()-1).Stop]
+	for len(text) > 0 {
+		line := text
+		if end := bytes.IndexByte(text, '\n'); end >= 0 {
+			line, text = text[:end], text[end+1:]
+		} else {
+			text = nil
+		}
+		if reason, ok := paragraphLineDirectiveReason(string(bytes.TrimLeftFunc(line, jsWhitespace))); ok {
+			return reason, true
+		}
+	}
+	return "", false
+}
+
+// jsWhitespace reports whether JavaScript's String.prototype.trimStart takes char off: its white
+// space and line terminators.
+func jsWhitespace(char rune) bool {
+	switch char {
+	case '\t', '\n', '\v', '\f', '\r', '\ufeff', '\u2028', '\u2029':
+		return true
+	}
+	return unicode.Is(unicode.Zs, char)
+}
+
+// paragraphLineDirectiveReason is that parser's refusal of a line of a paragraph opening with a
+// colon: `:::` alone and a three-colon typed block opening (`:::name{…}`) pass, and any other line
+// opening with three colons is refused, a four-colon opening a block would open with included.
+func paragraphLineDirectiveReason(line string) (string, bool) {
+	if strings.HasPrefix(line, ":::") {
+		if line == ":::" || paragraphTypedOpening.MatchString(line) {
+			return "", false
+		}
+		return malformedDirectiveReason, true
+	}
+	return unsupportedDirectiveReason(line)
+}
+
+// paragraphTypedOpening is the browser editor's pattern of a typed block's opening line; `.` there
+// matches no line terminator of JavaScript's.
+var paragraphTypedOpening = regexp.MustCompile(`^:::[A-Za-z0-9_-]+\{[^\x{2028}\x{2029}]*\}$`)
+
+const malformedDirectiveReason = "typed block directives use :::name{...}; Pandoc fenced divs and malformed directives are not supported"
+
 func unsupportedDirectiveReason(line string) (string, bool) {
 	if strings.HasPrefix(line, ":::") {
 		if line == ":::" {
 			return "", false
 		}
 		if _, _, ok := parseTypedDirectiveOpen(line); !ok {
-			return "typed block directives use :::name{...}; Pandoc fenced divs and malformed directives are not supported", true
+			return malformedDirectiveReason, true
 		}
 		return "", false
 	}

@@ -493,12 +493,18 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		}
 		return &Node{Type: "doc", Children: children}, nil
 	case *ast.Paragraph:
+		if reason, ok := paragraphDirectiveReason(current.Lines(), source); ok {
+			return nil, fmt.Errorf("%w: %s", ErrSchema, reason)
+		}
 		children, err := parseInline(current, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
 		return &Node{Type: "paragraph", Children: children}, nil
 	case *ast.TextBlock:
+		if reason, ok := paragraphDirectiveReason(current.Lines(), source); ok {
+			return nil, fmt.Errorf("%w: %s", ErrSchema, reason)
+		}
 		children, err := parseInline(current, source, nil, footnotes)
 		if err != nil {
 			return nil, err

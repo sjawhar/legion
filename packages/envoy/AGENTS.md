@@ -692,7 +692,11 @@ columns - the width of the list markers and `> ` around it, and a tab advancing 
 multiple of four from the column it stands at. A callout nested directly in a callout is written `::::callout{…}` …
 `::::`, as the browser editor writes it. There is
 no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and text directives are
-invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
+invalid outside code blocks: a line opening with one is refused where it could open a block, and in
+a paragraph wherever it stands, since the browser editor's parser checks each line of a
+paragraph's source with the whitespace it opens with trimmed (`paragraphDirectiveReason`), so only
+a quote's marker opening the line keeps it text, and there passes only `:::` alone or a three-colon
+opening, a four-colon one included in what it refuses. An unclosed typed block at document level is rejected, while one nested
 inside another block runs to that parent’s end. A typed block's lines start where its opening line's
 text does: both parsers take up to that many columns of indentation off each of its lines, as off a
 fenced code block's (`typedDirective.indent`), so a typed block nested in an indented one closes,

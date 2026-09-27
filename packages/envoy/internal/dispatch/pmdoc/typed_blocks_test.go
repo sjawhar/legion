@@ -433,6 +433,38 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     "Pandoc fenced divs and malformed directives are not supported",
 		},
 		{
+			// The browser editor's parser takes each line of a paragraph's source with the
+			// whitespace it opens with trimmed, so a line continuing the paragraph four or more
+			// columns in refuses it too.
+			name:     "a Pandoc fence continuing a paragraph four columns in",
+			markdown: "x\n    ::::\n",
+			want:     "Pandoc fenced divs and malformed directives are not supported",
+		},
+		{
+			// A paragraph's line passes that parser only as `:::` or a three-colon opening, so a
+			// four-colon one continuing a paragraph is refused where a block would open with it.
+			name:     "a four-colon typed block opening continuing a paragraph",
+			markdown: "x\n    ::::callout{#c1 kind=\"note\" title=\"\"}\n",
+			want:     "Pandoc fenced divs and malformed directives are not supported",
+		},
+		{
+			name:     "a leaf directive continuing a paragraph in a list item",
+			markdown: "- a\n        ::leaf\n",
+			want:     "leaf directives (::name) are not supported",
+		},
+		{
+			name:     "a text directive continuing a paragraph after a tab",
+			markdown: "x\n\t:t{a}\n",
+			want:     "text directives (:name{...}) are not supported",
+		},
+		{
+			// A list item numbered 10 cannot interrupt the paragraph, so the rest is the item's
+			// paragraph, its fence an inline code span over the line of colons.
+			name:     "the same in a paragraph an inline code span crosses",
+			markdown: "Para.\n1.\t10. ```\n          ::::\n        ```\n",
+			want:     "Pandoc fenced divs and malformed directives are not supported",
+		},
+		{
 			name:     "leaf directive",
 			markdown: "::callout{#block-1}\n",
 			want:     "leaf directives (::name) are not supported",

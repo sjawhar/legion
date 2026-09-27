@@ -2680,7 +2680,7 @@
   },
   {
     "name": "directive-like-text",
-    "markdown": "Production deploys **held** since 16:25Z, retried at 04:20Z.\n\nRatio a:b and see :note[value] here, spec lines :176-177.\n\n- retry at 04:20Z\n",
+    "markdown": "Production deploys **held** since 16:25Z, retried at 04:20Z.\n\nRatio a:b and see :note[value] here, spec lines :176-177.\n\n- retry at 04:20Z\n\nA quote marker opening a line keeps it text:\n\n> spec lines\n>     :::: and more\n\n> - see\n>       ::leaf here\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -2756,11 +2756,84 @@
               ]
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A quote marker opening a line keeps it text:"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000008"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "spec lines :::: and more"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000011"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000012"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "see ::leaf here"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "ARgBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQETUHJvZHVjdGlvbiBkZXBsb3lzIIYBFAZzdHJvbmcOeyJtYXJrZXIiOiIqIn2EARUEaGVsZIYBGQZzdHJvbmcEbnVsbIQBGiEgc2luY2UgMTY6MjVaLCByZXRyaWVkIGF0IDA0OjIwWi4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMJcGFyYWdyYXBoBwABPQYEAAE+OVJhdGlvIGE6YiBhbmQgc2VlIDpub3RlW3ZhbHVlXSBoZXJlLCBzcGVjIGxpbmVzIDoxNzYtMTc3LigAAT0HYmxvY2tJZAF3CGItMDAwMDAyhwE9AwtidWxsZXRfbGlzdAcAAXkDCWxpc3RfaXRlbQcAAXoDCXBhcmFncmFwaAcAAXsGBAABfA9yZXRyeSBhdCAwNDoyMFooAAF7B2Jsb2NrSWQBdwhiLTAwMDAwNSgAAXoFbGFiZWwBdwPigKIoAAF6CGxpc3RUeXBlAXcGYnVsbGV0KAABegZzcHJlYWQBeSgAAXoHYmxvY2tJZAF3CGItMDAwMDA0KAABeQZzcHJlYWQBeSgAAXkHYmxvY2tJZAF3CGItMDAwMDAzAA==",
-    "rendered_by_milkdown": "Production deploys **held** since 16:25Z, retried at 04:20Z.\n\nRatio a\\:b and see \\:note\\[value] here, spec lines :176-177.\n\n* retry at 04:20Z\n"
+    "yjs_update_v1_b64": "ATABAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQETUHJvZHVjdGlvbiBkZXBsb3lzIIYBFAZzdHJvbmcOeyJtYXJrZXIiOiIqIn2EARUEaGVsZIYBGQZzdHJvbmcEbnVsbIQBGiEgc2luY2UgMTY6MjVaLCByZXRyaWVkIGF0IDA0OjIwWi4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMJcGFyYWdyYXBoBwABPQYEAAE+OVJhdGlvIGE6YiBhbmQgc2VlIDpub3RlW3ZhbHVlXSBoZXJlLCBzcGVjIGxpbmVzIDoxNzYtMTc3LigAAT0HYmxvY2tJZAF3CGItMDAwMDAyhwE9AwtidWxsZXRfbGlzdAcAAXkDCWxpc3RfaXRlbQcAAXoDCXBhcmFncmFwaAcAAXsGBAABfA9yZXRyeSBhdCAwNDoyMFooAAF7B2Jsb2NrSWQBdwhiLTAwMDAwNSgAAXoFbGFiZWwBdwPigKIoAAF6CGxpc3RUeXBlAXcGYnVsbGV0KAABegZzcHJlYWQBeSgAAXoHYmxvY2tJZAF3CGItMDAwMDA0KAABeQZzcHJlYWQBeSgAAXkHYmxvY2tJZAF3CGItMDAwMDAzhwF5AwlwYXJhZ3JhcGgHAAGTAQYEAAGUASxBIHF1b3RlIG1hcmtlciBvcGVuaW5nIGEgbGluZSBrZWVwcyBpdCB0ZXh0OigAAZMBB2Jsb2NrSWQBdwhiLTAwMDAwNocBkwEDCmJsb2NrcXVvdGUHAAHCAQMJcGFyYWdyYXBoBwABwwEGBAABxAEYc3BlYyBsaW5lcyA6Ojo6IGFuZCBtb3JlKAABwwEHYmxvY2tJZAF3CGItMDAwMDA4KAABwgEHYmxvY2tJZAF3CGItMDAwMDA3hwHCAQMKYmxvY2txdW90ZQcAAd8BAwtidWxsZXRfbGlzdAcAAeABAwlsaXN0X2l0ZW0HAAHhAQMJcGFyYWdyYXBoBwAB4gEGBAAB4wEPc2VlIDo6bGVhZiBoZXJlKAAB4gEHYmxvY2tJZAF3CGItMDAwMDEyKAAB4QEFbGFiZWwBdwPigKIoAAHhAQhsaXN0VHlwZQF3BmJ1bGxldCgAAeEBBnNwcmVhZAF5KAAB4QEHYmxvY2tJZAF3CGItMDAwMDExKAAB4AEGc3ByZWFkAXkoAAHgAQdibG9ja0lkAXcIYi0wMDAwMTAoAAHfAQdibG9ja0lkAXcIYi0wMDAwMDkA",
+    "rendered_by_milkdown": "Production deploys **held** since 16:25Z, retried at 04:20Z.\n\nRatio a\\:b and see \\:note\\[value] here, spec lines :176-177.\n\n* retry at 04:20Z\n\nA quote marker opening a line keeps it text:\n\n> spec lines :::: and more\n\n> * see ::leaf here\n"
   },
   {
     "name": "emphasis",
