@@ -325,9 +325,11 @@ export async function createNatsTransport(
             callback(message.subject, codec.decode(message.data));
           }
         } catch (error) {
-          // A refused subscription ends here too; the status loop above reports it.
-          if (error instanceof NatsError && error.code === ErrorCode.PermissionsViolation) return;
-          console.error(`[legion] NATS subscription to ${subject} ended: ${error}`);
+          // A refused subscription ends here too; the status loop above reports it. Anything
+          // else fails loudly rather than leaving the daemon running without this subscription.
+          if (!(error instanceof NatsError && error.code === ErrorCode.PermissionsViolation)) {
+            throw error;
+          }
         }
       })();
       return () => {
