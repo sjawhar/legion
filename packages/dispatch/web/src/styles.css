@@ -62,15 +62,17 @@ a {
     align-items: center;
   }
 
-  /* An anchor inside a sentence is part of the sentence. A 44px box there is blank space in
-     the middle of a line - a reply's `view`, a `dispatch://` reference in a body - so an
-     inline link keeps its line box and grows its hit box with vertical padding instead: about
-     24px, at no layout cost, because padding on an inline element does not move the line.
-     An overlay was tried and withdrawn: sized to the link it covered whatever sat within 44px
-     of it - the link above in a stacked list, the words beside a wrapped link, the ask card's
-     copy button, an option row - so a tap near a link opened the link instead. WCAG 2.5.8 is
-     met at 24px, and both 2.5.8 and 2.5.5 exempt a link inside a sentence anyway. */
-  .prose a,
+  /* An anchor inside a sentence keeps its line box: a 44px control box there is blank space in
+     the middle of a line. Vertical padding grows its hit box instead, at no layout cost,
+     because padding on an inline element does not move the line. The two values are the two
+     line pitches: a body's links sit on 24px lines, where 3px is the most that does not reach
+     the text of a link on the line above, and Dispatch's own inline links (`view`, a
+     components line, a backlink) sit on their own row at 12px, where 6px is what reaches the
+     24px of WCAG 2.5.8. Both 2.5.8 and 2.5.5 exempt a link inside a sentence in any case. */
+  .prose a {
+    padding-block: 3px;
+  }
+
   .dispatch-inline-link {
     padding-block: 6px;
   }

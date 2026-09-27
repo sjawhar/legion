@@ -302,6 +302,11 @@ test("an inline link keeps its line and grows its hit box without covering its n
         "[First choice](https://example.invalid/one)",
         "",
         "[Second choice](https://example.invalid/two)",
+        "",
+        // A hard break, so the two links sit on consecutive lines of one paragraph - the
+        // tightest pitch there is, which separate paragraphs cannot reach.
+        "[Upper line](https://example.invalid/upper)\\",
+        "[Lower line](https://example.invalid/lower)",
       ].join("\n"),
     },
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
@@ -334,9 +339,23 @@ test("an inline link keeps its line and grows its hit box without covering its n
       const wrapped = named("handbook for the deployment gate");
       const first = named("First choice");
       const second = named("Second choice");
-      if (wrapped === undefined || first === undefined || second === undefined) {
+      const upper = named("Upper line");
+      const lower = named("Lower line");
+      if (
+        wrapped === undefined ||
+        first === undefined ||
+        second === undefined ||
+        upper === undefined ||
+        lower === undefined
+      ) {
         throw new Error("the seeded links are not all rendered");
       }
+      /** A link's own text box, which its padding extends past. */
+      const textRect = (link: Element) => {
+        const range = document.createRange();
+        range.selectNodeContents(link);
+        return range.getBoundingClientRect();
+      };
       const hitAt = (x: number, y: number) => {
         const node = document.elementFromPoint(x, y);
         return node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link");
@@ -359,6 +378,19 @@ test("an inline link keeps its line and grows its hit box without covering its n
           firstRect.y + firstRect.height - 1
         ),
         onWord: hitAt(wordRect.x + wordRect.width / 2, wordRect.y + wordRect.height / 2),
+        // On consecutive lines of one paragraph, the lower link's padding box must start at
+        // or below the bottom of the upper link's own text - anything higher is padding
+        // sitting on letters a reader is trying to tap.
+        lowerPaddingTop: lower.getBoundingClientRect().y,
+        upperTextBottom: textRect(upper).bottom,
+        upperTextBottomHits: (() => {
+          const rect = textRect(upper);
+          const hits: string[] = [];
+          for (let x = rect.x + 1; x < rect.x + rect.width - 1; x += 2) {
+            hits.push(hitAt(x, rect.bottom - 0.5));
+          }
+          return [...new Set(hits)].sort();
+        })(),
         secondTop: secondRect.y,
       };
     });
@@ -373,6 +405,10 @@ test("an inline link keeps its line and grows its hit box without covering its n
     //    second.
     expect(measured.onFirstLowerEdge).toBe("First choice");
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
+    // 5. And on consecutive lines of one paragraph - a hard break, the tightest pitch there
+    //    is - a tap at the bottom of the upper link's own text opens the upper link.
+    expect(measured.upperTextBottomHits).toEqual(["Upper line"]);
+    expect(measured.lowerPaddingTop).toBeGreaterThanOrEqual(measured.upperTextBottom);
   } finally {
     await context.close();
   }
