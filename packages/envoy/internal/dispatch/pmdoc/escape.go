@@ -543,13 +543,13 @@ func emphasisDelimiter(value string, offset int, delimiter byte) bool {
 }
 
 // footnoteReferenceText reports whether the text at offset, a `[`, reads as a reference to one of
-// labels, the document's defined footnote labels lowercased: `[^label]`.
+// labels, the document's defined footnote labels as footnoteLabelKey compares them: `[^label]`.
 func footnoteReferenceText(value string, offset int, labels map[string]bool) bool {
 	if offset+1 >= len(value) || value[offset+1] != '^' {
 		return false
 	}
 	closing := strings.IndexByte(value[offset+2:], ']')
-	return closing > 0 && labels[strings.ToLower(value[offset+2:offset+2+closing])]
+	return closing > 0 && labels[footnoteLabelKey(value[offset+2:offset+2+closing])]
 }
 
 func linkOpener(value string, offset int) bool {

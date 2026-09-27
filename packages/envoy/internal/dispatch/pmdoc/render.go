@@ -37,8 +37,9 @@ type renderer struct {
 	asteriskRule bool
 	// otherListMarker makes the next list written with its kind's other marker (otherListMarkers).
 	otherListMarker bool
-	// footnoteLabels is every footnote label the document defines, lowercased: text shaped like a
-	// reference to one would read as that reference.
+	// footnoteLabels is every footnote label the document defines, as the browser editor's parser
+	// compares labels (footnoteLabelKey): text shaped like a reference to one would read as that
+	// reference.
 	footnoteLabels map[string]bool
 	err            error
 	blockOffsets   []BlockOffset
@@ -121,16 +122,16 @@ func holdsAContainerTheBrowserDrops(doc *Node) bool {
 	return false
 }
 
-// definedFootnoteLabels is every label doc's footnote definitions carry, wherever they stand,
-// lowercased, since the browser editor's parser matches a reference to its definition whatever
-// the case.
+// definedFootnoteLabels is every label doc's footnote definitions carry, wherever they stand, as
+// the browser editor's parser compares them (footnoteLabelKey), since it matches a reference to
+// its definition whatever the case.
 func definedFootnoteLabels(doc *Node) map[string]bool {
 	labels := make(map[string]bool)
 	var walk func(*Node)
 	walk = func(node *Node) {
 		if node.Type == "footnote_definition" {
 			if label, ok := node.Attrs["label"].(string); ok {
-				labels[strings.ToLower(label)] = true
+				labels[footnoteLabelKey(label)] = true
 			}
 		}
 		for _, child := range node.Children {

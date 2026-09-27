@@ -832,8 +832,9 @@ func TestRenderKeepsTextAroundFootnoteReferences(t *testing.T) {
 	reference := func(label string) *Node { return &Node{Type: "footnote_reference", Attrs: Attrs{"label": label}} }
 	paragraph := func(children ...*Node) *Node { return &Node{Type: "paragraph", Children: children} }
 	for name, doc := range map[string]*Node{
-		"reference-shaped text":             {Type: "doc", Children: []*Node{paragraph(text("see [^1] here"), reference("1")), definition("1")}},
-		"reference-shaped text, other case": {Type: "doc", Children: []*Node{paragraph(text("[^Note]"), reference("note")), definition("note")}},
+		"reference-shaped text":                    {Type: "doc", Children: []*Node{paragraph(text("see [^1] here"), reference("1")), definition("1")}},
+		"reference-shaped text, other case":        {Type: "doc", Children: []*Node{paragraph(text("[^Note]"), reference("note")), definition("note")}},
+		"reference-shaped text, full case mapping": {Type: "doc", Children: []*Node{paragraph(text("[^ß]"), reference("SS")), definition("SS")}},
 		"reference-shaped text in its definition": {Type: "doc", Children: []*Node{paragraph(text("a"), reference("1")),
 			{Type: "footnote_definition", Attrs: Attrs{"label": "1"}, Children: []*Node{paragraph(text("[^1]"))}}}},
 		"asterisks before a reference":   {Type: "doc", Children: []*Node{paragraph(text("*-*"), reference("1")), definition("1")}},

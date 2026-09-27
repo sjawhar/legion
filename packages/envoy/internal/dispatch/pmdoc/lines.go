@@ -12,6 +12,8 @@ import (
 	"github.com/yuin/goldmark/parser"
 	gmtext "github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 // segmentsText is the text segments cover in source. Goldmark's own Segments.Value appends a
@@ -112,11 +114,18 @@ func (p tabIndented) Continue(node ast.Node, reader gmtext.Reader, pc parser.Con
 }
 
 // footnoteReferenceParser is goldmark's footnote reference parser, with a reference whose label
-// matches a definition's only up to case resolved to that definition, as the browser editor's
-// parser resolves it: goldmark matches a label byte for byte, and read `[^A]` as text beside
-// `[^a]: `. Such a reference carries its label as written (referenceLabelAttr), which the browser
-// editor keeps on it.
+// matches a definition's only up to case (footnoteLabelKey) resolved to that definition, as the
+// browser editor's parser resolves it: goldmark matches a label byte for byte, and read `[^A]` as
+// text beside `[^a]: `. Such a reference carries its label as written (referenceLabelAttr), which
+// the browser editor keeps on it.
 type footnoteReferenceParser struct{ parser.InlineParser }
+
+// footnoteLabelKey is a footnote label as the browser editor's parser compares it: with full case
+// mapping, lowered and then uppercased, so `ß` matches `SS` and `İ` matches `i̇`, which simple case
+// folding keeps apart.
+func footnoteLabelKey(label string) string {
+	return cases.Upper(language.Und).String(cases.Lower(language.Und).String(label))
+}
 
 // referenceLabelAttr is the label a reference resolved by footnoteReferenceParser is written with.
 var referenceLabelAttr = []byte("pmdoc-reference-label")
@@ -143,7 +152,7 @@ func (p footnoteReferenceParser) Parse(parent ast.Node, block gmtext.Reader, pc 
 	slots, _ := pc.Get(footnoteSlotsKey).([]*footnoteSlot)
 	for _, slot := range slots {
 		definition, ok := slot.definition.(*extensionast.Footnote)
-		if !ok || !bytes.EqualFold(definition.Ref, label) {
+		if !ok || footnoteLabelKey(string(definition.Ref)) != footnoteLabelKey(string(label)) {
 			continue
 		}
 		list, ok := definition.Parent().(*extensionast.FootnoteList)
