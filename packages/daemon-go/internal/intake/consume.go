@@ -110,30 +110,33 @@ func (c *Consumers) DispatchTarget(ctx context.Context) (int64, error) {
 	return int64(info.State.LastSeq), nil
 }
 
-// DispatchAckFloor is the Dispatch consumer's own current ack floor stream sequence — the point
-// before which every matching message is acknowledged, redeliveries and naks included — and
-// whether it has nothing left pending or unacknowledged at all. The notification stream also
-// carries GitHub subjects the Dispatch consumer's filter never matches, so a target set past the
-// consumer's own last matching message would otherwise never be reached by the ack floor alone;
-// idle covers that case.
-func (c *Consumers) DispatchAckFloor(ctx context.Context) (ackFloorStream int64, idle bool, err error) {
+// DispatchPosition is the Dispatch consumer's own current position, read fresh from JetStream:
+// the measurement Reconcile holds against DispatchTarget (DispatchConsumerPosition.Reached).
+func (c *Consumers) DispatchPosition(ctx context.Context) (DispatchConsumerPosition, error) {
 	info, err := c.dispatch.Info(ctx)
 	if err != nil {
-		return 0, false, fmt.Errorf("read Dispatch consumer info: %w", err)
+		return DispatchConsumerPosition{}, fmt.Errorf("read Dispatch consumer info: %w", err)
 	}
-	return int64(info.AckFloor.Stream), info.NumPending == 0 && info.NumAckPending == 0, nil
+	return positionOf(info), nil
+}
+
+func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
+	return DispatchConsumerPosition{
+		AckFloorStream: int64(info.AckFloor.Stream),
+		Idle:           info.NumPending == 0 && info.NumAckPending == 0,
+	}
 }
 
 // Run consumes both durable consumers until ctx ends, and returns the error of either one that
 // stops first. Every decoded fact enters ApplyFact; a committed transaction is acknowledged, a
 // rolled-back transaction is nacked with a delay, poison is terminated, and a committed refusal is
-// logged then acknowledged. dispatchObserved, when not nil, is told about every message the
-// Dispatch consumer delivers — decoded into a fact or not, poison or applied — never about the
-// GitHub consumer's.
-func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, dispatchObserved DispatchObserver, handlers ...Handler) error {
+// logged then acknowledged. observer, when not nil, is told about every message the Dispatch
+// consumer delivers — decoded into a fact or not, poison or applied — never about the GitHub
+// consumer's.
+func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, observer DispatchObserver, handlers ...Handler) error {
 	group, consumeContext := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, dispatchObserved, handlers)
+		return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, observer, handlers)
 	})
 	group.Go(func() error { return consumeConsumer(consumeContext, c.github, c.spec, pool, nil, handlers) })
 	return group.Wait()
@@ -213,10 +216,9 @@ func notePosition(ctx context.Context, consumer jetstream.Consumer, pool *pgxpoo
 		spec.Logger.Error("read Dispatch consumer info for a held release", "error", err)
 		return
 	}
-	ackFloor := int64(info.AckFloor.Stream)
-	idle := info.NumPending == 0 && info.NumAckPending == 0
-	eventID := fmt.Sprintf("dispatch-position:%d:%t", ackFloor, idle)
-	if _, err := ApplyFact(ctx, pool, "dispatch", eventID, DispatchConsumerPosition{AckFloorStream: ackFloor, Idle: idle}, handlers...); err != nil {
+	position := positionOf(info)
+	eventID := fmt.Sprintf("dispatch-position:%d:%t", position.AckFloorStream, position.Idle)
+	if _, err := ApplyFact(ctx, pool, "dispatch", eventID, position, handlers...); err != nil {
 		spec.Logger.Warn("apply Dispatch consumer position failed", "error", err)
 	}
 }

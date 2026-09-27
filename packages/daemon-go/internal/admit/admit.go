@@ -38,9 +38,8 @@ type Admission struct {
 	// distinguishes one held key's own catching-up from another's.
 	pending map[string]struct{}
 	// target is the notification stream's own last sequence Reconcile captured when it found the
-	// first record behind: every key in pending releases once the Dispatch consumer's ack floor
-	// reaches it, or once the consumer has nothing left pending or unacknowledged to reach it
-	// with. Zero means nothing is held.
+	// first record behind: every key in pending releases once the Dispatch consumer's position has
+	// Reached it. Zero means nothing is held.
 	target int64
 }
 
@@ -66,7 +65,7 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 	}
 
 	if position, ok := fact.(intake.DispatchConsumerPosition); ok {
-		if err := a.release(ctx, tx, position.AckFloorStream, position.Idle); err != nil {
+		if err := a.release(ctx, tx, position); err != nil {
 			return intake.Result{}, err
 		}
 		return intake.Result{}, nil
@@ -74,7 +73,7 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
-		if err := a.promote(ctx, tx); err != nil {
+		if _, err := a.promote(ctx, tx); err != nil {
 			return intake.Result{}, err
 		}
 		return intake.Result{}, nil
@@ -116,7 +115,7 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 	if err := a.releaseInactiveSlots(ctx, tx); err != nil {
 		return intake.Result{}, err
 	}
-	if err := a.promote(ctx, tx); err != nil {
+	if _, err := a.promote(ctx, tx); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, nil
@@ -128,13 +127,12 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 // The read is a snapshot with no actor on it: in it, an agent's own status write during a restart
 // looks exactly like a human's move. Dispatch says how far each issue's event log has run, so a
 // record behind that sequence is left alone — the stream still holds those events, and delivers
-// them with the actor that made each one — unless the Dispatch consumer has already caught up to
-// target when this call measured it (its ack floor reaching target, or idle: nothing left pending
-// or unacknowledged to reach it with). Then nothing more is coming for that record ever, so this
-// applies the listing's own snapshot to it directly instead of deferring a key nothing will later
-// release. target, ackFloorStream and idle are the caller's own single measurement of the stream
-// and the Dispatch consumer, taken once for the whole call, not per issue.
-func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispatch.IssueSummary, target, ackFloorStream int64, idle bool) error {
+// them with the actor that made each one — unless the Dispatch consumer's position had already
+// Reached target when the caller measured it. Then nothing more is coming for that record ever, so
+// this applies the listing's own snapshot to it directly instead of deferring a key nothing will
+// later release. target and position are the caller's own single measurement of the stream and
+// the Dispatch consumer, taken once for the whole call, not per issue.
+func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispatch.IssueSummary, target int64, position intake.DispatchConsumerPosition) error {
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("list admission slots: %w", err)
@@ -144,7 +142,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		slotted[slot.Issue] = struct{}{}
 	}
 
-	caughtUp := ackFloorStream >= target || idle
+	caughtUp := position.Reached(target)
 	var deferred []string
 	for _, summary := range summaries {
 		stored, err := a.store.Issue(ctx, tx, summary.Key)
@@ -209,13 +207,14 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		}
 		a.mu.Unlock()
 		a.log.Info("admission reconcile: holding roots for the Dispatch consumer to reach a stream position",
-			"count", len(deferred), "target", target)
+			"count", len(deferred), "target", target, "ack_floor", position.AckFloorStream)
 	}
 
 	if err := a.releaseInactiveSlots(ctx, tx); err != nil {
 		return err
 	}
-	return a.promote(ctx, tx)
+	_, err = a.promote(ctx, tx)
+	return err
 }
 
 func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intake.DispatchIssue, logOrphan bool) error {
@@ -405,24 +404,25 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
-// waiting line empties. A candidate a.pending still names is held back: the Dispatch consumer has
-// not yet reached the stream position Reconcile captured when it deferred that key. release, not
-// promote, is what clears pending — it empties the whole set at once, so this need only check
-// membership.
-func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
+// waiting line empties, and reports how many candidates it admitted. A candidate a.pending still
+// names is held back: the Dispatch consumer has not yet reached the stream position Reconcile
+// captured when it deferred that key. release, not promote, is what clears pending — it empties
+// the whole set at once, so this need only check membership.
+func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
 	if a.cap <= 0 {
-		return nil
+		return 0, nil
 	}
 	issues, err := a.store.Issues(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("list admission issues: %w", err)
+		return 0, fmt.Errorf("list admission issues: %w", err)
 	}
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("list admission slots: %w", err)
+		return 0, fmt.Errorf("list admission slots: %w", err)
 	}
 	own := ownSlots(issues, slots)
 	waiting := record.Waiting(issues, own)
+	admitted := 0
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
@@ -436,27 +436,28 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 		index := nextSlotIndex(slots)
 		candidate.Status = "in_progress"
 		if err := a.store.PutIssue(ctx, tx, candidate); err != nil {
-			return fmt.Errorf("record admitted issue %s: %w", candidate.Key, err)
+			return admitted, fmt.Errorf("record admitted issue %s: %w", candidate.Key, err)
 		}
 		slot := record.Slot{Issue: candidate.Key, Index: index, AdmittedAt: now}
 		if err := a.store.PutSlot(ctx, tx, slot); err != nil {
-			return fmt.Errorf("put admission slot for %s: %w", candidate.Key, err)
+			return admitted, fmt.Errorf("put admission slot for %s: %w", candidate.Key, err)
 		}
 		if err := a.enqueue(ctx, tx, candidate.Key, record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}, now); err != nil {
-			return err
+			return admitted, err
 		}
 		if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect, Generation: candidate.Generation}, now); err != nil {
-			return err
+			return admitted, err
 		}
 		if err := a.startMidPhaseChildren(ctx, tx, candidate, issues, now); err != nil {
-			return err
+			return admitted, err
 		}
 		if err := a.reenterStrandedChildren(ctx, tx, candidate, issues, now); err != nil {
-			return err
+			return admitted, err
 		}
 		slots, own = append(slots, slot), append(own, slot)
+		admitted++
 	}
-	return nil
+	return admitted, nil
 }
 
 // Held reports whether any key currently waits on the Dispatch consumer reaching the stream
@@ -470,25 +471,26 @@ func (a *Admission) Held() bool {
 	return len(a.pending) > 0
 }
 
-// release applies the Dispatch consumer's current stream position: once its ack floor reaches
-// target, or it has nothing left pending or unacknowledged to reach it with (idle covers a target
-// set past the consumer's own filter, on a stream that also carries subjects it never matches),
-// every key Reconcile deferred releases at once, and this call's own promote is what admits them -
-// a release always promotes in the same transaction it clears pending in, so nothing waits on a
-// later, unrelated fact to notice.
-func (a *Admission) release(ctx context.Context, tx pgx.Tx, ackFloorStream int64, idle bool) error {
+// release applies the Dispatch consumer's current position: once it has Reached target, every key
+// Reconcile deferred releases at once, and this call's own promote is what admits them — a release
+// always promotes in the same transaction it clears pending in, so nothing waits on a later,
+// unrelated fact to notice.
+func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.DispatchConsumerPosition) error {
 	a.mu.Lock()
-	count := len(a.pending)
-	caughtUp := count > 0 && (ackFloorStream >= a.target || idle)
+	caughtUp := len(a.pending) > 0 && position.Reached(a.target)
 	if caughtUp {
 		a.pending = make(map[string]struct{})
 	}
 	a.mu.Unlock()
+	admitted, err := a.promote(ctx, tx)
+	if err != nil {
+		return err
+	}
 	if caughtUp {
 		a.log.Info("admission: the Dispatch consumer has caught up; releasing held roots",
-			"count", count, "ack_floor", ackFloorStream, "idle", idle)
+			"ack_floor", position.AckFloorStream, "idle", position.Idle, "admitted", admitted)
 	}
-	return a.promote(ctx, tx)
+	return nil
 }
 
 // ownSlots is the slots of issues, this project's. The slots table is shared by every project's

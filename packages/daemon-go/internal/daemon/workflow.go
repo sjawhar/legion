@@ -237,10 +237,9 @@ func (w *workflowRuntime) recordedIssue(ctx context.Context, key string) (*recor
 // a move a human made while the daemon was down carries its own event, which the durable stream
 // consumer still holds and delivers with the actor that made it, so nothing here re-derives one.
 // The listing is read first, then the notification stream's own current position (target), then
-// the Dispatch consumer's ack floor: a message published between the listing and target would
-// land in the listing but go uncounted by target, and reading the consumer's own position last
-// catches it up as far as this call can before deciding what a record behind target must still
-// wait for.
+// the Dispatch consumer's own: a message published between the listing and target would land in
+// the listing but go uncounted by target, and reading the consumer's position last catches it up
+// as far as this call can before deciding what a record behind target must still wait for.
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, []string{"todo", "in_progress", "testing", "needs_review", "retro"})
 	if err != nil {
@@ -250,12 +249,12 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read notification stream target: %w", err)
 	}
-	ackFloor, idle, err := w.consumers.DispatchAckFloor(ctx)
+	position, err := w.consumers.DispatchPosition(ctx)
 	if err != nil {
 		return fmt.Errorf("read Dispatch consumer position: %w", err)
 	}
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		return w.admission.Reconcile(ctx, tx, issues, target, ackFloor, idle)
+		return w.admission.Reconcile(ctx, tx, issues, target, position)
 	}); err != nil {
 		return fmt.Errorf("reconcile admission: %w", err)
 	}

@@ -326,7 +326,7 @@ func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain
 	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 0 {
 		t.Fatalf("the merged child while its tree lingers = %s with %d implementer starts, want production_check with none", got.Phase, starts)
 	}
-	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine)
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, Labels: handed}, engine)
 	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 1 {
 		t.Fatalf("the merged child after re-admission = %s with %d implementer starts, want production_check with its implementer started", got.Phase, starts)
 	}
@@ -436,7 +436,7 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			seedSlotted(t, pool, "LEGION-100", "A")
-			root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Admitted, Generation: 2, Status: "todo", Rank: "B", LastDispatchSeq: 2}
+			root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Admitted, Generation: 2, Status: "todo", Rank: "B", HandedOver: true, LastDispatchSeq: 2}
 			putIssue(t, pool, root)
 			parentKey := root.Key
 			child := record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "child", Tree: root.Key, Parent: &parentKey,
@@ -1263,6 +1263,48 @@ func TestReconcileHoldsARootUntilTheDispatchConsumerReachesTheStreamPosition(t *
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "position-reached", intake.DispatchConsumerPosition{AckFloorStream: 5}, engineStub{}, admission); err != nil {
 		t.Fatalf("ApplyFact position-reached: %v", err)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-EDGE", Index: 0, AdmittedAt: fixedNow}})
+}
+
+// Reconcile logs the hold it starts once, naming how many roots it deferred, the stream position
+// (target) it is waiting for, and the consumer's own ack floor at that moment — the three numbers
+// an operator needs to tell a genuinely stuck hold from one still catching up, without a per-issue
+// count.
+func TestReconcileLogsTheHoldItStartsWithItsTargetAndAckFloor(t *testing.T) {
+	pool := migratedPool(t)
+	var logs bytes.Buffer
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(&logs, nil)))
+	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-EDGE", Title: "LEGION-EDGE", Status: "todo", Rank: "A", LastSeq: 2},
+	}, 5, 2, false)
+
+	if !strings.Contains(logs.String(), "count=1") || !strings.Contains(logs.String(), "target=5") || !strings.Contains(logs.String(), "ack_floor=2") {
+		t.Fatalf("hold log = %q, want it to name count 1, target 5 and ack_floor 2", logs.String())
+	}
+}
+
+// release logs once, naming the ack floor it reached or that the consumer went idle, and how many
+// roots its own promote actually admitted — not merely how many it released from the held set,
+// since the cap may still leave some of them waiting.
+func TestReleaseLogsThePositionItReachedAndHowManyRootsItAdmitted(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-EDGE", Title: "LEGION-EDGE", Status: "todo", Rank: "A", LastSeq: 2},
+	}, 5, 2, false)
+
+	var logs bytes.Buffer
+	admission.log = slog.New(slog.NewTextHandler(&logs, nil))
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "position-reached", intake.DispatchConsumerPosition{AckFloorStream: 5}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact position-reached: %v", err)
+	}
+
+	if !strings.Contains(logs.String(), "ack_floor=5") || !strings.Contains(logs.String(), "idle=false") || !strings.Contains(logs.String(), "admitted=1") {
+		t.Fatalf("release log = %q, want it to name ack_floor 5, idle false and admitted 1", logs.String())
 	}
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-EDGE", Index: 0, AdmittedAt: fixedNow}})
 }

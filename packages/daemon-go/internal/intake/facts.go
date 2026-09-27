@@ -67,17 +67,29 @@ type DispatchObserver interface {
 	Held() bool
 }
 
-// DispatchConsumerPosition is a synthesized report of the Dispatch consumer's own position,
-// applied by intake through ApplyFact after a delivery while something is held — never decoded
-// from a real Dispatch event. Admission is the only handler that acts on it: it releases every
-// hold whose target stream sequence the ack floor has reached, or whose project's consumer has
-// nothing left pending or unacknowledged to reach it with, and promotes in the same transaction.
+// DispatchConsumerPosition is one measurement of the Dispatch consumer's own position: its ack
+// floor as a stream sequence — the point before which every matching message is acknowledged,
+// redeliveries and naks included — and whether it is idle, nothing pending or unacknowledged at
+// all. Boot reads one for Reconcile (Consumers.DispatchPosition); intake applies one as a
+// synthetic fact through ApplyFact after a delivery while something is held — never decoded from
+// a real Dispatch event. Admission is the only handler that acts on it: it releases every hold
+// whose target the position has Reached, and promotes in the same transaction.
 type DispatchConsumerPosition struct {
 	AckFloorStream int64
 	Idle           bool
 }
 
 func (DispatchConsumerPosition) isFact() {}
+
+// Reached says whether the consumer at this position has caught up to target, a notification
+// stream sequence: its ack floor is at or past it, or it is idle. Idle covers a target the ack
+// floor alone can never reach — one set past the consumer's own last matching message, since the
+// stream also carries GitHub subjects the Dispatch consumer's filter never matches, or past
+// messages that landed before a consumer created at DeliverNewPolicy existed, which it will never
+// be given.
+func (p DispatchConsumerPosition) Reached(target int64) bool {
+	return p.AckFloorStream >= target || p.Idle
+}
 
 // PullRequestOpened registers a pull request whose branch or body identifies a Dispatch issue.
 type PullRequestOpened struct {
