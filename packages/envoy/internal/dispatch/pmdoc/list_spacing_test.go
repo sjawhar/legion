@@ -29,6 +29,12 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			readable: "- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  one\n\n  two\n  :::\n\n[^u]: one\n",
 		},
 		{
+			// A footnote definition's lines are the lines of the item that holds it.
+			name:     "a typed block holding a blank line in a footnote definition a list item holds",
+			refused:  "ref[^n] here.\n\n- [^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n\n      :::\n",
+			readable: "ref[^n] here.\n\n- [^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n      :::\n",
+		},
+		{
 			name:    "an empty list item before a paragraph its outer item holds",
 			refused: "- t\n\n  -\n\n  para\n",
 		},

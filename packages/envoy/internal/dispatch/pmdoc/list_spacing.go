@@ -171,10 +171,8 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 	directive, typed := ancestor[*typedDirective](list)
 	definition, footnoted := ancestor[*extensionast.Footnote](list)
 	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
-		for child := item.FirstChild(); child != nil; child = child.NextSibling() {
-			if directive, ok := child.(*typedDirective); ok && lines.blankInside(directive) {
-				return "a typed block holding a blank line inside a list item, which the browser editor reads as spacing the item"
-			}
+		if holdsTypedBlockWithBlankLine(item, lines) {
+			return "a typed block holding a blank line inside a list item, which the browser editor reads as spacing the item"
 		}
 	}
 	switch {
@@ -342,6 +340,24 @@ func blankAfterItem(item, definition ast.Node) bool {
 func endsWithList(item ast.Node) bool {
 	_, list := item.LastChild().(*ast.List)
 	return list
+}
+
+// holdsTypedBlockWithBlankLine reports whether container holds a typed block with a blank line
+// inside it, directly or in a footnote definition it holds, whose lines are the container's.
+func holdsTypedBlockWithBlankLine(container ast.Node, lines sourceLines) bool {
+	for child := container.FirstChild(); child != nil; child = child.NextSibling() {
+		switch child := child.(type) {
+		case *typedDirective:
+			if lines.blankInside(child) {
+				return true
+			}
+		case *extensionast.Footnote:
+			if holdsTypedBlockWithBlankLine(child, lines) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func setSpread(list *ast.List, spread bool, itemSpread func(ast.Node) bool) {
