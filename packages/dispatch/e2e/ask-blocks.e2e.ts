@@ -845,68 +845,13 @@ for (const [target, spec, quote, pasted, stored] of [
 }
 
 // Where nothing inside the caret's typed block can hold the pasted block, the pasted text joins the
-// text at the caret. A callout pasted into an ask's question once split the ask: the question
-// stayed, the callout went after it, and the options moved to a new ask under an empty question.
-test("a lone callout pasted as plain text into an ask's question leaves the ask whole", async ({
-  browser,
-}) => {
-  const { alice, issue, page } = await openWithCaret(
-    browser,
-    "Paste into a question",
-    ':::ask{#q1 urgency="med" multiple="false"}\nWhich here?\n\n- X\n- Y\n:::\n',
-    "Which here?",
-    "end"
-  );
-  try {
-    await paste(page, { html: "", text: loneCallout });
-
-    await expect
-      .poll(async () =>
-        withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
-      )
-      .toBe(":::ask{#q1}\nWhich here?Careful.\n\n- X\n- Y\n:::\n");
-    await expect
-      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.block_id))
-      .toEqual(["q1"]);
-  } finally {
-    await alice.close();
-  }
-});
-
-// A lone ask pasted into another ask's question has nowhere to be an ask, so its text joins the
-// question, as a callout's does. It once split the ask: the question took the pasted question and
-// options, and the ask's own options moved to a new ask under an empty question.
-test("a lone ask pasted as plain text into an ask's question joins the question", async ({
-  browser,
-}) => {
-  const { alice, issue, page } = await openWithCaret(
-    browser,
-    "Ask into a question",
-    ':::ask{#q1 urgency="med" multiple="false"}\nWhich here?\n\n- X\n- Y\n:::\n',
-    "Which here?",
-    "end"
-  );
-  try {
-    await paste(page, { html: "", text: loneAsk });
-
-    await expect
-      .poll(async () =>
-        withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
-      )
-      .toBe(":::ask{#q1}\nWhich here?Which one? A B\n\n- X\n- Y\n:::\n");
-    await expect
-      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.block_id))
-      .toEqual(["q1"]);
-  } finally {
-    await alice.close();
-  }
-});
-
-// A list or a table pasted into an ask's question, as plain text or as HTML, joins the question as
-// text too: the ask already holds its one options list and can't hold a table. It once split the
-// ask the same way, the question keeping the first item and the ask's own options moving to a new
-// ask under an empty question.
+// text at the caret. A lone callout, a lone ask, a list or a table pasted into an ask's question, as
+// plain text or as HTML, joins the question as text, since an ask holds only its question and one
+// options list. Each once split the ask, and the ask's own options moved to a new ask under an
+// empty question.
 for (const [shape, clipboard, question] of [
+  ["a lone callout as plain text", { html: "", text: loneCallout }, "Which here?Careful."],
+  ["a lone ask as plain text", { html: "", text: loneAsk }, "Which here?Which one? A B"],
   ["a list as plain text", { html: "", text: "- x\n- y\n" }, "Which here?x y"],
   ["a list as HTML", { html: "<ul><li>x</li><li>y</li></ul>", text: "x\ny" }, "Which here?x y"],
   [

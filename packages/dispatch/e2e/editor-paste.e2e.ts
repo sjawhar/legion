@@ -1,9 +1,8 @@
 import { type Browser, expect, type Page, test } from "@playwright/test";
 
-import { createIssue, createProject, getArtifactText, getIssue } from "./api";
-import { copy, documentEditor, openWithCaret, paste, selectEditorText } from "./editor";
+import { getArtifactText, getIssue } from "./api";
+import { copy, documentEditor, openIssue, openWithCaret, paste, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
-import { asUser } from "./users";
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -218,11 +217,7 @@ async function openWithCellsSelected(
   how: "drag" | "shift-click",
   spec: string = table
 ) {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", spec, title: "Cell selection paste" });
-  const alice = await asUser(browser, "alice");
-  const page = await alice.newPage();
-  await page.goto(`/issues/${issue.key}`);
+  const { alice, issue, page } = await openIssue(browser, "Cell selection paste", spec);
   await expect(documentEditor(page)).toContainText(to);
   await selectCells(page, from, to, how);
   return { alice, artifactId: issue.primary_artifact_id, page };
