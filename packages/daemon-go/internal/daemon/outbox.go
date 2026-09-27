@@ -339,8 +339,8 @@ var errNoticeWaits = errors.New("the notice waits for its architect")
 // daemon's rule (owningArchitect, packages/daemon/src/daemon/legion-state.ts): the nearest issue at
 // or above it, through its parents, whose sub-architect claim runs (one the operator started, and
 // not suspended: the workflow suspends a child's sub-architect when the child leaves, and nothing
-// starts it again for a notice), else the tree root, whose architect is the tree's own claim. A child's close or status
-// change starts at its parent (reduceIssueClosed and reduceChildStatus,
+// starts it again for a notice), else the tree root, whose architect is the tree's own claim. A
+// child's close or status change starts at its parent (reduceIssueClosed and reduceChildStatus,
 // packages/daemon/src/daemon/reducers.ts): the child's own sub-architect is suspended with it
 // (workflow's leave), and the architect above it decides what the rest of the tree does.
 func (r *outbox) owningArchitect(ctx context.Context, project string, issue record.Issue, kind record.NoticeKind) (claim.Token, error) {
@@ -409,29 +409,29 @@ func (r *outbox) earlierNoticeFor(ctx context.Context, project string, row recor
 }
 
 // claimRuns is whether this daemon supervises token's claim and it runs, or is on its way back to
-// running: not suspended, failed or retired.
+// running: it has not ended, and it is not suspended.
 func (r *outbox) claimRuns(token claim.Token) bool {
-	state, ok := r.claimState(token)
-	return ok && state != supervise.StateSuspended && state != supervise.StateFailed && state != supervise.StateRetired
+	state := r.claimState(token)
+	return !claimEnded(state) && state != supervise.StateSuspended
 }
 
-// claimEnded is whether token's claim will not hold its role again: this daemon does not supervise
-// it, or it failed or retired. A suspended claim has not ended: the operator's resume or deliver
-// starts it again (`legion claims resume`).
-func (r *outbox) claimEnded(token claim.Token) bool {
-	state, ok := r.claimState(token)
-	return !ok || state == supervise.StateFailed || state == supervise.StateRetired
+// claimEnded is whether a claim in state will not hold its role again: this daemon does not
+// supervise it (""), or it failed or retired. A suspended claim has not ended: the operator's
+// resume or deliver starts it again (`legion claims resume`).
+func claimEnded(state supervise.ClaimState) bool {
+	return state == "" || state == supervise.StateFailed || state == supervise.StateRetired
 }
 
-func (r *outbox) claimState(token claim.Token) (supervise.ClaimState, bool) {
+// claimState is the state of token's claim, or "" when this daemon does not supervise it.
+func (r *outbox) claimState(token claim.Token) supervise.ClaimState {
 	if r.supervisor == nil {
-		return "", false
+		return ""
 	}
 	machine, ok := r.supervisor.Machine(token)
 	if !ok {
-		return "", false
+		return ""
 	}
-	return machine.Claim().State, true
+	return machine.Claim().State
 }
 
 // architectEnded says why nobody will hold architect's role for a notice about issue, or "" when
@@ -445,7 +445,7 @@ func (r *outbox) architectEnded(ctx context.Context, architect claim.Token, issu
 	if root.LingerUntil != nil {
 		return "its tree lingers or has closed", nil
 	}
-	if r.claimEnded(architect) {
+	if claimEnded(r.claimState(architect)) {
 		return "its claim has failed, retired, or is not supervised", nil
 	}
 	return "", nil
