@@ -10,6 +10,7 @@ import {
   createAsk,
   createComment,
   createIssue,
+  createIssueArtifact,
   createMessage,
   createProject,
   editAsk,
@@ -648,5 +649,57 @@ test("the iPhone Conversation fits controls and keeps the composer above the rev
     await testInfo.attach("conversation phone", { contentType: "image/png", path: screenshot });
   } finally {
     await alice.close();
+  }
+});
+
+// A live session's title is free text and can be a whole sentence. An activity line that lets
+// its author set its own width pushed the line, the turns list and the document past the
+// viewport, so a reader scrolled sideways through the timeline.
+test("a long session title never widens the Conversation past its column", async ({
+  browser,
+}, testInfo) => {
+  const sessionId = "e2e-long-title-session";
+  const longTitle =
+    "Reviewing PR #1478 LEGION-67 conversation family visual polish pass at 390px and 1280px";
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Long author labels" });
+  // An upload is an activity line - `<author> added <name>` - so the session's title is the
+  // line's author column, which is the column under test.
+  await createIssueArtifact(
+    issue.key,
+    { content: "# Sketch\n", name: "Transcript sketch" },
+    { actor: { id: sessionId, kind: "session" }, as: "agent" }
+  );
+  if (!process.env.PLAYWRIGHT_BASE_URL) {
+    await setLiveSessions([{ session_id: sessionId, title: longTitle }]);
+  }
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    const width = testInfo.project.name === "chromium" ? 1280 : 390;
+    if (testInfo.project.name === "chromium") {
+      await page.setViewportSize({ height: 900, width });
+    }
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turns = page.getByRole("region", { name: "Conversation" }).locator("ol").first();
+    await expect(turns).toBeVisible();
+    // The line really is carrying that title, so the measurement below is not vacuous.
+    const activity = page
+      .locator('[data-kind="activity"]')
+      .filter({ hasText: "Transcript sketch" });
+    await expect(activity).toContainText("Reviewing PR #1478");
+
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      width
+    );
+    // The timeline never grows past the column it sits in.
+    const overflow = await turns.evaluate((node) => ({
+      client: (node.parentElement ?? node).clientWidth,
+      scroll: node.scrollWidth,
+    }));
+    expect(overflow.scroll).toBeLessThanOrEqual(overflow.client);
+  } finally {
+    await context.close();
   }
 });

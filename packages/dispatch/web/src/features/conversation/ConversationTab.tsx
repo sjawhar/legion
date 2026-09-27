@@ -1366,12 +1366,18 @@ export function ConversationTab({
               key={item.id}
               ref={registerObserved}
             >
-              {/* The author and the time are short and fixed; only the description may wrap,
-                  so neither of them is broken across two lines to make room for it. */}
-              <span className="shrink-0 font-medium whitespace-nowrap">
+              {/* The author keeps its whole width until the row runs out, then truncates with
+                  the full label on hover - a live session title can be a sentence, and left to
+                  set its own width it pushed the line, the turns list and the document past
+                  the viewport. The description keeps a floor so it wraps as prose rather than
+                  one word per line. */}
+              <span
+                className="max-w-full min-w-0 truncate font-medium"
+                title={resolveAuthor(item.author, titles).label}
+              >
                 {resolveAuthor(item.author, titles).label}
               </span>
-              <span className="min-w-0 flex-1">
+              <span className="min-w-48 flex-1 break-words">
                 <ActivityLine
                   description={item.description}
                   event={item.event}
