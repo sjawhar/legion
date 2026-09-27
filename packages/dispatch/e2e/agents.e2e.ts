@@ -182,7 +182,10 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     const waitingOnAgent = plannerCard.getByRole("link", { name: "Waiting on agent 1" });
     await expect(waitingOnAgent).toHaveAttribute("href", "/?agent=planner-session");
     await expect(plannerCard.getByText(/^Open asks/)).toHaveCount(0);
-    await expect(reviewerCard.getByRole("link")).toHaveCount(0);
+    // Every card carries the Open action; what this card must not carry is a whose-turn pill.
+    await expect(
+      reviewerCard.getByRole("link", { name: /Needs you|Waiting on agent/ })
+    ).toHaveCount(0);
     await expect(reviewerCard.getByText(/^(Needs you|Waiting on agent|Open asks)/)).toHaveCount(0);
 
     await reviewerCard.getByRole("button", { name: "Pin Reviewer" }).click();

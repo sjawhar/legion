@@ -16,7 +16,7 @@
 
 1. Tailscale mesh and ACLs already permit intended callers to reach the listener's new tsnet identity (all machines are already connected via Tailscale SSH for Docker provider transport)
 2. Scope is strictly `example-host-mx` — other machines (`sami`, `sami-claude`, `ghost-wispr`) are NOT in scope
-3. No external clients depend on public `http://78.12.245.82:9020/v1/*` — all legitimate Envoy callers are on the Tailscale mesh
+3. No external clients depend on public `http://<public-ip>:9020/v1/*` — all legitimate Envoy callers are on the Tailscale mesh
 4. The `envoy:tsnetAuthKey` Pulumi secret will either already be set, or the implementer will set it from SOPS before deploying (SOPS key: `TS_AUTHKEY`)
 
 ## File Structure
@@ -161,10 +161,10 @@ This squashes the auth key addition into the parent commit (which has the listen
 Before deploying, confirm the public endpoint is currently exposed:
 
 ```bash
-curl -s -o /dev/null -w "%{http_code}" http://78.12.245.82:9020/healthz
+curl -s -o /dev/null -w "%{http_code}" http://<public-ip>:9020/healthz
 # Expected: 200
 
-curl -s -o /dev/null -w "%{http_code}" -X POST http://78.12.245.82:9020/v1/messages/publish -d '{"topic":"test.security","message":"probe"}' -H 'Content-Type: application/json'
+curl -s -o /dev/null -w "%{http_code}" -X POST http://<public-ip>:9020/v1/messages/publish -d '{"topic":"test.security","message":"probe"}' -H 'Content-Type: application/json'
 # Expected: 200 (or other success) — this is the vulnerability
 ```
 
@@ -186,12 +186,12 @@ pulumi up --stack prod
 ### Post-Deploy Verification (GREEN — prove the fix works)
 
 1. **Legacy port security (CRITICAL)**
-   - Action: `curl -s -o /dev/null -w "%{http_code}" -X POST http://78.12.245.82:9020/v1/messages/publish -d '{}' -H 'Content-Type: application/json'`
+   - Action: `curl -s -o /dev/null -w "%{http_code}" -X POST http://<public-ip>:9020/v1/messages/publish -d '{}' -H 'Content-Type: application/json'`
    - Expected: 404 (route no longer registered on legacy port)
    - Tool: curl from non-Tailscale network
 
 2. **Healthz still available on legacy port**
-   - Action: `curl -sf http://78.12.245.82:9020/healthz`
+   - Action: `curl -sf http://<public-ip>:9020/healthz`
    - Expected: 200 OK
    - Tool: curl
 

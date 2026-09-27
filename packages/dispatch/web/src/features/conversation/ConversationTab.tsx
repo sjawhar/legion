@@ -51,7 +51,7 @@ import {
   sharedIssueStateWrites,
 } from "../issue/state-write-queue";
 import { ThreadCard } from "../margin/ThreadCard";
-import { useCommentActionQueue } from "../margin/useCommentActionQueue";
+import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath, documentItemPath } from "../refs/routes";
@@ -513,7 +513,7 @@ function CommentDeliveryList({
   );
 }
 function CommentTurn({
-  actionError,
+  actionFailure,
   agents,
   issueArtifacts,
   composerClassName,
@@ -535,7 +535,7 @@ function CommentTurn({
   register,
   viewerLogin,
 }: {
-  actionError: boolean;
+  actionFailure: CommentActionFailure | undefined;
   agents: readonly Agent[];
   issueArtifacts: ConversationTabProps["issueArtifacts"];
   composerClassName?: string;
@@ -617,7 +617,7 @@ function CommentTurn({
       ref={register}
     >
       <ThreadCard
-        actionError={actionError}
+        actionFailure={actionFailure}
         artifactSlug={artifactSlug}
         composerClassName={composerClassName}
         expanded={currentExpanded}
@@ -1223,9 +1223,11 @@ export function ConversationTab({
           </button>
         )}
         <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnCanvas}`}>
+          {/* The 44px target is the label, which is already `min-h-11`; putting it on the box
+              itself drew a checkbox three times the size of every other control. */}
           <input
             checked={showActivity}
-            className={`${checkboxAccent} min-h-11 min-w-11`}
+            className={checkboxAccent}
             onChange={(event) => setShowActivity(event.target.checked)}
             type="checkbox"
           />
@@ -1306,7 +1308,11 @@ export function ConversationTab({
           if (item.kind === "comment") {
             return (
               <CommentTurn
-                actionError={commentActions.actionErrorId === item.event.payload.id}
+                actionFailure={
+                  commentActions.actionFailure?.id === item.event.payload.id
+                    ? commentActions.actionFailure
+                    : undefined
+                }
                 hideReplyComposer={
                   replyTo?.parentKind === "comment" && replyTo.id === item.event.payload.id
                 }
@@ -1342,7 +1348,12 @@ export function ConversationTab({
                 ref={registerObserved}
               >
                 <div className="min-w-0 flex-1">
-                  <AskCard ask={item.ask} thread="collapsed" />
+                  {/* The margin shows this same open ask beside the document, so a full
+                      two-row composer here is the question, its options and its answer
+                      controls twice on one screen. The timeline is the record: it carries the
+                      compact density, whose options answer in one click and whose note field
+                      is one disclosure away. */}
+                  <AskCard ask={item.ask} thread="collapsed" variant="compact" />
                 </div>
                 <TurnPin disabled={hasFailedOps} onPin={onPin} pinned={pinned} />
               </li>
@@ -1350,17 +1361,40 @@ export function ConversationTab({
           }
           return (
             <li
-              className={`flex items-baseline gap-2 px-2 text-xs ${textMutedOnCanvas}`}
+              className={`flex flex-wrap items-baseline gap-x-2 px-2 text-xs ${textMutedOnCanvas}`}
               data-event-seq={item.lastSeq}
               data-kind="activity"
               data-turn={item.id}
               key={item.id}
               ref={registerObserved}
             >
-              <span className="font-medium">{resolveAuthor(item.author, titles).label}</span>
-              <ActivityLine description={item.description} event={item.event} issueKey={issueKey} />
-              <span aria-hidden="true">·</span>
-              <Timestamp at={item.at} />
+              {/* The author keeps its whole width until the row runs out, then truncates with
+                  the full label on hover - a live session title can be a sentence, and left to
+                  set its own width it pushed the line, the turns list and the document past
+                  the viewport. The description keeps a floor so it wraps as prose rather than
+                  one word per line. */}
+              {/* Who and when are one group that never breaks: the time used to wrap alone to
+                  the start of the next row once the author took most of the line. The author
+                  truncates inside it, with the full label on hover - a live session title can
+                  be a whole sentence - and only the description wraps, with a floor so it
+                  wraps as prose rather than one word per line. */}
+              <span className="flex max-w-full min-w-0 shrink-0 items-baseline gap-x-2 whitespace-nowrap">
+                <span
+                  className="min-w-0 truncate font-medium"
+                  title={resolveAuthor(item.author, titles).label}
+                >
+                  {resolveAuthor(item.author, titles).label}
+                </span>
+                <span aria-hidden="true">·</span>
+                <Timestamp at={item.at} />
+              </span>
+              <span className="min-w-48 flex-1 break-words">
+                <ActivityLine
+                  description={item.description}
+                  event={item.event}
+                  issueKey={issueKey}
+                />
+              </span>
             </li>
           );
         })}
@@ -1384,7 +1418,11 @@ export function ConversationTab({
           </header>
           <ol className="min-h-0 flex-1 overflow-y-auto px-4 pb-32">
             <CommentTurn
-              actionError={commentActions.actionErrorId === phoneThread.event.payload.id}
+              actionFailure={
+                commentActions.actionFailure?.id === phoneThread.event.payload.id
+                  ? commentActions.actionFailure
+                  : undefined
+              }
               agents={agents}
               issueArtifacts={issueArtifacts}
               composerClassName={`fixed inset-x-0 bottom-0 z-20 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}

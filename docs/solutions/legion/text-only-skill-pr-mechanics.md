@@ -33,7 +33,7 @@ symptoms:
 Learned on LEGION-18 (sjawhar/legion#953), nine text fixes to `skills/*/SKILL.md`,
 `packages/pi-envoy/roles/*.md`, and two `AGENTS.md` files. Nothing here is about the fixes
 themselves; it is about how a Legion worker lands and verifies a documentation-only change.
-Pane mechanics (stacked grants, bookmark placement, a reviewer's unpushed commit) are in
+Pane mechanics (stacked grants, bookmark placement, pushing your own commits) are in
 [worker-pane-shell-gotchas.md](worker-pane-shell-gotchas.md).
 
 ## 1. Two path-scoped commits that touch the same file: sequence the edits
@@ -115,7 +115,7 @@ and change every hit in the same commit; the tester's greps for the new phrase e
 - The worker skill's PR-body template names the `Tests` workflow run and its jobs (lint, typecheck,
   test) and the `PR Title` workflow run and its job (pr-title). A body-only or title-only edit runs
   only PR Title. Retargeting a pull request to a new base does not re-run Tests; after a retarget,
-  rebase onto the new base and push — the new head runs Tests against the new merge result — and cite
+  merge the bookmark onto the new base (`jj new legion/<KEY> <new base>`) and push — the new head runs Tests against the new merge result — and cite
   that run in the PR body. Fill the `CI:` line verbatim from
   `gh run view <run-id> --json jobs,headSha,conclusion` for each. A template line that names a check
   or job no workflow here defines is fixed in the template (LEGION-38, #1008), never explained away

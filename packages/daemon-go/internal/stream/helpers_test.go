@@ -227,7 +227,7 @@ func (p *peer) send(frame shimwire.Frame) {
 
 func (p *peer) hello(bootToken string) {
 	p.t.Helper()
-	p.send(shimwire.Hello{BootToken: bootToken})
+	p.send(shimwire.Hello2{BootToken: bootToken})
 }
 
 // expect is the daemon's next frame, which must be of the given type.

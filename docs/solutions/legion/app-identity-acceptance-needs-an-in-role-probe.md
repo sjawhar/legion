@@ -68,7 +68,7 @@ truthful.
 ## When to apply
 
 Any criterion of the shape "App X can act on App Y's artifact", or "the App of role R is refused
-X" — thread resolution, a push the review App must not be able to make, a permission boundary
+X" — thread resolution, a permission boundary
 between the two Apps. The tester's negative control (a deliberately not-accepted thread reported
 `left open`) still belongs to the tester; what the tester cannot do is *be* the other App. If no
 phase runs as the App the criterion names, the tester names that missing surface as the blocker
@@ -77,6 +77,7 @@ instead of passing the phase (the `legion-worker` skill's production-like-surfac
 ## Related
 
 - [external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §3 — why the
-  review App can reply but not resolve, who pushes, the reply grammar, and the GraphQL facts.
+  review App can reply but not resolve a thread on the implementer's pull request, the reply
+  grammar, and the GraphQL facts.
 - [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) §13 — the pane's `legion` is the
   deployed build; a new subcommand is exercised live as `bun packages/daemon/src/cli/index.ts …`.

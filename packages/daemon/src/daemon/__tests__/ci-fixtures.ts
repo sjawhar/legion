@@ -6,6 +6,7 @@ import type { DaemonConfig } from "../config";
 import type { DispatchClient } from "../dispatch-client";
 import { type LegionState, newLegionState, type PrState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
+import type { ReducerConfig } from "../reducers";
 
 /** A `DispatchClient` double for tests that need one wired (every `LegionApiDeps`,
  * `ProcessManagerDeps`, and `RunResyncDeps` requires one) but do not assert on Dispatch writes
@@ -154,7 +155,7 @@ function matches(pattern: string, subject: string): boolean {
   return patternTokens.length === subjectTokens.length;
 }
 
-export function config(): DaemonConfig {
+export function config(): DaemonConfig & ReducerConfig {
   return {
     project: "omp",
     legionId: "acme/1",
@@ -172,6 +173,7 @@ export function config(): DaemonConfig {
     maxRecursionDepth: 8,
     lingerHours: 72,
     maxFixAttempts: 3,
+    reviewAppLogin: "legion-reviewer[bot]",
     resyncIntervalMs: 600_000,
     workerStopTimeoutSeconds: 10,
     treeStopTimeoutSeconds: 60,

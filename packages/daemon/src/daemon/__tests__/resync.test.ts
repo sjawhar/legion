@@ -25,10 +25,14 @@ function resyncDeps(
       resyncIntervalMs: 600_000,
       projects: { LEGION: { repo: "sjawhar/legion" } },
       maxFixAttempts: 3,
+      reviewAppLogin: "legion-reviewer[bot]",
     },
     dispatchClient: fakeDispatchClient(),
     saveState: async () => {},
     fetchCiStatusBatch: async () => ({}),
+    compareChangedPaths: async () => {
+      throw new Error("no compare expected in this test");
+    },
     applyEffects: async () => {},
     reconcileAdmissionDrift: async () => repairAdmissionDrift(state),
     isResurrecting,
@@ -1246,7 +1250,12 @@ describe("runResync", () => {
 
     await runResync({
       ...resyncDeps(state),
-      config: { resyncIntervalMs: 600_000, projects, maxFixAttempts: 3 },
+      config: {
+        resyncIntervalMs: 600_000,
+        projects,
+        maxFixAttempts: 3,
+        reviewAppLogin: "legion-reviewer[bot]",
+      },
       dispatchClient: fakeDispatchClient({
         listIssues: async (project) => {
           projectCalls.push(project);
@@ -1821,5 +1830,383 @@ describe("runResync", () => {
     } finally {
       errorLog.mockRestore();
     }
+  });
+});
+
+describe("runResync settles a changes-requested decision no push webhook settled", () => {
+  const prKey = "sjawhar/legion#7";
+  const branch = `legion/${issue}`;
+  let seq = 0;
+
+  /** A PR at `head-0` whose reviewer asked for changes there, its branch registered for pushes. */
+  function reviewedState(): LegionState {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.prs[prKey] = checkPr(issue, {
+      repo: "sjawhar/legion",
+      headSha: "head-0",
+      headUpdatedAt: Date.parse("2026-08-23T00:00:00.000Z"),
+      reviewDecision: "changes_requested",
+    });
+    state.prByBranch[`sjawhar/legion@${branch}`] = prKey;
+    return state;
+  }
+  function deliver(state: LegionState, payload: Record<string, unknown>): void {
+    seq += 1;
+    reduceGithubEvent(
+      state,
+      "notifications.github.sjawhar.legion.pull_request",
+      { event_id: `settle-${seq}`, issued_at: Date.parse("2026-08-23T12:00:00.000Z"), payload },
+      resyncDeps(state).config
+    );
+  }
+  function synchronize(state: LegionState, sha: string, at: string): void {
+    deliver(state, {
+      kind: "pr",
+      action: "synchronize",
+      repo: "sjawhar/legion",
+      number: "7",
+      head_ref: branch,
+      head_sha: sha,
+      updated_at: at,
+    });
+  }
+  function push(state: LegionState, before: string, after: string, paths: string): void {
+    deliver(state, {
+      kind: "push",
+      repo: "sjawhar/legion",
+      ref: `refs/heads/${branch}`,
+      before,
+      after,
+      pusher: "legion-reviewer[bot]",
+      head_subject: "review: record handoff",
+      commit_count: "1",
+      compare_url: "https://example.invalid/compare",
+      changed_paths: paths,
+      changed_paths_truncated: "false",
+    });
+  }
+  /** GitHub's read: the PR open at `sha`, CI pending. */
+  function readAt(sha: string): RunResyncDeps["fetchCiStatusBatch"] {
+    return async () => ({
+      [prKey]: {
+        ciStatus: "pending" as const,
+        mergeableStatus: null,
+        headSha: sha,
+        updatedAt: "2026-08-24T00:00:00.000Z",
+        checkRuns: [],
+        isOpen: true,
+      },
+    });
+  }
+  /** GitHub's compare, answering `paths` and the commits' `authors` for any range and recording
+   * each range asked. */
+  function compareAnswering(
+    paths: string[],
+    asked: Array<[string, string]>,
+    authors: Array<string | null> = ["legion-implementer[bot]"]
+  ) {
+    return async (repo: string, base: string, head: string) => {
+      expect(repo).toBe("sjawhar/legion");
+      asked.push([base, head]);
+      return { paths, truncated: false, authors, commitsTruncated: false };
+    };
+  }
+
+  it("drops it on the head a synchronize brought without its push, when the compare shows a real change", async () => {
+    const state = reviewedState();
+    synchronize(state, "fix-sha", "2026-08-23T12:00:00.000Z");
+    const asked: Array<[string, string]> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      fetchCiStatusBatch: readAt("fix-sha"),
+      compareChangedPaths: compareAnswering([".legion/implement.json", "src/fix.ts"], asked),
+    });
+
+    expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+    expect(asked).toEqual([["head-0", "fix-sha"]]);
+  });
+
+  it("drops it on a real-change head resync's own read discovers", async () => {
+    const state = reviewedState();
+    const asked: Array<[string, string]> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      fetchCiStatusBatch: readAt("fix-sha"),
+      compareChangedPaths: compareAnswering(["src/fix.ts"], asked),
+    });
+
+    expect(state.prs[prKey]?.headSha).toBe("fix-sha");
+    expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+    expect(asked).toEqual([["head-0", "fix-sha"]]);
+  });
+
+  it("keeps it on a handoff-only head resync's read discovers, and asks GitHub once", async () => {
+    const state = reviewedState();
+    const asked: Array<[string, string]> = [];
+    const deps = {
+      ...resyncDeps(state),
+      fetchCiStatusBatch: readAt("review-handoff-sha"),
+      compareChangedPaths: compareAnswering([".legion/review.json"], asked),
+    };
+
+    await runResync(deps);
+    await runResync({ ...deps, now: () => Date.parse("2026-08-24T01:00:00.000Z") });
+
+    expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
+    expect(asked).toEqual([["head-0", "review-handoff-sha"]]);
+  });
+
+  it("a later handoff-only push does not carry the decision past a real change whose push was lost", async () => {
+    const state = reviewedState();
+    synchronize(state, "fix-sha", "2026-08-23T12:00:00.000Z");
+    synchronize(state, "handoff-sha", "2026-08-23T12:01:00.000Z");
+    push(state, "fix-sha", "handoff-sha", ".legion/test.json");
+    const asked: Array<[string, string]> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      fetchCiStatusBatch: readAt("handoff-sha"),
+      compareChangedPaths: compareAnswering(["src/fix.ts", ".legion/test.json"], asked),
+    });
+
+    expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+    expect(asked).toEqual([["head-0", "handoff-sha"]]);
+  });
+
+  it("a handoff-only push that arrives first but starts after the replaced head leaves the range to resync", async () => {
+    const state = reviewedState();
+    push(state, "fix-sha", "handoff-sha", ".legion/test.json");
+    synchronize(state, "handoff-sha", "2026-08-23T12:01:00.000Z");
+    const asked: Array<[string, string]> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      fetchCiStatusBatch: readAt("handoff-sha"),
+      compareChangedPaths: compareAnswering(["src/fix.ts", ".legion/test.json"], asked),
+    });
+
+    expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+    expect(asked).toEqual([["head-0", "handoff-sha"]]);
+  });
+
+  it("a late changes-requested review of an earlier commit is settled from that commit", async () => {
+    const state = reviewedState();
+    delete state.prs[prKey]?.reviewDecision;
+    synchronize(state, "fix-sha", "2026-08-23T12:00:00.000Z");
+    // Round 1's review, redelivered after the fix's head arrived.
+    deliver(state, {
+      kind: "review",
+      action: "submitted",
+      repo: "sjawhar/legion",
+      number: "7",
+      parent_kind: "pr",
+      author: "legion-reviewer[bot]",
+      url: "review-url",
+      state: "changes_requested",
+      body: "C1 blocks",
+      commit_id: "impl-sha",
+      head_sha: "impl-sha",
+    });
+    const asked: Array<[string, string]> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      fetchCiStatusBatch: readAt("fix-sha"),
+      compareChangedPaths: compareAnswering(["src/fix.ts"], asked),
+    });
+
+    expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+    expect(asked).toEqual([["impl-sha", "fix-sha"]]);
+  });
+
+  for (const order of ["push first", "synchronize first"] as const) {
+    it(`keeps a request pinned below a code head the review App pushed mid-review, whose every commit it authored (${order})`, async () => {
+      const state = reviewedState();
+      const reviewed = state.prs[prKey];
+      if (!reviewed) throw new Error("no pull request");
+      delete reviewed.reviewDecision;
+      // The head moves to the review App's code commit while the reviewer reads head-0 ...
+      if (order === "push first") push(state, "head-0", "app-code-sha", "src/widget.test.ts");
+      synchronize(state, "app-code-sha", "2026-08-23T12:00:00.000Z");
+      if (order === "synchronize first")
+        push(state, "head-0", "app-code-sha", "src/widget.test.ts");
+      // ... and the review it submits names head-0, below the head.
+      deliver(state, {
+        kind: "review",
+        action: "submitted",
+        repo: "sjawhar/legion",
+        number: "7",
+        parent_kind: "pr",
+        author: "legion-reviewer[bot]",
+        url: "review-url",
+        state: "changes_requested",
+        body: "C1 blocks",
+        commit_id: "head-0",
+        head_sha: "app-code-sha",
+      });
+      const asked: Array<[string, string]> = [];
+
+      await runResync({
+        ...resyncDeps(state),
+        fetchCiStatusBatch: readAt("app-code-sha"),
+        compareChangedPaths: compareAnswering(["src/widget.test.ts"], asked, [
+          "legion-reviewer[bot]",
+        ]),
+      });
+
+      expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
+      expect(state.prs[prKey]?.reviewDecisionUnsettledFrom).toBeUndefined();
+      expect(asked).toEqual([["head-0", "app-code-sha"]]);
+    });
+  }
+
+  it("drops it when the range holds another account's commit, or more commits than GitHub listed", async () => {
+    for (const compared of [
+      { authors: ["legion-reviewer[bot]", "legion-implementer[bot]"], commitsTruncated: false },
+      { authors: ["legion-reviewer[bot]", null], commitsTruncated: false },
+      { authors: ["legion-reviewer[bot]"], commitsTruncated: true },
+    ]) {
+      const state = reviewedState();
+      synchronize(state, "fix-sha", "2026-08-23T12:00:00.000Z");
+
+      await runResync({
+        ...resyncDeps(state),
+        fetchCiStatusBatch: readAt("fix-sha"),
+        compareChangedPaths: async () => ({ paths: ["src/fix.ts"], truncated: false, ...compared }),
+      });
+
+      expect(state.prs[prKey]?.reviewDecision, JSON.stringify(compared)).toBeUndefined();
+    }
+  });
+
+  it("drops it when GitHub's compare cannot classify the head", async () => {
+    for (const compare of [
+      async () => {
+        throw new Error("gh: Not Found (HTTP 404)");
+      },
+      async () => ({
+        paths: Array.from({ length: 300 }, (_, n) => `.legion/x${n}.json`),
+        truncated: true,
+        authors: ["legion-implementer[bot]"],
+        commitsTruncated: false,
+      }),
+      async () => ({
+        paths: [],
+        truncated: false,
+        authors: ["legion-implementer[bot]"],
+        commitsTruncated: false,
+      }),
+    ]) {
+      const state = reviewedState();
+      synchronize(state, "fix-sha", "2026-08-23T12:00:00.000Z");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await runResync({
+          ...resyncDeps(state),
+          fetchCiStatusBatch: readAt("fix-sha"),
+          compareChangedPaths: compare,
+        });
+      } finally {
+        warn.mockRestore();
+      }
+      expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+    }
+  });
+});
+
+describe("runResync clears a planned red carried onto a head no push classified", () => {
+  const prKey = "sjawhar/legion#7";
+  const branch = `legion/${issue}`;
+  let seq = 0;
+  function deliver(state: LegionState, payload: Record<string, unknown>): void {
+    seq += 1;
+    reduceGithubEvent(
+      state,
+      "notifications.github.sjawhar.legion.pull_request",
+      { event_id: `planned-${seq}`, issued_at: Date.parse("2026-08-23T12:00:00.000Z"), payload },
+      resyncDeps(state).config
+    );
+  }
+  function arrive(
+    state: LegionState,
+    before: string,
+    sha: string,
+    pusher: string | null,
+    at: string
+  ): void {
+    if (pusher !== null) {
+      deliver(state, {
+        kind: "push",
+        repo: "sjawhar/legion",
+        ref: `refs/heads/${branch}`,
+        before,
+        after: sha,
+        pusher,
+        head_subject: sha,
+        commit_count: "1",
+        compare_url: "https://example.invalid/compare",
+        changed_paths: "src/widget.test.ts",
+        changed_paths_truncated: "false",
+      });
+    }
+    deliver(state, {
+      kind: "pr",
+      action: "synchronize",
+      repo: "sjawhar/legion",
+      number: "7",
+      head_ref: branch,
+      head_sha: sha,
+      updated_at: at,
+    });
+  }
+  const readRedAt =
+    (sha: string): RunResyncDeps["fetchCiStatusBatch"] =>
+    async () => ({
+      [prKey]: {
+        ciStatus: "failing" as const,
+        mergeableStatus: null,
+        headSha: sha,
+        updatedAt: "2026-08-24T00:00:00.000Z",
+        checkRuns: [{ name: "test", id: 1 }],
+        failingChecks: ["test"],
+        failingStatuses: [],
+        isOpen: true,
+      },
+    });
+
+  it("so the fix after a fix whose push was lost counts one attempt", async () => {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.prs[prKey] = checkPr(issue, {
+      repo: "sjawhar/legion",
+      headSha: "impl-sha",
+      headUpdatedAt: Date.parse("2026-08-23T00:00:00.000Z"),
+      verdict: "green",
+      ciSettledAt: 1,
+    });
+    state.prByBranch[`sjawhar/legion@${branch}`] = prKey;
+    // The tester's red tests: a planned red.
+    arrive(state, "impl-sha", "red-tests-sha", "legion-reviewer[bot]", "2026-08-23T12:00:00.000Z");
+    state.prs[prKey] = {
+      ...state.prs[prKey],
+      verdict: "red",
+      failing: ["test"],
+      ciSettledAt: 2,
+    } as PrState;
+    // The implementer's fix: its synchronize lands, its push webhook is lost.
+    arrive(state, "red-tests-sha", "fix-sha", null, "2026-08-23T12:01:00.000Z");
+    expect(state.prs[prKey]?.fixAttempts).toBe(0);
+
+    // Resync reads the fix head and its red rollup.
+    await runResync({ ...resyncDeps(state), fetchCiStatusBatch: readRedAt("fix-sha") });
+    expect(state.prs[prKey]).toMatchObject({ headSha: "fix-sha", verdict: "red" });
+
+    // After resync's read, so its synchronize is newer than the head resync recorded.
+    arrive(state, "fix-sha", "fix-2-sha", "legion-implementer[bot]", "2026-08-24T01:00:00.000Z");
+
+    expect(state.prs[prKey]?.fixAttempts).toBe(1);
   });
 });

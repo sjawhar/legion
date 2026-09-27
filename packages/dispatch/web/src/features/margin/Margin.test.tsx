@@ -759,6 +759,71 @@ test("Margin links an orphaned ask to its original document version", async () =
   }
 });
 
+test("the desktop margin takes no width on a route that has no margin", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["user-state"], {});
+  const originalMatchMedia = window.matchMedia;
+  const originalInnerWidth = window.innerWidth;
+  const innerWidthDescriptor = Object.getOwnPropertyDescriptor(window, "innerWidth");
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const inbox = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    expect(screen.queryByTestId("desktop-margin-shell")).toBeNull();
+    expect(screen.queryByRole("separator", { name: "Resize margin" })).toBeNull();
+    expect(screen.queryByText("Open an issue or document to review its margin.")).toBeNull();
+  } finally {
+    inbox.unmount();
+  }
+
+  const onIssue = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    expect(await screen.findByTestId("desktop-margin-shell")).toBeTruthy();
+  } finally {
+    onIssue.unmount();
+    window.matchMedia = originalMatchMedia;
+    if (innerWidthDescriptor === undefined) {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalInnerWidth,
+      });
+    } else {
+      Object.defineProperty(window, "innerWidth", innerWidthDescriptor);
+    }
+  }
+});
+
 test("desktop margin resize handle supports keyboard adjustments and reset", async () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },

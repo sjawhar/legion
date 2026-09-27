@@ -32,7 +32,7 @@ func TestTailPrintsEnvelopesOnTheSubject(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	publisher, err := bus.Connect([]string{url})
+	publisher, err := bus.ConnectOwningStream([]string{url})
 	if err != nil {
 		t.Fatalf("connect publisher: %v", err)
 	}

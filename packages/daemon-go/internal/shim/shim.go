@@ -33,14 +33,15 @@ import (
 
 const (
 	// backlogLimit is how many of OMP's newest frames wait for a daemon that is not connected
-	// (worker-shim.ts:117).
+	// (BACKLOG_LIMIT, worker-shim.ts).
 	backlogLimit = 1000
 	// A refused or failed connect is retried after reconnectBase, doubling to reconnectCap
-	// (worker-shim.ts:118-119, 531).
+	// (RECONNECT_BASE_MS and RECONNECT_CAP_MS, and cmdWorkerShimConnect's retry, worker-shim.ts).
 	reconnectBase = 200 * time.Millisecond
 	reconnectCap  = 5 * time.Second
 	// DefaultGrace is how long a SIGTERMed child has to exit before it is killed: the shipped
-	// shim's default, half the daemon's default `worker_stop_timeout_seconds` (worker-shim.ts:18-22).
+	// shim's default, half the daemon's default `worker_stop_timeout_seconds`
+	// (DEFAULT_TERMINATE_STDIN_GRACE_MS, worker-shim.ts).
 	DefaultGrace = 5 * time.Second
 	// drainTimeout bounds reading OMP's stdout after OMP has exited. What OMP wrote is in the pipe
 	// by then; only a process it started and left holding the pipe keeps it open past this.
@@ -72,6 +73,9 @@ type Config struct {
 	Env []string
 	// ProviderEnv is NAME=value pairs for OMP's environment only (--provider-env-dir).
 	ProviderEnv []string
+	// AgentSecrets is the pod's enrollment with the secrets broker (agentsecrets.go); nil on a
+	// tmux pane, which is never enrolled.
+	AgentSecrets *AgentSecrets
 	// Log receives the shim's own lines and its one-line frame summaries: what the pane shows.
 	Log io.Writer
 	// Grace is how long a SIGTERMed child has before it is killed; zero is DefaultGrace.
@@ -101,6 +105,7 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 	s.out.log = s.log
 	s.loop, s.stop = context.WithCancel(context.Background())
 	defer s.stop()
+	defer s.renewers.Wait() // the renewer, if one was started, is a child of s.loop and ends with it
 	go s.watch(ctx)
 	return s.run()
 }
@@ -128,6 +133,12 @@ type shim struct {
 	exiting     bool // the shim is ending before any child was spawned; none will be
 	terminating bool
 	childExited chan struct{}
+	thumbprint  string // agent-secrets keygen's thumbprint, generated once per shim
+	renewing    bool   // the agent-secrets renewer goroutine has been started
+
+	// renewers is the agent-secrets renewer goroutine (agentsecrets.go's startRenewer), reaped by
+	// Run's deferred Wait before it returns.
+	renewers sync.WaitGroup
 
 	once sync.Once
 	code int
@@ -136,7 +147,7 @@ type shim struct {
 
 // run dials until the shim ends. A connection that was acked and then dropped is redialled at
 // once; a dial that fails, or a stream the daemon closes before its ack — a refused hello — is
-// retried with backoff (worker-shim.ts:478-540).
+// retried with backoff (cmdWorkerShimConnect's dial loop, worker-shim.ts).
 func (s *shim) run() (int, error) {
 	failures := 0
 	for s.loop.Err() == nil {
@@ -163,6 +174,14 @@ func (s *shim) run() (int, error) {
 // connect is one connection: the hello, the wait for its ack, the child spawned on the first
 // ack, and the daemon's frames until the stream drops. It reports whether the daemon acked.
 func (s *shim) connect() (acked bool, err error) {
+	identity, err := s.identity()
+	if err != nil {
+		// A pod that cannot generate its key or read its token registers as nothing: the shim ends
+		// naming the failure, before any dial (finish cancels the loop, so run returns 1 and the
+		// error), and the daemon observes the pod gone.
+		s.finish(1, err)
+		return false, err
+	}
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(s.loop, s.cfg.Network, s.cfg.Address)
 	if err != nil {
@@ -172,7 +191,7 @@ func (s *shim) connect() (acked bool, err error) {
 	defer context.AfterFunc(s.loop, func() { _ = conn.Close() })()
 
 	w := shimwire.NewWriter(conn)
-	if err := w.WriteFrame(shimwire.Hello{BootToken: s.cfg.BootToken}); err != nil {
+	if err := w.WriteFrame(shimwire.Hello2{BootToken: s.cfg.BootToken, AgentSecrets: identity}); err != nil {
 		return false, fmt.Errorf("send hello: %w", err)
 	}
 	r := shimwire.NewReader(conn)
@@ -185,11 +204,11 @@ func (s *shim) connect() (acked bool, err error) {
 			break
 		}
 		// Nothing the daemon sends before its ack is meant for a child that does not exist yet
-		// (worker-shim.ts:492-497).
+		// (cmdWorkerShimConnect's onLine before hello_ack, worker-shim.ts).
 		s.log.Printf("[worker-shim] ignoring a frame received before hello_ack: %.80s", line)
 	}
 	// Spawned here, before the next line is read: the daemon's first RPC frame may share a read
-	// with the ack, and it must find a child to go to (worker-shim.ts:499-510).
+	// with the ack, and it must find a child to go to (cmdWorkerShimConnect's ack, worker-shim.ts).
 	if !s.spawnOnce() {
 		// The shim is ending — told to stop before any child, or unable to start one — and
 		// finish settles its status; nothing is left to bridge.
@@ -208,13 +227,13 @@ func (s *shim) connect() (acked bool, err error) {
 }
 
 // fromDaemon routes one daemon frame: the two the shim answers itself, a delivery the dedupe
-// answers, and everything else to OMP unchanged (worker-shim.ts:313-381).
+// answers, and everything else to OMP unchanged (createShimBridge's onLine, worker-shim.ts).
 func (s *shim) fromDaemon(line []byte) {
 	frame, err := shimwire.Decode(line)
 	if err != nil {
-		if frameType(line) == shimwire.TypeAdoptWorkingCopy {
+		if typ := frameType(line); typ == shimwire.TypeAdoptWorkingCopy || typ == shimwire.TypeAgentSecretsEnrollment {
 			// The daemon is its only sender, and it is never OMP's to read.
-			s.log.Printf("[worker-shim] refusing a malformed adopt-working-copy frame: %v", err)
+			s.log.Printf("[worker-shim] refusing a malformed %s frame: %v", typ, err)
 			return
 		}
 		s.toChild(line)
@@ -226,6 +245,9 @@ func (s *shim) fromDaemon(line []byte) {
 		return
 	case shimwire.AdoptWorkingCopy:
 		go s.adopt(f)
+		return
+	case shimwire.AgentSecretsEnrollment:
+		s.enroll(f)
 		return
 	}
 	s.order.Lock()
@@ -310,7 +332,7 @@ func (s *shim) spawnOnce() bool {
 
 // pump carries OMP's stdout to the daemon, line by line and unchanged, after the dedupe has seen
 // each frame; the answers the dedupe owes other requests follow the frame that settled them
-// (worker-shim.ts:249-292).
+// (createShimBridge's forwardToSocket, worker-shim.ts).
 func (s *shim) pump(stdout *os.File, done chan<- struct{}) {
 	defer close(done)
 	defer stdout.Close()
@@ -374,7 +396,7 @@ func exitStatus(state *os.ProcessState) int {
 }
 
 // watch is the shim's own termination: ctx ending ends the child as `shutdown` does, and with no
-// child yet ends the shim (worker-shim.ts:469-476).
+// child yet ends the shim (cmdWorkerShimConnect's onTerminate callback, worker-shim.ts).
 func (s *shim) watch(ctx context.Context) {
 	select {
 	case <-ctx.Done():
@@ -425,8 +447,9 @@ func (s *shim) finish(code int, err error) {
 	})
 }
 
-// adopt answers `adopt-working-copy` (worker-shim.ts:327-343). A request the shim cannot act on
-// is answered with the reason when it names an id to answer.
+// adopt answers `adopt-working-copy` (the adoption branch of createShimBridge's onLine,
+// worker-shim.ts). A request the shim cannot act on is answered with the reason when it names an
+// id to answer.
 func (s *shim) adopt(request shimwire.AdoptWorkingCopy) {
 	result := shimwire.AdoptWorkingCopyResult{ID: request.ID, OK: true}
 	if err := request.Validate(); err != nil {
@@ -442,7 +465,7 @@ func (s *shim) adopt(request shimwire.AdoptWorkingCopy) {
 }
 
 // adoptionArgs is the one adoption command both executors run (adoptWorkingCopyCommand,
-// packages/workspace/src/workspace.ts:365-381): the working copy's author becomes the identity in
+// packages/workspace/src/workspace.ts): the working copy's author becomes the identity in
 // the command's environment, and only while it is undescribed — a described working copy is a
 // previous phase's work and keeps its author.
 func adoptionArgs(jj, dir string) []string {
@@ -461,9 +484,9 @@ func describedArgs(jj, dir string) []string {
 // is, and the incoming role starts on a fresh one of its own (`jj new`): otherwise its work would
 // land in the previous role's commit, authored by the previous role's App. One read decides which
 // of the two changes the working copy needs, and only that one runs. A failure is reported the way
-// the shipped runner does (commandFailure, packages/workspace/src/workspace.ts:58-69): the daemon
+// the shipped runner does (commandFailure, packages/workspace/src/workspace.ts): the daemon
 // decides what a failed adoption means. A shim without either variable was not started by a
-// runtime, and refuses (worker-shim.ts:800-807).
+// runtime, and refuses (runWorkingCopyAdoption, worker-shim.ts).
 func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	workspace := envValue(s.cfg.Env, "LEGION_WORKSPACE")
 	if workspace == "" {
@@ -531,7 +554,7 @@ func envValue(env []string, name string) string {
 }
 
 // summarize is the one line the pane shows for a frame worth a human's glance, or nothing
-// (worker-shim.ts:121-144).
+// (summarizeShimFrame, worker-shim.ts).
 func summarize(frame shimwire.Frame) string {
 	switch f := frame.(type) {
 	case shimwire.AgentStart:
@@ -592,7 +615,8 @@ func truncate(s string, n int) string {
 
 // outbox is every frame bound for the daemon: written to the connection when one is attached,
 // held in the backlog of the newest backlogLimit frames when none is, and replayed in order —
-// ahead of anything newer — when the next connection is acked (worker-shim.ts:232-247, 306-312).
+// ahead of anything newer — when the next connection is acked (createShimBridge's forward and
+// onConnect, worker-shim.ts).
 type outbox struct {
 	mu      sync.Mutex
 	conn    net.Conn

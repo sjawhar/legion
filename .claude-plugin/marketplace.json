@@ -6,8 +6,8 @@
   "description": "Claude Code plugins for Legion.",
   "plugins": [
     {
-      "name": "claude-envoy-bridge",
-      "source": "./packages/claude-envoy-bridge",
+      "name": "claude-envoy",
+      "source": "./packages/claude-envoy",
       "description": "Delivers Envoy NATS notifications into Claude Code."
     }
   ]

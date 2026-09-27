@@ -1,7 +1,9 @@
 import { canonicalRepo } from "@legion/contracts/repo";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { api } from "../../api/client";
+import { Link } from "react-router-dom";
+
+import { api, isCredentialFeatureOff } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
 import type { RepoProject } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
@@ -9,6 +11,8 @@ import {
   borderDefault,
   dangerHoverText,
   dangerText,
+  linkHoverText,
+  linkText,
   textMutedOnCanvas,
   textMutedOnSurface,
   textPrimaryOnCanvas,
@@ -16,12 +20,14 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { credentialPendingQuery } from "../credentials/pending";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentTokensSection } from "./AgentTokensSection";
 import { ArchitectureSourcesSection } from "./ArchitectureSourcesSection";
 import {
   settingsFieldLabel,
   settingsMonoInput,
+  settingsSectionGap,
   settingsSubmitButton,
   settingsTableHead,
   settingsTableRow,
@@ -42,6 +48,7 @@ export function SettingsPage(): ReactNode {
   const [failedAction, setFailedAction] = useState<FailedAction>();
   const mappings = useQuery({ queryKey: ["repo-projects"], queryFn: () => api.listRepoProjects() });
   const projects = useQuery(projectsQuery());
+  const credentialsAvailable = useQuery(credentialPendingQuery());
   const putMapping = useMutation<
     RepoProject,
     Error,
@@ -118,139 +125,164 @@ export function SettingsPage(): ReactNode {
           Control where external repository issues appear in Dispatch.
         </p>
       </header>
-      <ProjectsSection />
-      <AgentTokensSection />
-      <section aria-labelledby="repository-projects-heading">
-        <h2
-          className={`text-xl font-semibold ${textPrimaryOnCanvas}`}
-          id="repository-projects-heading"
-        >
-          Repositories → Projects
-        </h2>
-        <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
-          External issues use these mappings before falling back to the default project.
-        </p>
+      <div className={settingsSectionGap}>
+        <ProjectsSection />
+        <AgentTokensSection />
+        {credentialsAvailable.isPending ||
+        isCredentialFeatureOff(credentialsAvailable.error) ? null : (
+          <section aria-labelledby="approver-keys-heading">
+            <h2
+              className={`text-xl font-semibold ${textPrimaryOnCanvas}`}
+              id="approver-keys-heading"
+            >
+              Approver keys
+            </h2>
+            <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
+              Register or endorse the WebAuthn keys the broker trusts you to approve credential
+              requests with, and review your live grants.
+            </p>
+            <Link
+              className={`mt-2 inline-block text-sm font-medium ${linkText} ${linkHoverText}`}
+              to="/credentials/keys"
+            >
+              Manage approver keys →
+            </Link>
+          </section>
+        )}
+        <section aria-labelledby="repository-projects-heading">
+          <h2
+            className={`text-xl font-semibold ${textPrimaryOnCanvas}`}
+            id="repository-projects-heading"
+          >
+            Repositories → Projects
+          </h2>
+          <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
+            External issues use these mappings before falling back to the default project.
+          </p>
 
-        {mappings.isPending || projects.isPending ? (
-          <p className={`mt-6 ${textMutedOnCanvas}`}>Loading settings…</p>
-        ) : null}
-        {mappings.isError ? (
-          <div className="mt-6">
-            <QueryError
-              message="Couldn't load repository mappings."
-              onRetry={() => void mappings.refetch()}
-              retrying={mappings.isFetching}
-            />
-          </div>
-        ) : null}
-        {projects.isError ? (
-          <div className="mt-6">
-            <QueryError
-              message="Couldn't load projects."
-              onRetry={() => void projects.refetch()}
-              retrying={projects.isFetching}
-            />
-          </div>
-        ) : null}
-        {mappings.isSuccess && projects.isSuccess ? (
-          <>
-            <div className={settingsTableWrapper}>
-              <table className="w-full text-left text-sm">
-                <thead className={settingsTableHead}>
-                  <tr>
-                    <th className="px-4 py-3 font-semibold" scope="col">
-                      Repository
-                    </th>
-                    <th className="px-4 py-3 font-semibold" scope="col">
-                      Project
-                    </th>
-                    <th className="px-4 py-3" scope="col">
-                      <span className="sr-only">Actions</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {mappings.data.length === 0 ? (
+          {mappings.isPending || projects.isPending ? (
+            <p className={`mt-6 ${textMutedOnCanvas}`}>Loading settings…</p>
+          ) : null}
+          {mappings.isError ? (
+            <div className="mt-6">
+              <QueryError
+                message="Couldn't load repository mappings."
+                onRetry={() => void mappings.refetch()}
+                retrying={mappings.isFetching}
+              />
+            </div>
+          ) : null}
+          {projects.isError ? (
+            <div className="mt-6">
+              <QueryError
+                message="Couldn't load projects."
+                onRetry={() => void projects.refetch()}
+                retrying={projects.isFetching}
+              />
+            </div>
+          ) : null}
+          {mappings.isSuccess && projects.isSuccess ? (
+            <>
+              <div className={settingsTableWrapper}>
+                <table className="w-full text-left text-sm">
+                  <thead className={settingsTableHead}>
                     <tr>
-                      <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={3}>
-                        No repository mappings yet.
-                      </td>
+                      <th className="px-4 py-3 font-semibold" scope="col">
+                        Repository
+                      </th>
+                      <th className="px-4 py-3 font-semibold" scope="col">
+                        Project
+                      </th>
+                      <th className="px-4 py-3" scope="col">
+                        <span className="sr-only">Actions</span>
+                      </th>
                     </tr>
-                  ) : (
-                    mappings.data.map((mapping) => (
-                      <tr className={settingsTableRow} key={mapping.repo}>
-                        <td className={`px-4 py-3 font-mono ${textPrimaryOnSurface}`}>
-                          {mapping.repo}
-                        </td>
-                        <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>{mapping.project}</td>
-                        <td className="px-4 py-3 text-right">
-                          <button
-                            aria-label={`Delete mapping for ${mapping.repo}`}
-                            className={`font-medium disabled:cursor-not-allowed disabled:opacity-50 ${dangerText} ${dangerHoverText}`}
-                            disabled={deleteMapping.isPending || putMapping.isPending}
-                            onClick={() => deleteMapping.mutate(mapping.repo)}
-                            type="button"
-                          >
-                            Delete
-                          </button>
+                  </thead>
+                  <tbody>
+                    {mappings.data.length === 0 ? (
+                      <tr>
+                        <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={3}>
+                          No repository mappings yet.
                         </td>
                       </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-
-            <form
-              className={`mt-6 grid gap-4 rounded-xl border p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end ${borderDefault}`}
-              onSubmit={submit}
-            >
-              <label className={settingsFieldLabel} htmlFor="repository">
-                Repository
-                <input
-                  className={settingsMonoInput}
-                  id="repository"
-                  onChange={(event) => setRepository(event.target.value)}
-                  pattern="[^/\s]+/[^/\s]+"
-                  placeholder="owner/repo"
-                  required
-                  value={repository}
-                />
-              </label>
-              <label className={settingsFieldLabel} htmlFor="project">
-                Project
-                <ProjectSelect
-                  id="project"
-                  onChange={setProject}
-                  projects={projects.data}
-                  value={project}
-                />
-              </label>
-              <button
-                className={settingsSubmitButton}
-                disabled={putMapping.isPending || deleteMapping.isPending}
-                type="submit"
-              >
-                Add mapping
-              </button>
-            </form>
-            {failedAction !== undefined ? (
-              <div className="mt-4">
-                <QueryError
-                  message={
-                    failedAction.kind === "put"
-                      ? `Couldn't save ${failedAction.repo}.`
-                      : `Couldn't delete ${failedAction.repo}.`
-                  }
-                  onRetry={retry}
-                  retrying={putMapping.isPending || deleteMapping.isPending}
-                />
+                    ) : (
+                      mappings.data.map((mapping) => (
+                        <tr className={settingsTableRow} key={mapping.repo}>
+                          <td className={`px-4 py-3 font-mono ${textPrimaryOnSurface}`}>
+                            {mapping.repo}
+                          </td>
+                          <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
+                            {mapping.project}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <button
+                              aria-label={`Delete mapping for ${mapping.repo}`}
+                              className={`font-medium disabled:cursor-not-allowed disabled:opacity-50 ${dangerText} ${dangerHoverText}`}
+                              disabled={deleteMapping.isPending || putMapping.isPending}
+                              onClick={() => deleteMapping.mutate(mapping.repo)}
+                              type="button"
+                            >
+                              Delete
+                            </button>
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
               </div>
-            ) : null}
-          </>
-        ) : null}
-      </section>
-      <ArchitectureSourcesSection />
+
+              <form
+                className={`mt-6 grid gap-4 rounded-xl border p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end ${borderDefault}`}
+                onSubmit={submit}
+              >
+                <label className={settingsFieldLabel} htmlFor="repository">
+                  Repository
+                  <input
+                    className={settingsMonoInput}
+                    id="repository"
+                    onChange={(event) => setRepository(event.target.value)}
+                    pattern="[^/\s]+/[^/\s]+"
+                    placeholder="owner/repo"
+                    required
+                    value={repository}
+                  />
+                </label>
+                <label className={settingsFieldLabel} htmlFor="project">
+                  Project
+                  <ProjectSelect
+                    id="project"
+                    onChange={setProject}
+                    projects={projects.data}
+                    value={project}
+                  />
+                </label>
+                <button
+                  className={settingsSubmitButton}
+                  disabled={putMapping.isPending || deleteMapping.isPending}
+                  type="submit"
+                >
+                  Add mapping
+                </button>
+              </form>
+              {failedAction !== undefined ? (
+                <div className="mt-4">
+                  <QueryError
+                    message={
+                      failedAction.kind === "put"
+                        ? `Couldn't save ${failedAction.repo}.`
+                        : `Couldn't delete ${failedAction.repo}.`
+                    }
+                    onRetry={retry}
+                    retrying={putMapping.isPending || deleteMapping.isPending}
+                  />
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </section>
+        <ArchitectureSourcesSection />
+      </div>
     </section>
   );
 }

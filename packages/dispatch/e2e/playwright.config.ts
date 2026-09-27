@@ -51,5 +51,18 @@ export default defineConfig({
   projects: [
     { name: "chromium", use: { ...devices["Desktop Chrome"] } },
     { name: "iphone", use: { ...devices["iPhone 13"], browserName: "chromium" } },
+    // A caret beside a collaborator's cursor behaves per engine, so that spec also runs in WebKit.
+    {
+      name: "webkit",
+      testMatch: /collab-cursor\.e2e\.ts/,
+      use: { ...devices["Desktop Safari"] },
+    },
+    // Firefox's native editing mishandles text typed over what follows a block's last line break,
+    // so that spec also runs in Firefox.
+    {
+      name: "firefox",
+      testMatch: /code-line-replace\.e2e\.ts/,
+      use: { ...devices["Desktop Firefox"] },
+    },
   ],
 });

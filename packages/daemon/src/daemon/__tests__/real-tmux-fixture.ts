@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { type DaemonConfig, repoForIssue } from "../config";
+import { type DaemonConfig, type GitHubAppRole, repoForIssue } from "../config";
 import type { LegionState } from "../legion-state";
 import { locatorsForIssue, type ProcessManagerDeps } from "../processes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
@@ -73,13 +73,54 @@ export interface TmuxTestServer {
   teardown(): Promise<void>;
 }
 
+/** Reaps this test's private tmux server the moment this process dies, even when that death is a
+ * SIGKILL past every `try`/`finally` and `afterAll` -- the one path where a killed `bun test`
+ * never runs its own teardown, leaving the pane's `legion worker-shim` (and the OMP stand-in
+ * behind it) to keep the private server alive forever. `setsid` is not asked to `--fork`: a
+ * process `Bun.spawn` opens is never its own process-group leader, so `setsid` calls `setsid()`
+ * in place rather than forking, and the pid this function returns is the actual watchdog loop,
+ * now in a session and process group of its own -- a SIGKILL to this test process's own group (or
+ * process tree) cannot reach it. The loop polls only this process's own liveness -- there is no
+ * server yet to check at arm time (`createTmuxTestServer`'s own doc comment: "There is no server
+ * until the test's first tmux command"), so a session-existence check here would exit the watchdog
+ * immediately, before the test ever creates one -- and `kill-server` is idempotent (tmux reports
+ * an already-exited or never-created server without creating one), so running it unconditionally
+ * once this process dies is safe whether or not a server ever existed. `teardown` below kills the
+ * watchdog outright once its own `kill-session` returns, so the watchdog never outlives both the
+ * test and the server it guards. */
+function armOrphanWatchdog(session: string) {
+  const parentPid = process.pid;
+  const script = [
+    `while kill -0 ${parentPid} 2>/dev/null; do sleep 3; done`,
+    `tmux -L ${session} kill-server 2>/dev/null`,
+  ].join("\n");
+  const watchdog = Bun.spawn(["setsid", "sh", "-c", script], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  watchdog.unref();
+  return watchdog;
+}
+
 /** Names one real-tmux test's private server/session from a UUID rather than a fixed label.
- * There is no server until the test's first tmux command; teardown kills only the named session,
- * never every session on its server. */
+ * There is no server until the test's first tmux command; teardown kills only the named session
+ * -- never `kill-server` (the whole-server primitive `tmux-e2e-isolation.test.ts` refuses
+ * anywhere in this source tree, #1208: a shared host could still be running another run's server
+ * under a name this one's UUID happens to collide with, however unlikely, and `kill-server` would
+ * tear down every session on it, not just this test's own). Since this session is always the
+ * server's only one, killing it ends the server too -- tmux exits once its last session is gone
+ * -- so this stays as complete a teardown as `kill-server` would be, just scoped to the one name
+ * this run actually minted. A watchdog reaps that same private server if this process dies before
+ * teardown runs (see `armOrphanWatchdog`): its own `kill-server` is the one exception the guard
+ * does not need to cover, since it is a shell string the watchdog's script builds, addressed at
+ * the exact socket this call already owns. The orphaned session is still standing when the
+ * watchdog fires -- `kill-session -t <session>` would reach it exactly as `teardown` does -- so
+ * `kill-server` here is simply equivalent, not the only option, and carries the same negligible
+ * collision exposure either way. */
 export function createTmuxTestServer(label: string): TmuxTestServer {
   const project = `${label}${randomUUID().replaceAll("-", "")}`;
   const session = `legion-${project}`;
   const argv = (...rest: string[]) => ["tmux", "-L", session, ...rest];
+  const watchdog = armOrphanWatchdog(session);
   return {
     project,
     session,
@@ -87,6 +128,7 @@ export function createTmuxTestServer(label: string): TmuxTestServer {
     argv,
     teardown: async () => {
       await run(argv("kill-session", "-t", session));
+      watchdog.kill();
     },
   };
 }
@@ -203,11 +245,11 @@ export function realProcessManagerDeps(
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       baseEnv: {},
       tokenManager: {
-        getToken: async () => ({
+        getToken: async (role: GitHubAppRole) => ({
           token: "worker-token",
           expiresAt: "2099-01-01T00:00:00.000Z",
           gitIdentity: {
-            name: "legion-implement[bot]",
+            name: role === "review" ? "legion-review[bot]" : "legion-implement[bot]",
             email: "implement@users.noreply.github.com",
           },
         }),

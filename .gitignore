@@ -158,8 +158,8 @@ out
 .nuxt
 dist
 packages/*/dist/
-# The Claude Code plugin cache runs the bridge from its committed bundle.
-!packages/claude-envoy-bridge/dist/
+# The Claude Code plugin cache runs the plugin from its committed bundle.
+!packages/claude-envoy/dist/
 
 # Gatsby files
 .cache/
@@ -274,3 +274,7 @@ packages/dispatch/e2e/playwright-report/
 
 # PR screenshots live on detached bookmarks built off root(), never in main history.
 /pr-screenshots/
+
+# Operator secrets (provider keys, the operator token, the App keys) the removed kind overlay's
+# runbook had operators create inside the checkout; never tracked.
+deploy/kubernetes/daemon/overlays/kind/secrets/

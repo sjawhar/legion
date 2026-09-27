@@ -26,6 +26,15 @@ symptoms:
 
 # Rebasing an issue branch across a refactor of the code it changed
 
+**Superseded 2026-09-27 (LEGION-118):** the legion-worker skill's own conflict/retarget step is
+now a forward merge (`jj new legion/<KEY> <destination> -m "<message>"`, one new commit, never a
+rebase of the whole chain), so §5's rebase/squash mechanics and the "Rewriting pushed commits"
+reference no longer apply there — the merge is a genuine fast-forward and needs no pushed-tip
+bookkeeping. The reasoning below (re-anchor the invariant, resolve the conflict once bottom-up,
+type-check untouched fixtures, distrust `jj diff --from main`) is about *how to resolve* a
+conflict against a moved call site, independent of whether it arrives as one merge commit or a
+rebased chain, and stays current for that.
+
 PR #956 (LEGION-17) was rebased onto `main` twice in one round. The second rebase crossed 61
 commits, including LEGION-21's runtime boundary (#962), which had rewritten the exact region of
 `processes.ts` this branch had changed. Nothing about jj was hard; what was hard was deciding
@@ -83,16 +92,23 @@ is cheap enough (40 s here) that it was re-run anyway.
 
 ## 5. jj housekeeping specific to a rebased worker branch
 
+**Superseded 2026-09-27 (LEGION-118):** this housekeeping is for a rebased chain (divergent
+empty siblings from repeated rebases, the undescribed-working-copy push refusal, recording a
+pushed tip before a rewrite). The worker's own conflict/retarget step is now a forward merge —
+one new commit, nothing rewritten, no tip to record — so none of it applies there. Still useful
+for a genuine multi-commit rebase outside that step.
+
 - Before LEGION-58 the daemon-provisioned `.omp/config.yml` lived in the empty working-copy
   commit. Two rebases of the chain made that change divergent (two empty siblings of the head).
   Neither is under the bookmark and neither holds tracked content; `jj edit <one of them>` puts the
   working copy back on the tip. The worker skill forbids `jj abandon`, so leave the other in place
   and note it in the handoff.
-- After every `jj split` or `jj squash` that rewrites the head, re-run
-  `jj bookmark set legion/<KEY> -r @- --allow-backwards` before pushing; the bookmark otherwise
-  points at the undescribed working-copy commit, which `jj git push` refuses.
-- A reviewer's locally committed handoff sits above origin in the shared workspace (only the
-  implementer pushes). It rides along on the implementer's next push; confirm it is an ancestor of your
+- After every `jj split` or `jj squash` that rewrites the head, push with `skills/legion-worker/SKILL.md`'s push procedure,
+  which sets the bookmark with `-r @- --allow-backwards`; the bookmark otherwise points at the
+  undescribed working-copy commit, which `jj git push` refuses. A rebase or a squash into a pushed
+  commit records the pushed tip first (*Rewriting pushed commits* there), so the push is refused
+  if another role pushed in between.
+- A reviewer's handoff commit sits in the chain below yours; confirm it is an ancestor of your
   commit with `jj log` before building on it, and mention it in the push summary.
 
 ## 6. `jj diff --from main --to <branch>` is not the pull request's diff once `main` moves again

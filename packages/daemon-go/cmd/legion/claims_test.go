@@ -112,6 +112,10 @@ func (s *memoryClaims) PutDelivery(context.Context, legionclaim.Token, supervise
 	return nil
 }
 
+func (s *memoryClaims) PutClaimAndDelivery(context.Context, supervise.Claim, supervise.Delivery) error {
+	return nil
+}
+
 func (s *memoryClaims) RetireDelivery(context.Context, supervise.Claim, string) error { return nil }
 
 func (s *memoryClaims) ClaimByBootTokenHash(_ context.Context, hash []byte) (supervise.Claim, bool, error) {
@@ -549,7 +553,7 @@ func TestClaimsPrintsTheDaemonsRefusalAndFails(t *testing.T) {
 			args: func(d *operatorDaemon) []string {
 				return append(append([]string{"stop"}, d.reach()...), "--claim", string(architectClaim))
 			},
-			want: "the daemon answered 409 Conflict: stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered",
+			want: "the daemon answered 409 Conflict: stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered; no workflow issue backs its tree, so legion claims close ends it",
 		},
 		{
 			name: "a spawn the daemon cannot name",
@@ -669,7 +673,7 @@ func TestClaimsRefusesAMissingFlagBeforeReachingTheDaemon(t *testing.T) {
 	}
 }
 
-// The bearer is read by config.ReadOperatorTokenFile's rules: a token file that cannot be read,
+// The bearer is read by config.ReadPrivateSecretPointer's rules: a token file that cannot be read,
 // holds nothing but whitespace, is not a regular file, or that its group or others can read fails
 // the command naming the path, and nothing is sent.
 func TestClaimsRefusesAnOperatorTokenFileItCannotRead(t *testing.T) {

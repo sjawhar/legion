@@ -23,8 +23,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 type handlerFunc func(context.Context, pgx.Tx, Fact) (Result, error)
@@ -71,7 +73,7 @@ func TestApplyFactDeduplicatesBeforeHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("duplicate ApplyFact: %v", err)
 	}
-	if result != (Result{Duplicate: true}) {
+	if result.Duplicate != true || result.Refusal != nil || len(result.AfterCommit) != 0 {
 		t.Fatalf("duplicate result = %#v, want a duplicate with no refusal", result)
 	}
 	if got := writeCount(t, pool); got != 1 {
@@ -164,7 +166,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "pull request closed",
 			subject: "notifications.github.sjawhar.legion.pr.42",
 			file:    "github/pr-closed.json",
-			want:    PullRequestClosed{Repo: "sjawhar/legion", Number: 42},
+			want:    PullRequestClosed{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head-captured", UpdatedAt: updatedAt},
 		},
 		{
 			name:    "pull request merged",
@@ -188,7 +190,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "branch push",
 			subject: "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208",
 			file:    "github/push.json",
-			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false")},
+			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "before-captured", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false"), Pusher: "author"},
 		},
 		{
 			name:    "comment",
@@ -203,7 +205,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read captured envelope: %v", err)
 			}
-			got, err := decodeMessage(tc.subject, "CAPTURE", data)
+			got, err := decodeMessage(tc.subject, "CAPTURE", capturedRepositories, data)
 			if err != nil {
 				t.Fatalf("decode captured envelope: %v", err)
 			}
@@ -216,8 +218,90 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 
 func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	data := capturedIssueUpdatedEnvelope(t)
-	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", data); err != nil {
+	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, data); err != nil {
 		t.Fatalf("decode captured issue.updated envelope: %v", err)
+	}
+}
+
+// An issue event's labels say whether it is handed to Legion; decodeDispatchFact resolves that
+// once, into HandedOver, matching the label in any case among any others, never carrying the raw
+// list itself.
+func TestADispatchIssueEventResolvesHandedOverFromItsLabels(t *testing.T) {
+	data := strings.Replace(string(capturedIssueUpdatedEnvelope(t)), `\"labels\":[]`, `\"labels\":[\"frontend\",\"Legion\"]`, 1)
+	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(data))
+	if err != nil {
+		t.Fatalf("decode labeled issue.updated envelope: %v", err)
+	}
+	issue, ok := got.Fact.(DispatchIssue)
+	if !ok || !issue.HandedOver {
+		t.Fatalf("fact = %#v, want a Dispatch issue with HandedOver true (labels included Legion)", got.Fact)
+	}
+}
+
+// Envoy's goldens (packages/contracts/fixtures/github-envelopes, which its golden test writes from
+// its webhook fixtures) are the subjects its listener publishes. For each, the consumer configured
+// with the payload's repository filters on a prefix of the golden's topic and decodes the workflow
+// fact the golden carries: the two sides spell a repository's subject segments alike, a dotted name
+// included.
+func TestEnvoyGoldenSubjectsReachTheirRepositorysConsumer(t *testing.T) {
+	goldens, err := filepath.Glob(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "*.json"))
+	if err != nil || len(goldens) == 0 {
+		t.Fatalf("Envoy golden envelopes: %v, %d found", err, len(goldens))
+	}
+	for _, path := range goldens {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var golden struct {
+				Topic          string         `json:"topic"`
+				PayloadSummary string         `json:"payload_summary"`
+				Payload        map[string]any `json:"payload"`
+			}
+			if err := json.Unmarshal(data, &golden); err != nil {
+				t.Fatalf("decode golden: %v", err)
+			}
+			repository := ghrepo.MustParse(golden.Payload["repo"].(string))
+			filter := githubFilters([]ghrepo.Repository{repository})[0]
+			if !strings.HasPrefix(golden.Topic, strings.TrimSuffix(filter, ">")) {
+				t.Fatalf("%s's consumer filters %s, which does not match Envoy's %s", repository, filter, golden.Topic)
+			}
+			payload, err := json.Marshal(golden.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			envelope, err := json.Marshal(map[string]any{
+				"event_id": "golden", "source": "github", "source_event_id": "golden", "topic": golden.Topic,
+				"dedupe_key": "golden", "issued_at": 1, "payload_summary": golden.PayloadSummary,
+				"payload": string(payload), "trace_id": "golden",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := decodeMessage(golden.Topic, "GOLDEN", []ghrepo.Repository{repository}, envelope)
+			if err != nil {
+				t.Fatalf("decode %s: %v", golden.Topic, err)
+			}
+			if kind := golden.Payload["kind"]; (kind == "pr" || kind == "review" || kind == "push") && decoded.Fact == nil {
+				t.Fatalf("%s's %s event decoded no fact", repository, kind)
+			}
+		})
+	}
+}
+
+// A checks settlement names its pull request in its subject, where a dotted repository name is one
+// segment, a dot as `_`: the settlement decodes for the repository its payload names.
+func TestDecodeChecksForADottedRepository(t *testing.T) {
+	data := capturedGitHubEnvelope(t, "checks.json")
+	data = bytes.ReplaceAll(data, []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
+	data = bytes.ReplaceAll(data, []byte("sjawhar.legion."), []byte("sjawhar.legion_x."))
+	decoded, err := decodeMessage("notifications.github.sjawhar.legion_x.pr.42.checks", "CAPTURE", []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion.x")}, data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if checks, ok := decoded.Fact.(PullRequestChecks); !ok || checks.Repo != "sjawhar/legion.x" || checks.Number != 42 {
+		t.Fatalf("fact = %#v, want sjawhar/legion.x#42's checks", decoded.Fact)
 	}
 }
 
@@ -232,7 +316,7 @@ func TestConsumeTermsPoisonMessagesOnce(t *testing.T) {
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-208.issue.updated", []byte(`{`))
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-208.issue.updated", envelopeJSON(t, "dispatch-poison", "dispatch", `{"id":1,"issue_key":"CAPTURE-208","seq":1,"notify":true,"type":"issue.updated","payload":{"key":"CAPTURE-999","status":"todo","title":"wrong key"}}`))
-	eventually(t, "two poison logs", func() bool { return strings.Count(logs.String(), "poison JetStream message") == 2 })
+	testwait.Eventually(t, "two poison logs", func() bool { return strings.Count(logs.String(), "poison JetStream message") == 2 })
 	time.Sleep(3 * spec.AckWait)
 	if got := strings.Count(logs.String(), "poison JetStream message"); got != 2 {
 		t.Fatalf("poison logs after ack wait = %d, want 2", got)
@@ -253,7 +337,7 @@ func TestConsumeAcknowledgesAnotherProjectsDispatchEventWithoutApplyingIt(t *tes
 	defer stop()
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	eventually(t, "the foreign event acknowledged", func() bool {
+	testwait.Eventually(t, "the foreign event acknowledged", func() bool {
 		consumer, err := stream.Consumer(context.Background(), dispatchConsumerName(spec.Project))
 		if err != nil {
 			return false
@@ -263,6 +347,35 @@ func TestConsumeAcknowledgesAnotherProjectsDispatchEventWithoutApplyingIt(t *tes
 	})
 	if got := writeCount(t, pool); got != 0 {
 		t.Fatalf("handler writes for another project's event = %d, want 0", got)
+	}
+}
+
+// A subject inside a repository's filter does not prove the event is that repository's: a
+// repository whose name holds a dot (`sjawhar/legion.x`) publishes under more segments than an owner
+// and a name, which `sjawhar/legion`'s filter matches. The payload's repository decides, as the
+// shipped daemon's does (reducers.ts registerPrFenced: a pull request whose repository is not its
+// issue's is not registered), so another repository's pull request on a `legion/<KEY>` branch is
+// acknowledged and never reaches a handler.
+func TestConsumeAcknowledgesAnotherRepositorysGitHubEventWithoutApplyingIt(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	stop := startConsume(t, js, spec, pool, writeHandler("foreign", nil))
+	defer stop()
+
+	foreign := bytes.ReplaceAll(capturedGitHubEnvelope(t, "pr-opened.json"), []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
+	publish(t, js, "notifications.github.sjawhar.legion.x.pr.42", foreign)
+	testwait.Eventually(t, "the foreign pull request acknowledged", func() bool {
+		consumer, err := stream.Consumer(context.Background(), githubConsumerName(spec.Project))
+		if err != nil {
+			return false
+		}
+		info, err := consumer.Info(context.Background())
+		return err == nil && info.AckFloor.Consumer == 1 && info.NumAckPending == 0
+	})
+	if got := writeCount(t, pool); got != 0 {
+		t.Fatalf("handler writes for another repository's pull request = %d, want 0", got)
 	}
 }
 
@@ -277,7 +390,7 @@ func TestConsumeDeduplicatesOneEventAcrossDeliveries(t *testing.T) {
 	message := capturedIssueUpdatedEnvelope(t)
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", message)
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", message)
-	eventually(t, "one deduplicated write", func() bool { return writeCount(t, pool) == 1 })
+	testwait.Eventually(t, "one deduplicated write", func() bool { return writeCount(t, pool) == 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 }
 
@@ -300,7 +413,7 @@ func TestConsumeNaksRollbackAndAppliesRedeliveryOnce(t *testing.T) {
 	defer stop()
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	eventually(t, "redelivery committed once", func() bool { return calls.Load() >= 2 && writeCount(t, pool) == 1 })
+	testwait.Eventually(t, "redelivery committed once", func() bool { return calls.Load() >= 2 && writeCount(t, pool) == 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 }
 
@@ -312,13 +425,13 @@ func TestConsumeRestartResumesAfterAcknowledgedMessage(t *testing.T) {
 	stop := startConsume(t, js, spec, pool, writeHandler("restart", nil))
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	eventually(t, "first committed message", func() bool { return writeCount(t, pool) == 1 })
+	testwait.Eventually(t, "first committed message", func() bool { return writeCount(t, pool) == 1 })
 	stop()
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-4.issue.created", capturedIssueCreatedEnvelope(t))
 	stop = startConsume(t, js, spec, pool, writeHandler("restart", nil))
 	defer stop()
-	eventually(t, "durable consumer resumes after ack", func() bool { return writeCount(t, pool) == 2 })
+	testwait.Eventually(t, "durable consumer resumes after ack", func() bool { return writeCount(t, pool) == 2 })
 }
 
 // A daemon's first boot on a NATS server already holding history — production's stream keeps
@@ -345,7 +458,7 @@ func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
 	stop := runConsumers(t, consumers, pool, writeHandler("fresh", nil))
 	defer stop()
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-4.issue.created", capturedIssueCreatedEnvelope(t))
-	eventually(t, "the next message committed", func() bool { return writeCount(t, pool) >= 1 })
+	testwait.Eventually(t, "the next message committed", func() bool { return writeCount(t, pool) >= 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 	if got := writeCount(t, pool); got != 1 {
 		t.Errorf("%d facts committed, want only the message published after the consumers were created", got)
@@ -371,7 +484,7 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 		}
 	}
 
-	spec.Repositories = []string{"sjawhar/legion", "acme/widgets"}
+	spec.Repositories = []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
 	if _, err := OpenConsumers(context.Background(), js, spec); err != nil {
 		t.Fatalf("OpenConsumers over existing consumers: %v", err)
 	}
@@ -386,7 +499,7 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 
 	stop := startConsume(t, js, spec, pool, writeHandler("existing", nil))
 	defer stop()
-	eventually(t, "both backlogs delivered and acknowledged", func() bool {
+	testwait.Eventually(t, "both backlogs delivered and acknowledged", func() bool {
 		for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
 			if info := consumerInfo(t, stream, name); info.NumPending != 0 || info.NumAckPending != 0 || info.Delivered.Consumer == 0 {
 				return false
@@ -431,14 +544,28 @@ func TestConsumeCommitsRefusalAndAcknowledges(t *testing.T) {
 	defer stop()
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	eventually(t, "refusal committed", func() bool { return writeCount(t, pool) == 1 && strings.Count(logs.String(), "committed refusal") == 1 })
+	testwait.Eventually(t, "refusal committed", func() bool { return writeCount(t, pool) == 1 && strings.Count(logs.String(), "committed refusal") == 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 }
+
+// Every carrier of a ghrepo.Repository refuses the zero value, and intake is one: a zero
+// repository would subscribe to `notifications.github...>`, a subject no repository publishes on,
+// and intake would wait on it silently. The spec is refused by name before any consumer opens.
+func TestOpenConsumersRefusesAZeroRepository(t *testing.T) {
+	spec := consumerSpec(&lockedBuffer{})
+	spec.Repositories = append(spec.Repositories, ghrepo.Repository{})
+	if _, err := normalizedSpec(spec); err == nil || err.Error() != "intake consumer repository is required" {
+		t.Fatalf("normalizedSpec with a zero repository = %v, want \"intake consumer repository is required\"", err)
+	}
+}
+
+// capturedRepositories is the repository every captured GitHub envelope names.
+var capturedRepositories = []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}
 
 func consumerSpec(logs *lockedBuffer) ConsumerSpec {
 	return ConsumerSpec{
 		Project:      "CAPTURE",
-		Repositories: []string{"sjawhar/legion"},
+		Repositories: capturedRepositories,
 		AckWait:      200 * time.Millisecond,
 		NakDelay:     25 * time.Millisecond,
 		Logger:       slog.New(slog.NewTextHandler(logs, nil)),
@@ -490,7 +617,7 @@ func publish(t *testing.T, js jetstream.JetStream, subject string, data []byte) 
 
 func assertNoAckPending(t *testing.T, stream jetstream.Stream, consumer string) {
 	t.Helper()
-	eventually(t, consumer+" has no acknowledgement pending", func() bool {
+	testwait.Eventually(t, consumer+" has no acknowledgement pending", func() bool {
 		item, err := stream.Consumer(context.Background(), consumer)
 		if err != nil {
 			return false
@@ -638,25 +765,6 @@ func randomSuffix(t *testing.T) string {
 	return hex.EncodeToString(b[:])
 }
 
-// eventually polls until the condition holds. What it waits for is something the daemon reaches on
-// its own — a delivery, the transaction that answers it — so the wait is bounded by this test
-// binary's own deadline rather than a fixed span: on a loaded machine a step that is merely slow
-// is not a failure, and a condition that never holds still fails here, naming what it waited for.
-func eventually(t *testing.T, what string, condition func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(time.Minute)
-	if testDeadline, ok := t.Deadline(); ok && testDeadline.Add(-time.Second).Before(deadline) {
-		deadline = testDeadline.Add(-time.Second)
-	}
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
-}
-
 type lockedBuffer struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -713,7 +821,7 @@ func TestApplyFactSerializesConcurrentFacts(t *testing.T) {
 		_, err := ApplyFact(ctx, pool, "test", "second", DispatchIssue{Key: "LEGION-209"}, increment(nil, nil))
 		second <- err
 	}()
-	eventually(t, "the second fact to wait for the first", func() bool {
+	testwait.Eventually(t, "the second fact to wait for the first", func() bool {
 		var waiting int
 		if err := pool.QueryRow(ctx, `select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'`).Scan(&waiting); err != nil {
 			return false
@@ -737,7 +845,8 @@ func TestApplyFactSerializesConcurrentFacts(t *testing.T) {
 }
 
 // A reopened pull request is open again, recorded as when it opened: a closed pull request's record
-// is dropped at the next re-admission, so one reopened in between must not stay closed.
+// is dropped at the next re-admission, so one reopened in between must not stay closed. The fact
+// says it is a reopen, since GitHub sends opened only once and a second one is a redelivery.
 func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
 	data, err := os.ReadFile("testdata/github/pr-opened.json")
 	if err != nil {
@@ -756,11 +865,11 @@ func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", reopened)
+	got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", capturedRepositories, reopened)
 	if err != nil {
 		t.Fatalf("decode reopened: %v", err)
 	}
-	if opened, ok := got.Fact.(PullRequestOpened); !ok || opened.Number != 42 || opened.Branch != "legion/LEGION-208" || opened.HeadSHA != "head-captured" {
+	if opened, ok := got.Fact.(PullRequestOpened); !ok || opened.Number != 42 || opened.Branch != "legion/LEGION-208" || opened.HeadSHA != "head-captured" || !opened.Reopened {
 		t.Fatalf("reopened fact = %#v, want the pull request opened again", got.Fact)
 	}
 }
@@ -785,18 +894,83 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", byAgent)
+	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, byAgent)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if issue, ok := got.Fact.(DispatchIssue); !ok || issue.ActorSession != "ses-impl" {
 		t.Fatalf("fact = %#v, want the session actor ses-impl", got.Fact)
 	}
-	human, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", data)
+	human, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, data)
 	if err != nil {
 		t.Fatalf("decode the captured event: %v", err)
 	}
 	if issue, ok := human.Fact.(DispatchIssue); !ok || issue.ActorSession != "" {
 		t.Fatalf("fact = %#v, want no session actor for a user", human.Fact)
+	}
+}
+
+// The listener's forced marker, GitHub's review id and the review's submission time reach the
+// facts: the workflow reads a push without the marker as forced and orders reviews by submission
+// time then id, so each must survive decoding exactly. A review id that is not a positive integer
+// is refused rather than read as none. A time that cannot be read is taken as none and reported,
+// since a review without one is still ordered, by its id.
+func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
+	withPayload := func(t *testing.T, name, subject string, set map[string]any) (decodedMessage, error) {
+		t.Helper()
+		var envelope map[string]any
+		if err := json.Unmarshal(capturedGitHubEnvelope(t, name), &envelope); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		// The envelope carries its payload as JSON text.
+		var payload map[string]any
+		if err := json.Unmarshal([]byte(envelope["payload"].(string)), &payload); err != nil {
+			t.Fatalf("parse %s's payload: %v", name, err)
+		}
+		for key, value := range set {
+			payload[key] = value
+		}
+		text, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatalf("encode %s's payload: %v", name, err)
+		}
+		envelope["payload"] = string(text)
+		data, err := json.Marshal(envelope)
+		if err != nil {
+			t.Fatalf("encode %s: %v", name, err)
+		}
+		return decodeMessage(subject, "CAPTURE", capturedRepositories, data)
+	}
+	pushSubject := "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208"
+	reviewSubject := "notifications.github.sjawhar.legion.pr.42.review"
+
+	for _, forced := range []string{"true", "false"} {
+		decoded, err := withPayload(t, "push.json", pushSubject, map[string]any{"forced": forced})
+		if push, ok := decoded.Fact.(Push); err != nil || !ok || push.Forced == nil || *push.Forced != forced {
+			t.Fatalf("push with forced %q = %#v, %v", forced, decoded.Fact, err)
+		}
+	}
+	decoded, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010",
+		"submitted_at": "2026-09-26T12:03:00+02:00"})
+	submitted := time.Date(2026, 9, 26, 10, 3, 0, 0, time.UTC)
+	if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 ||
+		!review.SubmittedAt.Equal(submitted) || len(decoded.Unread) != 0 {
+		t.Fatalf("review with an id and a submission time = %#v, unread %q, %v", decoded.Fact, decoded.Unread, err)
+	}
+	if _, err := withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "not-a-number"}); err == nil {
+		t.Fatal("a review id that is not a number decoded")
+	}
+	for _, unreadable := range []any{"yesterday", 1.72735218e+09, true, map[string]any{"t": "2026-09-26T12:03:00Z"}} {
+		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": unreadable})
+		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || review.ID != 5325101010 || !review.SubmittedAt.IsZero() ||
+			len(decoded.Unread) != 1 || !strings.Contains(decoded.Unread[0], "submitted_at") {
+			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and the field reported", unreadable, decoded.Fact, decoded.Unread, err)
+		}
+	}
+	for _, absent := range []any{nil, ""} {
+		decoded, err = withPayload(t, "review.json", reviewSubject, map[string]any{"review_id": "5325101010", "submitted_at": absent})
+		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || !review.SubmittedAt.IsZero() || len(decoded.Unread) != 0 {
+			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and nothing reported", absent, decoded.Fact, decoded.Unread, err)
+		}
 	}
 }

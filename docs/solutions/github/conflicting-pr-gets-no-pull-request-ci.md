@@ -63,28 +63,30 @@ seconds and both workflows completed green.
    a release commit landed during conflict resolution and a second, conflict-free rebase was
    needed before the push.
 
-## Rebasing a Legion branch that carries other roles' commits
+## Resolving a Legion branch's conflict without rewriting another tree's commits
 
-The shared issue workspace holds the reviewer's and tester's handoff commits, some of them not
-yet on origin (only the implementer pushes; the other roles' commits ride on its next push).
-Rebase the whole chain, never only your own commits:
+The shared issue workspace holds the reviewer's and tester's handoff commits, and every issue
+workspace is a `jj workspace` of one shared repository and operation log — jj rebases every
+descendant of any commit it rewrites, so a rebase rooted at the branch's fork point also rewrites
+another tree's branch whenever one happens to be stacked on this one (LEGION-118). Resolve with a
+forward merge instead, which touches nothing that already exists:
 
 ```sh
-jj rebase -s 'roots(main@origin..@)' -d main@origin
+jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
 ```
 
-This moves every commit above `main` — yours, the tester's, the reviewer's local one — so the
-push that follows carries them in order. Resolve conflicts bottom-up with edit-and-squash
-(`jj new <first conflicted>`, fix, `jj squash`), as
-`docs/solutions/legion/handoff-file-conflicts-during-rebases.md` describes; jj re-applies the
-resolution to every descendant, so a conflict at the cutover commit is resolved once. Leave the
-stray empty working-copy commits `jj new` creates with `jj abandon` before `jj edit`ing the tip,
-and re-set the bookmark to the tip before pushing.
+Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed commit,
+and `jj git push` refuses to push any commit without a description. If it conflicts, resolve it
+directly in that one commit — edit the markers; there is nothing to squash, since the merge is
+the only new commit, and never `jj abandon` a stray working-copy commit in the shared workspace.
+It is a genuine fast-forward (the merge descends from both the bookmark's old position and
+`main@origin`), so advance the bookmark onto it and push with the ordinary push procedure in
+`skills/legion-worker/SKILL.md`.
 
 ## Related
 
 - `docs/solutions/github/pull-request-trigger-paths-follow-the-pr-head.md`: a different way a PR
   check fails to appear (a path-filtered workflow triggered on `push` instead of
   `pull_request`) on a *mergeable* PR.
-- `docs/solutions/legion/handoff-file-conflicts-during-rebases.md`: the `.legion/` conflict
-  resolution procedure the rebase above relies on.
+- `docs/solutions/legion/handoff-file-conflicts-during-rebases.md`: the `.legion/` handoff-file
+  conflict a rebase spread across several commits; the forward merge above raises it once.

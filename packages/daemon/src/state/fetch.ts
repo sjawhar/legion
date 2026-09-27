@@ -719,3 +719,78 @@ async function getCiStatusBatchWithOptions(
 
   return result;
 }
+
+// =============================================================================
+// Compare Two Heads
+// =============================================================================
+
+/** GitHub's compare lists at most this many files; a response at the limit may be partial. */
+const COMPARE_FILE_LIMIT = 300;
+
+/** The paths GitHub's compare of `base...head` changes: each file's name and, for a rename, its
+ * previous name. `truncated` when GitHub listed its maximum of files, so the list may be partial.
+ * `authors` holds each listed commit's author as GitHub attributes it (`author.login`, the account
+ * its email resolves to, `null` when it resolves to none); `commitsTruncated` when the range holds
+ * more commits than GitHub listed (`total_commits`; it lists at most 250). */
+export interface ComparedPaths {
+  paths: string[];
+  truncated: boolean;
+  authors: Array<string | null>;
+  commitsTruncated: boolean;
+}
+
+/** Reads `GET repos/<repo>/compare/<base>...<head>` through `gh api` (`repo` is `owner/name`).
+ * Throws `GitHubAPIError` naming the range when gh fails or the answer has another shape. */
+export async function getComparedPaths(
+  repo: string,
+  base: string,
+  head: string,
+  runner: CommandRunner,
+  runnerOptions?: CommandRunnerOptions
+): Promise<ComparedPaths> {
+  const range = `${repo} ${base}...${head}`;
+  const { stdout, stderr, exitCode } = await runner(
+    ["gh", "api", `repos/${repo}/compare/${base}...${head}`],
+    runnerOptions
+  );
+  if (exitCode !== 0) {
+    throw new GitHubAPIError(`compare ${range} failed: ${stderr.trim() || `exit ${exitCode}`}`);
+  }
+  let answer: Record<string, unknown> | undefined;
+  try {
+    answer = recordValue(JSON.parse(stdout));
+  } catch (error) {
+    throw new GitHubAPIError(`compare ${range} answered unparsable JSON: ${error}`);
+  }
+  const files = answer?.files ?? [];
+  const commits = answer?.commits;
+  const totalCommits = answer?.total_commits;
+  if (!Array.isArray(files) || !Array.isArray(commits) || typeof totalCommits !== "number")
+    throw new GitHubAPIError(`compare ${range} answered an unexpected shape`);
+  const authors: Array<string | null> = [];
+  for (const commit of commits) {
+    const author = recordValue(commit)?.author;
+    const login = author === null ? null : recordValue(author)?.login;
+    if (login !== null && typeof login !== "string") {
+      throw new GitHubAPIError(`compare ${range} answered an unexpected shape`);
+    }
+    authors.push(login);
+  }
+  const paths: string[] = [];
+  for (const file of files) {
+    const entry = recordValue(file);
+    const filename = entry?.filename;
+    const previous = entry?.previous_filename;
+    if (typeof filename !== "string" || (previous !== undefined && typeof previous !== "string")) {
+      throw new GitHubAPIError(`compare ${range} answered an unexpected shape`);
+    }
+    paths.push(filename);
+    if (previous !== undefined) paths.push(previous);
+  }
+  return {
+    paths,
+    truncated: files.length >= COMPARE_FILE_LIMIT,
+    authors,
+    commitsTruncated: totalCommits > commits.length,
+  };
+}

@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index ab0e21c0f2408c7790ba08fc9696dcda1ccd42ce..0c37f053672dc0447a740035724c9078f9811e72 100644
+index ab0e21c0f2408c7790ba08fc9696dcda1ccd42ce..9922b11f3b76e663d38a3abfac82b12d17b59731 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -90,9 +90,9 @@ var originalSchema = tableNodes({
@@ -14,3 +14,15 @@ index ab0e21c0f2408c7790ba08fc9696dcda1ccd42ce..0c37f053672dc0447a740035724c9078
  		}
  	} }
  });
+@@ -565,7 +565,10 @@ var tablePasteRule = $pasteRule((ctx) => ({ run: (slice, _view, isPlainText) =>
+ 	if (isPlainText) return slice;
+ 	function fixTable(node) {
+ 		const rowsCount = node.childCount;
+-		const colsCount = node.lastChild?.childCount ?? 0;
++		let colsCount = 0;
++		node.forEach((row) => {
++			colsCount = Math.max(colsCount, row.childCount);
++		});
+ 		if (rowsCount === 0 || colsCount === 0) return paragraphSchema.type(ctx).create();
+ 		const headerRow = node.firstChild;
+ 		if (!(colsCount > 0 && headerRow && headerRow.childCount === 0)) return node;

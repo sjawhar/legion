@@ -1,8 +1,11 @@
 package testnats
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -139,4 +142,44 @@ func TestASecondTakeByTheSameTestFailsAtOnce(t *testing.T) {
 	if !strings.Contains(again.message, "already holds the shared NATS server") {
 		t.Errorf("a second take by the same test failed with %q, not the re-entry refusal", again.message)
 	}
+}
+
+// StartNkeyAuthorized's readiness wait refuses a server that admits a client with no credential:
+// such a server enforces no nkey users, and every refusal a test expects of it would pass for the
+// wrong reason. The shared server, which asks for no credential, stands in for one.
+func TestTheNkeyReadinessWaitRefusesAServerThatAdmitsAnyone(t *testing.T) {
+	uri := URL(t)
+	wait := &fatalRecorder{TB: t}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		answering(wait, uri)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the readiness wait is still waiting on a server that admits anyone")
+	}
+	if want := "admitted a client with no credential"; !strings.Contains(wait.message, want) {
+		t.Errorf("the readiness wait ended with %q, want it to say %q", wait.message, want)
+	}
+}
+
+// A restart keeps its server's URL even when something else takes the URL's port while the server is
+// stopped, as another test's container or a free-port pick can on a busy host: #1387's CI lost the
+// port between a stop and a start ("address already in use" on restart 3).
+func TestARestartKeepsItsURLWhenThePortIsContendedWhileStopped(t *testing.T) {
+	ctr, uri := StartRestartable(t)
+	Stop(t, ctr)
+	u, err := url.Parse(uri)
+	if err != nil {
+		t.Fatalf("parse %s: %v", uri, err)
+	}
+	if taken, err := net.Listen("tcp", u.Host); err == nil {
+		t.Cleanup(func() { _ = taken.Close() })
+	}
+	if err := ctr.Start(context.Background()); err != nil {
+		t.Fatalf("start NATS again: %v", err)
+	}
+	Connect(t, uri).Close()
 }

@@ -79,6 +79,7 @@ func TestProductionImportsArePure(t *testing.T) {
 		}
 	}
 	allowed := map[string]bool{
+		"sort": true,
 		"time": true,
 		"github.com/sjawhar/legion/daemon/internal/record": true,
 	}
@@ -239,16 +240,17 @@ func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
 			deleted = true
 		}
 	case "push":
-		pr = ApplyPush(pr, stringValue(payload, "after"), ClassifyPush(PushPayload{
+		login := decoded.Config.ReviewAppLogin
+		classification := ClassifyPush(PushPayload{
 			ChangedPaths: optionalString(payload, "changed_paths"), ChangedPathsTruncated: optionalString(payload, "changed_paths_truncated"),
-		}))
-	case "review":
-		pr = ApplyReview(pr, lowerASCII(stringValue(payload, "state")), stringValue(payload, "commit_id"))
+		})
+		pr = ApplyPush(pr, record.ClassifiedPush{SHA: stringValue(payload, "after"), Before: stringValue(payload, "before"),
+			HandoffOnly: classification.HandoffOnly, Unknown: classification.Unknown,
+			ByReviewApp: login != "" && stringValue(payload, "pusher") == login})
 	case "checks":
 		candidate := SettlementCandidate{CheckRuns: attemptRuns(payload), Generation: int64(numberValue(payload, "generation")), Snapshot: stringValue(payload, "snapshot"), Verdict: stringValue(payload, "verdict"), Failing: stringSlice(payload, "failing")}
-		pr, _ = ApplySettlement(pr, candidate)
-		if pr.Verdict == "red" {
-			pr, _ = BlockFixAttempt(pr, 3)
+		if settled, applied := ApplySettlement(pr, candidate); applied {
+			pr, _ = BlockFixAttempt(settled, 3)
 		}
 	}
 	result := map[string]any{}
@@ -333,25 +335,27 @@ func canonicalOutcome(outcome CiOutcome) ([]byte, error) {
 }
 
 type fixturePullRequest struct {
-	Key                 string               `json:"key"`
-	Repo                string               `json:"repo"`
-	Number              int                  `json:"number"`
-	Branch              string               `json:"branch"`
-	HeadSHA             string               `json:"headSha"`
-	HeadUpdatedAt       json.RawMessage      `json:"headUpdatedAt"`
-	HeadUpdatedAtSource string               `json:"headUpdatedAtSource"`
-	Verdict             string               `json:"verdict"`
-	Failing             []string             `json:"failing"`
-	FailingStatuses     []string             `json:"failingStatuses"`
-	ReviewDecision      string               `json:"reviewDecision"`
-	FixAttempts         int                  `json:"fixAttempts"`
-	BlockedAttempts     *int                 `json:"blockedAttempts"`
-	CheckRuns           *[]record.AttemptRun `json:"ciCheckRuns"`
-	Generation          *int64               `json:"ciSettlementGeneration"`
-	Snapshot            *string              `json:"ciSnapshot"`
-	Reconciled          bool                 `json:"ciReconciled"`
-	PendingPush         *record.PendingPush  `json:"pendingPush"`
-	HeadCounted         *bool                `json:"headCounted"`
+	Key                 string          `json:"key"`
+	Repo                string          `json:"repo"`
+	Number              int             `json:"number"`
+	Branch              string          `json:"branch"`
+	HeadSHA             string          `json:"headSha"`
+	HeadUpdatedAt       json.RawMessage `json:"headUpdatedAt"`
+	HeadUpdatedAtSource string          `json:"headUpdatedAtSource"`
+	Verdict             string          `json:"verdict"`
+	Failing             []string        `json:"failing"`
+	FailingStatuses     []string        `json:"failingStatuses"`
+	// ReviewDecision is the shipped state's; the Go record keeps it on the review round instead.
+	ReviewDecision  string                 `json:"reviewDecision"`
+	FixAttempts     int                    `json:"fixAttempts"`
+	BlockedAttempts *int                   `json:"blockedAttempts"`
+	CheckRuns       *[]record.AttemptRun   `json:"ciCheckRuns"`
+	Generation      *int64                 `json:"ciSettlementGeneration"`
+	Snapshot        *string                `json:"ciSnapshot"`
+	Reconciled      bool                   `json:"ciReconciled"`
+	PendingPush     *record.ClassifiedPush `json:"pendingPush"`
+	HeadCounted     *bool                  `json:"headCounted"`
+	PlannedRed      bool                   `json:"plannedRed"`
 }
 
 func (fixture fixturePullRequest) record() record.PullRequest {
@@ -375,11 +379,16 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 	if fixture.HeadCounted != nil && *fixture.HeadCounted {
 		headCounted = fixture.HeadSHA
 	}
+	// The shipped state holds one pending push; the Go record keeps every one.
+	var pushes []record.ClassifiedPush
+	if fixture.PendingPush != nil {
+		pushes = []record.ClassifiedPush{*fixture.PendingPush}
+	}
 	return record.PullRequest{Issue: fixture.Key, Repo: fixture.Repo, Number: fixture.Number, Branch: fixture.Branch, HeadSHA: fixture.HeadSHA,
 		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), HeadUpdatedAtSource: fixture.HeadUpdatedAtSource, Verdict: fixture.Verdict,
-		Failing: append([]string{}, fixture.Failing...), FailingStatuses: append([]string{}, fixture.FailingStatuses...), ReviewDecision: fixture.ReviewDecision,
+		Failing: append([]string{}, fixture.Failing...), FailingStatuses: append([]string{}, fixture.FailingStatuses...),
 		FixAttempts: fixture.FixAttempts, BlockedAttempts: blocked, CheckRuns: checkRuns, Generation: generation, Snapshot: snapshot,
-		Reconciled: fixture.Reconciled, PendingPush: fixture.PendingPush, HeadCounted: headCounted}
+		Reconciled: fixture.Reconciled, Pushes: pushes, HeadCounted: headCounted, PlannedRed: fixture.PlannedRed}
 }
 
 type fixtureHeadClock struct {
@@ -442,6 +451,7 @@ type fixtureGithubInput struct {
 		Projects map[string]struct {
 			Repo string `json:"repo"`
 		} `json:"projects"`
+		ReviewAppLogin string `json:"reviewAppLogin"`
 	} `json:"config"`
 }
 
@@ -531,7 +541,6 @@ func fixtureVersion(values map[string]any) int {
 	}
 	return 0
 }
-func lowerASCII(value string) string                        { return strings.ToLower(value) }
 func attemptRuns(values map[string]any) []record.AttemptRun { return nil }
 func stringSlice(values map[string]any, key string) []string {
 	raw, _ := values[key].([]any)

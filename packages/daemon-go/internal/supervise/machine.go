@@ -93,9 +93,14 @@ type Claim struct {
 	// written to end a run that is over, and acting on it would stop the run that start began.
 	LastStartRow int64
 	Locator      *runtime.Locator
-	State        ClaimState
-	Budgets      Budgets
-	Pending      *Delivery
+	// Enrollment is the secrets broker's record of the claim's running process, when the runtime
+	// enrolls pods (AGENTC-393): the enrollment id, and the incarnation it was made for. It is
+	// revoked and cleared wherever the process is let go (letGo), so a record for another
+	// incarnation is never acted on.
+	Enrollment *Enrollment
+	State      ClaimState
+	Budgets    Budgets
+	Pending    *Delivery
 	// BootTokenHash is the hash of the current launch's boot token, which the shim's hello and the
 	// agent's registration are resolved by. CapabilityHash is the hash of the secret the agent's
 	// registration was issued.
@@ -119,6 +124,9 @@ type Event interface{ isEvent() }
 type Store interface {
 	PutClaim(ctx context.Context, c Claim) error
 	PutDelivery(ctx context.Context, token claim.Token, d Delivery) error
+	// PutClaimAndDelivery writes both in one transaction: a confirmation records the claim and
+	// the delivery its turn started, and half of that is a task nothing sends again.
+	PutClaimAndDelivery(ctx context.Context, c Claim, d Delivery) error
 	// RetireDelivery ends the claim's delivery and writes the claim it is given in the same
 	// transaction: the run a claim serves is set by the retiring of the task that ran.
 	RetireDelivery(ctx context.Context, c Claim, deliveryID string) error
@@ -172,6 +180,9 @@ type Deps struct {
 	Log      *slog.Logger
 	Limits   Limits
 	Timeouts Timeouts
+	// Secrets is the secrets broker's enrollment routes for the runtime's pods (AGENTC-393). nil
+	// deploys with no broker: no identity is kept, and nothing is enrolled or revoked.
+	Secrets Enroller
 	// Identity is the git identity a role's commits carry: its App's bot. Every delivery hands it
 	// to the agent's working copy before the task. nil, for a daemon with no GitHub Apps, adopts
 	// nothing.
@@ -189,11 +200,12 @@ type Deps struct {
 	PhaseHolds func(ctx context.Context, issue string, p phase.Phase) (bool, error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather
-	// than a refusal. It is asked only for the operator's own close — the workflow's linger close
-	// is its own decision — and here rather than by the caller, so the answer and the stop it
-	// decides are one decision rather than two round trips apart. It is not a lock on what it
-	// reads: an issue recorded for the tree commits in its own transaction and can still land
-	// between this answer and the retire. nil closes every tree.
+	// than a refusal. It is asked for the operator's own close — the workflow's linger close is its
+	// own decision — and here rather than by the caller, so the answer and the stop it decides are
+	// one decision rather than two round trips apart; and by a refused stop of the tree's root,
+	// whose refusal then names that close. It is not a lock on what it reads: an issue recorded for
+	// the tree commits in its own transaction and can still land between this answer and the
+	// retire. nil closes every tree.
 	TreeClosable func(ctx context.Context, c Claim) (bool, error)
 }
 
@@ -273,6 +285,13 @@ type Machine struct {
 	// a re-send, should that send fail.
 	send            *sending
 	helloDuringSend bool
+	// unsaved is a pending delivery that memory changed and the store did not take: settle writes
+	// it again, with the claim, before the next decision (saved).
+	unsaved bool
+	// sentThrough is the registration sequence of the newest connection a prompt was sent through
+	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
+	// rises, and a relaunch leaves it: the new process's connections are registered later still.
+	sentThrough uint64
 	// askFirst is a restored claim whose agent an earlier daemon was talking to: a pending
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
@@ -282,6 +301,11 @@ type Machine struct {
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
 	// memory only: after a restart the boot orphan sweep has reaped every process no claim records.
 	previous *runtime.Locator
+	// identity is the latest hello2 identity for the claim's current incarnation (AGENTC-393),
+	// kept until its enrollment lands; enrollmentSent is whether that enrollment has been handed
+	// to the shim over the claim's current connection.
+	identity       *heldIdentity
+	enrollmentSent bool
 	// stale is every stale event already logged, so a repeated one is dropped in silence.
 	stale map[string]bool
 	// goroutines counts sends whose outcome has not been handled yet; idle wakes Wait.
@@ -346,11 +370,21 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	if token := claimOf(ev); token != m.claim.Token {
 		return fmt.Errorf("supervise: %T for claim %s reached the machine of %s", ev, token, m.claim.Token)
 	}
+	// Settle first, so the fence judges the task the row will find: a settle after the fence could
+	// retire the very task it let the event through for.
+	if err := m.settle(ctx); err != nil {
+		return err
+	}
 	if pass, err := m.fence(ctx, ev); !pass {
 		return err
 	}
-	if err := m.settle(ctx); err != nil {
-		return err
+	if hello, ok := ev.(StreamHello); ok && hello.AgentSecrets != nil && m.claim.Locator != nil && m.deps.Secrets != nil {
+		identity := *hello.AgentSecrets
+		if e := m.claim.Enrollment; e != nil && e.Incarnation == m.claim.Locator.Incarnation {
+			identity.PodToken = "" // already enrolled for this incarnation; the token is not needed again
+		}
+		m.identity = &heldIdentity{incarnation: m.claim.Locator.Incarnation, AgentSecretsIdentity: identity}
+		m.enrollmentSent = false
 	}
 	k := key{m.claim.State, kindOf(ev)}
 	r, ok := table[k]
@@ -399,6 +433,39 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 	}
 	m.claim.LastStartRow = row
 	return m.persist(ctx)
+}
+
+// ServingRun is the issue generation of the run whose task this claim's worker took, and 0 for a
+// claim that has taken none. It is the daemon's whole answer to which run a completion belongs to:
+// a completion names no run, the pane cannot say it (LEGION_GENERATION is the claim's launch
+// counter, and a live worker is handed the next run's task without being relaunched), and the
+// three sources are read in this order.
+//
+//  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
+//     runs one turn at a time.
+//  2. Otherwise the run this claim is left serving: the turn's end retires its delivery, and the
+//     worker goes on working that run — a tester waiting on CI, a merger waiting on a person —
+//     until another delivery of a run replaces it. A notice's turn has no delivery behind it.
+//  3. Otherwise, for a claim that has served no run at all, a task it holds that the agent may
+//     have read. Oh My Pi's own agent_start names no prompt, so a turn that starts after the
+//     daemon's wait for it is indistinguishable from a turn of the agent's own and confirms
+//     nothing; a worker on its first task would otherwise have its completion refused. This
+//     cannot be mistaken for an older run's work, because there is no older run this claim
+//     served. A task the agent refused is not one it read, and carries no such mark.
+//
+// An operator's task belongs to no run and answers for none of them: it carries generation 0.
+func (c Claim) ServingRun() uint64 {
+	p := c.Pending
+	if p == nil || p.Generation == 0 {
+		return c.ServingGeneration
+	}
+	if !p.ConfirmedAt.IsZero() {
+		return p.Generation
+	}
+	if c.ServingGeneration == 0 && !p.DeliveredAt.IsZero() {
+		return p.Generation
+	}
+	return c.ServingGeneration
 }
 
 // Claim is a copy of the claim as the machine holds it now.
@@ -459,7 +526,13 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 			return false, nil
 		}
 	case StreamLateRefusal:
-		if pending == nil || pending.ID != ev.DeliveryID {
+		// A refusal naming the prompt that set the mark always reaches the table. One naming the
+		// pending id does when its connection sent that prompt, or when it takes back a task a turn
+		// not its own confirmed (takesBackConfirmed): a replayed refusal answers an earlier send, and
+		// the pending id may be the one its connection re-sent.
+		named := pending != nil && pending.MarkedBy == ev.DeliveryID
+		pendingNamed := pending != nil && pending.ID == ev.DeliveryID && !ev.Replayed
+		if pending == nil || !(named || pendingNamed || m.takesBackConfirmed(ev)) {
 			m.dropStale("StreamLateRefusal", "delivery", ev.DeliveryID, pendingID(pending))
 			return false, nil
 		}
@@ -585,10 +658,18 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 
 // died is the claim's process found gone — or found to be some other process — while it was
 // live: one launch failure, and the same session relaunched after it, or failed when the budget
-// is spent. A resume that found the tree volume lost is the exception (relaunchFresh).
+// is spent. A resume that found the tree volume lost is the exception (relaunchFresh). A task whose
+// turn the process was running goes back to waiting first (interrupted), for the relaunch to send,
+// and a death with work outstanding is counted as one (chargeDeath), failing the claim at the limit.
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
+	if err := m.interrupted(ctx); err != nil {
+		return err
+	}
+	if m.chargeDeath() {
+		return m.fail(ctx, "deaths with work outstanding ran out")
+	}
 	if observation.Kind == runtime.Gone && observation.WorkspaceLost && m.claim.SessionFile != "" {
 		return m.relaunchFresh(ctx)
 	}
@@ -630,7 +711,8 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	m.letGo()
 	m.claim.State = StateFailed
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
-		"promptFailures", m.claim.Budgets.PromptFailures, "promptRetires", m.claim.Budgets.PromptRetires)
+		"deaths", m.claim.Budgets.Deaths, "promptFailures", m.claim.Budgets.PromptFailures,
+		"promptRetires", m.claim.Budgets.PromptRetires)
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
@@ -673,6 +755,11 @@ func (m *Machine) retire(ctx context.Context) error {
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.forgetSend()
+	if e := m.claim.Enrollment; e != nil {
+		m.revoke(*e)
+		m.claim.Enrollment = nil
+	}
+	m.identity, m.enrollmentSent = nil, false
 	if m.claim.Locator != nil {
 		m.previous, m.claim.Locator = m.claim.Locator, nil
 	}
@@ -755,16 +842,30 @@ func (m *Machine) forgetSend() {
 	m.send, m.helloDuringSend, m.askFirst = nil, false, false
 }
 
-// persist writes the claim, the one place every transition passes. A capability belongs to a
-// registered agent whose process runs, so a claim in any other state — relaunching after a death,
-// suspended, failed, or retired — is written without one: the old secret authenticates nothing and
-// every grant it minted fails its fence, as the shipped daemon revokes a session's capability and
-// its grants on death, retirement, and teardown.
+// persist writes the claim alone. A capability belongs to a registered agent whose process runs,
+// so a claim in any other state — relaunching after a death, suspended, failed, or retired — gives
+// its capability up here, on the machine's own claim, which is what the capability check reads
+// (api/claims.go): the old secret authenticates nothing and every grant it minted fails its fence,
+// as the shipped daemon revokes a session's capability and its grants on death, retirement, and
+// teardown. A confirmation and a retire write the claim together with the delivery they change,
+// each in one transaction, and every write hands the store the same shape (stored).
 func (m *Machine) persist(ctx context.Context) error {
 	if !holdsCapability(m.claim.State) {
 		m.claim.CapabilityHash = nil
 	}
-	return m.deps.Store.PutClaim(ctx, m.claim)
+	return m.deps.Store.PutClaim(ctx, m.stored())
+}
+
+// stored is the claim as a write hands it to the store: without its pending delivery, which has a
+// table of its own, and without a capability once the claim no longer holds one. It is a copy and
+// changes nothing; revoking the live capability is persist's.
+func (m *Machine) stored() Claim {
+	c := m.claim
+	c.Pending = nil
+	if !holdsCapability(c.State) {
+		c.CapabilityHash = nil
+	}
+	return c
 }
 
 // holdsCapability says whether a claim in state has a registered agent with a running process.
@@ -829,6 +930,10 @@ func copyClaim(c Claim) Claim {
 	if c.Locator != nil {
 		loc := *c.Locator
 		c.Locator = &loc
+	}
+	if c.Enrollment != nil {
+		e := *c.Enrollment
+		c.Enrollment = &e
 	}
 	if c.Pending != nil {
 		d := *c.Pending

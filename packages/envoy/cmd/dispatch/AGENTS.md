@@ -25,6 +25,14 @@ script are tighter still at three seconds. The deadline covers the other half �
 a database that drops packets rather than refusing is answered `503` with
 `db: false` inside the bound, never with silence, and the reason is logged.
 
+Beside `ok`, `db` and `nats`, `/healthz` names what is deployed: `commit`, the
+legion commit the image build stamped (`main.buildCommit`, from the Dockerfile's
+`LEGION_COMMIT` build argument, which the release workflow sets to its
+`github.sha` and which must be a full sha or empty; `null` in an unstamped
+build), and `schema_version`, `max(version)` from `schema_migrations`, read by
+the same probe query (`null` whenever `db` is false). agent-c's dispatch-apply
+lane compares both with the image pin it applied and that commit's migrations.
+
 Migration 0010 adds stored generated `search` columns; Postgres maintains them on writes and no
 application code writes or refreshes them.
 
@@ -36,17 +44,32 @@ use the default get a `repo:owner/name` label. `DISPATCH_NATS_DISABLED=1` leaves
 database and SSE paths available and makes `/healthz` report `nats: null`.
 Otherwise Dispatch loads config in this precedence order: user `envoy.json`,
 repository `envoy.json`, then environment overrides. A present `NATS_URLS`
-overrides merged `natsUrls` before `bus.Connect` and the outbox start. A present
+overrides merged `natsUrls` before `bus.ConnectOwningStream` and the outbox
+start; the server owns `ENVOY_NOTIFICATIONS` on whichever server that resolves
+to, and refuses one that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1`
+says the run means it (every deployment sets it). A present
 `DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an
 absolute `http` or `https` URL with no path, and is the exact browser origin
 used for GitHub OAuth. It must equal the URL humans type into the browser, with
 `<DISPATCH_SERVER_URL>/auth/callback` registered on the GitHub App. Host
 adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
-`DISPATCH_TEST_HOOKS=1` mounts `POST /api/v1/events/_test/disconnect` (closes
-every open SSE connection, as if the server had restarted) — unset in every real
-deployment; e2e's `run-server.sh` sets it so the web client's
-reconnect-from-lastId path can be exercised without seeding thousands of
-events to trip the SSE replay cap.
+`DISPATCH_TEST_HOOKS=1` mounts two test-only routes — unset in every real
+deployment. `POST /api/v1/events/_test/disconnect` closes every open SSE
+connection, as if the server had restarted; e2e's `run-server.sh` sets the flag
+so the web client's reconnect-from-lastId path can be exercised without seeding
+thousands of events to trip the SSE replay cap. `POST
+/api/v1/artifacts/_test/quiesce` closes every live document, flushing each
+through the store, and waits for the settlements in flight, leaving the service
+able to load documents again; `e2e/seed.ts` calls it before truncating so its
+`TRUNCATE` cannot cross lock order with a settlement.
+
+With NATS configured and the GitHub App private key loaded, startup also runs the webhook
+redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
+`redeliver.Interval` it lists the App webhook's failed deliveries and redelivers them through
+GitHub's App API. Its cursor and per-delivery claims live in the `envoy_webhook_redelivery` KV
+bucket. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once
+over a chosen window without moving the cursor. The README's "Webhook redelivery" section has
+the rules: 4xx is never redelivered, bounded attempts, GitHub's rate limits, the log lines.
 
 Each document room has two shared Yjs types: the authoritative
 `Y.XmlFragment("prosemirror")` tree and `Y.Map("marks")`, the server-maintained
@@ -131,20 +154,20 @@ the table says human only.
 | `/auth/whoami` | GET | identity | Return the resolved human identity. |
 | `/api/github/rest/...` | any | identity | Proxy GitHub REST with the user's token. |
 | `/api/github/graphql` | POST | identity | Proxy GitHub GraphQL with the user's token. |
-| `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, and NATS is connected where configured. |
+| `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, and NATS is connected where configured, plus `commit` (the build's legion commit, or `null`) and `schema_version` (the highest applied migration, or `null` when the database did not answer). |
 | `/api/v1/projects` | GET, POST | POST human only | List projects (including `open_asks`) or create one. |
-| `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact. |
+| `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
 | `/api/v1/settings/repo-projects` | GET | human only | List repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | human only | Create or replace, or remove, a repository mapping. |
 | `/api/v1/settings/architecture-sources` | GET | human only | List every project's architecture source with its sync bookkeeping. |
-| `/api/v1/projects/{key}/architecture-source` | GET, PUT, DELETE | GET user or bearer; PUT, DELETE human only | A project's architecture source (`{repo, branch}`; the directory is fixed at `.dispatch/architecture/`). PUT proves the GitHub App can read the repository first (`409 SOURCE_ACCESS` otherwise); DELETE removes the source and the model it projected; GET is `404 SOURCE_NOT_FOUND` without one. |
+| `/api/v1/projects/{key}/architecture-source` | GET, PUT, DELETE | GET user or bearer; PUT, DELETE human only | A project's architecture source (`{repo, branch}`; the directory is fixed at `.dispatch/architecture/`). PUT proves the GitHub App can read the repository first (`409 SOURCE_ACCESS` otherwise); DELETE removes the source and the model it projected; GET answers `200 null` without one, since whether a project has a source is a question with an ordinary negative answer (DELETE and `/sync`, which act on a source, keep `404 SOURCE_NOT_FOUND`). |
 | `/api/v1/projects/{key}/architecture-source/sync` | POST | user or bearer | Import the model now; `200` carries the updated row (`last_error` set when the model was rejected and the previous projection stays up), `409 SOURCE_ACCESS` a credential or branch problem. |
 | `/api/v1/projects/{key}/architecture` | GET | user or bearer | The component tree with the work attached: `source`, `totals` (`issues_done`/`issues_total` over every filed issue, `unassigned`, `not_architectural`, `components_without_work` over non-external components, `retired_links`), one row per component (`done`/`total` count the distinct issues whose effective set names it or any component it contains, parents and icebox included, each once; `own_*` only those naming it itself; `issues` say how each qualified: `direct` > `inherited` > `contained` with `via`), and the `unassigned`, `not_architectural` (with `reason`, `inherited_from`), and `retired_links` lists. `404 SOURCE_NOT_FOUND` without a source. |
 | `/api/v1/me/agent-tokens` | GET, POST | human only | List personal token metadata or mint a personal agent token. |
 | `/api/v1/me/agent-tokens/{id}` | DELETE | human only | Revoke a personal agent token. |
 | `/api/v1/users` | GET | human only | The sign-in allowlist as `{users: [{login}]}`, sorted lowercase: the assignee picker's options (pure config, no DB). |
 | `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a human, `{kind: "agent", owner, service}` for a bearer (`owner` is the personal token's lowercase login, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
-| `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. |
+| `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`. |
 | `/api/v1/search?q=&project=&limit=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results contain `<mark>` snippets and SPA `href`s. `limit` is 1–50 (default 20); an under-two-character or stop-word-only query returns `400 INVALID_QUERY`, and an invalid limit returns `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. `assignee` (an allowlisted login, lowercased; `null` clears; absent leaves it) may be set by any caller; an unlisted login is `400 ASSIGNEE_NOT_ALLOWED`. `components` is the issue's own architecture attachment: `null` or `{mode: "inherit"}` deletes it (the issue takes its nearest ancestor's again), `{mode: "explicit", ids}` names bare component ids of the issue's project (`400 COMPONENTS_INPUT` for an unknown, retired, external, or other-project id), `{mode: "none", reason}` declares the issue not architectural; it is the one field besides `rank` a closed issue accepts without reopening. Every issue read carries the effective `components` (`mode`, `ids`, `unknown` for retired ids, `reason`, `inherited_from`), resolved up the parent chain in the same query. |
 | `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |
@@ -162,15 +185,18 @@ the table says human only.
 | `/api/v1/issues/{key}/comments` | GET, POST | user or bearer | List or create comments and suggestions. |
 | `/api/v1/comments/{id}` | GET | user or bearer | Read a comment and its reply chain. |
 | `/api/v1/comments/{id}/resolve` | POST | user or bearer | Resolve a comment. |
-| `/api/v1/comments/{id}/accept` | POST | human only | Apply and accept a suggestion. |
+| `/api/v1/comments/{id}/accept` | POST | human only | Apply and accept a suggestion. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and leaves the suggestion open; one removed after it answers `200` with `lost: true`. |
 | `/api/v1/comments/{id}/reject` | POST | human only | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | user or bearer | Post a short issue message. |
-| `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List issue artifacts or create a version from a multipart file or JSON inline content. The JSON form requires `Content-Type: application/json`. |
+| `/api/v1/broadcasts` | POST | human only | Send one message to many sessions: `{body, delivery, session_ids}`. Writes the broadcast and one issue-less targeted message per recipient in one transaction, answers 201, then delivers behind the request (four workers, each on its own tracking context derived from the server lifetime) through the ordinary targeted-message path, so a cut-off request cannot strand a recipient. Recipients come back with no attempt yet. A selected session that is not live or does not advertise `delivery` is excluded and named in `excluded` (never switched to another mode); a selection with no reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. At most 100 recipients, duplicates collapsed. |
+| `/api/v1/broadcasts` | GET | human only | List the 50 newest broadcasts with their recipient and reply counts. |
+| `/api/v1/broadcasts/{id}` | GET | human only | Read one broadcast with every recipient's message, delivery attempts and replies. Unknown or malformed id is `404 BROADCAST_NOT_FOUND`. |
+| `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List issue artifacts or create a version from a multipart file or JSON inline content. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
 | `/api/v1/artifacts/{id}` | GET | user or bearer | Read an artifact, versions, and incoming references. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/text` | GET | user or bearer | Read a live document's markdown. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | user or bearer | Create a named live-document version. `{id}` must be a UUID. |
-| `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. |
+| `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | user or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | user or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | user or bearer | Read an unlinked document's events. |
@@ -179,17 +205,18 @@ the table says human only.
 | `/api/v1/issues/{key}/artifacts/{slug}/text` | GET | user or bearer | Read an issue artifact's live markdown. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read an issue artifact version or download its blob. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named issue-document version. |
-| `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply issue-document edit operations. |
+| `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply issue-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/projects/{key}/artifacts/{slug}` | GET | user or bearer | Read an unlinked project artifact and its incoming references. `{slug}` is resolved within `{key}`. |
 | `/api/v1/projects/{key}/artifacts/{slug}/text` | GET | user or bearer | Read an unlinked project document's live markdown. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read an unlinked project document version or download its blob. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named project-document version. |
-| `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply project-document edit operations. |
+| `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply project-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
 | `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before}}`. |
 | `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation for this user: `{cleared_before: <RFC3339>}`, 400 `INVALID_STATE` when malformed or more than a minute ahead of the server clock. |
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
+| `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. |
 
@@ -202,6 +229,13 @@ Document events publish retained envelopes on
 ```sh
 go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1
 ```
+
+`natstail` publishes nothing and owns nothing on the bus: it neither creates nor
+updates `ENVOY_NOTIFICATIONS`, and it refuses a NATS server that is not this
+machine's, naming the URL. A machine whose `envoy.json` names a shared NATS
+(an agent devbox names production's) runs it with
+`ENVOY_ALLOW_REMOTE_NATS=1 go run ./cmd/natstail …`, which is the run saying it
+means that server.
 
 ## Checks
 

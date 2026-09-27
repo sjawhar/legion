@@ -14,7 +14,7 @@ For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Up
 
 ## Workspace restrictions
 
-Do not change another phase's bookmark. Make only path-scoped logical commits with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. You never push: only the implementer pushes the issue branch. The review App you act as can push (its installation holds `contents: write`), but the workflow gives pushing to the implementer, and your handoff commit rides the implementer's next push.
+Do not change another phase's bookmark. Make only path-scoped logical commits with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Each red test you write goes in the repository's own test suite as its own commit, and the `evidence` of its `failures` entry names the test and the command that shows it failing. Push your own commits — the red tests and your handoff commit — as `skill://legion-worker` shows.
 
 ## GitHub attribution
 

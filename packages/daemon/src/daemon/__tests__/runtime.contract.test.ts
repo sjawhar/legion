@@ -1286,9 +1286,9 @@ describe("TmuxRuntime", () => {
     expect(workspaceAdded(secondTree)).toEqual([
       path.join(harness.stateDir, "workspaces", "acme", "widgets", "legion-43"),
     ]);
-    // `git worktree prune` plus the five `git config` writes, each tree's, never interleaved.
-    expect(firstTree.filter((c) => c[0] === "git")).toHaveLength(6);
-    expect(secondTree.filter((c) => c[0] === "git")).toHaveLength(6);
+    // The five `git config` writes, each tree's, never interleaved.
+    expect(firstTree.filter((c) => c[0] === "git")).toHaveLength(5);
+    expect(secondTree.filter((c) => c[0] === "git")).toHaveLength(5);
   });
 
   it("adopts the working copy for the assigned role on a live-idle re-prompt: the shared jj metaedit command runs on the daemon-host workspace under the role's identity, and its failure is the adoption's", async () => {

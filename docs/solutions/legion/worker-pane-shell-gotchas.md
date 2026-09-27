@@ -75,7 +75,7 @@ symptoms:
   - "jj log shows (divergent) next to your commit after jj squash --into; a second visible commit shares its change id"
   - "Error: Change ID `xxxx` is divergent — Hint: Use change offset to select single revision"
   - "the pane's `legion gh` performed the write the branch's shim refuses, and skill:// served the template the branch fixed"
-  - "packages/claude-envoy-bridge bun test: expected Bearer reply-token, received the pane's real Dispatch token (40 pass, 1 fail in a pane; 41 pass elsewhere)"
+  - "packages/claude-envoy bun test: expected Bearer reply-token, received the pane's real Dispatch token (40 pass, 1 fail in a pane; 41 pass elsewhere)"
   - "the pane's `legion handoff write` accepted a payload the branch's schema refuses; the committed handoff was written by the deployed build"
   - "spawn_worker: POST /legion/v1/worker/spawn failed with 400: requestId: Invalid input: expected string, received undefined (a sub-architect pane on a pre-release plugin)"
   - "jq --version prints jaq 2.3.0 in the bash tool; a jq expression that passed there fails (or a failing one passes) when the script runs"
@@ -209,18 +209,22 @@ tests registered real tools against the fixture's stub zod; `legion.test.ts` inh
 tree launch markers`. Both suites now clear the whole variable family in `beforeEach` (the existing `environmentKeys`
 list in `legion.test.ts`; `DISPATCH_TOKEN_FILE` beside `DISPATCH_URL`/`DISPATCH_TOKEN` in `envoy.test.ts`) and restore
 it in `afterEach`. Clear the variable *family the resolver consumes*, in its precedence order — clearing the familiar
-name and leaving the file-pointer alive disables nothing. The third package to carry the same leak is
-`packages/claude-envoy-bridge`: `tests/envoy-channel-server.test.ts` expects its fixture's `Bearer reply-token` on the
-reply it posts to Dispatch and, in a pane, receives the real token from `DISPATCH_TOKEN_FILE` instead (LEGION-131's
-implementer, rebuilding the bridge bundles: `40 pass, 1 fail`; `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u
-DISPATCH_TOKEN bun test` → `41 pass`). Filed as LEGION-173; until it lands, run that package's suite with the three
-variables unset and say so in the proof.
+name and leaving the file-pointer alive disables nothing. The third package to carry the same leak was
+`packages/claude-envoy`: `tests/envoy-channel-server.test.ts` expected its fixture's `Bearer reply-token` on the
+reply it posts to Dispatch and, in a pane, received the real token from `DISPATCH_TOKEN_FILE` instead (LEGION-131's
+implementer, rebuilding the claude-envoy bundles: `40 pass, 1 fail`; `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u
+DISPATCH_TOKEN bun test` → `41 pass`). LEGION-173 fixed it: a claude-envoy test file that builds a Dispatch or Envoy
+client in-process calls `isolatePaneEnvironment()` from `tests/pane-environment.ts`, which clears `DISPATCH_URL`,
+`DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, `ENVOY_TOKEN` and `ENVOY_TOKEN_FILE` before each test and restores them after
+(`createEnvoyClient` reads `ENVOY_TOKEN_FILE` ahead of `ENVOY_TOKEN`, and a pointer that does not resolve fails it). A
+file that spawns its subject as a subprocess with a literal environment, as `open-asks-hook.test.ts` does (`PATH` plus
+the test's own values), needs no helper: none of those variables reaches the child from the pane.
 
 Run it from `packages/daemon`, which is the `working-directory` of the `test` job in
 `.github/workflows/pr-and-main.yaml` (that job also sets `LEGION_E2E=1` and `LEGION_TMUX_LIVE=1`). There is no root
 test script, and `bun test` from the repository root is not a CI entry point: it picks up every package, and the
 per-package `bunfig.toml` preloads do not apply from the root, so `packages/dispatch/web` fails by the hundreds with
-`document is not defined`, and the `pi-envoy` and `claude-envoy-bridge` suites fail with `ECONNREFUSED` for want of a
+`document is not defined`, and the `pi-envoy` and `claude-envoy` suites fail with `ECONNREFUSED` for want of a
 live NATS broker. LEGION-14's tester spent a diagnosis cycle on 262 such failures, none in the changed package. When
 an assignment says "run the root suite", run the daemon package's suite and say which invocation you used.
 
@@ -228,23 +232,25 @@ an assignment says "run the root suite", run the daemon package's suite and say 
 
 Workers commit with `jj split -m '…' <explicit paths>` (the worker skill's completion gate). After a split the issue
 bookmark sits on the **remaining** half — the new, undescribed working copy — not on the commit you just described.
-`jj bookmark set legion/<KEY>` then refuses (`Refusing to move bookmark backwards or sideways`). Before every push:
+`jj bookmark set legion/<KEY>` then refuses (`Refusing to move bookmark backwards or sideways`). Before every push,
+run the push procedure in `skills/legion-worker/SKILL.md`: it checks that `@-` descends from `legion/<KEY>@origin`, then
+sets the bookmark with `-r @- --allow-backwards` and pushes it. A rebase, a retarget, or a squash into a pushed commit
+leaves the pushed tip outside `::@-`; record that tip first (*Rewriting pushed commits* there), and the same push
+accepts the recorded tip and refuses any other.
 
-```bash
-jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- --allow-backwards
-jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
-```
-
-The remote still moves **forward** — jj 0.45's push summary reads `Changes to push to origin:` followed by
-`bookmark: legion/<KEY> [move forward from <old> to <new>]`; `--allow-backwards` only
-concerns the local pointer stepping from the empty child to its described parent. Check `jj diff -r @- --stat` first:
+When `@-` descends from the remote branch, the remote moves **forward**: jj 0.45's push summary reads
+`Changes to push to origin:` followed by `bookmark: legion/<KEY> [move forward from <old> to <new>]`, and
+`--allow-backwards` only concerns the local pointer stepping from the empty child to its described parent. When it does
+not, the flag is not harmless. Every issue workspace shares one clone, so another role's push moves
+`legion/<KEY>@origin` for every workspace at once, and the same two commands push
+`bookmark: legion/<KEY> [move sideways from <theirs> to <yours>]`, dropping their commit from the branch (measured on
+jj 0.45.1, 2026-09-25, LEGION-285). That is why the snippet checks ancestry first. A clone that has not seen the other
+push is refused by jj's own lease (`unexpectedly moved on the remote`). Check `jj diff -r @- --stat` first:
 the described commit must hold exactly the paths you named.
 
-Related: a planner's, tester's, reviewer's, or architect's local commit in the shared workspace rides along on the
-implementer's next push — those roles act as the review App and never push (`../legion/one-role-keyed-table-decides-which-github-app-acts.md`;
-the `remote: Repository not found.` GitHub gave such a push before 2026-09-25 is gone, since App 3202653 now holds
-`contents: write`). Verify with `jj log` that the commit is an
-ancestor before building on it. On LEGION-131 (#1106) the tester's `test: record handoff` and the reviewer's
+Related: every role pushes its own commits since LEGION-285 (2026-09-25; `../legion/one-role-keyed-table-decides-which-github-app-acts.md`).
+Before that, a planner's, tester's, reviewer's, or architect's local commit rode along on the implementer's next push.
+Verify with `jj log` that another role's commit is an ancestor before building on it. On LEGION-131 (#1106) the tester's `test: record handoff` and the reviewer's
 `review: record handoff` sat unpushed above the implementer's reviewed head `9f55687a` until the implementer's
 `.legion/` deletion push carried all three; the architect's instruction named both commits and said "do not rewrite
 or drop them", and the deletion head `239aaa28` was `9f55687a` + those two + the deletion. One consequence for the
@@ -403,8 +409,8 @@ has the same rule for the symmetric case; check `jj log -r '::main@origin ~ ::<b
 
 **Already recorded, so read these rather than re-deriving:** the 409 after a daemon restart and the architect's
 re-derived status write are §11 above and
-[external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §2 (LEGION-37); the review App's
-inability to push or resolve threads, and the implementer resolving the threads the reviewer accepted with
+[external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §2 (LEGION-37); who pushed before
+LEGION-285, and the implementer resolving the threads the reviewer accepted with
 `legion threads resolve --pr <n> --repo <owner>/<repo>` (LEGION-34, sjawhar/legion#1003 — until that release is
 deployed the pane's `legion` has no `threads` subcommand, see §13; a worker on LEGION-54 was told to run it before it
 existed on any branch), is §3 of that same note; the tester completion's status write is
@@ -442,7 +448,7 @@ call — and a `jj git push` through the credential helper fails as `could not r
 `tool.bash` bridge, with the shell in a script file (`bash /tmp/<issue>-step.sh`), keeps the model's own transcript
 out of the command text; the bridge attaches the grant exactly as the bash tool does. Second, a body-only
 or title-only PR edit re-runs only the `PR Title` workflow. The Tests workflow does not subscribe to `edited`.
-Retargeting a pull request to a new base does not re-run Tests; after a retarget, rebase onto the new base and
+Retargeting a pull request to a new base does not re-run Tests; after a retarget, merge the bookmark onto the new base (`jj new legion/<KEY> <new base>`) and
 push — the new head runs Tests against the new merge result — and cite that run in the PR body. The `CI:` line
 cites the distinct Tests and PR Title run ids at the head
 ([text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md), §6).

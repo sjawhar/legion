@@ -81,8 +81,9 @@ permits; the point of this note is what a *semantic* conflict adds to the proced
    commit: LEGION-93 (#1082) landed in the same four daemon files, LEGION-84 (#1080) in two of
    them. Retro's brief said "report, do not rebase", so the retro worker stopped with the three
    documents written but uncommitted and asked. The architect's ordering: commit the docs above
-   the approved head first (they ride the rebase — the skill's "a conflict-forced rebase after
-   retro moves these documents with the branch"), then rebase the whole chain, resolve
+   the approved head first (they ride the resolution — the skill's "a conflict-forced rebase after
+   retro moves these documents with the branch"), then rebase the whole chain (superseded
+   2026-09-27 by LEGION-118 — merge the bookmark forward instead, `skills/legion-worker/SKILL.md`), resolve
    semantically, re-run the gates, fingerprint at the old approved head and at the rebased
    deletion commit (the new code head, *below* the docs), push at the docs commit, and say in one
    PR comment that the fingerprint changed and the tester and reviewer will re-run and re-approve
@@ -142,7 +143,9 @@ file. Mechanics and history: `worker-pane-shell-gotchas.md` §11,
   legion/<KEY> -r @-` refuses (`Refusing to move bookmark backwards or sideways`) until
   `--allow-backwards`. Every later `set -r @-` is a forward move and needs no flag. `jj git push
   --bookmark` refuses a bookmark on a commit with no description, which is the loud version of the
-  same mistake. Always `jj split` with explicit paths so `.omp/config.yml` enters no commit (see
+  same mistake. `skills/legion-worker/SKILL.md`'s push procedure sets it that way after checking
+  that the remote branch is an ancestor of `@-`. Always `jj split` with explicit paths so
+  `.omp/config.yml` enters no commit (see
   `jj-bookmark-facts-verified-on-0-44-0-and-0-45-1.md` for why the bookmark starts on `@`).
 - **`bun install` first.** A fresh issue workspace has no `node_modules`; the first `bun test`
   fails with `Cannot find module '@legion/contracts'` (also noted in

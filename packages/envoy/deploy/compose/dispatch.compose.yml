@@ -26,6 +26,10 @@ services:
       DISPATCH_AGENT_TOKEN: ${DISPATCH_AGENT_TOKEN:?set DISPATCH_AGENT_TOKEN}
       DISPATCH_SERVER_URL: ${DISPATCH_SERVER_URL:?set DISPATCH_SERVER_URL (the browser origin)}
       NATS_URLS: ${NATS_URLS:?set NATS_URLS}
+      # This server owns ENVOY_NOTIFICATIONS on the NATS above, which is the shared server rather
+      # than this host's. Every connect refuses a NATS that is not the machine's own without this
+      # (packages/envoy/internal/bus/reach.go).
+      ENVOY_ALLOW_REMOTE_NATS: "1"
       DISPATCH_ALLOWED_LOGINS: ${DISPATCH_ALLOWED_LOGINS:?set DISPATCH_ALLOWED_LOGINS}
       DISPATCH_IDENTITY: ${DISPATCH_IDENTITY:-cookie}
       DISPATCH_IDENTITY_HEADER_TRUSTED: ${DISPATCH_IDENTITY_HEADER_TRUSTED:-}

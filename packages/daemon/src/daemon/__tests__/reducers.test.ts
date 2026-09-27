@@ -39,6 +39,7 @@ const prNumber = 17;
 const config: ReducerConfig = {
   maxFixAttempts: 3,
   projects: { LEGSMOKE: { repo } },
+  reviewAppLogin: "legion-reviewer[bot]",
 };
 
 /** A normalized `pull_request_review` payload as Envoy delivers it: flat strings, `commit_id`
@@ -1123,7 +1124,7 @@ describe("reduceGithubEvent", () => {
     const state = newLegionState("omp", 4);
     state.issues[legionIssue] = issueNode(legionIssue, "Legion issue");
     const twoProjectConfig = {
-      maxFixAttempts: 3,
+      ...config,
       projects: {
         LEGION: { repo: legionRepo },
         WIDGETS: { repo: widgetsRepo },
@@ -1841,7 +1842,11 @@ describe("push fix-attempt classification", () => {
     expect(
       pushEffects(state, { changed_paths: undefined, changed_paths_truncated: undefined })
     ).toEqual([{ kind: "log", message: expect.stringContaining("changed_paths absent") }]);
-    expect(state.prs[prKey]?.pendingPush).toEqual({ sha: "new-sha", handoffOnly: false });
+    expect(state.prs[prKey]?.pendingPush).toEqual({
+      sha: "new-sha",
+      handoffOnly: false,
+      before: "old-sha",
+    });
 
     effects(state, syncPayload("new-sha"));
 
@@ -1866,7 +1871,11 @@ describe("push fix-attempt classification", () => {
     const state = redPrState({ fixAttempts: 3, blockedAttempts: 3 });
 
     expect(pushEffects(state)).toEqual([]);
-    expect(state.prs[prKey]?.pendingPush).toEqual({ sha: "new-sha", handoffOnly: true });
+    expect(state.prs[prKey]?.pendingPush).toEqual({
+      sha: "new-sha",
+      handoffOnly: true,
+      before: "old-sha",
+    });
     expect(state.prs[prKey]?.fixAttempts).toBe(3);
 
     expect(effects(state, syncPayload("new-sha"))).toEqual([]);
@@ -1979,6 +1988,294 @@ describe("push fix-attempt classification", () => {
     expect(state.prs[prKey]?.fixAttempts).toBe(0);
     expect(state.prs[prKey]?.pendingPush).toBeUndefined();
     expect(state.prs[prKey]?.headCounted).toBeUndefined();
+  });
+});
+
+describe("review-App pushes and planned reds", () => {
+  const prKey = `${repo}#${prNumber}`;
+  const orders = ["push first", "synchronize first"] as const;
+  const tester = { pusher: "legion-reviewer[bot]", head_subject: "test: red tests for C1" };
+  const implementer = { pusher: "legion-implementer[bot]", head_subject: "fix: C1" };
+
+  /** One push of `sha` from `before`, both webhooks in `order`; it changes a path outside
+   * `.legion/` unless `paths` says otherwise. */
+  function arrive(
+    state: LegionState,
+    before: string,
+    sha: string,
+    order: (typeof orders)[number],
+    who: Record<string, unknown>,
+    paths = "src/widget.test.ts\n.legion/test.json"
+  ): Effect[] {
+    const push = { ...who, before, after: sha, changed_paths: paths };
+    const out: Effect[] = [];
+    if (order === "push first") out.push(...pushEffects(state, push));
+    out.push(...effects(state, syncPayload(sha)));
+    if (order === "synchronize first") out.push(...pushEffects(state, push));
+    return out;
+  }
+
+  for (const order of orders) {
+    it(`a tester's red-test push and the implementer's fix after it count no fix attempt; a red fix and its successor count one (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { headSha: "impl-sha", verdict: "green", ciSettledAt: 1 });
+
+      arrive(state, "impl-sha", "red-tests-sha", order, tester);
+      settleRed(state, "red-tests-sha", 2);
+      arrive(state, "red-tests-sha", "fix-sha", order, implementer);
+      expect(state.prs[prKey]?.fixAttempts).toBe(0);
+
+      settleRed(state, "fix-sha", 3);
+      arrive(state, "fix-sha", "fix-2-sha", order, implementer);
+      expect(state.prs[prKey]?.fixAttempts).toBe(1);
+    });
+
+    it(`the ordinary loop, implementer red then the tester's handoff-only push, counts 0, 1, 2, 3 and publishes pr-blocked once (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { headSha: "h0", verdict: "green", ciSettledAt: 1 });
+      const all: Effect[] = [];
+      const counts: number[] = [];
+      let head = "h0";
+      for (let round = 1; round <= 4; round += 1) {
+        all.push(...arrive(state, head, `impl-${round}`, order, implementer));
+        counts.push(state.prs[prKey]?.fixAttempts ?? -1);
+        all.push(...settleRed(state, `impl-${round}`, round * 10));
+        if (round === 4) break;
+        all.push(
+          ...arrive(state, `impl-${round}`, `test-${round}`, order, tester, ".legion/test.json")
+        );
+        all.push(...settleRed(state, `test-${round}`, round * 10 + 1));
+        head = `test-${round}`;
+      }
+
+      expect(counts).toEqual([0, 1, 2, 3]);
+      expect(prBlockedEffects(all)).toHaveLength(1);
+    });
+
+    it(`a red-test push keeps the next head uncounted across a handoff-only push after it (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { headSha: "impl-sha", verdict: "green", ciSettledAt: 1 });
+
+      arrive(state, "impl-sha", "red-tests-sha", order, tester);
+      settleRed(state, "red-tests-sha", 2);
+      arrive(
+        state,
+        "red-tests-sha",
+        "review-sha",
+        order,
+        { pusher: "legion-reviewer[bot]" },
+        ".legion/review.json"
+      );
+      settleRed(state, "review-sha", 3);
+      arrive(state, "review-sha", "fix-sha", order, implementer);
+
+      expect(state.prs[prKey]?.fixAttempts).toBe(0);
+    });
+
+    it(`a tester's red-test push onto a red head counts no fix attempt (${order})`, () => {
+      const state = redPrState();
+
+      arrive(state, "old-sha", "red-tests-sha", order, tester);
+
+      expect(state.prs[prKey]?.fixAttempts).toBe(0);
+    });
+  }
+
+  it("an unclassifiable push arriving first after a planned red logs no fix attempt, because none is counted", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, { headSha: "impl-sha", verdict: "green", ciSettledAt: 1 });
+    arrive(state, "impl-sha", "red-tests-sha", "push first", tester);
+    settleRed(state, "red-tests-sha", 2);
+
+    const logged = pushEffects(state, {
+      ...implementer,
+      before: "red-tests-sha",
+      after: "fix-sha",
+      changed_paths: undefined,
+      changed_paths_truncated: undefined,
+    });
+    effects(state, syncPayload("fix-sha"));
+
+    expect(logged).toEqual([]);
+    expect(state.prs[prKey]?.fixAttempts).toBe(0);
+  });
+
+  it("four tester rounds each followed by a fix publish no pr-blocked", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, { headSha: "h0", verdict: "green", ciSettledAt: 1 });
+    const all: Effect[] = [];
+    let head = "h0";
+    for (let round = 1; round <= 4; round += 1) {
+      all.push(...arrive(state, head, `red-${round}`, "synchronize first", tester));
+      all.push(...settleRed(state, `red-${round}`, round * 10));
+      all.push(...arrive(state, `red-${round}`, `fix-${round}`, "push first", implementer));
+      all.push(...settleGreen(state, `fix-${round}`, round * 10 + 1));
+      head = `fix-${round}`;
+    }
+
+    expect(state.prs[prKey]?.fixAttempts).toBe(0);
+    expect(prBlockedEffects(all)).toEqual([]);
+  });
+});
+
+describe("a review decision across a new head", () => {
+  const prKey = `${repo}#${prNumber}`;
+  const orders = ["push first", "synchronize first"] as const;
+
+  /** The two webhooks one push of `sha` fires, in `order`; `push` overrides the push envelope. */
+  function arrive(
+    state: LegionState,
+    sha: string,
+    order: (typeof orders)[number],
+    push: Record<string, unknown> = {}
+  ): void {
+    if (order === "push first") pushEffects(state, { after: sha, ...push });
+    effects(state, syncPayload(sha));
+    if (order === "synchronize first") pushEffects(state, { after: sha, ...push });
+  }
+
+  for (const order of orders) {
+    it(`the reviewer's handoff-only push keeps its changes-requested decision (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { reviewDecision: "changes_requested" });
+
+      if (order === "push first") pushEffects(state, { after: "review-handoff-sha" });
+      effects(state, syncPayload("review-handoff-sha"));
+      // Between the two webhooks the round is still the one the review asked changes of.
+      expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
+      if (order === "synchronize first") pushEffects(state, { after: "review-handoff-sha" });
+
+      expect(state.prs[prKey]).toMatchObject({
+        headSha: "review-handoff-sha",
+        reviewDecision: "changes_requested",
+      });
+    });
+
+    it(`a code push by the review App keeps changes requested, since none of its commits answers a request made of the implementer (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { reviewDecision: "changes_requested" });
+
+      arrive(state, "red-tests-sha", order, {
+        pusher: "legion-reviewer[bot]",
+        changed_paths: "src/widget.test.ts",
+      });
+
+      expect(state.prs[prKey]).toMatchObject({
+        headSha: "red-tests-sha",
+        reviewDecision: "changes_requested",
+      });
+      expect(state.prs[prKey]?.reviewDecisionUnsettledFrom).toBeUndefined();
+    });
+
+    it(`a handoff-only push still drops an approval, which is pinned to the head (${order})`, () => {
+      const state = rootState();
+      attachChild(state);
+      addPr(state, { reviewDecision: "approved" });
+
+      arrive(state, "review-handoff-sha", order);
+
+      expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+    });
+
+    for (const [name, push] of [
+      ["changes a path outside .legion/", { changed_paths: ".legion/implement.json\nsrc/fix.ts" }],
+      ["cannot be classified", { changed_paths: undefined, changed_paths_truncated: undefined }],
+    ] as const) {
+      it(`a push that ${name} ends the round and drops changes requested (${order})`, () => {
+        const state = rootState();
+        attachChild(state);
+        addPr(state, { reviewDecision: "changes_requested" });
+
+        arrive(state, "fix-sha", order, push);
+
+        expect(state.prs[prKey]?.headSha).toBe("fix-sha");
+        expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+      });
+    }
+  }
+
+  /** The reviewer asks for changes at `old-sha`; the implementer's fix `fix-sha` arrives by its
+   * synchronize alone (its push webhook lost), so the decision is kept with its range open. */
+  function lostPushRound(): LegionState {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+    effects(
+      state,
+      reviewPayload({
+        state: "changes_requested",
+        author: "legion-reviewer[bot]",
+        body: "C1 blocks",
+      })
+    );
+    effects(state, syncPayload("fix-sha"));
+    return state;
+  }
+  const atFix = { state: "commented", commit_id: "fix-sha", head_sha: "fix-sha" };
+
+  for (const [who, author, body] of [
+    ["CodeRabbit's review", "coderabbitai[bot]", "Actionable comments posted: 1"],
+    ["the implementer's empty-body thread reply", "legion-implementer[bot]", ""],
+    ["a human's comment", "sami", "Looks fine to me"],
+    ["the reviewer's own empty-body thread reply", "legion-reviewer[bot]", ""],
+  ] as const) {
+    it(`${who} at the fix leaves an open-range changes-requested decision standing`, () => {
+      const state = lostPushRound();
+
+      effects(state, reviewPayload({ ...atFix, author, body }));
+
+      expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
+    });
+  }
+
+  it("a follow-up comment by the requester at the head it requested changes at keeps the request", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state);
+    effects(
+      state,
+      reviewPayload({ state: "changes_requested", author: "sami", body: "C1 blocks" })
+    );
+
+    effects(state, reviewPayload({ state: "commented", author: "sami", body: "Also, C2" }));
+
+    expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
+  });
+
+  it("the reviewer's own non-empty COMMENT at the fix supersedes an open-range decision", () => {
+    const state = lostPushRound();
+
+    effects(
+      state,
+      reviewPayload({ ...atFix, author: "legion-reviewer[bot]", body: "Round 2: clean" })
+    );
+
+    expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+  });
+
+  it("a push redelivered after it settled its head leaves a later review's decision alone", () => {
+    const state = rootState();
+    attachChild(state);
+    addPr(state, { reviewDecision: "changes_requested" });
+    const fix = { after: "fix-sha", changed_paths: "src/fix.ts" };
+    effects(state, syncPayload("fix-sha"));
+    pushEffects(state, fix);
+    expect(state.prs[prKey]?.reviewDecision).toBeUndefined();
+
+    effects(
+      state,
+      reviewPayload({ state: "changes_requested", commit_id: "fix-sha", head_sha: "fix-sha" })
+    );
+    pushEffects(state, fix);
+
+    expect(state.prs[prKey]?.reviewDecision).toBe("changes_requested");
   });
 });
 

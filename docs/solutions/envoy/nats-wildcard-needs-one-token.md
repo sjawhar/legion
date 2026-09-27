@@ -29,7 +29,7 @@ pushes.
 In NATS, the `>` wildcard matches **one or more** trailing tokens. `a.b.>` matches `a.b.c` and
 `a.b.c.d` but never `a.b`. Envoy's Go matcher (`internal/routing/match.go`) treated `>` as
 zero-or-more, so the listener's fan-out path matched `pr.42` for a `pr.42.>` interest — but
-pi-envoy and the Claude bridge subscribe to NATS natively, where the real semantics apply. The Go
+pi-envoy and claude-envoy subscribe to NATS natively, where the real semantics apply. The Go
 unit tests encoded the wrong rule and passed.
 
 ## Fix

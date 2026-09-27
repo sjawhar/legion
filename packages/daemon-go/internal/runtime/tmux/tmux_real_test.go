@@ -88,6 +88,36 @@ func randomHex(t *testing.T, n int) string {
 	return hex.EncodeToString(raw)
 }
 
+// armOrphanWatchdog reaps this rig's private tmux server if the test binary itself dies before
+// t.Cleanup runs -- a SIGKILL past every deferred cleanup is exactly how an agent's tool timeout
+// ends a `go test` run, and the pane's `legion worker-shim` (and the stand-in OMP behind it) would
+// otherwise keep the server alive forever. setsid is not asked to --fork: a process os/exec starts
+// is never its own process-group leader, so setsid calls setsid() in place rather than forking,
+// and the returned Cmd's pid is the actual watchdog loop, now in a session and process group of
+// its own that a SIGKILL to this test binary's own process group cannot reach. The loop polls only
+// this process's own liveness -- there is no server yet to check at arm time (newRig calls this
+// before the rig's first tmux command), so a session-existence check here would exit the watchdog
+// within milliseconds of arming, before the test ever creates one, guarding nothing; kill-server is
+// idempotent (tmux reports an already-exited or never-created server without creating one), so
+// running it unconditionally once this process dies is safe whether or not a server ever existed.
+// newRig's Cleanup kills the watchdog outright once its own kill-server returns, so the watchdog
+// never outlives both the test and the server it guards.
+func armOrphanWatchdog(t *testing.T, session string, env []string) *exec.Cmd {
+	t.Helper()
+	script := fmt.Sprintf(
+		"while kill -0 %d 2>/dev/null; do sleep 3; done\n"+
+			"tmux -L %s kill-server 2>/dev/null",
+		os.Getpid(), session,
+	)
+	cmd := exec.Command("setsid", "sh", "-c", script)
+	cmd.Env = env
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("arming the orphan watchdog: %v", err)
+	}
+	go func() { _ = cmd.Wait() }()
+	return cmd
+}
+
 // bootClaim is what a boot token stands for.
 type bootClaim struct {
 	token      claim.Token
@@ -182,6 +212,8 @@ type streamStub struct {
 	daemon   *fakeDaemon
 	mu       sync.Mutex
 	conns    map[claim.Token]*stubConn
+	// registrations numbers the connections in the order they are admitted, as the listener does.
+	registrations uint64
 }
 
 var _ runtime.Conns = (*streamStub)(nil)
@@ -213,7 +245,7 @@ func (s *streamStub) admit(conn net.Conn) {
 		return
 	}
 	frame, err := shimwire.Decode(line)
-	hello, ok := frame.(shimwire.Hello)
+	hello, ok := frame.(shimwire.Hello2)
 	if err != nil || !ok {
 		conn.Close()
 		return
@@ -234,6 +266,8 @@ func (s *streamStub) admit(conn net.Conn) {
 		return
 	}
 	s.mu.Lock()
+	s.registrations++
+	stub.seq = s.registrations
 	s.conns[c.token] = stub
 	s.mu.Unlock()
 	stub.read(reader)
@@ -276,6 +310,7 @@ func (s *streamStub) await(t *testing.T, token claim.Token) *stubConn {
 
 // stubConn is one shim connection as a runtime.Conn.
 type stubConn struct {
+	seq     uint64
 	writer  *shimwire.Writer
 	mu      sync.Mutex
 	pending map[string]chan shimwire.Response
@@ -357,8 +392,14 @@ func (c *stubConn) GetState(ctx context.Context) (runtime.ConnState, error) {
 
 func (c *stubConn) Shutdown(context.Context) error { return c.writer.WriteFrame(shimwire.Shutdown{}) }
 
+func (c *stubConn) Sequence() uint64 { return c.seq }
+
 func (c *stubConn) AdoptWorkingCopy(context.Context, runtime.GitIdentity, time.Duration) error {
 	return errors.New("the stream stub does not adopt working copies")
+}
+
+func (c *stubConn) AgentSecretsEnrollment(context.Context, string) error {
+	return errors.New("the stream stub does not enroll agent secrets")
 }
 
 func (c *stubConn) awaitEvent(t *testing.T, want string) {
@@ -426,11 +467,13 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 	}
 	r.environ = append(r.environ, "TMUX_TMPDIR="+r.tmuxDir)
 	r.project = "t" + randomHex(t, 4)
+	watchdog := armOrphanWatchdog(t, "legion-"+r.project, r.environ)
 	r.daemon = newFakeDaemon()
 	r.stream = newStreamStub(t, filepath.Join(dir, "stream.sock"), r.daemon)
 	r.rt = r.newRuntime(adjust...)
 	t.Cleanup(func() {
 		_, _ = r.tmux("kill-server")
+		_ = watchdog.Process.Kill()
 		r.stream.listener.Close()
 		r.daemon.server.Close()
 		os.RemoveAll(dir)
@@ -523,7 +566,7 @@ func (r *rig) spec(tree, issue string, role claim.Role) runtime.SpawnSpec {
 		Generation: 1,
 		BootToken:  bootToken,
 		Env:        map[string]string{"PATH": "/legion-test-path-marker:" + os.Getenv("PATH")},
-		Secrets:    map[string]string{"ENVOY_TOKEN": "envoy-" + randomHex(r.t, 8)},
+		Secrets:    map[string]string{"ENVOY_TOKEN": "envoy-" + randomHex(r.t, 8), "NATS_NKEY_SEED": "SU" + randomHex(r.t, 8)},
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            []string{r.rolePrompt},
 			Addressing:                 `Your topic is "notifications.role.` + token + `"; $HOME stays literal.`,
@@ -747,19 +790,21 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		"LEGION_GRANT_FILE":      filepath.Join(secrets, string(spec.Claim)+"-grant"),
 		"LEGION_BOOT_TOKEN_FILE": filepath.Join(secrets, string(spec.Claim)),
 		"ENVOY_TOKEN_FILE":       filepath.Join(secrets, string(spec.Claim)+"-envoy_token"),
+		"NATS_NKEY_SEED_FILE":    filepath.Join(secrets, string(spec.Claim)+"-nats_nkey_seed"),
 	} {
 		if env[name] != want {
 			t.Errorf("OMP's %s = %q, want %q", name, env[name], want)
 		}
 	}
 	for name, value := range env {
-		if value == spec.BootToken || value == spec.Secrets["ENVOY_TOKEN"] {
+		if value == spec.BootToken || value == spec.Secrets["ENVOY_TOKEN"] || strings.Contains(value, spec.Secrets["NATS_NKEY_SEED"]) {
 			t.Errorf("OMP's %s carries a secret's value", name)
 		}
 	}
 	for pointer, want := range map[string]string{
 		"LEGION_BOOT_TOKEN_FILE": spec.BootToken,
 		"ENVOY_TOKEN_FILE":       spec.Secrets["ENVOY_TOKEN"],
+		"NATS_NKEY_SEED_FILE":    spec.Secrets["NATS_NKEY_SEED"],
 	} {
 		if info, err := os.Stat(env[pointer]); err != nil {
 			t.Errorf("%s file %s: %v", pointer, env[pointer], err)
@@ -777,7 +822,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	}
 	for _, argv := range r.recorded() {
 		for i, word := range argv {
-			if strings.Contains(word, spec.BootToken) || strings.Contains(word, spec.Secrets["ENVOY_TOKEN"]) {
+			if strings.Contains(word, spec.BootToken) || strings.Contains(word, spec.Secrets["ENVOY_TOKEN"]) || strings.Contains(word, spec.Secrets["NATS_NKEY_SEED"]) {
 				t.Errorf("a secret reached tmux's argv: %q", argv[3])
 			}
 			if word == "-e" && i+1 < len(argv) && strings.HasPrefix(argv[i+1], "PATH=") {

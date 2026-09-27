@@ -25,12 +25,62 @@ type askBlock struct {
 	urgency  string
 }
 
+// settlementReconciliation is what one settlement's pass over the ask blocks found. Everything
+// that names a version number - a repair, an invalid block, the retraction of an ask whose block
+// left - is left for nameVersion, since settlement knows the number only once it has rendered
+// the reconciled tree: a settlement whose markdown repeats the latest version writes no version
+// and leaves the document at the one it found.
 type settlementReconciliation struct {
-	changed bool
-	events  []model.Event
+	changed   bool
+	events    []model.Event
+	retracted []model.Ask
 }
 
-// ErrInvalidAskBlock rejects an agent edit that would leave an indexed ask malformed.
+// nameVersion completes the reconciliation at the version the settled document is at, writing
+// the retractions whose reason names it and stamping it into every event that carries one.
+func (r *settlementReconciliation) nameVersion(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	owner artifactOwner,
+	version int,
+) error {
+	for index, event := range r.events {
+		switch payload := event.Payload.(type) {
+		case model.BlockRepairedEventPayload:
+			payload.Version = version
+			r.events[index].Payload = payload
+		case model.BlockInvalidEventPayload:
+			payload.Version = version
+			r.events[index].Payload = payload
+		}
+	}
+	for _, ask := range r.retracted {
+		resolution := model.AskResolution{
+			Kind:   "retracted",
+			Reason: fmt.Sprintf("%s %d", SettlementRetractionReason, version),
+			Actor:  SettlementActor,
+			At:     time.Now().UTC(),
+		}
+		encoded, err := json.Marshal(resolution)
+		if err != nil {
+			return fmt.Errorf("encode ask retraction: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, encoded); err != nil {
+			return fmt.Errorf("retract deleted ask block: %w", err)
+		}
+		ask.State = "resolved"
+		ask.Resolution = &resolution
+		r.events = append(r.events, documentAskEvent(
+			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+		))
+	}
+	return nil
+}
+
+// ErrInvalidAskBlock refuses a write that would leave an ask it writes or changes unreadable: an
+// upload (a spec at issue creation, a new document or version) or an edit whose ask breaks the
+// content rule paragraph+ bullet_list?, or an edit whose ask settlement cannot read.
 type ErrInvalidAskBlock struct {
 	Reason error
 }
@@ -68,7 +118,6 @@ func (s *Service) reconcileAskBlocks(
 	owner artifactOwner,
 	tree *pmdoc.Node,
 	actor model.Actor,
-	version int,
 ) (settlementReconciliation, error) {
 	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
 	if err != nil {
@@ -91,7 +140,6 @@ func (s *Service) reconcileAskBlocks(
 				actor,
 				model.BlockInvalidEventPayload{
 					BlockID:     invalid.id,
-					Version:     version,
 					Reason:      invalid.reason.Error(),
 					DisturbedBy: actor,
 				},
@@ -179,7 +227,7 @@ func (s *Service) reconcileAskBlocks(
 				artifactID,
 				"block.repaired",
 				actor,
-				model.BlockRepairedEventPayload{BlockID: block.id, Version: version, DisturbedBy: actor},
+				model.BlockRepairedEventPayload{BlockID: block.id, DisturbedBy: actor},
 			))
 		}
 	}
@@ -191,24 +239,7 @@ func (s *Service) reconcileAskBlocks(
 		if ask.State != "open" {
 			continue
 		}
-		resolution := model.AskResolution{
-			Kind:   "retracted",
-			Reason: fmt.Sprintf("%s %d", SettlementRetractionReason, version),
-			Actor:  SettlementActor,
-			At:     time.Now().UTC(),
-		}
-		encoded, err := json.Marshal(resolution)
-		if err != nil {
-			return settlementReconciliation{}, fmt.Errorf("encode ask retraction: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `update asks set state = 'resolved', resolution = $2 where id = $1`, ask.ID, encoded); err != nil {
-			return settlementReconciliation{}, fmt.Errorf("retract deleted ask block: %w", err)
-		}
-		ask.State = "resolved"
-		ask.Resolution = &resolution
-		reconciled.events = append(reconciled.events, documentAskEvent(
-			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
-		))
+		reconciled.retracted = append(reconciled.retracted, ask)
 	}
 	return reconciled, nil
 }
@@ -219,17 +250,85 @@ type invalidAskBlock struct {
 	reason error
 }
 
-// validateAskBlocks reports the first reason a document's ask blocks cannot be settled: a
-// duplicate block id, then the first invalid block's reason.
-func validateAskBlocks(tree *pmdoc.Node) error {
-	_, invalidBlocks, err := collectAskBlocksForSettlement(tree)
-	if err != nil {
+// validateEditedAskBlocks refuses an edit that leaves an ask unreadable - breaking its content
+// rule, or holding what settlement cannot read - when the edit wrote or changed it.
+func validateEditedAskBlocks(before, after *pmdoc.Node) error {
+	return refuseChangedAsks(before, after, func(ask *pmdoc.Node) error {
+		if err := pmdoc.AskContentError(ask); err != nil {
+			return err
+		}
+		_, err := parseAskBlock(ask)
 		return err
+	}, nodeToken)
+}
+
+// refuseChangedAsks is the first reason check gives against an ask in after that before does not
+// hold as it is - an ask after wrote or changed - or nil. Two asks are the same when fingerprint
+// gives both the same value. An ask a browser edit already left unreadable,
+// which the write carries through unchanged, is not the write's to refuse: refusing it would refuse
+// every write to the document until someone repairs that ask in the browser, and settlement flags
+// it `invalid` meanwhile.
+func refuseChangedAsks(before, after *pmdoc.Node, check func(*pmdoc.Node) error, fingerprint func(*pmdoc.Node) (string, error)) error {
+	var held map[string]string
+	var refusal, walkErr error
+	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
+		if refusal != nil || walkErr != nil {
+			return false
+		}
+		if node.Type != "ask" {
+			return true
+		}
+		reason := check(node)
+		if reason == nil {
+			return true
+		}
+		if held == nil {
+			if held, walkErr = askFingerprints(before, fingerprint); walkErr != nil {
+				return false
+			}
+		}
+		value, err := fingerprint(node)
+		if err != nil {
+			walkErr = err
+			return false
+		}
+		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); held[id] == value {
+			return true
+		}
+		refusal = reason
+		return false
+	})
+	if walkErr != nil {
+		return walkErr
 	}
-	if len(invalidBlocks) > 0 {
-		return invalidBlocks[0].reason
-	}
-	return nil
+	return refusal
+}
+
+// askFingerprints is each ask in tree by its block id, as fingerprint gives it.
+func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, error)) (map[string]string, error) {
+	held := make(map[string]string)
+	var err error
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if err != nil {
+			return false
+		}
+		if node.Type != "ask" {
+			return true
+		}
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		held[id], err = fingerprint(node)
+		return true
+	})
+	return held, err
+}
+
+// askMarkdown is what an uploaded version can say of an ask: its rendering alone, taken as an
+// upload is (asUploaded) - without anchor marks, and with its server-owned attributes (`state`,
+// the answer, `invalid`) at their defaults, since an upload's are discarded for the ask row's. The
+// attributes a reader's browser derives are never rendered. A new version is markdown, so this is
+// how a version says it carries an ask unchanged.
+func askMarkdown(ask *pmdoc.Node) (string, error) {
+	return pmdoc.Render(asUploaded(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{ask}}))
 }
 
 func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBlock, error) {
@@ -259,6 +358,29 @@ func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBl
 		return nil, nil, collectErr
 	}
 	return blocks, invalidBlocks, nil
+}
+
+// askReadability visits each ask block in document order with the reason it cannot be read, nil
+// when it can: settlement's parse, then the content rule the browser editor holds an ask to (an ask
+// breaking it is dropped from the shared document when an editor renders it, and settlement then
+// retracts it). An ask repeating an earlier ask's id is unreadable as a duplicate, so every ask
+// gets an answer where collectAskBlocksForSettlement stops at the first repeat.
+func askReadability(tree *pmdoc.Node, visit func(id string, reason error) bool) {
+	seen := map[string]struct{}{}
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+		if node.Type != "ask" {
+			return true
+		}
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		var reason error
+		if _, duplicate := seen[id]; duplicate {
+			reason = fmt.Errorf("duplicate ask block id %q", id)
+		} else if _, reason = parseAskBlock(node); reason == nil {
+			reason = pmdoc.AskContentError(node)
+		}
+		seen[id] = struct{}{}
+		return visit(id, reason)
+	})
 }
 
 func parseAskBlock(node *pmdoc.Node) (askBlock, error) {

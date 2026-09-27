@@ -131,7 +131,9 @@ test("an untitled session reads the same on the Agents page, the ask card, its f
 
     await page.goto("/");
     const card = page.getByTestId(`ask-${ask.id}`);
-    await expect(card.getByRole("region", { name: "Recipients" })).toContainText("Reaches 1");
+    const recipients = card.getByRole("region", { name: "Recipients" });
+    await expect(recipients).toContainText("Reaches 1");
+    await recipients.getByRole("button", { name: /^Reaches/ }).click();
     // The author line and the follower chip both carry the label — the same text twice.
     await expect(card.getByText(label, { exact: true })).toHaveCount(2);
 

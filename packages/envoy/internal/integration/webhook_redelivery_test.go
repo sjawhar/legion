@@ -1,0 +1,277 @@
+package integration
+
+import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/webhook"
+)
+
+// GitHub, Slack and Ghost Wispr redeliver a webhook under the delivery id it first carried (GitHub's
+// X-GitHub-Delivery GUID, Slack's event_id, Ghost Wispr's X-GhostWispr-Delivery). When the first
+// attempt already reached the stream — it was answered too slowly, or failed after publishing part
+// of a fan-out — the redelivery must not put a second copy there. A different delivery id must.
+
+const redeliverySecret = "redelivery-secret"
+
+func TestWebhookRedelivery_AGitHubRedeliveryLandsOnceAndAnotherDeliveryLands(t *testing.T) {
+	env := setupTestEnv(t)
+	handler := webhook.GitHubHandler(redeliverySecret, "@legion", "", env.client, refusingRecorder{t})
+	body := `{
+		"action": "submitted",
+		"repository": {"name": "widgets", "owner": {"login": "acme"}, "full_name": "acme/widgets"},
+		"pull_request": {"number": 7, "head": {"sha": "abcdef1234567890abcdef1234567890abcdef12"}},
+		"review": {"state": "approved", "body": "ship it", "commit_id": "abcdef1234567890abcdef1234567890abcdef12", "user": {"login": "reviewer"}},
+		"sender": {"login": "reviewer", "type": "User"}
+	}`
+
+	postGitHub(t, handler, "pull_request_review", "delivery-a", body)
+	postGitHub(t, handler, "pull_request_review", "delivery-a", body) // GitHub's redelivery
+	postGitHub(t, handler, "pull_request_review", "delivery-b", body)
+
+	got := streamDedupeKeys(t, env, "notifications.github.acme.widgets.pr.7.review")
+	if want := []string{"github.delivery-a", "github.delivery-b"}; !slices.Equal(got, want) {
+		t.Fatalf("stream holds %v on the review topic, want %v", got, want)
+	}
+}
+
+// One GitHub delivery fans out to several topics under one dedupe key (a comment that mentions the
+// trigger): each copy lands once, and the redelivery adds none.
+func TestWebhookRedelivery_AGitHubFanOutLandsOncePerTopic(t *testing.T) {
+	env := setupTestEnv(t)
+	handler := webhook.GitHubHandler(redeliverySecret, "@legion", "", env.client, refusingRecorder{t})
+	body := `{
+		"action": "created",
+		"repository": {"name": "widgets", "owner": {"login": "acme"}, "full_name": "acme/widgets"},
+		"issue": {"number": 7, "title": "Widget", "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/7"}},
+		"comment": {"body": "@legion please look", "user": {"login": "author"}},
+		"sender": {"login": "author", "type": "User"}
+	}`
+
+	postGitHub(t, handler, "issue_comment", "delivery-c", body)
+	postGitHub(t, handler, "issue_comment", "delivery-c", body) // GitHub's redelivery
+
+	for _, topic := range []string{
+		"notifications.github.acme.widgets.pr.7.mention",
+		"notifications.github.acme.widgets.mention",
+		"notifications.github.acme.widgets.pr.7.comment",
+	} {
+		if got, want := streamDedupeKeys(t, env, topic), []string{"github.delivery-c"}; !slices.Equal(got, want) {
+			t.Errorf("stream holds %v on %s, want %v", got, topic, want)
+		}
+	}
+}
+
+func TestWebhookRedelivery_ASlackRetryLandsOnceAndAnotherEventLands(t *testing.T) {
+	env := setupTestEnv(t)
+	handler := webhook.SlackHandler(redeliverySecret, env.client)
+	event := func(eventID string) string {
+		return fmt.Sprintf(`{"type":"event_callback","team_id":"T1","event_id":%q,"event":{"type":"message","channel":"C1","user":"U1","text":"hello","ts":"1700000000.000100"}}`, eventID)
+	}
+
+	postSlack(t, handler, event("Ev1"))
+	postSlack(t, handler, event("Ev1")) // Slack's retry
+	postSlack(t, handler, event("Ev2"))
+
+	got := streamDedupeKeys(t, env, "notifications.slack.T1.C1.message")
+	if want := []string{"slack.Ev1", "slack.Ev2"}; !slices.Equal(got, want) {
+		t.Fatalf("stream holds %v on the channel topic, want %v", got, want)
+	}
+}
+
+func TestWebhookRedelivery_AGhostWisprRedeliveryLandsOnceAndAnotherDeliveryLands(t *testing.T) {
+	env := setupTestEnv(t)
+	handler := webhook.GhostWisprHandler(redeliverySecret, env.client)
+	body := `{"event_type":"summary_ready","payload":{"session_id":"20260326041629","type":"summary_ready"}}`
+
+	postGhostWispr(t, handler, "gw-1", body)
+	postGhostWispr(t, handler, "gw-1", body) // Ghost Wispr's redelivery
+	postGhostWispr(t, handler, "gw-2", body)
+
+	got := streamDedupeKeys(t, env, contracts.GhostWisprSubject("20260326041629", "summary.ready"))
+	if want := []string{"ghostwispr.gw-1", "ghostwispr.gw-2"}; !slices.Equal(got, want) {
+		t.Fatalf("stream holds %v on the summary topic, want %v", got, want)
+	}
+}
+
+// refusingRecorder is a webhook.CIRecorder that fails the test on any record: none of these
+// fixtures is a pull_request or CI event, so a call means the fixture is not the event it claims
+// to be.
+type refusingRecorder struct{ t *testing.T }
+
+func (r refusingRecorder) refuse(kind string) error {
+	r.t.Helper()
+	r.t.Errorf("unexpected CI record (%s): the fixture is not the event it claims to be", kind)
+	return nil
+}
+
+func (r refusingRecorder) Record(contracts.CIObservation) error      { return r.refuse("check") }
+func (r refusingRecorder) RecordSuite(contracts.CIObservation) error { return r.refuse("suite") }
+func (r refusingRecorder) RecordHead(_, _, _, _, _ string) error     { return r.refuse("head") }
+
+func postGitHub(t *testing.T, handler http.Handler, event, delivery, body string) {
+	t.Helper()
+	postGitHubExpecting(t, handler, event, delivery, body, http.StatusOK)
+}
+
+// postGitHubExpecting posts a signed GitHub delivery and requires the handler's own status.
+func postGitHubExpecting(t *testing.T, handler http.Handler, event, delivery, body string, want int) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(body))
+	req.Header.Set("X-GitHub-Delivery", delivery)
+	req.Header.Set("X-GitHub-Event", event)
+	req.Header.Set("X-Hub-Signature-256", "sha256="+hmacHex(redeliverySecret, body))
+	serve(t, handler, req, want)
+}
+
+func postSlack(t *testing.T, handler http.Handler, body string) {
+	t.Helper()
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/slack", strings.NewReader(body))
+	req.Header.Set("X-Slack-Request-Timestamp", timestamp)
+	req.Header.Set("X-Slack-Signature", "v0="+hmacHex(redeliverySecret, "v0:"+timestamp+":"+body))
+	serveOK(t, handler, req)
+}
+
+func postGhostWispr(t *testing.T, handler http.Handler, delivery, body string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/webhook/ghostwispr", strings.NewReader(body))
+	req.Header.Set("X-GhostWispr-Delivery", delivery)
+	req.Header.Set("X-GhostWispr-Event", "summary_ready")
+	req.Header.Set("X-GhostWispr-Signature", "sha256="+hmacHex(redeliverySecret, body))
+	serveOK(t, handler, req)
+}
+
+// serveOK serves req and requires 200: the sender marks a delivery successful only then, so a
+// redelivery the stream recognises must still be answered 200.
+func serveOK(t *testing.T, handler http.Handler, req *http.Request) {
+	t.Helper()
+	serve(t, handler, req, http.StatusOK)
+}
+
+// serve serves req and requires the status want.
+func serve(t *testing.T, handler http.Handler, req *http.Request, want int) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != want {
+		t.Fatalf("%s answered %d %q, want %d", req.URL.Path, rec.Code, rec.Body.String(), want)
+	}
+}
+
+func hmacHex(secret, message string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(message))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// streamDedupeKeys returns the dedupe key of every message the notification stream holds on
+// subject, in stream order.
+func streamDedupeKeys(t *testing.T, env *testEnv, subject string) []string {
+	t.Helper()
+	info, err := env.client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: subject})
+	if err != nil {
+		t.Fatalf("stream info for %s: %v", subject, err)
+	}
+	held := int(info.State.Subjects[subject])
+	keys := make([]string, 0, held)
+	if held == 0 {
+		return keys
+	}
+	sub, err := env.client.JS().SubscribeSync(subject, natsgo.BindStream(bus.Stream), natsgo.OrderedConsumer(), natsgo.DeliverAll())
+	if err != nil {
+		t.Fatalf("read %s: %v", subject, err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+	for range held {
+		msg, err := sub.NextMsg(5 * time.Second)
+		if err != nil {
+			t.Fatalf("read message %d of %d on %s: %v", len(keys)+1, held, subject, err)
+		}
+		var item contracts.Envelope
+		if err := json.Unmarshal(msg.Data, &item); err != nil {
+			t.Fatalf("decode message on %s: %v", subject, err)
+		}
+		keys = append(keys, item.DedupeKey)
+	}
+	return keys
+}
+
+// The case the MsgId exists for, end to end: a fan-out whose second publish fails. The first topic
+// is already on the stream, the rest are never attempted, and the handler answers 503, which is
+// what GitHub records as a failed delivery. Its redelivery must add nothing to the topic that
+// landed and must publish the ones that did not, so the event ends up on each of its topics
+// exactly once. Without the MsgId the first topic holds two copies of one delivery.
+func TestWebhookRedelivery_AFanOutThatFailedPartWayIsCompletedByTheRedelivery(t *testing.T) {
+	env := setupTestEnv(t)
+	body := `{
+		"action": "created",
+		"repository": {"name": "widgets", "owner": {"login": "acme"}, "full_name": "acme/widgets"},
+		"issue": {"number": 9, "title": "Widget", "pull_request": {"url": "https://api.github.com/repos/acme/widgets/pulls/9"}},
+		"comment": {"body": "@legion please look", "user": {"login": "author"}},
+		"sender": {"login": "author", "type": "User"}
+	}`
+	topics := []string{
+		"notifications.github.acme.widgets.pr.9.mention",
+		"notifications.github.acme.widgets.mention",
+		"notifications.github.acme.widgets.pr.9.comment",
+	}
+
+	// The first attempt publishes the first topic and fails on the second.
+	failing := &failAfter{inner: env.client, after: 1}
+	partial := webhook.GitHubHandler(redeliverySecret, "@legion", "", failing, refusingRecorder{t})
+	postGitHubExpecting(t, partial, "issue_comment", "delivery-partial", body, http.StatusServiceUnavailable)
+	if failing.published != 1 {
+		t.Fatalf("the first attempt published %d envelopes, want the one before the failure", failing.published)
+	}
+	if got, want := streamDedupeKeys(t, env, topics[0]), []string{"github.delivery-partial"}; !slices.Equal(got, want) {
+		t.Fatalf("stream holds %v on %s after the partial attempt, want %v", got, topics[0], want)
+	}
+	for _, topic := range topics[1:] {
+		if got := streamDedupeKeys(t, env, topic); len(got) != 0 {
+			t.Fatalf("stream holds %v on %s after the partial attempt, want nothing", got, topic)
+		}
+	}
+
+	// GitHub redelivers the failed delivery, now against a listener whose publishes all succeed.
+	whole := webhook.GitHubHandler(redeliverySecret, "@legion", "", env.client, refusingRecorder{t})
+	postGitHub(t, whole, "issue_comment", "delivery-partial", body)
+
+	for _, topic := range topics {
+		if got, want := streamDedupeKeys(t, env, topic), []string{"github.delivery-partial"}; !slices.Equal(got, want) {
+			t.Errorf("stream holds %v on %s after the redelivery, want %v", got, topic, want)
+		}
+	}
+}
+
+// failAfter publishes the first after envelopes through inner and fails every one beyond that, as
+// a listener does when NATS goes away part way through a fan-out.
+type failAfter struct {
+	inner     webhook.Publisher
+	after     int
+	published int
+}
+
+func (p *failAfter) Publish(item contracts.Envelope) error {
+	if p.published >= p.after {
+		return fmt.Errorf("publish refused after %d envelopes", p.after)
+	}
+	if err := p.inner.Publish(item); err != nil {
+		return err
+	}
+	p.published++
+	return nil
+}

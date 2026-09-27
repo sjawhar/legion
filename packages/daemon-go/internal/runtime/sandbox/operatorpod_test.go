@@ -16,8 +16,9 @@ import (
 
 // CheckPod refuses, naming both, an operator variable the runtime, the worker image, or every
 // launch sets, or one that places Oh My Pi's sessions; a volume Legion names; a mount at, under, or
-// above a path Legion mounts, the image owns, or a tool runs from; and a provider key naming any
-// variable already set in the agent's environment, or whose pointer is. It passes the Go live
+// above a path Legion mounts, the image owns, or a tool runs from; a provider key naming any
+// variable already set in the agent's environment, or whose pointer is; and a provider key reading
+// a providers secret's key, which would export that secret into Oh My Pi's environment. It passes the Go live
 // harnesses' operator pod, and an operator's own settings overlay and a baseline variable it may
 // override.
 func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
@@ -76,7 +77,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		}}, want: "runtime.kubernetes.pod.volumes[1].name boot is a volume Legion puts in every pod"},
 		{name: "a mount at a path Legion mounts", pod: mountAt("/var/run/legion/boot"), want: overlaps("/var/run/legion/boot", "/var/run/legion/boot", false)},
 		{name: "a mount under a path Legion mounts", pod: mountAt("/legion/operator"), want: overlaps("/legion/operator", "/legion", false)},
-		{name: "a mount above a path Legion mounts", pod: mountAt("/var/run/legion"), want: overlaps("/var/run/legion", "/var/run/legion/boot", false)},
+		{name: "a mount above a path Legion mounts", pod: mountAt("/var/run/legion"), want: overlaps("/var/run/legion", "/var/run/legion/agent-secrets", false)},
 		{name: "a mount above the sessions Legion mounts", pod: mountAt("/home/legion/.omp/profiles/legion/agent"),
 			want: overlaps("/home/legion/.omp/profiles/legion/agent", "/home/legion/.omp/profiles/legion/agent/sessions", false)},
 		{name: "a mount at the root", pod: mountAt("/"), want: overlaps("/", "/home/legion/.config", false)},
@@ -106,12 +107,14 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			keys: map[string]string{"OPENAI_BASE_URL": "openai_base_url"}, want: keyNames("OPENAI_BASE_URL", byOperator)},
 		{name: "a provider key whose pointer the pod's env sets", pod: env("GEMINI_API_KEY_FILE", "/var/run/operator/gemini"),
 			keys: map[string]string{"GEMINI_API_KEY": "gemini"}, want: keyPointer("GEMINI_API_KEY", byOperator)},
+		{name: "a provider key reading a providers secret's key", keys: map[string]string{"FOO": "NATS_NKEY_SEED"},
+			want: "provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO"},
 		{name: "the live harnesses' operator pod", pod: Pod(fixture), keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
 		{name: "an operator's own overlays and a baseline variable it overrides",
 			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml", "OTEL_SDK_DISABLED": "false"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN"})
+			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"})
 			switch {
 			case tc.want == "" && err != nil:
 				t.Fatalf("CheckPod = %v, want no refusal", err)
@@ -136,6 +139,10 @@ func TestTheRuntimeRefusesAnOperatorPodCollidingWithLegionsOwn(t *testing.T) {
 		{"a launch secret's pointer", func(o *Options) {
 			o.LaunchSecrets, o.ProviderKeys = []string{"ENVOY_TOKEN"}, map[string]string{"ENVOY_TOKEN": "envoy"}
 		}, "sandbox runtime: provider_keys names ENVOY_TOKEN, whose pointer ENVOY_TOKEN_FILE every launch sets (the pointer to the launch secret ENVOY_TOKEN): the shim skips a key whose pointer the pod sets"},
+		{"a provider key reading a providers secret's key", func(o *Options) {
+			o.LaunchSecrets, o.ProvidersSecrets = []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}
+			o.ProviderKeys = map[string]string{"FOO": "NATS_NKEY_SEED"}
+		}, "sandbox runtime: provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := testOptions()

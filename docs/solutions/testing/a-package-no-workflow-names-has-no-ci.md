@@ -43,7 +43,7 @@ The check below as first written would have passed `packages/envoy-plugin` — i
 `.github/workflows/envoy-and-contracts.yaml`'s `envoy-plugin` job steps into it three times, for
 `Lint envoy plugin` (`bun run lint`), `Typecheck envoy plugin` (`bun run typecheck`), and
 `Pack envoy plugin` (`bun pm pack`). Every sibling job in the same file (`contracts`,
-`envoy-client`, `pi-envoy`, `dispatch`, `claude-envoy-bridge`) also has a `Test <name>` step;
+`envoy-client`, `pi-envoy`, `dispatch`, `claude-envoy`) also has a `Test <name>` step;
 this one never did, and its seven test files / 61 tests ran nowhere. So when
 `@legion/contracts` gained two Dispatch tools, the plugin's `dispatch-tools.test.ts` went red on
 `main` (`Received + 2`) and stayed red until the LEGION-76 tester happened to run `bun test` from

@@ -29,7 +29,7 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
 }
 
 const ISSUE_REFERENCE =
-  "An issue is a native KEY or external owner/repo#n reference; an external reference creates its native issue in the repository's dashboard-configured project or, failing that, the default project (DISPATCH_DEFAULT_PROJECT).";
+  "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch_issue with external creates a native issue.";
 
 const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
@@ -173,6 +173,9 @@ export function isIssueStatus(value: string): value is IssueStatus {
   return (ISSUE_STATUSES as readonly string[]).includes(value);
 }
 
+/** Whether an issue's route reaches a running session (`model.RouteLive` and siblings). */
+export const ISSUE_ROUTE_STATUSES = ["live", "no_holder", "unknown"] as const;
+
 /** Document edit operations the Dispatch server applies. */
 export const DOC_EDIT_OPS = [
   "replace",
@@ -190,6 +193,7 @@ export const dispatchToolSpecs = [
     example: { project: "DSP", title: "Native workspace" },
     description:
       "Create a native Dispatch issue for newly tracked work. Search first with dispatch_search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " +
+      "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
@@ -225,7 +229,11 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_issue_update",
-    example: { issue: "DSP-1", status: "in_progress" },
+    example: {
+      issue: "DSP-1",
+      status: "done",
+      reason: "Shipped in owner/repo#7; verified on the production dashboard.",
+    },
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " +
       "its priority, link a URL (the pull request that delivers it, a run, a document), set its " +
@@ -233,15 +241,24 @@ export const dispatchToolSpecs = [
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. external_links are " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
-      "keeps every earlier link. components replaces the issue's own attachment. A closed issue " +
-      "takes only rank, components, and a reopening status (any status but done); everything " +
-      "else, priority included, waits for the reopen. " +
+      "keeps every earlier link. components replaces the issue's own attachment. Closing an issue " +
+      "(status done) requires reason, the note that says why: it is posted on the issue as a " +
+      "message, then the issue closes, because a closed issue refuses messages, comments, and " +
+      "artifacts; reason goes only with status done. A closed issue takes only rank, components, " +
+      "and a reopening status (any status but done); everything else, priority included, waits " +
+      "for the reopen. " +
       "priority is yours to set and a human overrides it; rank, the board's own order, is not " +
       "settable here. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       status: z.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
+      reason: z
+        .string({ max: 2000 })
+        .describe(
+          "Required with status done, and only with it: why the issue is closing, at most 2,000 characters. Posted on the issue as a message before it closes."
+        )
+        .optional(),
       title: z.string({ min: 1 }).describe("Replacement title.").optional(),
       labels: z
         .array(z.string({ min: 1, max: 40 }), { max: 20 })
@@ -276,6 +293,7 @@ export const dispatchToolSpecs = [
       check: (value) => {
         const input = value as {
           readonly status?: unknown;
+          readonly reason?: unknown;
           readonly title?: unknown;
           readonly labels?: unknown;
           readonly priority?: unknown;
@@ -284,20 +302,26 @@ export const dispatchToolSpecs = [
           readonly parent?: unknown;
           readonly components?: unknown;
         };
+        const reasonFits =
+          input.status === "done"
+            ? typeof input.reason === "string" && input.reason.trim() !== ""
+            : input.reason === undefined;
         return (
-          typeof input.status === "string" ||
-          typeof input.title === "string" ||
-          Array.isArray(input.labels) ||
-          typeof input.priority === "number" ||
-          input.priority === null ||
-          Array.isArray(input.external_links) ||
-          typeof input.route === "string" ||
-          typeof input.parent === "string" ||
-          (typeof input.components === "object" && input.components !== null)
+          reasonFits &&
+          (typeof input.status === "string" ||
+            typeof input.title === "string" ||
+            Array.isArray(input.labels) ||
+            typeof input.priority === "number" ||
+            input.priority === null ||
+            Array.isArray(input.external_links) ||
+            typeof input.route === "string" ||
+            typeof input.parent === "string" ||
+            (typeof input.components === "object" && input.components !== null))
         );
       },
       message:
-        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components.",
+        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components. " +
+        "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done.",
     },
     strict: true,
   },
@@ -335,6 +359,7 @@ export const dispatchToolSpecs = [
     description:
       "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " +
       "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " +
+      "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " +
       "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` +
       `characters and has at most 8 options. ${OWNER_REFERENCE}`,
@@ -391,8 +416,9 @@ export const dispatchToolSpecs = [
       "only the fields you name - pass urgency alone and the question's wording, formatting, links " +
       "and comment anchors are untouched - so the edit writes a document version and closes a " +
       "spec's design gate until that version is " +
-      'approved; an option label containing ": " and a question with a line beginning ":::" are ' +
-      "refused, naming the field, because the block cannot carry them unchanged.",
+      "approved; text the block cannot carry back unchanged is refused, naming the field - an " +
+      'option label containing ": ", the separator between a label and its description, is one ' +
+      "example.",
     arguments: (z) => ({
       ask: z
         .string()
@@ -565,7 +591,11 @@ export const dispatchToolSpecs = [
         .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       quote: z.string().describe("Exact document text to replace."),
-      replace_with: z.string().describe("Replacement text."),
+      replace_with: z
+        .string()
+        .describe(
+          "Replacement text; a CR LF or a lone carriage return in it is written as a line feed."
+        ),
       body: z
         .string({ max: 2000 })
         .describe("Optional rationale, at most 2,000 characters.")
@@ -581,9 +611,9 @@ export const dispatchToolSpecs = [
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
     description:
-      "Post a note humans must read now: a reply to a human's message, a deliverable that landed, or a blocker only " +
-      "they can clear. Never progress or status updates - Dispatch is a high-signal record, not a log. Not a decision " +
-      "(dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " +
+      "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A blocker only a human can " +
+      "clear is an ask (dispatch_ask), so it lands in their inbox. Never progress or status updates - Dispatch is a high-signal " +
+      "record, not a log. Not a decision (dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " +
       "one sent from the Agents page, which names no issue - pass that message's bare id as in_reply_to and no issue; " +
       "the reply lands in that conversation, and a second call with the same in_reply_to posts nothing because " +
       "Dispatch keeps the one reply per message. Every other message names its issue. " +
@@ -620,12 +650,14 @@ export const dispatchToolSpecs = [
     description:
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
       "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
-      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose. " +
-      "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. " +
+      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
+      "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
       "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
+      "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
+      "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
       `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -652,14 +684,19 @@ export const dispatchToolSpecs = [
               with: z
                 .string()
                 .describe(
-                  "Replacement text for replace, parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match."
+                  "Replacement text for replace: inside a code block, the code's literal text as sent (line breaks at its end do not survive a read); text that would read as block syntax at a line start, such as '---' over a paragraph, is stored escaped and reads back as those characters, so a rule is added with insert beside the paragraph; elsewhere parsed as inline markdown within the matched block; a marker of a different kind from the block's own is literal text, one of the same kind is refused unless it is a heading rename (where a level named by find is what lets with change it), a backslash escape keeps prose that merely looks like a marker, a block marker after a hard line break is refused because replace cannot open a new block, and any non-empty value that renders to no text is refused - only an empty value deletes the match. A CR LF or a lone carriage return in it is written as a line feed."
                 )
                 .optional(),
               occurrence: z
                 .number({ int: true, min: 0 })
                 .describe("Optional zero-based match occurrence.")
                 .optional(),
-              markdown: z.string().describe("Markdown to insert.").optional(),
+              markdown: z
+                .string()
+                .describe(
+                  "Markdown to insert; a CR LF or a lone carriage return in it is written as a line feed."
+                )
+                .optional(),
               after: z
                 .string()
                 .describe(
@@ -683,7 +720,12 @@ export const dispatchToolSpecs = [
                 .describe("Zero-based row or column index for delete_row or delete_column.")
                 .optional(),
               type: z.string().describe("Typed block name for retype.").optional(),
-              attributes: z.unknown().describe("Typed block attributes for retype.").optional(),
+              attributes: z
+                .unknown()
+                .describe(
+                  "Typed block attributes for retype; a CR LF or a lone carriage return in a string value is written as a line feed."
+                )
+                .optional(),
             },
             { strict: true }
           )
@@ -771,13 +813,20 @@ export const dispatchToolSpecs = [
     example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
-      `dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. ${OWNER_REFERENCE}`,
+      "dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. " +
+      "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " +
+      `${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key for an unlinked document.").optional(),
       name: z.string().describe("Artifact filename shown in Dispatch."),
       path: z.string().describe("Local path to the file to upload.").optional(),
-      content: z.string().describe("Inline text to store as a Markdown document.").optional(),
+      content: z
+        .string()
+        .describe(
+          "Inline text to store as a Markdown document; a CR LF or a lone carriage return in it is stored as a line feed."
+        )
+        .optional(),
       summary: z.string().describe("Optional version summary.").optional(),
     }),
     validation: {
@@ -834,21 +883,41 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC" },
+    example: { project: "AGENTC", route_status: "no_holder" },
     description:
       "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " +
-      "its status, priority, parent, labels, and open-ask count, so you can see backlog shape without " +
-      "opening every issue. Optionally filter by status, parent, label, or how recently it changed. Do " +
-      "not use it to search by keyword or phrase; dispatch_search remains the keyword surface. Rows are " +
-      "capped at limit (default 50, max 250), applied to the response here, not by the server.",
+      "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " +
+      "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " +
+      "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " +
+      "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " +
+      'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' +
+      "session that is not running at the moment of the read, whatever its priority. A restarting " +
+      "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " +
+      "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " +
+      "Rows are capped at limit (default 50, max 250), applied to the response here, not by the server.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
       parent: z.string().describe("Optional parent issue key filter.").optional(),
       label: z.string().describe("Optional label filter.").optional(),
+      priority: z
+        .array(z.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 })
+        .describe(
+          "Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " +
+            "for an issue with no priority; an issue matching any listed value is returned."
+        )
+        .optional(),
       updated_since: z
         .string()
         .describe("Optional RFC3339 timestamp; only issues updated at or after it.")
+        .optional(),
+      route_status: z
+        .enum(ISSUE_ROUTE_STATUSES)
+        .describe(
+          "Optional: only open issues whose route is in this state. live: a running session holds " +
+            "the role or is the routed session. no_holder: nobody running holds the role, or the " +
+            "session is not running, right now. unknown: the Envoy listener did not answer."
+        )
         .optional(),
       limit: z
         .number({ int: true, min: 1, max: 250 })

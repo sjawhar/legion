@@ -234,7 +234,10 @@ export function senderLabel(envelope: DeliveryEnvelope): string {
   return envelope.sender?.title === undefined ? sender : `${sender} (${envelope.sender.title})`;
 }
 
-/** A ready-to-issue tool call any host can act on (OMP devices and the Claude bridge's MCP tools share these names). */
+/**
+ * A ready-to-issue tool call any host can act on (OMP devices and claude-envoy's MCP tools share
+ * these names).
+ */
 export interface ReplyHint {
   readonly tool: string;
   readonly args: Readonly<Record<string, string>>;

@@ -31,7 +31,7 @@
 //
 // The package is tested against that property directly, not against a
 // reimplementation of the schema: every fixture's expected shape is produced
-// by the fork's headless Milkdown engine (@sjawhar/proof-editor/headless),
+// by the headless Milkdown engine (@legion/proof-editor/headless),
 // and every Update result is decoded back with the browser's own
 // y-prosemirror, not with this package's Read. See read_test.go,
 // update_test.go, and gen/decode.ts.
@@ -42,8 +42,11 @@
 // hand-written. To add a document fixture, drop a markdown file in
 // testdata/corpus/ and regenerate:
 //
-//	cd gen && bun install && bun run gen     # rewrite generated fixtures
-//	cd gen && bun run check                  # verify they are up to date (CI)
+//	cd gen && bun run gen     # rewrite generated fixtures
+//	cd gen && bun run check   # verify they are up to date (CI)
+//
+// gen is a workspace member, so the repo-root bun install covers its
+// dependencies, @legion/proof-editor among them.
 //
 // gen/gen.ts parses corpus files with the headless engine, encodes their
 // ProseMirror docs as Yjs updates with y-prosemirror, and records markdown,

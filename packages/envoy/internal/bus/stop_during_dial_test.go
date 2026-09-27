@@ -93,7 +93,7 @@ func (p *delayingProxy) close() {
 func TestARecoveryStoppedMidDialInstallsNothingAndLogsNoError(t *testing.T) {
 	_, uri := startNATS(t)
 	proxy := startDelayingProxy(t, strings.TrimPrefix(uri, "nats://"))
-	client, err := bus.Connect([]string{proxy.url()})
+	client, err := bus.ConnectOwningStream([]string{proxy.url()})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -143,7 +143,7 @@ func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 func TestARecoveryDiallingALostServerEndsAtTheStop(t *testing.T) {
 	_, uri := startNATS(t)
 	proxy := startDelayingProxy(t, strings.TrimPrefix(uri, "nats://"))
-	client, err := bus.Connect([]string{proxy.url()})
+	client, err := bus.ConnectOwningStream([]string{proxy.url()})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

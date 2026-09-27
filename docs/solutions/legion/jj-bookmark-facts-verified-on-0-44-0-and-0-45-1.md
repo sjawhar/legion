@@ -128,6 +128,33 @@ leaving the workspace **registered** (`jj workspace list` shows it) with its **d
 and its working copy parented on the root commit `000000000000`. Resolve to a commit id first and
 add by id; never let `add` be the thing that discovers the name is bad.
 
+## `jj bookmark set` refuses a sideways move off two local moves
+
+A bookmark conflicted by two local moves from one base (two divergent operations each setting it
+to a different child) is not moved back to its remote's commit by `jj bookmark set <name> -r
+<name>@origin`: both binaries exit 1 with `Error: Refusing to move bookmark backwards or sideways:
+<name>` and the hint to add `--allow-backwards`, which takes it (`Moved 1 bookmarks to …`). A way
+out that restores a bookmark to its remote from such a conflict carries the flag.
+
+## With no local `main`, `jj workspace add --revision main` registers before it errors
+
+A clone has no local `main` when the repository's default branch is another, when `main` was
+deleted in the clone while `main@origin` stays tracked, or when `jj bookmark forget main` left
+`main@origin` untracked. Bare `main` names none of the remote rows, so in each case `--revision
+main` registers the workspace, parented on the root commit, and then fails with `Error: Revision
+\`main\` doesn't exist` (followed by `Hint: Did you mean \`main@origin\`?` when that row exists),
+the same shape as a missing issue bookmark above. The Go `createWorkspace` resolves `main` with
+the rows template too and adds its id (`mainCommit`), refusing each of these states by name first.
+
+## `jj workspace add` refuses `--ignore-working-copy`, after registering
+
+`jj workspace add` refuses `--ignore-working-copy` on both binaries, after the same registration:
+`Created workspace in "…"`, then `Error: This command must be able to update the working copy.` /
+`Hint: Don't use --ignore-working-copy.`, exit 1, the workspace registered and its directory
+created. So the add is the one jj command on a shared clone that snapshots the clone's own working
+copy. Every other command run against it (`-R <clone>`) takes the flag: the fetch, `jj workspace
+forget`, `jj bookmark set|delete|forget|track`, `jj config get|set|list|unset`, and the reads.
+
 ## `jj workspace forget` takes only workspace names
 
 `jj workspace forget [WORKSPACES]...` — no `--cleanup`, no `--force`, on 0.44.0 and 0.45.1 alike
@@ -198,12 +225,16 @@ and leaves no side effect), which is why the three removal tests in `workspace.t
   `jj log -r 'a@'` for an unregistered name: `Error: Workspace \`a\` doesn't have a working-copy
   commit`, exit 1 — check registration before asking for `a@`.
 - On 0.45.1 a colocated clone's `jj workspace add` creates a git worktree
-  (`git --git-dir=clone/.git worktree list` names it, `prunable` once the directory is gone) and
-  `git worktree prune` removes it after the forget; on **0.44.0** no git worktree is created and
-  the prune is a no-op, exit 0.
+  (`git --git-dir=clone/.git worktree list` names it, `prunable` once the directory is gone, unless
+  locked). The fork's `jj workspace forget` removes it only while its directory exists; forgotten
+  after the directory went, the entry stays, and a later `jj workspace add` at that path stops at
+  git's `is a missing but already registered worktree`. Removal and provisioning delete that one
+  entry themselves (docs/solutions/daemon/jj-git-worktree-interop.md). On **0.44.0** no git
+  worktree is created.
 - Order: delete the directory, then forget. Directory gone but still registered:
-  `jj workspace add … --name a` says `Error: Workspace named 'a' already exists` (exit 1) —
-  `createWorkspace`'s `already (registered|exists)` branch forgets, prunes, and adds again.
+  `jj workspace add … --name a` says `Error: Workspace named 'a' already exists` (exit 1), and
+  creates no git worktree — `createWorkspace`'s `already (registered|exists)` branch forgets and
+  adds again.
   Registration gone but directory present: `jj workspace update-stale` inside it says
   `Error: Nothing checked out in this workspace` (exit 1; 0.45.1 also
   `Removed Git worktree for …`) — the failure the wrong order would give every later provisioning.
@@ -236,7 +267,7 @@ jj -R clone workspace add a --name a --revision main; jj -R clone workspace add 
 (cd a && jj bookmark set legion/A -r @ && echo hi > f && jj new -m "a work 2")
 jj log -r '::a@ ~ ::(working_copies() ~ a@) ~ ::(bookmarks() | remote_bookmarks() | tags())' --no-graph -T 'commit_id ++ "\n"' --ignore-working-copy -R clone
 rm -rf a; jj abandon -r '<the ids, | -joined>' --ignore-working-copy -R clone; jj workspace forget a --ignore-working-copy -R clone
-git --git-dir=clone/.git worktree prune; (cd b && jj log -r 'all()')
+rm -rf clone/.git/worktrees/a; (cd b && jj log -r 'all()')   # a's own entry (named a in this fresh clone); never a bare prune
 # conflicted, one side a deletion: delete legion/D locally, move it on origin, fetch
 (cd clone && jj bookmark delete legion/D)
 git --git-dir=clone/.git push "$PWD/remote" <new commit>:refs/heads/legion/D; jj -R clone git fetch

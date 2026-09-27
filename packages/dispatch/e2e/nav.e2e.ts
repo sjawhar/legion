@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import { createAsk, createIssue, createProject } from "./api";
 import { resetDatabase } from "./seed";
@@ -118,6 +118,34 @@ test("issue tabs are URL-driven and keyboard-navigable, and titles follow direct
     await expect(page.getByRole("heading", { name: "Page not found" })).toBeVisible();
     await expect(page).toHaveTitle("Not found · Dispatch");
     await expect(page.getByRole("link", { name: "Back to inbox" })).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+// One count, one colour: the Inbox badge means the viewer must act, and a reader who learns it
+// in the drawer must recognise it in the top bar.
+test("the needs-you count is the same badge in the phone top bar and the drawer", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the compact top bar exists below the xl rail");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Badge colour" });
+  await createAsk(issue.key, { question: "Which colour?" }, session);
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/");
+    const fill = (locator: ReturnType<Page["getByText"]>) =>
+      locator.evaluate((element) => getComputedStyle(element).backgroundColor);
+    const topBar = page.getByText("Needs you 1", { exact: true });
+    await expect(topBar).toBeVisible();
+    const topBarFill = await fill(topBar);
+    await page.getByRole("button", { name: "Open navigation" }).click();
+    const drawer = page.getByRole("link", { name: /Inbox/ }).getByText("Needs you 1");
+    await expect(drawer).toBeVisible();
+    expect(topBarFill).toBe(await fill(drawer));
   } finally {
     await context.close();
   }

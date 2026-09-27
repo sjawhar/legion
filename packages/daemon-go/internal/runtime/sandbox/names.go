@@ -28,6 +28,15 @@ const (
 	ProvidersDir    = "/var/run/legion/providers"
 )
 
+// AgentSecretsKeyDir is the memory-backed directory the pod's agent-secrets key and enrollment id
+// live in, and AgentSecretsTokenDir where its projected token for the broker's audience is
+// mounted, as AgentSecretsTokenFile (AGENTC-393). Both are the worker container's alone.
+const (
+	AgentSecretsKeyDir    = "/var/run/legion/agent-secrets"
+	AgentSecretsTokenDir  = "/var/run/legion/agent-secrets-token"
+	AgentSecretsTokenFile = "token"
+)
+
 // The image's own paths (packages/daemon/docker/worker.Dockerfile: ENV and the COPY lines).
 const (
 	// ompProfileDir is the image's Oh My Pi profile, <HOME>/.omp/profiles/<OMP_PROFILE>, whose

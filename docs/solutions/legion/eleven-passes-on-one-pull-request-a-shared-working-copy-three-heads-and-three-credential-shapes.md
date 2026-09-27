@@ -44,6 +44,15 @@ From the eighth pass on, the shared issue workspace's working copy (`@`) was the
 empty commit carrying only `.omp/config.yml` on top of the tester's record. Every rule below
 follows from one decision — never move it.
 
+**Superseded 2026-09-27 (LEGION-118):** `jj new legion/<KEY> main@origin -m "<message>"` (a
+forward merge, `skills/legion-worker/SKILL.md`) never touches an existing commit, so it never
+risks another role's working copy either, whichever chain it sits on — and the first rule below
+was no safer against LEGION-118: per `jj help rebase`, `-b X -d D` is defined as `-s roots(D..X)
+-d D`, the identical descendant-inclusive set. Merge from the bookmark, not `@`: a handoff split
+leaves `@` empty and undescribed, and `jj git push` refuses a commit with no description. None of
+the workarounds below are needed going forward; what follows records the earlier, rebase-based
+ones.
+
 - **Rebase by explicit commit id**, `jj rebase -b <commit id> -d main@origin`, not
   `roots(main@origin..@)`: `@` was not on the chain being moved, and after LEGION-45 the architect
   ruled that a rebase names what it moves. The tester's and reviewer's record commits move with
@@ -63,8 +72,9 @@ follows from one decision — never move it.
 - **Divergent change ids are normal** on a branch other workspaces still point at (old copies stay
   visible); address commits by commit id and leave the divergence alone. `jj abandon` is off the
   table on the shared repository anyway.
-- **Push by bookmark**, `jj bookmark set legion/<KEY> -r <commit id> --allow-backwards` then
-  `jj git push --bookmark legion/<KEY>`; never commit `.omp/config.yml`.
+- **Push by bookmark**, with `skills/legion-worker/SKILL.md`'s push procedure (it sets `legion/<KEY>` with `-r @- --allow-backwards`
+  only after checking that the remote branch is an ancestor, or the tip recorded before a
+  rewrite); never commit `.omp/config.yml`.
 
 The same discipline made two conflict-forced rebases inside one hour cheap: all conflicts were in
 the daemon `AGENTS.md` and one doc comment, each resolved in place in minutes, with the suites

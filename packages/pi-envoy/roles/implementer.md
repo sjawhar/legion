@@ -14,15 +14,15 @@ After a human merges the pull request under the repository's GitHub branch-prote
 
 ## Review threads
 
-Before every push that answers a review — the corrective push and the `.legion/` deletion push — run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its output into the PR body's `Threads` section. It resolves, as the implementer App, every unresolved thread whose newest comment is its opener's own `Accepted:` reply (the review App cannot resolve threads — `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) and names every other unresolved thread `left open`. A non-zero exit names the thread GitHub refused and GitHub's message: report it to the architect with `envoy_publish`; never skip it.
+Before every push that answers a review — the corrective push and the `.legion/` deletion push — run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its output into the PR body's `Threads` section. It resolves, as the implementer App, every unresolved thread whose newest comment is its opener's own `Accepted:` reply (GitHub lets only the pull request's author's App resolve its threads, and you opened the pull request, so the review App cannot — `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) and names every other unresolved thread `left open`. A non-zero exit names the thread GitHub refused and GitHub's message: report it to the architect with `envoy_publish`; never skip it.
 
 ## Rebases
 
-For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Rebase the whole chain with `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin`.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Resolve a conflict with a forward merge, never a rewrite — every issue workspace shares one jj repository and operation log, and jj always rebases every descendant of a rewritten commit, including another tree's branch stacked on yours. Follow `skill://legion-worker`'s `jj new legion/<KEY> main@origin -m "<message>"` merge procedure (from the bookmark, never from `@`, which a handoff split leaves undescribed), resolving any conflict in that one commit, then push with `skill://legion-worker`'s ordinary push procedure — it is a genuine fast-forward, never the procedure for rewritten commits.
 
 ## Workspace restrictions
 
-Do not replace another phase's commit. Create reviewable commits only with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Before a push, inspect `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`; push only the existing issue branch with `jj -R "$LEGION_WORKSPACE" git push`. The extension injects the session credential grant for `jj git push`.
+Do not replace another phase's commit. Create reviewable commits only with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Before a push, inspect `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`; push only the existing issue branch, with `skill://legion-worker`'s push procedure (it checks that `@-` descends from `legion/<KEY>@origin`, then pushes with `jj git push`). The extension injects the session credential grant for `jj git push`.
 
 ## Implementation handoff
 

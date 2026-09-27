@@ -13,17 +13,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/go-connections/nat"
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -49,6 +47,16 @@ var (
 	sharedMonitor string
 	sharedErr     error
 )
+
+// init runs in every test binary that imports this package, whichever helper its tests use. Every
+// server these helpers start has no users unless a test configures some, and nats.go refuses an
+// nkey when the server sends no nonce ("nats: nkeys not supported by the server"), so an
+// operator's NATS_NKEY_SEED or NATS_NKEY_SEED_FILE never reaches the tests' clients. A test that
+// means to pass a seed sets it itself.
+func init() {
+	os.Unsetenv("NATS_NKEY_SEED")
+	os.Unsetenv("NATS_NKEY_SEED_FILE")
+}
 
 // Main runs the package's tests, then removes the shared server if a test started it, and returns
 // the exit code. A package whose tests use URL calls it from TestMain: os.Exit(testnats.Main(m)).
@@ -224,27 +232,111 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 	return ctr, uri
 }
 
-// StartRestartable runs a NATS test container on a fixed host port, which survives the container's
-// stop and start as a server's address does, and returns it with its URL once it answers. A
-// restart keeps the container's JetStream store, as a server restarted on its own volume does.
+// StartNkeyAuthorized runs a NATS test container on Image, with JetStream, that accepts only
+// clients authenticating as the nkey user whose public key is user, removed when the test ends,
+// and returns its client URL once the server answers there (answering).
+func StartNkeyAuthorized(t testing.TB, user string) string {
+	t.Helper()
+	ctx := context.Background()
+	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ { nkey: %q } ]\n}\n", user)
+	ctr, err := tcnats.Run(ctx, Image, tcnats.WithConfigFile(strings.NewReader(config)))
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		t.Fatalf("start nkey-authorized NATS: %v", err)
+	}
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	answering(t, uri)
+	return uri
+}
+
+// answering waits, within connectTimeout, for the server at uri to refuse a connection with no
+// credential with its own authorization violation: the proof it speaks the client protocol and
+// enforces its nkey users. Testcontainers can report a mapped port before the NATS protocol
+// handshake, and a dial then ends in EOF or a refusal that says nothing about the server's users.
+// A server that admits the connection enforces no users, and every refusal a test expects of it
+// would pass for the wrong reason, so that fails the test.
+func answering(t testing.TB, uri string) {
+	t.Helper()
+	deadline := time.Now().Add(connectTimeout)
+	var err error
+	for time.Now().Before(deadline) {
+		var conn *natsgo.Conn
+		if conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect()); err == nil {
+			conn.Close()
+			t.Fatalf("NATS at %s admitted a client with no credential: it enforces no nkey users", uri)
+		}
+		if errors.Is(err, natsgo.ErrAuthorization) {
+			return
+		}
+		time.Sleep(retryInterval)
+	}
+	t.Fatalf("NATS at %s did not answer within %s: %v", uri, connectTimeout, err)
+}
+
+// StartRestartable runs a NATS test container a test can stop and start as a server restarts, and
+// returns it, once it answers, with a URL that stays the server's across every restart. The URL's
+// port is a listener this process holds for the test's life, which relays each connection to
+// wherever Docker maps the container's client port at that moment. Docker releases a stopped
+// container's host port, so a fixed mapping could be taken by another container or a free-port
+// pick before the restart, and the restart then fails with "address already in use". A
+// connection made while the server is down is closed at once, as a refused dial would be, and one
+// the server drops is dropped on the client's side too. A restart keeps the container's JetStream
+// store, as a server restarted on its own volume does.
 func StartRestartable(t testing.TB) (*tcnats.NATSContainer, string) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("pick a port: %v", err)
-	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	_ = listener.Close()
-	ctr, err := tcnats.Run(context.Background(), Image, testcontainers.WithHostConfigModifier(func(hostConfig *container.HostConfig) {
-		hostConfig.PortBindings = nat.PortMap{"4222/tcp": {{HostIP: "127.0.0.1", HostPort: port}}}
-	}))
+	ctr, err := tcnats.Run(context.Background(), Image)
 	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	uri := "nats://127.0.0.1:" + port
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold the server's port: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go relay(listener, func(ctx context.Context) (string, error) {
+		return ctr.PortEndpoint(ctx, "4222/tcp", "")
+	})
+	uri := "nats://" + listener.Addr().String()
 	Connect(t, uri).Close()
 	return ctr, uri
+}
+
+// relay joins each connection listener accepts to the server's current address, until the
+// listener closes.
+func relay(listener net.Listener, server func(context.Context) (string, error)) {
+	for {
+		client, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		go join(client, server)
+	}
+}
+
+// join copies client and the server's connection into each other until either side ends, then
+// closes both. A server without a mapped port (it is stopped) or one that refuses the dial ends
+// the client at once.
+func join(client net.Conn, server func(context.Context) (string, error)) {
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	address, err := server(ctx)
+	cancel()
+	if err != nil {
+		return
+	}
+	upstream, err := net.DialTimeout("tcp", address, dialTimeout)
+	if err != nil {
+		return
+	}
+	defer upstream.Close()
+	ended := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(upstream, client); ended <- struct{}{} }()
+	go func() { _, _ = io.Copy(client, upstream); ended <- struct{}{} }()
+	<-ended
 }
 
 // Stop stops a NATS test container within one second, which its Start restarts.

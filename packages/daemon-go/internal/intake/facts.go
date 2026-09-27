@@ -19,7 +19,9 @@ import (
 type Fact interface{ isFact() }
 
 // DispatchIssue records Dispatch's complete issue observation. Rank is Dispatch's fractional key,
-// compared as bytes — the order rank.Between generates.
+// compared as bytes — the order rank.Between generates. HandedOver is resolved once at decode
+// (decodeDispatchFact), from the event's own raw labels: every reader acts on this bool, never on
+// a label list of its own.
 type DispatchIssue struct {
 	Key    string
 	Seq    int64
@@ -28,6 +30,8 @@ type DispatchIssue struct {
 	Title  string
 	Parent string
 	Rank   string
+	// HandedOver is whether the event's own labels carried dispatch.LegionLabel.
+	HandedOver bool
 	// ActorSession is the id of the session that wrote the event, when a session did; empty for a
 	// user or any other actor kind.
 	ActorSession string
@@ -55,6 +59,31 @@ type DispatchArtifact struct {
 
 func (DispatchArtifact) isFact() {}
 
+// DispatchConsumerPosition is one measurement of the Dispatch consumer's own position: its ack
+// floor as a stream sequence — the point before which every matching message is acknowledged,
+// redeliveries and naks included — and whether it is idle, nothing pending or unacknowledged at
+// all. The daemon's boot-owned poll reads one (Consumers.DispatchPosition) for Reconcile, and
+// again on a ticker while admission holds anything back, applying each changed reading through
+// ApplyFact as a synthetic fact — never decoded from a real Dispatch event. Admission is the only
+// handler that acts on it: it releases every hold whose target the position has Reached, applies
+// each released key's own listing snapshot, and promotes, all in the same transaction.
+type DispatchConsumerPosition struct {
+	AckFloorStream int64
+	Idle           bool
+}
+
+func (DispatchConsumerPosition) isFact() {}
+
+// Reached says whether the consumer at this position has caught up to target, a notification
+// stream sequence: its ack floor is at or past it, or it is idle. Idle covers a target the ack
+// floor alone can never reach — one set past the consumer's own last matching message, since the
+// stream also carries GitHub subjects the Dispatch consumer's filter never matches, or past
+// messages that landed before a consumer created at DeliverNewPolicy existed, which it will never
+// be given.
+func (p DispatchConsumerPosition) Reached(target int64) bool {
+	return p.AckFloorStream >= target || p.Idle
+}
+
 // PullRequestOpened registers a pull request whose branch or body identifies a Dispatch issue.
 type PullRequestOpened struct {
 	Repo      string
@@ -64,6 +93,9 @@ type PullRequestOpened struct {
 	Body      string
 	URL       string
 	UpdatedAt time.Time
+	// Reopened is GitHub's reopened action; false is opened, which GitHub sends once per pull
+	// request.
+	Reopened bool
 }
 
 func (PullRequestOpened) isFact() {}
@@ -83,13 +115,21 @@ func (PullRequestSynchronized) isFact() {}
 
 // PullRequestReview is a submitted review on a pull request.
 type PullRequestReview struct {
-	Repo     string
-	Number   int
-	State    string
-	CommitID string
-	HeadSHA  string
-	Author   string
-	Body     string
+	Repo   string
+	Number int
+	// ID is GitHub's review id, assigned when the review is created: a pending review (a draft)
+	// keeps the id it was created with when it is submitted later. Zero when the listener did not
+	// carry it.
+	ID int64
+	// SubmittedAt is when the review was submitted, zero when the listener did not carry it or
+	// carried one that could not be read. Reviews are ordered by it, then by ID
+	// (record.ReviewOrder).
+	SubmittedAt time.Time
+	State       string
+	CommitID    string
+	HeadSHA     string
+	Author      string
+	Body        string
 }
 
 func (PullRequestReview) isFact() {}
@@ -122,21 +162,31 @@ type PullRequestMerged struct {
 
 func (PullRequestMerged) isFact() {}
 
-// PullRequestClosed records GitHub's terminal, unmerged close observation.
+// PullRequestClosed records GitHub's unmerged close observation: the head the pull request closed
+// at, and its updated_at, which orders the close against a reopen and the synchronizes before it.
 type PullRequestClosed struct {
-	Repo   string
-	Number int
+	Repo      string
+	Number    int
+	HeadSHA   string
+	UpdatedAt time.Time
 }
 
 func (PullRequestClosed) isFact() {}
 
 // Push records a branch push. Nil ChangedPaths and Truncated preserve an omitted normalized field.
 type Push struct {
-	Repo         string
-	Branch       string
+	Repo   string
+	Branch string
+	// Before is the head the push replaced, After the head it left.
+	Before       string
 	After        string
 	ChangedPaths *string
 	Truncated    *string
+	// Forced is the listener's "true" or "false" for whether the push rewrote history; absent from
+	// a listener that predates the field.
+	Forced *string
+	// Pusher is the push's pusher login (the listener's `pusher`, GitHub's pusher.name).
+	Pusher string
 }
 
 func (Push) isFact() {}
@@ -210,10 +260,15 @@ type ClaimFailed struct {
 
 func (ClaimFailed) isFact() {}
 
-// ClaimReady is the supervision observation that a claimed phase worker is ready.
+// ClaimReady is a claim ready to be prompted, from either of two sources: the supervision
+// observation of a launch's ready, its agent having taken its Envoy role and said it can be
+// prompted (workflowRuntime.applyTerminal), and a start the outbox runs that finds a tree's root
+// architect already running, whose launch has no second ready (the outbox's start). Launch is the
+// claim's launch generation the ready belongs to, the running one for the second source.
 type ClaimReady struct {
-	Issue string
-	Role  claim.Role
+	Issue  string
+	Role   claim.Role
+	Launch uint64
 }
 
 func (ClaimReady) isFact() {}
@@ -233,9 +288,14 @@ type Handler interface {
 
 // Result carries a refusal that is durable: handlers finish and the transaction commits. Duplicate
 // reports that the event id was already processed, so no handler ran and nothing changed.
+// AfterCommit runs, in order, only once ApplyFact's own transaction has actually committed: a
+// handler whose in-memory state must never claim more than what committed returns a closure here
+// instead of mutating that state inside its own Apply, where a later handler's failure would still
+// roll the transaction back but leave the in-memory mutation behind.
 type Result struct {
-	Refusal   *Refusal
-	Duplicate bool
+	Refusal     *Refusal
+	Duplicate   bool
+	AfterCommit []func()
 }
 
 // Refusal is a committed API response or JetStream log record, never a transaction failure.
@@ -297,10 +357,14 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 		if result.Refusal == nil && candidate.Refusal != nil {
 			result.Refusal = candidate.Refusal
 		}
+		result.AfterCommit = append(result.AfterCommit, candidate.AfterCommit...)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Result{}, err
 	}
 	committed = true
+	for _, after := range result.AfterCommit {
+		after()
+	}
 	return result, nil
 }

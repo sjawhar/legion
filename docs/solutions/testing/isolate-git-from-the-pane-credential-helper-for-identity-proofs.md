@@ -30,7 +30,7 @@ LEGION-42's production-like proof stood up the branch's real Legion API (`startL
 `TokenManager`, real `api.github.com`) and redeemed a **tester** grant and an **implementer**
 grant through `/legion/v1/gh-token`, then used each token against the sandbox repository. One
 negative control was "the tester's token cannot push". Run 1 reported the tester push as
-`exit=0` — the review App had pushed a commit to GitHub, which its permission set makes
+`exit=0` — the review App had pushed a commit to GitHub, which its permission set then made
 impossible.
 
 ## What happened
@@ -83,8 +83,9 @@ Two details of the negative control:
   `Resource not accessible by integration`. GitHub hides the repository from a token without
   `contents` over git; the REST text appears only on API writes (`POST /git/refs`,
   `resolveReviewThread`). A control that greps for the REST text on a git push will report a
-  false failure. (Measured before 2026-09-25. App 3202653 now holds `contents: write`, so a
-  review-App push succeeds and can no longer serve as this negative control.)
+  false failure. (Measured before 2026-09-25. The review App's installation now holds `contents: write`
+  (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps), so a review-App push succeeds and can no
+  longer serve as this negative control.)
 
 The tester's independent round (`.legion/test.json`, PR #1021) used the same isolation and
 recorded it in its `surface` line; that is the form to copy.
@@ -105,6 +106,6 @@ the pane's grant file and `PATH`, so its `git push` or `gh` also acts as the pan
 ## Related
 
 - `../legion/one-role-keyed-table-decides-which-github-app-acts.md` — which App each role acts
-  as, both Apps' real permission sets, and who pushes.
+  as and both Apps' real permission sets.
 - `../legion/worker-pane-shell-gotchas.md` §4 — the box's global credential helper hanging a rig
   daemon's clone: the same helper, a different failure.

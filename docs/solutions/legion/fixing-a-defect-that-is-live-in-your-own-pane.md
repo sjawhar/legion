@@ -81,6 +81,8 @@ deletion cost one tester bare-gate pass and one short reviewer re-check — the 
 issue for wording, is a deferral in disguise; Sami's rule is no deferrals. The order that works:
 fast-follow commit → `legion threads resolve` (every accepted thread resolves in that push) →
 push → tester bare gates → reviewer re-check → `.legion/` deletion → approval of that head → retro.
+(2026-09-25, LEGION-285: the tester and the reviewer now push their own handoff commits; the order
+is unchanged.)
 
 ## Two fingerprints, one fileset — and `docs/solutions/` is shared surface
 

@@ -1,6 +1,8 @@
 # Legion on Kubernetes
 
-This runbook covers the worker image, the Kubernetes runtime, the session store, the in-cluster daemon, and the kind smoke that proves them on a throwaway cluster.
+This runbook covers the worker image, the session store, the Kubernetes runtime, and the operator-launched controller.
+
+The Go coordinator (`packages/daemon-go`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon (`packages/daemon`) no longer runs on Kubernetes: it refuses `runtime: kubernetes` at config load and names the Go daemon (LEGION-286). Its runtime's section below is kept for reference and goes with `packages/daemon` at Stage 7 (LEGION-223).
 
 ## Worker image
 
@@ -21,7 +23,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
   `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`);
-- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The in-cluster daemon reads every configured part for the process it spawns. They are not part of the packed plugin (its `files` is `dist`), and the compiled `legion` binary cannot find them beside its sources the way a daemon run from a checkout does, so boot refuses, naming the directory and the missing file, if any prompt part is absent there;
+- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The Go daemon inlines the prompts it composes from its own copy into each pod it runs, and `legion probe-image` resolves the task agents and skills this copy names when it is given no `--role-references` (`packages/daemon-go/cmd/legion/probe_image.go`). They are not part of the packed plugin (its `files` is `dist`), and the compiled `legion` binary cannot find them beside its sources the way a daemon run from a checkout does, so boot refuses, naming the directory and the missing file, if any prompt part is absent there;
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
   `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
@@ -53,9 +55,7 @@ name (`task(agent="…")`, `skill://…`) resolved by name through the same laun
 rubrics and `ce-simplify-code` with Legion's other skills in `dist/skills`). The build has none of
 the operator's model configuration, so it leaves those agents' models unresolved
 (`--skip-agent-models`), printing
-`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped go-daemon-api-version=<N>`. The in-cluster
-TypeScript daemon runs `legion probe-image` in a one-shot pod against the configured digest
-([The probe pod](#the-probe-pod)); the Go daemon's Agent Sandbox runtime runs the Go command in a probe
+`probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=skipped go-daemon-api-version=<N>`. The Go daemon's Agent Sandbox runtime runs the Go command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
 tool resolves a subagent's (`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run them yourself:
@@ -87,21 +87,24 @@ Runs from any other ref publish the `sha-` tag only and never touch a release.
 + `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
 cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
-the `cli` job on every `main` push that touches the daemon, the plugin, or the Go module and its build
-inputs (below), (2) on every head of a pull request against `main` whose diff touches any of
-`packages/daemon/docker/**`, the OMP pin (`packages/daemon/src/daemon/omp-pin.ts`), the plugin the image
-installs (`packages/pi-envoy/**`, its role prompts and agent definitions included) and the skills it ships
-(`skills/**`), the code a pod runs, the Go build inputs, or the workflow itself — building
-the PR head and publishing `sha-` only — and
-(3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. What a pod
-executes is part of the image's behaviour, so a change to it builds the image it is proven on: the
-TypeScript provisioning (`packages/workspace/**`, `packages/daemon/src/cli/workspace-init.ts`), and the
-whole Go module the image compiles the Go `legion` from (`packages/daemon-go/**`) — the command a Sandbox
-pod runs, the launch probes `legion probe-image` runs in the image's final step and in the Go daemon's probe
-Sandbox, and every package they import. The module is named whole because a hand-kept list of its packages
-already missed one. The Go build inputs are `go.work`, `go.work.sum`, and `packages/envoy`'s
+the `cli` job on every `main` push that touches any file the image builds from, (2) on every head of a pull
+request against `main` whose diff touches any of those files — building the PR head and publishing `sha-`
+only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. The
+files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
+lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
+whole — the daemon the `legion` CLI is compiled from (`packages/daemon/**`, the Dockerfile and the OMP pin
+included), the plugin and what it bundles (`packages/pi-envoy/**`, `packages/envoy-client/**`,
+`packages/contracts/**`), the provisioning code (`packages/workspace/**`) and the skills (`skills/**`); the
+whole Go module the image compiles the Go `legion` from (`packages/daemon-go/**`) and its build inputs; the
+context's `.dockerignore`; and the workflow itself. What a pod executes is part of the image's behaviour —
+the command a Sandbox pod runs, the launch probes `legion probe-image` runs in the image's final step and in
+the Go daemon's probe Sandbox, and every package they import — so a change to any of it builds the image it
+is proven on, and a change that breaks the image fails on its own pull request rather than merging and
+publishing nothing. The Go build inputs are `go.work`, `go.work.sum`, and `packages/envoy`'s
 `go.mod`/`go.sum`: the image compiles the Go `legion` at `go.work`'s Go version, so a change that moves it
 past the build stage's Go fails on its own pull request rather than in the next image build.
+`.github/scripts/check-image-trigger-paths.sh` (the lint job of `pr-and-main.yaml`) parses the Dockerfile
+and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it.
 Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR
 diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
 PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
@@ -279,7 +282,7 @@ files without a word — the one silent fallback this setting must never allow. 
 image: `legion probe-image`, which the image build runs before it publishes, starts the image's own Oh My
 Pi with a nonsense `OMP_SESSION_STORAGE` value and passes only if it refuses, then prints
 `session-storage=probed` on its OK line. Under `session_store: postgres` the daemon's worker-image probe
-([The probe pod](#the-probe-pod)) requires that token in the probe pod's log: an image whose OK line
+requires that token in the probe pod's log: an image whose OK line
 lacks it is refused before the daemon serves — `pod <name> Succeeded without printing
 session-storage=probed, which session_store: postgres requires (its Oh My Pi or legion CLI predates the
 session-storage setting)` — exactly as one lacking `daemon-api-version=<N>` is. Under `pvc` the token
@@ -294,13 +297,361 @@ runs again. Because the image builds the `legion` CLI and the `@sjawhar/pi-legio
 checkout, an image that prints the token also carries the plugin's storage-independent subagent guard
 ([The extension under SQL storage](#the-extension-under-sql-storage)).
 
-## Kubernetes runtime
+## Kubernetes runtime: the Go daemon on Agent Sandbox
 
-With `runtime: kubernetes`, the daemon runs the tree's root architects and phase workers as one
+Under the Go coordinator, `runtime: kubernetes` runs every claim as one Agent Sandbox: each root
+architect, sub-architect and phase worker gets a `agents.x-k8s.io` `Sandbox` (kubernetes-sigs/agent-sandbox,
+LEGION-206), and its pod runs under gVisor on the Legion pool. The Sandbox is named by the claim token,
+`legion-<project>-<issue>-<role>`, and keeps that name across generations: a new generation rotates
+the boot token and takes the Sandbox `Suspended` and then `Running` again
+(`packages/daemon-go/internal/runtime/sandbox`). The daemon runs on a host its pods can reach and
+serves the worker stream they dial. The controller is `legion controller start` on the operator's
+machine ([Operator-launched controller](#operator-launched-controller)).
+
+### Configuration
+
+```yaml
+runtime:
+  kubernetes:
+    namespace: legion
+    image: ghcr.io/sjawhar/legion-worker@sha256:<64 hex>   # digest only
+    storage_class: gp2          # required: the tree volume's class (the cluster has no default)
+    tree_volume: 20Gi           # default 20Gi
+    kubeconfig: /home/ubuntu/.kube/legion-daemon-production   # relative to legion.yaml's directory
+    context: legion-daemon@production   # required when the kubeconfig sets no current context
+    scheduling:                 # optional, beyond the Legion pool the runtime always selects
+      node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
+      tolerations: []
+      priority_class: legion
+    resources:                  # optional; a role absent here gets no requests or limits
+      tester: { limits: { memory: 8Gi } }
+    pod:                        # the operator's: env, volumes, mounts, ServiceAccount (below)
+      service_account: legion-worker
+      env: { PI_CONFIG_FILES: /etc/legion-operator/overlay.yml }
+      volumes: [...]
+      volume_mounts: [...]
+bind: <the daemon host's own address>   # pods dial tcp://<bind>:<worker_stream_port>
+worker_stream_port: 13371
+daemon_url: http://<the daemon host's own address>:13370
+```
+
+`packages/daemon-go/internal/config/kubernetes.go` reads the block and refuses, naming the key:
+- anything it does not model: `role_profiles`, since each role's requests and limits go under
+  `resources`;
+- `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
+- an image that is not pinned by digest;
+- `session_store: postgres` until Stage 6, since a pod's session lives on the tree volume, and a
+  `session_dsn_secret` under `pvc`.
+
+Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `secret`,
+`config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
+image probe's included, and refused where they name a path or variable of Legion's own or the
+worker image's. `provider_keys` names keys of the providers Secret, which every pod mounts, those
+keys alone, for the shim to export. `scripts/e2e/fixtures/operator-route/` is one operator's: the
+Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings
+overlay, and the pod that mounts them; the Stage 4a and 4b proofs run on it, each with its own copy
+of its ConfigMap.
+
+Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
+`envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
+`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. Every address a pod is handed must be one a pod can reach, so
+`bind`, `daemon_url`, `envoy_url`, `dispatch_url` and each `nats_urls` entry may be neither loopback
+nor the unspecified address. `legion start --check-config` runs all of it without starting the
+daemon, writing a file or running a key command, and then every refusal boot makes from the files
+and the environment before its first write, in boot's words: the operator, Envoy and Dispatch
+bearers' files, the NATS nkey seed, the instructions file, the role prompts, and the runtime's own
+reads (the kubeconfig and every value's translation; under tmux, the OMP invocation, through `mise
+where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it does not do is
+what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the
+image probe.
+
+The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
+directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
+`legion-pane` user every pod connects as, and the user the daemon's own NATS connection
+authenticates as when it has no seed of its own (below). A set source that is empty,
+missing, unreadable, blank, readable by more than its owner, or not an nkey user seed refuses boot,
+naming the key and the path. One exception: when root owns the file and the daemon is not root,
+its group may read it, since a daemon running as a non-root uid in a pod reads a mounted Secret —
+always root's — only through the pod's `fsGroup`. Mount it with `defaultMode: 0440`, never the
+kubelet's default `0644`, which others can read; any other seed file, the daemon's own or another
+user's, stays 0600. A daemon running as root in a pod has no such exception: under `fsGroup` its
+mount is `root:<fsGroup>` 0440, which the reader refuses for a root reader, so give that pod no
+`fsGroup` and mount the Secret with `defaultMode: 0400`, or pass the seed as `NATS_NKEY_SEED` (and
+the daemon's own as `NATS_DAEMON_NKEY_SEED`) from a `secretKeyRef`. `legion start --check-config`
+reads the seed as boot does, and its OK line then names the seed's user by public key
+(`Config OK: project=<project> nats-nkey-user=U…`), never the seed. With one, every pod's
+`NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the providers Secret's own
+`NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`,
+whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same
+seed in the providers Secret under that key. The image probe refuses boot when the kubelet cannot
+mount the key, when it holds no user seed, and when its user is not the pane seed's (the
+probe reports the user's public key, never the seed); it reads the key by the daemon's rule above.
+A probe that reports no user at all is an image whose `legion probe-image` predates the report, and
+the refusal says to build the image from the daemon's commit: a current one exits 1 on a blank or
+invalid key. The shim skips the file, since the pointer
+names it, so the seed is never a variable of Oh My Pi or the tools it runs. With none, a pod
+carries no pointer and mounts no such key. While the daemon has a seed, `provider_keys` may neither
+name `NATS_NKEY_SEED` (on either runtime) nor read the Secret's `NATS_NKEY_SEED` key under another
+name, and `pod.env` may not set `NATS_NKEY_SEED_FILE`.
+
+The daemon's own NATS seed is optional too, and no pod ever gets it: `nats_daemon_nkey_seed_file`
+(relative to `legion.yaml`'s directory), else `NATS_DAEMON_NKEY_SEED_FILE`, else
+`NATS_DAEMON_NKEY_SEED` in the daemon's environment, is the `legion-daemon` user the daemon's
+connection authenticates as. That user's grants, which `legion-pane` does not hold, are exactly
+what the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
+`$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
+`$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (its two
+durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`), and subscribe
+`notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>`. It publishes on no core
+subject: role and controller notices go to the Envoy listener over HTTP, and control directives
+over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subjects were verified
+live: a server granting exactly them logged no refusal across a boot creating both durables, a
+restart onto the existing ones, Dispatch and GitHub events acknowledged and a poison message
+terminated, and its trace showed no other API subject (no `$JS.API.INFO`, no
+`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead). It is read by the same rule
+and refusals as the pane seed, the
+group-readable mount included, and neither seed falls back to the other: an unusable
+daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane
+seed, and with neither, with no credential. Keep it out of the providers Secret, which every pod
+mounts: in-cluster, put it in a Secret of its own, mounted into the daemon's pod alone with
+`defaultMode: 0440` (0400 with no `fsGroup` for a daemon running as root, as above; on a host, a
+0600 file the daemon's uid owns), and name that file in
+`nats_daemon_nkey_seed_file`. No launch carries it, and a tmux pane's environment drops its
+variables with every other credential-shaped name. That keeps the seed out of what the daemon
+hands a pane, not out of a pane's reach: on the tmux runtime every pane runs as the daemon's own
+uid, so a pane process can read the daemon's seed file, or `/proc/<daemon pid>/environ` when the
+raw `NATS_DAEMON_NKEY_SEED` is used. The daemon/pane split limits what a leaked pane seed can do,
+not what a pane process can do; the process boundary holds only when the daemon runs apart from
+its agents, as a user or in a pod of its own (the Kubernetes runtime). Every command the daemon itself starts (git and
+jj in a managed repository's checkout, `mise where`, a key command) runs without
+`NATS_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED`, so a seed passed by value never reaches a repository's
+tooling; still, prefer the file forms (`nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, or the
+`_FILE` variables), since a value stays in the daemon's own process environment. At boot the
+daemon logs, once, `legion daemon connects to NATS` with `user=U…` (the public key, never the
+seed), `paneUser=true|false`, and `seed=daemon|pane|none`. `legion start --check-config` reads it
+as boot does and adds
+`nats-daemon-nkey-user=U…` to its OK line. Every permission the server refuses the daemon's
+connection, a subscription or a publish (its JetStream consumers' API requests included), is logged
+at error as `NATS refused the daemon a permission: its NATS user lacks that grant` with its
+`operation` and `subject`; the server reports a refusal asynchronously, and nats.go's default
+handler would only write it to stderr, outside the daemon's log. Every other asynchronous error is
+logged at warn with the `subject` of the subscription it names, a dropped connection at warn as
+`NATS connection lost` with its `error`, the reconnect at info as `NATS connection restored`
+with its `server`, and a terminal close (a fatal server `-ERR`, or reconnects run out) at error,
+once, as `NATS connection closed` with its `error`; the workflow's `workflow intake stopped` error
+then names the same cause as the connection's last error.
+
+Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
+`legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
+every daemon gets it and restarts, and each boot line must name the daemon's own user: a Go
+daemon's `legion daemon connects to NATS` line reads `paneUser=false`, and a TypeScript daemon's
+`[legion] daemon NATS connects as nkey user U…` line reads `its own daemon user, not the pane user`
+(#1494, `packages/daemon/src/daemon/AGENTS.md`). Only then is the
+`legion-pane` seed written. A clean boot line proves the user, not every grant: the check before
+the pane seed is written also has each daemon consume a Dispatch and a GitHub event with no error
+line, and searches each daemon's log for `NATS refused the daemon` (either daemon's line), since a missing
+grant on the exceptions lane (`notifications.envoy.exceptions.notifications.role.>`) still boots
+healthy and consumes both events, and that error line is its only sign. The check also has a
+TypeScript daemon send a control directive, since its `legion.ctl` publish is refused only when it
+first sends one (`packages/daemon/src/daemon/AGENTS.md`). `legion-pane` is never granted the daemon's
+subjects above. Reversed, a daemon holding only the `legion-pane` seed connects as `legion-pane`,
+and each refused subject logs the error line above (a refused consumer or subscription never
+delivers).
+
+### Anatomy of a Sandbox pod
+
+Each object of a claim carries `legion.dev/project`, `legion.dev/tree`, `legion.dev/issue` and
+`legion.dev/role` (`names.go`). The pod template (`manifest.go`) has two init containers and one
+main container:
+
+1. `workspace-fetch` clones the repository into the pod's feed. It is the only process that holds
+   the provisioning token ([Trust model](#trust-model-the-provisioning-token)).
+2. `workspace-init` provisions the tree volume's shared clone and the issue's jj workspace from the
+   read-only feed.
+3. `worker` runs `legion worker-shim --connect tcp://<bind>:<worker_stream_port>
+   --boot-token-file …` with Oh My Pi under it.
+
+The tree volume is the root Sandbox's `volumeClaimTemplates` entry, and each worker Sandbox
+references that claim by name. The main container mounts it at `/legion`, and again at Oh My Pi's
+sessions directory through a `subPath`, so a session survives its pod. The claim's Secret is
+projected twice: its boot half into the worker, read-only, and its provisioning half into
+`workspace-fetch` alone. The operator's volumes and mounts join the worker's, and the providers
+Secret's configured keys when there are any, with its `NATS_NKEY_SEED` key when the daemon has a
+NATS nkey seed. State, `/tmp` and the XDG config home are in-memory.
+
+Every pod runs:
+- with `runtimeClassName: gvisor`;
+- with `serviceAccountName` set to the operator's `pod.service_account` (the namespace's default
+  when it names none) and `automountServiceAccountToken: false`;
+- under Pod Security "restricted": non-root user 1000 on the pod, and on each container no
+  privilege escalation, ALL capabilities dropped and the RuntimeDefault seccomp profile;
+- on the Legion pool, with its node selector and toleration;
+- annotated `karpenter.sh/do-not-disrupt: "true"`.
+
+The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>`, with
+`shutdownPolicy: Delete` ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
+
+### A shell on the tree volume
+
+Some of provisioning's refusals name `jj` commands against the tree's shared clone,
+`-R /legion/repos/github.com/<owner>/<repo>` (`packages/daemon-go/internal/workspace/bookmark.go`):
+- a local bookmark deleted and never pushed: restore it, cancel the deletion, or start from main;
+- a conflicted local bookmark: keep an added commit, or start from main.
+
+The refusals for an origin row that racing fetches conflicted or moved name no command, because
+provisioning again settles them.
+
+Each refusal is in the failing pod's `workspace-init` log
+(`kubectl -n legion logs <pod> -c workspace-init`), and the daemon's log quotes its tail. Nothing
+is registered before a refusal, so the pod's next attempt refuses again until the operator acts.
+The clone is only on the tree volume, so the commands run in a pod that mounts it, from the
+operator's context: the daemon's identity creates no pod and has no exec
+([RBAC](#rbac-the-go-daemon-needs)).
+
+**A pod of the tree is running.** Its `worker` container mounts the volume at `/legion`:
+
+```sh
+kubectl -n legion get pods -l legion.dev/tree=<KEY> --field-selector=status.phase=Running
+kubectl -n legion exec -it <pod> -c worker -- sh
+jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/<repo>
+```
+
+The shell runs as the tree's agents do, user 1000 under gVisor, with nothing they lack.
+
+**No pod of the tree is running**, as when the only pod is the one whose `workspace-init`
+refuses: mount the tree's claim in a pod of your own, `tree-<root Sandbox>`, e.g.
+`tree-legion-<project>-<root issue>-architect`
+(`kubectl -n legion get pvc -l legion.dev/tree=<KEY>`). The claim is `ReadWriteOnce`, so the pod
+must land on the node where the tree's pods hold it; the preferred affinity below puts it there.
+Delete it before the tree's next pod starts elsewhere, because that pod cannot attach the volume
+while this one holds it:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata: { name: legion-tree-shell, namespace: legion }   # no legion.dev/* labels
+spec:
+  runtimeClassName: gvisor
+  automountServiceAccountToken: false
+  nodeSelector: { legion.dev/pool: legion }
+  tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
+  affinity:
+    podAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector: { matchLabels: { legion.dev/tree: <KEY> } }
+            topologyKey: kubernetes.io/hostname
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000             # the tree pods' own: their files on the volume are group 1000
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: shell
+      image: <runtime.kubernetes.image>      # the daemon's worker image, by digest
+      command: [sleep, "3600"]
+      securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts: [{ name: tree, mountPath: /legion }]
+  volumes: [{ name: tree, persistentVolumeClaim: { claimName: tree-legion-<project>-<root issue>-architect } }]
+```
+
+```sh
+kubectl -n legion apply -f legion-tree-shell.yaml
+kubectl -n legion wait --for=condition=Ready pod/legion-tree-shell --timeout=300s
+kubectl -n legion exec -it legion-tree-shell -- sh
+kubectl -n legion delete pod legion-tree-shell
+```
+
+The pod carries no credential. A tree agent can plant git and jj configuration in the shared clone
+([Trust model](#trust-model-the-provisioning-token)), which this shell's `jj` obeys, and the pod
+gives that configuration nothing to take. Run no command in it that holds a token.
+
+### Tree sizing: one tree per node
+
+The pool's floor, not the pod, decides node size. Legion pods carry no
+`karpenter.k8s.aws/instance-cpu` selector and no resource requests. The `legion` NodePool's
+`karpenter.k8s.aws/instance-cpu Gt 3` requirement makes Karpenter launch the cheapest 4-vCPU type.
+
+Every tree pod carries two rules:
+- a required pod affinity to the pods of its own tree, since the volume attaches to one node;
+- a required anti-affinity against the pods of every other tree (`legion.dev/tree Exists` and
+  `NotIn [<own tree>]`, at `kubernetes.io/hostname`).
+
+So concurrent trees never share a node. Requests stay unset because under required colocation the
+first pod placed decides the node, and a request on a later pod would strand it.
+
+**The bound.** The pool's `limits.cpu: 64`, with one tree per 4-vCPU node, caps concurrently running
+trees at **16**. The TypeScript production configuration runs `admission_cap: 29`. Stage 7's cutover
+raises the pool's `limits.cpu` in agent-c's Legion component to at least `4 × admission_cap`; until
+then an `admission_cap` above 16 admits trees whose pods cannot schedule.
+
+### Trust model: the provisioning token
+
+The provisioning token, the implement App's installation token, is a credential for the whole
+repository, and every agent of a tree can write the tree volume: the shared clone's hooks, its git
+and jj configuration (a legacy `.jj/workspace-config.toml` included), its remote URL, its
+`http.proxy`. git and jj obey all of it — they run hooks, the git jj is told to run, working-copy
+filters and `ext::` transports, and send credentials through the proxy the configuration names —
+so no process that can read the token may touch the tree volume. The Go coordinator's pods
+(`packages/daemon-go`) keep to that with two init containers:
+
+- **`workspace-fetch`** mounts the provisioning Secret, an in-memory `TMPDIR` of its own, and the
+  pod's `feed` `emptyDir`, and runs `legion workspace-init fetch --repo <owner>/<repo> --feed
+  /var/run/legion/feed`: one `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
+  reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
+  It mounts neither the tree volume nor the config home.
+- **`workspace-init`** mounts the tree volume, the feed read-only, and the config home — never the
+  Secret — and runs `legion workspace-init provision`: the shared clone's clone and fetch reach
+  `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file
+  transport, then the workspace add, `update-stale`, and the configuration writes. What a tree agent
+  planted can run there, with nothing to take that the agent does not already hold.
+
+`packages/daemon-go/internal/runtime/sandbox/boundary_test.go` runs both containers exactly as the
+manifest states them against nine such plants, with every one of provisioning's git and jj pins made
+ineffective.
+
+On the **tmux** runtime there is no such boundary: panes run under the daemon's uid and can read its
+0600 credential files, and the daemon's credentialed clone and fetch run in the shared clone itself.
+Provisioning's pins there — no git hook (`core.hooksPath=/dev/null`), the git the daemon resolved at
+boot as jj's `git.executable-path`, `GIT_ALLOW_PROTOCOL=https`, no working-copy snapshot in the
+credentialed fetch, the one-shot credential scoped to `https://github.com` with no askpass, and
+`GIT_CONFIG_PARAMETERS` unset — are defence, not a boundary. They hold the settings they name; they
+do not stop every program the shared clone's own git or jj configuration can name. One example of
+what they leave open: a tree-written `http.proxy` with `http.sslVerify=false` still sees the token
+on its way to github.com.
+
+### RBAC the Go daemon needs
+
+The daemon runs as a restricted identity (production: the `legion-daemon` group, as the
+`production-legion-daemon` role). It needs:
+- `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
+- `secrets`: create, delete, update, get, but never list;
+- `pods`: get, list, watch, which the incarnation fence's pod informer reads; `pods/log`: get;
+- `events`: list;
+- a cluster-scoped get on `customresourcedefinitions` named `sandboxes.agents.x-k8s.io`, and a get
+  on the `agent-sandbox-controller` Deployment in `agent-sandbox-system`, for the boot refusal when
+  either is missing.
+
+It has no pod create or delete and no PVC verb (LEGION-206 Requirement 8).
+
+### The live proof
+
+`scripts/e2e/stage4b-sandbox-tree.sh` drives three real issue trees through the Go daemon on this
+runtime, in the production cluster's namespace `legion`, against production Dispatch, the Envoy
+listener and NATS, with real agents. What it holds, and what it touches in production, is in
+[`scripts/e2e/README.md`](../scripts/e2e/README.md#stage4b-sandbox-treesh).
+
+## Kubernetes runtime (TypeScript daemon)
+
+This section is the TypeScript daemon's runtime, which it no longer runs: it refuses `runtime:
+kubernetes` at config load (LEGION-286), and the section goes with `packages/daemon` at Stage 7. With `runtime: kubernetes`, the daemon runs the tree's root architects and phase workers as one
 Kubernetes pod per process, on one disk volume per issue tree. The controller always remains an
 interactive tmux pane on the daemon host: `runtime: kubernetes` selects where roots and workers run,
 never the controller. Attach with `tmux -L legion-<project> attach -t legion-<project>`. LEGION-25
-Part B (`legion controller start` against an in-cluster daemon) is unaffected and optional.
+Part B (`legion controller start`, "Operator-launched controller" below) is unaffected and optional.
 
 The daemon keeps owning retries, generations, the same-agent `--resume`, and the running-worker cap
 exactly as it does on a single machine; Kubernetes only supplies the root or worker process, volume,
@@ -308,7 +659,8 @@ and resource allowance. Nothing in this mode uses a Job, a StatefulSet, or `acti
 
 ### Configuration
 
-This section is the TypeScript daemon's. The Go coordinator (`packages/daemon-go`, LEGION-208)
+This section is the TypeScript daemon's, which now refuses `runtime: kubernetes` outright, naming the
+Go daemon (LEGION-286); what follows is the block it read before. The Go coordinator (`packages/daemon-go`, LEGION-208)
 reads the same `runtime.kubernetes` key with different rules, and refuses the examples below as
 written: its runtime selects the Legion pool itself, so `scheduling.node_selector` may not set
 `legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` is
@@ -321,7 +673,7 @@ unspecified host (`packages/daemon-go/internal/config/kubernetes.go`). It also r
 source), `volume_mounts` (read-only unless `read_only: false`), and `service_account` — which it
 adds to every pod, the image probe's included, refusing any name or path of Legion's own or the
 worker image's; and the top-level `provider_keys` maps each variable Oh My Pi reads to a key of the
-providers Secret below, which every pod then mounts, those keys alone, for the shim to export.
+providers Secret, of which every pod then mounts those keys alone, for the shim to export.
 Legion holds no model route: everything a pod's Oh My Pi needs to reach a model — a `models.yml`,
 a settings overlay in `PI_CONFIG_FILES`, a token — is the operator's, through `pod` and
 `provider_keys`. `scripts/e2e/fixtures/operator-route/` is one such operator's (the Go live
@@ -385,7 +737,7 @@ Startup refuses, naming the field, when: `runtime: kubernetes` is given without 
 (`runtime.kubernetes is required when runtime is kubernetes: …`); `namespace` or `image` is missing;
 `image` is not pinned by digest; `daemon_url` is missing; `envoy_token_file` is missing
 (`envoy_token_file is required when runtime is kubernetes (or set ENVOY_TOKEN_FILE)` — a listener
-bound off loopback requires a bearer, see "The Envoy token" below); `omp_launch_prefix` (or
+bound off loopback requires a bearer); `omp_launch_prefix` (or
 `LEGION_OMP_LAUNCH_PREFIX`) is set — provider keys come from the mounted Secret, so the prefix has no
 process to wrap; `session_store` is anything but `pvc` or `postgres`; `session_store: postgres` comes
 without `session_dsn_secret`, or with one that is empty, is not a Secret data key
@@ -434,10 +786,39 @@ claim's pod and the image probe's.
   check. [`scripts/e2e/fixtures/operator-route/pod.yml`](../scripts/e2e/fixtures/operator-route/pod.yml)
   is a complete one, the live harnesses': a `models.yml` and a settings overlay from a ConfigMap, and
   a projected token its key command reads.
-- **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of
-  [the providers Secret](#the-providers-secret), `legion-<project>-providers`, which the operator
-  creates. Every pod mounts those keys alone, and the shim exports each into Oh My Pi's environment,
-  never its own. A Secret or key the kubelet cannot mount is refused at boot by the image probe,
+- **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
+  (AGENTC-393 Plan C), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only
+  that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
+  address); `operator` is the login that approves this daemon's own machine logins on the Dispatch
+  credential page — there is no launcher-token file and no manual CLI step. The daemon runs its own
+  login at boot, on a background context, and logs the confirmation code exactly once:
+  `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
+  <operator>); pod enrollment is held until approved`. The same code and the login's current status
+  ("none", "pending", "issued", "denied", or "expired") are on `GET /legion/v1/state`'s
+  `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a human
+  approves the code there. On expiry or revocation the daemon starts a fresh login and logs a new
+  code. `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
+  `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, agent-c's admission cap)
+  shape the one projected token every pod carries for the broker, alone in its volume beside the
+  operator's middleman token. With the block, the worker container mounts that token read-only at
+  `/var/run/legion/agent-secrets-token/token`, a memory-backed key directory at
+  `/var/run/legion/agent-secrets`, and is told `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`; the
+  shim generates the pod's key there before it dials, its `hello2` carries the key's thumbprint and
+  the token, and the daemon enrolls the pod under its own won credential once the agent has
+  registered — naming the pod UID it recorded at spawn (the enrollment carries no issue or
+  approver at all; the broker's rules pick the approver for the pod's later credential requests at
+  request time) — hands the enrollment id back to the shim, and revokes it wherever it lets the pod
+  go (a death, the registration deadline, a suspension, a stop, the tree's close). Without the
+  block, pods carry none of this. An older worker image is refused at the image probe: the block's
+  pod variables are daemon API contract 8.
+- **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of the providers
+  Secret, `legion-<project>-providers`, which the operator creates. Every pod mounts the keys
+  `provider_keys` names and no other key of the Secret, each at a file named for its variable, and
+  the shim exports each into Oh My Pi's environment, never its own. The one other key a pod mounts
+  is `NATS_NKEY_SEED`, when the daemon has a NATS nkey seed: the operator puts the `legion-pane`
+  seed there, and every pod reads it through `NATS_NKEY_SEED_FILE`, which the shim does not export
+  ([Configuration](#configuration)). (The TypeScript daemon's
+  [providers Secret](#the-providers-secret) mounts every key; the Go runtime does not.) A Secret or key the kubelet cannot mount is refused at boot by the image probe,
   naming the Secret and keys. A `provider_keys` variable that anything else in the pod sets is
   refused at load.
 - **Settings order.** Oh My Pi reads `PI_CONFIG_FILES` in order, each overlay outranking the ones
@@ -453,16 +834,16 @@ claim's pod and the image probe's.
   does not work, because Oh My Pi's task tool would quietly run it on the parent session's model.
   The bundled agents Legion's prompts also dispatch use Oh My Pi's built-in roles: `scout` is
   `@smol` and `reviewer` is `@slow`. `smol` and `slow`, left unset in every layer, inherit the
-  default role's model, which the gate accepts (no other role inherits it). Settings records merge
+  default role's model, which the gate accepts. Settings records merge
   key by key across layers, though, so a role the operator's overlay does not name can be named by a
   repository's `.omp/config.yml`. Name each role those agents use (`review`, `oracle`, `smol`,
   `slow`) to keep the choice the operator's.
 - **The repository `.env`.** Oh My Pi's runtime loads the working directory's `.env` into its
-  environment at start, filling every variable the pod left unset. A repository can therefore set
+  environment at start, filling every variable the pod left unset or empty. A repository can therefore set
   anything Oh My Pi reads from its environment: a provider's API key, `PI_SMOL_MODEL`,
   `PI_SLOW_MODEL` and `PI_PLAN_MODEL` (which override those roles), and `CLAUDE_CODE_USE_FOUNDRY`
   with `FOUNDRY_BASE_URL` (Anthropic Foundry, which takes a model's endpoint). Set every such
-  variable your route depends on in `pod.env`, where the pod's value outranks `.env`. The fixture
+  variable your route depends on in `pod.env` to a non-empty value, which outranks `.env`. The fixture
   sets `CLAUDE_CODE_USE_FOUNDRY: "0"` for this reason.
 - **Providers the route does not use.** Oh My Pi falls back from a failing provider to any other
   enabled provider it holds a key for, without a word. Legion names no provider, so the operator's
@@ -475,10 +856,7 @@ claim's pod and the image probe's.
   agents' models need, at every boot. A command that fails is "no working credentials", whether the
   cause is a revoked token or a network blip: the gate cannot tell the two apart, and passing on a
   failed key is the fallback the gate exists to stop. Nothing restarts the Go daemon on its own: it
-  runs off the cluster, and whoever started it starts it again (the in-cluster Deployment runs the
-  TypeScript daemon). On the devbox harness, Stage 3 at `6963c3d6` ran the gateway's key command 29
-  times: it minted one key, served the rest from its cache, and failed none
-  (`scripts/e2e/lib/install-model-gateway.sh`'s key log).
+  runs off the cluster, and whoever started it starts it again.
 
 ### Cutting over an instance from tmux to pods
 
@@ -486,9 +864,9 @@ Drain every tree while it is still on tmux, stop the daemon, choose a new `state
 with `runtime: kubernetes`. The state file intentionally holds the controller's tmux locator beside
 root and worker pod locators; the daemon routes them by process kind.
 
-Before this production cutover, run the local host-daemon smoke and its checkpoints on the stack
-head. The block below is the TypeScript daemon's; [Configuration](#configuration) says where the Go
-coordinator's rules differ.
+The block below is the TypeScript daemon's. The Go daemon's cutover is the same drain and fresh
+`state_dir`; its [Configuration](#configuration) says where its rules differ, and its
+[live proof](#the-live-proof) is what to run at the head you deploy.
 
 ```yaml
 runtime:
@@ -622,41 +1000,6 @@ of every tool the agent runs; refusing to start at all, naming the key and its f
 already a variable of the shim's own environment (see the providers Secret, below) — and never into
 its own (`/proc/1/environ` inside the pod carries no key; the OMP child's does, by design).
 
-### Trust model: the provisioning token
-
-The provisioning token, the implement App's installation token, is a credential for the whole
-repository, and every agent of a tree can write the tree volume: the shared clone's hooks, its git
-and jj configuration (a legacy `.jj/workspace-config.toml` included), its remote URL, its
-`http.proxy`. git and jj obey all of it — they run hooks, the git jj is told to run, working-copy
-filters and `ext::` transports, and send credentials through the proxy the configuration names —
-so no process that can read the token may touch the tree volume. The Go coordinator's pods
-(`packages/daemon-go`) keep to that with two init containers:
-
-- **`workspace-fetch`** mounts the provisioning Secret, an in-memory `TMPDIR` of its own, and the
-  pod's `feed` `emptyDir`, and runs `legion workspace-init fetch --repo <owner>/<repo> --feed
-  /var/run/legion/feed`: one `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
-  reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
-  `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
-  It mounts neither the tree volume nor the config home.
-- **`workspace-init`** mounts the tree volume, the feed read-only, and the config home — never the
-  Secret — and runs `legion workspace-init provision`: the shared clone's clone and fetch reach
-  `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file
-  transport, then the workspace add, `update-stale`, and the configuration writes. What a tree agent
-  planted can run there, with nothing to take that the agent does not already hold.
-
-`packages/daemon-go/internal/runtime/sandbox/boundary_test.go` runs both containers exactly as the
-manifest states them against nine such plants, with every one of provisioning's git and jj pins made
-ineffective. The TypeScript daemon's pods, which this section describes, still provision in one init
-container with the Secret mounted for its whole life (LEGION-223).
-
-On the **tmux** runtime there is no such boundary: panes run under the daemon's uid and can read its
-0600 credential files, and the daemon's credentialed clone and fetch run in the shared clone itself.
-Provisioning's pins there — no git hook (`core.hooksPath=/dev/null`), the git the daemon resolved at
-boot as jj's `git.executable-path`, `GIT_ALLOW_PROTOCOL=https`, no working-copy snapshot in the
-credentialed fetch, the one-shot credential scoped to `https://github.com` with no askpass, and
-`GIT_CONFIG_PARAMETERS` unset — are defence, not a boundary: a tree-written `http.proxy` with
-`http.sslVerify=false` still sees the token on its way to github.com.
-
 ### The providers Secret
 
 `legion-<project>-providers` (where `<project>` is `legion.yaml`'s `project` lowercased with
@@ -665,13 +1008,10 @@ OMP or the extension reads: `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_K
 and `ENVOY_TOKEN` when the Envoy listener requires a bearer. It is mounted read-only into every main
 container, and every pod's `ENVOY_TOKEN_FILE` points at its `ENVOY_TOKEN` key — so a daemon that runs
 outside the cluster over a kubeconfig and has an `envoy_token_file` must put that same token in this
-Secret, or its pods' listener calls are refused. The daemon cannot `get` or `list` Secrets through the API (its Role grants neither); the
-in-cluster daemon receives `DISPATCH_TOKEN` from it through the Deployment's env and reads
-`ENVOY_TOKEN` from the mounted file `envoy_token_file` names. The orphan sweep never touches it: the
+Secret, or its pods' listener calls are refused. The daemon cannot `get` or `list` Secrets through the API (its Role grants neither). The orphan sweep never touches it: the
 sweep deletes only the per-pod Secret named after an orphan pod. Nothing else belongs in it — every
 worker pod mounts the volume and the shim exports each file that has no `<NAME>_FILE` pointer in the
-pod into the OMP child's environment, so a GitHub App private key here would reach every worker; the
-in-cluster daemon keeps those in its own daemon-only Secret (below). And a key must not be named like
+pod into the OMP child's environment, so a GitHub App private key here would reach every worker. And a key must not be named like
 a variable the pod already carries — `OMP_SESSION_STORAGE`, `OMP_SESSION_SQL_DSN_FILE`, any
 `LEGION_*`, `DISPATCH_URL`, the deliberately empty `GH_TOKEN`: that export lands over the pod's own
 environment, so such a key would replace the daemon's value without anything saying so (a stale
@@ -724,7 +1064,7 @@ reclaim) before creating its own, exactly as it treats a same-name pod.
 
 ### RBAC the daemon needs
 
-For the in-cluster daemon's Role (LEGION-25), the verbs this runtime uses on core/v1 in its namespace:
+For the daemon's Role (LEGION-25), the verbs this runtime uses on core/v1 in its namespace:
 
 | resource | verbs |
 | :--- | :--- |
@@ -798,397 +1138,84 @@ line `<role token>: worker process died (its stream closed and the one reconnect
 launch failure 1/3; relaunching the same agent with --resume and its catch-up`, then
 `respawning <issue> by resuming OMP session <path>`, within seconds.
 
-## In-cluster daemon
+## Operator-launched controller
 
-`runtime: kubernetes` can run the daemon itself as a Deployment of the worker image — the image already
-carries the `legion` CLI and the `jj`, `git`, and `gh` the daemon runs — with its state on a
-PersistentVolumeClaim and its configuration in a ConfigMap. Everything the tmux daemon does with a
-terminal multiplexer is absent: no `mise`, no `tmux`, no local OMP (`omp_invocation` and
-`omp_launch_prefix` must not be set), and the boot probes run inside a pod of the image (below). The
-API binds `bind: 0.0.0.0` and `daemon_url` names the Service, so the pods it launches reach it. The
-state page (`GET /legion/v1/state`, redacted) stays unauthenticated on the pod network; the
-NetworkPolicy limits who reaches it. `legion status`/`stop`/`restart` assume a shared machine and are
-not the way to operate a pod: the Deployment is (`kubectl rollout restart`, `kubectl scale`); SIGTERM
-runs the daemon's own persist-and-exit handler. The controller is not a pod — the operator starts it
-on their own machine with `legion controller start` (below).
+The controller is the one Legion session a person talks to, and that person starts it. The Go
+daemon launches it under neither runtime, tmux included: it has no process of the controller to
+start, stop or resume. It holds the controller's record and reads the session's liveness from the
+Envoy role registry. While no session holds the current capability, or the registry says the
+session is gone, the daemon logs `controller not registered; run legion controller start` at most
+once per `worker_boot_timeout_seconds`.
 
-### Manifests
+**The operator token.** `operator_token_file` in `legion.yaml` names a file holding one long random
+string (`openssl rand -hex 32`). The Go daemon requires it under every runtime, because the operator
+routes that spawn and drive claims authenticate against it as well as the controller's
+(`operator_token_file is required: the operator routes that spawn and drive claims authenticate
+against the bearer it names`). It is read once at boot, and is never an environment variable or a
+flag.
 
-`deploy/kubernetes/daemon/` is plain kustomize, no Helm. The base carries the example project `demo`:
-
-| resource | name | what it is |
-| :--- | :--- | :--- |
-| Namespace | `legion` | everything below, and the pods the daemon launches (`runtime.kubernetes.namespace`) |
-| ServiceAccount, Role, RoleBinding | `legion-daemon` | exactly the verbs in "RBAC the daemon needs" — no `watch`, nothing watches |
-| PersistentVolumeClaim | `legion-daemon-demo-state` | `state_dir` (`/var/lib/legion`): `state.json`, the instance lock, secrets, the image-probe cache; ReadWriteOnce, 5Gi, the cluster's default class |
-| Deployment | `legion-daemon-demo` | 1 replica, `Recreate` (one instance lock, one RWO mount), `legion start demo --config /etc/legion/legion.yaml`, `DISPATCH_TOKEN` from the providers Secret, liveness `GET /legion/v1/state` (no readiness probe: the page answers throughout boot, and a definitive probe failure exits the process, which the Deployment restarts) |
-| ConfigMap (generated) | `legion-daemon-demo-config-<hash>` | `legion.yaml` and `instructions.md` at `/etc/legion`; the hash suffix rolls the Deployment on a config change |
-| Service | `legion-daemon-demo` | ClusterIP, `13370` (the API) and `13371` (the worker stream the shims reverse-dial) |
-| NetworkPolicy | `legion-daemon-demo` | ingress from `legion.dev/project: demo` pods on both ports; egress DNS, 443 (GitHub, Dispatch, model endpoints), 4222 (NATS), 9020 (Envoy), 6443 (the API server); cluster-specific addresses and the operator's ingress are overlay additions. kind's kindnet enforces it (kind ≥ v0.21): an unlabelled pod's request to the Service times out |
-
-Three Secrets, created by the deployment (never by the daemon), all mounted read-only:
-
-- `legion-demo-providers` at `/var/run/legion/providers` — LEGION-24's providers contract, shared with
-  every worker pod: `DISPATCH_TOKEN` (the daemon's own is the Deployment's env from this key),
-  `ENVOY_TOKEN` (`envoy_token_file` points at its file), and the provider keys.
-- `legion-demo-daemon` at `/var/run/legion/daemon` — daemon-only: `github-app-implement.pem` and
-  `github-app-review.pem`, read by `github_apps.<role>.private_key_command: cat …`. Never the providers
-  Secret: every worker pod mounts that one, and the shim exports each of its files without a
-  `<NAME>_FILE` pointer into the OMP child's environment.
-- `legion-demo-operator` at `/var/run/legion/operator` — daemon-only: one key, `OPERATOR_TOKEN`, the
-  bearer `legion controller start` presents (`operator_token_file`, "Operator-launched controller"
-  below). Never the providers Secret, for the same reason.
-
-The project name is literal in five resource names (`legion-daemon-demo`, `legion-daemon-demo-state`,
-`legion-demo-providers`, `legion-demo-daemon`, `legion-demo-operator`) because kustomize cannot suffix the Secret names
-the runtime derives from `project`; another project is an overlay that patches those five and its own
-`legion.yaml`. The base's image digest is a zero placeholder — an overlay pins the real one in **two**
-places that must agree: `images:` (the Deployment) and `runtime.kubernetes.image` in `legion.yaml`
-(the pods and the probe pod). The daemon pod is labelled `app.kubernetes.io/name: legion-daemon` and
-`app.kubernetes.io/instance: demo`, never `legion.dev/project`: that label is the runtime's ownership
-marker for the pods the daemon launches, and the orphan sweep deletes every pod carrying it that no
-recorded locator names — grace 0 at boot — so a daemon pod labelled that way deletes itself (the
-LEGION-25 kind run found this the hard way).
-
-### The probe pod
-
-A daemon in a pod is not the worker image at the configured digest, and it has no local OMP, so the
-three local boot checks (`pi.agents`, plugin load, plugin daemon-API contract) run **inside a one-shot
-pod of that image**: `legion-probe-<project>-<first 12 hex of the digest>` (one name per project and
-image, so two projects' daemons in one namespace never contend for a pod), `restartPolicy: Never`, the providers
-Secret mounted read-only (a missing Secret fails the mount — one of the things the probe proves), no
-tree volume and no shim, running `legion probe-image --daemon-api-version <N>` with the `small`
-profile's resources. The image's own CLI runs the two OMP probes and compares its plugin's
-`legion.daemonApiVersion` to `<N>`, the daemon's contract; a mismatch exits 1 naming both. The daemon
-polls the pod every 2 s under `slow_command_timeout_seconds`, reads its last 50 log lines, and always
-deletes it — a leftover of the same name from a crashed boot is deleted and awaited first, but only
-when its `legion.dev/project` label is this daemon's; a same-name pod of another project (or of none)
-is a definitive refusal naming that project, and nothing of theirs is deleted.
-
-| outcome | classification | what happens |
-| :--- | :--- | :--- |
-| `Succeeded` with `probe-image: OK … daemon-api-version=<N>` in the log | pass | `<state_dir>/image-probes/<64 hex>.json` written atomically: `{digest, daemonApiVersion, probedAt}` plus `sessionStorageProbed: true` when the line also carried `session-storage=probed`; the launch hold releases |
-| `Failed` | definitive | startup refuses, quoting the log — a contract mismatch names both versions and the digest; the daemon exits 1 and the Deployment restarts it |
-| `Succeeded` with an OK line carrying no `daemon-api-version=` | definitive | refused (`… predates the check`): an image whose `legion` CLI predates `--daemon-api-version` ignores the flag (citty drops unknown options), runs the two OMP probes, and prints a bare `probe-image: OK` — it checked no contract, so it is not waved through |
-| `Succeeded` with an OK line confirming another contract `<M>` | definitive | refused: `confirmed daemon API contract <M>, this daemon requires <N>` |
-| `Succeeded` with an OK line lacking `session-storage=probed`, under `session_store: postgres` | definitive | refused: `without printing session-storage=probed, which session_store: postgres requires (its Oh My Pi or legion CLI predates the session-storage setting)` — see [The image guard](#the-image-guard); under `pvc` the token is not required |
-| the pod vanished mid-poll (404) | transient | another actor deleted it; the next attempt creates it again |
-| API failure while creating or reading the pod | 400/401/403/422 definitive (the request will be refused again: a malformed request, RBAC, credentials, a rejected manifest), and a 404 on the create (the namespace does not exist); anything else transient | the message is the detail; a transient one is retried with the probe backoff |
-| still `Pending`/`Running` at the budget | transient | retried with the daemon's probe backoff (10 s doubling to 5 min, unbounded), the phase and the container's waiting reason (`ImagePullBackOff`, …) logged each attempt; the state page answers meanwhile |
-| container waiting with `InvalidImageName` / `ErrImageNeverPull` | definitive | refused at once |
-
-The cache is per (digest, contract) — and, under `session_store: postgres`, the confirmed
-`sessionStorageProbed` flag: a restart with the same image and the same daemon contract passes
-from the file with no API call (`worker image <digest> passed its probe at <probedAt> … reusing <file>`
-in the log), so a crash-restart loop never launches a second probe pod for a digest that already
-passed. A cache file that is unreadable, malformed, or names another digest or contract is logged
-naming the file, ignored, and rewritten by the next pass. Only a pass is cached: a definitive failure
-runs a probe pod on every restart, each quoting the failure, spaced by `CrashLoopBackOff`.
-
-### The Envoy token
-
-A listener bound off loopback requires a credential — `ENVOY_API_TOKEN`, or the
-`ENVOY_OIDC_ISSUER`/`ENVOY_OIDC_AUDIENCE` pair that makes a pod's projected service-account token a
-bearer of its own — and refuses to start with neither (`ENVOY_API_ALLOW_UNAUTHENTICATED=1` is a
-Fargate-transition flag, never something these manifests set). It answers every `/v1` request
-carrying neither credential with 401, an empty `ENVOY_API_TOKEN` included once a verifier is
-configured. These manifests set the shared token; the OIDC pair is Stage 5's.
-The daemon reads its bearer from
-`envoy_token_file` (a relative path resolves against `legion.yaml`'s directory) or `ENVOY_TOKEN_FILE` — a
-0600 file's trimmed contents; a set-but-missing, unreadable, or blank file refuses startup naming the
-key and the path, never a fallback — or, lower in precedence, the plain `ENVOY_TOKEN` environment
-value. Required under `runtime: kubernetes`; optional under tmux, where an unset token changes
-nothing. Every daemon call to the listener sends `Authorization: Bearer <token>`; a 401/403 keeps the
-usual `EnvoyPublishError` and logs one line naming the listener URL and whether a token was sent.
-
-Every process the daemon launches gets the same token the way it gets its boot token: as a 0600 file
-named by `ENVOY_TOKEN_FILE` — under tmux `<state_dir>/secrets/<role token>-envoy_token`, pruned with
-the pane's other files; under kubernetes always the providers Secret's own `ENVOY_TOKEN` file
-(`/var/run/legion/providers/ENVOY_TOKEN`, mounted in every pod) — the token is never copied into a per-pod
-Secret, and never appears as an environment value. `@legion/envoy-client` reads `ENVOY_TOKEN_FILE` ahead of `ENVOY_TOKEN`
-(an unreadable or blank file is an error naming both, not a fallback), so the pi-envoy extension in
-every pane and pod, and the operator-launched controller, authenticate with it.
-
-### Operator-launched controller
-
-Nobody can open a terminal on a pod, so the controller — the one Legion session a person talks to —
-is started by that person on their own machine and connects to the in-cluster daemon (LEGION-25
-Part B). The daemon never launches it: `KubernetesRuntime.controllerLaunch` is `operator`, and
-`ensureController` mints nothing, arms no registration deadline, opens nothing, and logs
-`[legion] controller not registered; run legion controller start` at most once per
-`worker_boot_timeout_seconds` until one registers.
-
-**The operator Secret.** `legion-<project>-operator` holds one key, `OPERATOR_TOKEN` — one long random
-string (`openssl rand -hex 32`; the kind overlay's `secrets/operator.env.example`). The Deployment
-mounts it read-only at `/var/run/legion/operator`, and `legion.yaml`'s
-`operator_token_file: /var/run/legion/operator/OPERATOR_TOKEN` names it: required under
-`runtime: kubernetes` (`operator_token_file is required when runtime is kubernetes: …`), refused under
-tmux (`operator_token_file is only used when runtime is kubernetes: …`), read once at boot with no
-mode check (the mount mode is the cluster's), never an environment variable or flag.
-`legion start --check-config` validates the path without reading it.
-
-**The operator-side file.** `legion controller start` reads a small file of its own — never the
-cluster's `legion.yaml`, whose loader would run `private_key_command` on your laptop and demand the
-image, namespace, and Envoy token the controller never uses. `deploy/kubernetes/daemon/controller.yaml.example`
-is the complete shape: the same key names as `legion.yaml`, only the twelve the controller needs
+**The operator-side file.** `legion controller start` reads a small file of its own, never the
+daemon's `legion.yaml`, whose loader would run both GitHub Apps' `private_key_command` on your
+machine and demand keys the controller never uses. `deploy/kubernetes/daemon/controller.yaml.example`
+is the complete shape: the same key names as `legion.yaml`, only the thirteen the controller needs
 (`project`, `daemon_url`, `operator_token_file`, `envoy_url`, `envoy_token_file`, `nats_urls`,
-`dispatch_url`, `dispatch_token_file`, `instructions`, `omp_invocation`, `omp_launch_prefix`,
-`state_dir`); any other key is refused naming it and the example (`unknown key "runtime" in the
-controller configuration; …`), a missing required one is refused naming it, `dispatch_url` and
-`dispatch_token_file` go together, and relative paths resolve against the file's own directory
-(no `~`). The operator token sits in a file only you can read: `chmod 0600`; a group- or
-world-readable file is refused naming the path and mode (`… is readable by its group or others
-(mode 0640); chmod 0600 it`) before anything is fetched or written, as is a missing or blank one.
+`nats_nkey_seed_file`, `dispatch_url`, `dispatch_token_file`, `instructions`, `omp_invocation`,
+`omp_launch_prefix`, `state_dir`; `nats_nkey_seed_file` is the Go CLI's alone, which the TypeScript CLI refuses as unknown). Any other key is refused naming it and the example (`unknown key "runtime" in the
+controller configuration; legion controller start reads only … — see
+deploy/kubernetes/daemon/controller.yaml.example`); `nats_urls` is required; `dispatch_url` and
+`dispatch_token_file` go together; and relative paths resolve against the file's own directory, with
+no `~`. The operator token and the NATS nkey seed each sit in a file only you can read (mode 0600):
+a group- or world-readable one is refused naming the path and mode (`… is readable by its group or
+others (mode 0640); chmod 0600 it`). The daemon's read of either of its seeds holds a file it owns
+to the same rule, and lets the group read only a root-owned file, as a pod's kubelet-mounted Secret is
+([Configuration](#configuration)).
 
-**Starting it.** Reach the daemon's API through a port-forward, then run the command:
+**Starting it.** Run `legion controller start --config controller.yaml`, where `daemon_url` (or
+`--daemon-url <url>`, which replaces it) is the daemon's API as your machine reaches it. In order, and
+keeping nothing until the daemon has answered, the command:
 
-```sh
-kubectl -n legion port-forward svc/legion-daemon-demo 13370:13370 &
-legion controller start --config controller.yaml --daemon-url http://127.0.0.1:13370
-```
+1. reads the file and refuses as above, and refuses a blank or unreadable Envoy or Dispatch token
+   file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or
+   holds no nkey user seed, a
+   role-prompt directory missing a file (`LEGION_ROLE_PROMPTS_DIR`, or the checkout's
+   `packages/pi-envoy/roles`), a missing or blank instructions file, and an Oh My Pi invocation that
+   does not resolve;
+2. probes that Oh My Pi as the controller will run it, with `omp models`, which starts no session, and
+   refuses a pi-legion-envoy it does not load, or one speaking another Go daemon API contract;
+3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer`. The
+   daemon compares it in constant time and mints a fresh controller capability, which replaces the
+   previous one and its registration and ends every controller grant: the last start wins;
+4. writes the secret 0600 under the local state directory (`state_dir`, by default
+   `$XDG_STATE_HOME/legion/<project>-controller`), beside the `gh` shim, the `legion` launcher and the
+   deployment instructions;
+5. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
+   `--append-system-prompt`, no `--resume`, no `--mode rpc`) with the controller's environment
+   (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_API=go`, `LEGION_DAEMON_URL`,
+   `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, the Envoy and Dispatch
+   endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
+   of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE`
+   (the controller is pane-side, and never gets the daemon's seed), and exits with Oh My Pi's exit
+   code.
 
-`--daemon-url` overrides the file's `daemon_url` for both the secret request and the controller's
-`LEGION_DAEMON_URL`. The command, in order and writing nothing until the daemon has answered:
-`POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer` (the daemon
-compares it in constant time against `operator_token_file`'s hash and mints the controller
-capability exactly as it does for its own tmux pane — the previous controller session's secret and
-grants stop working, last claim wins); writes the secret 0600 under the local state directory
-(`state_dir`, default `$XDG_STATE_HOME/legion/<project>-controller`) beside the `gh` shim
-(`worker-bin/gh`, 0700), the `legion` launcher (`bin/legion`), and the deployment-instructions copy a
-pane gets; then runs the same interactive OMP command the tmux daemon runs — `omp_launch_prefix` +
-`omp_invocation`, one joined `--append-system-prompt` (the controller role prompt, then the
-instructions), no `--resume`, no `--mode rpc` — through `sh -c` in the foreground with the shared
-controller environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE`, `LEGION_DAEMON_URL`, `LEGION_PROJECT`,
-`LEGION_STATE_DIR`, `ENVOY_NATS_URL`, `ENVOY_URL`, the credential environment, `DISPATCH_URL` and
-`DISPATCH_TOKEN_FILE`, plus `LEGION_CONTROLLER_SECRET_FILE` and `ENVOY_TOKEN_FILE` pointing at your
-own files), and exits with Oh My Pi's exit code (1 on a signal death). The role prompts come from
-`LEGION_ROLE_PROMPTS_DIR` or the checkout's `packages/pi-envoy/roles`, exactly as the daemon resolves
-them; the directory must contain the core and mechanics fragments, phase residues, and the root,
-controller, and sub-architect single-file prompts. The compiled `legion` binary has no checkout beside
-it, so set the variable to that directory when running a release binary.
+A refusal before the secret is written removes the directories made for the probe, so the state
+directory is as it was.
 
-**How the daemon sees it.** The pi-envoy extension in that session claims the controller role and
-calls `/controller/ready` by itself, exactly as under tmux; the daemon records the session as
-`controllerLocator: {runtime: "kubernetes", external: true, sessionId, registeredAt}` (`legion state --json`,
-`GET /legion/v1/state`; daemon-API contract 6). Liveness is the Envoy role registry, not a pane:
-`KubernetesRuntime.probe` reads `GET /v1/roles/legion-<project>-controller` with the daemon's bearer and
-answers alive while the holder is the recorded session and `last_seen` is within
-`max(worker_boot_timeout_seconds, 2 × 120 s)` (240 s at defaults); gone on 404, another holder, or a
-stale `last_seen` (each logged once); `unknown` — never dead — when the listener is unreachable.
-A dead record is left in state until the next `/controller/ready` overwrites it, so the state page
-shows the last known controller and when it registered.
+**How the daemon sees it.** The session's pi-envoy extension registers on
+`POST /legion/v1/claims/register` with the capability and takes the controller role. The daemon
+records `controllerLocator: {runtime, external: true, sessionId, registeredAt}` (`legion state
+--json`, `GET /legion/v1/state`), `runtime` being the daemon's own. On every orphan sweep it reads
+`GET /v1/roles/legion-<project>-controller` from the Envoy listener with its bearer. The controller is
+alive while the holder is the recorded session and its `last_seen` is within
+`max(worker_boot_timeout_seconds, 2 × 120 s)`, which is 240 s at the defaults. It is gone when the role
+is unheld or expired, held by another session, or last seen that long ago. It is unknown, never gone,
+when the listener is unreachable, refuses with anything but a 404, or answers a body the probe cannot
+read.
 
-**Re-running and failing.** Running the command again mints a new secret and takes the role (the
-previous session's heartbeat learns it lost the role and stops re-asserting it). Closing the terminal
-leaves the project without a controller until you run it again; the daemon logs the not-registered
-line once per interval. Failures name what to fix: a wrong token —
-`http://127.0.0.1:13370/legion/v1/controller/secret answered 403: Invalid operator token — the operator token does not match the daemon's operator_token_file, or this daemon has none configured`;
-a closed port-forward — `could not reach the Legion daemon at http://127.0.0.1:13370: …; is the port-forward running? (never falls back to another address)`;
-a tmux daemon — `answered 403: This daemon has no operator_token_file configured; the controller secret route is disabled`.
+**Re-running and failing.** Running the command again mints a new capability and takes the role.
+Closing the terminal leaves the project without a controller until you run it again. Failures name
+what to fix:
 
-## Runbook: the kind smoke
-
-`scripts/kind-smoke/` proves the Kubernetes worker runtime on a throwaway kind cluster. Its default
-`SMOKE_DAEMON_MODE=cluster` runs the daemon in the worker image. `SMOKE_DAEMON_MODE=host` instead
-runs the daemon on the host through an exec-plugin kubeconfig and leaves every worker in kind, which
-matches the production daemon shape. The README (`scripts/kind-smoke/README.md`) documents every
-variable, mode, record, and checkpoint; this section is the operator's path through it.
-
-### Prerequisites
-
-- `docker` (≥ 24), `kind` v0.24.0, `kubectl` v1.31.0 (its built-in kustomize renders the overlay),
-  Go 1.26 (`packages/envoy` is `go 1.26.1`; on a box where go is a mise tool, run the rig under
-  `mise x go@1.26 --`), `bun`, `tmux`, `jq`, `curl`, `openssl`, `ss`, `shred`, `setsid`, and `mise`
-  with the pinned Oh My Pi (`OMP_FORK_PIN`, needed only once the checkout has `legion controller
-  start`, pull request #1110). Install hints:
-  `curl -Lo ~/.local/bin/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64 && chmod +x ~/.local/bin/kind`,
-  `curl -Lo ~/.local/bin/kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl && chmod +x ~/.local/bin/kubectl`.
-- The sandbox repository `sjawhar/legion-smoke` (`SMOKE_REPO`) has both Legion GitHub Apps
-  installed; you hold the two App private keys (base64 in `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` /
-  `GH_REVIEW_APP_PRIVATE_KEY_B64`, or PEM paths in `SMOKE_IMPLEMENT_APP_KEY_FILE` /
-  `SMOKE_REVIEW_APP_KEY_FILE`) and at least one model provider key (`ANTHROPIC_API_KEY`,
-  `GEMINI_API_KEY`, or `OPENAI_API_KEY`), all supplied through the environment only.
-- A digest of the worker image to run (`SMOKE_WORKER_IMAGE`; the README's "Finding a digest"). A
-  tag is refused.
-- Nothing of the dev-box daemon: the rig never starts, stops, or touches it, the shared Dispatch
-  server, production NATS beyond one optional read-only subscription, or any pane, pod, container,
-  or cluster it did not create.
-
-### Running the kind smoke
-
-```sh
-cd -- "$LEGION_WORKSPACE"    # or the checkout root
-export SMOKE_WORKER_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest>
-# On a box with the secrets CLI:
-secrets ANTHROPIC_API_KEY LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash scripts/kind-smoke/up.sh
-# On the Legion dev box (provider keys come from /etc/legion/provider.env; the App keys are PEM files):
-SMOKE_DAEMON_MODE=host SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem \
-  SMOKE_OMP_LAUNCH_PREFIX=/home/legion/.local/bin/legion-pane-env /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
-# If go is a mise tool rather than on PATH, prefix either line with: mise x go@1.26 --
-for c in admitted architect-pod spec-posted tree-moved kill-pod-resume scheduling controller-pane exec-auth; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
-bash scripts/kind-smoke/checkpoints.sh exec-auth --wait-refresh
-SMOKE_PLUGIN_TGZ=/path/to/version-bumped-pi-legion-envoy.tgz bash scripts/kind-smoke/checkpoints.sh plugin-skew
-for c in volume-lost pod-hygiene done; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
-bash scripts/kind-smoke/down.sh
-# The worker-cap checkpoint needs its own instance:
-SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 SMOKE_WORKER_IDLE_RETIRE=60 <the same up.sh line>
-SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/checkpoints.sh worker-cap
-SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/down.sh
-# Absence checks after down.sh:
-kind get clusters; docker ps -a --filter label=legion-smoke.instance=<instance>; tmux -L legion-smoke<instance> ls; grep -c legion-smoke ~/.kube/config 2>/dev/null
-```
-
-`up.sh` creates the kind cluster `legion-smoke-<instance>` (kubeconfig under the instance's state
-directory, never `~/.kube/config`), starts the instance's NATS and Postgres containers and its
-Envoy listener and scratch Dispatch server on the instance ports bound to the kind docker
-network's gateway, copies and fills the checkout's kind overlay, applies it, waits for the daemon
-pod and its image probe, keeps a `kubectl port-forward` to the daemon alive, decides whether a
-controller pane can open, creates and releases the root issue(s), and prints one `KIND SMOKE READY`
-block naming every resource, port, record, and mode. The Envoy listener and the scratch Dispatch
-server are built from the checkout with `go build` — the only two components of the instance not
-taken from a published image — so a run proves the checkout's listener and Dispatch server beside
-main's released daemon image (the digest under test).
-
-For the production-shaped local proof, set `SMOKE_DAEMON_MODE=host`. The rig creates a separate
-kind worker node, labels and taints it for Legion, applies the daemon ServiceAccount, Role, and
-RoleBinding plus the `legion` PriorityClass, then starts the daemon on the host with its
-ServiceAccount-token exec kubeconfig. The daemon's HTTP API is `base+4` and its worker stream is
-`base+5`; its controller is in `tmux -L legion-smoke<instance>`. The host sequence adds
-`scheduling`, `controller-pane`, `exec-auth`, `exec-auth --wait-refresh`, `plugin-skew`, and
-`volume-lost` between `kill-pod-resume` and `pod-hygiene`. The plugin check records one warning per
-inherited process before restart-time reconnection; volume loss records each recovered pod's start
-time and timestamped `workspace-init` log after proving the root and workers recovered.
-
-What the checkpoints print on today's main, in order: `admitted` OK, `architect-pod` OK,
-`spec-posted` OK, `tree-moved` OK, `kill-pod-resume` OK (with one `WORKAROUND LEGION-177 …` line
-before it), `pod-hygiene` OK, and `CHECKPOINT done SKIPPED-BLOCKED: the run has no controller (…)`
-with exit 3 — `done` needs `legion controller start` (pull request #1110) and
-`SMOKE_GITHUB_INGRESS=envoy`, and a blocked line is the correct result until then, never a false
-green. `worker-cap` prints `SKIPPED-BLOCKED` naming `SMOKE_ROOT_ISSUES` and `SMOKE_WORKER_CAP`
-unless the instance was started with `2` and `1`; its OK line reads the daemon's queue holding a
-task while a worker pod runs and the head's promotion, and judges the cap by a *sustained* excess of
-worker pods — a finished worker's pod stays alive idle for `worker_idle_retire_seconds` without
-counting against the daemon's cap, and the state page exposes no run state, so a pod count only
-over-approximates the daemon's own (`SMOKE_WORKER_IDLE_RETIRE=60` keeps that window short).
-
-Run the host checkpoint sequence right after `up.sh`, with `kill-pod-resume` straight after
-`tree-moved`. It waits for an early active implementer turn, rather than a planner: the matching
-implementer claim must be ready-confirmed and Running, be assigned less than 120 seconds earlier,
-and have an unfinished shim turn containing a tool call. The root is then killed early in that
-longer phase, so the completion-into-a-dying-root race in `dispatch://LEGION-182` is excluded by
-construction. An ineligible phase keeps polling; it is not killed at a phase boundary.
-
-### What the instance is
-
-Everything outside the cluster is named by `SMOKE_INSTANCE` and recorded as one file under
-`${SMOKE_DIR:-~/.local/state/legion-smoke/<instance>}/records`: the cluster, the two containers
-(labelled `legion-smoke.instance=<instance>`), the host processes (pid + start ticks), the tmux
-server, the Dispatch project `S<INSTANCE>`, the root issues, the controller decision, the probe
-contract, the LEGION-177 workaround mode. Ports are `SMOKE_PORT_BASE` (default 31000) `+0` NATS,
-`+1` listener, `+2` Dispatch, `+3` Postgres, `+4` the daemon API, and `+5` the worker stream in
-host-daemon mode. Cluster mode uses `+4` for the port-forward instead. Inside the cluster the base
-manifests' `demo` names stay: the cluster itself is the instance. `down.sh` acts on those records
-only, verifies ownership before every destructive step, shreds the generated secrets, and refuses
-a directory that never started an instance. The README's "Names, ports, records" table has the full
-list.
-
-### Troubleshooting
-
-| symptom | cause and remedy |
-| :--- | :--- |
-| `kind load docker-image <digest ref>` leaves `image "docker.io/library/import-…@sha256:…": not found` on the node | a digest-only reference loads as an unusable anonymous image; never load — the node pulls `SMOKE_WORKER_IMAGE` from GHCR by digest (~10 s), which is all `up.sh` does |
-| a pod's request to the daemon Service times out (`HTTP 000`) | kindnet enforces the NetworkPolicy: only `legion.dev/project`-labelled pods reach the Service; read state through the port-forward (`http://127.0.0.1:<base+4>/legion/v1/state`), which the API server and kubelet carry outside NetworkPolicy |
-| a helper or debug pod vanishes | it carried `legion.dev/project`, and the daemon's orphan sweep deletes every such pod it does not know (grace 0 at boot); label helpers `app.kubernetes.io/*` and give one that must reach the Service its own `from` entry in the overlay's NetworkPolicy |
-| the daemon pod crash-loops; `up.sh` prints `the daemon pod is crash-looping (N restarts); its last log lines:` with `Unknown config key "operator_token_file"` / `"session_store"` (or `operator_token_file is required when runtime is kubernetes`) | image and checkout disagree about `legion.yaml` keys: the overlay emits `operator_token_file` when the checkout's base carries it and `session_store` under `SMOKE_SESSION_STORE=postgres`; pick an image built from a commit on the same side of #1110 / #1108 as the checkout; the cluster is left for inspection |
-| `port N (<name>) is already in use and is not this instance's; choose another SMOKE_PORT_BASE (current B)` | another instance or a leftover listener; the rig reuses only a listener its own records prove is its (container label, pid + start ticks) and never kills one |
-| `the kind docker network has no IPv4 gateway` | kind creates the `kind` network on the first cluster create; check `docker network inspect kind` — the gateway is chosen by regex because the IPv6 IPAM entry can come first |
-| the probe pod stays `Pending` with `ImagePullBackOff` / `ErrImagePull` (`up.sh`: `the daemon never logged a passed image probe`) | a digest typo or GHCR unreachable from the node; `kubectl --kubeconfig <state>/kubeconfig -n legion describe pod legion-probe-demo-…` |
-| `controller: none (<reason>)` | one of: the checkout has no `legion controller start` (#1110); the daemon answers 404 on `POST /legion/v1/controller/secret` (the image predates the route); the installed `pi-legion-envoy` speaks another daemon-API contract than the image daemon; `done` then prints `SKIPPED-BLOCKED` |
-| `kill-pod-resume` FAILED `the replacement registered session '<s1>', recorded <s0>` | the same-agent rule refused a different session (409, the pod exits) under `postgres`, or the session file was lost under `pvc`; the reason quotes the worker log tail |
-| `kill-pod-resume` FAILED `replacement pod … its init container failed (LEGION-177 without the workaround? SMOKE_LEGION_177_WORKAROUND=…)`, log tail `unable to get password from user` — or, without the rig, a phase worker's pod loops through generations with the same init failure | LEGION-177: on the image's git 2.47 the `credential.interactive=false` provisioning writes into the tree's shared clone makes the next pod's init `jj git fetch` fail, for every phase worker and every resurrected root. With `SMOKE_LEGION_177_WORKAROUND=1` (default) `up.sh` runs the recorded `legion-177-keeper` loop (the unset through `kubectl exec` in each Running Legion pod, through the instance kubeconfig only, every `SMOKE_LEGION_177_INTERVAL` s, each pod and time logged to `logs/legion-177-keeper.log`) and the checkpoint applies the one-shot unset before the kill (`WORKAROUND LEGION-177 applied`). Close rule for LEGION-26: a green `kill-pod-resume` with `SMOKE_LEGION_177_WORKAROUND=0` on an image that carries LEGION-177 |
-| `kill-pod-resume` FAILED `the kill did not land: pod <pod> is still Running after <kill method> while the tree moved on at generation N` | the killed pod is still alive — `docker exec <kind node> kill -9 <pid>` or the forced delete did not reach the process (a wrong container id, a pod that had already been replaced); `kubectl exec … kill -9 1` never works either (SIGKILL to a PID namespace's init from inside it is dropped), which is why the rig signals from the node. Judged from the pod, immediately |
-| `kill-pod-resume` FAILED `no replacement within <budget>s: the daemon did not resurrect the root (recorded generation N, current N; pod0 pod <pod> Failed (worker exit 137) …)` | the kill landed (the pod is `Failed`/exit 137 or gone) but no new generation appeared within `SMOKE_WAIT_KILL_RESUME` (one `SMOKE_RESYNC_INTERVAL` plus a pod start): the daemon's resync probe did not resurrect the root — read the daemon log for `resurrecting <KEY>` and the probe verdict. A phase worker finishing meanwhile (the issue's status moving at the recorded generation) is other work continuing and is never itself the verdict |
-| `kill-pod-resume` FAILED `could not read pod <pod>: <kubectl stderr>` | the API server could not be read while waiting for the kill to land (a blip, a timeout, a stale kubeconfig); only a `NotFound` counts as the pod gone, anything else is retried within the budget and named at expiry |
-| the daemon refuses startup with `envoy_token_file names /var/run/legion/providers/ENVOY_TOKEN, which could not be read: ENOENT` | the providers Secret lacks `ENVOY_TOKEN`; `up.sh` writes it from the instance's generated listener token — a hand-edited `providers.env` is the usual cause |
-| a pod stays `Pending` past `worker_boot_timeout_seconds` | a launch failure the daemon counts against the role (a node without room, an image pull that never completes); `kubectl describe pod` names the reason |
-| the replacement pod is delayed after a kill | the previous generation's pod is still terminating; the daemon deletes and awaits it before creating the next generation |
-| `probe` verdicts read `unknown` in the daemon log | the API server was unreachable; `unknown` never marks anything dead by itself — the next probe decides |
-| the daemon log shows `architect shim connect for <KEY> failed (attempt k/6, cycle 1); retrying in <d>s: Worker RPC "negotiate_protocol" timed out after 5000ms` after every root start, ending in `stopping architect shim connect … retries: …` or a best-effort give-up | expected: LEGION-39's bounded, best-effort connect to the root's shim at ready time (`connectOnReady`, `packages/daemon/src/daemon/AGENTS.md`, the `ReadyDeliveryRetrier` bullet) — `/process/ready` still lands, `readyConfirmedAt` is set, the tree confirms and works; nothing is retired and no counter moves. Seen on every root start of every instance in the LEGION-26 runs |
-
-### Running it on kind by hand
-
-`scripts/kind-smoke/up.sh` automates every step below with instance-scoped names; use this section
-when you need a piece of it by hand.
-
-The overlay `deploy/kubernetes/daemon/overlays/kind` is a template for a cluster of your own
-(`kind create cluster --name <name>`); pods pull the public image from GHCR, so nothing is built
-locally. Every value in it is a placeholder — the image digest, the host address, the Dispatch
-project mapping, the two GitHub App ids, and the secrets — and `kubectl apply -k` runs it as
-written, so replace them first; every mapping entry must point to a project and repository set aside
-for the run, never a live one. A NATS server and an Envoy listener run on the host, bound where pods
-them — the kind docker network's gateway (`docker network inspect kind -f '{{(index .IPAM.Config 1).Gateway}}'`,
-`172.30.0.1` on the box the overlay was written on; substitute yours below and in `legion.yaml`) —
-with the listener requiring a token:
-
-```sh
-docker run -d --name kind-nats -p 14222:4222 nats:2.10 -js
-(cd packages/envoy && go build -o out/envoy-listener ./cmd/listener)
-ENVOY_TOKEN=$(openssl rand -hex 24)
-PORT=19020 ENVOY_LISTEN_HOST=172.30.0.1 ENVOY_API_TOKEN="$ENVOY_TOKEN" ENVOY_MACHINE_ID=kind \
-  NATS_URLS=nats://127.0.0.1:14222 packages/envoy/out/envoy-listener &
-```
-
-Then the overlay's values and inputs, and the apply:
-
-```sh
-cd deploy/kubernetes/daemon/overlays/kind
-# legion.yaml: envoy_url / nats_urls / dispatch_url (the gateway address), projects (Dispatch
-#   project-to-repository mappings set aside for the run), github_apps.<role>.app_id (your Apps)
-# kustomization.yaml `images:` digest and legion.yaml `runtime.kubernetes.image`: the digest of the
-#   worker image to run (a `Worker Image` workflow run's job summary)
-cp secrets/providers.env.example secrets/providers.env        # DISPATCH_TOKEN, ENVOY_TOKEN, provider keys
-cp secrets/operator.env.example secrets/operator.env          # OPERATOR_TOKEN: one random string (openssl rand -hex 32); the same value goes into the operator's 0600 file
-# secrets/github-app-implement.pem, secrets/github-app-review.pem: the two App private keys
-kubectl --context kind-<name> apply -k .
-kubectl --context kind-<name> -n legion rollout status deploy/legion-daemon-demo
-```
-
-What to look for, in order:
-
-1. **State through the Service** (proves `bind: 0.0.0.0` and `daemon_url` — and the NetworkPolicy:
-   the pod must carry the ingress label):
-   `kubectl -n legion run curl --rm -i --restart=Never --image=curlimages/curl --labels=legion.dev/project=demo -- curl -s http://legion-daemon-demo.legion.svc:13370/legion/v1/state`
-   answers the redacted state JSON; the same pod without `--labels` times out (`HTTP 000`).
-2. **The probe pod, once**: `kubectl -n legion logs deploy/legion-daemon-demo` shows
-   `worker image sha256:… : probe pod legion-probe-demo-<12> passed: probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=<N>`;
-   `kubectl -n legion get pods` shows no `legion-probe-*` afterwards;
-   `kubectl -n legion exec deploy/legion-daemon-demo -- cat /var/lib/legion/image-probes/<64 hex>.json`
-   is `{digest, daemonApiVersion, probedAt}`.
-3. **The cache on restart**: `kubectl -n legion rollout restart deploy/legion-daemon-demo`; the new
-   pod's log says `passed its probe at <probedAt> … reusing …`, and
-   `kubectl -n legion get events --field-selector reason=Created` names no `legion-probe-*`.
-4. **A role publish answers 200** against the token-requiring listener, with the operator-launched
-   controller as the holder: `kubectl -n legion port-forward svc/legion-daemon-demo 13370:13370 &`
-   then `legion controller start --config controller.yaml --daemon-url http://127.0.0.1:13370` on a
-   machine that reaches the listener and NATS (the `controller.yaml.example` filled in with the
-   overlay's addresses and the operator Secret's token). `legion state --json` shows
-   `controllerLocator: {runtime: "kubernetes", external: true, sessionId, registeredAt}`; create a
-   root issue in one of the overlay's `projects` keys, and the daemon consumes `<KEY>.issue.created`,
-   publishes `{"type":"triage","issue":"<KEY>"}` to the controller role with its bearer (the listener
-   logs `listener received … topic: notifications.role.legion-demo-controller`; no `refused the
-   publish` line in the daemon's), and the notice reaches that terminal. The same publish by `curl`
-   without the bearer answers 401. When no operator machine can reach the listener, stand in for
-   the holder instead: register a session with the listener (`POST /v1/interests/subscribe`, then
-   `POST /v1/roles/set {role: legion-demo-controller}`), have it answer its
-   `notifications.agent.<session>` NATS subject with an empty receipt, relay the Dispatch server's
-   issue events onto that NATS as `notifications.dispatch.issue.>` messages, and read the envelope
-   there.
-5. **Negative controls**: remove the providers Secret's `ENVOY_TOKEN` key
-   (`kubectl -n legion patch secret legion-demo-providers --type=json -p '[{"op":"remove","path":"/data/ENVOY_TOKEN"}]'`)
-   and restart — startup refuses `envoy_token_file names /var/run/legion/providers/ENVOY_TOKEN, which
-   could not be read: ENOENT`; point `runtime.kubernetes.image` (the ConfigMap only — the Deployment keeps the
-   real image) at an image built before this branch — its `legion probe-image` ignores
-   `--daemon-api-version`, the pod `Succeeded`s with a bare `probe-image: OK`, and the daemon exits
-   `failed its probe: pod legion-probe-demo-<12> Succeeded without confirming daemon API contract <N> (its
-   legion CLI predates the check) — log tail: probe-image: OK (…)`; an image whose plugin speaks another contract `Failed`s the
-   pod instead and the daemon quotes `speaks daemon API contract <M>; this daemon requires <N>`.
+- a wrong token: `<daemon_url>/legion/v1/controller/secret: the daemon answered 403 Forbidden: Invalid
+  operator token — the operator token does not match the daemon's operator_token_file`;
+- an unreachable daemon: `could not reach the Legion daemon at <daemon_url>: …; is the port-forward
+  running? (never falls back to another address)`.

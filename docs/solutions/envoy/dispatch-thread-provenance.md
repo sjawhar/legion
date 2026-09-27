@@ -31,9 +31,9 @@ question without hunting for the session that asked it, which needs exactly that
 
 Put session-derived defaults in the **plugin's own tool**, not the server or the model.
 
-Each host plugin (pi-envoy for OMP, envoy-plugin for OpenCode, claude-envoy-bridge for
+Each host plugin (pi-envoy for OMP, envoy-plugin for OpenCode, claude-envoy for
 Claude Code) offers `dispatch` as its own tool — native in OMP and OpenCode, a tool of the
-bridge's `envoy` MCP server in Claude Code — so the code that prepares the call runs inside
+plugin's `envoy` MCP server in Claude Code — so the code that prepares the call runs inside
 the session's own process and working directory
 (`packages/envoy-client/src/dispatch-call.ts`, shared by all three). Before the call reaches
 the service it fills what the model cannot know and should not be trusted to state:

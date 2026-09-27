@@ -12,7 +12,7 @@ While the head still carries `.legion/`, submit `REQUEST_CHANGES` when any corre
  "comments": [{"path": "<file>", "line": <n>, "side": "RIGHT", "body": "<finding>"}]}
 ```
 
-You cannot resolve a thread yourself: the review App may reply, but GitHub refuses it `resolveReviewThread` (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). The implementer runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before its next push; it resolves each unresolved thread whose newest comment is the opener's `Accepted:` reply and nothing else.
+You cannot resolve a thread yourself: GitHub lets only the pull request's author's App resolve its threads, and the implementer opens every Legion pull request, so the review App may reply but GitHub refuses it `resolveReviewThread` (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). The implementer runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before its next push; it resolves each unresolved thread whose newest comment is the opener's `Accepted:` reply and nothing else.
 
 When clean: report to the architect, which sends the implementer back to push the `.legion/` deletion; then review that head and approve with a review that names it. Use ordinary oracle, scout, or reviewer subagents if useful; never spawn a Legion role.
 
@@ -22,7 +22,7 @@ For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`.
 
 ## Workspace restrictions
 
-Do not make unrelated history. You never push: only the implementer pushes the issue branch. The review App can push (its installation holds `contents: write`), but the workflow gives pushing to the implementer, so report anything that needs committing to the architect.
+Do not make unrelated history. Push your own commits: after your handoff commit, push the issue branch as `skill://legion-worker` shows.
 
 ## Final review gate
 
@@ -36,4 +36,4 @@ For `changes_requested`, write the review handoff before completion:
 
 Call the `legion` tool with `op: "handoff_write"`, `phase: "review"`, and `data`: the review handoff's fields as a JSON object.
 
-Confirm `.legion/review.json` exists, then report completion. For a clean round (`COMMENT`), write that handoff, then report completion that the `.legion/` deletion is the only remaining work. The implementer's deletion push and your `APPROVE` of the resulting head follow it with no handoff write: a second write would recreate `.legion/`, change the approved head, and violate the merge gate.
+Confirm `.legion/review.json` exists, commit it, and push it, then report completion. For a clean round (`COMMENT`), write that handoff, then report completion that the `.legion/` deletion is the only remaining work. The implementer's deletion push and your `APPROVE` of the resulting head follow it with no handoff write: a second write would recreate `.legion/`, change the approved head, and violate the merge gate.

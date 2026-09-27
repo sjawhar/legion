@@ -118,6 +118,7 @@ func issueFixture(key string) Issue {
 		Generation:          3,
 		Status:              "in_progress",
 		Rank:                "00042U",
+		HandedOver:          true,
 		LastDispatchSeq:     41,
 		ReadyPendingVersion: &ready,
 	}
@@ -131,14 +132,17 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	issue.Tree = "LEGION-200"
 	updatedAt := time.Date(2026, 9, 22, 14, 12, 13, 456000000, time.UTC)
 	approved := 7
-	pending := &PendingPush{SHA: "b1c2d3", HandoffOnly: true, Unknown: "paths_truncated"}
+	pushes := []ClassifiedPush{
+		{SHA: "b1c2d3", Before: "a0b1c2", HandoffOnly: true, Unknown: "paths_truncated", ByReviewApp: true},
+		{SHA: "c2d3e4", Before: "b1c2d3", Forced: true},
+	}
 	pr := PullRequest{
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1243, Branch: "legion/LEGION-208",
 		HeadSHA: "b1c2d3", HeadUpdatedAt: updatedAt, HeadUpdatedAtSource: "pull_request.synchronize",
 		Verdict: "failing", Failing: []string{"unit"}, FailingStatuses: []string{"unit / test"},
-		ReviewDecision: "changes_requested", FixAttempts: 2, BlockedAttempts: 1,
+		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Reconciled: true, PendingPush: pending, HeadCounted: "b1c2d3", State: PullRequestMerged,
+		Snapshot: "snapshot-4", Reconciled: true, Pushes: pushes, HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged,
 	}
 	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
@@ -205,23 +209,23 @@ func TestStoreRoundTripsLingerStateAndRefusesHeldFromHeld(t *testing.T) {
 	st := migratedStore(t)
 	records := NewStore()
 	until := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
-	heldFrom := phase.Implementing
+	hold := Hold{From: phase.Implementing, Reason: HoldEscalated}
 	lingering := issueFixture("LEGION-210")
 	lingering.LingerUntil = &until
-	lingering.HeldFrom = &heldFrom
+	lingering.Hold = &hold
 
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, lingering))
 		got, err := records.Issue(ctx, tx, lingering.Key)
 		must(t, err)
-		if got == nil || got.LingerUntil == nil || !got.LingerUntil.Equal(until) || got.HeldFrom == nil || *got.HeldFrom != heldFrom {
-			t.Fatalf("lingering issue state = %#v, want linger until %s from %s", got, until, heldFrom)
+		if got == nil || got.LingerUntil == nil || !got.LingerUntil.Equal(until) || got.Hold == nil || *got.Hold != hold {
+			t.Fatalf("lingering issue state = %#v, want linger until %s and hold %+v", got, until, hold)
 		}
 	})
 
 	cleared := lingering
 	cleared.LingerUntil = nil
-	cleared.HeldFrom = nil
+	cleared.Hold = nil
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, cleared))
 		got, err := records.Issue(ctx, tx, cleared.Key)
@@ -232,8 +236,7 @@ func TestStoreRoundTripsLingerStateAndRefusesHeldFromHeld(t *testing.T) {
 	})
 
 	invalid := issueFixture("LEGION-211")
-	held := phase.Held
-	invalid.HeldFrom = &held
+	invalid.Hold = &Hold{From: phase.Held}
 	err := st.Tx(ctx, func(tx pgx.Tx) error {
 		return records.PutIssue(ctx, tx, invalid)
 	})
@@ -242,15 +245,75 @@ func TestStoreRoundTripsLingerStateAndRefusesHeldFromHeld(t *testing.T) {
 	}
 }
 
+// A hold's reason ends with the hold whichever build writes the row: an earlier build's upsert
+// names no hold_reason, so ending a hold and holding the issue again there would otherwise leave
+// the old escalation on a hold nobody escalated.
+func TestAWriteThatEndsAHoldEndsItsReasonWhateverWritesIt(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-212")
+	issue.Phase, issue.Hold = phase.Held, &Hold{From: phase.Implementing, Reason: HoldEscalated}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		for _, write := range []string{
+			"update issues set phase = 'implementing', held_from = null where key = $1",
+			"update issues set phase = 'held', held_from = 'implementing' where key = $1",
+		} {
+			if _, err := tx.Exec(ctx, write, issue.Key); err != nil {
+				t.Fatalf("%s: %v", write, err)
+			}
+		}
+		got, err := records.Issue(ctx, tx, issue.Key)
+		must(t, err)
+		if want := (Hold{From: phase.Implementing}); got == nil || got.Hold == nil || *got.Hold != want {
+			t.Fatalf("hold after it ended and began again without a reason = %+v, want %+v", got.Hold, want)
+		}
+	})
+}
+
 func samePullRequest(got, want PullRequest) bool {
 	return got.Issue == want.Issue && got.Repo == want.Repo && got.Number == want.Number &&
 		got.Branch == want.Branch && got.HeadSHA == want.HeadSHA && got.HeadUpdatedAt.Equal(want.HeadUpdatedAt) &&
 		got.HeadUpdatedAtSource == want.HeadUpdatedAtSource && got.Verdict == want.Verdict &&
 		reflect.DeepEqual(got.Failing, want.Failing) && reflect.DeepEqual(got.FailingStatuses, want.FailingStatuses) &&
-		got.ReviewDecision == want.ReviewDecision && got.FixAttempts == want.FixAttempts &&
+		got.FixAttempts == want.FixAttempts &&
 		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot && got.Reconciled == want.Reconciled &&
-		reflect.DeepEqual(got.PendingPush, want.PendingPush) && got.HeadCounted == want.HeadCounted
+		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted &&
+		got.PlannedRed == want.PlannedRed
+}
+
+// A new generation keeps an open pull request but none of the old generation's fix-attempt
+// accounting: its counts, its counted head, and its planned mark, which would otherwise exempt the
+// new generation's first red from counting.
+func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	issue := issueFixture("LEGION-285")
+	pr := PullRequest{
+		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1359, Branch: "legion/LEGION-285",
+		HeadSHA: "red-tests", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC), HeadUpdatedAtSource: "webhook",
+		Verdict: "red", Failing: []string{"test"}, FailingStatuses: []string{}, CheckRuns: []AttemptRun{},
+		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", PlannedRed: true, State: PullRequestOpen,
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issue))
+		must(t, records.PutPullRequest(ctx, tx, pr))
+		must(t, records.ClearGeneration(ctx, tx, issue.Key))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.PullRequest(ctx, tx, issue.Key)
+		must(t, err)
+		if got == nil {
+			t.Fatal("the open pull request is gone, want it kept")
+		}
+		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.PlannedRed {
+			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q plannedRed=%v, want 0, 0, \"\" and false",
+				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.PlannedRed)
+		}
+	})
 }
 
 func TestMarkProcessedIsIdempotent(t *testing.T) {
@@ -436,13 +499,16 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	}
 }
 
-func TestWaitingIncludesOnlySlotlessTodoRootsAndOrphansInRankOrder(t *testing.T) {
+// The waiting line is the slotless todo roots and orphans handed to Legion, in rank order: a root
+// in todo without the label waits for nothing, however high it ranks.
+func TestWaitingIncludesOnlySlotlessHandedOverTodoRootsAndOrphansInRankOrder(t *testing.T) {
 	issues := []Issue{
-		{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Rank: "00000"},
-		{Key: "LEGION-211", Tree: "LEGION-211", Status: "backlog", Rank: "00001"},
-		{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1},
-		{Key: "LEGION-213", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10},
+		{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Rank: "00000", HandedOver: true},
+		{Key: "LEGION-211", Tree: "LEGION-211", Status: "backlog", Rank: "00001", HandedOver: true},
+		{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
+		{Key: "LEGION-213", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, HandedOver: true},
 		{Key: "LEGION-214", Tree: "LEGION-212", Status: "todo", Rank: "00002"},
+		{Key: "LEGION-215", Tree: "LEGION-215", Status: "todo", Rank: "00000"},
 	}
 	got := Waiting(issues, nil)
 	want := []Issue{issues[3], issues[2]}
@@ -497,9 +563,9 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version"},
-		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "last_handoff"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "review_decision", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pending_push", "head_counted", "state"},
+		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason"},
+		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},
@@ -522,6 +588,69 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 			if !reflect.DeepEqual(got, expected) {
 				t.Fatalf("%s columns = %v, want %v", table, got, expected)
 			}
+		}
+	})
+}
+
+// Migration 0019 moves the newest deciding review off the reviewer's phase row onto the pull
+// request, so a database the daemon ran on before it keeps ordering the reviews it has seen, and
+// the round's decision keeps what it decided without the id it no longer carries.
+func TestReviewOrderMigrationCarriesTheReviewersMarkToThePullRequest(t *testing.T) {
+	ctx := context.Background()
+	st := emptyStore(t)
+	all, err := migrations.All()
+	must(t, err)
+	for _, migration := range all {
+		if migration.Version >= 19 {
+			break
+		}
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, func() error {
+				if _, err := tx.Exec(ctx, migration.SQL); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, "insert into schema_version (version) values ($1)", migration.Version)
+				return err
+			}())
+		})
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, statement := range []string{
+			`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+				values ('LEGION-208', 'LEGION-208', 'LEGION', 'the issue', 'reviewing', 1, 'needs_review', 'U', 0)`,
+			`insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
+				verdict, failing, failing_statuses, fix_attempts, blocked_attempts, check_runs, generation, snapshot,
+				reconciled, pushes, head_counted, planned_red, state)
+				values ('LEGION-208', 'sjawhar/legion', 42, 'legion/LEGION-208', 'head', now(), 'webhook', '', '[]', '[]',
+				0, 0, '[]', 0, '', false, '[]', '', false, 'open')`,
+			`insert into phases (issue, role, claim, handoff_commit, rounds, verdict, last_handoff, decision, review_seen)
+				values ('LEGION-208', 'reviewer', 'review-claim', '', 0, '', '',
+				'{"state": "approved", "body": "ship it", "head": "head", "id": 12}', 12)`,
+		} {
+			_, err := tx.Exec(ctx, statement)
+			must(t, err)
+		}
+	})
+
+	_, err = st.Migrate(ctx)
+	must(t, err)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		pr, err := records.PullRequest(ctx, tx, "LEGION-208")
+		must(t, err)
+		if pr == nil || pr.ReviewSeen.ID != 12 || !pr.ReviewSeen.SubmittedAt.IsZero() {
+			t.Fatalf("pull request after 0019 = %+v, want the reviewer's mark 12 with no submission time", pr)
+		}
+		phases, err := records.Phases(ctx, tx, "LEGION-208")
+		must(t, err)
+		want := &ReviewDecision{State: "approved", Body: "ship it", Head: "head"}
+		if len(phases) != 1 || !reflect.DeepEqual(phases[0].Decision, want) {
+			t.Fatalf("reviewer phase after 0019 = %+v, want the decision %+v", phases, want)
+		}
+		var keepsID bool
+		must(t, tx.QueryRow(ctx, `select decision ? 'id' from phases where issue = 'LEGION-208'`).Scan(&keepsID))
+		if keepsID {
+			t.Fatal("the stored decision still carries its review id")
 		}
 	})
 }
