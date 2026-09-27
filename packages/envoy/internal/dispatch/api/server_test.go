@@ -1925,6 +1925,14 @@ func TestDisconnectAllStreamsHookIsGatedByTestHooksEnabled(t *testing.T) {
 	}
 }
 
+func TestQuiesceDocumentsHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/_test/quiesce", nil, "alice")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("quiesce hook without TestHooksEnabled: status=%d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
 // TestDisconnectAllStreamsClosesOpenConnections proves the test-only hook drives a
 // client through its reconnect-from-lastId path without seeding thousands of events
 // to trip the replay cap: the same recovery path useEventStream exercises after any

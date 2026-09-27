@@ -49,7 +49,11 @@
   },
   "overrides": [
     {
-      "includes": ["packages/proof-editor/src/**", "!packages/proof-editor/src/tests/harness.ts"],
+      "includes": [
+        "packages/proof-editor/src/**",
+        "!packages/proof-editor/src/tests/harness.ts",
+        "packages/proof-editor/upstream/**"
+      ],
       "assist": { "enabled": false },
       "formatter": { "enabled": false },
       "linter": { "enabled": false }

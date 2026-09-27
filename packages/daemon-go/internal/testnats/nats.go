@@ -46,6 +46,16 @@ var (
 	startErr   error
 )
 
+// init runs in every test binary that imports this package, whichever helper its tests use. Every
+// server these helpers start has no users unless a test configures some, and nats.go refuses an
+// nkey when the server sends no nonce ("nats: nkeys not supported by the server"), so an
+// operator's NATS_NKEY_SEED or NATS_NKEY_SEED_FILE never reaches the tests' clients. A test that
+// means to pass a seed sets it itself.
+func init() {
+	os.Unsetenv("NATS_NKEY_SEED")
+	os.Unsetenv("NATS_NKEY_SEED_FILE")
+}
+
 // Main runs the package's tests, then removes the NATS container if a test started one, and
 // returns the exit code. A package whose tests use URL or JetStream calls it from TestMain:
 // os.Exit(testnats.Main(m)).
@@ -215,6 +225,24 @@ func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer
 		return started, errors.Join(err, testcontainers.TerminateContainer(started))
 	}
 	return started, nil
+}
+
+// StartNkeyAuthorized runs a NATS container of its own, with JetStream, that accepts only clients
+// authenticating as the nkey user whose public key is user, removed when t ends, and returns its
+// client URL.
+func StartNkeyAuthorized(t testing.TB, user string) string {
+	t.Helper()
+	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ { nkey: %q } ]\n}\n", user)
+	container, err := start(tcnats.WithConfigFile(strings.NewReader(config)))
+	if err != nil {
+		t.Fatalf("start nkey-authorized NATS: %v", err)
+	}
+	testcontainers.CleanupContainer(t, container)
+	url, err := container.ConnectionString(context.Background())
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	return url
 }
 
 // connect returns a connection to the server once its JetStream API answers.

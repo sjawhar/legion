@@ -620,6 +620,9 @@ describe("isSecretLikeName", () => {
       "GITHUB_PAT",
       "GOOGLE_APPLICATION_CREDENTIALS",
       "GOOGLE_APPLICATION_CREDENTIALS_FILE",
+      "NATS_NKEY_SEED",
+      "NATS_NKEY_SEED_FILE",
+      "nats_nkey_seed",
       "npm_config_token",
       "my_api_key",
       "some_private_key_pem",
@@ -630,7 +633,7 @@ describe("isSecretLikeName", () => {
 
   it("leaves ordinary names alone, including ones that merely contain a suffix mid-word", () => {
     // The segment must end the name (or be followed only by `_FILE`): `TOKENIZER`, `X_PATH`
-    // (`_PAT` + `H`), `X_KEYBOARD` (`_KEY` + `BOARD`) are not credentials. Every allow-listed name
+    // (`_PAT` + `H`), `X_KEYBOARD` (`_KEY` + `BOARD`), `X_SEEDS` (`_SEED` + `S`) are not credentials. Every allow-listed name
     // must land here, or the allow-list would hand a pane nothing.
     for (const name of [
       "PATH",
@@ -647,6 +650,8 @@ describe("isSecretLikeName", () => {
       "NODE_EXTRA_CA_CERTS",
       "LEGION_CREDENTIAL_HELPER",
       "GH_CONFIG_DIR",
+      "SEEDLING",
+      "X_SEEDS",
     ]) {
       expect(isSecretLikeName(name)).toBe(false);
     }

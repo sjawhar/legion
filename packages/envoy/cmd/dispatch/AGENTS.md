@@ -36,17 +36,24 @@ use the default get a `repo:owner/name` label. `DISPATCH_NATS_DISABLED=1` leaves
 database and SSE paths available and makes `/healthz` report `nats: null`.
 Otherwise Dispatch loads config in this precedence order: user `envoy.json`,
 repository `envoy.json`, then environment overrides. A present `NATS_URLS`
-overrides merged `natsUrls` before `bus.Connect` and the outbox start. A present
+overrides merged `natsUrls` before `bus.ConnectOwningStream` and the outbox
+start; the server owns `ENVOY_NOTIFICATIONS` on whichever server that resolves
+to, and refuses one that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1`
+says the run means it (every deployment sets it). A present
 `DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an
 absolute `http` or `https` URL with no path, and is the exact browser origin
 used for GitHub OAuth. It must equal the URL humans type into the browser, with
 `<DISPATCH_SERVER_URL>/auth/callback` registered on the GitHub App. Host
 adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
-`DISPATCH_TEST_HOOKS=1` mounts `POST /api/v1/events/_test/disconnect` (closes
-every open SSE connection, as if the server had restarted) — unset in every real
-deployment; e2e's `run-server.sh` sets it so the web client's
-reconnect-from-lastId path can be exercised without seeding thousands of
-events to trip the SSE replay cap.
+`DISPATCH_TEST_HOOKS=1` mounts two test-only routes — unset in every real
+deployment. `POST /api/v1/events/_test/disconnect` closes every open SSE
+connection, as if the server had restarted; e2e's `run-server.sh` sets the flag
+so the web client's reconnect-from-lastId path can be exercised without seeding
+thousands of events to trip the SSE replay cap. `POST
+/api/v1/artifacts/_test/quiesce` closes every live document, flushing each
+through the store, and waits for the settlements in flight, leaving the service
+able to load documents again; `e2e/seed.ts` calls it before truncating so its
+`TRUNCATE` cannot cross lock order with a settlement.
 
 With NATS configured and the GitHub App private key loaded, startup also runs the webhook
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
@@ -170,7 +177,7 @@ the table says human only.
 | `/api/v1/issues/{key}/comments` | GET, POST | user or bearer | List or create comments and suggestions. |
 | `/api/v1/comments/{id}` | GET | user or bearer | Read a comment and its reply chain. |
 | `/api/v1/comments/{id}/resolve` | POST | user or bearer | Resolve a comment. |
-| `/api/v1/comments/{id}/accept` | POST | human only | Apply and accept a suggestion. |
+| `/api/v1/comments/{id}/accept` | POST | human only | Apply and accept a suggestion. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and leaves the suggestion open; one removed after it answers `200` with `lost: true`. |
 | `/api/v1/comments/{id}/reject` | POST | human only | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | user or bearer | Post a short issue message. |
 | `/api/v1/issues/{key}/artifacts` | GET, POST | user or bearer | List issue artifacts or create a version from a multipart file or JSON inline content. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
@@ -178,7 +185,7 @@ the table says human only.
 | `/api/v1/artifacts/{id}/text` | GET | user or bearer | Read a live document's markdown. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | user or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | user or bearer | Create a named live-document version. `{id}` must be a UUID. |
-| `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. |
+| `/api/v1/artifacts/{id}/edits` | POST | user or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | user or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | user or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | user or bearer | Read an unlinked document's events. |
@@ -187,17 +194,18 @@ the table says human only.
 | `/api/v1/issues/{key}/artifacts/{slug}/text` | GET | user or bearer | Read an issue artifact's live markdown. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read an issue artifact version or download its blob. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named issue-document version. |
-| `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply issue-document edit operations. |
+| `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply issue-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/projects/{key}/artifacts/{slug}` | GET | user or bearer | Read an unlinked project artifact and its incoming references. `{slug}` is resolved within `{key}`. |
 | `/api/v1/projects/{key}/artifacts/{slug}/text` | GET | user or bearer | Read an unlinked project document's live markdown. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read an unlinked project document version or download its blob. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named project-document version. |
-| `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply project-document edit operations. |
+| `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply project-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
 | `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before}}`. |
 | `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation for this user: `{cleared_before: <RFC3339>}`, 400 `INVALID_STATE` when malformed or more than a minute ahead of the server clock. |
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
+| `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. |
 
@@ -210,6 +218,13 @@ Document events publish retained envelopes on
 ```sh
 go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1
 ```
+
+`natstail` publishes nothing and owns nothing on the bus: it neither creates nor
+updates `ENVOY_NOTIFICATIONS`, and it refuses a NATS server that is not this
+machine's, naming the URL. A machine whose `envoy.json` names a shared NATS
+(an agent devbox names production's) runs it with
+`ENVOY_ALLOW_REMOTE_NATS=1 go run ./cmd/natstail …`, which is the run saying it
+means that server.
 
 ## Checks
 

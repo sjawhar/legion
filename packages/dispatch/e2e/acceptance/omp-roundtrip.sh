@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Drives the model-gated OMP acceptance scenarios against a running native Dispatch stack.
 set -euo pipefail
+# This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
+# no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
+# NATS_NKEY_SEED or NATS_NKEY_SEED_FILE.
+unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 
 readonly mode="${1:-E4}"
 readonly role="acceptance-r"

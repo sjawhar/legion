@@ -99,6 +99,215 @@ func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
 	}
 }
 
+// A spec's decisions are ask blocks, and the write that adds one already carries its words into
+// a version: indexing it afterwards is bookkeeping over the same document. Settlement recording
+// that bookkeeping as a version of its own wrote a byte-identical version credited to nobody,
+// which stales the approval pinned to the version the agent wrote - and Legion's design gate,
+// open exactly while the approved version is the latest, closes with nothing in the event stream
+// to explain it (LEGION-273).
+func TestSettlementIndexingAnAskBlockTheEditVersionedWritesNoVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	seedServiceText(t, service, artifactID, "# Spec\n\nContext\n")
+	snapshotAndCommitVersion(t, service, artifactID, agent)
+
+	written := agentEditVersion(t, service, artifactID, agent, []model.EditOp{{
+		Op: "insert", After: "end", Markdown: ":::ask{#decision urgency=\"high\" multiple=\"false\"}\n" +
+			"Which transport?\n\n- REST: Matches the platform\n- gRPC: Adds streaming\n:::\n",
+	}})
+	settleCurrentGeneration(t, service, artifactID)
+
+	// The settlement ran: it indexed the block the edit wrote.
+	var state string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select state from asks where block_artifact_id = $1 and block_id = 'decision'
+	`, artifactID).Scan(&state); err != nil {
+		t.Fatalf("read the ask settlement indexed: %v", err)
+	}
+	if state != "open" {
+		t.Fatalf("indexed ask state = %q, want open", state)
+	}
+	var latest, count int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select coalesce(max(number), 0), count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&latest, &count); err != nil {
+		t.Fatalf("read document versions: %v", err)
+	}
+	if latest != written.Number || count != written.Number {
+		t.Fatalf("after settlement the document is at version %d of %d, want the edit's %d alone",
+			latest, count, written.Number)
+	}
+}
+
+// agentEditVersion applies ops as an agent and versions the result, the way
+// POST /api/v1/artifacts/{id}/edits does: one transaction, the edit then the snapshot.
+func agentEditVersion(t *testing.T, service *Service, artifactID string, actor model.Actor, ops []model.EditOp) model.Version {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin agent edit: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	editCtx, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	edit, err := service.ApplyOps(editCtx, artifactID, ops, actor, nil)
+	if err != nil {
+		t.Fatalf("agent edit: %v", err)
+	}
+	if !edit.Changed {
+		t.Fatalf("agent edit changed nothing: %#v", edit)
+	}
+	written, err := service.SnapshotVersion(editCtx, artifactID, actor)
+	if err != nil {
+		t.Fatalf("version the agent edit: %v", err)
+	}
+	if !written.Wrote {
+		t.Fatalf("agent edit wrote no version: %#v", written)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit agent edit: %v", err)
+	}
+	return written.Version
+}
+
+// The same defect from the other producer: settlement stamps a legacy document's missing block
+// ids and records that as a content change, because the stored Proof state really did move. The
+// rendered markdown did not - a paragraph's block id is not in it - so a version for the repair
+// repeats the version before it on a document nobody edited (LEGION-229 requirement 2).
+func TestSettlementStampingBlockIDsWritesNoVersion(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+	seedUnidentifiedProofDocument(t, database, artifactID, "before")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+
+	settleCurrentGeneration(t, service, artifactID)
+
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs != 0 {
+		t.Fatalf("settlement left %d unstamped blocks, so it never ran its repair", repairs)
+	}
+	var versions int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count document versions: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("document versions = %d, want the one the repair did not change", versions)
+	}
+}
+
+// A settlement that writes no version moves no version cursor, so the row its closure appended
+// stays past that cursor for good. The row therefore has to say what the closure actually
+// rendered: one that claimed a content change it never made would leave `contentChanged` true on
+// every later settlement of that document, and the first one after a renderer change - opening
+// the document schedules one - would version a document nobody had touched, credited to nobody,
+// staling its approval all over again.
+func TestSettlementRepairThatRendersTheSameMarkdownRecordsNoContentChange(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "snake_case here")
+	seedUnidentifiedProofDocument(t, database, artifactID, "snake_case here")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	alignLatestVersionWithUpdates(t, service, artifactID)
+
+	settleCurrentGeneration(t, service, artifactID)
+
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs != 0 {
+		t.Fatalf("settlement left %d unstamped blocks, so it never ran its repair", repairs)
+	}
+	if rows := contentRowsPastLatestVersion(t, database, artifactID); rows != 0 {
+		t.Fatalf("the repair left %d content-class rows past the latest version's cursor; a block id no rendering carries changed no text", rows)
+	}
+
+	// A deployed renderer change, as the stored version sees it: the document now renders
+	// differently from the markdown the version holds, and nobody has touched it.
+	if _, err := database.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, artifactID, "snake\\_case here\n"); err != nil {
+		t.Fatalf("store the older rendering on the latest version: %v", err)
+	}
+
+	settleCurrentGeneration(t, service, artifactID)
+
+	var versions int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count document versions: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("settling an untouched document under a changed rendering wrote %d versions, want the one it found", versions)
+	}
+}
+
+// contentRowsPastLatestVersion is how many content-class document updates lie past the cursor of
+// the document's latest version - what `contentChangedSinceVersion` asks the next settlement.
+func contentRowsPastLatestVersion(t *testing.T, database *store.Store, artifactID string) int {
+	t.Helper()
+	var rows int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from doc_updates
+		where artifact_id = $1 and content_changed and version > (
+			select doc_update_version from artifact_versions
+			where artifact_id = $1 order by number desc limit 1
+		)
+	`, artifactID).Scan(&rows); err != nil {
+		t.Fatalf("count content updates past the latest version: %v", err)
+	}
+	return rows
+}
+
+// A settlement that writes no version leaves the document at the version it found, and the
+// events that name one - here `block.invalid`, whose `invalid` attribute no rendering carries -
+// have to say that number rather than the one the settlement would have written.
+func TestSettlementWritingNoVersionNamesTheOneItLeavesTheDocumentAt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
+	service.settleRoom(artifactID, 0)
+	waitForDocumentVersion(t, service.store, artifactID, 2)
+
+	// A browser leaves an option without a label, which settlement cannot parse, and a human
+	// anchoring a comment versions that document before the settlement sees it.
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children[1].Children[0].Children[0].Children = nil
+		return tree
+	})
+	snapshotAndCommitVersion(t, service, artifactID, model.Actor{Kind: "user", ID: "alice"})
+	settleCurrentGeneration(t, service, artifactID)
+
+	var latest int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select max(number) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&latest); err != nil {
+		t.Fatalf("read document versions: %v", err)
+	}
+	if latest != 3 {
+		t.Fatalf("document is at version %d, want the human's 3: flagging a block invalid renders no markdown", latest)
+	}
+	var blockID, version string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select payload->>'block_id', payload->>'version'
+		from events where type = 'block.invalid' order by id desc limit 1
+	`).Scan(&blockID, &version); err != nil {
+		t.Fatalf("load malformed-block event: %v", err)
+	}
+	if blockID != "ask-block" || version != "3" {
+		t.Fatalf("malformed-block event = block=%q version=%q, want ask-block at version 3", blockID, version)
+	}
+}
+
 func TestSettlementRepairsServerOwnedAskAttributesOncePerVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -1243,7 +1452,7 @@ func TestUnlinkedDocumentIsAlwaysOpen(t *testing.T) {
 	if !open {
 		t.Fatal("unlinked document is closed")
 	}
-	namedResult, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"})
+	namedResult, err := namedVersion(t, service, artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"})
 	version := namedResult.Version
 	if err != nil {
 		t.Fatalf("name unlinked document version: %v", err)
@@ -1593,7 +1802,7 @@ func TestShutdownDrainsPendingUpdateBeforeSettling(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write document before shutdown: %v", err)
 	}
-	if _, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := namedVersion(t, service, artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write named version before shutdown: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -2049,6 +2258,30 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 	}
 }
 
+// namedVersion names a version the way every caller does: inside a transaction joined with
+// Service.Join, whose commit credits the version's authors and publishes its events. It
+// returns NamedVersion's own error, which several tests assert on, and commits only without
+// one.
+func namedVersion(t *testing.T, service *Service, artifactID, summary string, actor model.Actor) (VersionResult, error) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin named version: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	result, err := service.NamedVersion(joined, artifactID, summary, actor)
+	if err != nil {
+		return VersionResult{}, err
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit named version: %v", err)
+	}
+	return result, nil
+}
+
 func alignLatestVersionWithUpdates(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
 	if _, err := service.store.Pool.Exec(context.Background(), `
@@ -2469,4 +2702,45 @@ func assertTableCellPipeVersionAndEventCounts(t *testing.T, database *store.Stor
 	if versions != wantVersions || events != wantEvents {
 		t.Fatalf("document counts = versions:%d events:%d, want versions:%d events:%d", versions, events, wantVersions, wantEvents)
 	}
+}
+
+// Quiesce is what lets the browser-test harness truncate its database between scenarios: it
+// leaves the server with no live document and no settlement of its own to run. It has to flush
+// each room before it closes it, or an edit that had only reached the room would be lost, and
+// it has to leave the service able to load the document again afterwards.
+func TestQuiesceFlushesEveryLiveDocumentAndLeavesTheServiceUsable(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+
+	if err := service.Quiesce(context.Background()); err != nil {
+		t.Fatalf("quiesce document service: %v", err)
+	}
+	if _, live := service.rooms.Load(artifactID); live {
+		t.Fatal("a document room outlived the quiesce")
+	}
+
+	// The room is gone, so this text is what the store holds: the edit reached it.
+	text, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read document after quiesce: %v", err)
+	}
+	if !strings.Contains(text, "after") {
+		t.Fatalf("document text after quiesce = %q, want the edit", text)
+	}
+
+	// And the service schedules its own settlements again: an edit after the quiesce arms the
+	// room's timer. A quiesce that never lifted its hold would leave that timer unarmed and
+	// every later edit unsettled, which settling this room by hand below cannot show.
+	editLiveTree(t, service, artifactID, replaceRun("after", "later"))
+	state := service.room(artifactID)
+	state.mu.Lock()
+	armed := service.isSettleTimerArmed(state.settle)
+	state.mu.Unlock()
+	if !armed {
+		t.Fatal("no settlement was scheduled for the edit after the quiesce")
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	waitForDocumentVersion(t, service.store, artifactID, 2)
 }

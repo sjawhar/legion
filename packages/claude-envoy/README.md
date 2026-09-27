@@ -151,10 +151,11 @@ skipped: you asked for plugin:…@legion-plugins but the installed claude-envoy 
 …`).
 
 The plugin needs `ENVOY_NATS_URL` and reaches the listener at `ENVOY_URL`, which defaults to
-`http://127.0.0.1:9020`. Both are inherited from the environment that launched `claude` —
-`.mcp.json` passes through only `CLAUDE_PROJECT_DIR`, because an unset `${VAR}` in `.mcp.json` is
-substituted as the literal text, which used to register a session as the literal id
-`${ENVOY_SESSION_ID}`. Claude Code provides `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PLUGIN_DATA`; set
+`http://127.0.0.1:9020`. A NATS server that requires an nkey user takes the seed from
+`NATS_NKEY_SEED_FILE` (a file, which wins) or `NATS_NKEY_SEED`. All are inherited from the
+environment that launched `claude` — `.mcp.json` passes through only `CLAUDE_PROJECT_DIR`, because
+an unset `${VAR}` in `.mcp.json` is substituted as the literal text, which used to register a
+session as the literal id `${ENVOY_SESSION_ID}`. Claude Code provides `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PLUGIN_DATA`; set
 `ENVOY_SESSION_ID` only to use a controlled identity for QA (the smoke does). Dispatch tools and
 the open-asks hook read `DISPATCH_URL`/`DISPATCH_TOKEN` or `envoy.json` through
 `@legion/envoy-client/dispatch-config`.

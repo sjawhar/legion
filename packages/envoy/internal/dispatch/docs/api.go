@@ -39,6 +39,7 @@ type API interface {
 	Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger)
 	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error)
 	CompactAll(ctx context.Context, keep int) error
+	Quiesce(ctx context.Context) error
 }
 
 // VersionResult is a written document version together with what its markdown moved in the

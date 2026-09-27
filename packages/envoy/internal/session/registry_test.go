@@ -69,7 +69,7 @@ func clearSessionBucket(t *testing.T, conn *natsgo.Conn) {
 
 func setupNATS(t *testing.T) *bus.Client {
 	t.Helper()
-	client, err := bus.Connect([]string{sharedTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{sharedTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}

@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
+# no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
+# NATS_NKEY_SEED or NATS_NKEY_SEED_FILE.
+unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 
 # The server is a test fixture. It must not inherit a service endpoint,
 # credential, data file or configuration from the shell that starts Playwright:

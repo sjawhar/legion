@@ -1,12 +1,10 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 import { test } from './harness.js';
 import { Schema } from '@milkdown/kit/prose/model';
 
 import { typedBlockSpec, type BlockTypeSchema } from '../block-schema.js';
 import { createHeadlessProof } from '../lib-headless.js';
 
-function assert(condition: boolean, message: string): void {
+function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 

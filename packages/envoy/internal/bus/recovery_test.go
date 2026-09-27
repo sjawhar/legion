@@ -46,7 +46,7 @@ func subscribeAllNotifications(client *bus.Client, handler natsgo.MsgHandler, op
 // TestSubOK_NoSubscription verifies SubOK is false when no subscription exists.
 func TestSubOK_NoSubscription(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestPublishBoundsReconnectWhenNATSUnavailable(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctr, uri := startNATS(t)
-			client, err := bus.Connect([]string{uri})
+			client, err := bus.ConnectOwningStream([]string{uri})
 			if err != nil {
 				t.Fatalf("connect: %v", err)
 			}
@@ -125,7 +125,7 @@ func TestPublishBoundsReconnectWhenNATSUnavailable(t *testing.T) {
 
 func TestCoreSubscriptionRestoresAfterConnectionRecovery(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -158,12 +158,12 @@ func TestCoreSubscriptionRestoresAfterConnectionRecovery(t *testing.T) {
 
 func TestCoreSubscriptionsShareQueueGroup(t *testing.T) {
 	_, uri := startNATS(t)
-	first, err := bus.Connect([]string{uri})
+	first, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect first client: %v", err)
 	}
 	defer first.Close()
-	second, err := bus.Connect([]string{uri})
+	second, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect second client: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestCoreSubscriptionsShareQueueGroup(t *testing.T) {
 // TestSubOK_AfterSubscribe verifies SubOK is true after subscribing.
 func TestSubOK_AfterSubscribe(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestSubOK_AfterSubscribe(t *testing.T) {
 // messages flow normally through the restored subscription.
 func TestRecovery_ClosedTriggersWithoutPublish(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestRecovery_ClosedTriggersWithoutPublish(t *testing.T) {
 // subscription callback is active (no duplicate message delivery).
 func TestRecovery_AtMostOneSubscription(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestRecovery_AtMostOneSubscription(t *testing.T) {
 // at most one recovery goroutine runs at a time.
 func TestRecovery_ConcurrentRecoverySerializes(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -379,7 +379,7 @@ func TestStreamSubjectsIncludesDispatchEvents(t *testing.T) {
 
 func TestConnectedReportsLiveConnection(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -392,7 +392,7 @@ func TestConnectedReportsLiveConnection(t *testing.T) {
 
 func TestReconnectHookRunsAfterReconnect(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -418,7 +418,7 @@ func TestReconnectHookRunsAfterReconnect(t *testing.T) {
 
 func TestJetStreamPublishDeduplicatesAStableEnvelopeDestination(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -450,14 +450,14 @@ func TestJetStreamPublishDeduplicatesAStableEnvelopeDestination(t *testing.T) {
 	}
 }
 
-// The Go Legion daemon publishes each workflow notice on notifications.legion.<project>.<issue>
-// through the listener's publish route. That route publishes to JetStream, so the stream must carry
+// The Go Legion daemon publishes its controller notices on notifications.legion.<project>.controller,
+// one name of the notifications.legion.<project>.<name> family, through the listener's publish route. That route publishes to JetStream, so the stream must carry
 // the subject; outside every stream subject JetStream has no responder and the route answers 500.
 // The retained copy is not a replay for a pane: a pane subscribes over core NATS and gets only what
 // is published while it is subscribed.
 func TestJetStreamPublishRetainsLegionIssueNotices(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
