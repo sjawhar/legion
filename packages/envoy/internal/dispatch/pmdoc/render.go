@@ -78,7 +78,7 @@ func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
 
 func render(doc *Node) (r *renderer, err error) {
 	// The renderer reads back what it writes (blockKinds, parseInlineWithDefinitions).
-	defer refuseOnPanic(&r, &err, "rendering a document")
+	defer recoverPanic(&r, &err, "rendering a document")
 	if doc == nil || doc.Type != "doc" {
 		if doc == nil {
 			return nil, fmt.Errorf("%w: Render wants a doc, got nil", ErrSchema)

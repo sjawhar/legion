@@ -75,15 +75,19 @@ func blockParsers() []util.PrioritizedValue {
 	return parsers
 }
 
-// refuseOnPanic, deferred around an entry point that reads markdown, turns a panic in it into an
-// ErrSchema refusal, so a shape the reader cannot handle is refused as other markdown outside the
-// schema is (INVALID_MARKDOWN at the API) instead of failing the caller, and logs the panic with
-// its stack, since it is a bug.
-func refuseOnPanic[T any](result *T, err *error, reading string) {
+// ErrPanic is a panic in this package's reader or renderer, recovered at the entry point that
+// caught it: a bug here, never a shape of the caller's markdown, so callers answer it as an internal
+// error. Its text begins with "panic: ".
+var ErrPanic = errors.New("panic")
+
+// recoverPanic, deferred around an entry point that reads or writes markdown, turns a panic in it
+// into an ErrPanic, so the bug fails that one call rather than the process, and logs the panic with
+// its stack.
+func recoverPanic[T any](result *T, err *error, reading string) {
 	if recovered := recover(); recovered != nil {
 		var zero T
 		*result = zero
-		*err = fmt.Errorf("%w: %s failed: %v", ErrSchema, reading, recovered)
+		*err = fmt.Errorf("%w: %s: %v", ErrPanic, reading, recovered)
 		slog.Error("pmdoc: "+reading+" panicked", "panic", recovered, "stack", string(debug.Stack()))
 	}
 }
@@ -178,7 +182,7 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 // block that names none has none yet. Without readFrontmatter a closed front-matter block is read
 // as the blocks its lines make.
 func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error) {
-	defer refuseOnPanic(&doc, &err, "reading markdown")
+	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(markdown)
 	var front *Node
 	if readFrontmatter {
@@ -271,7 +275,7 @@ func referencedLabels(nodes []*Node) []string {
 // nodes. Markdown that forms more than one paragraph, or holds text after its
 // paragraph's last line, is ErrSchema.
 func ParseInline(markdown string) (nodes []*Node, err error) {
-	defer refuseOnPanic(&nodes, &err, "reading inline markdown")
+	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(LineFeeds(markdown))
 	root := withLineStarts(inlineMarkdownParser, source, parser.NewContext())
 	if root.ChildCount() > 1 {

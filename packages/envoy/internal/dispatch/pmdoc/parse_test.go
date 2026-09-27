@@ -270,3 +270,17 @@ func TestParseResolvesUnmatchedReferencesWithoutComparingEveryDefinition(t *test
 		t.Fatalf("parsing took %v with 2,000 definitions and %v with them as paragraphs, want under ten times as long", withDefinitions, plain)
 	}
 }
+
+// A panic in this package's reader or renderer is recovered at the entry point, so it never
+// crashes the caller, and is this package's bug: an ErrPanic, which callers answer as an internal
+// error, never an ErrSchema refusal of the caller's markdown.
+func TestAPanicWhileReadingIsAnInternalErrorNotARefusal(t *testing.T) {
+	read := func() (doc *Node, err error) {
+		defer recoverPanic(&doc, &err, "reading markdown")
+		panic("can not call with inline nodes.")
+	}
+	doc, err := read()
+	if doc != nil || !errors.Is(err, ErrPanic) || errors.Is(err, ErrSchema) || !strings.HasPrefix(err.Error(), "panic: ") {
+		t.Fatalf("read() = %v, %v; want nil and an ErrPanic that is not an ErrSchema, reading \"panic: ...\"", doc, err)
+	}
+}
