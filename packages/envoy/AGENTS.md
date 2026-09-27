@@ -720,8 +720,9 @@ quote's end count as anything, and none spreads the list (`definitionEndSpreadsI
 and spreads nothing, even where the code's text drops it, unless a quote between ends at it
 (`keepsBlankLinesAfter`). The renderer writes each spacing so that it reads back
 (`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
-a list where one would spread what it follows, and none inside a list item after a list ending in
-an empty item, where goldmark ends the item at a blank line; a footnote definition a tight list item
+a list where one would spread what it follows, none inside a list item after a list ending in
+an empty item, where goldmark ends the item at a blank line, and none in a quote after a footnote
+definition ending in a list no line continues, where the reader refuses one (`endsInClosedList`); a footnote definition a tight list item
 holds writes its blocks with the item's tight lines, since that parser reads them as the item's
 (`itemBlocks`). Where the lines alone do not decide
 the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote

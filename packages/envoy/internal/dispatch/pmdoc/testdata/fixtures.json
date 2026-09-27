@@ -13604,7 +13604,7 @@
   },
   {
     "name": "quoted-definition-first-items",
-    "markdown": "Items that open with their footnote definitions[^a][^b][^c][^d], in quotes.\n\n> 1. [^a]: a\n>\n>\n> Tail a.\n\nNext.\n\n> - [^b]: ```\n>       b\n>       ```\n>\n>\n> Tail b.\n\nNext.\n\n> - - [^c]: c\n>\n>\n>   Tail c.\n\nNext.\n\n> - [^d]: d\n>\n>\n> - e\n",
+    "markdown": "Items that open with their footnote definitions[^a][^b][^c][^d][^e][^f], in quotes.\n\n> 1. [^a]: a\n>\n>\n> Tail a.\n\nNext.\n\n> - [^b]: ```\n>       b\n>       ```\n>\n>\n> Tail b.\n\nNext.\n\n> - - [^c]: c\n>\n>\n>   Tail c.\n\nNext.\n\n> - [^d]: d\n>\n>\n> - e\n\nNext.\n\n> 1. [^e]: - ~~~\n>          e\n>          ~~~\n> Tail e.\n\nNext.\n\n> - [^f]: > - ```\n>       >   f\n>       >   ```\n>   Tail f.\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -13640,6 +13640,18 @@
               "type": "footnote_reference",
               "attrs": {
                 "label": "d"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "e"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "f"
               }
             },
             {
@@ -13996,11 +14008,236 @@
               ]
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000037"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000038"
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false,
+                "blockId": "b-000039"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000040"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000041"
+                      }
+                    },
+                    {
+                      "type": "footnote_definition",
+                      "attrs": {
+                        "label": "e",
+                        "blockId": "b-000042"
+                      },
+                      "content": [
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000043"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000044"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000045"
+                                  }
+                                },
+                                {
+                                  "type": "code_block",
+                                  "attrs": {
+                                    "language": null,
+                                    "blockId": "b-000046"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "e"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000047"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Tail e."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000048"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000049"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000050"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000051"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000052"
+                      }
+                    },
+                    {
+                      "type": "footnote_definition",
+                      "attrs": {
+                        "label": "f",
+                        "blockId": "b-000053"
+                      },
+                      "content": [
+                        {
+                          "type": "blockquote",
+                          "attrs": {
+                            "blockId": "b-000054"
+                          },
+                          "content": [
+                            {
+                              "type": "bullet_list",
+                              "attrs": {
+                                "spread": false,
+                                "blockId": "b-000055"
+                              },
+                              "content": [
+                                {
+                                  "type": "list_item",
+                                  "attrs": {
+                                    "label": "•",
+                                    "listType": "bullet",
+                                    "spread": false,
+                                    "checked": null,
+                                    "blockId": "b-000056"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "paragraph",
+                                      "attrs": {
+                                        "blockId": "b-000057"
+                                      }
+                                    },
+                                    {
+                                      "type": "code_block",
+                                      "attrs": {
+                                        "language": null,
+                                        "blockId": "b-000058"
+                                      },
+                                      "content": [
+                                        {
+                                          "type": "text",
+                                          "text": "f"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000059"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Tail f."
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AYYBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBL0l0ZW1zIHRoYXQgb3BlbiB3aXRoIHRoZWlyIGZvb3Rub3RlIGRlZmluaXRpb25zhwEBAxJmb290bm90ZV9yZWZlcmVuY2UoAAExBWxhYmVsAXcBYYcBMQMSZm9vdG5vdGVfcmVmZXJlbmNlKAABMwVsYWJlbAF3AWKHATMDEmZvb3Rub3RlX3JlZmVyZW5jZSgAATUFbGFiZWwBdwFjhwE1AxJmb290bm90ZV9yZWZlcmVuY2UoAAE3BWxhYmVsAXcBZIcBNwYEAAE5DCwgaW4gcXVvdGVzLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwpibG9ja3F1b3RlBwABRwMMb3JkZXJlZF9saXN0BwABSAMJbGlzdF9pdGVtBwABSQMJcGFyYWdyYXBoKAABSgdibG9ja0lkAXcIYi0wMDAwMDWHAUoDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAFMAwlwYXJhZ3JhcGgHAAFNBgQAAU4BYSgAAU0HYmxvY2tJZAF3CGItMDAwMDA3KAABTAVsYWJlbAF3AWEoAAFMB2Jsb2NrSWQBdwhiLTAwMDAwNigAAUkFbGFiZWwBdwPigKIoAAFJCGxpc3RUeXBlAXcGYnVsbGV0KAABSQZzcHJlYWQBeCgAAUkHYmxvY2tJZAF3CGItMDAwMDA0KAABSAVvcmRlcgF9ASgAAUgGc3ByZWFkAXkoAAFIB2Jsb2NrSWQBdwhiLTAwMDAwM4cBSAMJcGFyYWdyYXBoBwABWgYEAAFbB1RhaWwgYS4oAAFaB2Jsb2NrSWQBdwhiLTAwMDAwOCgAAUcHYmxvY2tJZAF3CGItMDAwMDAyhwFHAwlwYXJhZ3JhcGgHAAFlBgQAAWYFTmV4dC4oAAFlB2Jsb2NrSWQBdwhiLTAwMDAwOYcBZQMKYmxvY2txdW90ZQcAAW0DC2J1bGxldF9saXN0BwABbgMJbGlzdF9pdGVtBwABbwMJcGFyYWdyYXBoKAABcAdibG9ja0lkAXcIYi0wMDAwMTOHAXADE2Zvb3Rub3RlX2RlZmluaXRpb24HAAFyAwpjb2RlX2Jsb2NrBwABcwYEAAF0AWIoAAFzB2Jsb2NrSWQBdwhiLTAwMDAxNSgAAXIFbGFiZWwBdwFiKAABcgdibG9ja0lkAXcIYi0wMDAwMTQoAAFvBWxhYmVsAXcD4oCiKAABbwhsaXN0VHlwZQF3BmJ1bGxldCgAAW8Gc3ByZWFkAXgoAAFvB2Jsb2NrSWQBdwhiLTAwMDAxMigAAW4Gc3ByZWFkAXkoAAFuB2Jsb2NrSWQBdwhiLTAwMDAxMYcBbgMJcGFyYWdyYXBoBwABfwYEAAGAAQdUYWlsIGIuKAABfwdibG9ja0lkAXcIYi0wMDAwMTYoAAFtB2Jsb2NrSWQBdwhiLTAwMDAxMIcBbQMJcGFyYWdyYXBoBwABigEGBAABiwEFTmV4dC4oAAGKAQdibG9ja0lkAXcIYi0wMDAwMTeHAYoBAwpibG9ja3F1b3RlBwABkgEDC2J1bGxldF9saXN0BwABkwEDCWxpc3RfaXRlbQcAAZQBAwlwYXJhZ3JhcGgoAAGVAQdibG9ja0lkAXcIYi0wMDAwMjGHAZUBAwtidWxsZXRfbGlzdAcAAZcBAwlsaXN0X2l0ZW0HAAGYAQMJcGFyYWdyYXBoKAABmQEHYmxvY2tJZAF3CGItMDAwMDI0hwGZAQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAZsBAwlwYXJhZ3JhcGgHAAGcAQYEAAGdAQFjKAABnAEHYmxvY2tJZAF3CGItMDAwMDI2KAABmwEFbGFiZWwBdwFjKAABmwEHYmxvY2tJZAF3CGItMDAwMDI1KAABmAEFbGFiZWwBdwPigKIoAAGYAQhsaXN0VHlwZQF3BmJ1bGxldCgAAZgBBnNwcmVhZAF4KAABmAEHYmxvY2tJZAF3CGItMDAwMDIzKAABlwEGc3ByZWFkAXkoAAGXAQdibG9ja0lkAXcIYi0wMDAwMjKHAZcBAwlwYXJhZ3JhcGgHAAGoAQYEAAGpAQdUYWlsIGMuKAABqAEHYmxvY2tJZAF3CGItMDAwMDI3KAABlAEFbGFiZWwBdwPigKIoAAGUAQhsaXN0VHlwZQF3BmJ1bGxldCgAAZQBBnNwcmVhZAF5KAABlAEHYmxvY2tJZAF3CGItMDAwMDIwKAABkwEGc3ByZWFkAXkoAAGTAQdibG9ja0lkAXcIYi0wMDAwMTkoAAGSAQdibG9ja0lkAXcIYi0wMDAwMTiHAZIBAwlwYXJhZ3JhcGgHAAG5AQYEAAG6AQVOZXh0LigAAbkBB2Jsb2NrSWQBdwhiLTAwMDAyOIcBuQEDCmJsb2NrcXVvdGUHAAHBAQMLYnVsbGV0X2xpc3QHAAHCAQMJbGlzdF9pdGVtBwABwwEDCXBhcmFncmFwaCgAAcQBB2Jsb2NrSWQBdwhiLTAwMDAzMocBxAEDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAHGAQMJcGFyYWdyYXBoBwABxwEGBAAByAEBZCgAAccBB2Jsb2NrSWQBdwhiLTAwMDAzNCgAAcYBBWxhYmVsAXcBZCgAAcYBB2Jsb2NrSWQBdwhiLTAwMDAzMygAAcMBBWxhYmVsAXcD4oCiKAABwwEIbGlzdFR5cGUBdwZidWxsZXQoAAHDAQZzcHJlYWQBeCgAAcMBB2Jsb2NrSWQBdwhiLTAwMDAzMYcBwwEDCWxpc3RfaXRlbQcAAdEBAwlwYXJhZ3JhcGgHAAHSAQYEAAHTAQFlKAAB0gEHYmxvY2tJZAF3CGItMDAwMDM2KAAB0QEFbGFiZWwBdwPigKIoAAHRAQhsaXN0VHlwZQF3BmJ1bGxldCgAAdEBBnNwcmVhZAF5KAAB0QEHYmxvY2tJZAF3CGItMDAwMDM1KAABwgEGc3ByZWFkAXkoAAHCAQdibG9ja0lkAXcIYi0wMDAwMzAoAAHBAQdibG9ja0lkAXcIYi0wMDAwMjkA",
-    "rendered_by_milkdown": "Items that open with their footnote definitions[^a][^b][^c][^d], in quotes.\n\n> 1.\n>\n>    [^a]: a\n>\n> Tail a.\n\nNext.\n\n> *\n>\n>   [^b]: ```\n>       b\n>       ```\n>\n> Tail b.\n\nNext.\n\n> *\n>   *\n>\n>     [^c]: c\n>   Tail c.\n\nNext.\n\n> *\n>\n>   [^d]: d\n> * e\n"
+    "yjs_update_v1_b64": "AdcBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBL0l0ZW1zIHRoYXQgb3BlbiB3aXRoIHRoZWlyIGZvb3Rub3RlIGRlZmluaXRpb25zhwEBAxJmb290bm90ZV9yZWZlcmVuY2UoAAExBWxhYmVsAXcBYYcBMQMSZm9vdG5vdGVfcmVmZXJlbmNlKAABMwVsYWJlbAF3AWKHATMDEmZvb3Rub3RlX3JlZmVyZW5jZSgAATUFbGFiZWwBdwFjhwE1AxJmb290bm90ZV9yZWZlcmVuY2UoAAE3BWxhYmVsAXcBZIcBNwMSZm9vdG5vdGVfcmVmZXJlbmNlKAABOQVsYWJlbAF3AWWHATkDEmZvb3Rub3RlX3JlZmVyZW5jZSgAATsFbGFiZWwBdwFmhwE7BgQAAT0MLCBpbiBxdW90ZXMuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmJsb2NrcXVvdGUHAAFLAwxvcmRlcmVkX2xpc3QHAAFMAwlsaXN0X2l0ZW0HAAFNAwlwYXJhZ3JhcGgoAAFOB2Jsb2NrSWQBdwhiLTAwMDAwNYcBTgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAVADCXBhcmFncmFwaAcAAVEGBAABUgFhKAABUQdibG9ja0lkAXcIYi0wMDAwMDcoAAFQBWxhYmVsAXcBYSgAAVAHYmxvY2tJZAF3CGItMDAwMDA2KAABTQVsYWJlbAF3A+KAoigAAU0IbGlzdFR5cGUBdwZidWxsZXQoAAFNBnNwcmVhZAF4KAABTQdibG9ja0lkAXcIYi0wMDAwMDQoAAFMBW9yZGVyAX0BKAABTAZzcHJlYWQBeSgAAUwHYmxvY2tJZAF3CGItMDAwMDAzhwFMAwlwYXJhZ3JhcGgHAAFeBgQAAV8HVGFpbCBhLigAAV4HYmxvY2tJZAF3CGItMDAwMDA4KAABSwdibG9ja0lkAXcIYi0wMDAwMDKHAUsDCXBhcmFncmFwaAcAAWkGBAABagVOZXh0LigAAWkHYmxvY2tJZAF3CGItMDAwMDA5hwFpAwpibG9ja3F1b3RlBwABcQMLYnVsbGV0X2xpc3QHAAFyAwlsaXN0X2l0ZW0HAAFzAwlwYXJhZ3JhcGgoAAF0B2Jsb2NrSWQBdwhiLTAwMDAxM4cBdAMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAXYDCmNvZGVfYmxvY2sHAAF3BgQAAXgBYigAAXcHYmxvY2tJZAF3CGItMDAwMDE1KAABdgVsYWJlbAF3AWIoAAF2B2Jsb2NrSWQBdwhiLTAwMDAxNCgAAXMFbGFiZWwBdwPigKIoAAFzCGxpc3RUeXBlAXcGYnVsbGV0KAABcwZzcHJlYWQBeCgAAXMHYmxvY2tJZAF3CGItMDAwMDEyKAABcgZzcHJlYWQBeSgAAXIHYmxvY2tJZAF3CGItMDAwMDExhwFyAwlwYXJhZ3JhcGgHAAGDAQYEAAGEAQdUYWlsIGIuKAABgwEHYmxvY2tJZAF3CGItMDAwMDE2KAABcQdibG9ja0lkAXcIYi0wMDAwMTCHAXEDCXBhcmFncmFwaAcAAY4BBgQAAY8BBU5leHQuKAABjgEHYmxvY2tJZAF3CGItMDAwMDE3hwGOAQMKYmxvY2txdW90ZQcAAZYBAwtidWxsZXRfbGlzdAcAAZcBAwlsaXN0X2l0ZW0HAAGYAQMJcGFyYWdyYXBoKAABmQEHYmxvY2tJZAF3CGItMDAwMDIxhwGZAQMLYnVsbGV0X2xpc3QHAAGbAQMJbGlzdF9pdGVtBwABnAEDCXBhcmFncmFwaCgAAZ0BB2Jsb2NrSWQBdwhiLTAwMDAyNIcBnQEDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGfAQMJcGFyYWdyYXBoBwABoAEGBAABoQEBYygAAaABB2Jsb2NrSWQBdwhiLTAwMDAyNigAAZ8BBWxhYmVsAXcBYygAAZ8BB2Jsb2NrSWQBdwhiLTAwMDAyNSgAAZwBBWxhYmVsAXcD4oCiKAABnAEIbGlzdFR5cGUBdwZidWxsZXQoAAGcAQZzcHJlYWQBeCgAAZwBB2Jsb2NrSWQBdwhiLTAwMDAyMygAAZsBBnNwcmVhZAF5KAABmwEHYmxvY2tJZAF3CGItMDAwMDIyhwGbAQMJcGFyYWdyYXBoBwABrAEGBAABrQEHVGFpbCBjLigAAawBB2Jsb2NrSWQBdwhiLTAwMDAyNygAAZgBBWxhYmVsAXcD4oCiKAABmAEIbGlzdFR5cGUBdwZidWxsZXQoAAGYAQZzcHJlYWQBeSgAAZgBB2Jsb2NrSWQBdwhiLTAwMDAyMCgAAZcBBnNwcmVhZAF5KAABlwEHYmxvY2tJZAF3CGItMDAwMDE5KAABlgEHYmxvY2tJZAF3CGItMDAwMDE4hwGWAQMJcGFyYWdyYXBoBwABvQEGBAABvgEFTmV4dC4oAAG9AQdibG9ja0lkAXcIYi0wMDAwMjiHAb0BAwpibG9ja3F1b3RlBwABxQEDC2J1bGxldF9saXN0BwABxgEDCWxpc3RfaXRlbQcAAccBAwlwYXJhZ3JhcGgoAAHIAQdibG9ja0lkAXcIYi0wMDAwMzKHAcgBAxNmb290bm90ZV9kZWZpbml0aW9uBwABygEDCXBhcmFncmFwaAcAAcsBBgQAAcwBAWQoAAHLAQdibG9ja0lkAXcIYi0wMDAwMzQoAAHKAQVsYWJlbAF3AWQoAAHKAQdibG9ja0lkAXcIYi0wMDAwMzMoAAHHAQVsYWJlbAF3A+KAoigAAccBCGxpc3RUeXBlAXcGYnVsbGV0KAABxwEGc3ByZWFkAXgoAAHHAQdibG9ja0lkAXcIYi0wMDAwMzGHAccBAwlsaXN0X2l0ZW0HAAHVAQMJcGFyYWdyYXBoBwAB1gEGBAAB1wEBZSgAAdYBB2Jsb2NrSWQBdwhiLTAwMDAzNigAAdUBBWxhYmVsAXcD4oCiKAAB1QEIbGlzdFR5cGUBdwZidWxsZXQoAAHVAQZzcHJlYWQBeSgAAdUBB2Jsb2NrSWQBdwhiLTAwMDAzNSgAAcYBBnNwcmVhZAF5KAABxgEHYmxvY2tJZAF3CGItMDAwMDMwKAABxQEHYmxvY2tJZAF3CGItMDAwMDI5hwHFAQMJcGFyYWdyYXBoBwAB4QEGBAAB4gEFTmV4dC4oAAHhAQdibG9ja0lkAXcIYi0wMDAwMzeHAeEBAwpibG9ja3F1b3RlBwAB6QEDDG9yZGVyZWRfbGlzdAcAAeoBAwlsaXN0X2l0ZW0HAAHrAQMJcGFyYWdyYXBoKAAB7AEHYmxvY2tJZAF3CGItMDAwMDQxhwHsAQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAe4BAwtidWxsZXRfbGlzdAcAAe8BAwlsaXN0X2l0ZW0HAAHwAQMJcGFyYWdyYXBoKAAB8QEHYmxvY2tJZAF3CGItMDAwMDQ1hwHxAQMKY29kZV9ibG9jawcAAfMBBgQAAfQBAWUoAAHzAQdibG9ja0lkAXcIYi0wMDAwNDYoAAHwAQVsYWJlbAF3A+KAoigAAfABCGxpc3RUeXBlAXcGYnVsbGV0KAAB8AEGc3ByZWFkAXkoAAHwAQdibG9ja0lkAXcIYi0wMDAwNDQoAAHvAQZzcHJlYWQBeSgAAe8BB2Jsb2NrSWQBdwhiLTAwMDA0MygAAe4BBWxhYmVsAXcBZSgAAe4BB2Jsb2NrSWQBdwhiLTAwMDA0MigAAesBBWxhYmVsAXcD4oCiKAAB6wEIbGlzdFR5cGUBdwZidWxsZXQoAAHrAQZzcHJlYWQBeSgAAesBB2Jsb2NrSWQBdwhiLTAwMDA0MCgAAeoBBW9yZGVyAX0BKAAB6gEGc3ByZWFkAXkoAAHqAQdibG9ja0lkAXcIYi0wMDAwMzmHAeoBAwlwYXJhZ3JhcGgHAAGGAgYEAAGHAgdUYWlsIGUuKAABhgIHYmxvY2tJZAF3CGItMDAwMDQ3KAAB6QEHYmxvY2tJZAF3CGItMDAwMDM4hwHpAQMJcGFyYWdyYXBoBwABkQIGBAABkgIFTmV4dC4oAAGRAgdibG9ja0lkAXcIYi0wMDAwNDiHAZECAwpibG9ja3F1b3RlBwABmQIDC2J1bGxldF9saXN0BwABmgIDCWxpc3RfaXRlbQcAAZsCAwlwYXJhZ3JhcGgoAAGcAgdibG9ja0lkAXcIYi0wMDAwNTKHAZwCAxNmb290bm90ZV9kZWZpbml0aW9uBwABngIDCmJsb2NrcXVvdGUHAAGfAgMLYnVsbGV0X2xpc3QHAAGgAgMJbGlzdF9pdGVtBwABoQIDCXBhcmFncmFwaCgAAaICB2Jsb2NrSWQBdwhiLTAwMDA1N4cBogIDCmNvZGVfYmxvY2sHAAGkAgYEAAGlAgFmKAABpAIHYmxvY2tJZAF3CGItMDAwMDU4KAABoQIFbGFiZWwBdwPigKIoAAGhAghsaXN0VHlwZQF3BmJ1bGxldCgAAaECBnNwcmVhZAF5KAABoQIHYmxvY2tJZAF3CGItMDAwMDU2KAABoAIGc3ByZWFkAXkoAAGgAgdibG9ja0lkAXcIYi0wMDAwNTUoAAGfAgdibG9ja0lkAXcIYi0wMDAwNTQoAAGeAgVsYWJlbAF3AWYoAAGeAgdibG9ja0lkAXcIYi0wMDAwNTOHAZ4CAwlwYXJhZ3JhcGgHAAGxAgYEAAGyAgdUYWlsIGYuKAABsQIHYmxvY2tJZAF3CGItMDAwMDU5KAABmwIFbGFiZWwBdwPigKIoAAGbAghsaXN0VHlwZQF3BmJ1bGxldCgAAZsCBnNwcmVhZAF5KAABmwIHYmxvY2tJZAF3CGItMDAwMDUxKAABmgIGc3ByZWFkAXkoAAGaAgdibG9ja0lkAXcIYi0wMDAwNTAoAAGZAgdibG9ja0lkAXcIYi0wMDAwNDkA",
+    "rendered_by_milkdown": "Items that open with their footnote definitions[^a][^b][^c][^d][^e][^f], in quotes.\n\n> 1.\n>\n>    [^a]: a\n>\n> Tail a.\n\nNext.\n\n> *\n>\n>   [^b]: ```\n>       b\n>       ```\n>\n> Tail b.\n\nNext.\n\n> *\n>   *\n>\n>     [^c]: c\n>   Tail c.\n\nNext.\n\n> *\n>\n>   [^d]: d\n> * e\n\nNext.\n\n> 1.\n>    [^e]: *\n>          ```\n>          e\n>          ```\n>\n> Tail e.\n\nNext.\n\n> *\n>   [^f]: > *\n>       >   ```\n>       >   f\n>       >   ```\n>   Tail f.\n"
   },
   {
     "name": "quoted-definition-items",
@@ -14756,6 +14993,389 @@
     },
     "yjs_update_v1_b64": "Af4BAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBLkl0ZW1zIGluIHF1b3RlcyBlbmRpbmcgaW4gZm9vdG5vdGUgZGVmaW5pdGlvbnOHAQEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAATAFbGFiZWwBdwJxYYcBMAMSZm9vdG5vdGVfcmVmZXJlbmNlKAABMgVsYWJlbAF3AnFihwEyAxJmb290bm90ZV9yZWZlcmVuY2UoAAE0BWxhYmVsAXcCcWOHATQGBAABNh8sIHNvbWUgcmVmZXJlbmNlZCBhbmQgc29tZSBub3QuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmJsb2NrcXVvdGUHAAFXAwtidWxsZXRfbGlzdAcAAVgDCWxpc3RfaXRlbQcAAVkDCXBhcmFncmFwaAcAAVoGBAABWwFhKAABWgdibG9ja0lkAXcIYi0wMDAwMDWHAVoDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAFeAwlwYXJhZ3JhcGgHAAFfBgQAAWABZCgAAV8HYmxvY2tJZAF3CGItMDAwMDA3KAABXgVsYWJlbAF3AnFhKAABXgdibG9ja0lkAXcIYi0wMDAwMDYoAAFZBWxhYmVsAXcD4oCiKAABWQhsaXN0VHlwZQF3BmJ1bGxldCgAAVkGc3ByZWFkAXgoAAFZB2Jsb2NrSWQBdwhiLTAwMDAwNCgAAVgGc3ByZWFkAXkoAAFYB2Jsb2NrSWQBdwhiLTAwMDAwM4cBWAMJcGFyYWdyYXBoBwABawYEAAFsAXAoAAFrB2Jsb2NrSWQBdwhiLTAwMDAwOCgAAVcHYmxvY2tJZAF3CGItMDAwMDAyhwFXAwlwYXJhZ3JhcGgHAAFwBgQAAXEFTmV4dC4oAAFwB2Jsb2NrSWQBdwhiLTAwMDAwOYcBcAMKYmxvY2txdW90ZQcAAXgDDG9yZGVyZWRfbGlzdAcAAXkDCWxpc3RfaXRlbQcAAXoDCXBhcmFncmFwaAcAAXsGBAABfAFhKAABewdibG9ja0lkAXcIYi0wMDAwMTOHAXsDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAF/AwlwYXJhZ3JhcGgHAAGAAQYEAAGBAQFkKAABgAEHYmxvY2tJZAF3CGItMDAwMDE1KAABfwVsYWJlbAF3AnFiKAABfwdibG9ja0lkAXcIYi0wMDAwMTQoAAF6BWxhYmVsAXcD4oCiKAABeghsaXN0VHlwZQF3BmJ1bGxldCgAAXoGc3ByZWFkAXgoAAF6B2Jsb2NrSWQBdwhiLTAwMDAxMigAAXkFb3JkZXIBfQEoAAF5BnNwcmVhZAF5KAABeQdibG9ja0lkAXcIYi0wMDAwMTGHAXkDCXBhcmFncmFwaAcAAY0BBgQAAY4BAXAoAAGNAQdibG9ja0lkAXcIYi0wMDAwMTYoAAF4B2Jsb2NrSWQBdwhiLTAwMDAxMIcBeAMJcGFyYWdyYXBoBwABkgEGBAABkwEFTmV4dC4oAAGSAQdibG9ja0lkAXcIYi0wMDAwMTeHAZIBAwpibG9ja3F1b3RlBwABmgEDC2J1bGxldF9saXN0BwABmwEDCWxpc3RfaXRlbQcAAZwBAwlwYXJhZ3JhcGgHAAGdAQYEAAGeAQFhKAABnQEHYmxvY2tJZAF3CGItMDAwMDIxhwGdAQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAaEBAwlwYXJhZ3JhcGgHAAGiAQYEAAGjAQFkKAABogEHYmxvY2tJZAF3CGItMDAwMDIzKAABoQEFbGFiZWwBdwJxYygAAaEBB2Jsb2NrSWQBdwhiLTAwMDAyMigAAZwBBWxhYmVsAXcD4oCiKAABnAEIbGlzdFR5cGUBdwZidWxsZXQoAAGcAQZzcHJlYWQBeSgAAZwBB2Jsb2NrSWQBdwhiLTAwMDAyMIcBnAEDCWxpc3RfaXRlbQcAAawBAwlwYXJhZ3JhcGgHAAGtAQYEAAGuAQFiKAABrQEHYmxvY2tJZAF3CGItMDAwMDI1KAABrAEFbGFiZWwBdwPigKIoAAGsAQhsaXN0VHlwZQF3BmJ1bGxldCgAAawBBnNwcmVhZAF5KAABrAEHYmxvY2tJZAF3CGItMDAwMDI0KAABmwEGc3ByZWFkAXkoAAGbAQdibG9ja0lkAXcIYi0wMDAwMTkoAAGaAQdibG9ja0lkAXcIYi0wMDAwMTiHAZoBAwlwYXJhZ3JhcGgHAAG4AQYEAAG5AQVOZXh0LigAAbgBB2Jsb2NrSWQBdwhiLTAwMDAyNocBuAEDCmJsb2NrcXVvdGUHAAHAAQMLYnVsbGV0X2xpc3QHAAHBAQMJbGlzdF9pdGVtBwABwgEDCXBhcmFncmFwaAcAAcMBBgQAAcQBAWEoAAHDAQdibG9ja0lkAXcIYi0wMDAwMzCHAcMBAxNmb290bm90ZV9kZWZpbml0aW9uBwABxwEDCXBhcmFncmFwaAcAAcgBBgQAAckBAWQoAAHIAQdibG9ja0lkAXcIYi0wMDAwMzIoAAHHAQVsYWJlbAF3AnFkKAABxwEHYmxvY2tJZAF3CGItMDAwMDMxKAABwgEFbGFiZWwBdwPigKIoAAHCAQhsaXN0VHlwZQF3BmJ1bGxldCgAAcIBBnNwcmVhZAF4KAABwgEHYmxvY2tJZAF3CGItMDAwMDI5hwHCAQMJbGlzdF9pdGVtBwAB0gEDCXBhcmFncmFwaAcAAdMBBgQAAdQBAWIoAAHTAQdibG9ja0lkAXcIYi0wMDAwMzQoAAHSAQVsYWJlbAF3A+KAoigAAdIBCGxpc3RUeXBlAXcGYnVsbGV0KAAB0gEGc3ByZWFkAXkoAAHSAQdibG9ja0lkAXcIYi0wMDAwMzMoAAHBAQZzcHJlYWQBeSgAAcEBB2Jsb2NrSWQBdwhiLTAwMDAyOCgAAcABB2Jsb2NrSWQBdwhiLTAwMDAyN4cBwAEDCXBhcmFncmFwaAcAAd4BBgQAAd8BBU5leHQuKAAB3gEHYmxvY2tJZAF3CGItMDAwMDM1hwHeAQMKYmxvY2txdW90ZQcAAeYBAwtidWxsZXRfbGlzdAcAAecBAwlsaXN0X2l0ZW0HAAHoAQMJcGFyYWdyYXBoBwAB6QEGBAAB6gEBYSgAAekBB2Jsb2NrSWQBdwhiLTAwMDAzOYcB6QEDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAHtAQMJcGFyYWdyYXBoBwAB7gEGBAAB7wEBZCgAAe4BB2Jsb2NrSWQBdwhiLTAwMDA0MSgAAe0BBWxhYmVsAXcCcWUoAAHtAQdibG9ja0lkAXcIYi0wMDAwNDAoAAHoAQVsYWJlbAF3A+KAoigAAegBCGxpc3RUeXBlAXcGYnVsbGV0KAAB6AEGc3ByZWFkAXkoAAHoAQdibG9ja0lkAXcIYi0wMDAwMzgoAAHnAQZzcHJlYWQBeSgAAecBB2Jsb2NrSWQBdwhiLTAwMDAzN4cB5wEDCXBhcmFncmFwaAcAAfoBBgQAAfsBAXAoAAH6AQdibG9ja0lkAXcIYi0wMDAwNDIoAAHmAQdibG9ja0lkAXcIYi0wMDAwMzaHAeYBAwlwYXJhZ3JhcGgHAAH/AQYEAAGAAgVOZXh0LigAAf8BB2Jsb2NrSWQBdwhiLTAwMDA0M4cB/wEDCmJsb2NrcXVvdGUHAAGHAgMLYnVsbGV0X2xpc3QHAAGIAgMJbGlzdF9pdGVtBwABiQIDCXBhcmFncmFwaAcAAYoCBgQAAYsCAWEoAAGKAgdibG9ja0lkAXcIYi0wMDAwNDeHAYoCAxNmb290bm90ZV9kZWZpbml0aW9uBwABjgIDCXBhcmFncmFwaAcAAY8CBgQAAZACAWQoAAGPAgdibG9ja0lkAXcIYi0wMDAwNDkoAAGOAgVsYWJlbAF3AnFmKAABjgIHYmxvY2tJZAF3CGItMDAwMDQ4KAABiQIFbGFiZWwBdwPigKIoAAGJAghsaXN0VHlwZQF3BmJ1bGxldCgAAYkCBnNwcmVhZAF4KAABiQIHYmxvY2tJZAF3CGItMDAwMDQ2KAABiAIGc3ByZWFkAXkoAAGIAgdibG9ja0lkAXcIYi0wMDAwNDWHAYgCAwlwYXJhZ3JhcGgHAAGbAgYEAAGcAgFwKAABmwIHYmxvY2tJZAF3CGItMDAwMDUwKAABhwIHYmxvY2tJZAF3CGItMDAwMDQ0hwGHAgMJcGFyYWdyYXBoBwABoAIGBAABoQIFTmV4dC4oAAGgAgdibG9ja0lkAXcIYi0wMDAwNTGHAaACAwpibG9ja3F1b3RlBwABqAIDC2J1bGxldF9saXN0BwABqQIDCWxpc3RfaXRlbQcAAaoCAwlwYXJhZ3JhcGgHAAGrAgYEAAGsAgFhKAABqwIHYmxvY2tJZAF3CGItMDAwMDU1hwGrAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAa8CAwlwYXJhZ3JhcGgHAAGwAgYEAAGxAgFkKAABsAIHYmxvY2tJZAF3CGItMDAwMDU3KAABrwIFbGFiZWwBdwJxZygAAa8CB2Jsb2NrSWQBdwhiLTAwMDA1NigAAaoCBWxhYmVsAXcD4oCiKAABqgIIbGlzdFR5cGUBdwZidWxsZXQoAAGqAgZzcHJlYWQBeCgAAaoCB2Jsb2NrSWQBdwhiLTAwMDA1NCgAAakCBnNwcmVhZAF5KAABqQIHYmxvY2tJZAF3CGItMDAwMDUzhwGpAgMKYmxvY2txdW90ZQcAAbwCAwlwYXJhZ3JhcGgHAAG9AgYEAAG+AgFxKAABvQIHYmxvY2tJZAF3CGItMDAwMDU5KAABvAIHYmxvY2tJZAF3CGItMDAwMDU4KAABqAIHYmxvY2tJZAF3CGItMDAwMDUyhwGoAgMJcGFyYWdyYXBoBwABwwIGBAABxAIFTmV4dC4oAAHDAgdibG9ja0lkAXcIYi0wMDAwNjCHAcMCAwpibG9ja3F1b3RlBwABywIDDG9yZGVyZWRfbGlzdAcAAcwCAwlsaXN0X2l0ZW0HAAHNAgMJcGFyYWdyYXBoBwABzgIGBAABzwIBYSgAAc4CB2Jsb2NrSWQBdwhiLTAwMDA2NIcBzgIDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAHSAgMJcGFyYWdyYXBoBwAB0wIGBAAB1AIBZCgAAdMCB2Jsb2NrSWQBdwhiLTAwMDA2NigAAdICBWxhYmVsAXcCcWgoAAHSAgdibG9ja0lkAXcIYi0wMDAwNjUoAAHNAgVsYWJlbAF3A+KAoigAAc0CCGxpc3RUeXBlAXcGYnVsbGV0KAABzQIGc3ByZWFkAXgoAAHNAgdibG9ja0lkAXcIYi0wMDAwNjMoAAHMAgVvcmRlcgF9ASgAAcwCBnNwcmVhZAF5KAABzAIHYmxvY2tJZAF3CGItMDAwMDYyKAABywIHYmxvY2tJZAF3CGItMDAwMDYxhwHLAgMJcGFyYWdyYXBoBwAB4QIGBAAB4gIGQWZ0ZXIuKAAB4QIHYmxvY2tJZAF3CGItMDAwMDY3AA==",
     "rendered_by_milkdown": "Items in quotes ending in footnote definitions[^qa][^qb][^qc], some referenced and some not.\n\n> * a\n>\n>   [^qa]: d\n>\n> p\n\nNext.\n\n> 1. a\n>\n>    [^qb]: d\n>\n> p\n\nNext.\n\n> * a\n>   [^qc]: d\n> * b\n\nNext.\n\n> * a\n>\n>   [^qd]: d\n> * b\n\nNext.\n\n> * a\n>   [^qe]: d\n>\n> p\n\nNext.\n\n> * a\n>\n>   [^qf]: d\n>\n> p\n\nNext.\n\n> * a\n>\n>   [^qg]: d\n>\n> > q\n\nNext.\n\n> 1. a\n>\n>    [^qh]: d\n\nAfter.\n"
+  },
+  {
+    "name": "quoted-definitions-ending-in-lists",
+    "markdown": "Definitions ending in lists[^a][^b][^c], in quoted list items.\n\n> - a\n>   [^a]: - ```\n>         a\n>         ```\n> Tail a.\n\nNext.\n\n> - b\n>   [^b]: - ```\n>         b\n>         ```\n>   Tail b.\n\nNext.\n\n> - c\n>   [^c]: > - ```\n>       >   c\n>       >   ```\n> Tail c.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Definitions ending in lists"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "a"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "b"
+              }
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "c"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", in quoted list items."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000003"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000004"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000005"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "footnote_definition",
+                      "attrs": {
+                        "label": "a",
+                        "blockId": "b-000006"
+                      },
+                      "content": [
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000007"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000008"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000009"
+                                  }
+                                },
+                                {
+                                  "type": "code_block",
+                                  "attrs": {
+                                    "language": null,
+                                    "blockId": "b-000010"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "a"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000011"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Tail a."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000015"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000016"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "footnote_definition",
+                      "attrs": {
+                        "label": "b",
+                        "blockId": "b-000017"
+                      },
+                      "content": [
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000018"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000019"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000020"
+                                  }
+                                },
+                                {
+                                  "type": "code_block",
+                                  "attrs": {
+                                    "language": null,
+                                    "blockId": "b-000021"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "b"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000022"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "Tail b."
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000023"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000024"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000025"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000026"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000027"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "c"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "footnote_definition",
+                      "attrs": {
+                        "label": "c",
+                        "blockId": "b-000028"
+                      },
+                      "content": [
+                        {
+                          "type": "blockquote",
+                          "attrs": {
+                            "blockId": "b-000029"
+                          },
+                          "content": [
+                            {
+                              "type": "bullet_list",
+                              "attrs": {
+                                "spread": false,
+                                "blockId": "b-000030"
+                              },
+                              "content": [
+                                {
+                                  "type": "list_item",
+                                  "attrs": {
+                                    "label": "•",
+                                    "listType": "bullet",
+                                    "spread": false,
+                                    "checked": null,
+                                    "blockId": "b-000031"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "paragraph",
+                                      "attrs": {
+                                        "blockId": "b-000032"
+                                      }
+                                    },
+                                    {
+                                      "type": "code_block",
+                                      "attrs": {
+                                        "language": null,
+                                        "blockId": "b-000033"
+                                      },
+                                      "content": [
+                                        {
+                                          "type": "text",
+                                          "text": "c"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000034"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Tail c."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AX8BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEbRGVmaW5pdGlvbnMgZW5kaW5nIGluIGxpc3RzhwEBAxJmb290bm90ZV9yZWZlcmVuY2UoAAEdBWxhYmVsAXcBYYcBHQMSZm9vdG5vdGVfcmVmZXJlbmNlKAABHwVsYWJlbAF3AWKHAR8DEmZvb3Rub3RlX3JlZmVyZW5jZSgAASEFbGFiZWwBdwFjhwEhBgQAASMXLCBpbiBxdW90ZWQgbGlzdCBpdGVtcy4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMKYmxvY2txdW90ZQcAATwDC2J1bGxldF9saXN0BwABPQMJbGlzdF9pdGVtBwABPgMJcGFyYWdyYXBoBwABPwYEAAFAAWEoAAE/B2Jsb2NrSWQBdwhiLTAwMDAwNYcBPwMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAUMDC2J1bGxldF9saXN0BwABRAMJbGlzdF9pdGVtBwABRQMJcGFyYWdyYXBoKAABRgdibG9ja0lkAXcIYi0wMDAwMDmHAUYDCmNvZGVfYmxvY2sHAAFIBgQAAUkBYSgAAUgHYmxvY2tJZAF3CGItMDAwMDEwKAABRQVsYWJlbAF3A+KAoigAAUUIbGlzdFR5cGUBdwZidWxsZXQoAAFFBnNwcmVhZAF5KAABRQdibG9ja0lkAXcIYi0wMDAwMDgoAAFEBnNwcmVhZAF5KAABRAdibG9ja0lkAXcIYi0wMDAwMDcoAAFDBWxhYmVsAXcBYSgAAUMHYmxvY2tJZAF3CGItMDAwMDA2KAABPgVsYWJlbAF3A+KAoigAAT4IbGlzdFR5cGUBdwZidWxsZXQoAAE+BnNwcmVhZAF5KAABPgdibG9ja0lkAXcIYi0wMDAwMDQoAAE9BnNwcmVhZAF5KAABPQdibG9ja0lkAXcIYi0wMDAwMDOHAT0DCXBhcmFncmFwaAcAAVoGBAABWwdUYWlsIGEuKAABWgdibG9ja0lkAXcIYi0wMDAwMTEoAAE8B2Jsb2NrSWQBdwhiLTAwMDAwMocBPAMJcGFyYWdyYXBoBwABZQYEAAFmBU5leHQuKAABZQdibG9ja0lkAXcIYi0wMDAwMTKHAWUDCmJsb2NrcXVvdGUHAAFtAwtidWxsZXRfbGlzdAcAAW4DCWxpc3RfaXRlbQcAAW8DCXBhcmFncmFwaAcAAXAGBAABcQFiKAABcAdibG9ja0lkAXcIYi0wMDAwMTaHAXADE2Zvb3Rub3RlX2RlZmluaXRpb24HAAF0AwtidWxsZXRfbGlzdAcAAXUDCWxpc3RfaXRlbQcAAXYDCXBhcmFncmFwaCgAAXcHYmxvY2tJZAF3CGItMDAwMDIwhwF3Awpjb2RlX2Jsb2NrBwABeQYEAAF6AWIoAAF5B2Jsb2NrSWQBdwhiLTAwMDAyMSgAAXYFbGFiZWwBdwPigKIoAAF2CGxpc3RUeXBlAXcGYnVsbGV0KAABdgZzcHJlYWQBeSgAAXYHYmxvY2tJZAF3CGItMDAwMDE5KAABdQZzcHJlYWQBeSgAAXUHYmxvY2tJZAF3CGItMDAwMDE4KAABdAVsYWJlbAF3AWIoAAF0B2Jsb2NrSWQBdwhiLTAwMDAxN4cBdAMJcGFyYWdyYXBoBwABhQEGBAABhgEHVGFpbCBiLigAAYUBB2Jsb2NrSWQBdwhiLTAwMDAyMigAAW8FbGFiZWwBdwPigKIoAAFvCGxpc3RUeXBlAXcGYnVsbGV0KAABbwZzcHJlYWQBeSgAAW8HYmxvY2tJZAF3CGItMDAwMDE1KAABbgZzcHJlYWQBeSgAAW4HYmxvY2tJZAF3CGItMDAwMDE0KAABbQdibG9ja0lkAXcIYi0wMDAwMTOHAW0DCXBhcmFncmFwaAcAAZYBBgQAAZcBBU5leHQuKAABlgEHYmxvY2tJZAF3CGItMDAwMDIzhwGWAQMKYmxvY2txdW90ZQcAAZ4BAwtidWxsZXRfbGlzdAcAAZ8BAwlsaXN0X2l0ZW0HAAGgAQMJcGFyYWdyYXBoBwABoQEGBAABogEBYygAAaEBB2Jsb2NrSWQBdwhiLTAwMDAyN4cBoQEDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGlAQMKYmxvY2txdW90ZQcAAaYBAwtidWxsZXRfbGlzdAcAAacBAwlsaXN0X2l0ZW0HAAGoAQMJcGFyYWdyYXBoKAABqQEHYmxvY2tJZAF3CGItMDAwMDMyhwGpAQMKY29kZV9ibG9jawcAAasBBgQAAawBAWMoAAGrAQdibG9ja0lkAXcIYi0wMDAwMzMoAAGoAQVsYWJlbAF3A+KAoigAAagBCGxpc3RUeXBlAXcGYnVsbGV0KAABqAEGc3ByZWFkAXkoAAGoAQdibG9ja0lkAXcIYi0wMDAwMzEoAAGnAQZzcHJlYWQBeSgAAacBB2Jsb2NrSWQBdwhiLTAwMDAzMCgAAaYBB2Jsb2NrSWQBdwhiLTAwMDAyOSgAAaUBBWxhYmVsAXcBYygAAaUBB2Jsb2NrSWQBdwhiLTAwMDAyOCgAAaABBWxhYmVsAXcD4oCiKAABoAEIbGlzdFR5cGUBdwZidWxsZXQoAAGgAQZzcHJlYWQBeSgAAaABB2Jsb2NrSWQBdwhiLTAwMDAyNigAAZ8BBnNwcmVhZAF5KAABnwEHYmxvY2tJZAF3CGItMDAwMDI1hwGfAQMJcGFyYWdyYXBoBwABvgEGBAABvwEHVGFpbCBjLigAAb4BB2Jsb2NrSWQBdwhiLTAwMDAzNCgAAZ4BB2Jsb2NrSWQBdwhiLTAwMDAyNAA=",
+    "rendered_by_milkdown": "Definitions ending in lists[^a][^b][^c], in quoted list items.\n\n> * a\n>   [^a]: *\n>         ```\n>         a\n>         ```\n>\n> Tail a.\n\nNext.\n\n> * b\n>   [^b]: *\n>         ```\n>         b\n>         ```\n>   Tail b.\n\nNext.\n\n> * c\n>   [^c]: > *\n>       >   ```\n>       >   c\n>       >   ```\n>\n> Tail c.\n"
   },
   {
     "name": "softbreak",

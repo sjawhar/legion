@@ -543,11 +543,12 @@ func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string
 				// before anything else (definitionBlanksInQuote). A spread item writes two where no
 				// blank line between two of its other blocks spreads it, and a tight one writes one
 				// only to keep a block that cannot open on the line after a paragraph off the
-				// definition's.
+				// definition's, and none after a definition ending in a list no line continues
+				// (endsInClosedList).
 				switch {
 				case spread && !spreadElsewhere(blocks):
 					blanks = 2
-				case spread || !opensAfterParagraph(child):
+				case spread || !opensAfterParagraph(child) && !endsInClosedList(previous):
 					blanks = 1
 				}
 			}

@@ -1,4 +1,4 @@
-Items that open with their footnote definitions[^a][^b][^c][^d], in quotes.
+Items that open with their footnote definitions[^a][^b][^c][^d][^e][^f], in quotes.
 
 > 1. [^a]: a
 >
@@ -27,3 +27,17 @@ Next.
 >
 >
 > - e
+
+Next.
+
+> 1. [^e]: - ~~~
+>          e
+>          ~~~
+> Tail e.
+
+Next.
+
+> - [^f]: > - ```
+>       >   f
+>       >   ```
+>   Tail f.
