@@ -423,15 +423,7 @@ func (l sourceLines) textColumn(position int) int {
 	for position < len(l.source) && (l.source[position] == ' ' || l.source[position] == '\t') {
 		position++
 	}
-	column := 0
-	for _, char := range l.source[l.starts[l.lineOf(position)]:position] {
-		if char == '\t' {
-			column += 4 - column%4
-		} else {
-			column++
-		}
-	}
-	return column
+	return columnOf(l.source[l.starts[l.lineOf(position)]:position])
 }
 
 // blankLines is the blank lines from from's first line up to until's, until nil standing for the

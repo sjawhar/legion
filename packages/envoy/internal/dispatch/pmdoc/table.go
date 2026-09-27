@@ -44,11 +44,12 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	// Read the paragraph as a table apart from the document to see which lines would be its
 	// header and delimiter rows.
 	trial := ast.NewParagraph()
-	lines := gmtext.NewSegments()
-	for index := 0; index < node.Lines().Len(); index++ {
-		lines.Append(node.Lines().At(index))
+	expanded := tabExpandedLines(node.Lines(), source)
+	starts := make([]int, expanded.Len())
+	for index := range starts {
+		starts[index] = expanded.At(index).Start
 	}
-	trial.SetLines(lines)
+	trial.SetLines(expanded)
 	holder := ast.NewDocument()
 	holder.AppendChild(holder, trial)
 	t.table.Transform(trial, reader, parser.NewContext())
@@ -59,7 +60,7 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 		}
 		for index := 0; index+1 < node.Lines().Len(); index++ {
 			line := node.Lines().At(index)
-			if line.Start != table.FirstChild().Pos() {
+			if starts[index] != table.FirstChild().Pos() {
 				continue
 			}
 			if lazy != nil && (lazy[index] || lazy[index+1]) || lonePipe(source[line.Start:line.Stop]) {
@@ -70,17 +71,24 @@ func (t lazyTableRows) Transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	t.transform(node, reader, pc)
 }
 
-// transform is goldmark's table transformer. A table that takes the paragraph's first line takes
-// the paragraph's place, starting where its text does and after the blank line before it if there
-// was one; goldmark gives it neither. The browser list spacing reads both, the blank line through
-// blankAfterAttr, since goldmark's looseness, which reads HasBlankPreviousLines, has never seen it.
+// transform is goldmark's table transformer, reading the paragraph's lines with their indentation
+// expanded where it holds a tab (tabExpandedLines); a paragraph that stays one keeps its lines. A
+// table that takes the paragraph's first line takes the paragraph's place, starting where its text
+// does and after the blank line before it if there was one; goldmark gives it neither. The browser
+// list spacing reads both, the blank line through blankAfterAttr, since goldmark's looseness, which
+// reads HasBlankPreviousLines, has never seen it.
 func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc parser.Context) {
-	first := node.Lines().At(0)
+	lines := node.Lines()
+	first := lines.At(0)
 	start := first.TrimLeftSpace(reader.Source()).Start
 	blank := node.HasBlankPreviousLines()
 	parent, previous := node.Parent(), node.PreviousSibling()
+	node.SetLines(tabExpandedLines(lines, reader.Source()))
 	t.table.Transform(node, reader, pc)
 	if node.Parent() != nil {
+		if node.Lines().Len() == lines.Len() {
+			node.SetLines(lines)
+		}
 		return
 	}
 	place := parent.FirstChild()

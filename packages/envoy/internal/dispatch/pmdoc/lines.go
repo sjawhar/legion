@@ -54,6 +54,87 @@ func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Co
 	return p.BlockParser.Open(parent, reader, pc)
 }
 
+// tabIndented is a block parser reading a line whose indentation holds a tab as CommonMark and the
+// browser editor's parser do, when what follows the indentation matches opens: the tab spans the
+// columns to the next multiple of four, so after a quote's `> ` it spans two. Goldmark measures such
+// a line's indentation as if it began the line, or takes a list marker or a setext underline only
+// after spaces, and read `> \t- a` and `> a\n> \t===` as paragraph text. Before the parser looks at
+// such a line, its indentation is taken as the columns it spans, as padding.
+type tabIndented struct {
+	parser.BlockParser
+	opens *regexp.Regexp
+}
+
+func (p tabIndented) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	expandTabIndentation(reader, p.opens)
+	return p.BlockParser.Open(parent, reader, pc)
+}
+
+func (p tabIndented) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	expandTabIndentation(reader, p.opens)
+	return p.BlockParser.Continue(node, reader, pc)
+}
+
+var (
+	// listMarkerStart is a list marker opening a line's text: a bullet, or an ordered item's number
+	// and delimiter, followed by a space, a tab or the line's end.
+	listMarkerStart = regexp.MustCompile(`^(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|\n|$)`)
+	// setextUnderline is a setext heading's underline.
+	setextUnderline = regexp.MustCompile(`^(?:=+|-+)[ \t]*(?:\n|$)`)
+)
+
+// expandTabIndentation takes the indentation of reader's line as the columns it spans, as padding,
+// when it holds a tab, spans fewer than four columns, and what follows it matches opens; the line
+// reads the same, with spaces where a tab stood.
+func expandTabIndentation(reader gmtext.Reader, opens *regexp.Regexp) {
+	line, _ := reader.PeekLine()
+	end := 0
+	for end < len(line) && (line[end] == ' ' || line[end] == '\t') {
+		end++
+	}
+	if bytes.IndexByte(line[:end], '\t') < 0 || !opens.Match(line[end:]) {
+		return
+	}
+	if width, _ := util.IndentWidth(line, reader.LineOffset()); width < 4 {
+		reader.AdvanceAndSetPadding(end, width)
+	}
+}
+
+// tabExpandedLines is lines with each one's indentation, where it holds a tab, taken as the columns
+// it spans on its source line, as padding: goldmark's table transformer measures a row's indentation
+// as if the row began its line, so `> \t| a |` read as paragraph text.
+func tabExpandedLines(lines *gmtext.Segments, source []byte) *gmtext.Segments {
+	expanded := gmtext.NewSegments()
+	for index := 0; index < lines.Len(); index++ {
+		line := lines.At(index)
+		end := line.Start
+		for end < line.Stop && (source[end] == ' ' || source[end] == '\t') {
+			end++
+		}
+		if line.Padding == 0 && bytes.IndexByte(source[line.Start:end], '\t') >= 0 {
+			from := lineStart(source, line.Start)
+			width, _ := util.IndentWidth(source[line.Start:end], columnOf(source[from:line.Start]))
+			line = gmtext.Segment{Start: end, Stop: line.Stop, Padding: width, ForceNewline: line.ForceNewline}
+		}
+		expanded.Append(line)
+	}
+	return expanded
+}
+
+// columnOf is the column text, the start of a line, ends at, a tab advancing to the next multiple
+// of four.
+func columnOf(text []byte) int {
+	column := 0
+	for _, char := range text {
+		if char == '\t' {
+			column += 4 - column%4
+		} else {
+			column++
+		}
+	}
+	return column
+}
+
 // interruptsParagraph reports whether container, opened on the line starting at start with the
 // containers above it that it opens first, follows a paragraph whose last line is the one before.
 func interruptsParagraph(container ast.Node, source []byte, start int) bool {

@@ -549,6 +549,11 @@ such a span sheds at each end (`codeSpanPadded`), and the writer pads a span who
 ends with one. A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
 prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
+A tab in a line's indentation spans the columns to the next multiple of four from where it stands,
+as CommonMark and the browser editor's parser read it, so after a quote's `> ` it spans two: `> \t- a`
+opens a list, `> \t| a |` over `> \t| - |` is a table, and `> a` over `> \t===` a setext heading
+(`tabIndented`, `tabExpandedLines`). Goldmark measured such indentation as if it began the line, or
+took a list marker or an underline only after spaces, and read each as paragraph text.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
