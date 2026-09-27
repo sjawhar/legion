@@ -843,6 +843,25 @@ earlier) — and records the attempt as `sent` with no error and the reply's id;
 already-failed attempt returns the stored attempt unchanged, and a second `body` on an answered
 attempt returns the stored reply (200).
 
+A human reaches many sessions at once with `POST /api/v1/broadcasts`
+`{body, delivery, session_ids}`. A broadcast is a grouping over the targeted messages above,
+not a second delivery mechanism: one row in `broadcasts` plus one issue-less message per
+recipient carrying its `broadcast_id`, all in one transaction, then the ordinary
+`deliverMessage` path per recipient - so each recipient's attempts, retries and replies are
+exactly a single targeted message's. Recipients are judged against one listener read: a
+selected session that is not live, or does not advertise the chosen mode, is excluded before
+anything is written and named in the response's `excluded`, never switched to another mode
+(the mode is part of what the sender said). Exclusions are not stored; a send with no
+reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. The send answers 201 as soon
+as the messages are committed and delivers behind the request, four recipients at a time, each
+worker on its own `store.WithTransactionTracking` context derived from the server's lifetime
+(the pool's one-connection guard is per context, and a request's context would strand every
+recipient after the one in flight when a tab closes or a deploy shuts the server down). A
+recipient therefore starts with no attempt, and one still carrying none was not sent to.
+`GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and
+`GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies; all
+three routes are human-only, like the one-session route they are built from.
+
 The issue stream retains the targeted `message.created`, `message.delivery`, and
 `message.answered` events for the Conversation card. Issue-less targeted-message events have no
 issue owner, use sequence `0`, and reach their recipient through the synchronous listener send;

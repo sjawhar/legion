@@ -6,6 +6,7 @@
 package routes
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -80,6 +81,7 @@ type AppContextOptions struct {
 	GitHubAPIBase    string
 	OIDC             *oidc.Verifier
 	AgentStream      agentstream.Source
+	Lifetime         context.Context
 	TestHooksEnabled bool
 }
 
@@ -109,6 +111,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		GitHubAPIBase:    opts.GitHubAPIBase,
 		OIDC:             opts.OIDC,
 		AgentStream:      opts.AgentStream,
+		Lifetime:         opts.Lifetime,
 		TestHooksEnabled: opts.TestHooksEnabled,
 	})
 	if err != nil {

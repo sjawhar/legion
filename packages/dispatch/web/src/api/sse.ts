@@ -385,7 +385,12 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     if (key === undefined) {
       throw new Error("issue-less message event is missing its session target");
     }
-    return [key];
+    // Every recipient of a broadcast holds an issue-less targeted message, so every event
+    // that moves a broadcast's recipient table arrives here. The open broadcast views are
+    // refreshed by key prefix rather than by threading a broadcast id through the message,
+    // delivery and reply payloads; nothing else is keyed under ["broadcast"], and the
+    // queries only exist while a broadcast page is mounted.
+    return [key, ["broadcast"]];
   }
   if (event.issue_key === null) {
     if (event.artifact_id === null || event.artifact_id === undefined) {
