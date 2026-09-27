@@ -10,8 +10,8 @@
  *   bun scripts/upstream-declarations.ts          # rewrite upstream/
  *   bun scripts/upstream-declarations.ts --check  # exit 1 when upstream/ is not what the pin emits
  *
- * `tests/upstream-declarations.test.ts` runs `--check`, so a moved pin that changes the surface
- * fails until `upstream/` is rebuilt.
+ * `tests/upstream-pin.test.ts` runs `--check`, so a moved pin that changes the surface fails
+ * until `upstream/` is rebuilt.
  */
 import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";

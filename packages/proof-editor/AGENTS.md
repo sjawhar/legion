@@ -46,9 +46,14 @@ banner, the comment beside that import and the case's own name follow, since thi
 build and there is no distribution left to name; `src/editor/schema/block-ids.ts`'s two
 consumer-side changes, which are what the move made necessary — it extends the upstream
 `code_block` and `frontmatter` schemas itself (the fork used to do that in its own modules) and
-reads `withDomAttributes` from `./dom-attributes`; `src/block-schema.ts`'s `contentElement`
-parse rule and its client-owned DOM attributes; and annotations, casts and assertions that make
-a file type-check, each of which erases before runtime (below).
+reads `withDomAttributes` from `./dom-attributes`; the copy-attributes fix legion #1452 lifted
+into `src/block-schema.ts` and `src/tests/block-schema.test.ts`, which is the largest divergence
+in the tree (136 lines in the module) — `typedBlockSpec` moved out of `blockSchemaPlugins`'s
+`$nodeSchema` callback and exported so a test can build the spec without a Milkdown ctx,
+`attributeText` lifted out of `markdownAttrs`, the new `domAttributeName`, `domAttrs` and
+`parsedDomAttrs`, the parse rule's `getAttrs` and `contentElement`, the `withDomAttributes`
+wrapper on `toDOM`, and the suite's cases for all of it; and annotations, casts and assertions
+that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
@@ -111,7 +116,7 @@ TypeScript, Vite compiles it. There is no `dist` and nothing to build before usi
 
 ```bash
 bun run test                   # the moved suites through src/tests/harness.ts, plus tests/
-bun run typecheck              # tsc against tsconfig.check.json (src/ and tests/)
+bun run typecheck              # tsc against tsconfig.check.json (src/, tests/ and scripts/)
 bun run lint                   # Biome over the package; the root biome.json turns it off for the copy
 bun run upstream-declarations  # rewrite upstream/ from the pinned sources (only a moved pin needs it)
 ```
