@@ -14,16 +14,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/api"
+	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
-var handoffPhases = map[string]bool{
-	"architect": true, "plan": true, "implement": true, "test": true, "review": true, "merge": true,
-	// Claim roles remain the command's role vocabulary; these aliases keep existing phase handoff
-	// paths readable while the stage transitions use implement/test/review/merge.
-	"planner": true, "implementer": true, "tester": true, "reviewer": true, "merger": true,
-}
+// handoffPhases are the phase words a handoff is written under, .legion/<phase>.json: the ones the
+// role prompts pass to the legion tool's handoff_write (packages/contracts/src/handoff-schema.ts
+// HANDOFF_PHASES). A pane's role is its claim role, LEGION_ROLE, never one of these.
+var handoffPhases = map[string]bool{"architect": true, "plan": true, "implement": true, "test": true, "review": true}
 
 func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -82,11 +81,15 @@ func runHandoffWrite(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "legion handoff write: data must be a JSON object")
 		return 1
 	}
+	var carried []string
 	for _, reserved := range []string{"schemaVersion", "phase", "completed"} {
 		if _, present := payload[reserved]; present {
-			fmt.Fprintf(stderr, "legion handoff write: handoff data field %s is not allowed\n", reserved)
-			return 1
+			carried = append(carried, reserved)
 		}
+	}
+	if len(carried) > 0 {
+		fmt.Fprintf(stderr, "legion handoff write: data carries %s, which this command writes itself (schemaVersion, phase and completed); send only the phase's own fields\n", strings.Join(carried, ", "))
+		return 1
 	}
 	workspace, err := resolveWorkspace(*workspaceFlag)
 	if err != nil {
@@ -144,12 +147,12 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 		fmt.Fprintln(stderr, "usage: legion handoff complete --summary <text> [--verdict pass|fail] [--ready] [--workspace <dir>]")
 		return 2
 	}
-	role := os.Getenv("LEGION_ROLE")
-	if !validHandoffPhase(role) {
-		fmt.Fprintln(stderr, "legion handoff complete: LEGION_ROLE must name the claimed phase")
+	role := legionclaim.Role(os.Getenv("LEGION_ROLE"))
+	if !legionclaim.IsRole(role) {
+		fmt.Fprintf(stderr, "legion handoff complete: LEGION_ROLE must name the pane's claim role, not %q\n", role)
 		return 1
 	}
-	if role == "tester" || role == "test" {
+	if role == legionclaim.RoleTester {
 		if *verdict != "pass" && *verdict != "fail" {
 			fmt.Fprintln(stderr, "legion handoff complete: a tester's completion needs verdict pass or fail (the legion tool's handoff_complete with verdict, or --verdict)")
 			return 1
@@ -158,7 +161,7 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 		fmt.Fprintln(stderr, "legion handoff complete: only a tester's completion carries a verdict; call the legion tool's handoff_complete without verdict")
 		return 1
 	}
-	if *ready && role != "merger" && role != "merge" {
+	if *ready && role != legionclaim.RoleMerger {
 		fmt.Fprintln(stderr, "legion handoff complete: only a merger's completion carries ready; call the legion tool's handoff_complete without ready")
 		return 1
 	}
@@ -167,7 +170,12 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
 	}
-	commit, err := handoffCommit(ctx, workspace, role)
+	current, err := issuePhase(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion handoff complete: read the issue's phase from the daemon's state: %v\n", err)
+		return 1
+	}
+	commit, err := handoffCommit(workspace, role, current)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
@@ -203,43 +211,28 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 	return 0
 }
 
-// handoffFiles names the handoff file each file-backed role writes: the phase word its role prompt
-// gives the legion tool's handoff_write (packages/pi-envoy/roles/*.md), whichever vocabulary the
-// pane's LEGION_ROLE uses. The merger is not file-backed — it verifies and publishes READY and
-// writes no handoff (packages/pi-envoy/roles/merger.md).
-var handoffFiles = map[string]string{
-	"planner": "plan", "plan": "plan",
-	"implementer": "implement", "implement": "implement",
-	"tester": "test", "test": "test",
-	"reviewer": "review", "review": "review",
-}
-
-// handoffCommit is the commit a completion reports, resolved with the jj the daemon resolved at
-// boot, which it names on every pane as LEGION_JJ_PATH. A file-backed role reports the commit that
-// carries its handoff: the last commit on the issue branch that changed .legion/<phase>.json,
-// which in the end game is the committed .legion/ deletion. The handoff it wrote last must be
-// committed — none of it only in the working copy — and it must have been committed on this
-// branch, never inherited from the base: a pane whose handoff is still uncommitted would otherwise
-// report a commit that carries another issue's file. The daemon refuses a carrying commit the role
-// already reported in its previous phase. When nothing on the branch changed the handoff, the
-// phase decides, not the role: the implementer's retro and production check write none (the
-// production check runs after the squash merge deleted the branch), and report the commit the
-// workspace stands on, as the merger always does; the daemon's state names the phase. Paths reach
-// jj as root-anchored filesets, so --workspace works from any directory.
-func handoffCommit(ctx context.Context, workspace, role string) (string, error) {
+// handoffCommit is the commit a completion of phase current reports, resolved with the jj the
+// daemon resolved at boot, which it names on every pane as LEGION_JJ_PATH. The phase decides, not
+// the role. A phase phase.HandoffFile names ends with its role's handoff, and the completion reports
+// the commit that carries it: the last commit on the issue branch that changed .legion/<phase>.json,
+// which in the end game is the committed .legion/ deletion. That handoff must be committed — none of
+// it only in the working copy — and committed on this branch, never inherited from the base: a pane
+// whose handoff is still uncommitted would otherwise report a commit that carries another issue's
+// file. The daemon refuses a carrying commit the role already reported in its previous phase. Every
+// other completion reports the commit the workspace stands on: retro, the production check (which
+// runs after the squash merge deleted the branch), the merger's READY, and a role reporting a phase
+// it does not run, which the daemon refuses naming whose phase it is. Paths reach jj as
+// root-anchored filesets, so --workspace works from any directory.
+func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase) (string, error) {
 	jj := os.Getenv("LEGION_JJ_PATH")
-	word, fileBacked := handoffFiles[role]
-	file := filepath.Join(".legion", word+".json")
 	if !filepath.IsAbs(jj) {
-		message := "LEGION_JJ_PATH is not an absolute path; the Legion daemon names the jj it resolved at boot on every pane"
-		if fileBacked {
-			message += ", and it resolves the commit carrying " + file
-		}
-		return "", errors.New(message)
+		return "", errors.New("LEGION_JJ_PATH is not an absolute path; the Legion daemon names the jj it resolved at boot on every pane")
 	}
-	if !fileBacked {
+	word, fileBacked := phase.HandoffFile(current)
+	if !fileBacked || workflow.RoleFor(current) != role {
 		return standingCommit(jj, workspace)
 	}
+	file := filepath.Join(".legion", word+".json")
 	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(file))
 	uncommitted, err := jjOutput(jj, workspace, file, "diff", "-r", "@", "--name-only", fileset)
 	if err != nil {
@@ -252,28 +245,21 @@ func handoffCommit(ctx context.Context, workspace, role string) (string, error) 
 	if err != nil {
 		return "", err
 	}
+	_, missing := os.Stat(filepath.Join(workspace, file))
 	if carrying != "" {
 		// A committed deletion is not a handoff this role wrote: the implementer's end-game
 		// .legion/ deletion carries every role's file away.
-		if _, err := os.Stat(filepath.Join(workspace, file)); err == nil {
+		if missing == nil {
 			if err := ownHandoff(jj, workspace, file, carrying); err != nil {
 				return "", err
 			}
 		}
 		return carrying, nil
 	}
-	refusal := fmt.Errorf("%s is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff", file)
-	if _, err := os.Stat(filepath.Join(workspace, file)); err != nil {
-		refusal = fmt.Errorf("%s is missing from the workspace: write this phase's handoff with the legion tool's handoff_write with phase %s", file, word)
+	if missing != nil {
+		return "", fmt.Errorf("%s is missing from the workspace: write this phase's handoff with the legion tool's handoff_write with phase %s", file, word)
 	}
-	current, err := issuePhase(ctx)
-	if err != nil {
-		return "", fmt.Errorf("%w (the daemon's state, which names whether this phase writes a handoff, is unreadable: %v)", refusal, err)
-	}
-	if !phase.FileBacked(current) {
-		return standingCommit(jj, workspace)
-	}
-	return "", refusal
+	return "", fmt.Errorf("%s is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff", file)
 }
 
 // ownHandoff refuses a handoff commit another App authored: every role of an issue shares the
@@ -301,7 +287,8 @@ func standingCommit(jj, workspace string) (string, error) {
 	return jjOutput(jj, workspace, "the workspace", "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 }
 
-// issuePhase reads the pane's issue phase (LEGION_ISSUE) from the daemon's state document.
+// issuePhase reads the pane's issue phase (LEGION_ISSUE) from the daemon's state document, decoding
+// that one issue's phase and nothing else of the document.
 func issuePhase(ctx context.Context) (phase.Phase, error) {
 	issue := os.Getenv("LEGION_ISSUE")
 	if issue == "" {
@@ -311,7 +298,9 @@ func issuePhase(ctx context.Context) (phase.Phase, error) {
 	if err != nil {
 		return "", err
 	}
-	var state api.State
+	var state struct {
+		Issues map[string]json.RawMessage `json:"issues"`
+	}
 	if err := json.Unmarshal(body, &state); err != nil {
 		return "", fmt.Errorf("decode the daemon's state: %w", err)
 	}
@@ -319,7 +308,13 @@ func issuePhase(ctx context.Context) (phase.Phase, error) {
 	if !ok {
 		return "", fmt.Errorf("the daemon's state records no issue %s", issue)
 	}
-	return recorded.Phase, nil
+	var current struct {
+		Phase phase.Phase `json:"phase"`
+	}
+	if err := json.Unmarshal(recorded, &current); err != nil {
+		return "", fmt.Errorf("decode the daemon's record of %s: %w", issue, err)
+	}
+	return current.Phase, nil
 }
 
 // jjOutput runs the boot-resolved jj on the pane workspace and returns its trimmed output.
