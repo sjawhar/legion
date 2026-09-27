@@ -34,6 +34,7 @@
 
 ### Changed
 
+- `legion.goDaemonApiVersion` is 10. Contract 10 adds `legionAppLogins` to the Go daemon's `POST /legion/v1/gh-token` answer, every Legion role App's login, which the Go client's strict `LegionGoGitHubTokenResponse` now accepts (LEGION-208). Nothing in the extension calls `githubToken`, but the credential shapes are part of the contract.
 - `legion threads resolve` also resolves a thread a bot account opened that is none of Legion's
   role Apps (a CI bot's) once the pull request's author answers it, in its newest
   submitted comment, with `Fixed in <commit>: …` or `Declined: …` as its first line. A bot never posts `Accepted:`,
