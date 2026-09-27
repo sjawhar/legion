@@ -608,24 +608,33 @@ test("a soft line break in markdown written through the API is a space in the ed
 // fixTables ran again, forever. With an empty last row, preset-gfm's paste rule counted the table's
 // columns in that row, found none, and replaced the table with an empty paragraph.
 const tableRows = (header: readonly string[], body: readonly string[], indent = "") =>
-  [header, [":---", ":---"], body].map((cells) => `${indent}| ${cells.join(" | ")} |\n`).join("");
-for (const [row, html, header, body] of [
-  ["first", "<table><tr></tr><tr><td>a</td><td>b</td></tr></table>", ["", ""], ["a", "b"]],
-  ["last", "<table><tr><td>a</td><td>b</td></tr><tr></tr></table>", ["a", "b"], ["", ""]],
+  [header, header.map(() => ":---"), body]
+    .map((cells) => `${indent}| ${cells.join(" | ")} |\n`)
+    .join("");
+for (const [row, clipboard, header, body] of [
+  ["first", emptyFirstRow, ["", ""], ["a", "b"]],
+  ["last", emptyLastRow, ["a", "b"], ["", ""]],
 ] as const) {
   const rows = tableRows(header, body);
-  for (const [context, spec, stored] of [
-    ["a paragraph", "Intro end.\n", `Intro\n\n${rows}\n&#32;end.\n`],
+  // Both readers give back the stored bytes exactly, except in a tight list item: pmdoc writes its
+  // blocks one line apart, so the paragraph after the table reads back as one more table row, in Go
+  // as in the engine (LEGION-290). There only the table's own rows read back.
+  for (const [context, spec, stored, indent, readsBackExactly] of [
+    ["a paragraph", "Intro end.\n", `Intro\n\n${rows}\n&#32;end.\n`, "", true],
     [
       "a callout",
       ':::callout{#k1 kind="note"}\nIntro end.\n:::\n',
       `:::callout{#k1 kind="note" title=""}\nIntro\n\n${rows}\n&#32;end.\n:::\n`,
+      "",
+      true,
     ],
-    ["a heading", "# Intro end\n", `# Intro\n\n${rows}\n# &#32;end\n`],
+    ["a heading", "# Intro end\n", `# Intro\n\n${rows}\n# &#32;end\n`, "", true],
     [
       "a nested list",
       "- top\n  - Intro end\n",
       `- top\n  - Intro\n${tableRows(header, body, "    ")}    &#32;end\n`,
+      "    ",
+      false,
     ],
   ] as const) {
     test(`a table whose ${row} row is empty, pasted into ${context}, keeps its cells`, async ({
@@ -639,22 +648,16 @@ for (const [row, html, header, body] of [
         "end"
       );
       try {
-        await paste(page, { html, text: "a\tb" });
+        await paste(page, clipboard);
 
         await expect
           .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
           .toBe(stored);
         const [table] = engineTables(stored);
-        if (context === "a nested list") {
-          // pmdoc writes a tight list item's blocks one line apart, so the paragraph after the
-          // table reads back as one more table row, in Go as in the engine. That writer defect is
-          // the pmdoc lane's follow-up after #1464. The table's own rows still read back.
-          expect(table.slice(0, 2)).toEqual([header, body]);
-          expect(await goReadBack(stored)).toContain(tableRows(header, body, "    "));
-        } else {
-          expect(table).toEqual([header, body]);
-          expect(await goReadBack(stored)).toBe(stored);
-        }
+        const goRead = await goReadBack(stored);
+        expect(table.slice(0, 2)).toEqual([header, body]);
+        expect(goRead).toContain(tableRows(header, body, indent));
+        expect(table.length === 2 && goRead === stored).toBe(readsBackExactly);
       } finally {
         await alice.close();
       }
