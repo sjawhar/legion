@@ -788,17 +788,17 @@ const GIT_WORKTREE_LOCK_REASON =
  * clone with no linked worktree, or a jj that colocates no workspace (0.44), has none. */
 async function gitWorktreeEntries(cloneDir: string, dir: string): Promise<string[]> {
   const admin = path.join(cloneDir, ".git", "worktrees");
-  if (!existsSync(admin)) return [];
+  const entries = await readdir(admin, { withFileTypes: true }).catch(missingAsUndefined);
+  if (entries === undefined) return [];
   const want = [path.join(path.resolve(dir), ".git"), path.join(await resolvedPath(dir), ".git")];
   const own: string[] = [];
-  for (const entry of await readdir(admin, { withFileTypes: true })) {
+  for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const entryDir = path.join(admin, entry.name);
-    const gitdirFile = path.join(entryDir, "gitdir");
+    const gitdir = await readFile(path.join(entryDir, "gitdir"), "utf8").catch(missingAsUndefined);
     // No worktree git could name: nobody's to claim.
-    if (!existsSync(gitdirFile)) continue;
-    const target = (await readFile(gitdirFile, "utf8")).replace(/\n$/, "");
-    if (want.includes(path.resolve(entryDir, target))) own.push(entryDir);
+    if (gitdir === undefined) continue;
+    if (want.includes(path.resolve(entryDir, gitdir.replace(/\n$/, "")))) own.push(entryDir);
   }
   return own;
 }
@@ -807,11 +807,19 @@ async function gitWorktreeEntries(cloneDir: string, dir: string): Promise<string
 async function resolvedPath(target: string): Promise<string> {
   let existing = path.resolve(target);
   const missing: string[] = [];
-  while (!existsSync(existing)) {
+  for (;;) {
+    const resolved = await realpath(existing).catch(missingAsUndefined);
+    if (resolved !== undefined) return path.join(resolved, ...missing);
     missing.unshift(path.basename(existing));
     existing = path.dirname(existing);
   }
-  return path.join(await realpath(existing), ...missing);
+}
+
+/** A filesystem call's rejection handler: `undefined` for a path that does not exist, any other
+ * failure rethrown. */
+function missingAsUndefined(error: unknown): undefined {
+  if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+  throw error;
 }
 
 /** Deletes the shared clone's git worktree entry for `dir`, whose directory is gone: what `git

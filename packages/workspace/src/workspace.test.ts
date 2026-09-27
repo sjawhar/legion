@@ -247,12 +247,17 @@ async function gitToplevel(dir: string): Promise<string> {
   expect(toplevel.exitCode, `git rev-parse in ${dir}: ${toplevel.stderr}`).toBe(0);
   return toplevel.stdout.trim();
 }
-/** Deletes the lock of the git worktree the workspace at `dir` names in its `.git` file, if it has
- * one: the entry as a process that locks nothing leaves it. */
-async function unlockGitWorktree(dir: string): Promise<void> {
+/** Deletes the lock of the git worktree the workspace at `dir` names in its `.git` file, leaving
+ * the entry as a process that locks nothing leaves it, and fails the test unless git then reports
+ * the worktree unlocked. The pointer is relative to `dir` when git writes relative worktree paths
+ * (jj asks for them; git 2.48 and later honour it). */
+async function unlockGitWorktree(repoCloneDir: string, dir: string): Promise<void> {
   const pointer = (await readFile(path.join(dir, ".git"), "utf8")).trim();
   expect(pointer, `${dir}/.git`).toStartWith("gitdir: ");
-  await rm(path.join(pointer.slice("gitdir: ".length), "locked"), { force: true });
+  await rm(path.resolve(dir, pointer.slice("gitdir: ".length), "locked"), { force: true });
+  expect(await gitWorktreeLocks(repoCloneDir), `${dir} after unlocking it`).toMatchObject({
+    [dir]: false,
+  });
 }
 
 const JJ_BINARIES = [
@@ -2425,7 +2430,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [other]: true });
     // An entry another process added carries no lock; this one is out of view, as another host's
     // or another tree's is: a bare `git worktree prune` here would take it for stale.
-    await unlockGitWorktree(other);
+    await unlockGitWorktree(repoCloneDir, other);
     const elsewhere = path.join(await temporaryDirectory(), "elsewhere");
     await rename(other, elsewhere);
 
@@ -2456,8 +2461,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const stateDir = path.join(await temporaryDirectory(), "state");
     const { repoCloneDir, workspaceDir, calls, deps } = await realJjRig(command, stateDir);
     await provisionIssueWorkspace("WIDGETS-42", deps);
-    await unlockGitWorktree(workspaceDir);
-    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [workspaceDir]: false });
+    await unlockGitWorktree(repoCloneDir, workspaceDir);
     calls.length = 0;
     await provisionIssueWorkspace("WIDGETS-42", deps);
     expect(

@@ -649,7 +649,7 @@ func TestProvisioningAndRemovalTouchOnlyTheirOwnGitWorktree(t *testing.T) {
 		t.Errorf("provisioning left the new workspace's git worktree unlocked: %v", locked)
 	}
 	// An entry another process added carries no lock; this one is out of view, as another tree's is.
-	unlockGitWorktree(t, other.Dir)
+	unlockGitWorktree(t, other.Clone, other.Dir)
 	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
 	if err := os.Rename(other.Dir, elsewhere); err != nil {
 		t.Fatal(err)
@@ -700,10 +700,7 @@ func TestProvisionLocksAnExistingUnlockedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	unlockGitWorktree(t, workspace.Dir)
-	if locked := gitWorktreeLocks(t, workspace.Clone); locked[workspace.Dir] {
-		t.Fatalf("the workspace is still locked after unlocking it: %v", locked)
-	}
+	unlockGitWorktree(t, workspace.Clone, workspace.Dir)
 	before := len(run.Calls())
 	if _, err := Provision(context.Background(), run, request); err != nil {
 		t.Fatalf("provision the existing workspace: %v", err)
@@ -717,8 +714,10 @@ func TestProvisionLocksAnExistingUnlockedWorkspace(t *testing.T) {
 }
 
 // unlockGitWorktree deletes the lock of the git worktree the workspace at dir names in its .git
-// file, if it has one: the entry as a process that locks nothing leaves it.
-func unlockGitWorktree(t *testing.T, dir string) {
+// file, leaving the entry as a process that locks nothing leaves it, and fails the test unless git
+// then reports the worktree unlocked. The pointer is relative to dir when git writes relative
+// worktree paths (jj asks for them; git 2.48 and later honour it).
+func unlockGitWorktree(t *testing.T, clone, dir string) {
 	t.Helper()
 	pointer, err := os.ReadFile(filepath.Join(dir, ".git"))
 	if err != nil {
@@ -728,8 +727,15 @@ func unlockGitWorktree(t *testing.T, dir string) {
 	if !ok {
 		t.Fatalf("%s/.git names no git worktree: %q", dir, pointer)
 	}
+	if !filepath.IsAbs(admin) {
+		admin = filepath.Join(dir, admin)
+	}
 	if err := os.Remove(filepath.Join(admin, "locked")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
+	}
+	locks := gitWorktreeLocks(t, clone)
+	if locked, registered := locks[dir]; !registered || locked {
+		t.Fatalf("git does not report %s registered and unlocked after unlocking it: %v", dir, locks)
 	}
 }
 
