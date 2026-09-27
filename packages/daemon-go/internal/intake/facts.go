@@ -19,7 +19,9 @@ import (
 type Fact interface{ isFact() }
 
 // DispatchIssue records Dispatch's complete issue observation. Rank is Dispatch's fractional key,
-// compared as bytes — the order rank.Between generates.
+// compared as bytes — the order rank.Between generates. HandedOver is resolved once at decode
+// (decodeDispatchFact), from the event's own raw labels: every reader acts on this bool, never on
+// a label list of its own.
 type DispatchIssue struct {
 	Key    string
 	Seq    int64
@@ -28,8 +30,8 @@ type DispatchIssue struct {
 	Title  string
 	Parent string
 	Rank   string
-	// Labels are the issue's Dispatch labels as the event carried them.
-	Labels []string
+	// HandedOver is whether the event's own labels carried dispatch.LegionLabel.
+	HandedOver bool
 	// ActorSession is the id of the session that wrote the event, when a session did; empty for a
 	// user or any other actor kind.
 	ActorSession string
@@ -57,23 +59,14 @@ type DispatchArtifact struct {
 
 func (DispatchArtifact) isFact() {}
 
-// DispatchObserver reports, without any I/O of its own, whether a caller (admission) currently
-// holds anything back waiting for the Dispatch consumer to catch up to a boot read's target
-// stream position. Intake calls it once after every message the Dispatch consumer delivers —
-// decoded into a fact or not, terminated as poison or applied — so it can skip reading the
-// consumer's own position and applying a synthetic DispatchConsumerPosition fact once nothing is
-// held, the cost that check would otherwise add to every routine Dispatch event.
-type DispatchObserver interface {
-	Held() bool
-}
-
 // DispatchConsumerPosition is one measurement of the Dispatch consumer's own position: its ack
 // floor as a stream sequence — the point before which every matching message is acknowledged,
 // redeliveries and naks included — and whether it is idle, nothing pending or unacknowledged at
-// all. Boot reads one for Reconcile (Consumers.DispatchPosition); intake applies one as a
-// synthetic fact through ApplyFact after a delivery while something is held — never decoded from
-// a real Dispatch event. Admission is the only handler that acts on it: it releases every hold
-// whose target the position has Reached, and promotes in the same transaction.
+// all. The daemon's boot-owned poll reads one (Consumers.DispatchPosition) for Reconcile, and
+// again on a ticker while admission holds anything back, applying each changed reading through
+// ApplyFact as a synthetic fact — never decoded from a real Dispatch event. Admission is the only
+// handler that acts on it: it releases every hold whose target the position has Reached, applies
+// each released key's own listing snapshot, and promotes, all in the same transaction.
 type DispatchConsumerPosition struct {
 	AckFloorStream int64
 	Idle           bool
@@ -290,9 +283,14 @@ type Handler interface {
 
 // Result carries a refusal that is durable: handlers finish and the transaction commits. Duplicate
 // reports that the event id was already processed, so no handler ran and nothing changed.
+// AfterCommit runs, in order, only once ApplyFact's own transaction has actually committed: a
+// handler whose in-memory state must never claim more than what committed returns a closure here
+// instead of mutating that state inside its own Apply, where a later handler's failure would still
+// roll the transaction back but leave the in-memory mutation behind.
 type Result struct {
-	Refusal   *Refusal
-	Duplicate bool
+	Refusal     *Refusal
+	Duplicate   bool
+	AfterCommit []func()
 }
 
 // Refusal is a committed API response or JetStream log record, never a transaction failure.
@@ -354,10 +352,14 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 		if result.Refusal == nil && candidate.Refusal != nil {
 			result.Refusal = candidate.Refusal
 		}
+		result.AfterCommit = append(result.AfterCommit, candidate.AfterCommit...)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Result{}, err
 	}
 	committed = true
+	for _, after := range result.AfterCommit {
+		after()
+	}
 	return result, nil
 }

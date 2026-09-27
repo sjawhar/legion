@@ -54,7 +54,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 		t.Fatalf("implementer = %s, want failed", got)
 	}
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
-	admission := admit.New(records, 2, "LEGION", quietLogger())
+	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 	handlers := []intake.Handler{engine, admission}
 	client := &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}
 	runner := &outbox{
@@ -69,7 +69,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 
 	for _, observed := range []intake.DispatchIssue{
 		{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: "U"},
-		{Key: root.Key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U", Labels: []string{record.LegionLabel}},
+		{Key: root.Key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U", HandedOver: true},
 	} {
 		if _, err := intake.ApplyFact(ctx, pool, "dispatch", "ev-"+observed.Status, observed, handlers...); err != nil {
 			t.Fatalf("%s: %v", observed.Status, err)
@@ -166,13 +166,13 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
-	admission := admit.New(records, 2, "LEGION", quietLogger())
+	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 	for _, step := range []struct {
 		id   string
 		fact intake.Fact
 	}{
 		{"backlog", intake.DispatchIssue{Key: key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: "U"}},
-		{"todo", intake.DispatchIssue{Key: key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U", Labels: []string{record.LegionLabel}}},
+		{"todo", intake.DispatchIssue{Key: key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U", HandedOver: true}},
 		{"gate", intake.GateRegistered{Issue: key, ArtifactID: artifact, Version: 2}},
 		{"approve", intake.DispatchArtifact{Key: key, ArtifactID: artifact, Kind: intake.DispatchArtifactApproved, Version: 2}},
 		{"plan", intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RolePlanner, Summary: "plan", Commit: "plan-1"}},
@@ -219,7 +219,7 @@ func TestAChildAHumanMovesOutOfTheWorkflowStopsAndKeepsTheHumansStatus(t *testin
 		t.Fatal(err)
 	}
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
-	admission := admit.New(records, 2, "LEGION", quietLogger())
+	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-backlog", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: parent, Rank: "V"}, engine, admission); err != nil {
 		t.Fatal(err)

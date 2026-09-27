@@ -517,26 +517,6 @@ func TestWaitingIncludesOnlySlotlessHandedOverTodoRootsAndOrphansInRankOrder(t *
 	}
 }
 
-// Dispatch keeps a label's case as typed and treats labels differing only in case as one label, so
-// the label that hands an issue to Legion matches in any case, and nothing else stands in for it.
-func TestCarriesLegionLabelMatchesTheLabelInAnyCaseAndNothingElse(t *testing.T) {
-	for _, tc := range []struct {
-		labels []string
-		want   bool
-	}{
-		{labels: []string{"legion"}, want: true},
-		{labels: []string{"frontend", "Legion"}, want: true},
-		{labels: []string{"LEGION"}, want: true},
-		{labels: nil},
-		{labels: []string{"frontend"}},
-		{labels: []string{"legion-smoke", "not legion"}},
-	} {
-		if got := CarriesLegionLabel(tc.labels); got != tc.want {
-			t.Errorf("CarriesLegionLabel(%q) = %v, want %v", tc.labels, got, tc.want)
-		}
-	}
-}
-
 func TestRecordMigrationAppliesOverAPopulatedStageTwoDatabase(t *testing.T) {
 	ctx := context.Background()
 	st := emptyStore(t)

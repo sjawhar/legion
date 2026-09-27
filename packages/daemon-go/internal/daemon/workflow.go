@@ -53,6 +53,15 @@ type workflowRuntime struct {
 	conn            *nats.Conn
 	consumers       *intake.Consumers
 	outbox          *outbox
+	// bootID disambiguates this boot's synthetic Dispatch consumer position facts from another
+	// boot's, or another project's daemon: processed_events is keyed only on (source, event_id),
+	// shared by every project's daemon in the database, and a stream recreated by a later boot
+	// would otherwise repeat the same (ack floor, idle) pairs and have its own releases swallowed
+	// as duplicates of the previous boot's.
+	bootID string
+	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
+	// test shortens it to bound how long a release takes to observe.
+	holdPollInterval time.Duration
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -128,7 +137,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// The database is shared by every project's daemon: the workflow reads this project's issues.
 	records := projectRecords{Store: record.NewStore(), project: cfg.Project}
 	engine := workflow.New(records, engineConfig(cfg, reviewAppLogin), log)
-	admission := admit.New(records, cfg.AdmissionCap, cfg.Project, log)
+	admission := admit.New(records, engine, cfg.AdmissionCap, cfg.Project, log)
 	return &workflowRuntime{
 		pool: st.Pool(), records: records, engine: engine, admission: admission,
 		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner,
@@ -170,7 +179,11 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error 
 	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
 		Project: cfg.Project, Repositories: []ghrepo.Repository{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
+	return nil
 }
 
 // phaseHolds answers supervise's Deps.PhaseHolds from the issue record: a task carries the phase
@@ -323,13 +336,17 @@ func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, 
 func (w *workflowRuntime) run(ctx context.Context) error {
 	group, running := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		if err := w.consumers.Run(running, w.pool, w.admission, w.handlers...); err != nil {
+		if err := w.consumers.Run(running, w.pool, w.handlers...); err != nil {
 			return fmt.Errorf("workflow intake stopped: %w", err)
 		}
 		return nil
 	})
 	group.Go(func() error {
 		w.outbox.Run(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.pollHoldRelease(running)
 		return nil
 	})
 	group.Go(func() error {
@@ -341,6 +358,68 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		}
 	})
 	return group.Wait()
+}
+
+// defaultHoldPollInterval is pollHoldRelease's production ticker period.
+const defaultHoldPollInterval = 2 * time.Second
+
+// positionReader is pollHoldRelease's only dependency on the Dispatch consumer: reading its
+// current position. A test substitutes one that fails on demand to prove the poll logs and
+// retries rather than silently ending the hold.
+type positionReader interface {
+	DispatchPosition(ctx context.Context) (intake.DispatchConsumerPosition, error)
+}
+
+// pollHoldRelease is the boot-owned release B1 replaces intake's per-delivery hook with: while
+// admission holds anything back, it re-reads the Dispatch consumer's own position on a ticker and
+// applies each changed reading as a synthetic fact, independent of any message delivery. A quiet
+// stream after its last backlog message delivers nothing further to trigger a release the old
+// per-delivery hook depended on, and Ack() does not wait for the server: a position read taken
+// immediately after a delivery's own ack can still see the previous one. This ticker is what
+// eventually observes the ack once JetStream has applied it, bounded by its own period, and what
+// closes a hold nothing will ever redeliver — the recreated-consumer and outbox-lag cases alike.
+// A failed read is logged and retried on the next tick; the hold never ends on the strength of an
+// error. The event id folds in the project and this boot (bootID): processed_events is one table
+// shared by every project's daemon, and a stream a later boot recreates would otherwise repeat an
+// earlier boot's (ack floor, idle) pairs and have its own release swallowed as a duplicate of one
+// that ran under the old boot.
+func (w *workflowRuntime) pollHoldRelease(ctx context.Context) {
+	w.pollHoldReleaseWith(ctx, w.consumers)
+}
+
+func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positionReader) {
+	interval := w.holdPollInterval
+	if interval <= 0 {
+		interval = defaultHoldPollInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var last intake.DispatchConsumerPosition
+	haveLast := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if !w.admission.Held() {
+			haveLast = false
+			continue
+		}
+		position, err := reader.DispatchPosition(ctx)
+		if err != nil {
+			w.log.Error("read Dispatch consumer position for a held release", "error", err)
+			continue
+		}
+		if haveLast && position == last {
+			continue
+		}
+		last, haveLast = position, true
+		eventID := fmt.Sprintf("dispatch-position:%s:%s:%d:%t", w.dispatchProject, w.bootID, position.AckFloorStream, position.Idle)
+		if _, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, position, w.handlers...); err != nil {
+			w.log.Warn("apply Dispatch consumer position failed", "error", err)
+		}
+	}
 }
 
 func (w *workflowRuntime) stop() {

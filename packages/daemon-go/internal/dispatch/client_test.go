@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"testing"
 	"time"
 )
@@ -41,11 +40,11 @@ func TestListIssuesFiltersStatusesWithoutChangingDispatchOrder(t *testing.T) {
 	if len(issues) != 2 {
 		t.Fatalf("listed issues = %#v, want two todo issues", issues)
 	}
-	if issues[0].Key != "LEGION-3" || fmt.Sprint(issues[0].Rank) != "b" || !slices.Equal(issues[0].Labels, []string{"frontend", "Legion"}) {
-		t.Fatalf("first filtered issue = %#v, want LEGION-3 with Dispatch rank b and its labels as Dispatch wrote them", issues[0])
+	if issues[0].Key != "LEGION-3" || fmt.Sprint(issues[0].Rank) != "b" || !issues[0].HandedOver {
+		t.Fatalf("first filtered issue = %#v, want LEGION-3 with Dispatch rank b, handed over (its labels carried Legion)", issues[0])
 	}
-	if issues[1].Key != "LEGION-2" || fmt.Sprint(issues[1].Rank) != "c" || issues[1].Parent == nil || *issues[1].Parent != "LEGION-1" || len(issues[1].Labels) != 0 {
-		t.Fatalf("second filtered issue = %#v, want LEGION-2 with Dispatch rank c under LEGION-1 and no labels", issues[1])
+	if issues[1].Key != "LEGION-2" || fmt.Sprint(issues[1].Rank) != "c" || issues[1].Parent == nil || *issues[1].Parent != "LEGION-1" || issues[1].HandedOver {
+		t.Fatalf("second filtered issue = %#v, want LEGION-2 with Dispatch rank c under LEGION-1, not handed over (no labels)", issues[1])
 	}
 }
 
@@ -302,5 +301,25 @@ func TestMessageBodiesSincePagesNewestFirstUntilTheOutboxWindow(t *testing.T) {
 	}
 	if requests != 2 || len(bodies) != 1 || bodies[0] != "Existing daemon notice." {
 		t.Fatalf("requests=%d bodies=%#v, want one recent message", requests, bodies)
+	}
+}
+
+// Dispatch keeps a label's case as typed and treats labels differing only in case as one label, so
+// the label that hands an issue to Legion matches in any case, and nothing else stands in for it.
+func TestCarriesLegionLabelMatchesTheLabelInAnyCaseAndNothingElse(t *testing.T) {
+	for _, tc := range []struct {
+		labels []string
+		want   bool
+	}{
+		{labels: []string{"legion"}, want: true},
+		{labels: []string{"frontend", "Legion"}, want: true},
+		{labels: []string{"LEGION"}, want: true},
+		{labels: nil},
+		{labels: []string{"frontend"}},
+		{labels: []string{"legion-smoke", "not legion"}},
+	} {
+		if got := CarriesLegionLabel(tc.labels); got != tc.want {
+			t.Errorf("CarriesLegionLabel(%q) = %v, want %v", tc.labels, got, tc.want)
+		}
 	}
 }

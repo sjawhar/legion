@@ -73,7 +73,7 @@ func TestApplyFactDeduplicatesBeforeHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("duplicate ApplyFact: %v", err)
 	}
-	if result != (Result{Duplicate: true}) {
+	if result.Duplicate != true || result.Refusal != nil || len(result.AfterCommit) != 0 {
 		t.Fatalf("duplicate result = %#v, want a duplicate with no refusal", result)
 	}
 	if got := writeCount(t, pool); got != 1 {
@@ -118,19 +118,19 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch issue created",
 			subject: "notifications.dispatch.issue.CAPTURE-4.issue.created",
 			file:    "dispatch/issue-created.json",
-			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 1, Type: "issue.created", Status: "triage", Title: "Captured approval issue", Rank: "UUUU", Labels: []string{}},
+			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 1, Type: "issue.created", Status: "triage", Title: "Captured approval issue", Rank: "UUUU"},
 		},
 		{
 			name:    "Dispatch issue updated",
 			subject: "notifications.dispatch.issue.CAPTURE-3.issue.updated",
 			file:    "dispatch/issue-updated.json",
-			want:    DispatchIssue{Key: "CAPTURE-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "Captured workflow issue", Rank: "UUU", Labels: []string{}},
+			want:    DispatchIssue{Key: "CAPTURE-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "Captured workflow issue", Rank: "UUU"},
 		},
 		{
 			name:    "Dispatch issue closed",
 			subject: "notifications.dispatch.issue.CAPTURE-4.issue.closed",
 			file:    "dispatch/issue-closed.json",
-			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 6, Type: "issue.closed", Status: "done", Title: "Captured approval issue", Rank: "UUUU", Labels: []string{}},
+			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 6, Type: "issue.closed", Status: "done", Title: "Captured approval issue", Rank: "UUUU"},
 		},
 		{
 			name:    "Dispatch artifact version",
@@ -223,17 +223,18 @@ func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	}
 }
 
-// An issue event carries the issue's labels, which say whether it is handed to Legion; they reach the
-// fact as Dispatch wrote them, case and order kept.
-func TestADispatchIssueEventCarriesItsLabels(t *testing.T) {
+// An issue event's labels say whether it is handed to Legion; decodeDispatchFact resolves that
+// once, into HandedOver, matching the label in any case among any others, never carrying the raw
+// list itself.
+func TestADispatchIssueEventResolvesHandedOverFromItsLabels(t *testing.T) {
 	data := strings.Replace(string(capturedIssueUpdatedEnvelope(t)), `\"labels\":[]`, `\"labels\":[\"frontend\",\"Legion\"]`, 1)
 	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(data))
 	if err != nil {
 		t.Fatalf("decode labeled issue.updated envelope: %v", err)
 	}
 	issue, ok := got.Fact.(DispatchIssue)
-	if !ok || !slices.Equal(issue.Labels, []string{"frontend", "Legion"}) {
-		t.Fatalf("fact = %#v, want a Dispatch issue carrying labels [frontend Legion]", got.Fact)
+	if !ok || !issue.HandedOver {
+		t.Fatalf("fact = %#v, want a Dispatch issue with HandedOver true (labels included Legion)", got.Fact)
 	}
 }
 
@@ -584,7 +585,7 @@ func runConsumers(t *testing.T, consumers *Consumers, pool *pgxpool.Pool, handle
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(ctx, pool, nil, handlers...) }()
+	go func() { done <- consumers.Run(ctx, pool, handlers...) }()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -971,123 +972,5 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 		if review, ok := decoded.Fact.(PullRequestReview); err != nil || !ok || !review.SubmittedAt.IsZero() || len(decoded.Unread) != 0 {
 			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and nothing reported", absent, decoded.Fact, decoded.Unread, err)
 		}
-	}
-}
-
-// The Dispatch consumer's every delivery checks a DispatchObserver's Held, decoded into a fact or
-// not: while held, the position check applies a synthetic DispatchConsumerPosition fact through
-// the same handlers every other fact reaches; while not held, nothing is checked and no such fact
-// is ever applied - and never for the GitHub consumer's own delivery either way.
-func TestConsumeAppliesDispatchConsumerPositionOnlyWhileHeld(t *testing.T) {
-	pool := migratedPool(t)
-	createWrites(t, pool)
-	js, _ := testJetStream(t)
-	spec := consumerSpec(&lockedBuffer{})
-	observer := &heldStub{}
-	positions := &positionRecorder{}
-	consumers, err := OpenConsumers(context.Background(), js, spec)
-	if err != nil {
-		t.Fatalf("OpenConsumers: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		done <- consumers.Run(ctx, pool, observer, writeHandler("applied", nil), positions.handler())
-	}()
-	defer func() {
-		cancel()
-		if err := <-done; err != nil {
-			t.Errorf("Run: %v", err)
-		}
-	}()
-
-	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.comment.created", envelopeJSON(t, "dispatch-comment", "dispatch",
-		`{"id":2,"issue_key":"CAPTURE-3","seq":9,"notify":true,"type":"comment.created","payload":{"body":"hi"}}`))
-	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
-	testwait.Eventually(t, "the Dispatch issue.updated applied", func() bool { return len(writeHandlers(t, pool)) == 1 })
-	time.Sleep(3 * spec.AckWait)
-	if got := positions.count(); got != 0 {
-		t.Fatalf("Dispatch consumer positions applied while not held = %d, want 0", got)
-	}
-
-	observer.setHeld(true)
-	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.comment.created", envelopeJSON(t, "dispatch-comment", "dispatch",
-		`{"id":3,"issue_key":"CAPTURE-3","seq":10,"notify":true,"type":"comment.created","payload":{"body":"bye"}}`))
-	testwait.Eventually(t, "a Dispatch consumer position applied once held", func() bool { return positions.count() > 0 })
-}
-
-type heldStub struct {
-	mu   sync.Mutex
-	held bool
-}
-
-func (h *heldStub) Held() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.held
-}
-
-func (h *heldStub) setHeld(v bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.held = v
-}
-
-type positionRecorder struct {
-	mu sync.Mutex
-	n  int
-}
-
-func (p *positionRecorder) handler() Handler {
-	return handlerFunc(func(_ context.Context, _ pgx.Tx, fact Fact) (Result, error) {
-		if _, ok := fact.(DispatchConsumerPosition); ok {
-			p.mu.Lock()
-			p.n++
-			p.mu.Unlock()
-		}
-		return Result{}, nil
-	})
-}
-
-func (p *positionRecorder) count() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.n
-}
-
-// A Dispatch consumer recreated after messages already landed on the stream — deleted and
-// reopened, or a first boot against a stream that already carries history — starts at
-// DeliverNewPolicy: it will never receive those older messages, so its ack floor can never reach
-// a target the listing read against them. DispatchPosition's idle, not the ack floor alone, is
-// what tells Reconcile nothing more is ever coming for a record those messages already advanced
-// past.
-func TestDispatchPositionIsIdleForARecreatedConsumerBehindPreExistingMessages(t *testing.T) {
-	js, _ := testJetStream(t)
-	spec := consumerSpec(&lockedBuffer{})
-	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.comment.created", envelopeJSON(t, "dispatch-comment", "dispatch",
-		`{"id":2,"issue_key":"CAPTURE-3","seq":9,"notify":true,"type":"comment.created","payload":{"body":"hi"}}`))
-
-	consumers, err := OpenConsumers(context.Background(), js, spec)
-	if err != nil {
-		t.Fatalf("OpenConsumers: %v", err)
-	}
-	target, err := consumers.DispatchTarget(context.Background())
-	if err != nil {
-		t.Fatalf("DispatchTarget: %v", err)
-	}
-	if target < 2 {
-		t.Fatalf("target = %d, want at least 2 (the two messages already published)", target)
-	}
-	position, err := consumers.DispatchPosition(context.Background())
-	if err != nil {
-		t.Fatalf("DispatchPosition: %v", err)
-	}
-	if !position.Idle {
-		t.Fatalf("idle = false for a freshly (re)created consumer with nothing it can ever deliver from before it existed, want true")
-	}
-	if position.AckFloorStream >= target {
-		t.Fatalf("ack_floor = %d, target = %d; want ack_floor short of target so idle is what closes the gap, not the floor", position.AckFloorStream, target)
 	}
 }

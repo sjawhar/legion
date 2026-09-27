@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 type engineStub struct {
@@ -56,13 +57,16 @@ func (e engineStub) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 const testProject = "LEGION"
 
 // handed is the label set of an issue handed to Legion.
-var handed = []string{record.LegionLabel}
+// handed is the label list intake.DispatchIssue.Labels once carried; the wire types now
+// resolve HandedOver at the decode/client boundary, so tests set it directly.
+const handed = true
 
 var fixedNow = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 
 func newAdmission(t *testing.T, cap int, log *slog.Logger) *Admission {
 	t.Helper()
-	admission := New(record.NewStore(), cap, testProject, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Clock: func() time.Time { return fixedNow }}, log)
+	admission := New(record.NewStore(), engine, cap, testProject, log)
 	admission.now = func() time.Time { return fixedNow }
 	return admission
 }

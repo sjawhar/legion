@@ -130,21 +130,21 @@ func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
 // Run consumes both durable consumers until ctx ends, and returns the error of either one that
 // stops first. Every decoded fact enters ApplyFact; a committed transaction is acknowledged, a
 // rolled-back transaction is nacked with a delay, poison is terminated, and a committed refusal is
-// logged then acknowledged. observer, when not nil, is told about every message the Dispatch
-// consumer delivers — decoded into a fact or not, poison or applied — never about the GitHub
-// consumer's.
-func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, observer DispatchObserver, handlers ...Handler) error {
+// logged then acknowledged. The Dispatch consumer's own position, and admission's hold on it, are
+// the daemon's boot-owned concern (workflowRuntime.pollHoldRelease), not intake's: this loop knows
+// nothing about either.
+func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, handlers ...Handler) error {
 	group, consumeContext := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, observer, handlers)
+		return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, handlers)
 	})
-	group.Go(func() error { return consumeConsumer(consumeContext, c.github, c.spec, pool, nil, handlers) })
+	group.Go(func() error { return consumeConsumer(consumeContext, c.github, c.spec, pool, handlers) })
 	return group.Wait()
 }
 
-func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec ConsumerSpec, pool *pgxpool.Pool, observer DispatchObserver, handlers []Handler) error {
+func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec ConsumerSpec, pool *pgxpool.Pool, handlers []Handler) error {
 	consuming, err := consumer.Consume(func(message jetstream.Msg) {
-		consumeMessage(ctx, message, consumer, spec, pool, observer, handlers)
+		consumeMessage(ctx, message, spec, pool, handlers)
 	})
 	if err != nil {
 		return err
@@ -162,10 +162,7 @@ func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec Cons
 	}
 }
 
-func consumeMessage(ctx context.Context, message jetstream.Msg, consumer jetstream.Consumer, spec ConsumerSpec, pool *pgxpool.Pool, observer DispatchObserver, handlers []Handler) {
-	if observer != nil {
-		defer notePosition(ctx, consumer, pool, spec, observer, handlers)
-	}
+func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, handlers []Handler) {
 	decoded, err := decodeMessage(message.Subject(), spec.Project, spec.Repositories, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
@@ -199,28 +196,6 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, consumer jetstre
 		)
 	}
 	ackMessage(spec.Logger, message)
-}
-
-// notePosition applies a synthetic DispatchConsumerPosition fact through ApplyFact — a real
-// transaction under the fact lock, so a release it unblocks is promoted in the same commit — with
-// the Dispatch consumer's current ack floor and idle state, but only while the observer holds
-// something back: reading consumer info costs a JetStream call, paid only while a hold exists.
-// The event id keys on the values themselves, so repeated checks that find the same position
-// (ack floor unmoved, still not idle) are idempotent no-ops, not wasted transactions.
-func notePosition(ctx context.Context, consumer jetstream.Consumer, pool *pgxpool.Pool, spec ConsumerSpec, observer DispatchObserver, handlers []Handler) {
-	if !observer.Held() {
-		return
-	}
-	info, err := consumer.Info(ctx)
-	if err != nil {
-		spec.Logger.Error("read Dispatch consumer info for a held release", "error", err)
-		return
-	}
-	position := positionOf(info)
-	eventID := fmt.Sprintf("dispatch-position:%d:%t", position.AckFloorStream, position.Idle)
-	if _, err := ApplyFact(ctx, pool, "dispatch", eventID, position, handlers...); err != nil {
-		spec.Logger.Warn("apply Dispatch consumer position failed", "error", err)
-	}
 }
 
 func ackMessage(logger *slog.Logger, message jetstream.Msg) {

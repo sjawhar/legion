@@ -4,7 +4,6 @@ import (
 	"context"
 	"slices"
 	"sort"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -32,18 +31,6 @@ func OutOfWorkflow(status string) bool {
 	}
 }
 
-// LegionLabel is the Dispatch label that hands an issue to Legion. A human sets it from the issue
-// header in the Dispatch dashboard, an agent with Dispatch's issue tools. A label is the mark, and
-// not the issue's route, because a route has Dispatch publish every event of the issue to the
-// route's topic, while a label only marks it.
-const LegionLabel = "legion"
-
-// CarriesLegionLabel says whether labels include LegionLabel. Dispatch keeps a label's case as it
-// was typed and holds labels differing only in case as one label, so the match ignores case.
-func CarriesLegionLabel(labels []string) bool {
-	return slices.ContainsFunc(labels, func(label string) bool { return strings.EqualFold(label, LegionLabel) })
-}
-
 // Waiting returns the slotless todo roots and orphans handed to Legion, in Dispatch rank order. A
 // root without the label waits for nothing; a child's tree holds its place, so a child needs none.
 func Waiting(issues []Issue, slots []Slot) []Issue {
@@ -66,7 +53,7 @@ func Waiting(issues []Issue, slots []Slot) []Issue {
 // TreeLive says whether root's tree is live: the root holds a slot or waits for one, and does not
 // linger after its close. A todo child under a live tree runs in it; under any other it is an orphan.
 func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, error) {
-	if root.LingerUntil != nil {
+	if root.Lingers() {
 		return false, nil
 	}
 	slots, err := store.Slots(ctx, tx)

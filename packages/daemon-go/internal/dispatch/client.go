@@ -56,13 +56,13 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 			}
 		}
 		issues = append(issues, IssueSummary{
-			Key:     issue.Key,
-			Title:   issue.Title,
-			Status:  issue.Status,
-			Parent:  issue.Parent,
-			Rank:    issue.Rank,
-			Labels:  issue.Labels,
-			LastSeq: issue.LastSeq,
+			Key:        issue.Key,
+			Title:      issue.Title,
+			Status:     issue.Status,
+			Parent:     issue.Parent,
+			Rank:       issue.Rank,
+			HandedOver: CarriesLegionLabel(issue.Labels),
+			LastSeq:    issue.LastSeq,
 		})
 	}
 	return issues, nil
