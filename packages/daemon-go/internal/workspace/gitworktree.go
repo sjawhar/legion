@@ -243,6 +243,25 @@ func restoreGitWorktree(ctx context.Context, run Runner, workspace Workspace, lo
 	if err := os.Rename(tmp, target); err != nil {
 		return fmt.Errorf("restore git worktree %s: %w", target, err)
 	}
+	// No lock makes two concurrent restores of this workspace impossible on every path that
+	// reaches here: workspace-init's own per-repository flock covers only the Kubernetes init
+	// container, and the Go daemon's own tmux-runtime path (outbox.go) serializes provisioning
+	// only incidentally, through a single daemon process running one strictly sequential
+	// goroutine, not a dedicated per-workspace claim. So a stale sibling from an earlier kill is
+	// swept only now, after this restore's own rename already succeeded: at this point our own
+	// temporary directory is gone (renamed away), target exists complete, and any sibling still
+	// naming this workspace is provably not still in use by us -- a still-racing concurrent
+	// restore's own eventual rename onto target can now only fail, never corrupt what this one
+	// just wrote, so sweeping it costs that race nothing this restore did not already win.
+	if stale, globErr := filepath.Glob(filepath.Join(worktrees, "."+filepath.Base(target)+".restore-*")); globErr != nil {
+		log(fmt.Sprintf("Workspace %s: could not list stale restore entries under %s: %v", workspace.Dir, worktrees, globErr))
+	} else {
+		for _, entry := range stale {
+			if err := os.RemoveAll(entry); err != nil {
+				log(fmt.Sprintf("Workspace %s: could not remove the stale restore entry %s: %v", workspace.Dir, entry, err))
+			}
+		}
+	}
 	log(fmt.Sprintf("Workspace %s had lost its git worktree entry %s (a git worktree prune that could not see the workspace deletes it): restored it %s, the working copy untouched", workspace.Dir, target, where))
 	return nil
 }

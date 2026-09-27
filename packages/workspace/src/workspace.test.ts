@@ -2589,7 +2589,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(await readdir(elsewhere)).toEqual([]);
   }, 60_000);
 
-  test("restores cleanly after a kill between the writes despite an unrelated stale temporary sibling", async () => {
+  test("restores cleanly after a kill between the writes, sweeping the unrelated stale temporary sibling", async () => {
     const [{ name, command }] = JJ_BINARIES;
     const stateDir = path.join(await temporaryDirectory(), "state");
     const { workspaceDir, deps } = await realJjRig(command, stateDir);
@@ -2598,15 +2598,16 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     await rm(admin, { recursive: true, force: true });
     // A process killed after mkdtemp but before every write, or before the rename, leaves exactly
     // this: a temporary sibling with partial or stale content, and no entry at admin itself. Its
-    // randomized name means a later attempt cannot find or clear it by name, so it plays no part in
-    // the present check, which looks at admin alone; whether it survives or some other step clears
-    // it away is incidental, not part of the contract under test here.
+    // randomized name means a later attempt cannot find or clear it by name until that attempt's
+    // own restore succeeds, at which point it sweeps every such sibling: nothing else can still be
+    // using one, since TmuxRuntime's provisionQueue serializes this whole call by repository.
     const stale = path.join(path.dirname(admin), `.${path.basename(admin)}.restore-stale`);
     await mkdir(stale, { recursive: true });
     await writeFile(path.join(stale, "HEAD"), "stale\n", "utf8");
 
     await provisionIssueWorkspace("WIDGETS-42", deps);
     expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+    expect(existsSync(stale), name).toBeFalse();
   }, 60_000);
 
   test("restores a workspace with no real parent commit using jj's own unborn ref and an empty index", async () => {

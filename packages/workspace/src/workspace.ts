@@ -930,7 +930,26 @@ async function restoreGitWorktree(
   // with this temporary one. The random suffix also keeps two concurrent restores of the same
   // workspace from writing into, and renaming, the same temporary directory.
   await mkdir(worktrees, { recursive: true });
-  const tmp = await mkdtemp(path.join(worktrees, `.${path.basename(target)}.restore-`));
+  // TmuxRuntime.provisionQueue (runtime-tmux.ts), an async mutex keyed by repository wrapping
+  // every provisionIssueWorkspace call including this one, makes two concurrent restores of this
+  // workspace impossible: nothing else can be using a temporary entry naming this workspace while
+  // we hold it, so any left over from an earlier kill is swept before this restore creates its own.
+  const restorePrefix = `.${path.basename(target)}.restore-`;
+  const siblings = await readdir(worktrees).catch((error) => {
+    console.error(
+      `[legion] workspace ${workspaceDir}: could not list stale restore entries under ${worktrees}: ${error}`
+    );
+    return [];
+  });
+  for (const entry of siblings) {
+    if (!entry.startsWith(restorePrefix)) continue;
+    await rm(path.join(worktrees, entry), { recursive: true, force: true }).catch((error) => {
+      console.error(
+        `[legion] workspace ${workspaceDir}: could not remove the stale restore entry ${entry}: ${error}`
+      );
+    });
+  }
+  const tmp = await mkdtemp(path.join(worktrees, restorePrefix));
   // mkdtemp creates tmp at 0o700; git's own worktree entries land at 0o755 (a plain mkdir under the
   // ordinary 022 umask), and this restore's doc comment says it writes what `git worktree add`
   // would, so the mode matches too.
