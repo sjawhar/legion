@@ -1845,6 +1845,9 @@ export async function executeDispatchTool(
       const status = optionalString(args, "status");
       const parent = optionalString(args, "parent");
       const label = optionalString(args, "label");
+      const priority = Array.isArray(args.priority)
+        ? (args.priority as (IssuePriority | null)[]).map((value) => value ?? ("none" as const))
+        : undefined;
       const updatedSince = optionalString(args, "updated_since");
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
       const issues = await client.listIssues({
@@ -1852,6 +1855,7 @@ export async function executeDispatchTool(
         ...(status === undefined ? {} : { status }),
         ...(parent === undefined ? {} : { parent }),
         ...(label === undefined ? {} : { label }),
+        ...(priority === undefined ? {} : { priority }),
         ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
       });
       const rows = issues.slice(0, limit).map((row) => ({

@@ -1448,6 +1448,7 @@ describe("executeDispatchTool", () => {
         status: "todo",
         parent: "AGENTC-9",
         label: "bug",
+        priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
       },
       cwd: "/workspace",
@@ -1462,13 +1463,17 @@ describe("executeDispatchTool", () => {
       "/api/v1/issues",
       "/api/v1/agents",
     ]);
-    expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
-      project: "AGENTC",
-      status: "todo",
-      parent: "AGENTC-9",
-      label: "bug",
-      updated_since: "2026-09-01T00:00:00Z",
-    });
+    // Each priority repeats as its own parameter, and null asks for issues with no priority.
+    expect([...(requests[0]?.searchParams ?? [])]).toEqual([
+      ["project", "AGENTC"],
+      ["status", "todo"],
+      ["parent", "AGENTC-9"],
+      ["label", "bug"],
+      ["priority", "0"],
+      ["priority", "1"],
+      ["priority", "none"],
+      ["updated_since", "2026-09-01T00:00:00Z"],
+    ]);
     expect(result.details).toEqual({
       issues: [
         {
