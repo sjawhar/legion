@@ -203,6 +203,71 @@ func TestSettlementStampingBlockIDsWritesNoVersion(t *testing.T) {
 	}
 }
 
+// A settlement that writes no version moves no version cursor, so the row its closure appended
+// stays past that cursor for good. The row therefore has to say what the closure actually
+// rendered: one that claimed a content change it never made would leave `contentChanged` true on
+// every later settlement of that document, and the first one after a renderer change - opening
+// the document schedules one - would version a document nobody had touched, credited to nobody,
+// staling its approval all over again.
+func TestSettlementRepairThatRendersTheSameMarkdownRecordsNoContentChange(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "snake_case here")
+	seedUnidentifiedProofDocument(t, database, artifactID, "snake_case here")
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	alignLatestVersionWithUpdates(t, service, artifactID)
+
+	settleCurrentGeneration(t, service, artifactID)
+
+	if repairs := pmdoc.BlockIDRepairCount(persistedProofTree(t, database, artifactID)); repairs != 0 {
+		t.Fatalf("settlement left %d unstamped blocks, so it never ran its repair", repairs)
+	}
+	if rows := contentRowsPastLatestVersion(t, database, artifactID); rows != 0 {
+		t.Fatalf("the repair left %d content-class rows past the latest version's cursor; a block id no rendering carries changed no text", rows)
+	}
+
+	// A deployed renderer change, as the stored version sees it: the document now renders
+	// differently from the markdown the version holds, and nobody has touched it.
+	if _, err := database.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, artifactID, "snake\\_case here\n"); err != nil {
+		t.Fatalf("store the older rendering on the latest version: %v", err)
+	}
+
+	settleCurrentGeneration(t, service, artifactID)
+
+	var versions int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from artifact_versions where artifact_id = $1
+	`, artifactID).Scan(&versions); err != nil {
+		t.Fatalf("count document versions: %v", err)
+	}
+	if versions != 1 {
+		t.Fatalf("settling an untouched document under a changed rendering wrote %d versions, want the one it found", versions)
+	}
+}
+
+// contentRowsPastLatestVersion is how many content-class document updates lie past the cursor of
+// the document's latest version - what `contentChangedSinceVersion` asks the next settlement.
+func contentRowsPastLatestVersion(t *testing.T, database *store.Store, artifactID string) int {
+	t.Helper()
+	var rows int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from doc_updates
+		where artifact_id = $1 and content_changed and version > (
+			select doc_update_version from artifact_versions
+			where artifact_id = $1 order by number desc limit 1
+		)
+	`, artifactID).Scan(&rows); err != nil {
+		t.Fatalf("count content updates past the latest version: %v", err)
+	}
+	return rows
+}
+
 // A settlement that writes no version leaves the document at the version it found, and the
 // events that name one - here `block.invalid`, whose `invalid` attribute no rendering carries -
 // have to say that number rather than the one the settlement would have written.

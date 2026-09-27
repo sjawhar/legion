@@ -777,6 +777,15 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 
+	// What the document renders before its closure runs. The closure's own update is classified
+	// against it (closureChangedMarkdown), as a transactional live write classifies its own
+	// (applyJoined): a `doc_updates` row says whether the update changed the rendered markdown,
+	// and a repair that renders the document exactly as it was changed none. A row that claimed
+	// otherwise would sit past every later version's cursor, since no version follows it to move
+	// the cursor, and the first settlement after a renderer change would version a document
+	// nobody had touched.
+	beforeMarkdown, beforeRenderErr := renderTree(tree)
+
 	stamped := pmdoc.BlockIDRepairCount(tree)
 	var slot *suppressSlot
 	var updates [][]byte
@@ -831,7 +840,8 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.failRoom(room, fmt.Errorf("broadcast superseded document identity update: %w", err))
 			return
 		}
-		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, identityUpdate, true); err != nil {
+		identityChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, tree)
+		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, identityUpdate, identityChanged); err != nil {
 			s.discardSuppressedPersistence(room, slot)
 			s.failRoom(room, err)
 			return
@@ -900,7 +910,8 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.failRoom(room, fmt.Errorf("broadcast document closure update: %w", err))
 			return
 		}
-		if _, appendErr := s.persistence.AppendUpdateTx(ctx, tx, room, update, true); appendErr != nil {
+		closureChanged := closureChangedMarkdown(beforeMarkdown, beforeRenderErr, tree)
+		if _, appendErr := s.persistence.AppendUpdateTx(ctx, tx, room, update, closureChanged); appendErr != nil {
 			s.discardSuppressedPersistence(room, slot)
 			s.failRoom(room, appendErr)
 			return
@@ -960,10 +971,13 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return nil
 	}
 	// Settlement writes a version only when the document now reads differently from the latest
-	// one. Its own writes - stamping block ids, restoring an ask block's server-owned
-	// attributes, indexing a new ask - change the stored Proof state while rendering the same
-	// markdown, so a version they minted repeated the version before it, credited to nobody,
-	// and staled an approval pinned to what an agent had just written (LEGION-273, LEGION-229).
+	// one. Indexing an ask block writes an `asks` row and an `ask.opened` event over words the
+	// edit that wrote the block already versioned, and settlement used to version the document
+	// for that event alone: a byte-identical version credited to nobody, which staled an
+	// approval pinned to what an agent had just written (LEGION-273). Its tree writes - stamping
+	// block ids, restoring an ask block's server-owned attributes - move the stored Proof state
+	// and often render the same markdown, and a version for one of those repeated the version
+	// before it too (LEGION-229 requirement 2).
 	// contentChanged stays the first half of the test: a version an older renderer wrote is not
 	// this settlement's to canonicalise when nothing has touched the document since.
 	contentChanged, err := contentChangedSinceVersion(ctx, tx, room, latest.docUpdateVersion)
@@ -1177,10 +1191,19 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	backfillCtx := withOwnerVerified(ctx)
 	slot := s.prepareSuppressedPersistence(artifactID)
 	origin := &identityClosureOrigin{}
+	// The backfill writes the same closure the settlement does, so its row is classified the same
+	// way: stamping a block a rendering never names changes no text, while re-minting a typed
+	// block's repeated id changes the `#id` its directive carries.
+	var stampedChanged bool
 	updates, err := s.applyCaptured(backfillCtx, artifactID, origin, func(doc *crdt.Doc) error {
-		var stampErr error
-		_, report.Stamped, stampErr = ensureBlockIDsInDocument(doc, origin)
-		return stampErr
+		before, beforeErr := renderDocument(doc)
+		stamped, count, stampErr := ensureBlockIDsInDocument(doc, origin)
+		report.Stamped = count
+		if stampErr != nil {
+			return stampErr
+		}
+		stampedChanged = closureChangedMarkdown(before, beforeErr, stamped)
+		return nil
 	})
 	if err != nil {
 		s.cancelSuppressedPersistence(artifactID, slot)
@@ -1212,7 +1235,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		return report
 	}
 	defer tx.Rollback(ctx)
-	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, true); err != nil {
+	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, stampedChanged); err != nil {
 		s.discardSuppressedPersistence(artifactID, slot)
 		s.failRoom(artifactID, err)
 		report.Err = fmt.Errorf("append identity update: %w", err)
