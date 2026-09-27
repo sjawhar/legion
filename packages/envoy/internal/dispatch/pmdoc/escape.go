@@ -315,18 +315,28 @@ func closesTypedBlock(line, prefix string) bool {
 // anything here. The lines are read as the content of the blockquotes their prefix opens, without
 // the list indentation they share up to the indentation of that prefix, so a deeply nested item
 // is not read as indented code while text that is itself indented still is. footnote is the
-// label, as written, of the footnote definition the read begins with, or empty: the parser drops a
-// definition nothing refers to, so the lines are read after a reference to it.
+// label, as written, of the footnote definition the read begins with, or empty: its opener stands
+// in the columns its later lines are indented, so the lines are read as its content with the
+// opener written as those columns' spaces, and a quote opening its first line is read as the one
+// its later lines carry.
 func lineReadsAsText(before, line, rewrittenLine, prefix, footnote string) bool {
+	if footnote != "" {
+		opener := "[^" + footnote + "]: "
+		if before != "" {
+			before = definitionIndent + strings.TrimPrefix(before, opener)
+		} else {
+			line = definitionIndent + strings.TrimPrefix(line, opener)
+			rewrittenLine = definitionIndent + strings.TrimPrefix(rewrittenLine, opener)
+		}
+	}
 	quote, indentation := splitPrefix(prefix)
 	written := dedent(unquote(before+line, quote), indentation)
 	rewritten := dedent(unquote(before+rewrittenLine, quote), indentation)
-	if footnote != "" {
-		reference := "x[^" + footnote + "]\n\n"
-		written, rewritten = reference+written, reference+rewritten
-	}
 	return slices.Equal(blockKinds(written), blockKinds(rewritten))
 }
+
+// definitionIndent is the indentation a footnote definition's later lines are written with.
+const definitionIndent = "    "
 
 // splitPrefix splits a textblock's line prefix into the blockquote markers it opens with - up to
 // its last `>` and the one space after it - and the indentation of the list items inside them.
@@ -341,7 +351,8 @@ func splitPrefix(prefix string) (quote string, indentation int) {
 }
 
 // unquote drops quote from the start of each line that carries it, or its trimmed form from a
-// blank quoted line.
+// blank quoted line. A container's first line carries it with list markers where its later lines
+// write spaces (`- > ` over `  > `), and drops the same columns.
 func unquote(lines, quote string) string {
 	if quote == "" {
 		return lines
@@ -349,13 +360,27 @@ func unquote(lines, quote string) string {
 	blank := strings.TrimRight(quote, " ")
 	parts := strings.Split(lines, "\n")
 	for index, line := range parts {
-		if strings.HasPrefix(line, quote) {
+		if quotedBy(line, quote) {
 			parts[index] = line[len(quote):]
-		} else if strings.HasPrefix(line, blank) {
+		} else if quotedBy(line, blank) {
 			parts[index] = line[len(blank):]
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// quotedBy reports whether line opens with quote, or with a list marker's characters in the
+// columns quote holds spaces.
+func quotedBy(line, quote string) bool {
+	if len(line) < len(quote) {
+		return false
+	}
+	for index := range len(quote) {
+		if quote[index] != line[index] && (quote[index] != ' ' || !strings.ContainsRune("-+*.)0123456789", rune(line[index]))) {
+			return false
+		}
+	}
+	return true
 }
 
 // blockKinds is the kinds of the blocks the parser reads markdown as, in document order.
