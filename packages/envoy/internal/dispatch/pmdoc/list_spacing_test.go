@@ -55,6 +55,12 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			refused: "> > - a\n> >\n> >   -\n> >\n> >   x\n",
 		},
 		{
+			// The empty item's content starts on the next line, so the ordered list is the outer
+			// item's, and so is the paragraph after the blank line.
+			name:    "an empty list item holding a list on its next line, then a blank line and a paragraph",
+			refused: "-\n  1.\n\n  para\n",
+		},
+		{
 			name:    "an empty list item followed by a blank quote line and a quote in the list item around it",
 			refused: "> - a\n>\n>   -\n>\n>   > x\n",
 		},

@@ -65,6 +65,30 @@ func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Co
 	return p.BlockParser.Open(parent, reader, pc)
 }
 
+// Continue keeps the list open for a line holding its empty last item's content, as the browser
+// editor's parser reads it: an item whose marker line holds nothing takes its content from the
+// next line when that line, with no blank line between, reaches the item's content column, a list
+// marker there included. Goldmark closes the list when that marker cannot continue it - another
+// bullet character, or an ordered marker under a bullet - so `-\n  1.` read as two lists and
+// `> 1.\n>    2) a` as two quoted lists.
+func (p emptyItemGuard) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	state := p.BlockParser.Continue(node, reader, pc)
+	item, ok := node.LastChild().(*ast.ListItem)
+	if state != parser.Close || !ok || item.ChildCount() != 0 {
+		return state
+	}
+	line, segment := reader.PeekLine()
+	source := reader.Source()
+	start := lineStart(source, segment.Start)
+	if util.IsBlank(line) || start == 0 || markersOrWhitespace(source[lineStart(source, start-1):start]) {
+		return state
+	}
+	if indent, _ := util.IndentWidth(line, reader.LineOffset()); indent < item.Offset {
+		return state
+	}
+	return parser.Continue | parser.HasChildren
+}
+
 // orderedMarkerStart is an ordered list marker opening a line, its number captured.
 var orderedMarkerStart = regexp.MustCompile(`^ {0,3}([0-9]{1,9})[.)](?:[ \t]|\n|$)`)
 

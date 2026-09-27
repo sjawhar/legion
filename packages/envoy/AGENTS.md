@@ -769,7 +769,10 @@ paragraph. Neither is opened on a line after indented code, blank lines between 
 containers the line opens first, since that parser holds the code open to that line and decides
 once per line whether it interrupts - except code right after a list, which that parser ends on its
 own line (`interruptsOpenBlock`): `    code\n> 2. b` is a quote holding the paragraph `2. b`, and
-`1.\n\n    code\n2. b` is two lists with the code between.
+`1.\n\n    code\n2. b` is two lists with the code between. An item whose marker line holds nothing
+takes its content from the next line when that line reaches its content column with no blank line
+between, a list marker there included (`emptyItemGuard.Continue`): goldmark closed the list for a
+marker that cannot continue it, so `-\n  1.` read as two lists.
 
 Every document's lists are spaced as that parser reads them (`browserListSpacing`): outside
 quotes and footnote definitions a blank line between two items spreads the list, and one between
