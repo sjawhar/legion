@@ -519,12 +519,15 @@ func attributeDifference(want, got *Node, ignore skip) (string, any, any, bool) 
 }
 
 // writtenAttrs is the attributes node's markdown writes: tokenAttrs, with a table column that has
-// no alignment written left (tableAlignment).
+// no alignment - null, or the "none" this parser once stored - written unaligned (tableAlignment),
+// which reads back with none.
 func writtenAttrs(node *Node) Attrs {
 	attrs := tokenAttrs(node.Type, node.Attrs)
 	if node.Type == "table_header" || node.Type == "table_cell" {
-		if alignment, _ := attrs["alignment"].(string); alignment != "center" && alignment != "right" {
-			attrs["alignment"] = "left"
+		switch attrs["alignment"] {
+		case "left", "center", "right":
+		default:
+			delete(attrs, "alignment")
 		}
 	}
 	return attrs

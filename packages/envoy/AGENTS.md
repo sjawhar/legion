@@ -224,7 +224,7 @@ blocks. Outside an ask it then runs, over every document-level block it changed,
 checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
 `paragraph+ bullet_list?` rule. Last, the whole document is read back (`refuseMisreadAccept`:
 `pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes
-and text, a column without alignment expected back left as the renderer writes it: an accept is
+and text, a column without alignment expected back unaligned as the renderer writes it: an accept is
 refused where a block now reads back otherwise that did not before, such as a task item emptied to
 `- [ ]`, which reads back as a plain item. Each block that reads back otherwise is found as far
 down as its markdown still pairs, and one that already read back otherwise the same way before,

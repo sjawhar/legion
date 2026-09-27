@@ -619,6 +619,9 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 		{name: "text ending in breaks from a list item's code through a whole nested item", spec: "- ```\n  abc\n  ```\n  - Next\n", quote: "abc Next", with: "x\n\n", want: "- ```\n  x\n  ```\n"},
 		{name: "text ending in a break from a list item's code through the item's whole paragraph", spec: "- ```\n  abc\n  ```\n\n  Next\n", quote: "abc Next", with: "x\n", want: "- ```\n  x\n  ```\n"},
 		{name: "text ending in a line of spaces from a list item's code through the whole next item, which keeps them", spec: "- ```\n  abc\n  ```\n- Next\n", quote: "abc Next", with: "x\n  ", want: "- ```\n  x\n    \n  ```\n"},
+		// A column its delimiter row aligns nowhere is written `---` and reads back with no
+		// alignment, so a table with one is stored where the document held no table before.
+		{name: "a table with an unaligned column over a paragraph", spec: "Intro.\n\nBody.\n", quote: "Body.", with: "| a | b |\n| --- | :---: |\n| c | d |", want: "Intro.\n\n| a | b |\n| --- | :---: |\n| c | d |\n"},
 		{name: "text from code into a table cell", spec: "Intro.\n\n```\nabc\n```\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "X", want: "Intro.\n\n```\nX\n```\n\n|  | b |\n| :--- | :--- |\n| c | d |\n"},
 		{name: "text from a paragraph into a table cell", spec: "Intro abc\n\n| Next | b |\n| :--- | :--- |\n| c | d |\n", quote: "abc Next", with: "x", want: "Intro x\n\n|  | b |\n| :--- | :--- |\n| c | d |\n"},
 		{name: "text from code in a callout into a table after the callout", spec: ":::callout{#c1 kind=\"note\" title=\"T\"}\n```\nabc\n```\n:::\n\n| Next | b |\n| :--- | :--- |\n| x | y |\n", quote: "abc Next", with: "x", want: ":::callout{#c1 kind=\"note\" title=\"T\"}\n```\nx\n```\n:::\n\n|  | b |\n| :--- | :--- |\n| x | y |\n"},
