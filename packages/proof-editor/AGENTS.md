@@ -15,7 +15,7 @@ held them. The cut that followed deleted them from the fork, so that commit stay
 source however far the fork line moves.
 
 The upstream modules this package imports at runtime come from the git dependency, pinned at
-**c2697996af3ca82817e8ce8748a56b491717bd21** on the fork's cleaned `library` line. Moving that
+**06fc1977f1fee637d92c6393965555e88ab9adcb** on the fork's cleaned `library` line. Moving that
 pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstream` holds, and
 `tests/upstream-pin.test.ts` is what checks it.
 
@@ -99,12 +99,16 @@ copied file carries `// @ts-nocheck` any more. `tests/upstream-boundary.ts` is t
 names every binding this package imports across the boundary and fails `bun run typecheck` if
 one of them is `any`.
 
-The pinned source commit carries the Dark Reader fix: peer-cursor colours and mark decorations
-avoid inline `style` attributes, because Dark Reader rewrites those attributes inside the
-contenteditable and ProseMirror reads the writes as content mutations. That can cause an endless
-redraw loop that wedges the tab. `tests/upstream-pin.test.ts` reads the installed modules so a
-pin that loses the fix fails. Moving the pin changes the package dependency, `bun.lock`,
-`upstream/` and this file's source audit references; no Bun patch applies to this source.
+The pinned source commit carries two fixes, each an open upstream pull request. The Dark Reader
+fix (EveryInc/proof-sdk#81): peer-cursor colours and mark decorations avoid inline `style`
+attributes, because Dark Reader rewrites those attributes inside the contenteditable and
+ProseMirror reads the writes as content mutations. That can cause an endless redraw loop that
+wedges the tab. The proof-mark rendering fix (EveryInc/proof-sdk#82): the five proof marks render
+only their `data-*` attributes, where upstream renders `id`, `kind` and `by` as
+`[object Object]`, and a replace suggestion's widget redraws when its replacement changes.
+`tests/upstream-pin.test.ts` reads or runs the installed modules so a pin that loses either fix
+fails. Moving the pin changes the package dependency, `bun.lock`, `upstream/` and this file's
+source audit references; no Bun patch applies to this source.
 
 ## No build step
 
