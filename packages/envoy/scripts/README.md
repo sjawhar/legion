@@ -92,6 +92,10 @@ The run writes its reusable evidence to `packages/envoy/out/e2e/`:
 - `rendered-go.txt` — the corresponding Go `Deliverer.Text` output
 
 Use `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` to avoid local port
-collisions. The script owns only the literal `envoy-e2e-nats` container and
-removes it on exit. Unlike `probe-webhook-e2e.sh`, it has no deployment URL or
-secret prerequisite: it validates local branch behavior only.
+collisions, and `E2E_NATS_CONTAINER` to name the NATS container something other
+than `envoy-e2e-nats`. The script owns only that one container: it refuses to
+start when the name is taken and removes it on exit. Unlike
+`probe-webhook-e2e.sh`, it has no deployment URL or secret prerequisite: it
+validates local branch behavior only. CI runs it as the `envoy-e2e-local` job of
+`.github/workflows/envoy-and-contracts.yaml` on every change to
+`packages/envoy`, `packages/envoy-client` or `packages/contracts`.

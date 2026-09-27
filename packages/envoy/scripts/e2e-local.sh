@@ -8,6 +8,7 @@
 # bounded acceptance run responsive while retaining the production settle logic.
 #
 # Optional ports: E2E_NATS_PORT (14222), E2E_PORT (19020), E2E_SESSION_PORT (19021).
+# Optional NATS container name: E2E_NATS_CONTAINER (envoy-e2e-nats).
 set -euo pipefail
 
 usage() {
@@ -47,7 +48,8 @@ readonly out_dir
 nats_port="${E2E_NATS_PORT:-14222}"
 listener_port="${E2E_PORT:-19020}"
 session_port="${E2E_SESSION_PORT:-19021}"
-readonly nats_port listener_port session_port
+nats_container="${E2E_NATS_CONTAINER:-envoy-e2e-nats}"
+readonly nats_port listener_port session_port nats_container
 listener_url="http://127.0.0.1:${listener_port}"
 readonly listener_url
 nats_url="nats://127.0.0.1:${nats_port}"
@@ -90,8 +92,8 @@ cleanup() {
   done
   rm -f "$session_ready_fifo" "$subscriber_ready_fifo"
   if [[ "$nats_started" -eq 1 ]]; then
-    docker stop envoy-e2e-nats >/dev/null 2>&1 || true
-    docker rm envoy-e2e-nats >/dev/null 2>&1 || true
+    docker stop "$nats_container" >/dev/null 2>&1 || true
+    docker rm "$nats_container" >/dev/null 2>&1 || true
   fi
   exit "$rc"
 }
@@ -104,8 +106,8 @@ for command in bun curl docker go jq openssl; do
   }
 done
 
-if docker container inspect envoy-e2e-nats >/dev/null 2>&1; then
-  printf 'ERR: envoy-e2e-nats already exists; leave it untouched and choose a free Docker daemon.\n' >&2
+if docker container inspect "$nats_container" >/dev/null 2>&1; then
+  printf 'ERR: %s already exists; leave it untouched and set E2E_NATS_CONTAINER to a free name.\n' "$nats_container" >&2
   exit 3
 fi
 
@@ -117,8 +119,8 @@ rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_g
 : >"$session_prompts_file"
 mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
 
-printf 'starting NATS: envoy-e2e-nats on 127.0.0.1:%s\n' "$nats_port"
-docker run --name envoy-e2e-nats -d -p "${nats_port}:4222" nats:2.10-alpine -js >/dev/null
+printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_container" "$nats_port"
+docker run --name "$nats_container" -d -p "${nats_port}:4222" nats:2.10-alpine -js >/dev/null
 nats_started=1
 
 printf 'building listener\n'
