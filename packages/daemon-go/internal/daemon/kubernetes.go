@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"slices"
 	"strconv"
 	"time"
 
@@ -188,7 +187,7 @@ func launchSecretNames(cfg config.Config, lookup func(string) (string, bool)) []
 // copy the cluster holds is the deployment's, in the Secret every pod already mounts; the daemon's
 // own file (or variable) is where the daemon reads it, and the two must hold the same seed.
 func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []string {
-	if slices.Contains(launchSecretNames(cfg, lookup), natsauth.SeedVariable) {
+	if natsauth.Configured(cfg.NatsNkeySeedFile, lookup) {
 		return []string{natsauth.SeedVariable}
 	}
 	return nil
