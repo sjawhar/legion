@@ -191,7 +191,7 @@ describe("resolution", () => {
     expect(bash("echo hi > ~/new-file-that-does-not-exist")).toBeUndefined();
   });
 
-  test("follows xargs shell text and multicall applets", () => {
+  test("follows xargs shell and interpreter text plus multicall applets", () => {
     for (const command of [
       "echo x | xargs sh -c 'rm -rf \"$HOME\"'",
       "echo x | xargs -I{} bash -c 'rm -rf $HOME/.ssh'",
@@ -200,11 +200,16 @@ describe("resolution", () => {
       "echo x | xargs --replace sh -c 'rm -rf \"$HOME\"'",
       "echo x | xargs --eof sh -c 'rm -rf \"$HOME\"'",
       "echo x | xargs --max-lines sh -c 'rm -rf \"$HOME\"'",
+      `echo x | xargs -I{} python3 -c 'import shutil; shutil.rmtree("${home}/{}")'`,
+      `echo x | xargs -I{} node -e 'require("fs").rmSync("${home}/{}", { recursive: true })'`,
       "busybox rm -rf ~",
       "toybox rm -rf ~",
     ]) {
       expect(bash(command), command).toBeDefined();
     }
+    expect(
+      bash(`echo x | xargs -I{} python3 -c 'import shutil; shutil.rmtree("{}")'`)
+    ).toBeUndefined();
   });
 
   test("refuses destructive synchronization and archive destinations", () => {

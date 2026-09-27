@@ -2092,8 +2092,28 @@ function checkXargs(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void
     return;
   }
   const interpreter = interpreterLanguage(program);
-  if (interpreter !== undefined)
-    runInterpreter(program, interpreter, argv.slice(1), invocation, st, ctx);
+  if (interpreter !== undefined) {
+    const codeArgv =
+      replacement === undefined
+        ? argv
+        : inner.map((arg) => {
+            const text = literalText(arg.exp);
+            return text === undefined || !text.includes(replacement)
+              ? arg
+              : {
+                  text: arg.text,
+                  exp: [literal(text.replaceAll(replacement, `\\"$${UNKNOWN_MARKER}\\"`))],
+                };
+          });
+    runInterpreter(
+      program,
+      interpreter,
+      codeArgv.slice(1),
+      { ...invocation, args: codeArgv },
+      st,
+      ctx
+    );
+  }
 }
 function checkKill(list: readonly Arg[], ctx: Ctx, site: Site): void {
   const words = list.map((arg) => literalText(arg.exp));

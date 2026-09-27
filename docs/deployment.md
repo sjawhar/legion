@@ -41,10 +41,8 @@ destination for `rsync`, extract-mode `tar`, and `unzip` when it can identify on
 distinguish one pane's allowed `/tmp` directory from another. A running shell started through `hub`
 can receive later unguarded input, and `xd://debug` can launch an unguarded program. The documented
 residuals are `git -C <path> clean`, Python loop values, an aliased CommonJS `require`, an `eval`
-trap whose outer exit timing is not modeled, an `xargs` replacement string inserted into code passed
-to an interpreter unless the code independently constructs an outside prefix (for example,
-`os.environ["HOME"]`), an `rsync` destination followed by an unrecognised valued option, and a
-`TMUX` value that begins with a comma and therefore names no socket path.
+trap whose outer exit timing is not modeled, an `rsync` destination followed by an unrecognised
+valued option, and a `TMUX` value that begins with a comma and therefore names no socket path.
 This is a mistake-guard, not a sandbox: it exists because an agent probe deleted the operator's home
 directory. LEGION-122 and the Kubernetes pod boundary are the hard isolation controls.
 
