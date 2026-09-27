@@ -1230,6 +1230,48 @@ test("a registry removal that fails is reconciled by the next heartbeat, without
   }
 })
 
+test("a persistent reconciliation failure retries once immediately, then waits for the next heartbeat, rather than hot-looping", async () => {
+  const stateDirectory = await scratchState()
+  const nats = new FakeNats()
+  let getInterestAttempts = 0
+  const client = recordingClient([], {
+    getInterest: async () => {
+      getInterestAttempts++
+      throw new Error("listener degraded")
+    },
+  })
+  // A handoff file naming the session's own current id triggers one heartbeat at
+  // startup (adoptHandoff no-ops, `next === identity.id`) without waiting out the
+  // 10 s interval below, which otherwise contributes no tick in this test's window.
+  const handoff = sessionHandoffFile(stateDirectory, 991)
+  await writeSessionHandoff(handoff, "ses_claude")
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      client,
+      heartbeatMs: 10_000,
+      handoffPid: 991,
+    }),
+  )
+
+
+  try {
+    // One at startup (`recoverRegisteredInterests`, swallowed there), one from the
+    // heartbeat the handoff poke triggers, one bounded immediate retry (N2) — then
+    // the outage guard must hold with no interval tick due for 10 s.
+    await waitFor(async () => getInterestAttempts >= 3, "the startup read, the first reconciliation attempt, and its one bounded retry")
+    // A real wait, not a guessed one: proving the guard holds needs to observe a
+    // window in which nothing further happens, and nothing else here produces an
+    // event to wait for instead — a hot loop would have run thousands of times
+    // over 150 ms (measured: ~9,000 in 300 ms without this fix).
+    await Bun.sleep(150)
+    expect(getInterestAttempts).toBe(3)
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
 test("a handoff stuck on a stalled NATS flush gives up, so shutdown still deregisters", async () => {
   const stateDirectory = await scratchState()
   const calls: string[] = []

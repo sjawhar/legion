@@ -44297,11 +44297,11 @@ async function startChannelSession(options) {
       await serialized(async () => {
         await adoptHandoff();
         await register();
-        outageReported = false;
         await reassertRole();
         await transferRole();
         await reconcileRegisteredInterests();
       });
+      outageReported = false;
     } catch (error48) {
       if (outageReported)
         return;

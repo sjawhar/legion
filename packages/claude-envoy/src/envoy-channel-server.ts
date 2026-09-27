@@ -609,11 +609,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       await serialized(async () => {
         await adoptHandoff()
         await register()
-        outageReported = false
         await reassertRole()
         await transferRole()
         await reconcileRegisteredInterests()
       })
+      outageReported = false
     } catch (error) {
       if (outageReported) return
       outageReported = true
