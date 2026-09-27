@@ -310,8 +310,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if code {
 			codeText := with
 			if accept {
-				end, _ := pmdoc.ContainingTextblock(tree, range_.To)
-				codeText, range_ = acceptedCode(with, at, end, range_)
+				codeText, range_ = acceptedCode(tree, with, at, range_)
 			}
 			replacement = codeReplacement(codeText)
 		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From)); err != nil {

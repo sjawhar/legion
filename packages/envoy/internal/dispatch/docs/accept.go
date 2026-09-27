@@ -36,15 +36,18 @@ func settleAccepted(before, after *pmdoc.Node, match pmdoc.Range, with string) (
 // what reads back and changes nothing but the lines it writes: in a list item's code, the lines it
 // leaves blank (blankListItemLines); then, markdown dropping the line breaks that end code, where
 // only line breaks follow the match, the text's own ending breaks, a blank line it ends with
-// included. A match can run past the code into later blocks, to end, the textblock it ends in.
-// One that takes all of end's text leaves nothing after the text, as at the code's end, so the
-// same rules apply. One that ends inside end's text is written as sent: the rest of end, which the
-// splice joins to the code, follows the text, and neither rule can judge it, so a line of spaces
-// and tabs that text leaves in a list item's code reads back empty and the accept is refused.
-func acceptedCode(with string, at, end pmdoc.TextblockAt, match pmdoc.Range) (string, pmdoc.Range) {
+// included. A match can run past the code into later blocks of tree, to the textblock it ends in.
+// One that takes all of that textblock's text leaves nothing after the text, as at the code's end,
+// so the same rules apply. One that ends inside that text is written as sent: the rest of it,
+// which the splice joins to the code, follows the text, and neither rule can judge it, so a line
+// of spaces and tabs that text leaves in a list item's code reads back empty and the accept is
+// refused.
+func acceptedCode(tree *pmdoc.Node, with string, at pmdoc.TextblockAt, match pmdoc.Range) (string, pmdoc.Range) {
 	past := match.To > at.Content.To
-	if past && match.To != end.Content.To {
-		return with, match
+	if past {
+		if end, _ := pmdoc.ContainingTextblock(tree, match.To); match.To != end.Content.To {
+			return with, match
+		}
 	}
 	var text strings.Builder
 	for _, child := range at.Node.Children {
