@@ -332,10 +332,6 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			if err := refuseAcceptedCodeThatReshapes(tree, next, range_, at, with); err != nil {
 				return err
 			}
-		} else if code {
-			if err := refuseCodeThatReshapesItsBlock(tree, next, range_, at, "replace_with", with); err != nil {
-				return err
-			}
 		}
 		if accept {
 			if next, err = settleAccepted(tree, next, range_, with); err != nil {

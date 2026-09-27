@@ -169,11 +169,12 @@ code into the blocks after it. One that takes all of the text of the textblock i
 nothing after its own text, as at the code's end, so both rules apply. One that ends inside that
 text is written as sent, and the rest of that text joins the code after it, so a line of spaces
 and tabs it leaves in a list item's code reads back empty and the accept is refused. Code on other
-lines stays as it was. An accept whose code changes how a block around it reads back is refused
-naming the typed block holding the code, or else the block that reads back otherwise, such as a
-table the suggestion runs into, and advising rejecting the suggestion
-(`refuseAcceptedCodeThatReshapes`); the edit route's refusal of the same shape advises moving the
-code out of the typed block instead. A line of colons in code inside a typed block is kept: the browser editor's
+lines stays as it was. An accept whose code changes how a block around it reads back is refused,
+advising rejecting the suggestion (`refuseAcceptedCodeThatReshapes`). It names the typed block
+holding the code when the document-level block that reads back otherwise is the one holding the
+code, and otherwise names that block, such as a table the suggestion runs into. The edit route's
+refusal of the same shape advises moving the code out of the typed block instead, and a reject in
+code, like any reject, is not read back. A line of colons in code inside a typed block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
 them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -

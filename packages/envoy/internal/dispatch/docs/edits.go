@@ -1141,7 +1141,7 @@ func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdo
 // line, a table cell or a heading is inline HTML and is kept. A block that was already unreadable,
 // or another block that is, is no reason to refuse this replace.
 func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
+	_, unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
 	if err != nil || unreadable == nil {
 		return err
 	}
@@ -1153,7 +1153,7 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 // break inside a code span or inline HTML there ends the block, as a hard break would
 // (hasHardBreak), and the document reads back a heading and a paragraph, or a row as two rows.
 func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	_, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}
@@ -1289,7 +1289,7 @@ func inlineAware(markdown string, edges textEdges, opensDocument bool) (*pmdoc.N
 // this one, could read as that fence (pmdoc's typedFence). Code that only reads back with
 // different whitespace keeps its shape and is not refused.
 func refuseCodeThatReshapesItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
-	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	_, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}

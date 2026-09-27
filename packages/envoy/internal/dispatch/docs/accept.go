@@ -139,7 +139,7 @@ func refuseReshapedAccept(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc
 }
 
 func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, check func(*pmdoc.Node) error) error {
-	broke, err := replacementBroke(before, after, match, check)
+	_, broke, err := replacementBroke(before, after, match, check)
 	if err != nil || broke == nil {
 		return err
 	}
@@ -211,22 +211,19 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 // reads back (pmdoc.BlockShapeError), in the words of the other accept refusals: the block, why,
 // and what the person accepting can do, since they cannot move the code as the edit route's
 // refusal (refuseCodeThatReshapesItsBlock) advises. The block named is the typed block holding
-// the code, or else the document-level block that reads back otherwise, such as the table a
-// suggestion running out of the code runs into.
+// the code when the document-level block that reads back otherwise is the one holding the code,
+// and otherwise that block, such as the table a suggestion running out of the code runs into.
 func refuseAcceptedCodeThatReshapes(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string) error {
-	var broken *pmdoc.Node
-	reshaped, err := replacementBroke(before, after, match, func(block *pmdoc.Node) error {
-		err := pmdoc.BlockShapeError(block)
-		if err != nil {
-			broken = block
-		}
-		return err
-	})
+	broken, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}
+	holding := at.Node
+	if len(at.Ancestors) > 1 {
+		holding = at.Ancestors[len(at.Ancestors)-2]
+	}
 	for _, ancestor := range at.Ancestors {
-		if pmdoc.IsTypedBlock(ancestor.Type) {
+		if pmdoc.IsTypedBlock(ancestor.Type) && blockID(broken) == blockID(holding) {
 			holder := holderName(ancestor)
 			return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
 				"replace_with %q changes how the %s holding this code block reads back (%v); reject the suggestion, or reply asking for code the %s can hold",
@@ -273,23 +270,24 @@ func changedBlocks(before, after *pmdoc.Node, match pmdoc.Range) (first, last, l
 	return first, last, max(first, last+len(after.Children)-len(before.Children)), nil
 }
 
-// replacementBroke is what check says of a document-level block the write changed
-// (changedBlocks), when it said nothing of the blocks the match lay in before: a block that already
-// failed the check, or another block that does, is no reason to refuse this write.
-func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (broke, err error) {
+// replacementBroke is the first document-level block the write changed (changedBlocks) that check
+// fails, and what check says of it, when it said nothing of the blocks the match lay in before: a
+// block that already failed the check, or another block that does, is no reason to refuse this
+// write.
+func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (block *pmdoc.Node, broke, err error) {
 	first, last, lastAfter, err := changedBlocks(before, after, match)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for index := first; index <= last; index++ {
 		if check(before.Children[index]) != nil {
-			return nil, nil
+			return nil, nil, nil
 		}
 	}
 	for index := first; index <= lastAfter; index++ {
 		if broke = check(after.Children[index]); broke != nil {
-			return broke, nil
+			return after.Children[index], broke, nil
 		}
 	}
-	return nil, nil
+	return nil, nil, nil
 }
