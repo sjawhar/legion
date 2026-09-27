@@ -995,6 +995,19 @@ function fileGitHubApps(fields: Record<string, unknown>): GitHubAppsConfig | und
   return parsed.success ? (parsed.data as GitHubAppsConfig) : undefined;
 }
 
+/** The path `legion.yaml`'s `key` names, resolved against the file's directory `configDir` when
+ * relative; undefined when the key is absent, and a refusal when it is not a string or is empty. */
+function readConfigPath(
+  config: Record<string, unknown>,
+  key: string,
+  configDir: string
+): string | undefined {
+  const value = readString(config[key], key);
+  if (value === undefined) return undefined;
+  const configured = requireNonEmpty(value, key);
+  return path.isAbsolute(configured) ? configured : path.resolve(configDir, configured);
+}
+
 export function loadConfigFromFile(
   yamlText: string,
   configDir: string,
@@ -1043,37 +1056,14 @@ export function loadConfigFromFile(
   if (bind !== undefined) fields.bind = requireNonEmpty(bind, "bind");
   const envoyUrl = readString(config.envoy_url, "envoy_url");
   if (envoyUrl !== undefined) fields.envoyUrl = validateUrl(envoyUrl, "envoy_url");
-  const envoyTokenFile = readString(config.envoy_token_file, "envoy_token_file");
-  if (envoyTokenFile !== undefined) {
-    const tokenPath = requireNonEmpty(envoyTokenFile, "envoy_token_file");
-    fields.envoyTokenFile = path.isAbsolute(tokenPath)
-      ? tokenPath
-      : path.resolve(configDir, tokenPath);
-  }
-  const natsNkeySeedFile = readString(config.nats_nkey_seed_file, "nats_nkey_seed_file");
-  if (natsNkeySeedFile !== undefined) {
-    const seedPath = requireNonEmpty(natsNkeySeedFile, "nats_nkey_seed_file");
-    fields.natsNkeySeedFile = path.isAbsolute(seedPath)
-      ? seedPath
-      : path.resolve(configDir, seedPath);
-  }
-  const natsDaemonNkeySeedFile = readString(
-    config.nats_daemon_nkey_seed_file,
-    "nats_daemon_nkey_seed_file"
-  );
-  if (natsDaemonNkeySeedFile !== undefined) {
-    const seedPath = requireNonEmpty(natsDaemonNkeySeedFile, "nats_daemon_nkey_seed_file");
-    fields.natsDaemonNkeySeedFile = path.isAbsolute(seedPath)
-      ? seedPath
-      : path.resolve(configDir, seedPath);
-  }
-  const operatorTokenFile = readString(config.operator_token_file, "operator_token_file");
-  if (operatorTokenFile !== undefined) {
-    const tokenPath = requireNonEmpty(operatorTokenFile, "operator_token_file");
-    fields.operatorTokenFile = path.isAbsolute(tokenPath)
-      ? tokenPath
-      : path.resolve(configDir, tokenPath);
-  }
+  const envoyTokenFile = readConfigPath(config, "envoy_token_file", configDir);
+  if (envoyTokenFile !== undefined) fields.envoyTokenFile = envoyTokenFile;
+  const natsNkeySeedFile = readConfigPath(config, "nats_nkey_seed_file", configDir);
+  if (natsNkeySeedFile !== undefined) fields.natsNkeySeedFile = natsNkeySeedFile;
+  const natsDaemonNkeySeedFile = readConfigPath(config, "nats_daemon_nkey_seed_file", configDir);
+  if (natsDaemonNkeySeedFile !== undefined) fields.natsDaemonNkeySeedFile = natsDaemonNkeySeedFile;
+  const operatorTokenFile = readConfigPath(config, "operator_token_file", configDir);
+  if (operatorTokenFile !== undefined) fields.operatorTokenFile = operatorTokenFile;
   if (config.dispatch_mcp_url !== undefined) {
     throw new Error(
       "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
@@ -1169,13 +1159,8 @@ export function loadConfigFromFile(
   if (stateDir !== undefined) {
     fields.stateDir = path.isAbsolute(stateDir) ? stateDir : path.resolve(configDir, stateDir);
   }
-  const instructions = readString(config.instructions, "instructions");
-  if (instructions !== undefined) {
-    const instructionsPath = requireNonEmpty(instructions, "instructions");
-    fields.instructionsPath = path.isAbsolute(instructionsPath)
-      ? instructionsPath
-      : path.resolve(configDir, instructionsPath);
-  }
+  const instructionsPath = readConfigPath(config, "instructions", configDir);
+  if (instructionsPath !== undefined) fields.instructionsPath = instructionsPath;
   const gates = parseGates(config.gates, "gates");
   if (gates !== undefined) fields.gates = gates;
   const githubApps = loadGitHubApps(config.github_apps, options.resolveSecrets ?? true);
