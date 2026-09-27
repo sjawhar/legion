@@ -2542,7 +2542,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const failingReadTree = {
       ...deps,
       run: async (cmd: string[], opts?: RunCall["opts"]): Promise<RunResult> => {
-        if (cmd[0] === "git" && cmd[1] === "read-tree") {
+        if (cmd[0] === "git" && cmd.includes("read-tree")) {
           return { exitCode: 1, stdout: "", stderr: "forced read-tree failure for test" };
         }
         return deps.run(cmd, opts);
@@ -2566,6 +2566,70 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       "outside the shared clone's"
     );
     expect(existsSync(elsewhere)).toBeFalse();
+  }, 60_000);
+
+  test("refuses a workspace's .git through a symlinked worktrees directory, writing nothing there", async () => {
+    const [{ command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    const admin = await gitWorktreeAdmin(workspaceDir);
+    const worktreesDir = path.dirname(admin);
+    await rm(worktreesDir, { recursive: true, force: true });
+    const elsewhere = path.join(await temporaryDirectory(), "elsewhere");
+    await mkdir(elsewhere, { recursive: true });
+    await symlink(elsewhere, worktreesDir);
+    const evil = path.join(worktreesDir, "evil");
+    await writeFile(path.join(workspaceDir, ".git"), `gitdir: ${evil}\n`, "utf8");
+
+    await expect(provisionIssueWorkspace("WIDGETS-42", deps)).rejects.toThrow(
+      "outside the shared clone's"
+    );
+    expect(await readdir(elsewhere)).toEqual([]);
+  }, 60_000);
+
+  test("restores cleanly after a kill between the writes, which leaves only a temporary sibling behind", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    const admin = await gitWorktreeAdmin(workspaceDir);
+    await rm(admin, { recursive: true, force: true });
+    // A process killed after mkdir but before every write, or before the rename, leaves exactly
+    // this: a temporary sibling with partial or stale content, and no entry at admin itself.
+    const stale = `${admin}.tmp`;
+    await mkdir(stale, { recursive: true });
+    await writeFile(path.join(stale, "HEAD"), "stale\n", "utf8");
+
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+    expect(existsSync(stale), name).toBeFalse();
+  }, 60_000);
+
+  test("restores a workspace with no real parent commit using jj's own unborn ref and an empty index", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, jj, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    // Rebasing @ onto root() directly is not anything Legion's own provisioning does; it stands in
+    // for a workspace whose working copy has never had a real parent commit.
+    await jj(["rebase", "-r", "@", "-d", "root()"], { cwd: workspaceDir });
+    const admin = await gitWorktreeAdmin(workspaceDir);
+    await rm(admin, { recursive: true, force: true });
+
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let logged: string[];
+    try {
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      logged = errorSpy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+    expect(await readFile(path.join(admin, "HEAD"), "utf8"), name).toBe("ref: refs/jj/root\n");
+    const status = await runCommand([SYSTEM_GIT, "status", "--porcelain"], { cwd: workspaceDir });
+    expect(status.stdout.trim(), name).toBe("");
+    expect(logged, name).toEqual([expect.stringContaining("fresh, with no real commit yet")]);
   }, 60_000);
 
   test("removal deletes the git worktree entry a crash after its forget left, with the workspace neither registered nor present", async () => {

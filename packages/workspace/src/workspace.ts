@@ -852,16 +852,33 @@ async function lockGitWorktree(cloneDir: string, dir: string): Promise<void> {
   }
 }
 
+/** jj's sentinel commit id for the root commit, the Go twin's (`rootCommitID`): every workspace's
+ * history ends there, and it has no git tree because it isn't a real git commit (`git cat-file`
+ * reports no such object). A workspace whose working copy has no real parent yet -- its `@-` is the
+ * root -- prints this as `restoreGitWorktree`'s `head`, and `git read-tree` on it fails ("failed to
+ * unpack tree object HEAD"); jj's own colocated `workspace add` writes HEAD as the unborn ref below
+ * and an empty index for exactly this case, which `restoreGitWorktree` matches instead of failing
+ * to restore a workspace that has never had a git-visible commit. */
+const ROOT_COMMIT_ID = "0000000000000000000000000000000000000000";
+
+/** The unborn ref jj's own colocated `workspace add` writes to HEAD when a workspace's working
+ * copy has no real parent yet (verified against jj 0.45.1-sami), the Go twin's (`rootHeadRef`). */
+const ROOT_HEAD_REF = "ref: refs/jj/root";
+
 /** Re-creates the shared clone's git worktree entry for the workspace at `dir` when the entry its
  * `.git` names is gone, the Go twin's (`restoreGitWorktree`): a bare `git worktree prune` from a
  * process that could not see `dir` leaves git failing there while jj keeps working, and `git
- * worktree repair` cannot rebuild a missing entry. It writes what `git worktree add` would, at the
- * path the pointer names: `gitdir`, `commondir`, and `HEAD` at the working-copy commit's first
- * parent, as jj keeps it; then the index from HEAD with `git read-tree`, which writes no
- * working-tree file. A failure past that point removes whatever was written, so a later
- * provisioning still finds the entry gone and restores it, instead of skipping a half-written one.
- * A workspace with no `.git` (jj 0.44), or whose entry exists, is left alone; a pointer outside the
- * clone's git worktrees is refused, since a tree agent can write the workspace's `.git`. */
+ * worktree repair` cannot rebuild a missing entry. It writes what `git worktree add` would --
+ * `gitdir`, `commondir`, and `HEAD` at the working-copy commit's first parent, as jj keeps it, then
+ * the index from HEAD with `git read-tree`, which writes no working-tree file -- into a temporary
+ * sibling directory, and renames it onto `target` only once every step succeeds, so `target` is
+ * either the complete entry or still absent. A kill at any point before the rename (a SIGKILL, an
+ * OOM, a pod eviction, a daemon restart) never runs a `finally`, so building in place and cleaning
+ * up on error, this function's first approach, cannot protect against one: the next provisioning
+ * would find a half-written `target` already present and skip the restore, leaving the workspace
+ * git-broken. The rename makes that unreachable instead of merely handled. A workspace with no
+ * `.git` (jj 0.44), or whose entry exists, is left alone; a pointer outside the clone's git
+ * worktrees is refused, since a tree agent can write the workspace's `.git`. */
 async function restoreGitWorktree(
   deps: CommandDeps,
   cloneDir: string,
@@ -876,7 +893,12 @@ async function restoreGitWorktree(
   const dir = await realpath(workspaceDir);
   const target = await resolvedPath(path.resolve(dir, trimmed.slice("gitdir: ".length)));
   if (existsSync(target)) return;
-  const worktrees = await resolvedPath(path.join(cloneDir, ".git", "worktrees"));
+  // worktrees is .git's own resolution (realpath) with a literal "worktrees" joined on top, never
+  // resolved itself: a tree agent that can write the shared clone's .git can replace .git/worktrees
+  // with a symlink to any directory, and resolving through it here, as an earlier version of this
+  // function did, would let a workspace's own rewritten .git point restoration at that directory
+  // instead of refusing it.
+  const worktrees = path.join(await realpath(path.join(cloneDir, ".git")), "worktrees");
   const name = path.basename(target);
   if (path.dirname(target) !== worktrees || name === "." || name === "..") {
     throw new Error(
@@ -903,18 +925,25 @@ async function restoreGitWorktree(
       `Workspace ${workspaceDir}: jj printed no parent commit for its working copy: ${JSON.stringify(parents.stdout)}`
     );
   }
-  await mkdir(target, { recursive: true });
-  let restored = false;
+  const tmp = `${target}.tmp`;
+  await rm(tmp, { recursive: true, force: true });
+  await mkdir(tmp, { recursive: true });
+  const headContent = head === ROOT_COMMIT_ID ? ROOT_HEAD_REF : head;
+  const readTree =
+    head === ROOT_COMMIT_ID
+      ? ["git", `--git-dir=${tmp}`, `--work-tree=${dir}`, "read-tree", "--empty"]
+      : ["git", `--git-dir=${tmp}`, `--work-tree=${dir}`, "read-tree", "HEAD"];
   try {
-    await writeFile(path.join(target, "gitdir"), `${path.join(dir, ".git")}\n`);
-    await writeFile(path.join(target, "commondir"), `${path.join("..", "..")}\n`);
-    await writeFile(path.join(target, "HEAD"), `${head}\n`);
-    await runChecked(deps, ["git", "read-tree", "HEAD"], { cwd: workspaceDir });
-    restored = true;
+    await writeFile(path.join(tmp, "gitdir"), `${path.join(dir, ".git")}\n`);
+    await writeFile(path.join(tmp, "commondir"), `${path.join("..", "..")}\n`);
+    await writeFile(path.join(tmp, "HEAD"), `${headContent}\n`);
+    await runChecked(deps, readTree, { cwd: cloneDir });
+    await rename(tmp, target);
   } finally {
-    if (!restored) await rm(target, { recursive: true, force: true });
+    await rm(tmp, { recursive: true, force: true });
   }
+  const where = head === ROOT_COMMIT_ID ? "fresh, with no real commit yet" : `at ${head}`;
   console.error(
-    `[legion] workspace ${workspaceDir} had lost its git worktree entry ${target} (a git worktree prune that could not see the workspace deletes it): restored it at ${head}, the working copy untouched`
+    `[legion] workspace ${workspaceDir} had lost its git worktree entry ${target} (a git worktree prune that could not see the workspace deletes it): restored it ${where}, the working copy untouched`
   );
 }

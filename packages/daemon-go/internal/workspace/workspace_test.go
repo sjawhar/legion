@@ -53,7 +53,7 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 		}
 		return Result{ExitCode: 137, Stderr: "clone interrupted"}, nil
 	}
-	if r.failReadTree && commandWith(command.Argv, "git", "read-tree", "HEAD") {
+	if r.failReadTree && command.Argv[0] == "git" && slices.Contains(command.Argv, "read-tree") {
 		return Result{ExitCode: 1, Stderr: "forced read-tree failure for test"}, nil
 	}
 
@@ -849,6 +849,121 @@ func TestProvisionRefusesAGitPointerOutsideTheClone(t *testing.T) {
 	}
 	if _, statErr := os.Stat(elsewhere); !errors.Is(statErr, os.ErrNotExist) {
 		t.Errorf("provisioning created %s: %v", elsewhere, statErr)
+	}
+}
+
+// A tree agent that can write the shared clone's .git can replace .git/worktrees with a symlink to
+// any directory: resolving only .git, never worktrees itself, keeps that symlink from extending
+// where a restored entry may land.
+func TestProvisionRefusesAWorktreesSymlinkEscape(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	admin := gitWorktreeAdmin(t, workspace.Dir)
+	worktreesDir := filepath.Dir(admin)
+	if err := os.RemoveAll(worktreesDir); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Mkdir(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, worktreesDir); err != nil {
+		t.Fatal(err)
+	}
+	evil := filepath.Join(worktreesDir, "evil")
+	if err := os.WriteFile(filepath.Join(workspace.Dir, ".git"), []byte("gitdir: "+evil+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Provision(context.Background(), run, request)
+	if err == nil || !strings.Contains(err.Error(), "outside the shared clone's") {
+		t.Fatalf("provision through a symlinked worktrees directory = %v, want it refused", err)
+	}
+	entries, err := os.ReadDir(elsewhere)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("provisioning wrote into the symlinked-away directory: %v", entries)
+	}
+}
+
+// A kill between the writes into the temporary entry and its rename (a SIGKILL, an OOM, a pod
+// eviction, a daemon restart) leaves only the temporary directory behind, never the entry itself:
+// the next provisioning finds no entry, clears the stale temporary directory, and restores cleanly
+// instead of treating a half-written entry as done.
+func TestProvisionRestoresCleanlyAfterAKillBetweenTheWrites(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	admin := gitWorktreeAdmin(t, workspace.Dir)
+	if err := os.RemoveAll(admin); err != nil {
+		t.Fatal(err)
+	}
+	// A process killed after mkdir but before every write, or before the rename, leaves exactly
+	// this: a temporary sibling with partial or stale content, and no entry at admin itself.
+	stale := admin + ".tmp"
+	if err := os.MkdirAll(stale, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "HEAD"), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("provision after a kill between the writes: %v", err)
+	}
+	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
+		t.Errorf("git in the restored workspace answers %q, want %q", got, workspace.Dir)
+	}
+	if _, statErr := os.Stat(stale); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the stale temporary entry %s survived restoration: %v", stale, statErr)
+	}
+}
+
+// A workspace whose working copy has no real parent commit yet -- its @- is the root commit, which
+// has no git tree -- restores with jj's own unborn ref and an empty index instead of failing at
+// `git read-tree HEAD` ("failed to unpack tree object HEAD").
+func TestProvisionRestoresAWorkspaceWithNoRealParentCommit(t *testing.T) {
+	clone := t.TempDir()
+	runSetup(t, clone, "jj", "git", "init", "--colocate", ".")
+	other := filepath.Join(t.TempDir(), "other")
+	runSetup(t, clone, "jj", "workspace", "add", other, "-R", clone)
+	admin := gitWorktreeAdmin(t, other)
+	if err := os.RemoveAll(admin); err != nil {
+		t.Fatal(err)
+	}
+
+	run := NewRunner(testTimeout, testTools(t))
+	var logged []string
+	err := restoreGitWorktree(context.Background(), run, Workspace{Dir: other, Clone: clone}, func(line string) {
+		logged = append(logged, line)
+	})
+	if err != nil {
+		t.Fatalf("restore a workspace with no real parent commit: %v", err)
+	}
+	if got := strings.TrimSpace(runSetup(t, other, "git", "rev-parse", "--show-toplevel")); got != other {
+		t.Errorf("git in the restored workspace answers %q, want %q", got, other)
+	}
+	headContent, err := os.ReadFile(filepath.Join(admin, "HEAD"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(headContent)) != rootHeadRef {
+		t.Errorf("HEAD = %q, want %q", headContent, rootHeadRef)
+	}
+	if got := strings.TrimSpace(runSetup(t, other, "git", "status", "--porcelain")); got != "" {
+		t.Errorf("git status in the restored workspace = %q, want empty", got)
+	}
+	if !slices.ContainsFunc(logged, func(line string) bool { return strings.Contains(line, "fresh, with no real commit yet") }) {
+		t.Errorf("provisioning logged no restoration: %q", logged)
 	}
 }
 

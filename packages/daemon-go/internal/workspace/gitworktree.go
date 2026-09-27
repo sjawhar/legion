@@ -17,6 +17,19 @@ import (
 // or may run one without asking (stock jj 0.45.1's `jj workspace forget` prunes the whole clone).
 const gitWorktreeLockReason = "legion workspace: its directory may be invisible to other processes sharing this clone"
 
+// rootCommitID is jj's sentinel commit id for the root commit: every workspace's history ends
+// there, and it has no git tree because it isn't a real git commit (`git cat-file` reports no such
+// object). A workspace whose working copy has no real parent yet -- its `@-` is the root -- prints
+// this as restoreGitWorktree's head, and `git read-tree` on it fails ("failed to unpack tree object
+// HEAD"); jj's own colocated `workspace add` writes HEAD as the unborn ref below and an empty
+// index for exactly this case, which restoreGitWorktree matches instead of failing to restore a
+// workspace that has never had a git-visible commit.
+const rootCommitID = "0000000000000000000000000000000000000000"
+
+// rootHeadRef is the unborn ref jj's own colocated `workspace add` writes to HEAD when a
+// workspace's working copy has no real parent yet (verified against jj 0.45.1-sami).
+const rootHeadRef = "ref: refs/jj/root"
+
 // gitWorktreeEntries is the admin directories of the shared clone's git worktrees registered at
 // dir: each <clone>/.git/worktrees/<id> whose gitdir file names dir's .git, dir as given or with its
 // symlinks resolved, as jj records it. git names an entry after the directory's base name, with a
@@ -131,13 +144,17 @@ func lockGitWorktree(cloneDir, dir string) error {
 // restoreGitWorktree re-creates the shared clone's git worktree entry for the workspace at dir when
 // the entry its .git names is gone, as a bare `git worktree prune` from a process that could not see
 // dir leaves it: git fails there while jj keeps working, and `git worktree repair` cannot rebuild a
-// missing entry. It writes what `git worktree add` would, at the path the pointer names: gitdir,
-// commondir, and HEAD at the working-copy commit's first parent, as jj keeps it; then the index from
-// HEAD with `git read-tree`, which writes no working-tree file. A failure past that point removes
-// whatever was written, so a later provisioning still finds the entry gone and restores it, instead
-// of skipping a half-written one. A workspace with no .git (jj 0.44), or whose entry exists, is left
-// alone; a pointer outside the clone's git worktrees is refused, since a tree agent can write the
-// workspace's .git.
+// missing entry. It writes what `git worktree add` would -- gitdir, commondir, and HEAD at the
+// working-copy commit's first parent, as jj keeps it, then the index from HEAD with `git read-tree`,
+// which writes no working-tree file -- into a temporary sibling directory, and renames it onto
+// target only once every step succeeds, so target is either the complete entry or still absent. A
+// kill at any point before the rename (a SIGKILL, an OOM, a pod eviction, a daemon restart) never
+// runs a Go defer, so building in place and cleaning up on error, this function's first approach,
+// cannot protect against one: the next provisioning would find a half-written target already
+// "present" and skip the restore, leaving the workspace git-broken. The rename makes that
+// unreachable instead of merely handled. A workspace with no .git (jj 0.44), or whose entry exists,
+// is left alone; a pointer outside the clone's git worktrees is refused, since a tree agent can
+// write the workspace's .git.
 func restoreGitWorktree(ctx context.Context, run Runner, workspace Workspace, log func(string)) error {
 	pointer, err := os.ReadFile(filepath.Join(workspace.Dir, ".git"))
 	if errors.Is(err, fs.ErrNotExist) {
@@ -164,10 +181,16 @@ func restoreGitWorktree(ctx context.Context, run Runner, workspace Workspace, lo
 	if err != nil || present {
 		return err
 	}
-	worktrees, err := resolvedPath(filepath.Join(workspace.Clone, ".git", "worktrees"))
+	// worktrees is .git's own resolution (EvalSymlinks) with a literal "worktrees" joined on top,
+	// never resolved itself: a tree agent that can write the shared clone's .git can replace
+	// .git/worktrees with a symlink to any directory, and resolving through it here, as an earlier
+	// version of this function did, would let a workspace's own rewritten .git point restoration at
+	// that directory instead of refusing it.
+	gitDir, err := filepath.EvalSymlinks(filepath.Join(workspace.Clone, ".git"))
 	if err != nil {
-		return fmt.Errorf("resolve the shared clone's git worktrees: %w", err)
+		return fmt.Errorf("resolve the shared clone's git directory: %w", err)
 	}
+	worktrees := filepath.Join(gitDir, "worktrees")
 	if name := filepath.Base(target); filepath.Dir(target) != worktrees || name == "." || name == ".." {
 		return fmt.Errorf("workspace %s's .git, which a tree agent can write, names %s outside the shared clone's %s; provisioning refuses to create or write it. Remove the workspace so the next provisioning adds it again", workspace.Dir, target, worktrees)
 	}
@@ -179,28 +202,39 @@ func restoreGitWorktree(ctx context.Context, run Runner, workspace Workspace, lo
 	if !commitID.MatchString(head) {
 		return fmt.Errorf("workspace %s: jj printed no parent commit for its working copy: %q", workspace.Dir, parents.Stdout)
 	}
-	if err := os.MkdirAll(target, 0o755); err != nil {
+	tmp := target + ".tmp"
+	if err := os.RemoveAll(tmp); err != nil {
+		return fmt.Errorf("clear the restore's temporary worktree entry %s: %w", tmp, err)
+	}
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
 		return fmt.Errorf("restore git worktree %s: %w", target, err)
 	}
-	restored := false
-	defer func() {
-		if !restored {
-			_ = os.RemoveAll(target)
-		}
-	}()
+	defer func() { _ = os.RemoveAll(tmp) }()
+	headContent := head
+	readTree := []string{"git", "--git-dir=" + tmp, "--work-tree=" + dir, "read-tree", "HEAD"}
+	if head == rootCommitID {
+		headContent = rootHeadRef
+		readTree = []string{"git", "--git-dir=" + tmp, "--work-tree=" + dir, "read-tree", "--empty"}
+	}
 	for name, content := range map[string]string{
 		"gitdir":    filepath.Join(dir, ".git"),
 		"commondir": filepath.Join("..", ".."),
-		"HEAD":      head,
+		"HEAD":      headContent,
 	} {
-		if err := os.WriteFile(filepath.Join(target, name), []byte(content+"\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte(content+"\n"), 0o644); err != nil {
 			return fmt.Errorf("restore git worktree %s: %w", target, err)
 		}
 	}
-	if _, err := RunChecked(ctx, run, []string{"git", "read-tree", "HEAD"}, nil, workspace.Dir); err != nil {
+	if _, err := RunChecked(ctx, run, readTree, nil, workspace.Clone); err != nil {
 		return err
 	}
-	restored = true
-	log(fmt.Sprintf("Workspace %s had lost its git worktree entry %s (a git worktree prune that could not see the workspace deletes it): restored it at %s, the working copy untouched", workspace.Dir, target, head))
+	if err := os.Rename(tmp, target); err != nil {
+		return fmt.Errorf("restore git worktree %s: %w", target, err)
+	}
+	where := "at " + head
+	if head == rootCommitID {
+		where = "fresh, with no real commit yet"
+	}
+	log(fmt.Sprintf("Workspace %s had lost its git worktree entry %s (a git worktree prune that could not see the workspace deletes it): restored it %s, the working copy untouched", workspace.Dir, target, where))
 	return nil
 }
