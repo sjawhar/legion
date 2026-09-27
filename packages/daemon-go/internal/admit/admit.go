@@ -49,7 +49,7 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
-		if err := a.promote(ctx, tx); err != nil {
+		if err := a.promote(ctx, tx, nil); err != nil {
 			return intake.Result{}, err
 		}
 		return intake.Result{}, nil
@@ -74,6 +74,9 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 		}
 		// An unrecorded todo issue without the label is someone else's work in a project Legion may
 		// share with humans and other agents: Legion records nothing of it until it is handed over.
+		if observation.Status == "todo" && !handed {
+			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", record.LegionLabel)
+		}
 		if observation.Status != "todo" || !handed {
 			return intake.Result{}, nil
 		}
@@ -87,7 +90,7 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 	if err := a.releaseInactiveSlots(ctx, tx); err != nil {
 		return intake.Result{}, err
 	}
-	if err := a.promote(ctx, tx); err != nil {
+	if err := a.promote(ctx, tx, nil); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, nil
@@ -111,12 +114,16 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		slotted[slot.Issue] = struct{}{}
 	}
 
+	deferred := make(map[string]struct{})
 	for _, summary := range summaries {
 		stored, err := a.store.Issue(ctx, tx, summary.Key)
 		if err != nil {
 			return fmt.Errorf("read reconciled issue %s: %w", summary.Key, err)
 		}
 		if stored == nil {
+			if summary.Status == "todo" && !record.CarriesLegionLabel(summary.Labels) {
+				a.log.Debug("admission: not handed to Legion", "issue", summary.Key, "label", record.LegionLabel)
+			}
 			if summary.Status != "todo" || !record.CarriesLegionLabel(summary.Labels) {
 				continue
 			}
@@ -130,6 +137,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		if summary.LastSeq > stored.LastDispatchSeq {
 			a.log.Info("admission reconcile: the stream holds newer events for this issue; leaving it to them",
 				"issue", stored.Key, "applied", stored.LastDispatchSeq, "dispatch", summary.LastSeq)
+			deferred[stored.Key] = struct{}{}
 			continue
 		}
 
@@ -156,7 +164,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 	if err := a.releaseInactiveSlots(ctx, tx); err != nil {
 		return err
 	}
-	return a.promote(ctx, tx)
+	return a.promote(ctx, tx, deferred)
 }
 
 func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intake.DispatchIssue, logOrphan bool) error {
@@ -346,7 +354,12 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
+// promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
+// waiting line empties. skip excludes candidates this call must not promote: Reconcile's boot read
+// passes the keys whose record is behind Dispatch's own log, so a record that still reads waiting
+// here is left for the stream's own Apply to promote or dequeue once it delivers the event already
+// on its way.
+func (a *Admission) promote(ctx context.Context, tx pgx.Tx, skip map[string]struct{}) error {
 	if a.cap <= 0 {
 		return nil
 	}
@@ -363,6 +376,9 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
+		if _, held := skip[candidate.Key]; held {
+			continue
+		}
 		now := a.now()
 		index := nextSlotIndex(slots)
 		candidate.Status = "in_progress"
@@ -380,6 +396,9 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 			return err
 		}
 		if err := a.startMidPhaseChildren(ctx, tx, candidate, issues, now); err != nil {
+			return err
+		}
+		if err := a.reenterStrandedChildren(ctx, tx, candidate, issues, now); err != nil {
 			return err
 		}
 		slots, own = append(slots, slot), append(own, slot)
@@ -423,6 +442,38 @@ func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root r
 		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation,
 			Phase: child.Phase, Task: workflow.ResumePhaseTask(child)}
 		if err := a.enqueue(ctx, tx, child.Key, payload, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// reenterStrandedChildren re-enters, at candidate's promotion, every tree member admission left
+// recorded todo with its previous run's phase at done: a reopen admission declined to re-enter for
+// want of the label while the tree was not live, which recordObservation otherwise records with the
+// phase untouched. Candidate's own promotion is what makes the tree live for these, since nothing
+// else reaches them afterward — reenterChild only re-enters a live tree's reopened child, and a
+// later todo observation of one already todo changes nothing. It repeats what reenterChild does for
+// one: the next generation, its own generation-scoped facts cleared, admitted, in its tree kept.
+// advanceAdmittedTree moves it on once the tree's architect reopens the design gate.
+func (a *Admission) reenterStrandedChildren(ctx context.Context, tx pgx.Tx, candidate record.Issue, issues []record.Issue, now time.Time) error {
+	for _, child := range issues {
+		if child.Key == candidate.Key || child.Tree != candidate.Tree {
+			continue
+		}
+		if child.Status != "todo" || child.Phase != phase.Done {
+			continue
+		}
+		if err := a.store.ClearGeneration(ctx, tx, child.Key); err != nil {
+			return err
+		}
+		child.Phase = phase.Admitted
+		child.Generation++
+		if err := a.store.PutIssue(ctx, tx, child); err != nil {
+			return fmt.Errorf("re-enter stranded child %s: %w", child.Key, err)
+		}
+		reason := fmt.Sprintf("%s is todo; it runs again under %s", child.Key, candidate.Key)
+		if err := a.enqueue(ctx, tx, child.Key, record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: reason}, now); err != nil {
 			return err
 		}
 	}

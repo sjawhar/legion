@@ -936,3 +936,55 @@ func TestALabelAddedToAReopenedChildOfALingeringTreeAdmitsItAsAnOrphan(t *testin
 		})
 	}
 }
+
+// A child of a lingering tree reopened without the label is recorded todo with its old phase left
+// at done, and stays there: nothing re-enters it until its root is re-admitted. The root's
+// re-admission, once labeled, is what makes the tree live again, and it must re-enter this child
+// too, not only the ones a live tree's own todo observation reaches — the child keeps its old
+// tree's key, not become an orphan root of its own, since it never carried the label itself.
+func TestReadmissionReentersAChildStrandedTodoWithoutTheLabel(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	const root, child = "LEGION-LINGER", "LEGION-2"
+	until := fixedNow.Add(time.Hour)
+	parent := root
+	putIssue(t, pool, record.Issue{Key: root, Project: testProject, Title: "lingering", Tree: root, Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, HandedOver: true})
+	putIssue(t, pool, record.Issue{Key: child, Project: testProject, Title: "child", Tree: root, Parent: &parent, Phase: phase.Done, Generation: 2, Status: "done", Rank: "B", LastDispatchSeq: 1})
+
+	apply(t, pool, admission, "child-reopened-unlabeled", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B"}, engine)
+	if got := issue(t, pool, child); got.Tree != root || got.Phase != phase.Done || got.Status != "todo" {
+		t.Fatalf("child reopened without the label = %#v, want it left todo, phase done, in %s's tree", got, root)
+	}
+
+	apply(t, pool, admission, "root-readmitted", intake.DispatchIssue{Key: root, Seq: 2, Type: "issue.updated", Status: "todo", Title: "lingering", Rank: "A", Labels: handed}, engine)
+
+	got := issue(t, pool, child)
+	if got.Tree != root {
+		t.Fatalf("child after the root's re-admission = %#v, want it kept in %s's tree, not its own", got, root)
+	}
+	if got.Phase != phase.Admitted || got.Generation != 3 {
+		t.Fatalf("child after the root's re-admission = %#v, want phase admitted, generation 3", got)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: root, Index: 0, AdmittedAt: fixedNow}})
+}
+
+// Reconcile's boot read defers a record behind Dispatch's own log to the stream instead of touching
+// it, but its own promotion at the end of the same call must not promote that record while it is
+// still deferred: the stream is already carrying an event for it, here one that drops it from the
+// waiting line, and admitting it first only for the removal to arrive after would start an agent on
+// an issue no longer handed to Legion.
+func TestReconcilePromotionSkipsARootTheStreamHoldsANewerEventFor(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+
+	reconcile(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-EDGE", Title: "LEGION-EDGE", Status: "todo", Rank: "A", LastSeq: 2},
+	})
+	assertSlots(t, pool, nil)
+
+	apply(t, pool, admission, "label-removed", intake.DispatchIssue{Key: "LEGION-EDGE", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-EDGE", Rank: "A"}, engineStub{})
+	assertWaiting(t, pool, nil)
+	assertSlots(t, pool, nil)
+}
