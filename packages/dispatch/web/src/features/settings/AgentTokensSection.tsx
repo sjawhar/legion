@@ -189,11 +189,7 @@ export function AgentTokensSection(): ReactNode {
             value={name}
           />
         </label>
-        <button
-          className={`min-h-11 ${settingsSubmitButton}`}
-          disabled={createToken.isPending}
-          type="submit"
-        >
+        <button className={settingsSubmitButton} disabled={createToken.isPending} type="submit">
           New token
         </button>
       </form>

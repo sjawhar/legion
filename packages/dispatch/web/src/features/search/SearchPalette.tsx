@@ -12,15 +12,20 @@ import {
   borderDefault,
   card,
   inputClasses,
+  kbdHint,
   searchHitBg,
   searchHitText,
   selectedCardBg,
   selectedCardBorder,
+  surfaceMutedBg,
   textMutedOnSelectedCard,
   textMutedOnSurface,
+  textMutedOnSurfaceMuted,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
+  textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
+import { statusText } from "../project/board-model";
 import { referenceRouteFromHref } from "../refs/RefLink";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { DIALOG_SCOPE, useKeymap } from "../shell/keymap";
@@ -302,18 +307,22 @@ export function SearchPalette({
                 const muted = header.status === "done";
                 return (
                   <Fragment key={header.id}>
+                    {/* The group's own row: a label for the hits under it, on the recessed
+                        surface so the hits read as the list and this reads as its heading.
+                        Its status is the lifecycle label the rest of the product shows -
+                        `Needs review`, never the raw value. */}
                     <div
                       aria-label={`${header.key}: ${header.name}`}
-                      className={`flex min-w-0 items-center gap-2 border-b px-3 py-2 text-xs ${borderDefault} ${
-                        muted ? textMutedOnSurface : ""
+                      className={`flex min-w-0 items-center gap-2 border-b px-3 py-1.5 text-xs ${borderDefault} ${surfaceMutedBg} ${
+                        muted ? textMutedOnSurfaceMuted : ""
                       }`}
                       data-status={header.status}
                       role="presentation"
                     >
-                      <span className="font-medium">{header.key}</span>
+                      <span className="font-semibold">{header.key}</span>
                       <span
                         className={`min-w-0 flex-1 truncate ${
-                          muted ? textMutedOnSurface : textSecondaryOnSurface
+                          muted ? textMutedOnSurfaceMuted : textSecondaryOnSurfaceMuted
                         }`}
                       >
                         {header.name}
@@ -322,7 +331,7 @@ export function SearchPalette({
                         <span
                           className={`rounded-full px-2 py-0.5 font-medium ${badgeLow.bg} ${badgeLow.text}`}
                         >
-                          {header.status}
+                          {statusText(header.status)}
                         </span>
                       )}
                     </div>
@@ -340,6 +349,25 @@ export function SearchPalette({
               })}
             </div>
           )}
+          {/* The palette is a keyboard surface and never said so: the keys that drive it now
+              sit at its foot, quieter than any hit above them. */}
+          <div
+            className={`flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-3 py-2 text-xs ${borderDefault} ${textMutedOnSurface}`}
+          >
+            <span className="inline-flex items-center gap-1">
+              <kbd className={`rounded px-1 py-0.5 font-medium ${kbdHint}`}>↑</kbd>
+              <kbd className={`rounded px-1 py-0.5 font-medium ${kbdHint}`}>↓</kbd>
+              to move
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <kbd className={`rounded px-1 py-0.5 font-medium ${kbdHint}`}>Enter</kbd>
+              to open
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <kbd className={`rounded px-1 py-0.5 font-medium ${kbdHint}`}>Esc</kbd>
+              to close
+            </span>
+          </div>
         </div>
       </div>
     </>
