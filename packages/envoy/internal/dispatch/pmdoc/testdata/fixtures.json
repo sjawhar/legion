@@ -12059,6 +12059,324 @@
     "rendered_by_milkdown": "***\n\n## title: x\n\nBody.\n"
   },
   {
+    "name": "frontmatter-opener-unclosed",
+    "markdown": "---\n- a\n- b\n\n1. a\n\n2. b\n\n> q\n\n# h\n\n> q2\n\na\n- b\n\n* * *\n- a\n\n```\n- x\n```\n- y\n\n -\n\n- [ ] t\n\n:::callout{#b1 kind=\"note\" title=\"T\"}\n- a\n> q\n:::\n\n    - code\n\n| a |\n| - |\n| - b |\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000001"
+          }
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "- a - b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "1. a"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "2. b"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "> q"
+            }
+          ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 1,
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "h"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "> q2"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "a - b"
+            }
+          ]
+        },
+        {
+          "type": "hr",
+          "attrs": {
+            "blockId": "b-000009"
+          }
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "- a"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "- x"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "- y"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "-"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "- [ ] t"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "T",
+            "blockId": "b1"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000015"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000016"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000017"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000018"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000019"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "q"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000020"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "- code"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "blockId": "b-000021"
+          },
+          "content": [
+            {
+              "type": "table_header_row",
+              "attrs": {
+                "blockId": "b-000022"
+              },
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000023"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000024"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000025"
+              },
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000026"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000027"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "- b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AWYBAAcBC3Byb3NlbWlycm9yAwJocigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAECBgQAAQMHLSBhIC0gYigAAQIHYmxvY2tJZAF3CGItMDAwMDAyhwECAwlwYXJhZ3JhcGgHAAEMBgQAAQ0EMS4gYSgAAQwHYmxvY2tJZAF3CGItMDAwMDAzhwEMAwlwYXJhZ3JhcGgHAAETBgQAARQEMi4gYigAARMHYmxvY2tJZAF3CGItMDAwMDA0hwETAwlwYXJhZ3JhcGgHAAEaBgQAARsDPiBxKAABGgdibG9ja0lkAXcIYi0wMDAwMDWHARoDB2hlYWRpbmcHAAEgBgQAASEBaCgAASACaWQBdwAoAAEgBWxldmVsAX0BKAABIAdibG9ja0lkAXcIYi0wMDAwMDaHASADCXBhcmFncmFwaAcAASYGBAABJwQ+IHEyKAABJgdibG9ja0lkAXcIYi0wMDAwMDeHASYDCXBhcmFncmFwaAcAAS0GBAABLgVhIC0gYigAAS0HYmxvY2tJZAF3CGItMDAwMDA4hwEtAwJocigAATUHYmxvY2tJZAF3CGItMDAwMDA5hwE1AwlwYXJhZ3JhcGgHAAE3BgQAATgDLSBhKAABNwdibG9ja0lkAXcIYi0wMDAwMTCHATcDCmNvZGVfYmxvY2sHAAE9BgQAAT4DLSB4KAABPQdibG9ja0lkAXcIYi0wMDAwMTGHAT0DCXBhcmFncmFwaAcAAUMGBAABRAMtIHkoAAFDB2Jsb2NrSWQBdwhiLTAwMDAxMocBQwMJcGFyYWdyYXBoBwABSQYEAAFKAS0oAAFJB2Jsb2NrSWQBdwhiLTAwMDAxM4cBSQMJcGFyYWdyYXBoBwABTQYEAAFOBy0gWyBdIHQoAAFNB2Jsb2NrSWQBdwhiLTAwMDAxNIcBTQMHY2FsbG91dAcAAVcDC2J1bGxldF9saXN0BwABWAMJbGlzdF9pdGVtBwABWQMJcGFyYWdyYXBoBwABWgYEAAFbAWEoAAFaB2Jsb2NrSWQBdwhiLTAwMDAxNygAAVkFbGFiZWwBdwPigKIoAAFZCGxpc3RUeXBlAXcGYnVsbGV0KAABWQZzcHJlYWQBeSgAAVkHYmxvY2tJZAF3CGItMDAwMDE2KAABWAZzcHJlYWQBeSgAAVgHYmxvY2tJZAF3CGItMDAwMDE1hwFYAwpibG9ja3F1b3RlBwABZAMJcGFyYWdyYXBoBwABZQYEAAFmAXEoAAFlB2Jsb2NrSWQBdwhiLTAwMDAxOSgAAWQHYmxvY2tJZAF3CGItMDAwMDE4KAABVwRraW5kAXcEbm90ZSgAAVcFdGl0bGUBdwFUKAABVwdibG9ja0lkAXcCYjGHAVcDCmNvZGVfYmxvY2sHAAFtBgQAAW4GLSBjb2RlKAABbQdibG9ja0lkAXcIYi0wMDAwMjCHAW0DBXRhYmxlBwABdgMQdGFibGVfaGVhZGVyX3JvdwcAAXcDDHRhYmxlX2hlYWRlcgcAAXgDCXBhcmFncmFwaAcAAXkGBAABegFhKAABeQdibG9ja0lkAXcIYi0wMDAwMjQoAAF4B2NvbHNwYW4BfQEoAAF4B3Jvd3NwYW4BfQEoAAF4B2Jsb2NrSWQBdwhiLTAwMDAyMygAAXcHYmxvY2tJZAF3CGItMDAwMDIyhwF3Awl0YWJsZV9yb3cHAAGBAQMKdGFibGVfY2VsbAcAAYIBAwlwYXJhZ3JhcGgHAAGDAQYEAAGEAQMtIGIoAAGDAQdibG9ja0lkAXcIYi0wMDAwMjcoAAGCAQdjb2xzcGFuAX0BKAABggEHcm93c3BhbgF9ASgAAYIBB2Jsb2NrSWQBdwhiLTAwMDAyNigAAYEBB2Jsb2NrSWQBdwhiLTAwMDAyNSgAAXYHYmxvY2tJZAF3CGItMDAwMDIxAA==",
+    "rendered_by_milkdown": "***\n\n\\- a - b\n\n1\\. a\n\n2\\. b\n\n\\> q\n\n# h\n\n\\> q2\n\na - b\n\n***\n\n\\- a\n\n```\n- x\n```\n\n\\- y\n\n\\-\n\n\\- \\[ ] t\n\n:::callout{#b1 kind=\"note\" title=\"T\"}\n* a\n\n> q\n:::\n\n```\n- code\n```\n\n| a   |\n| --- |\n| - b |\n"
+  },
+  {
     "name": "frontmatter",
     "markdown": "---\ntitle: Fixture\ntags:\n  - pmdoc\n---\n\nFrontmatter paragraph.\n",
     "pm_json": {

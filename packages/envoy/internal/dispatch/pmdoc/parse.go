@@ -48,8 +48,10 @@ var blockReader = markdownReader{md: goldmark.New(
 // fenced code parsers reading a tab in a line's indentation as the columns it spans, its indented
 // code parser measuring a blank line's columns as a line of code's (codeColumns), its setext
 // heading parser opening no heading under a table (underlineAfterTable), its list, list item and
-// quote parsers recording where their containers' lines end (endsContainers), and every one placing
-// the block it opens where its text starts (tabIndented).
+// quote parsers recording where their containers' lines end (endsContainers), its list and quote
+// parsers opening nothing at the document's level after an unclosed front-matter opener
+// (frontmatterAttempt), and every one placing the block it opens where its text starts
+// (tabIndented).
 func blockParsers() []util.PrioritizedValue {
 	parsers := parser.DefaultBlockParsers()
 	listParser := reflect.TypeOf(parser.NewListParser())
@@ -62,11 +64,11 @@ func blockParsers() []util.PrioritizedValue {
 		block := prioritized.Value.(parser.BlockParser)
 		switch reflect.TypeOf(block) {
 		case listParser:
-			parsers[index].Value = tabIndented{endsContainers{emptyItemGuard{block}}, listMarkerStart}
+			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{emptyItemGuard{block}}, listMarkerStart}}
 		case listItemParser:
 			parsers[index].Value = tabIndented{endsContainers{listItemColumns{block}}, listMarkerStart}
 		case quoteParser:
-			parsers[index].Value = tabIndented{endsContainers{block}, nil}
+			parsers[index].Value = frontmatterAttempt{tabIndented{endsContainers{block}, nil}}
 		case setextParser:
 			parsers[index].Value = tabIndented{underlineAfterTable{block}, setextUnderline}
 		case fenceParser:
@@ -173,12 +175,14 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(markdown)
 	var front *Node
+	unclosedFrontmatter := false
 	if readFrontmatter {
 		var rest int
 		front, rest = parseFrontmatterBlock(source)
+		unclosedFrontmatter = front == nil && opensFrontmatter(source)
 		source = source[rest:]
 	}
-	root := blockReader.parse(source)
+	root := blockReader.parse(source, unclosedFrontmatter)
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
 	}

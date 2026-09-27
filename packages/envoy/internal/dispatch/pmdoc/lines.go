@@ -29,9 +29,36 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 	return text.String()
 }
 
-// parse parses source.
-func (reader markdownReader) parse(source []byte) ast.Node {
-	return withLineStarts(reader.md.Parser(), source, parser.NewContext())
+// parse parses source. unclosedFrontmatter says source opens a document with a front-matter opener
+// no later line closes, after which no container opens at the document's level
+// (frontmatterAttempt).
+func (reader markdownReader) parse(source []byte, unclosedFrontmatter bool) ast.Node {
+	pc := parser.NewContext()
+	if unclosedFrontmatter {
+		pc.Set(unclosedFrontmatterKey, true)
+	}
+	return withLineStarts(reader.md.Parser(), source, pc)
+}
+
+// unclosedFrontmatterKey marks the parse of a document that opens with a front-matter opener no
+// later line closes.
+var unclosedFrontmatterKey = parser.NewContextKey()
+
+// frontmatterAttempt is a container's parser - a list's, a quote's or a footnote definition's -
+// that opens nothing at the document's level in a document opening with a front-matter opener no
+// later line closes (unclosedFrontmatterKey). The browser editor's parser tries front matter from
+// that opener to the document's end, and front matter is a construct no container opens in, so on
+// none of those lines does a container open at the document's level. With no line closing it, that
+// parser reads the lines again as the blocks they form without those containers: `---\n- a\n- b`
+// is a rule and one paragraph holding both lines, and `---\n> a` a rule and the paragraph `> a`.
+// Inside a typed block they open as anywhere else.
+type frontmatterAttempt struct{ parser.BlockParser }
+
+func (p frontmatterAttempt) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	if parent.Kind() == ast.KindDocument && pc.Get(unclosedFrontmatterKey) != nil {
+		return nil, parser.NoChildren
+	}
+	return p.BlockParser.Open(parent, reader, pc)
 }
 
 // bareMarkerLine is a line holding only a list marker.
@@ -638,6 +665,13 @@ func insideImage(node ast.Node) bool {
 		}
 	}
 	return false
+}
+
+// opensFrontmatter reports whether source's first line opens front matter as the browser editor's
+// parser reads it: `---` and any spaces or tabs.
+func opensFrontmatter(source []byte) bool {
+	line, _, _ := bytes.Cut(source, []byte("\n"))
+	return string(bytes.TrimRight(line, " \t")) == "---"
 }
 
 // parseFrontmatterBlock reads the front matter a document opens with in source, as the

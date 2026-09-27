@@ -758,10 +758,12 @@ first line that is `---`, with any spaces or tabs after it, opens it, the first 
 the same closes it, and its text is stored between plain `---` fences with line feeds between its
 lines. A `---` opener nothing closes is a thematic break. That parser, having tried such an opener
 as front matter to the document's end, reads no list, quote or footnote definition at the
-document's level in the rest. So the renderer writes a rule that opens a document as `***` where
-`---` would be misread - a later `---` line would close front matter, or the document holds a
-list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
-everywhere else.
+document's level in the rest, since no container opens inside front matter; the lines read as the
+other blocks they make, so `---\n- a\n- b` is a rule and one paragraph holding both lines. Parse
+reads them so too (`pmdoc.frontmatterAttempt`); a typed block's content opens them as anywhere.
+So the renderer writes a rule that opens a document as `***` where `---` would be misread - a
+later `---` line would close front matter, or the document holds a list, quote or footnote
+definition at its level (`holdsAContainerTheBrowserDrops`) - and `---` everywhere else.
 
 Two lists of one kind side by side read back as one when written with one marker, so the
 renderer writes a list whose kind matches the block before it - past an empty paragraph, which
