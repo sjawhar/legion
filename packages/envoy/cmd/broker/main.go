@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/x509"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -48,10 +49,16 @@ const machineLoginPendingTTL = 15 * time.Minute
 const agentSecretPendingTTL = 12 * time.Hour
 
 func main() {
+	devAttestationRoot := flag.String("dev-attestation-root", "",
+		"development only: trust exactly this PEM certificate as the sole approver attestation "+
+			"root instead of the embedded Yubico roots; refused together with BROKER_RULES_S3_URI")
+	flag.Parse()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	cfg, err := config.Load(os.Getenv)
 	fatal(err)
+	fatal(refuseDevAttestationRootInProduction(*devAttestationRoot, cfg.RulesS3URI))
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	fatal(err)
 	fatal(st.Migrate(ctx))
@@ -91,13 +98,23 @@ func main() {
 	}
 
 	// Attestation trust roots are always a constructor parameter, never read from the
-	// environment: the three embedded Yubico PEMs, loaded once at boot.
+	// environment: the three embedded Yubico PEMs, loaded once at boot — unless -dev-attestation-
+	// root names a single PEM to trust instead (ruling 10; refused together with
+	// BROKER_RULES_S3_URI above, so no test root can ever reach a production wiring).
 	rootPool := x509.NewCertPool()
-	for _, name := range roots.Names {
-		pem, err := roots.Files.ReadFile(name)
+	if *devAttestationRoot != "" {
+		pem, err := os.ReadFile(*devAttestationRoot)
 		fatal(err)
 		if !rootPool.AppendCertsFromPEM(pem) {
-			fatal(fmt.Errorf("approver trust roots: %s did not parse as a PEM certificate", name))
+			fatal(fmt.Errorf("-dev-attestation-root: %s did not parse as a PEM certificate", *devAttestationRoot))
+		}
+	} else {
+		for _, name := range roots.Names {
+			pem, err := roots.Files.ReadFile(name)
+			fatal(err)
+			if !rootPool.AppendCertsFromPEM(pem) {
+				fatal(fmt.Errorf("approver trust roots: %s did not parse as a PEM certificate", name))
+			}
 		}
 	}
 	aaguids := make(map[uuid.UUID]bool, len(initialSet.Approvers.AAGUIDs))
@@ -211,4 +228,16 @@ func fatal(err error) {
 		slog.Error("broker: fatal", "error", err)
 		os.Exit(1)
 	}
+}
+
+// refuseDevAttestationRootInProduction is ruling 10: -dev-attestation-root is a development-only
+// override of the embedded Yubico trust roots, refused whenever it is paired with
+// BROKER_RULES_S3_URI (production's own rules source), so no test attestation root can ever reach
+// a production wiring. Extracted from main so a test can drive it directly instead of through
+// fatal, which calls os.Exit.
+func refuseDevAttestationRootInProduction(devAttestationRoot, rulesS3URI string) error {
+	if devAttestationRoot != "" && rulesS3URI != "" {
+		return errors.New("-dev-attestation-root is a development flag; production loads rules from S3 and trusts the embedded Yubico roots")
+	}
+	return nil
 }

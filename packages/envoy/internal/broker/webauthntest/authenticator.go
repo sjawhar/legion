@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"testing"
 	"time"
@@ -513,4 +514,51 @@ func marshalCredential(t testing.TB, credentialID []byte, response any) json.Raw
 	}
 
 	return raw
+}
+
+// Key returns the credential's own signing private key: the same key Register and Assert both
+// sign with for an ordinary (non-self-attested) credential's assertions, and Register signs
+// registrations with in the self-attestation case. Exported, with AttestationCertDER,
+// AttestationKey and SignCount below, so a caller outside this package can persist a generated
+// Authenticator's full material and later reconstruct the identical Authenticator with Restore —
+// needed only by a process that must keep acting as the same WebAuthn credential across separate
+// invocations (agent-secrets-devkey, AGENTC-393 Task 12), never by production code.
+func (a *Authenticator) Key() *ecdsa.PrivateKey { return a.key }
+
+// AttestationCertDER is the DER encoding of the CA-signed attestation leaf certificate Register's
+// basic (x5c) attestation chains to.
+func (a *Authenticator) AttestationCertDER() []byte { return a.attCert.Raw }
+
+// AttestationKey is the attestation leaf certificate's own private key: what Register signs a
+// basic (non-self-attested) attestation statement with.
+func (a *Authenticator) AttestationKey() *ecdsa.PrivateKey { return a.attKey }
+
+// SignCount is the authenticator's current signature counter, as Assert last left it (0 before
+// any Assert call). Read it after every Assert to persist the advanced counter, so a later
+// process reconstructing this Authenticator with Restore never replays a value the broker has
+// already seen (approvers.Service.VerifyAssertion requires strictly increasing counters once
+// either side is non-zero).
+func (a *Authenticator) SignCount() uint32 { return a.signCount }
+
+// Restore reconstructs an Authenticator from material a caller persisted after generating it with
+// CA.NewAuthenticator: Authenticator's key, attCert and attKey fields are unexported, so no
+// package outside webauthntest can otherwise keep signing as the same credential once the
+// generating process exits. attestationCertDER is AttestationCertDER's own output, parsed back
+// into the *x509.Certificate Register's x5c embeds; credentialKey and attestationKey are the two
+// ecdsa.PrivateKeys Key and AttestationKey returned; signCount is SignCount's last-read value.
+// Never used in production — only by agent-secrets-devkey (AGENTC-393 Task 12), which is the
+// caller this constructor exists for.
+func Restore(credentialID []byte, aaguid uuid.UUID, credentialKey *ecdsa.PrivateKey, attestationCertDER []byte, attestationKey *ecdsa.PrivateKey, signCount uint32) (*Authenticator, error) {
+	attCert, err := x509.ParseCertificate(attestationCertDER)
+	if err != nil {
+		return nil, fmt.Errorf("webauthntest: restore: parse attestation certificate: %w", err)
+	}
+	return &Authenticator{
+		CredentialID: credentialID,
+		AAGUID:       aaguid,
+		signCount:    signCount,
+		key:          credentialKey,
+		attCert:      attCert,
+		attKey:       attestationKey,
+	}, nil
 }
