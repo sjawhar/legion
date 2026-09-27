@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -11,10 +12,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// RoleFor is the role that works a phase: the one a transition starts, and the one it suspends
-// when the issue moves on. A phase no role works — awaiting_merge, done, held — has none.
+// RoleFor is the role that works a phase: the one a transition starts, the one it suspends when
+// the issue moves on, and the one whose handoff `legion handoff complete` resolves for a file-backed
+// phase (cmd/legion). A phase no role works — awaiting_merge, done, held — has none.
 //
 // It is exported for admission too, which starts the mid-phase children of a tree it re-admits
 // and needs each child's own phase's role to start it on.
@@ -44,6 +47,65 @@ func SuspendApplies(leaves, current phase.Phase) bool {
 	return leaves == "" || RoleFor(current) != RoleFor(leaves)
 }
 
+// StopActs is whether a queued stop, row id, still acts on its claim when the outbox runs it, with
+// the issue in phase current, lastStart the newest start the outbox ran against the claim (its
+// last_start_row), and root the issue's tree root as recorded, read only for a tree close. The
+// outbox executor asks it of every suspend and every tree close, and StartFor of every queued
+// stop, so all read one rule. A tree close acts while its tree lingers at the root generation it
+// names (record.Issue.LingersAt): never once re-admission has moved the root on. A suspend acts unless the issue is back in a phase its role
+// works (SuspendApplies), or a newer start has already run: that start replaced the run the stop
+// was written for, so acting would suspend the run it began and retire the task with it, whatever
+// the retry timing was. A row with no id is not older than anything: the store gives every row
+// one, and an unknown id must not silently drop a stop. Any other operation is not a stop.
+func StopActs(id int64, stop record.SuperviseRequest, current phase.Phase, lastStart int64, root *record.Issue) bool {
+	switch stop.Op {
+	case "tree_close":
+		return root != nil && root.LingersAt(stop.Linger)
+	case "suspend":
+		return SuspendApplies(stop.Leaves, current) && (id <= 0 || id >= lastStart)
+	default:
+		return false
+	}
+}
+
+// StartFor is whether a re-admitted tree's promotion starts the role of a mid-phase child, from
+// run, the role's queued rows and claim for generation, with the child in phase current and root
+// its re-admitted tree root. It does
+// not when the role is already started for this run: the newest of its operations that will still
+// act is a start. A stop that still acts (StopActs) undoes any older start, which may run first,
+// so past one only a newer queued start for current counts. With none, a queued start for current
+// counts, and so does a claim that may have a process: a live one, or one whose launch is
+// uncertain holding current's task for generation undelivered or unconfirmed (the task its start
+// gave it). No start acts while the tree lingers, and the tree's close queues a suspend of every
+// claim, so such a claim was started since the tree ran again. A failed, retired, suspended or
+// queued claim runs nothing, so promotion starts it whatever task it holds. Whether the start's
+// resume task is delivered is the outbox executor's decision when the start runs: not to a claim
+// that holds a task for the same generation and phase by then (record.SuperviseRequest's
+// ResumeTask).
+func StartFor(run record.RoleRun, root record.Issue, generation uint64, current phase.Phase) bool {
+	held := run.Claim
+	var lastStart int64
+	if held != nil {
+		lastStart = held.LastStartRow
+	}
+	var stop int64
+	for _, queued := range run.Queued {
+		if StopActs(queued.ID, queued.Request, current, lastStart, &root) {
+			stop = max(stop, queued.ID)
+		}
+	}
+	for _, queued := range run.Queued {
+		if queued.Request.Op == "start" && queued.Request.Phase == current && queued.ID > stop {
+			return false
+		}
+	}
+	if stop != 0 || held == nil {
+		return true
+	}
+	holds := held.Pending != nil && held.Pending.StillWorked(generation, current, held.State)
+	return !slices.Contains(supervise.LiveStates(), held.State) && !(holds && held.State == supervise.StateLaunchUncertain)
+}
+
 func (e *Engine) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload) error {
 	row, err := record.NewOutboxRow(issue, payload, e.now())
 	if err != nil {
@@ -63,8 +125,8 @@ func (e *Engine) notice(ctx context.Context, tx pgx.Tx, issue string, notice rec
 	return e.enqueue(ctx, tx, issue, notice)
 }
 
-// noticeWithController tells the issue's topic and, in an outbox row of its own, the project's
-// controller: the two publishes retry apart, so a controller topic that keeps failing never sends
+// noticeWithController tells the architect that owns the issue and, in an outbox row of its own,
+// the project's controller: the two publishes retry apart, so a controller topic that keeps failing never sends
 // the architect the same notice again. Every hold is told this way, since the architect answers one
 // with a retry or an escalation to the controller, and so is the tree architect's own failed
 // claim, since every other notice of the tree reaches that architect.
@@ -80,21 +142,32 @@ func refused(code, message string) intake.Result {
 	return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: code, Message: message}}
 }
 
-// clearHandoff empties the handoff a role reported for its previous phase, keeping its claim and
-// the review rounds, when a transition starts it on a new phase. A role's recorded handoff is then
-// always its current phase's: the implementer's round-1 commit cannot advance round 2, and the
-// production check is recorded only by the production check's own completion.
+// refusedLingering refuses a worker's request on issue while its tree lingers: linger holds the
+// member where it stood (record.TreeLingers), so the request changed nothing.
+func refusedLingering(issue record.Issue, request string) intake.Result {
+	return refused("TREE_LINGERING", fmt.Sprintf("the tree %s is lingering after it left the workflow, so %s of %s changed nothing", issue.Tree, request, issue.Key))
+}
+
+// clearHandoff empties the handoff a role reported for its previous phase — its commit, verdict,
+// summary, and the review round's decision, which ends with the round — keeping its claim and the
+// review rounds, when a transition starts it on a new phase. A role's recorded handoff is then
+// always its current phase's: the implementer's round-1 commit cannot advance round 2, the
+// production check is recorded only by the production check's own completion, a merger sent back to
+// verify again has no READY packet until its next one, and no round inherits an earlier decision.
 func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) error {
 	if role == "" {
 		return nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue, role)
-	if err != nil || row.HandoffCommit == "" && row.Verdict == "" && row.Decision == nil {
+	if err != nil {
 		return err
 	}
-	// The review round's decision ends with the round.
-	row.HandoffCommit, row.Verdict, row.Decision = "", "", nil
-	return e.store.PutPhase(ctx, tx, row)
+	cleared := row
+	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision = "", "", "", nil
+	if cleared == row {
+		return nil
+	}
+	return e.store.PutPhase(ctx, tx, cleared)
 }
 
 // suspend stops the role the issue leaves, the transition's suspend stamped with the phase it ends.
@@ -148,6 +221,14 @@ func continueLine(issue record.Issue) string {
 // retired and whose phase rows the new generation cleared.
 func ResumePhaseTask(issue record.Issue) string {
 	return continueLine(issue) + " Resume the existing phase work."
+}
+
+// ChildReenteredNotice is the notice a re-entered child's tree architect is told, whichever path
+// re-enters it: reenterChild for a live tree's reopened child, or admission's
+// reenterStrandedChildren for one a reopen declined to re-enter for want of the label until its
+// root's own promotion made the tree live.
+func ChildReenteredNotice(child, root string) record.Notice {
+	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child, root)}
 }
 
 func (e *Engine) lingerAt() time.Time { return e.now().Add(e.cfg.Linger) }

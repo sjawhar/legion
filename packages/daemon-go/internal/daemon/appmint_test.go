@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -112,10 +113,16 @@ func installed(w http.ResponseWriter) {
 // bootsOrExits runs the daemon until it answers /healthz or run returns, and says which.
 func bootsOrExits(t *testing.T, cfg config.Config, tokens appauth.Tokens, within time.Duration) error {
 	t.Helper()
+	return bootsOrExitsLogging(t, cfg, tokens, within, quietLogger())
+}
+
+// bootsOrExitsLogging is bootsOrExits with the daemon logging to log.
+func bootsOrExitsLogging(t *testing.T, cfg config.Config, tokens appauth.Tokens, within time.Duration, log *slog.Logger) error {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- run(ctx, cfg, quietLogger(), overrides{
+		done <- run(ctx, cfg, log, overrides{
 			runtime:        fakeRuntime(fake.NewRuntime(), &built{}).runtime,
 			clock:          stillClock{},
 			workflowTokens: tokens,

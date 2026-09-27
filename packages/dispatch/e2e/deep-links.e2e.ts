@@ -83,6 +83,16 @@ async function seedAsks(
 }
 
 /**
+ * How many frames without a scroll or a change of the margin's scroll height count as the
+ * landing having stopped. A smooth scroll emits a scroll event every frame it runs, and the
+ * margin's own corrections follow the render that moved its cards, so the thing being waited
+ * for is measured in frames; a machine under load stretches them and stretches this with them,
+ * which a wall-clock window cannot do. Ten covers the gap between the document reporting its
+ * mark offsets and the margin re-placing the cards those offsets moved.
+ */
+const STILL_FRAMES = 10;
+
+/**
  * Waits until the landing has stopped moving and reports where it stopped. A link's scroll to
  * its quote is smooth, and the margin corrects its own scroll as it fills in, so the target is
  * in view well before either finishes; clicking something while the page is still travelling
@@ -91,26 +101,38 @@ async function seedAsks(
 async function landingSettled(
   sheet: Locator
 ): Promise<{ scrollHeight: number; scrollTop: number; windowScrollY: number }> {
-  let previous = { scrollHeight: -1, scrollTop: -1, windowScrollY: -1 };
-  await expect
-    .poll(
-      async () => {
-        const current = await sheet.evaluate((element) => ({
-          scrollHeight: element.scrollHeight,
-          scrollTop: element.scrollTop,
-          windowScrollY: window.scrollY,
-        }));
-        const settled =
-          current.scrollHeight === previous.scrollHeight &&
-          current.scrollTop === previous.scrollTop &&
-          current.windowScrollY === previous.windowScrollY;
-        previous = current;
-        return settled;
-      },
-      { intervals: [300] }
-    )
-    .toBe(true);
-  return previous;
+  return await sheet.evaluate(
+    (element, stillFrames) =>
+      new Promise<{ scrollHeight: number; scrollTop: number; windowScrollY: number }>((resolve) => {
+        let still = 0;
+        let height = element.scrollHeight;
+        const moved = () => {
+          still = 0;
+        };
+        element.addEventListener("scroll", moved, { passive: true });
+        window.addEventListener("scroll", moved, { passive: true });
+        const frame = () => {
+          if (element.scrollHeight !== height) {
+            height = element.scrollHeight;
+            still = 0;
+          }
+          still += 1;
+          if (still < stillFrames) {
+            requestAnimationFrame(frame);
+            return;
+          }
+          element.removeEventListener("scroll", moved);
+          window.removeEventListener("scroll", moved);
+          resolve({
+            scrollHeight: element.scrollHeight,
+            scrollTop: element.scrollTop,
+            windowScrollY: window.scrollY,
+          });
+        };
+        requestAnimationFrame(frame);
+      }),
+    STILL_FRAMES
+  );
 }
 
 /** Polls until `inner` has settled wholly inside `outer`'s box - the margin's own scrollport,

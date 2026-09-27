@@ -118,6 +118,7 @@ func populatedState() State {
 			SessionID:    "ses_controller",
 			RegisteredAt: time.Date(2026, 9, 22, 9, 16, 40, 0, time.UTC),
 		},
+		AgentSecretsLogin: &AgentSecretsLoginView{State: "pending", Code: "WXYZ-1234"},
 	}
 }
 
@@ -339,4 +340,6 @@ func TestTask310RouteGoldens(t *testing.T) {
 	golden(t, "phase-backward.json", PhaseBackwardResponse{})
 	golden(t, "phase-retry.json", PhaseRetryResponse{})
 	golden(t, "signoff.json", SignOffResponse{})
+	golden(t, "child-park.json", EmptyResponse{})
+	golden(t, "child-rerun.json", EmptyResponse{})
 }

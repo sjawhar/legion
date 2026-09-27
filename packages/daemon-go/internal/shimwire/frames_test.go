@@ -1,9 +1,11 @@
 package shimwire
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -182,6 +184,97 @@ func TestTheFramesTheShippedCodeValidatesRefuseTheirMalformedForms(t *testing.T)
 	} {
 		if err := tc.frame.Validate(); !errors.Is(err, ErrMalformedFrame) {
 			t.Fatalf("%s: Validate = %v, want ErrMalformedFrame", tc.name, err)
+		}
+	}
+}
+
+func TestHello2RoundTripsWithAndWithoutAnIdentity(t *testing.T) {
+	identity := &AgentSecretsHello{Thumbprint: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs", PodToken: "eyJhbGciOiJSUzI1NiJ9.e30.sig"}
+	for name, frame := range map[string]Hello2{
+		"with identity":    {BootToken: "boot", AgentSecrets: identity},
+		"without identity": {BootToken: "boot"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			line, err := json.Marshal(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.HasPrefix(line, []byte(`{"type":"hello2"`)) {
+				t.Fatalf("encoded as %s, want the hello2 type first", line)
+			}
+			if frame.AgentSecrets == nil && bytes.Contains(line, []byte("agentSecrets")) {
+				t.Fatalf("an absent identity is encoded: %s", line)
+			}
+			decoded, err := Decode(line)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := decoded.(Hello2)
+			if !ok || got.BootToken != "boot" || (got.AgentSecrets == nil) != (frame.AgentSecrets == nil) ||
+				(got.AgentSecrets != nil && *got.AgentSecrets != *identity) {
+				t.Fatalf("decoded %#v", decoded)
+			}
+			if err := got.Validate(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestHello2ValidateNamesWhatIsMissing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		frame Hello2
+		want  string
+	}{
+		"no boot token":     {Hello2{}, "no bootToken"},
+		"no thumbprint":     {Hello2{BootToken: "b", AgentSecrets: &AgentSecretsHello{PodToken: "a.b.c"}}, "no thumbprint"},
+		"bad thumbprint":    {Hello2{BootToken: "b", AgentSecrets: &AgentSecretsHello{Thumbprint: "not base64url!", PodToken: "a.b.c"}}, "not a base64url SHA-256"},
+		"no pod token":      {Hello2{BootToken: "b", AgentSecrets: &AgentSecretsHello{Thumbprint: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"}}, "no podToken"},
+		"pod token not jwt": {Hello2{BootToken: "b", AgentSecrets: &AgentSecretsHello{Thumbprint: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs", PodToken: "nodots"}}, "not a JWT"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := tc.frame.Validate()
+			if err == nil || !errors.Is(err, ErrMalformedFrame) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate() = %v, want ErrMalformedFrame naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A hello2 carrying a projected token the size EKS issues (about 1 KiB; a 2 KiB one here, for
+// margin) fits the listener's pre-newline bound, so MaxHelloBytes stays as the shipped listener
+// had it.
+func TestAHello2WithAProjectedTokenFitsTheHelloBound(t *testing.T) {
+	token := strings.Repeat("a", 700) + "." + strings.Repeat("b", 1000) + "." + strings.Repeat("c", 342)
+	line, err := json.Marshal(Hello2{BootToken: strings.Repeat("t", 64), AgentSecrets: &AgentSecretsHello{
+		Thumbprint: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs", PodToken: token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(line)+1 > MaxHelloBytes {
+		t.Fatalf("a hello2 with a 2 KiB token is %d bytes; MaxHelloBytes is %d", len(line)+1, MaxHelloBytes)
+	}
+}
+
+func TestEnrollmentFramesRoundTrip(t *testing.T) {
+	request := AgentSecretsEnrollment{ID: "req-1", EnrollmentID: "enr-1"}
+	if err := request.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (AgentSecretsEnrollment{ID: "req-1"}).Validate(); err == nil || !errors.Is(err, ErrMalformedFrame) {
+		t.Fatalf("an enrollment frame with no enrollment id validated: %v", err)
+	}
+	for _, frame := range []Frame{request, AgentSecretsEnrollmentResult{ID: "req-1", OK: false, Error: "key dir is read-only"}} {
+		line, err := json.Marshal(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := Decode(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded.FrameType() != frame.FrameType() || !reflect.DeepEqual(decoded, frame) {
+			t.Fatalf("decoded %#v from %s, want %#v", decoded, line, frame)
 		}
 	}
 }

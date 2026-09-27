@@ -16,4 +16,10 @@ package api
 // test and read by the plugin's, holds the two together. The TypeScript daemon's own contract,
 // `legion.daemonApiVersion` against `LEGION_DAEMON_API_VERSION`, is a separate number that moves on
 // its own until Stage 7 removes it.
-const GoDaemonAPIVersion = 7
+//
+// 8: AGENTC-393 -- AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR on an enrolled pod's worker
+// container, and the shim's hello2.
+//
+// 9: AGENTC-393 Plan C -- the daemon's own agent-secrets machine login state
+// (agentSecretsLogin) on GET /legion/v1/state.
+const GoDaemonAPIVersion = 9

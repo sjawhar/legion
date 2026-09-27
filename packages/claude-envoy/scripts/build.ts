@@ -22,12 +22,10 @@ export async function buildBundles(outdir: string): Promise<void> {
     entrypoints: Object.values(BUNDLE_ENTRYPOINTS).map((entry) => join(packageRoot, entry)),
     outdir,
     target: "bun",
-    // Syntax minification stays off: Bun 1.3.14's constant folding of a multi-operand
-    // string concatenation (`"a " + "b " + "c"`) sometimes emits only the first operand
-    // in CI builds (~1 in 10; run 35220693690 truncated dispatch_open_asks' description at
-    // "Omit project to "), which corrupted the tool text and failed check-dist against a
-    // correct committed bundle. Whitespace and identifier minification are unaffected.
-    minify: { whitespace: true, identifiers: true, syntax: false },
+    // Whitespace and identifier minification stay off so unrelated source changes retain distinct
+    // bundle lines and merge cleanly. Syntax minification stays off because Bun 1.3.14's constant
+    // folding of multi-operand string concatenation can truncate the result in CI builds.
+    minify: { whitespace: false, identifiers: false, syntax: false },
     sourcemap: "none",
     naming: "[name].[ext]",
   })

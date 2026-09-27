@@ -12,15 +12,20 @@ import {
   borderDefault,
   card,
   inputClasses,
+  kbdHint,
   searchHitBg,
   searchHitText,
   selectedCardBg,
   selectedCardBorder,
+  surfaceMutedBg,
   textMutedOnSelectedCard,
   textMutedOnSurface,
+  textMutedOnSurfaceMuted,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
+  textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
+import { statusText } from "../project/board-model";
 import { referenceRouteFromHref } from "../refs/RefLink";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { DIALOG_SCOPE, useKeymap } from "../shell/keymap";
@@ -302,18 +307,28 @@ export function SearchPalette({
                 const muted = header.status === "done";
                 return (
                   <Fragment key={header.id}>
+                    {/* The group's own row: a label for the hits under it, on the recessed
+                        surface so the hits read as the list and this reads as its heading.
+                        Its status is the lifecycle label the rest of the product shows -
+                        `Needs review`, never the raw value. */}
+                    {/* `aria-hidden` because the group below takes its name from this row: a
+                        reader would otherwise hear the owner twice, once as the row and once
+                        as the group's label. `aria-labelledby` computes a name from a hidden
+                        element, so the group keeps it. */}
                     <div
+                      aria-hidden="true"
                       aria-label={`${header.key}: ${header.name}`}
-                      className={`flex min-w-0 items-center gap-2 border-b px-3 py-2 text-xs ${borderDefault} ${
-                        muted ? textMutedOnSurface : ""
+                      className={`flex min-w-0 items-center gap-2 border-b px-3 py-1.5 text-xs ${borderDefault} ${surfaceMutedBg} ${
+                        muted ? textMutedOnSurfaceMuted : ""
                       }`}
                       data-status={header.status}
+                      id={`search-group-${header.id}`}
                       role="presentation"
                     >
-                      <span className="font-medium">{header.key}</span>
+                      <span className="font-semibold">{header.key}</span>
                       <span
                         className={`min-w-0 flex-1 truncate ${
-                          muted ? textMutedOnSurface : textSecondaryOnSurface
+                          muted ? textMutedOnSurfaceMuted : textSecondaryOnSurfaceMuted
                         }`}
                       >
                         {header.name}
@@ -322,24 +337,54 @@ export function SearchPalette({
                         <span
                           className={`rounded-full px-2 py-0.5 font-medium ${badgeLow.bg} ${badgeLow.text}`}
                         >
-                          {header.status}
+                          {statusText(header.status)}
                         </span>
                       )}
                     </div>
-                    {ownerResults.map((result) => (
-                      <ResultOption
-                        active={result === activeResult}
-                        muted={muted}
-                        key={optionId(result)}
-                        onSelect={() => navigateToResult(result)}
-                        result={result}
-                      />
-                    ))}
+                    {/* The hits of one owner are a group named by the row above them, so a
+                        reader who cannot see that row still hears which issue or document a
+                        hit belongs to. The options stay direct children of the group and the
+                        listbox's own arrow navigation is untouched. A `fieldset` carries the
+                        group role implicitly; `min-w-0` overrides its UA `min-inline-size:
+                        min-content`, which a long hit would otherwise widen the palette to. */}
+                    <fieldset aria-labelledby={`search-group-${header.id}`} className="min-w-0">
+                      {ownerResults.map((result) => (
+                        <ResultOption
+                          active={result === activeResult}
+                          muted={muted}
+                          key={optionId(result)}
+                          onSelect={() => navigateToResult(result)}
+                          result={result}
+                        />
+                      ))}
+                    </fieldset>
                   </Fragment>
                 );
               })}
             </div>
           )}
+          {/* The palette is a keyboard surface and never said so: the keys that drive it sit
+              at its foot, quieter than any hit above them - and only where there is a pointer
+              that can hover, since a touch reader has none of these keys and the row would
+              cost them 33px of hits. */}
+          <div
+            className={`hidden flex-wrap items-center gap-x-3 gap-y-1 border-t px-3 py-2 text-xs pointer-fine:flex ${borderDefault} ${textMutedOnSurface}`}
+            data-testid="search-keyboard-hints"
+          >
+            <span className="inline-flex items-center gap-1">
+              <kbd className={`rounded px-1 py-0.5 font-medium ${kbdHint}`}>↑</kbd>
+              <kbd className={`rounded px-1 py-0.5 font-medium ${kbdHint}`}>↓</kbd>
+              to move
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <kbd className={`rounded px-1 py-0.5 font-medium ${kbdHint}`}>Enter</kbd>
+              to open
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <kbd className={`rounded px-1 py-0.5 font-medium ${kbdHint}`}>Esc</kbd>
+              to close
+            </span>
+          </div>
         </div>
       </div>
     </>

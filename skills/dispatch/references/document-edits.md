@@ -9,8 +9,8 @@ reject a stale edit.
 dispatch_doc_edit({ issue?, project?, artifact, ops, precondition?, summary? })
 ```
 It returns issue or project-document owner details plus `applied`, optional `version`, `changed`,
-`unchanged_ops`, and the document token this edit produced, rendered as a `Document token: <token>`
-line. `ops` is an array of this exact `EditOp` shape:
+`unchanged_ops`, `lost_ops`, and the document token this edit produced, rendered as a
+`Document token: <token>` line. `ops` is an array of this exact `EditOp` shape:
 
 ```ts
 type EditOp = {
@@ -66,17 +66,17 @@ heading's actual level — `find="## Old"`, `with="### New"` retitles and makes 
 so `find="# Old"` renames the text and keeps whatever level it selected. `with` that forms more than one
 paragraph is rejected (`INVALID_OP` on `with`) — see the recipe for a multi-paragraph rewrite below; so is any non-empty `with` that
 renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
-alone. An empty `with` deletes the matched text on purpose; where the block holding it cannot be written without that
-paragraph, the replace is `INVALID_OP`, and the refusal names the `delete` that removes it instead. Inside a code
+alone. An empty `with` deletes the matched text on purpose; a list item, quote, typed block or footnote definition left
+holding only the emptied paragraph keeps it, and reads back holding it. Emptying a task item's first paragraph while
+another block follows it in the item is `INVALID_OP`, since the browser editor reads no such item as a task. Inside a code
 block none of this applies: `with` is the code's literal text, written as sent, whitespace, markdown syntax and
 references included, except that line breaks at the end of the code's text, and a line holding only whitespace in a
-list item's code, do not survive the next read; and a line of three or more colons in code inside a typed block,
-indented less than four columns from where the typed block's lines start, is `INVALID_OP`, since the browser editor
-ends the typed block there - indent it four or more spaces (a tab reaches only the next tab stop, which inside a list
-item or a blockquote can be two columns away), or move the code block out of the typed block. Text a `replace` writes
-that would read as block syntax at a line start is stored escaped and reads back as the characters you sent: `---` over
-a paragraph is stored `\---`, not a rule, so to add a rule, `insert` it beside the paragraph (`insert` with markdown
-`***`). Use zero-based
+list item's code, do not survive the next read. A line of colons in code inside a typed block is kept: Dispatch writes
+that typed block's fence longer than any such line the browser editor would end it at. Text a `replace` writes that
+would read as block syntax at a line start is stored escaped and reads back as the characters you sent: `---` over a
+paragraph is stored `\---`, not a rule, so to add a rule, `insert` it beside the paragraph (`insert` with markdown
+`***`). A CR LF or a lone carriage return in any text you write - an insert's markdown, a `with` in text or in code,
+a suggestion, an upload or a spec - is stored as a line feed, as the browser editor reads both. Use zero-based
 `occurrence` for a
 repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 
@@ -117,7 +117,7 @@ block before or after it. The delete is what costs the id (below); a typed block
 carries it, which works only in that order, because an insert carrying an id the document still holds is refused.
 Then read the document back with
 `dispatch_doc_read` and read the passage and its neighbours, not a grep for the words you added: an empty
-`with` deletes the matched text on purpose where the block allows it, so a `replace` whose `with` you meant to fill
+`with` deletes the matched text on purpose, so a `replace` whose `with` you meant to fill
 empties that paragraph — the block and its id stay, holding nothing — and only a read shows what the document now says.
 
 A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a
@@ -159,6 +159,17 @@ changes the relevant token. A stale guard returns `409 PRECONDITION_FAILED` with
 token; Dispatch applies no part of that batch. It is the hashline `#TAG` property applied to stable block ids,
 not line numbers: canonical Markdown lines shift under concurrent edits and rendering changes, while block ids
 survive moves and retyping.
+
+A browser editing the same document while your edit is in flight never makes your edit a silent
+no-op. The two changes merge, and a human's deletion of the paragraph you are rewriting wins — but
+you are told. `409 EDIT_LOST_TO_CONCURRENT_CHANGE` means the whole batch was refused and nothing
+was written: re-read the document and decide again, as with `PRECONDITION_FAILED`. A success whose
+`lost_ops` names operations means the version was written and the live document already lacks what
+those operations wrote, because the deletion landed after the version: re-read before building on
+it. `lost_ops: []` is the ordinary outcome, and a result that says it could not confirm the edit
+survived means the room is reloading — re-read. An operation that only removes text (`delete`,
+`delete_row`, `delete_column`, a `replace` that shortens) is never reported lost: a concurrent
+deletion cannot undo a removal.
 
 `retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when

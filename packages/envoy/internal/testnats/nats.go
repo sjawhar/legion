@@ -48,6 +48,16 @@ var (
 	sharedErr     error
 )
 
+// init runs in every test binary that imports this package, whichever helper its tests use. Every
+// server these helpers start has no users unless a test configures some, and nats.go refuses an
+// nkey when the server sends no nonce ("nats: nkeys not supported by the server"), so an
+// operator's NATS_NKEY_SEED or NATS_NKEY_SEED_FILE never reaches the tests' clients. A test that
+// means to pass a seed sets it itself.
+func init() {
+	os.Unsetenv("NATS_NKEY_SEED")
+	os.Unsetenv("NATS_NKEY_SEED_FILE")
+}
+
 // Main runs the package's tests, then removes the shared server if a test started it, and returns
 // the exit code. A package whose tests use URL calls it from TestMain: os.Exit(testnats.Main(m)).
 func Main(m *testing.M) int {
@@ -216,6 +226,50 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 		t.Fatalf("NATS connection string: %v", err)
 	}
 	return ctr, uri
+}
+
+// StartNkeyAuthorized runs a NATS test container on Image, with JetStream, that accepts only
+// clients authenticating as the nkey user whose public key is user, removed when the test ends,
+// and returns its client URL once the server answers there (answering).
+func StartNkeyAuthorized(t testing.TB, user string) string {
+	t.Helper()
+	ctx := context.Background()
+	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ { nkey: %q } ]\n}\n", user)
+	ctr, err := tcnats.Run(ctx, Image, tcnats.WithConfigFile(strings.NewReader(config)))
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		t.Fatalf("start nkey-authorized NATS: %v", err)
+	}
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	answering(t, uri)
+	return uri
+}
+
+// answering waits, within connectTimeout, for the server at uri to refuse a connection with no
+// credential with its own authorization violation: the proof it speaks the client protocol and
+// enforces its nkey users. Testcontainers can report a mapped port before the NATS protocol
+// handshake, and a dial then ends in EOF or a refusal that says nothing about the server's users.
+// A server that admits the connection enforces no users, and every refusal a test expects of it
+// would pass for the wrong reason, so that fails the test.
+func answering(t testing.TB, uri string) {
+	t.Helper()
+	deadline := time.Now().Add(connectTimeout)
+	var err error
+	for time.Now().Before(deadline) {
+		var conn *natsgo.Conn
+		if conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect()); err == nil {
+			conn.Close()
+			t.Fatalf("NATS at %s admitted a client with no credential: it enforces no nkey users", uri)
+		}
+		if errors.Is(err, natsgo.ErrAuthorization) {
+			return
+		}
+		time.Sleep(retryInterval)
+	}
+	t.Fatalf("NATS at %s did not answer within %s: %v", uri, connectTimeout, err)
 }
 
 // StartRestartable runs a NATS test container a test can stop and start as a server restarts, and

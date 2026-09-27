@@ -73,6 +73,9 @@ type Config struct {
 	Env []string
 	// ProviderEnv is NAME=value pairs for OMP's environment only (--provider-env-dir).
 	ProviderEnv []string
+	// AgentSecrets is the pod's enrollment with the secrets broker (agentsecrets.go); nil on a
+	// tmux pane, which is never enrolled.
+	AgentSecrets *AgentSecrets
 	// Log receives the shim's own lines and its one-line frame summaries: what the pane shows.
 	Log io.Writer
 	// Grace is how long a SIGTERMed child has before it is killed; zero is DefaultGrace.
@@ -102,6 +105,7 @@ func Run(ctx context.Context, cfg Config) (int, error) {
 	s.out.log = s.log
 	s.loop, s.stop = context.WithCancel(context.Background())
 	defer s.stop()
+	defer s.renewers.Wait() // the renewer, if one was started, is a child of s.loop and ends with it
 	go s.watch(ctx)
 	return s.run()
 }
@@ -129,6 +133,12 @@ type shim struct {
 	exiting     bool // the shim is ending before any child was spawned; none will be
 	terminating bool
 	childExited chan struct{}
+	thumbprint  string // agent-secrets keygen's thumbprint, generated once per shim
+	renewing    bool   // the agent-secrets renewer goroutine has been started
+
+	// renewers is the agent-secrets renewer goroutine (agentsecrets.go's startRenewer), reaped by
+	// Run's deferred Wait before it returns.
+	renewers sync.WaitGroup
 
 	once sync.Once
 	code int
@@ -164,6 +174,14 @@ func (s *shim) run() (int, error) {
 // connect is one connection: the hello, the wait for its ack, the child spawned on the first
 // ack, and the daemon's frames until the stream drops. It reports whether the daemon acked.
 func (s *shim) connect() (acked bool, err error) {
+	identity, err := s.identity()
+	if err != nil {
+		// A pod that cannot generate its key or read its token registers as nothing: the shim ends
+		// naming the failure, before any dial (finish cancels the loop, so run returns 1 and the
+		// error), and the daemon observes the pod gone.
+		s.finish(1, err)
+		return false, err
+	}
 	var dialer net.Dialer
 	conn, err := dialer.DialContext(s.loop, s.cfg.Network, s.cfg.Address)
 	if err != nil {
@@ -173,7 +191,7 @@ func (s *shim) connect() (acked bool, err error) {
 	defer context.AfterFunc(s.loop, func() { _ = conn.Close() })()
 
 	w := shimwire.NewWriter(conn)
-	if err := w.WriteFrame(shimwire.Hello{BootToken: s.cfg.BootToken}); err != nil {
+	if err := w.WriteFrame(shimwire.Hello2{BootToken: s.cfg.BootToken, AgentSecrets: identity}); err != nil {
 		return false, fmt.Errorf("send hello: %w", err)
 	}
 	r := shimwire.NewReader(conn)
@@ -213,9 +231,9 @@ func (s *shim) connect() (acked bool, err error) {
 func (s *shim) fromDaemon(line []byte) {
 	frame, err := shimwire.Decode(line)
 	if err != nil {
-		if frameType(line) == shimwire.TypeAdoptWorkingCopy {
+		if typ := frameType(line); typ == shimwire.TypeAdoptWorkingCopy || typ == shimwire.TypeAgentSecretsEnrollment {
 			// The daemon is its only sender, and it is never OMP's to read.
-			s.log.Printf("[worker-shim] refusing a malformed adopt-working-copy frame: %v", err)
+			s.log.Printf("[worker-shim] refusing a malformed %s frame: %v", typ, err)
 			return
 		}
 		s.toChild(line)
@@ -227,6 +245,9 @@ func (s *shim) fromDaemon(line []byte) {
 		return
 	case shimwire.AdoptWorkingCopy:
 		go s.adopt(f)
+		return
+	case shimwire.AgentSecretsEnrollment:
+		s.enroll(f)
 		return
 	}
 	s.order.Lock()

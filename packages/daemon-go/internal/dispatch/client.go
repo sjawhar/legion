@@ -56,12 +56,13 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 			}
 		}
 		issues = append(issues, IssueSummary{
-			Key:     issue.Key,
-			Title:   issue.Title,
-			Status:  issue.Status,
-			Parent:  issue.Parent,
-			Rank:    issue.Rank,
-			LastSeq: issue.LastSeq,
+			Key:        issue.Key,
+			Title:      issue.Title,
+			Status:     issue.Status,
+			Parent:     issue.Parent,
+			Rank:       issue.Rank,
+			HandedOver: CarriesLegionLabel(issue.Labels),
+			LastSeq:    issue.LastSeq,
 		})
 	}
 	return issues, nil
@@ -238,12 +239,13 @@ func dispatchError(status int, statusText string, payload []byte) *Error {
 }
 
 type issueSummaryResponse struct {
-	Key     string  `json:"key"`
-	Title   string  `json:"title"`
-	Status  string  `json:"status"`
-	Parent  *string `json:"parent"`
-	Rank    string  `json:"rank"`
-	LastSeq int64   `json:"last_seq"`
+	Key     string   `json:"key"`
+	Title   string   `json:"title"`
+	Status  string   `json:"status"`
+	Parent  *string  `json:"parent"`
+	Rank    string   `json:"rank"`
+	Labels  []string `json:"labels"`
+	LastSeq int64    `json:"last_seq"`
 }
 
 type issueResponse struct {

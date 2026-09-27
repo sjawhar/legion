@@ -81,10 +81,10 @@ test("renders grouped results with marked snippets and dims a done issue", async
   try {
     await searchFor("astrolabe");
 
-    const doneGroup = screen
-      .getAllByRole("presentation")
-      .find((group) => group.getAttribute("aria-label") === "LEGION-2: Navigation instruments");
-    expect(screen.getAllByRole("presentation")).toHaveLength(2);
+    // The owner rows name their groups and are `aria-hidden`, so a reader hears each owner
+    // once; they are found by their label attribute rather than by role.
+    const doneGroup = document.querySelector('[aria-label="LEGION-2: Navigation instruments"]');
+    expect(screen.getAllByRole("group")).toHaveLength(2);
     expect(screen.getAllByRole("option")).toHaveLength(3);
     expect(screen.getAllByText("astrolabe", { selector: "mark" })).not.toHaveLength(0);
     expect(doneGroup?.getAttribute("data-status")).toBe("done");
@@ -121,10 +121,9 @@ test("renders document-owned results under the document and opens their discussi
   try {
     await searchFor("astrolabe");
 
-    const documentGroup = screen
-      .getAllByRole("presentation")
-      .find((group) => group.getAttribute("aria-label") === "CORE: Navigation design");
-    expect(documentGroup).toBeDefined();
+    const documentGroup = document.querySelector('[aria-label="CORE: Navigation design"]');
+    expect(documentGroup).not.toBeNull();
+    expect(screen.getByRole("group", { name: "CORE: Navigation design" })).toBeTruthy();
     fireEvent.click(screen.getByRole("option"));
     expect(screen.getByTestId("current-route").textContent).toBe(
       "/projects/CORE/documents/navigation-design?comment=comment-2"

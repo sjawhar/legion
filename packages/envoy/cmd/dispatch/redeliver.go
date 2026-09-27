@@ -114,11 +114,7 @@ func writeRedeliveryReport(out io.Writer, report redeliver.Report) {
 	}
 	_ = table.Flush()
 	fmt.Fprintf(out, "redeliver-webhooks: since=%s failed_attempts=%d deliveries=%d", report.Since.Format(time.RFC3339), report.Listed, len(report.Decisions))
-	for _, outcome := range []redeliver.Outcome{
-		redeliver.Redelivered, redeliver.WouldRedeliver, redeliver.RequestRefused, redeliver.RateLimited,
-		redeliver.Waiting, redeliver.Pending, redeliver.Delivered, redeliver.Terminal, redeliver.Exhausted,
-		redeliver.Closed, redeliver.ClaimedElsewhere,
-	} {
+	for _, outcome := range redeliver.Outcomes {
 		if n := report.Count(outcome); n > 0 {
 			fmt.Fprintf(out, " %s=%d", outcome, n)
 		}

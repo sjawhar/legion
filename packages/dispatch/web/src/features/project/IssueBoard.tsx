@@ -25,6 +25,7 @@ import { LabelPill, Pill, StatusPill } from "../../components/Pill";
 import { copyText } from "../../lib/clipboard";
 import {
   borderDefault,
+  borderStrong,
   card,
   cardHoverBorder,
   focusVisibleRing,
@@ -32,6 +33,7 @@ import {
   linkText,
   selectedCardBorder,
   surfaceMutedBg,
+  textMutedOnCanvas,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
@@ -197,7 +199,18 @@ const BoardColumnView = memo(function BoardColumnView({
           <Pill>{column.issues.length}</Pill>
         </div>
       </header>
-      {column.issues.length === 0 ? null : (
+      {column.issues.length === 0 ? (
+        // An empty column rendered as a bare header: the board lost its shape wherever a
+        // status had no work, and the droppable - which is the whole section - was 52 px tall.
+        // A dashed body keeps the column's width and its drop area visible.
+        <div
+          className={`mt-3 min-h-40 rounded-xl border border-dashed px-3 py-6 text-center text-xs ${textMutedOnCanvas} ${
+            isOver ? selectedCardBorder : borderStrong
+          }`}
+        >
+          Nothing here
+        </div>
+      ) : (
         <SortableContext
           items={column.issues.map((issue) => issue.key)}
           strategy={verticalListSortingStrategy}

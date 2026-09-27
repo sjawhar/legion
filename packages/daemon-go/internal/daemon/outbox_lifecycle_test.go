@@ -54,7 +54,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 		t.Fatalf("implementer = %s, want failed", got)
 	}
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
-	admission := admit.New(records, 2, "LEGION", quietLogger())
+	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 	handlers := []intake.Handler{engine, admission}
 	client := &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}
 	runner := &outbox{
@@ -69,7 +69,7 @@ func TestAnEarlierGenerationsSuperviseRowNeverActsOnTheNextGeneration(t *testing
 
 	for _, observed := range []intake.DispatchIssue{
 		{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: "U"},
-		{Key: root.Key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U"},
+		{Key: root.Key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U", HandedOver: true},
 	} {
 		if _, err := intake.ApplyFact(ctx, pool, "dispatch", "ev-"+observed.Status, observed, handlers...); err != nil {
 			t.Fatalf("%s: %v", observed.Status, err)
@@ -166,13 +166,13 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
-	admission := admit.New(records, 2, "LEGION", quietLogger())
+	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 	for _, step := range []struct {
 		id   string
 		fact intake.Fact
 	}{
 		{"backlog", intake.DispatchIssue{Key: key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: "U"}},
-		{"todo", intake.DispatchIssue{Key: key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U"}},
+		{"todo", intake.DispatchIssue{Key: key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U", HandedOver: true}},
 		{"gate", intake.GateRegistered{Issue: key, ArtifactID: artifact, Version: 2}},
 		{"approve", intake.DispatchArtifact{Key: key, ArtifactID: artifact, Kind: intake.DispatchArtifactApproved, Version: 2}},
 		{"plan", intake.HandoffComplete{Generation: 2, Issue: key, Role: claim.RolePlanner, Summary: "plan", Commit: "plan-1"}},
@@ -219,7 +219,7 @@ func TestAChildAHumanMovesOutOfTheWorkflowStopsAndKeepsTheHumansStatus(t *testin
 		t.Fatal(err)
 	}
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
-	admission := admit.New(records, 2, "LEGION", quietLogger())
+	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-backlog", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: parent, Rank: "V"}, engine, admission); err != nil {
 		t.Fatal(err)
@@ -629,6 +629,29 @@ func TestARetryOfAClaimThatKeptItsPhasesTaskDeliversNothingMore(t *testing.T) {
 	}
 	if got.Pending == nil || got.Pending.ID != kept.ID || got.Pending.Task != kept.Task {
 		t.Fatalf("retried claim pending %+v, want the kept task alone", got.Pending)
+	}
+}
+
+// A held claim can keep a confirmed task only when the write retiring it failed: its turn is over,
+// and the relaunch's first decision retires it. The retry's own task then goes in its place, where
+// a check made before the relaunch, seeing the task still held, would relaunch the claim with
+// nothing to do.
+func TestARetryOfAClaimWhoseKeptTasksTurnWasOverDeliversItsTask(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	kept := supervise.Delivery{ID: "kept-task", Task: "Continue Workflow. Issue: LEGION-208. Phase: implementing.",
+		Phase: phase.Implementing, Generation: issue.Generation, QueuedAt: time.Now(), DeliveredAt: time.Now(), ConfirmedAt: time.Now()}
+	machine := heldImplementer(t, sup, issue, kept)
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
+
+	if err := runner.execute(context.Background(), retryHeldPhase(t, issue)); err != nil {
+		t.Fatalf("start the held claim: %v", err)
+	}
+	if got := machine.Claim().Pending; got == nil || got.ID != "outbox:92" {
+		t.Fatalf("retried claim pending %+v, want the retry's own task", got)
 	}
 }
 

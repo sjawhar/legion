@@ -45,7 +45,7 @@ func ClassifyPush(p PushPayload) PushClassification {
 	}
 	switch *p.ChangedPathsTruncated {
 	case "true":
-		return PushClassification{Unknown: "changed_paths truncated at 100"}
+		return PushClassification{Unknown: "changed_paths truncated"}
 	case "false":
 		if p.ChangedPaths == nil || *p.ChangedPaths == "" {
 			return PushClassification{Unknown: "no commits listed"}

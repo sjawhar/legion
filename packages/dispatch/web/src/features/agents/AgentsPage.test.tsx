@@ -108,6 +108,19 @@ function renderAgents({
     message(input.body, { issue_key: issue, target: input.target ?? null })
   );
   const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const createBroadcast = spyOn(api, "createBroadcast").mockImplementation(async (input) => ({
+    author: { id: "alice", kind: "user" },
+    body: input.body,
+    created_at: "2026-09-14T00:00:00Z",
+    delivery: input.delivery,
+    excluded: [],
+    id: "broadcast-1",
+    recipients: input.session_ids.map((sessionID) => ({
+      message: message(input.body, { target: `session:${sessionID}` }),
+      replies: [],
+      session_id: sessionID,
+    })),
+  }));
   const getBlockSchema = spyOn(api, "getBlockSchema").mockResolvedValue({ types: [], version: 1 });
   const createMessageDelivery = spyOn(api, "createMessageDelivery").mockResolvedValue({
     attempt: 2,
@@ -135,6 +148,7 @@ function renderAgents({
   return {
     createAgentMessage,
     createComment,
+    createBroadcast,
     createMessageDelivery,
     createMessage,
     getBlockSchema,
@@ -153,6 +167,7 @@ function renderAgents({
       createComment.mockRestore();
       createMessage.mockRestore();
       createAgentMessage.mockRestore();
+      createBroadcast.mockRestore();
       createMessageDelivery.mockRestore();
       listProjects.mockRestore();
       listIssues.mockRestore();
@@ -268,7 +283,8 @@ test("Agents shows one whose-turn pill per card: Needs you, plus Waiting on agen
     expect(waiting.getAttribute("title")).toContain("Builder");
 
     const reviewer = card(region, "Reviewer");
-    expect(within(reviewer).queryByRole("link")).toBeNull();
+    // Every card carries the Open action; what this card must not carry is a whose-turn pill.
+    expect(within(reviewer).queryByRole("link", { name: /Needs you|Waiting on agent/ })).toBeNull();
     expect(within(reviewer).queryByText(/^(Needs you|Waiting on agent|Open asks)/)).toBeNull();
   } finally {
     page.view.unmount();
@@ -1246,6 +1262,89 @@ test("a reply's targeted-message retry on the Agents page checks the thread's cu
         .getByRole("button", { name: "Send as BTW instead" })
         .hasAttribute("disabled")
     ).toBe(false);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("a broadcast leaves out a selected agent that does not advertise the chosen mode", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    const broadcast = within(region).getByRole("region", { name: "Broadcast" });
+    // The Reviewer advertises `aside` only, so BTW reaches the Planner alone.
+    fireEvent.change(within(broadcast).getByRole("combobox", { name: "Delivery mode" }), {
+      target: { value: "btw" },
+    });
+    expect(
+      within(broadcast).getByText(/Excluded: Reviewer \(does not advertise btw\)/)
+    ).toBeTruthy();
+    fireEvent.change(within(broadcast).getByRole("textbox", { name: "Broadcast message" }), {
+      target: { value: "Stand down and report status." },
+    });
+    fireEvent.click(within(broadcast).getByRole("button", { name: "Send to 1" }));
+    await waitFor(() =>
+      expect(page.createBroadcast).toHaveBeenCalledWith({
+        body: "Stand down and report status.",
+        delivery: "btw",
+        session_ids: ["planner-session"],
+      })
+    );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("a mode both recipients advertise takes the excluded one back in", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    const broadcast = within(region).getByRole("region", { name: "Broadcast" });
+    fireEvent.change(within(broadcast).getByRole("combobox", { name: "Delivery mode" }), {
+      target: { value: "aside" },
+    });
+    expect(within(broadcast).queryByText(/Excluded:/)).toBeNull();
+    expect(within(broadcast).getByRole("button", { name: "Send to 2" })).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("a directory filter narrows the listed agents and what Select all ticks", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    fireEvent.change(within(region).getByRole("searchbox", { name: "Directory contains" }), {
+      target: { value: "PLANNER" },
+    });
+    await waitFor(() =>
+      expect(within(region).queryByRole("heading", { level: 2, name: "Reviewer" })).toBeNull()
+    );
+    fireEvent.click(within(region).getByRole("button", { name: "Select all (1)" }));
+    const broadcast = within(region).getByRole("region", { name: "Broadcast" });
+    expect(
+      within(broadcast).getByRole("heading", { name: "Broadcast to 1 of 1 selected" })
+    ).toBeTruthy();
+    const chips = within(broadcast).getByRole("list", { name: "Selected agents" });
+    expect(
+      within(chips)
+        .getAllByRole("button")
+        .map((chip) => chip.textContent)
+    ).toEqual(["Planner ✕"]);
   } finally {
     page.view.unmount();
     page.restore();

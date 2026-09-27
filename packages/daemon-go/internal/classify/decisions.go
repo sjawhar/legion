@@ -105,14 +105,15 @@ func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullReq
 }
 
 // ApplySettlement applies a listener CI settlement only when the exported fence classifiers say
-// it is newer or a refresh. It returns false for stale, duplicate, and conflicting observations.
+// it is newer or a refresh, merging its attempt set into the fence. It returns false for stale,
+// duplicate, and conflicting observations.
 func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
 	classification := ClassifySettlement(pr, candidate)
 	if classification != SettlementNewer && classification != SettlementRefresh {
 		return pr, false
 	}
 	outcome := EffectiveOutcome(pr, candidate)
-	pr.CheckRuns = append([]record.AttemptRun(nil), candidate.CheckRuns...)
+	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, candidate.CheckRuns)
 	pr.Generation = candidate.Generation
 	pr.Snapshot = candidate.Snapshot
 	pr.Verdict = outcome.Verdict
@@ -129,6 +130,15 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 // clock on either side fences nothing.
 func LateLifecycle(observed, applied time.Time) bool {
 	return !observed.IsZero() && !applied.IsZero() && observed.Before(applied)
+}
+
+// RepeatedClose reports whether a close at observed repeats the close already applied to pr: pr is
+// recorded closed and the close's clock is not after the recorded one, or the close has none. A
+// later close is a second one, whose reopen between the two has not been delivered yet. Unlike
+// LateLifecycle, an equal clock is the same event here: a second close in the same second as the
+// first goes unreported only when the reopen between them was never observed.
+func RepeatedClose(pr record.PullRequest, observed time.Time) bool {
+	return pr.State == record.PullRequestClosed && !observed.After(pr.HeadUpdatedAt)
 }
 
 // LatestClock is the clock a pull request keeps after applying an observation at observed: the

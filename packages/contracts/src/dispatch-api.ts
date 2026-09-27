@@ -702,6 +702,18 @@ export interface Suggestion {
 }
 
 /**
+ * `POST /api/v1/comments/{id}/accept` answers the comment plus whether the live document already
+ * lacks the text the accept wrote: a concurrent browser change removed it after the accept's
+ * version was rendered and before the write reached the room, which is past undoing (LEGION-269).
+ * A loss inside the earlier window is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` instead, and leaves the
+ * suggestion open. `null` is a check that reached no verdict, which is not the same statement as
+ * `false`; `undefined` is a Dispatch server predating the check.
+ */
+export interface AcceptSuggestionResponse extends Comment {
+  readonly lost?: boolean | null;
+}
+
+/**
  * The payload of every `comment.*` event. It is the comment row as it stood when the event was
  * written, and events are retained verbatim, so the row's later additions are optional here:
  * `mentions` and `deliveries` were added on 2026-09-18 (#1188), and every comment event recorded
@@ -1550,6 +1562,61 @@ export interface MessageRead {
   readonly replies: Message[];
 }
 
+/**
+ * One human message sent to many sessions at once. A broadcast is a grouping over the
+ * targeted messages Dispatch already sends, not a second delivery mechanism: every recipient
+ * gets an ordinary issue-less `Message` aimed at its own session, so each recipient's thread,
+ * retry and reply behave exactly as they do for a message sent from one agent card. This row
+ * is what they share.
+ */
+export interface Broadcast {
+  readonly id: string;
+  readonly author: Actor;
+  readonly body: string;
+  readonly delivery: MessageDeliveryMode;
+  readonly created_at: string;
+}
+
+/** A broadcast list row: the send, how many sessions it reached, and how many answered. */
+export interface BroadcastSummary extends Broadcast {
+  readonly recipients: number;
+  readonly replies: number;
+}
+
+/** One session's copy of a broadcast: the message it was sent, with its delivery attempts,
+ *  and the replies threaded under it. Delivery runs behind the create response, so a recipient
+ *  starts with no attempt; a recipient still carrying none has not been sent to. */
+export interface BroadcastRecipient {
+  readonly session_id: string;
+  readonly message: Message;
+  readonly replies: Message[];
+}
+
+export interface BroadcastRead extends Broadcast {
+  readonly recipients: BroadcastRecipient[];
+}
+
+/** A session the sender selected that was not sent to. A recipient that does not advertise
+ *  the chosen mode is excluded, never switched to another one: the mode is part of what the
+ *  sender said. Exclusions are reported here and never stored. */
+export interface BroadcastExclusion {
+  readonly session_id: string;
+  readonly title: string;
+  readonly reason: string;
+}
+
+export interface BroadcastCreated extends BroadcastRead {
+  readonly excluded: BroadcastExclusion[];
+}
+
+export interface CreateBroadcastInput {
+  readonly body: string;
+  readonly delivery: MessageDeliveryMode;
+  /** The sessions the human selected. A session named twice is one recipient; one that is no
+   *  longer live, or that does not advertise `delivery`, comes back under `excluded`. */
+  readonly session_ids: readonly string[];
+}
+
 export interface IssueRead {
   readonly issue: IssueDetails;
   readonly events: Event[];
@@ -1588,6 +1655,14 @@ export interface EditArtifactResponse {
   readonly changed?: boolean;
   /** Zero-based index of each operation that left the document as it found it. */
   readonly unchanged_ops?: number[];
+  /** Zero-based index of each operation whose text the live document no longer carried once this
+   *  edit reached it: a concurrent browser change removed it after the version was rendered and
+   *  before the write was published, which is past undoing, so the version records text the live
+   *  document does not have. An empty array is the ordinary outcome. `null` is a check that
+   *  reached no verdict, which is not the same statement; `undefined` is a Dispatch server
+   *  predating the check (LEGION-269). A loss inside the earlier window is refused outright with
+   *  `409 EDIT_LOST_TO_CONCURRENT_CHANGE`, not reported here. */
+  readonly lost_ops?: number[] | null;
   /** Opaque SHA-256 token for the full Proof document state this edit produced, including inline
    *  marks: the document precondition for the caller's next edit, with no read in between. Absent
    *  from a Dispatch server predating it. */

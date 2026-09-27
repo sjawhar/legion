@@ -5,8 +5,25 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf16"
 )
+
+// MessageBodyLimit is the longest message body Dispatch accepts, in UTF-16 code units: the server
+// refuses a longer one with CAP_EXCEEDED on every attempt (packages/envoy/internal/dispatch/api/
+// messages.go maxMessageBody16, counted by server.go len16).
+const MessageBodyLimit = 2000
+
+// MessageBodyLength is body's length as Dispatch counts it against MessageBodyLimit: UTF-16 code
+// units, so a character outside the Basic Multilingual Plane counts twice.
+func MessageBodyLength(body string) int {
+	length := 0
+	for _, r := range body {
+		length += utf16.RuneLen(r)
+	}
+	return length
+}
 
 // Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
 // writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
@@ -19,14 +36,34 @@ type Client interface {
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 }
 
+// LegionLabel is the Dispatch label that hands an issue to Legion. A human sets it from the issue
+// header in the Dispatch dashboard, an agent with Dispatch's issue tools. A label is the mark, and
+// not the issue's route, because a route has Dispatch publish every event of the issue to the
+// route's topic, while a label only marks it.
+const LegionLabel = "legion"
+
+// CarriesLegionLabel says whether labels include LegionLabel. Dispatch keeps a label's case as it
+// was typed and holds labels differing only in case as one label, so the match ignores case.
+func CarriesLegionLabel(labels []string) bool {
+	for _, label := range labels {
+		if strings.EqualFold(label, LegionLabel) {
+			return true
+		}
+	}
+	return false
+}
+
 // IssueSummary is one issue from Dispatch's project list. Rank is Dispatch's fractional key;
-// callers preserve the list's order when filtering.
+// callers preserve the list's order when filtering. HandedOver is resolved once here, at the
+// client boundary, from the raw labels Dispatch's list route answers: every other reader of an
+// IssueSummary acts on this bool, never on a label list of its own.
 type IssueSummary struct {
-	Key    string
-	Title  string
-	Status string
-	Parent *string
-	Rank   string
+	Key        string
+	Title      string
+	Status     string
+	Parent     *string
+	Rank       string
+	HandedOver bool
 	// LastSeq is how far Dispatch's own event log for the issue has run. A record whose applied
 	// sequence is behind it has events still to come on the stream, which carry the actor this
 	// snapshot does not.

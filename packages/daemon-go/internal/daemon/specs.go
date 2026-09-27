@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -33,6 +34,9 @@ type specs struct {
 	secrets      map[string]string
 	repo         ghrepo.Repository
 	prompts      *prompts.Composer
+	// designGate is the project's design gate policy (gates.design), which a tree's root architect
+	// is told after its addressing (designGateFragment).
+	designGate config.DesignGate
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
@@ -43,10 +47,10 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 	return filepath.Join(stateDir, "prompts", string(token)+".md")
 }
 
-// SpawnSpec is the launch's secrets (the Envoy bearer, when the daemon has one), its prompt — the
-// role prompt parts, the addressing sentence, and the deployment instructions — and its
-// repository; for a claim whose workspace was lost with its session, the issue's branch the
-// recreated workspace is recovered from.
+// SpawnSpec is the launch's secrets (launchSecrets: the Envoy bearer and the NATS nkey seed, each
+// when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
+// deployment instructions — and its repository; for a claim whose workspace was lost with its
+// session, the issue's branch the recreated workspace is recovered from.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
@@ -55,6 +59,9 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	addressing, err := addressingFragment(s.project, c)
 	if err != nil {
 		return runtime.SpawnSpec{}, err
+	}
+	if claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
+		addressing += " " + designGateFragment(s.designGate)
 	}
 	env := map[string]string{}
 	if s.identity != nil {
@@ -102,9 +109,10 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 // addressingFragment is the sentence that tells an agent where it and its peers are reached: its
 // own role topic, the tree architect's, and the project controller's, spelled from the tokens so
 // the model never hand-encodes one (addressingFragment, packages/daemon/src/daemon/processes.ts).
-// The shipped sentence's merge-queue clause is left out: the merge queue is
-// `projects.<KEY>.merge_queue_role`, which this daemon does not read until Stage 3, and a clause
-// saying there is none would be a claim about a setting the daemon never looked at.
+// The shipped sentence's merge-queue clause is left out: it tells the merger where to publish
+// READY, and under this daemon the merger publishes nothing — the daemon posts the READY packet
+// and publishes it to `projects.<KEY>.merge_queue_role` itself (workflow.Engine.ready,
+// prompts/go/merger.md).
 func addressingFragment(project string, c supervise.Claim) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
 	if err != nil {
@@ -113,4 +121,12 @@ func addressingFragment(project string, c supervise.Claim) (string, error) {
 	return fmt.Sprintf("Legion addressing: your role topic is `%s%s`; the architect that owns your issue is `%s%s`; "+
 		"the project's controller is `%s%s`; a sibling role on your issue is your topic with the trailing `-<role>` replaced.",
 		roleTopicPrefix, c.Token, roleTopicPrefix, architect, roleTopicPrefix, claim.ControllerToken(project)), nil
+}
+
+// designGateFragment is the sentence a tree's root architect is told after its addressing: this
+// project's design gate policy, the "Design gate policy" line the shared role prompt reads
+// (designGateFragment, packages/daemon/src/daemon/processes.ts). What each policy asks of the
+// architect under this daemon is in its Go role part (prompts/go/architect-root.md).
+func designGateFragment(policy config.DesignGate) string {
+	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
 }

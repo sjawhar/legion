@@ -184,14 +184,25 @@ const legionGoControllerLocator = z.strictObject({
   registeredAt: timestamp,
 });
 
+/** `api.AgentSecretsLoginView` — the daemon's own agent-secrets machine login's current status
+ * (runtime.kubernetes.agent_secrets, AGENTC-393 Plan C): `state` is one of "none" (no login has
+ * ever been started), "pending", "issued", "denied", or "expired"; `code` is the confirmation
+ * code shown on the Dispatch credential page for a pending login, "" otherwise. */
+const legionGoAgentSecretsLoginView = z.strictObject({
+  state: z.string(),
+  code: z.string(),
+});
+
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
- * registers with the capability `legion controller start` fetched. */
+ * registers with the capability `legion controller start` fetched; `agentSecretsLogin` is absent
+ * when the deployment configures no broker (contract 9). */
 export const LegionGoStateResponse = z.strictObject({
   daemon: goDaemonInfo,
   admission: legionGoAdmission,
   issues: z.record(z.string(), legionGoIssue),
   pendingStatusWrites: z.array(legionGoPendingStatusWrite),
   controllerLocator: legionGoControllerLocator.optional(),
+  agentSecretsLogin: legionGoAgentSecretsLoginView.optional(),
 });
 
 export type LegionGoState = z.output<typeof LegionGoStateResponse>;
@@ -368,6 +379,12 @@ export const LegionGoPhaseRetryRequest = z.strictObject({
 
 /** `api.SignOffRequest`, the owning architect's post-production-check sign-off. */
 export const LegionGoSignOffRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
+});
+
+/** `api.ChildRequest`, the architect's park_child or rerun_child of one child of its tree. */
+export const LegionGoChildRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,
 });

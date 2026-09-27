@@ -16,19 +16,31 @@ import type {
   AskRead,
   AskSnooze,
   AuthenticatedUser,
+  AuthenticationResponseJSON,
   BlockSchema,
+  BroadcastCreated,
+  BroadcastRead,
+  BroadcastSummary,
   Comment,
   CommentDelivery,
   CommentRead,
   CreateAgentMessageInput,
   CreateArtifactInput,
   CreateAskInput,
+  CreateBroadcastInput,
   CreateCommentInput,
   CreatedAgentToken,
   CreateIssueInput,
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  CredentialCeremonyBeginResponse,
+  CredentialCeremonyFinishResponse,
+  CredentialDecisionResponse,
+  CredentialGrantsResponse,
+  CredentialKeysResponse,
+  CredentialPendingResponse,
+  CredentialRecord,
   DispatchUser,
   EditCommentInput,
   Event,
@@ -43,6 +55,7 @@ import type {
   MessageDelivery,
   MessageRead,
   Project,
+  RegistrationResponseJSON,
   RepoProject,
   SearchResponse,
   Subscriber,
@@ -112,11 +125,20 @@ export function isForbidden(error: unknown): boolean {
   return error instanceof ApiError && error.status === 403 && error.code === "LOGIN_NOT_ALLOWED";
 }
 
-// A project without an architecture source answers its architecture reads with this 404 —
-// definitive like an auth outcome (retrying changes nothing) and the one case the project page
-// and the issue header's component editor treat as "no model", never as a failure.
+// The architecture TREE read answers this 404 for a project with no source — definitive like an
+// auth outcome, since retrying changes nothing. The source read itself answers `null` instead:
+// the question it asks has "no source" as an ordinary answer, and a 404 made every reader of an
+// ordinary project page log a failed request.
 export function isSourceNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
+}
+
+// A launcher-credential machine-lookup record never carries a `code` UI; a broker deployed
+// without credential requests configured answers every credential route with this 404 —
+// definitive like an auth outcome (retrying changes nothing), and the one case the inbox's
+// credential section treats as "not configured", never as a failure.
+export function isCredentialFeatureOff(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && error.code === "FEATURE_OFF";
 }
 
 // The retry policy every query in the app shares: an auth outcome (401/403) or a missing
@@ -258,8 +280,9 @@ export class DispatchApiClient {
     return this.json<ArchitectureSource[]>("/api/v1/settings/architecture-sources");
   }
 
-  getArchitectureSource(project: string): Promise<ArchitectureSource> {
-    return this.json<ArchitectureSource>(
+  /** `null` when the project has no source: having none is the common answer, not a failure. */
+  getArchitectureSource(project: string): Promise<ArchitectureSource | null> {
+    return this.json<ArchitectureSource | null>(
       `/api/v1/projects/${pathSegment(project)}/architecture-source`
     );
   }
@@ -453,6 +476,18 @@ export class DispatchApiClient {
     return this.json<MessageRead[]>(`/api/v1/agents/${pathSegment(sessionID)}/messages`);
   }
 
+  createBroadcast(input: CreateBroadcastInput): Promise<BroadcastCreated> {
+    return this.post<BroadcastCreated>("/api/v1/broadcasts", input);
+  }
+
+  listBroadcasts(): Promise<BroadcastSummary[]> {
+    return this.json<BroadcastSummary[]>("/api/v1/broadcasts");
+  }
+
+  getBroadcast(id: string): Promise<BroadcastRead> {
+    return this.json<BroadcastRead>(`/api/v1/broadcasts/${pathSegment(id)}`);
+  }
+
   createMessageDelivery(id: string, delivery: "btw" | "aside" | "steer"): Promise<MessageDelivery> {
     return this.post<MessageDelivery>(`/api/v1/messages/${pathSegment(id)}/deliveries`, {
       delivery,
@@ -629,6 +664,105 @@ export class DispatchApiClient {
 
   githubGraphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
     return this.post<T>("/api/github/graphql", { query, variables });
+  }
+
+  /** `GET /api/v1/credential-requests?approver=me`: every request waiting on the viewer, as
+   *  the Inbox's credential-requests section lists them. */
+  getCredentialPending(): Promise<CredentialPendingResponse> {
+    return this.json<CredentialPendingResponse>(
+      pathWithQuery("/api/v1/credential-requests", { approver: "me" })
+    );
+  }
+
+  getCredentialRecord(recordId: string): Promise<CredentialRecord> {
+    return this.json<CredentialRecord>(`/api/v1/credential-requests/${pathSegment(recordId)}`);
+  }
+
+  approveCredentialRecord(
+    recordId: string,
+    body: { assertion: AuthenticationResponseJSON; code?: string }
+  ): Promise<CredentialDecisionResponse> {
+    return this.post<CredentialDecisionResponse>(
+      `/api/v1/credential-requests/${pathSegment(recordId)}/approve`,
+      body
+    );
+  }
+
+  denyCredentialRecord(
+    recordId: string,
+    body: { assertion: AuthenticationResponseJSON }
+  ): Promise<CredentialDecisionResponse> {
+    return this.post<CredentialDecisionResponse>(
+      `/api/v1/credential-requests/${pathSegment(recordId)}/deny`,
+      body
+    );
+  }
+
+  /** A machine (`launcher_credential`) record's challenges only ever come from this route,
+   *  never from `getCredentialRecord` — the code the operator types in is what proves which
+   *  pending request they mean. */
+  lookupMachineCredential(code: string): Promise<CredentialRecord> {
+    return this.post<CredentialRecord>("/api/v1/credential-requests/machine-lookup", { code });
+  }
+
+  getCredentialKeys(login: string): Promise<CredentialKeysResponse> {
+    return this.json<CredentialKeysResponse>(`/api/v1/credential-keys/${pathSegment(login)}`);
+  }
+
+  beginCredentialKeyRegistration(login: string): Promise<CredentialCeremonyBeginResponse> {
+    return this.post<CredentialCeremonyBeginResponse>(
+      `/api/v1/credential-keys/${pathSegment(login)}/register/begin`,
+      {}
+    );
+  }
+
+  finishCredentialKeyRegistration(
+    login: string,
+    body: { ceremony_id: string; response: RegistrationResponseJSON }
+  ): Promise<CredentialCeremonyFinishResponse> {
+    return this.post<CredentialCeremonyFinishResponse>(
+      `/api/v1/credential-keys/${pathSegment(login)}/register/finish`,
+      body
+    );
+  }
+
+  beginCredentialKeyEndorsement(
+    login: string,
+    body: { credential_id: string; key_hash: string }
+  ): Promise<CredentialCeremonyBeginResponse> {
+    return this.post<CredentialCeremonyBeginResponse>(
+      `/api/v1/credential-keys/${pathSegment(login)}/endorse/begin`,
+      body
+    );
+  }
+
+  finishCredentialKeyEndorsement(
+    login: string,
+    body: { ceremony_id: string; response: AuthenticationResponseJSON }
+  ): Promise<CredentialCeremonyFinishResponse> {
+    return this.post<CredentialCeremonyFinishResponse>(
+      `/api/v1/credential-keys/${pathSegment(login)}/endorse/finish`,
+      body
+    );
+  }
+
+  /** `GET /api/v1/credential-grants?approver=me`: every grant the viewer approved, for the
+   *  revoke-list page a later task adds. */
+  getCredentialGrants(): Promise<CredentialGrantsResponse> {
+    return this.json<CredentialGrantsResponse>(
+      pathWithQuery("/api/v1/credential-grants", { approver: "me" })
+    );
+  }
+
+  async revokeCredentialGrant(
+    grantId: string,
+    body: { assertion: AuthenticationResponseJSON }
+  ): Promise<void> {
+    await this.response(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {
+      body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
   }
 }
 

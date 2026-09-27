@@ -20,8 +20,8 @@ const ControllerConfigExample = "deploy/kubernetes/daemon/controller.yaml.exampl
 // the ones the controller needs (packages/daemon/src/cli/controller-start.ts:34-47).
 var controllerKeys = []string{
 	"project", "daemon_url", "operator_token_file", "envoy_url", "envoy_token_file", "nats_urls",
-	"dispatch_url", "dispatch_token_file", "instructions", "omp_invocation", "omp_launch_prefix",
-	"state_dir",
+	"nats_nkey_seed_file", "dispatch_url", "dispatch_token_file", "instructions", "omp_invocation",
+	"omp_launch_prefix", "state_dir",
 }
 
 // ControllerConfig is `legion controller start`'s operator-side file, settled. Every path is
@@ -36,6 +36,9 @@ type ControllerConfig struct {
 	EnvoyURL          string
 	EnvoyTokenFile    string
 	NatsURLs          []string
+	// NatsNkeySeedFile is the NATS nkey user seed's file the controller's Oh My Pi reads through
+	// NATS_NKEY_SEED_FILE, "" when the file names none.
+	NatsNkeySeedFile  string
 	DispatchURL       string
 	DispatchTokenFile string
 	InstructionsPath  string
@@ -54,7 +57,8 @@ type ControllerConfig struct {
 // It is never the daemon's loader, which runs both GitHub Apps' private_key_command and demands
 // keys the controller never uses. Relative paths resolve against the file's directory; `~` is not
 // expanded. daemonURL, when not "", is `--daemon-url`, which replaces the file's daemon_url and is
-// validated the same way (packages/daemon/src/cli/controller-start.ts:75-175, 291-300).
+// validated the same way (loadControllerStartConfig and cmdControllerStart's --daemon-url check,
+// packages/daemon/src/cli/controller-start.ts).
 func LoadController(path, daemonURL string) (ControllerConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -129,6 +133,9 @@ func LoadController(path, daemonURL string) (ControllerConfig, error) {
 		return ControllerConfig{}, errors.New("nats_urls is required in the controller configuration")
 	}
 	if cfg.EnvoyTokenFile, err = optionalPath("envoy_token_file"); err != nil {
+		return ControllerConfig{}, err
+	}
+	if cfg.NatsNkeySeedFile, err = optionalPath("nats_nkey_seed_file"); err != nil {
 		return ControllerConfig{}, err
 	}
 	dispatchURL, err := optionalString(values["dispatch_url"], "dispatch_url")

@@ -1,4 +1,8 @@
-import { LEGION_GO_WORKFLOW_PHASES, type LegionGoState } from "@legion/contracts/legion-go-api";
+import {
+  LEGION_GO_WORKFLOW_PHASES,
+  LegionGoGateRegisterRequest,
+  type LegionGoState,
+} from "@legion/contracts/legion-go-api";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
 import type { LegionGoDaemonClient } from "./go-daemon-client";
@@ -7,6 +11,7 @@ import {
   HANDOFF_OPERATIONS,
   handoffSchemaFields,
   isHandoffOperation,
+  rootArchitectHandoffRefusal,
   runHandoffAction,
 } from "./handoff-actions";
 
@@ -27,6 +32,8 @@ const OPERATIONS: Readonly<Record<GoLegionToolRole, readonly string[]>> = {
     "request_backward_move",
     "retry_or_escalate",
     "sign_off",
+    "park_child",
+    "rerun_child",
     "read_record",
   ],
   "phase-worker": ["request_backward_move", "read_record"],
@@ -38,6 +45,8 @@ const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   request_backward_move: ["to", "reason"],
   retry_or_escalate: ["issue", "decision"],
   sign_off: ["issue"],
+  park_child: ["issue"],
+  rerun_child: ["issue"],
   read_record: ["issue"],
 };
 
@@ -53,11 +62,16 @@ function toolSchema(pi: PiApi): unknown {
       "request_backward_move",
       "retry_or_escalate",
       "sign_off",
+      "park_child",
+      "rerun_child",
       "read_record",
       ...HANDOFF_OPERATIONS,
     ]),
     issue: z.string().optional(),
-    artifactId: z.string().optional(),
+    artifactId: z
+      .string()
+      .describe("register_gate's root spec document: its artifact id, slug, or filename, as the Dispatch tools take it")
+      .optional(),
     version: z.number().optional(),
     issues: z.array(z.string()).optional(),
     to: z.enum(LEGION_GO_WORKFLOW_PHASES).optional(),
@@ -114,8 +128,12 @@ export function createGoLegionTool(deps: {
   readonly session: (context: SessionContext) => GoLegionToolSession;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
+  /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
+   * looked up in Dispatch as the Dispatch tools do; throws naming the reference when none matches,
+   * or when it names two documents. */
+  readonly resolveDocument: (issue: string, reference: string) => Promise<string>;
 }): RegisteredTool {
-  const { pi, daemon, session, onPhaseCompleted } = deps;
+  const { pi, daemon, session, onPhaseCompleted, resolveDocument } = deps;
   return {
     name: "legion",
     label: "legion",
@@ -130,7 +148,7 @@ export function createGoLegionTool(deps: {
         const operation = requiredString(parameters, "legion", "op");
         if (isHandoffOperation(operation)) {
           if (active.kind === "architect" && active.issue === active.tree) {
-            throw new Error(`${operation} is not available to a root architect session`);
+            throw new Error(rootArchitectHandoffRefusal(operation));
           }
           return await runHandoffAction({
             operation,
@@ -159,13 +177,27 @@ export function createGoLegionTool(deps: {
             ) {
               throw new Error("register_gate requires a positive integer version");
             }
+            // The gate is the tree root's, registered by the root's own architect, as the daemon
+            // requires: anyone else is refused before a lookup could answer for the wrong issue.
+            const issue = requiredString(parameters, operation, "issue");
+            if (active.issue !== active.tree) {
+              throw new Error(
+                `the design gate belongs to the tree root ${active.tree}; its root architect registers it`
+              );
+            }
+            if (issue !== active.issue) {
+              throw new Error(
+                `the design gate belongs to the tree root ${active.tree}; register it there`
+              );
+            }
+            // The daemon takes the document's id alone; `spec`, a slug or a filename, the
+            // references the Dispatch tools accept, is looked up first, so the architect's first
+            // call names the document however it knows it.
+            const reference = requiredString(parameters, operation, "artifactId");
+            const isId = LegionGoGateRegisterRequest.shape.artifactId.safeParse(reference).success;
+            const artifactId = isId ? reference : await resolveDocument(issue, reference);
             const grantId = await grantFor(client, active);
-            await client.gateRegister({
-              grantId,
-              issue: requiredString(parameters, operation, "issue"),
-              artifactId: requiredString(parameters, operation, "artifactId"),
-              version,
-            });
+            await client.gateRegister({ grantId, issue, artifactId, version });
             return jsonSuccess({});
           }
           case "release_children": {
@@ -204,6 +236,13 @@ export function createGoLegionTool(deps: {
               grantId,
               issue: requiredString(parameters, operation, "issue"),
             });
+            return jsonSuccess({});
+          }
+          case "park_child":
+          case "rerun_child": {
+            const grantId = await grantFor(client, active);
+            const request = { grantId, issue: requiredString(parameters, operation, "issue") };
+            await (operation === "park_child" ? client.childPark(request) : client.childRerun(request));
             return jsonSuccess({});
           }
           default:

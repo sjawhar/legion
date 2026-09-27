@@ -80,7 +80,7 @@ export function AgentTokensSection(): ReactNode {
   };
 
   return (
-    <section aria-labelledby="agent-tokens-heading" className="mt-10">
+    <section aria-labelledby="agent-tokens-heading">
       <h2 className={`text-xl font-semibold ${textPrimaryOnCanvas}`} id="agent-tokens-heading">
         Agent tokens
       </h2>
@@ -189,11 +189,7 @@ export function AgentTokensSection(): ReactNode {
             value={name}
           />
         </label>
-        <button
-          className={`min-h-11 ${settingsSubmitButton}`}
-          disabled={createToken.isPending}
-          type="submit"
-        >
+        <button className={settingsSubmitButton} disabled={createToken.isPending} type="submit">
           New token
         </button>
       </form>

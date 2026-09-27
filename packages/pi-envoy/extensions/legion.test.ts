@@ -74,7 +74,11 @@ const natsConnections: {
 }[] = [];
 /** A connect for a connection name calls its gate, when a test sets one, and waits on it. */
 const natsConnectGates = new Map<string, () => Promise<void>>();
+// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
+const { nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
+  nkeyAuthenticator,
+  nkeys,
   connect: async (options: { readonly name: string }) => {
     await natsConnectGates.get(options.name)?.();
     const endings: (() => void)[] = [];
@@ -461,6 +465,7 @@ function sessionContext(
       ensureOnDisk,
     },
     setInterval: () => undefined,
+    setTimeout: () => undefined,
     ui: { notify: () => undefined },
   };
 }
@@ -4921,7 +4926,12 @@ describe("Legion OMP extension", () => {
       ).resolves.toMatchObject({
         isError: true,
         content: [
-          { type: "text", text: "handoff_complete is not available to a root architect session" },
+          {
+            type: "text",
+            text: expect.stringContaining(
+              "handoff_complete is not available to a root architect session; a root architect reads handoffs with `legion handoff read"
+            ),
+          },
         ],
       });
     });
@@ -5191,7 +5201,50 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     });
   });
 
-  test("subscribes each Go role to the notice topic it owns", async () => {
+  test("register_gate names the lookup and the reference when Dispatch cannot be reached", async () => {
+    const pane = await goPane({
+      role: "architect",
+      tree: "REPO-42",
+      issue: "REPO-42",
+      sessionId: "ses_go_gate",
+    });
+    await pane.start();
+    // The lookup reads the pane's Dispatch configuration when it runs, and fails to connect.
+    process.env.DISPATCH_URL = "http://dispatch.unreachable.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const paneFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      if (new URL(input.toString()).host === "dispatch.unreachable.test") {
+        throw new TypeError("Unable to connect. Is the computer able to access the url?");
+      }
+      return paneFetch(input, init);
+    }) as typeof fetch;
+    const legion = pane.tools.find((tool) => tool.name === "legion");
+    if (legion === undefined) throw new Error("the Go legion tool was not registered");
+
+    await expect(
+      legion.execute(
+        "go-gate",
+        { op: "register_gate", issue: "REPO-42", artifactId: "spec", version: 2 },
+        undefined,
+        undefined,
+        pane.context
+      )
+    ).resolves.toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: 'register_gate could not look up document "spec" on REPO-42 in Dispatch: Unable to connect. Is the computer able to access the url?',
+        },
+      ],
+    });
+    expect(pane.requests.some((request) => request.path === "/legion/v1/gates/register")).toBe(
+      false
+    );
+  });
+
+  test("subscribes no Go role to an issue's notice topic", async () => {
     const architect = await goPane({
       role: "architect",
       tree: "REPO-42",
@@ -5209,12 +5262,13 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     });
     await worker.start();
 
-    expect(natsConnections.flatMap((connection) => connection.subjects)).toEqual(
-      expect.arrayContaining([
-        "notifications.legion.omp.REPO-42",
-        "notifications.legion.omp.REPO-43",
-      ])
-    );
+    // The Go daemon sends every notice to the owning architect's role topic, which the architect
+    // claims as its Envoy role; a phase worker subscribed to its issue's topic would be woken by
+    // notices meant for the architect.
+    const subjects = natsConnections.flatMap((connection) => connection.subjects);
+    expect(
+      subjects.filter((subject) => subject.startsWith("notifications.legion.omp.REPO-"))
+    ).toEqual([]);
   });
 
   test("mints and atomically replaces a Go claim grant for every bash command", async () => {

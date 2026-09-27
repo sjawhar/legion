@@ -3,6 +3,7 @@ import { setLiveSessions } from "./agents";
 
 import {
   createAsk,
+  createComment,
   createIssue,
   createMessage,
   createProject,
@@ -262,5 +263,152 @@ test("inline @ autocomplete has touch-sized controls and no overflow on iPhone",
     ).toBe(true);
   } finally {
     await alice.close();
+  }
+});
+
+// An anchor inside a sentence is part of the sentence. The compact touch-target rule gave every
+// anchor a 44px box, so a reply's `view` and a `dispatch://` reference inside a body became
+// 44px-tall inline-flex boxes with blank space around them in the middle of a line. The fix is
+// vertical padding, not an overlay: padding on an inline element grows the hit box without
+// moving the line, and without covering whatever happens to sit within 44px of the link.
+test("an inline link keeps its line and grows its hit box without covering its neighbours", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the 390 px interaction applies on iPhone");
+  test.setTimeout(120_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Inline links" });
+  const ask = await createAsk(
+    issue.key,
+    { question: "Which transport?" },
+    { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
+  );
+  // A session's reply to an ask is an activity line - "<author> replied to … view · <time>" -
+  // whose `view` is a link in the middle of a sentence.
+  await createComment(
+    issue.key,
+    { ask_id: ask.id, body: "Still measuring." },
+    { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
+  );
+  // An open ask's question renders in full on the Inbox, so it is where a body with a wrapped
+  // link and two stacked links can be measured. A generous hit box would reach the words
+  // beside the first and the link above the last.
+  const bodyAsk = await createAsk(
+    issue.key,
+    {
+      question: [
+        "Read the [handbook for the deployment gate and its rollout rules](https://example.invalid/handbook) before changing it.",
+        "",
+        "[First choice](https://example.invalid/one)",
+        "",
+        "[Second choice](https://example.invalid/two)",
+      ].join("\n"),
+    },
+    { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
+  );
+
+  // A message turn is 16px prose on 24px lines - the tightest pitch a body reaches - and a
+  // hard break puts two links on consecutive lines of it.
+  await createMessage(
+    issue.key,
+    {
+      body: "[Upper line](https://example.invalid/upper)\\\n[Lower line](https://example.invalid/lower)",
+    },
+    { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
+  );
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByRole("link", { name: "view" }).first()).toBeVisible();
+    await expect(page.getByRole("link", { name: "Lower line" }).first()).toBeVisible();
+    const line = await page.evaluate(() => {
+      // Outside the ask cards: a decision block renders the same body in its own card.
+      const links = [...document.querySelectorAll("main a")].filter(
+        (link) => link.closest('[data-testid^="ask-"]') === null
+      );
+      const named = (text: string) => links.find((link) => (link.textContent ?? "") === text);
+      const view = named("view");
+      const upper = named("Upper line");
+      const lower = named("Lower line");
+      if (view === undefined || upper === undefined || lower === undefined) {
+        throw new Error("the conversation is missing a seeded link");
+      }
+      const range = document.createRange();
+      range.selectNodeContents(upper);
+      const upperText = range.getBoundingClientRect();
+      const node = document.elementFromPoint(
+        upperText.x + upperText.width / 2,
+        upperText.bottom - 1
+      );
+      return {
+        lineHeight: (view.parentElement ?? view).getBoundingClientRect().height,
+        // How far the lower link's padding box starts below the upper link's own text.
+        // Negative is padding sitting on letters a reader is trying to tap.
+        lowerClearance: lower.getBoundingClientRect().y - upperText.bottom,
+        onUpperTextBottom:
+          node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link"),
+        viewHeight: view.getBoundingClientRect().height,
+      };
+    });
+
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${bodyAsk.id}`);
+    await expect(card.getByRole("link", { name: "Second choice" })).toBeVisible();
+
+    const measured = await page.evaluate(() => {
+      const links = [...document.querySelectorAll("main a")];
+      const named = (text: string) =>
+        links.find((link) => (link.textContent ?? "").startsWith(text));
+      const wrapped = named("handbook for the deployment gate");
+      const first = named("First choice");
+      const second = named("Second choice");
+      if (wrapped === undefined || first === undefined || second === undefined) {
+        throw new Error("the seeded links are not all rendered");
+      }
+      const hitAt = (x: number, y: number) => {
+        const node = document.elementFromPoint(x, y);
+        return node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link");
+      };
+      const firstRect = first.getBoundingClientRect();
+      const secondRect = second.getBoundingClientRect();
+      // The word the wrapped link's own paragraph opens with.
+      const lead = wrapped.parentElement?.firstChild;
+      if (lead === null || lead === undefined || lead.nodeType !== Node.TEXT_NODE) {
+        throw new Error("the link's paragraph does not open with text");
+      }
+      const range = document.createRange();
+      range.setStart(lead, 0);
+      range.setEnd(lead, 4);
+      const wordRect = range.getBoundingClientRect();
+      return {
+        firstBottom: firstRect.y + firstRect.height,
+        onFirstLowerEdge: hitAt(
+          firstRect.x + firstRect.width / 2,
+          firstRect.y + firstRect.height - 1
+        ),
+        onWord: hitAt(wordRect.x + wordRect.width / 2, wordRect.y + wordRect.height / 2),
+        secondTop: secondRect.y,
+      };
+    });
+
+    // 1. The line the inline link sits in is a line of text: it was 44px as a control box.
+    expect(line.lineHeight).toBeLessThanOrEqual(28);
+    // 2. Its own hit box clears the 24px WCAG 2.5.8 target.
+    expect(line.viewHeight).toBeGreaterThanOrEqual(24);
+    // 3. On consecutive lines of one message turn - 16px prose on 24px lines, the tightest
+    //    pitch a body reaches - the lower link's padding starts below the upper link's own
+    //    text, so a tap at the bottom of that text opens the upper link.
+    expect(line.lowerClearance).toBeGreaterThanOrEqual(0);
+    expect(line.onUpperTextBottom).toBe("Upper line");
+    // 4. A tap on the word before a wrapped link stays on the text.
+    expect(measured.onWord).toBe("not-a-link");
+    // 5. Two stacked links: the lower edge of the first is the first, and it never reaches the
+    //    second.
+    expect(measured.onFirstLowerEdge).toBe("First choice");
+    expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
+  } finally {
+    await context.close();
   }
 });

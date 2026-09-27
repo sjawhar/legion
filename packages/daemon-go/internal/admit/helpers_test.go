@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 type engineStub struct {
@@ -55,11 +56,17 @@ func (e engineStub) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 
 const testProject = "LEGION"
 
+// handed is the label set of an issue handed to Legion.
+// handed is the label list intake.DispatchIssue.Labels once carried; the wire types now
+// resolve HandedOver at the decode/client boundary, so tests set it directly.
+const handed = true
+
 var fixedNow = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 
 func newAdmission(t *testing.T, cap int, log *slog.Logger) *Admission {
 	t.Helper()
-	admission := New(record.NewStore(), cap, testProject, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Clock: func() time.Time { return fixedNow }}, log)
+	admission := New(record.NewStore(), engine, cap, testProject, log)
 	admission.now = func() time.Time { return fixedNow }
 	return admission
 }
@@ -158,6 +165,15 @@ func slots(t *testing.T, pool *pgxpool.Pool) []record.Slot {
 
 func issue(t *testing.T, pool *pgxpool.Pool, key string) record.Issue {
 	t.Helper()
+	got := maybeIssue(t, pool, key)
+	if got == nil {
+		t.Fatalf("issue %s is missing", key)
+	}
+	return *got
+}
+
+func maybeIssue(t *testing.T, pool *pgxpool.Pool, key string) *record.Issue {
+	t.Helper()
 	var got *record.Issue
 	inTx(t, pool, func(tx pgx.Tx) {
 		var err error
@@ -166,10 +182,7 @@ func issue(t *testing.T, pool *pgxpool.Pool, key string) record.Issue {
 			t.Fatalf("read issue: %v", err)
 		}
 	})
-	if got == nil {
-		t.Fatalf("issue %s is missing", key)
-	}
-	return *got
+	return got
 }
 
 func putIssue(t *testing.T, pool *pgxpool.Pool, issue record.Issue) {
@@ -185,7 +198,7 @@ func seedSlotted(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 	t.Helper()
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: rank}); err != nil {
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: rank, HandedOver: true}); err != nil {
 			t.Fatalf("put active issue: %v", err)
 		}
 		slots, err := records.Slots(context.Background(), tx)
@@ -200,7 +213,7 @@ func seedSlotted(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 
 func seedWaiting(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 	t.Helper()
-	putIssue(t, pool, record.Issue{Key: key, Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: rank})
+	putIssue(t, pool, record.Issue{Key: key, Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: rank, HandedOver: true})
 }
 
 func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx)) {
@@ -285,8 +298,19 @@ func testJetStream(t *testing.T) jetstream.JetStream {
 
 func reconcile(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries []dispatch.IssueSummary) {
 	t.Helper()
+	// target=1 against ack floor 0, not idle, never Reaches: a caller that never measured a real
+	// stream position makes no claim of having caught up, so a summary found behind a stored record
+	// is deferred exactly as production would, leaving the record alone — matching every test built
+	// before Reconcile took a stream position at all. Tests exercising the hold or its release use
+	// reconcileWithPosition directly.
+	reconcileWithPosition(t, pool, admission, summaries, 1, 0, false)
+}
+
+func reconcileWithPosition(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries []dispatch.IssueSummary, target, ackFloorStream int64, idle bool) {
+	t.Helper()
+	position := intake.DispatchConsumerPosition{AckFloorStream: ackFloorStream, Idle: idle}
 	inTx(t, pool, func(tx pgx.Tx) {
-		if err := admission.Reconcile(context.Background(), tx, summaries); err != nil {
+		if err := admission.Reconcile(context.Background(), tx, summaries, target, position); err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
 	})

@@ -20,7 +20,7 @@ import { installLegionCliLauncher, resolveRolePromptsDir } from "../daemon/envir
 import { DEFAULT_OMP_INVOCATION } from "../daemon/omp-pin";
 import { resolveLegionPaths } from "../daemon/paths";
 import { systemPromptArguments, withOmpLaunchPrefix } from "../daemon/runtime-tmux";
-import { writeSecretFile } from "../daemon/secrets";
+import { readOwnerOnlySecretPointer, writeSecretFile } from "../daemon/secrets";
 import { installWorkerGhShim, pathWithoutWorkerBin } from "../daemon/worker-bin";
 import { CliError } from "./errors";
 import { readSecretPointer } from "./secret-pointer";
@@ -173,28 +173,16 @@ export function loadControllerStartConfig(
   };
 }
 
-/** The operator token: a regular file readable by its owner only (`mode & 0o077 === 0`), trimmed
+/** The operator token: `readOwnerOnlySecretPointer` (`daemon/secrets.ts`) as a CLI failure — a
+ * regular file only its owner may read, opened, checked and read through one descriptor, trimmed
  * non-empty contents. Refused before anything is fetched or written — the token is the one thing
  * that buys a controller secret, and a group- or world-readable copy is a second way in. */
 export function readOperatorTokenFile(file: string): string {
-  let stats: fs.Stats;
   try {
-    stats = fs.statSync(file);
+    return readOwnerOnlySecretPointer("operator_token_file", file);
   } catch (error) {
-    throw new CliError(
-      `operator_token_file names ${file}, which could not be read: ${(error as Error).message}`
-    );
+    throw new CliError(error instanceof Error ? error.message : String(error));
   }
-  if (!stats.isFile()) {
-    throw new CliError(`operator_token_file names ${file}, which is not a regular file`);
-  }
-  const mode = stats.mode & 0o777;
-  if ((mode & 0o077) !== 0) {
-    throw new CliError(
-      `operator_token_file ${file} is readable by its group or others (mode 0${mode.toString(8)}); chmod 0600 it`
-    );
-  }
-  return readSecretPointer("operator_token_file", file);
 }
 
 /** The one HTTP call the command makes; `typeof fetch` would also demand Bun's `preconnect`. */

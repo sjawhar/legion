@@ -26,8 +26,10 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/logging"
 )
 
 // Bucket is the JetStream KV bucket name for per-commit CI state.
@@ -141,6 +143,12 @@ type State struct {
 	EmittedCount   uint64           `json:"emitted_count"`
 	SettledEmitted bool             `json:"settled_emitted"`
 	Claim          *SettlementClaim `json:"claim,omitempty"`
+	// Overflowed says the listener never settles this head again, because the head is past what it
+	// can publish: a check was refused because it would take the record past maxRecordBytes or the
+	// record's settlement past maxSettlementBytes (write), or NATS refused the settlement itself
+	// (markOverflowed, from the summary loop). A head that settled before it overflowed keeps its
+	// last settlement; nothing supersedes it.
+	Overflowed bool `json:"overflowed,omitempty"`
 }
 
 // UnmarshalJSON maps the retired resettled marker to the durable fact that
@@ -251,6 +259,9 @@ type Store struct {
 	// be written to it (update).
 	combineMu sync.Mutex
 	combiners map[string]*keyCombiner
+
+	// logger writes the store's JSON lines, which an alarm can count (write).
+	logger *logging.Logger
 }
 
 type openOpts struct {
@@ -282,8 +293,8 @@ func WithTTL(d time.Duration) Option {
 
 // Open connects (or creates) the CI-state KV bucket and starts the WatchAll
 // cache. Mirrors store.Open: the cache is populated asynchronously by watch()
-// so Open never blocks on per-key Gets.
-func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
+// so Open never blocks on per-key Gets. The store logs through logger.
+func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error) {
 	o := openOpts{replicas: 1, ttl: 7 * 24 * time.Hour, bucket: Bucket}
 	for _, f := range opts {
 		f(&o)
@@ -292,15 +303,12 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := js.KeyValue(o.bucket)
-	if errors.Is(err, nats.ErrBucketNotFound) {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{
-			Bucket:   o.bucket,
-			Replicas: o.replicas,
-			Storage:  nats.FileStorage,
-			TTL:      o.ttl,
-		})
-	}
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
+		Bucket:   o.bucket,
+		Replicas: o.replicas,
+		Storage:  nats.FileStorage,
+		TTL:      o.ttl,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -310,6 +318,7 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 		cacheRevisions: map[string]uint64{},
 		combiners:      map[string]*keyCombiner{},
 		rewatched:      make(chan struct{}),
+		logger:         logger,
 	}
 	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)
 	s.watcher.Start()
@@ -387,7 +396,7 @@ func (s *Store) applyWatched(entry nats.KeyValueEntry) {
 	s.mu.Unlock()
 
 	if malformed != nil {
-		slog.Warn("cistore watch evicted malformed value",
+		s.logger.Warn("cistore watch evicted malformed value",
 			slog.String("key", key),
 			slog.Uint64("revision", entry.Revision()),
 			slog.String("error", malformed.Error()),
@@ -800,6 +809,19 @@ func (s *Store) MarkSettled(key string, generation uint64) (bool, error) {
 	return marked, err
 }
 
+// markOverflowed marks key's record overflowed, so it never settles: NATS refused its settlement,
+// which it would refuse on every tick.
+func (s *Store) markOverflowed(key string) error {
+	_, _, err := s.casState(key, func(state *State) (bool, error) {
+		if state.Overflowed {
+			return false, nil
+		}
+		state.Overflowed = true
+		return true, nil
+	})
+	return err
+}
+
 func (s *Store) durableHeadMatches(state State) (bool, error) {
 	kv := s.watcher.KV()
 	entry, err := kv.Get(headKey(state.Owner, state.Repo, state.Number))
@@ -816,8 +838,10 @@ func (s *Store) durableHeadMatches(state State) (bool, error) {
 	return head.SHA == state.SHA, nil
 }
 
+// settlementReady reports whether st can settle: every check and suite it holds is terminal, one
+// check has a run id, and the record holds the whole head, which an overflowed one does not.
 func settlementReady(st State) bool {
-	if !terminal(st) {
+	if st.Overflowed || !terminal(st) {
 		return false
 	}
 	hasCheckRunID := false

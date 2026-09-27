@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // DesignGate is the human design-review policy the workflow applies to root issues.
@@ -296,7 +297,9 @@ func resolveGitHubApp(app GitHubApp, field string) (GitHubApp, error) {
 }
 
 func executePrivateKeyCommand(command, field string) (string, error) {
-	result, err := exec.Command("sh", "-c", command).Output()
+	keyCommand := exec.Command("sh", "-c", command)
+	keyCommand.Env = runtime.WithoutNATSSeeds(os.Environ())
+	result, err := keyCommand.Output()
 	if err != nil {
 		return "", commandError(field, err)
 	}
@@ -390,7 +393,7 @@ func runAppSecretsGet(name, flag, field string) (string, error) {
 }
 
 func daemonEnvironment() []string {
-	environment := os.Environ()
+	environment := runtime.WithoutNATSSeeds(os.Environ())
 	filtered := make([]string, 0, len(environment))
 	for _, entry := range environment {
 		if !strings.HasPrefix(entry, "SECRETSD_SESSION_TOKEN_FILE=") {

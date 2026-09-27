@@ -27,6 +27,14 @@
 # fixture's models.yml names;
 # STAGE4A_FROM a development entry point, which is never the proof; STAGE4A_EVIDENCE_DIR where the
 # transcript and the runtime's log go (default a fresh /tmp directory, kept and printed).
+#
+# The secrets-* checks (AGENTC-393) are optional and print CHECK <name>: SKIPPED-BLOCKED when
+# unconfigured: LEGION_E2E_AGENT_SECRETS_URL, LEGION_E2E_AGENT_SECRETS_OPERATOR (the login an
+# attended machine login is approved by, approved on the Dispatch credential page during the
+# run), and LEGION_E2E_AGENT_SECRETS_AUTO_SHA256. secrets-approval-ask's own credential request is
+# approved by that same LEGION_E2E_AGENT_SECRETS_OPERATOR, attended the same way as the machine
+# login: the harness polls, prints STAGE4A: approve credential request …, and waits up to 10
+# minutes for the operator's real approval. See scripts/e2e/README.md's Stage 4a section.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -39,11 +47,15 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
+agent_secrets_url=${LEGION_E2E_AGENT_SECRETS_URL:-}
+agent_secrets_operator=${LEGION_E2E_AGENT_SECRETS_OPERATOR:-}
+agent_secrets_auto_sha=${LEGION_E2E_AGENT_SECRETS_AUTO_SHA256:-}
 from=${STAGE4A_FROM:-}
 evidence=${STAGE4A_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4a-evidence.XXXXXXXX)}
 work=$(mktemp -d /tmp/legion-e2e4a.XXXXXXXX)
-project_prefix=s4a-
-project="${project_prefix}$(date -u +%Y%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
+label_prefix=s4a-
+project="${label_prefix}$(date -u +%Y%m%d%H%M%S)-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
+run_label=$project
 fixture=$root/scripts/e2e/fixtures/operator-route
 route_configmap=legion-operator-route-$project
 providers_secret=legion-$project-providers
@@ -55,7 +67,13 @@ compared=
 ok=
 
 mkdir -p "$evidence"
-exec > >(tee -a "$evidence/transcript.log") 2>&1
+# tee shares the driver's process group, so a signal to the group (Ctrl-C, a closed pane, timeout's
+# TERM) would end it before cleanup writes, and cleanup's first write would die of SIGPIPE: tee
+# ignores the signals the driver traps, and outlives the driver's last line.
+exec > >(trap '' HUP INT TERM && exec tee -a "$evidence/transcript.log") 2>&1
+# fd 7 keeps the transcript for cleanup: a signal runs the EXIT trap under the redirections of the
+# command it interrupted, whose output may be /dev/null or an evidence file.
+exec 7>&1
 
 begin() {
   check=$1
@@ -72,6 +90,9 @@ fail() {
 
 cleanup() {
   local status=$?
+  # A second signal must not cut the teardown short, and a closed output must not end it.
+  trap '' HUP INT TERM PIPE
+  exec >&7 2>&7
   set +e
   teardown
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
@@ -105,12 +126,14 @@ note "run project $project (every object's legion.dev/project label)"
 note "image $image"
 note "worker stream tcp://$host:$port (the devbox's private address)"
 note "runtime identity: context $runtime_context in $runtime_kubeconfig; operator: context $operator"
-if command -v jj >/dev/null && jj -R "$root" root >/dev/null 2>&1; then
-  note "source: $(jj -R "$root" log -r @ --no-graph -T 'commit_id ++ if(empty, " (working copy: no changes)", " (working copy has changes)")') on $(jj -R "$root" log -r @- --no-graph -T 'commit_id')"
-else
-  note "source: $(git -C "$root" rev-parse HEAD)"
-fi
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root") || fail "lib/built-from.sh could not read the source revision"
+while IFS= read -r line; do note "$line"; done <<<"$built"
 [ -z "$from" ] || note "STAGE4A_FROM=$from: a development run, never the proof"
+if [ -n "$agent_secrets_url" ]; then
+  note "agent-secrets: $agent_secrets_url"
+else
+  note "agent-secrets: none (the secrets-* checks report SKIPPED-BLOCKED)"
+fi
 
 begin snapshot
 snapshot "$evidence/namespace-before.txt" || fail "the operator could not list namespace $namespace"
@@ -124,21 +147,22 @@ models=$(<"$fixture/models.yml")
 printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
 grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the fixture's models.yml has no baseUrl $placeholder to point at the gateway"
 op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
-  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
+  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
-note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$project"
+note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$run_label"
 # The run's providers Secret, named as the runtime names it (ProvidersSecretName), holding one key no
 # model route reads: provider_keys hands it to every agent's Oh My Pi, and provider-key checks where
 # it arrives.
 op create secret generic "$providers_secret" --from-literal=stage4a="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')" \
-  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$project" -o yaml | op create -f - >/dev/null ||
+  --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create Secret $providers_secret"
-note "[operator] Secret $providers_secret: one key, stage4a (a random value no route reads), label legion.dev/project=$project"
+note "[operator] Secret $providers_secret: one key, stage4a (a random value no route reads), label legion.dev/project=$run_label"
 pass
 
 begin build
 go -C "$root/packages/daemon-go" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
-note "built the e2e harness from the checkout"
+go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
+note "built the e2e harness and agent-secrets from the checkout"
 
 harness_ok=
 if env \
@@ -158,6 +182,10 @@ if env \
   LEGION_E2E_FROM="$from" \
   LEGION_E2E_OPERATOR_POD="$fixture/pod.yml" \
   LEGION_E2E_OPERATOR_CONFIGMAP="$route_configmap" \
+  LEGION_E2E_AGENT_SECRETS_URL="$agent_secrets_url" \
+  LEGION_E2E_AGENT_SECRETS_OPERATOR="$agent_secrets_operator" \
+  LEGION_E2E_AGENT_SECRETS_AUTO_SHA256="$agent_secrets_auto_sha" \
+  LEGION_E2E_AGENT_SECRETS_BIN="$work/agent-secrets" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m; then
   harness_ok=1
 fi
