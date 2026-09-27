@@ -41,7 +41,7 @@ func TestApplySettlementUsesTheExportedSettlementClassifiers(t *testing.T) {
 }
 
 func TestBlockFixAttemptPublishesOnlyOncePerExhaustedCount(t *testing.T) {
-	prior := record.PullRequest{Verdict: "red", FixAttempts: 3}
+	prior := record.PullRequest{HeadSHA: "head", CheckedHead: "head", Verdict: "red", FixAttempts: 3}
 	got, blocked := BlockFixAttempt(prior, 3)
 	if !blocked || got.BlockedAttempts != 3 {
 		t.Fatalf("first exhausted count = %#v blocked %t, want publish", got, blocked)
@@ -53,9 +53,14 @@ func TestBlockFixAttemptPublishesOnlyOncePerExhaustedCount(t *testing.T) {
 }
 
 // A green settlement at an exhausted count is the fix that worked, not a blocked pull request: only
-// a red one reports the count.
+// a red one reports the count, and only a red that stands for the head (HeadVerdict): a red a code
+// push left behind reports nothing.
 func TestBlockFixAttemptPublishesOnlyOnARedSettlement(t *testing.T) {
-	exhausted := record.PullRequest{Verdict: "green", FixAttempts: 3}
+	stale := record.PullRequest{HeadSHA: "fix", CheckedHead: "head", Verdict: "red", FixAttempts: 3}
+	if got, blocked := BlockFixAttempt(stale, 3); blocked || got.BlockedAttempts != 0 {
+		t.Fatalf("a red that no longer stands for the head = %#v blocked %t, want no publish", got, blocked)
+	}
+	exhausted := record.PullRequest{HeadSHA: "head", CheckedHead: "head", Verdict: "green", FixAttempts: 3}
 	if got, blocked := BlockFixAttempt(exhausted, 3); blocked || got.BlockedAttempts != 0 {
 		t.Fatalf("green settlement at an exhausted count = %#v blocked %t, want no publish", got, blocked)
 	}
