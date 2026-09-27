@@ -72,6 +72,16 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			refused: "- t\n\n  -\n\n  para\n",
 		},
 		{
+			// A definition's later lines start four columns past its quote's content, not past its
+			// marker, so "- c" stands inside the item "a" as both parsers measure it.
+			name:    "an empty list item in an item opening a definition indented in its quote",
+			refused: ">   [^n]: - a\n>\n>       -\n>\n>       - c\n",
+		},
+		{
+			name:    "the same, indented by a tab after the quote's marker",
+			refused: ">\t[^n]: - a\n>\n>\t    -\n>\n>\t    - c\n",
+		},
+		{
 			name:    "a blank line at the end of a quote holding a footnote definition, after a list",
 			refused: "x[^1]\n\n> [^1]: t\n>\n>     - a\n>\n\nAfter.\n",
 		},

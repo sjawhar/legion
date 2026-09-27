@@ -134,6 +134,37 @@ func emptyItemEndsOuterItem(item *ast.ListItem, lines sourceLines) bool {
 		lines.textColumn(start) >= browserTextColumn(outer.FirstChild(), lines)
 }
 
+// quoteContentColumn is the column the content of count quotes starts at on position's line: past
+// each quote marker, the spaces and tabs before it, and one column of the space or tab after it -
+// the rest of a tab there is the content's indentation.
+func (l sourceLines) quoteContentColumn(position, count int) int {
+	index, column := l.starts[l.lineOf(position)], 0
+	advance := func() {
+		if l.source[index] == '\t' {
+			column += 4 - column%4
+		} else {
+			column++
+		}
+		index++
+	}
+	for ; count > 0; count-- {
+		for index < len(l.source) && (l.source[index] == ' ' || l.source[index] == '\t') {
+			advance()
+		}
+		if index >= len(l.source) || l.source[index] != '>' {
+			break
+		}
+		advance()
+		if index < len(l.source) && (l.source[index] == ' ' || l.source[index] == '\t') {
+			if count == 1 {
+				return column + 1
+			}
+			advance()
+		}
+	}
+	return column
+}
+
 // pastQuoteMarkers is position past count quote markers on its line, each with the spaces and tabs
 // before it and the space after it.
 func (l sourceLines) pastQuoteMarkers(position, count int) int {
@@ -153,15 +184,23 @@ func (l sourceLines) pastQuoteMarkers(position, count int) int {
 }
 
 // browserTextColumn is the column block's text starts at as the browser editor's parser measures
-// it: on a footnote definition's first line, the definition's text starts four columns past the
-// definition, where its later lines' text does, whatever the spaces after its `]:`.
+// it: on a footnote definition's first line, the definition's text starts where its later lines'
+// text does, four columns past where its container's content starts, whatever the spaces before
+// its `[^` and after its `]:`.
 func browserTextColumn(block ast.Node, lines sourceLines) int {
 	column := lines.textColumn(startOf(block))
 	definition, footnoted := ancestor[*extensionast.Footnote](block)
 	if !footnoted || lines.lineOf(definition.Pos()) != lines.lineOf(startOf(block)) {
 		return column
 	}
-	return column - lines.textColumn(startOf(definition.FirstChild())) + lines.textColumn(definition.Pos()) + 4
+	base := lines.textColumn(definition.Pos())
+	switch definition.Parent().(type) {
+	case *ast.Document:
+		base = 0
+	case *ast.Blockquote:
+		base = lines.quoteContentColumn(definition.Pos(), quoteDepth(definition))
+	}
+	return column - lines.textColumn(startOf(definition.FirstChild())) + base + 4
 }
 
 // browserOnlyShape names the first shape in the document that the browser editor's parser and
