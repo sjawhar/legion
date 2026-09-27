@@ -12,6 +12,7 @@ const tables = [
   "events",
   "refs",
   "messages",
+  "broadcasts",
   "comments",
   "asks",
   "doc_checkpoints",

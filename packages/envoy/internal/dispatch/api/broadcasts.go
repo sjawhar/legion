@@ -1,0 +1,447 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+)
+
+// A broadcast is one human's message to many sessions. It is a grouping over the targeted
+// messages Dispatch already sends, not a second delivery mechanism: every recipient gets an
+// ordinary issue-less message aimed at its own session, carrying the broadcast's id, so each
+// recipient's thread, retry and reply work exactly as they do for a message sent from one
+// agent card. Nothing reads a broadcast to deliver it; the broadcast row only records what
+// the recipients share, and GET /api/v1/broadcasts/{id} reads their messages back.
+//
+// A selected session that does not advertise the chosen mode is never switched to another
+// one: it is excluded before anything is written, and named in the create response. The mode
+// a human picked is part of what they said - a steer interrupts an agent and a btw waits for
+// an answer - so silently downgrading it would deliver a different message than the one the
+// sender composed. Exclusions are not stored: the browser excludes them at compose time from
+// the same capability list, and the response covers the race where a session's capabilities
+// or liveness changed in between. What persists is who was actually sent to.
+//
+// Broadcasting is human-only, like the one-session route it is built from.
+
+// maxBroadcastRecipients bounds one send. Selection is a human ticking boxes over the live
+// session list, so this is a runaway guard rather than a product limit.
+const maxBroadcastRecipients = 100
+
+// Recipients are delivered to one after another, never in parallel. Dispatch's shared pool
+// refuses one caller a second connection while it holds one (store.ErrNestedAcquire) - the
+// invariant that keeps a request from deadlocking the pool against itself - and every
+// delivery takes one, so a broadcast's sends are serialised by the same rule every other
+// handler obeys rather than by a budget of its own.
+
+// broadcast is what a send's recipients share: who sent it, the body they were all sent, the
+// mode it was sent in, and when.
+type broadcast struct {
+	ID        string      `json:"id"`
+	Author    model.Actor `json:"author"`
+	Body      string      `json:"body"`
+	Delivery  string      `json:"delivery"`
+	CreatedAt time.Time   `json:"created_at"`
+}
+
+// broadcastSummary is one row of the broadcast list: the send, how many sessions it reached,
+// and how many of them have answered.
+type broadcastSummary struct {
+	broadcast
+	Recipients int `json:"recipients"`
+	Replies    int `json:"replies"`
+}
+
+// broadcastRecipient is one session's copy of a broadcast: the message it was sent, with its
+// delivery attempts, and the replies threaded under it.
+type broadcastRecipient struct {
+	SessionID string          `json:"session_id"`
+	Message   model.Message   `json:"message"`
+	Replies   []model.Message `json:"replies"`
+	// SendError is set only when Dispatch could not record the delivery attempt at all, so
+	// the message exists with no attempt to show. A send the listener refused is an ordinary
+	// failed attempt on the message and is reported there.
+	SendError string `json:"send_error,omitempty"`
+}
+
+// broadcastRead is a broadcast with every recipient's state.
+type broadcastRead struct {
+	broadcast
+	Recipients []broadcastRecipient `json:"recipients"`
+}
+
+// broadcastExclusion is a session the sender selected that was not sent to, and why.
+type broadcastExclusion struct {
+	SessionID string `json:"session_id"`
+	Title     string `json:"title"`
+	Reason    string `json:"reason"`
+}
+
+// broadcastCreated is the create response: what was sent, and what was left out of it.
+type broadcastCreated struct {
+	broadcastRead
+	Excluded []broadcastExclusion `json:"excluded"`
+}
+
+// broadcastTarget is one selected session the send resolved: the live row it matched, or the
+// reason it was excluded.
+type broadcastTarget struct {
+	sessionID string
+	title     string
+	reason    string
+}
+
+// POST /api/v1/broadcasts
+func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		Body       string   `json:"body"`
+		Delivery   string   `json:"delivery"`
+		SessionIDs []string `json:"session_ids"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	requested, err := validateBroadcastInput(input.Body, input.Delivery, input.SessionIDs)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if s.deps.Envoy == nil {
+		writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, "ENVOY_URL is not configured")
+		return
+	}
+	// One listener read decides every recipient, so a broadcast judges its whole selection
+	// against one view of the registry rather than a different one per session.
+	sessions, err := s.deps.Envoy.Sessions(r.Context())
+	if err != nil {
+		if errors.Is(err, dispatchenvoy.ErrUnavailable) {
+			writeError(w, "ENVOY_UNAVAILABLE", http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		s.writeHandlerError(w, err)
+		return
+	}
+	targets := resolveBroadcastTargets(requested, input.Delivery, sessions)
+	recipients := make([]broadcastTarget, 0, len(targets))
+	excluded := make([]broadcastExclusion, 0)
+	for _, target := range targets {
+		if target.reason != "" {
+			excluded = append(excluded, broadcastExclusion{
+				SessionID: target.sessionID, Title: target.title, Reason: target.reason,
+			})
+			continue
+		}
+		recipients = append(recipients, target)
+	}
+	if len(recipients) == 0 {
+		writeError(w, "BROADCAST_EMPTY", http.StatusBadRequest,
+			"no selected session can receive this message: "+excludedSummary(excluded))
+		return
+	}
+
+	created, events, err := s.writeBroadcast(r.Context(), actor, input.Body, input.Delivery, recipients)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	for _, event := range events {
+		s.publish(event)
+	}
+	s.deliverBroadcast(r.Context(), created.Recipients, input.Delivery, actor)
+	WriteJSON(w, http.StatusCreated, broadcastCreated{broadcastRead: created, Excluded: excluded})
+}
+
+// validateBroadcastInput checks one send's shape and returns its recipients, in the order the
+// caller listed them and with the duplicates a multi-select can produce removed: a session
+// named twice is one recipient, not two messages.
+func validateBroadcastInput(body, delivery string, sessionIDs []string) ([]string, error) {
+	if strings.TrimSpace(body) == "" {
+		return nil, errorf(http.StatusBadRequest, "INVALID_MESSAGE", "message body is required")
+	}
+	if length := len16(body); length > maxMessageBody16 {
+		return nil, capExceededError("body", length, maxMessageBody16)
+	}
+	if !validDelivery(delivery) {
+		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT", "delivery must be one of btw, aside, steer")
+	}
+	seen := make(map[string]struct{}, len(sessionIDs))
+	requested := make([]string, 0, len(sessionIDs))
+	for _, sessionID := range sessionIDs {
+		trimmed := strings.TrimSpace(sessionID)
+		if trimmed == "" {
+			continue
+		}
+		if _, duplicate := seen[trimmed]; duplicate {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		requested = append(requested, trimmed)
+	}
+	if len(requested) == 0 {
+		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT", "session_ids must name at least one session")
+	}
+	if len(requested) > maxBroadcastRecipients {
+		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT",
+			"a broadcast reaches at most %d sessions (%d selected)", maxBroadcastRecipients, len(requested))
+	}
+	return requested, nil
+}
+
+// resolveBroadcastTargets judges each selected session against one registry read: it is a
+// recipient when it is live and advertises the chosen mode, and otherwise carries the reason
+// it was left out.
+func resolveBroadcastTargets(
+	requested []string, delivery string, sessions []dispatchenvoy.Session,
+) []broadcastTarget {
+	live := make(map[string]dispatchenvoy.Session, len(sessions))
+	for _, session := range sessions {
+		live[session.SessionID] = session
+	}
+	targets := make([]broadcastTarget, 0, len(requested))
+	for _, sessionID := range requested {
+		session, ok := live[sessionID]
+		switch {
+		case !ok:
+			targets = append(targets, broadcastTarget{sessionID: sessionID, reason: "no live session"})
+		case !hasCapability(session.Capabilities, delivery):
+			targets = append(targets, broadcastTarget{
+				sessionID: sessionID, title: session.Title, reason: "does not advertise " + delivery,
+			})
+		default:
+			targets = append(targets, broadcastTarget{sessionID: sessionID, title: session.Title})
+		}
+	}
+	return targets
+}
+
+// excludedSummary names every excluded session and its reason, for the error a send with no
+// reachable recipient answers with.
+func excludedSummary(excluded []broadcastExclusion) string {
+	reasons := make([]string, 0, len(excluded))
+	for _, item := range excluded {
+		name := item.Title
+		if name == "" {
+			name = item.SessionID
+		}
+		reasons = append(reasons, name+" "+item.Reason)
+	}
+	return strings.Join(reasons, "; ")
+}
+
+// writeBroadcast commits the broadcast and one targeted message per recipient in a single
+// transaction, so a send is never half-written, and returns the events its messages owe the
+// stream. Nothing is delivered here: a listener call never runs with a transaction open
+// (envoy_resolve.go).
+func (s *server) writeBroadcast(
+	ctx context.Context,
+	actor model.Actor,
+	body, delivery string,
+	recipients []broadcastTarget,
+) (broadcastRead, []model.Event, error) {
+	author, err := json.Marshal(actor)
+	if err != nil {
+		return broadcastRead{}, nil, err
+	}
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return broadcastRead{}, nil, err
+	}
+	defer tx.Rollback(ctx)
+	sent := broadcastRead{broadcast: broadcast{Author: actor, Body: body, Delivery: delivery}}
+	if err := tx.QueryRow(ctx, `
+		insert into broadcasts (author, body, delivery)
+		values ($1, $2, $3)
+		returning id::text, created_at
+	`, author, body, delivery).Scan(&sent.ID, &sent.CreatedAt); err != nil {
+		return broadcastRead{}, nil, err
+	}
+	events := make([]model.Event, 0, len(recipients))
+	sent.Recipients = make([]broadcastRecipient, 0, len(recipients))
+	for _, recipient := range recipients {
+		target := "session:" + recipient.sessionID
+		message, err := scanMessage(tx.QueryRow(ctx, `
+			insert into messages (issue_key, author, body, target, broadcast_id)
+			values (null, $1, $2, $3, $4)
+			returning `+messageColumns+`
+		`, author, body, target, sent.ID))
+		if err != nil {
+			return broadcastRead{}, nil, err
+		}
+		// A broadcast message is a thread root that answers nothing, so its event says what
+		// every other root's does; the broadcast it belongs to is read from the message row.
+		event, err := s.appendEvent(ctx, tx, messageEvent(
+			message, "message.created", actor, messageReplyThread{}.payload(message, model.ReferenceChanges{}),
+		))
+		if err != nil {
+			return broadcastRead{}, nil, err
+		}
+		events = append(events, event)
+		sent.Recipients = append(sent.Recipients, broadcastRecipient{
+			SessionID: recipient.sessionID, Message: message, Replies: []model.Message{},
+		})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return broadcastRead{}, nil, err
+	}
+	return sent, events, nil
+}
+
+// deliverBroadcast sends each recipient's message in turn and records what each send did on
+// its recipient. One recipient's failure never stops another's: a send the listener refused
+// lands as a failed attempt on that message, and a failure to record the attempt at all is
+// reported as that recipient's send_error, leaving the message with no attempt to show.
+func (s *server) deliverBroadcast(
+	ctx context.Context, recipients []broadcastRecipient, delivery string, actor model.Actor,
+) {
+	for index := range recipients {
+		recipient := &recipients[index]
+		attempt, err := s.deliverMessage(ctx, recipient.Message, delivery, nil, actor, nil)
+		if err != nil {
+			recipient.SendError = err.Error()
+			continue
+		}
+		recipient.Message.Deliveries = []model.MessageDelivery{attempt}
+	}
+}
+
+// GET /api/v1/broadcasts
+func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHuman(w, r); !ok {
+		return
+	}
+	rows, err := s.deps.Store.Pool.Query(r.Context(), `
+		select b.id::text, b.author, b.body, b.delivery, b.created_at,
+		       count(distinct m.id), count(distinct d.reply_id)
+		from broadcasts b
+		left join messages m on m.broadcast_id = b.id
+		left join message_deliveries d on d.message_id = m.id and d.reply_id is not null
+		group by b.id
+		order by b.created_at desc, b.id desc
+		limit 50
+	`)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer rows.Close()
+	summaries := []broadcastSummary{}
+	for rows.Next() {
+		var summary broadcastSummary
+		var author []byte
+		if err := rows.Scan(
+			&summary.ID, &author, &summary.Body, &summary.Delivery, &summary.CreatedAt,
+			&summary.Recipients, &summary.Replies,
+		); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if err := json.Unmarshal(author, &summary.Author); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		summaries = append(summaries, summary)
+	}
+	if err := rows.Err(); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, summaries)
+}
+
+// GET /api/v1/broadcasts/{id}
+func (s *server) getBroadcast(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireHuman(w, r); !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, "BROADCAST_NOT_FOUND", http.StatusNotFound, "broadcast not found")
+		return
+	}
+	var read broadcastRead
+	var author []byte
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+		select id::text, author, body, delivery, created_at from broadcasts where id = $1
+	`, id).Scan(&read.ID, &author, &read.Body, &read.Delivery, &read.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, "BROADCAST_NOT_FOUND", http.StatusNotFound, "broadcast not found")
+			return
+		}
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := json.Unmarshal(author, &read.Author); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	recipients, err := s.loadBroadcastRecipients(r.Context(), read.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	read.Recipients = recipients
+	WriteJSON(w, http.StatusOK, read)
+}
+
+// loadBroadcastRecipients reads every message the broadcast sent, oldest first, each with its
+// delivery attempts and the replies threaded under it - the same shape one agent card's
+// conversation is read in, so a recipient's state reads the same on both pages.
+func (s *server) loadBroadcastRecipients(ctx context.Context, broadcastID string) ([]broadcastRecipient, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select `+messageColumns+`
+		from messages
+		where broadcast_id = $1
+		order by created_at, id
+	`, broadcastID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	messages := []model.Message{}
+	for rows.Next() {
+		message, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	ids := make([]string, len(messages))
+	for index, message := range messages {
+		ids[index] = message.ID
+	}
+	deliveries, err := s.loadMessageDeliveries(ctx, s.deps.Store.Pool, ids)
+	if err != nil {
+		return nil, err
+	}
+	replies, err := s.loadMessageReplyChains(ctx, s.deps.Store.Pool, ids)
+	if err != nil {
+		return nil, err
+	}
+	recipients := make([]broadcastRecipient, 0, len(messages))
+	for _, message := range messages {
+		message.Deliveries = deliveries[message.ID]
+		recipients = append(recipients, broadcastRecipient{
+			SessionID: strings.TrimPrefix(messageTarget(message.Target), "session:"),
+			Message:   message,
+			Replies:   replies[message.ID],
+		})
+	}
+	return recipients, nil
+}
