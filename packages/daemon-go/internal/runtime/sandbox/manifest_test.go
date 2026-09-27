@@ -276,6 +276,38 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	}
 }
 
+// bun (measured: bun 1.3.14, LEGION-198) resolves its install cache at
+// $XDG_CACHE_HOME/.bun/install/cache when neither BUN_INSTALL nor BUN_INSTALL_CACHE_DIR is set —
+// neither is ever set here — and hardlinks that cache's files into every worktree's node_modules,
+// which is how one shared cache corrupted every checkout on a box at once (LEGION-198's spec). A
+// pod's XDG_CACHE_HOME is mounted from no volume of this pod's — not the tree volume, the boot
+// volume, the state volume, nor the in-memory config volume, at, above, or beneath it — so it
+// lives on the pod's own ephemeral container filesystem alone: private to this one pod, never
+// shared with the operator or another pod's, and gone with the pod. `overlaps` (operatorpod.go),
+// the package's own at/under/above predicate for exactly this question, catches a volume mounted
+// beneath the cache home (e.g. a tree-shared warm-cache volume at
+// $XDG_CACHE_HOME/.bun/install/cache) that a bare prefix-or-equal check would miss. No code
+// change is needed to keep the cache private; this test locks the absence of any overlapping
+// mount so a future volume addition cannot reintroduce sharing.
+func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := podOf(t, r, workerSpec(t), false)
+	main := containerNamed(t, pod, mainContainer)
+	cacheHome := envOf(main)["XDG_CACHE_HOME"]
+	if cacheHome == "" {
+		t.Fatal("the main container carries no XDG_CACHE_HOME")
+	}
+	for _, mount := range main.VolumeMounts {
+		if overlaps(mount.MountPath, cacheHome) {
+			t.Fatalf("XDG_CACHE_HOME %s overlaps volume %q's mount %q; bun's cache would then persist or share across pods",
+				cacheHome, mount.Name, mount.MountPath)
+		}
+	}
+}
+
 // Oh My Pi copies its own environment once for every `gh` it runs to serve a pr:// or issue://
 // read, so the worker container is told LEGION_GRANT_FILE from its start; the extension writes a
 // grant there before each such call (LEGION-262). The file is the claim's, on the state volume in
