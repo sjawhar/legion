@@ -168,23 +168,21 @@ blocks. Outside an ask it then runs, over every document-level block it changed,
 `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison
 (`refuseReshapedAccept`: `pmdoc.BlockShapeError`). A non-empty replacement inside a typed block is
 checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
-`paragraph+ bullet_list?` rule; each non-ask typed block around the match then round-trips through
-its rendered markdown (`refuseTypedAcceptRoundTrip`), so a list written beside a list of its kind
-in a callout, which reads back as one list, is refused. Last, the whole document is read back
-(`refuseMisreadAccept`: `pmdoc.NewMisread`), each document-level block beside the ones around it
-and with its attributes and text, a column without alignment expected back left as the renderer
-writes it: an accept is refused where what it changed, or a block that read back as written
-beside it, now reads back otherwise - two lists of one kind meeting at the document's level or
-beside a typed block it rewrites or consumes, a task item emptied to `- [ ]` that reads back as a
-plain item. What read back otherwise before the accept, a block or an attribute, is not its to
-refuse, and nothing else in the document switches the check off. That refusal names what reads
-back and advises only rejecting, since where the join removes what stood between two lists no
-text keeps them apart. An accept parses its text as blocks
+`paragraph+ bullet_list?` rule. Last, the whole document is read back (`refuseMisreadAccept`:
+`pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes
+and text, a column without alignment expected back left as the renderer writes it: an accept is
+refused where what it changed, or a block that read back as written beside it, now reads back
+otherwise, such as a task item emptied to `- [ ]`, which reads back as a plain item. What read
+back otherwise before the accept, a block or an attribute, is not its to refuse, and nothing else
+in the document switches the check off, except a document the parser already refuses, where the
+block checks alone judge the accept. That refusal names what reads back and advises rejecting. A
+list an accept writes beside a list of its kind is written with the other marker (below), so the
+two read back as the two lists it made. An accept parses its text as blocks
 written into the document (`pmdoc.ParseFragment`: a leading `---` is a rule, as `***` is, except
 that a closed front-matter block is front matter where the text lands at the document's start,
 at the start of a top-level first block's text), so a rule or a list over a whole paragraph is
 written as that block and kept, while one that leaves a block the document cannot read back,
-such as a list beside a list of its kind, is refused: the document
+such as an empty callout in a list item, is refused: the document
 stays as it was and the suggestion stays open. The person accepting cannot change the text, so
 the refusal (`acceptRefusal`) says what the text writes where it lands - for a same-id rewrite of
 a typed block, in the block that typed block stands in - and names what they can
@@ -606,12 +604,21 @@ document's level in the rest. So the renderer writes a rule that opens a documen
 list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
 everywhere else.
 
+Two lists of one kind side by side read back as one when written with one marker, so the
+renderer writes a list whose kind matches the block before it - past an empty paragraph, which
+it writes as nothing - with its kind's other marker, `*` after `-` and `)` after `.`, alternating
+as the browser editor does (`otherListMarkers`); a list anywhere else keeps `-` or `.`. An edit
+that leaves two lists side by side (deleting or emptying what stood between them, inserting or
+accepting a list beside one) therefore stores the two lists it made, and a `replace` refusal that
+names a list item's marker names the one it is written with (`BlockMarker.Other`).
+
 A container that holds nothing is read as the browser editor's parser reads it, holding one empty
 paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
 definition, and a list item that opens with another block (`- # h`) holds an empty paragraph ahead
 of it. A table with no body row holds one empty row, which the renderer writes as nothing. The
 renderer writes a list item's empty first paragraph as nothing, with the next block on the
-marker's line, a rule there as `***` (`- ---` is a thematic break at the list's level). A task
+marker's line, a rule there with the other character from the marker's, `***`, and `---` after
+`* ` (`- ---` and `* ***` are thematic breaks at the list's level). A task
 item cannot be written so, since its marker's line would carry the next block as the task's text
 and the browser reads no other form of it as a task: a task item whose emptied first paragraph has
 another block after it does not render, and an edit that would leave one is refused.

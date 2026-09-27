@@ -1792,20 +1792,24 @@ func TestApplyOperationReplaceSetsAHeadingLevelOnlyFromALevelNamingFind(t *testi
 
 // The refusal quotes the marker the reader will see in the document, not a stand-in: AGENTC-193's
 // item was `7.`, and telling that reader the block renders `1.` sends them looking for a
-// different bullet.
+// different bullet. A list beside a list of its kind is written with the kind's other marker.
 func TestApplyOperationReplaceRefusalQuotesTheBlocksRealMarker(t *testing.T) {
-	tree, err := parseInput("7. Launcher contract\n8. Acceptance\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct{ find, want string }{
-		{find: "Launcher contract", want: `"7. "`},
-		{find: "Acceptance", want: `"8. "`},
+	for _, test := range []struct{ markdown, find, with, want string }{
+		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Launcher contract", with: "9. Launcher contract", want: `"7. "`},
+		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Acceptance", with: "9. Acceptance", want: `"8. "`},
+		{markdown: "0. Launcher contract\n1. Acceptance\n", find: "Launcher contract", with: "9. Launcher contract", want: `"0. "`},
+		{markdown: "- a\n\n* b\n", find: "b", with: "* c", want: `"* "`},
+		{markdown: "1. a\n\n1) b\n2) c\n", find: "c", with: "2) d", want: `"2) "`},
+		{markdown: "- outer\n  - x\n  * y\n", find: "y", with: "- z", want: `"* "`},
 	} {
-		_, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: "9. " + test.find})
+		tree, err := parseInput(test.markdown)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 		var invalid *ErrInvalidOp
 		if !errors.As(err, &invalid) {
-			t.Fatalf("replace in %q = %v, want invalid with", test.find, err)
+			t.Fatalf("replace %q in %q = %v, want invalid with", test.find, test.markdown, err)
 		}
 		if !strings.Contains(invalid.Reason, test.want) {
 			t.Fatalf("reason = %q, want it to quote %s", invalid.Reason, test.want)

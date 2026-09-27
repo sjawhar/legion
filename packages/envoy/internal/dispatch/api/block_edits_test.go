@@ -115,6 +115,80 @@ func TestDocumentEditsRefuseBlockHTMLWithAdviceToKeepItInsideALine(t *testing.T)
 	}
 }
 
+// Two lists of one kind side by side are written with different markers, so a write that leaves
+// them so - by deleting or emptying what stood between them, inserting a list beside one, or
+// accepting a list beside one - is stored as the two lists it made, not one.
+func TestAdjacentListsAnEditLeavesReadBackAsTwoLists(t *testing.T) {
+	handler := newTestHandler(t)
+	for index, test := range []struct {
+		name, spec, want string
+		op               map[string]any
+		accept           string
+		// items is how many items the two lists hold together, two when unset.
+		items int
+	}{
+		{name: "a delete of the paragraph between them", spec: "- a\n\nBetween.\n\n- b\n", want: "- a\n\n* b\n",
+			op: map[string]any{"op": "delete", "find": "Between."}},
+		{name: "a replace that empties the paragraph between them", spec: "- a\n\nBetween.\n\n- b\n", want: "- a\n\n\n\n* b\n",
+			op: map[string]any{"op": "replace", "find": "Between.", "with": ""}},
+		{name: "an insert of a list before one", spec: "Intro.\n\n- y\n", want: "Intro.\n\n- x\n\n* y\n",
+			op: map[string]any{"op": "insert", "after": "Intro.", "markdown": "- x"}},
+		{name: "an insert of an ordered list before one", spec: "Intro.\n\n1. y\n", want: "Intro.\n\n1. x\n\n1) y\n",
+			op: map[string]any{"op": "insert", "after": "Intro.", "markdown": "1. x"}},
+		{name: "an accepted list over the paragraph before one", spec: "Intro.\n\nBody.\n\n- y\n", want: "Intro.\n\n- x\n\n* y\n",
+			accept: "- x\n"},
+		{name: "a delete beside a list whose item opens with a rule", spec: "- a\n\nBetween.\n\n- ***\n", want: "- a\n\n* ---\n",
+			op: map[string]any{"op": "delete", "find": "Between."}},
+		{name: "a delete beside a list whose later item opens with a rule", spec: "- a\n\nBetween.\n\n- b\n- ***\n", want: "- a\n\n* b\n* ---\n",
+			op: map[string]any{"op": "delete", "find": "Between."}, items: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "AL"+string(rune('A'+index)), test.name, test.spec)
+			if test.accept != "" {
+				created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+					"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
+					"suggestion": map[string]string{"replace_with": test.accept}, "actor": sessionActor(),
+				})
+				if created.Code != http.StatusCreated {
+					t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+				}
+				comment := decodeBody[model.Comment](t, created)
+				if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
+					t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+				}
+			} else {
+				response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+					"ops": []map[string]any{test.op},
+				}, "alice")
+				if response.Code != http.StatusOK {
+					t.Fatalf("edit: status=%d body=%s", response.Code, response.Body.String())
+				}
+			}
+			markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+			if markdown != test.want {
+				t.Fatalf("stored %q, want %q", markdown, test.want)
+			}
+			back, err := pmdoc.Parse(markdown)
+			if err != nil {
+				t.Fatalf("stored %q does not read back: %v", markdown, err)
+			}
+			lists, items := 0, 0
+			for _, block := range back.Children {
+				if block.Type == "bullet_list" || block.Type == "ordered_list" {
+					lists++
+					items += len(block.Children)
+				}
+			}
+			if lists != 2 {
+				t.Fatalf("stored %q reads back holding %d lists, want 2", markdown, lists)
+			}
+			if want := max(test.items, 2); items != want {
+				t.Fatalf("stored %q reads back holding %d items, want %d", markdown, items, want)
+			}
+		})
+	}
+}
+
 // An empty with that empties a container's paragraph is taken: a list item, a blockquote or a
 // typed block holding only an empty paragraph reads back holding it, as the browser editor's
 // parser reads it, and so does a list item whose first block is an emptied paragraph. An ask's
@@ -419,28 +493,80 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 	}
 }
 
-// deleteText deletes find's text through the edit route, as an edit can leave a document that
-// already reads back otherwise; an empty find deletes nothing.
-func deleteText(t *testing.T, handler http.Handler, artifactID, find string) {
+// acceptCase is a suggestion of with over quote in a document seeded with spec, after emptying
+// emptied's text through the edit route (as an edit can leave a document that already reads back
+// otherwise), and what accepting it does: refused naming says, or stored as want.
+type acceptCase struct{ name, spec, quote, with, emptied, says, want string }
+
+// checkAccept accepts test's suggestion and checks the outcome. A refusal is 400 INVALID_OP naming
+// test.says, with the document unchanged and the suggestion open. A stored accept reads back as
+// the live document: a document seeded with the stored markdown holds the accepted one's token,
+// except after an empty replacement, whose emptied paragraph stays in the live document, and in a
+// document the edit left reading back otherwise already.
+func checkAccept(t *testing.T, handler http.Handler, documentService *docs.Service, key string, test acceptCase) {
 	t.Helper()
-	if find == "" {
+	issue := createInteractionIssue(t, handler, key, test.name, test.spec)
+	if test.emptied != "" {
+		edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+			"ops": []map[string]any{{"op": "replace", "find": test.emptied, "with": ""}},
+		}, "alice")
+		if edited.Code != http.StatusOK || !strings.Contains(edited.Body.String(), `"changed":true`) {
+			t.Fatalf("empty %q: status=%d body=%s", test.emptied, edited.Code, edited.Body.String())
+		}
+	}
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
+		"suggestion": map[string]string{"replace_with": test.with}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	stored, token, err := documentService.TextWithToken(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if test.says != "" {
+		if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_OP"`) || !strings.Contains(accepted.Body.String(), test.says) {
+			t.Fatalf("accept: status=%d body=%s, want 400 INVALID_OP saying %q", accepted.Code, accepted.Body.String(), test.says)
+		}
+		if stored != before {
+			t.Fatalf("after refused accept = %q, want unchanged %q", stored, before)
+		}
+		read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+		if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
+			t.Fatalf("suggestion after refusal: status=%d body=%s, want it open", read.Code, read.Body.String())
+		}
 		return
 	}
-	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", map[string]any{
-		"ops": []map[string]any{{"op": "delete", "find": find}},
-	}, "alice")
-	if edited.Code != http.StatusOK || !strings.Contains(edited.Body.String(), `"changed":true`) {
-		t.Fatalf("delete %q: status=%d body=%s", find, edited.Code, edited.Body.String())
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	if stored != test.want {
+		t.Fatalf("after accepting = %q, want %q", stored, test.want)
+	}
+	if test.with == "" || test.emptied != "" {
+		return
+	}
+	seeded := createInteractionIssue(t, handler, "S"+key, "seeded "+test.name, stored)
+	if _, readBack, err := documentService.TextWithToken(context.Background(), seeded.PrimaryArtifactID); err != nil || readBack != token {
+		t.Fatalf("the accepted document's token = %s, but its markdown reads back as %s (%v)", token, readBack, err)
 	}
 }
 
-// An accept is refused where the document it would store reads back otherwise. Two lists of one
-// kind side by side read back as one list wherever they meet, the document's own level included:
-// a list written beside one, text that joins away what stood between two, or blocks an accept
-// writes where a callout it rewrites or consumes stood. A task item emptied of its text reads back
-// as a plain item. The refusal names what reads back and advises rejecting, since no text over the
-// match keeps two lists apart where the join removes what stood between them.
-func TestAcceptingASuggestionRefusesWhatTheDocumentReadsBackOtherwise(t *testing.T) {
+// An accept is judged by the whole document it would store. Two lists of one kind side by side
+// are written with different markers, so they read back as two lists wherever an accept leaves
+// them: a list written beside one, text that joins away what stood between two, or blocks an
+// accept writes where a callout it rewrites or consumes stood. A task item emptied of its text
+// reads back as a plain item, so emptying one is refused, naming that and advising rejecting. A
+// task item the document already reads back as plain is not the accept's: text elsewhere is
+// stored, and a second task item emptied is still refused.
+func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -448,53 +574,24 @@ func TestAcceptingASuggestionRefusesWhatTheDocumentReadsBackOtherwise(t *testing
 		return documentService
 	})
 	const (
-		bullets = "a bullet list beside another of its kind reads back as one list"
 		callout = ":::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::"
+		task    = "leaves blocks the document reads back otherwise (a task item reads back as a plain list item); reject the suggestion"
 	)
-	for index, test := range []struct{ name, spec, quote, with, says, deleted string }{
-		{"a list before a list", "Intro.\n\nBody.\n\n- y\n", "Body.", "- x", bullets, ""},
-		{"a list after a list", "Intro.\n\n- y\n\nBody.\n", "Body.", "- x", bullets, ""},
-		{"an ordered list before an ordered list", "Intro.\n\nBody.\n\n1. y\n", "Body.", "1. x", "an ordered list beside another of its kind reads back as one list", ""},
-		{"two bullet lists", "Intro.\n\nBody.\n\nAfter.\n", "Body.", "- a\n\n* b", bullets, ""},
-		{"nothing between two lists", "- a\n\nBody.\n\n- b\n", "Body.", "", bullets, ""},
-		{"text joining a list item to the paragraph before a list", "- y\n- Body.\n\nAfter here.\n\n- z\n", "Body. After", "x", bullets, ""},
-		{"a list beside a callout's rewrite, before a list", "- y\n\n" + callout + "\n", "Body.", "- x\n\n" + callout, bullets, ""},
-		{"a list consuming a callout beside a list", "Intro.\n\n" + callout + "\n\n- After here.\n", "Body. After", "- a", bullets, ""},
-		// Two lists the document already reads back as one (an edit that deletes what stood between
-		// them leaves them so) are not this accept's, and do not let it join two more.
-		{"nothing in a task item", "- [ ] Body.\n- [x] two\n", "Body.", "", "a task item reads back as a plain list item", ""},
-		{"nothing between two lists, beside two that already read back as one", "- a\n\nSep.\n\n- b\n\nIntro.\n\n- c\n\nBody.\n\n- d\n", "Body.", "", bullets, "Sep."},
+	for index, test := range []acceptCase{
+		{name: "a list before a list", spec: "Intro.\n\nBody.\n\n- y\n", quote: "Body.", with: "- x", want: "Intro.\n\n- x\n\n* y\n"},
+		{name: "a list after a list", spec: "Intro.\n\n- y\n\nBody.\n", quote: "Body.", with: "- x", want: "Intro.\n\n- y\n\n* x\n"},
+		{name: "an ordered list before an ordered list", spec: "Intro.\n\nBody.\n\n1. y\n", quote: "Body.", with: "1. x", want: "Intro.\n\n1. x\n\n1) y\n"},
+		{name: "two bullet lists", spec: "Intro.\n\nBody.\n\nAfter.\n", quote: "Body.", with: "- a\n\n* b", want: "Intro.\n\n- a\n\n* b\n\nAfter.\n"},
+		{name: "nothing between two lists", spec: "- a\n\nBody.\n\n- b\n", quote: "Body.", want: "- a\n\n\n\n* b\n"},
+		{name: "text joining a list item to the paragraph before a list", spec: "- y\n- Body.\n\nAfter here.\n\n- z\n", quote: "Body. After", with: "x", want: "- y\n- x here.\n\n* z\n"},
+		{name: "a list beside a callout's rewrite, before a list", spec: "- y\n\n" + callout + "\n", quote: "Body.", with: "- x\n\n" + callout, want: "- y\n\n* x\n\n" + callout + "\n"},
+		{name: "a list consuming a callout beside a list", spec: "Intro.\n\n" + callout + "\n\n- After here.\n", quote: "Body. After", with: "- a", want: "Intro.\n\n- a\n\n* &#32;here.\n"},
+		{name: "nothing in a task item", spec: "- [ ] Body.\n- [x] two\n", quote: "Body.", says: task},
+		{name: "nothing in a task item, in a document already reading another back as a plain item", spec: "- [ ] Done\n\nIntro.\n\n- [ ] Body.\n", quote: "Body.", emptied: "Done", says: task},
+		{name: "text in a document already reading a task item back as a plain item", spec: "- [ ] Done\n\nBody.\n", quote: "Body.", emptied: "Done", with: "Changed.", want: "- [ ] \n\nChanged.\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			issue := createInteractionIssue(t, handler, "L"+string(rune('A'+index)), test.name, test.spec)
-			deleteText(t, handler, issue.PrimaryArtifactID, test.deleted)
-			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
-				"suggestion": map[string]string{"replace_with": test.with}, "actor": sessionActor(),
-			})
-			if created.Code != http.StatusCreated {
-				t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
-			}
-			comment := decodeBody[model.Comment](t, created)
-			before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-			var refusal struct{ Code, Error string }
-			if err := json.Unmarshal(accepted.Body.Bytes(), &refusal); err != nil || accepted.Code != http.StatusBadRequest || refusal.Code != "INVALID_OP" {
-				t.Fatalf("accept: status=%d body=%s, want 400 INVALID_OP", accepted.Code, accepted.Body.String())
-			}
-			if want := "leaves blocks the document reads back otherwise (" + test.says + "); reject the suggestion"; !strings.HasSuffix(refusal.Error, want) {
-				t.Fatalf("refusal %q, want it to end %q", refusal.Error, want)
-			}
-			if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != before {
-				t.Fatalf("after refused accept = %q (%v), want unchanged %q", after, err, before)
-			}
-			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
-			if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
-				t.Fatalf("suggestion after refusal: status=%d body=%s, want it open", read.Code, read.Body.String())
-			}
+			checkAccept(t, handler, documentService, "L"+string(rune('A'+index)), test)
 		})
 	}
 }
@@ -557,52 +654,32 @@ func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
 	}
 }
 
-// An accept in a typed block is refused when the block it stores reads back as another tree: two
-// lists of one kind side by side read back as one inside a callout, or inside the blockquote a
-// callout rewritten under its own id stands in, which the refusal names. Lists the document
-// already reads back as one elsewhere do not let it through.
-func TestAcceptingASuggestionAroundATypedBlockRefusesWhatCannotRoundTrip(t *testing.T) {
+// An accept in or around a typed block is judged by what the typed block reads back as: lists of
+// one kind side by side in a callout are written with different markers, as they are in the
+// blockquote a callout rewritten under its own id stands in, and read back as written. Blocks a
+// same-id rewrite puts where the typed block stood are refused naming that block, a list item for
+// an empty callout, which cannot be written there.
+func TestAcceptingASuggestionAroundATypedBlock(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
 	})
-	const rewrite = ":::callout{#c1 kind=\"note\" title=\"T\"}\nBody2.\n:::\n\n- x\n"
-	const quoted = "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n>\n> - y\n"
-	for index, test := range []struct{ name, spec, quote, with, says, deleted string }{
-		{"a list beside a list in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\n- y\n:::\n", "Body.", "- x", "writes a bullet list in this callout", ""},
-		{"a list beside a list in a blockquote inside a callout", ":::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n>\n> - y\n:::\n", "Body.", "- x", "writes a bullet list in this blockquote", ""},
-		{"a callout rewritten beside a list in a blockquote", "Intro.\n\n" + quoted, "Body.", rewrite, "writes a callout and a bullet list in this blockquote", ""},
-		{"a callout rewritten beside a list in a blockquote, beside lists that already read back as one", "- a\n\nSep.\n\n- b\n\n" + quoted, "Body.", rewrite, "writes a callout and a bullet list in this blockquote", "Sep."},
+	const (
+		callout = ":::callout{#c1 kind=\"note\" title=\"T\"}\n"
+		rewrite = callout + "Body2.\n:::\n\n- x\n"
+	)
+	for index, test := range []acceptCase{
+		{name: "a list beside a list in a callout", spec: "Intro.\n\n" + callout + "Body.\n\n- y\n:::\n", quote: "Body.", with: "- x", want: "Intro.\n\n" + callout + "- x\n\n* y\n:::\n"},
+		{name: "a list beside a list in a blockquote inside a callout", spec: callout + "> Body.\n>\n> - y\n:::\n", quote: "Body.", with: "- x", want: callout + "> - x\n>\n> * y\n:::\n"},
+		{name: "a callout rewritten beside a list in a blockquote", spec: "Intro.\n\n> " + callout + "> Body.\n> :::\n>\n> - y\n", quote: "Body.", with: rewrite,
+			want: "Intro.\n\n> " + callout + "> Body2.\n> :::\n>\n> - x\n>\n> * y\n"},
+		{name: "an empty callout beside a callout rewritten in a list item", spec: "- Lead.\n\n  " + callout + "  Body.\n  :::\n", quote: "Body.",
+			with: callout + "Re.\n:::\n\n:::callout{kind=\"note\" title=\"T\"}\n:::", says: "writes two callouts in this list item"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			issue := createInteractionIssue(t, handler, "N"+string(rune('A'+index)), test.name, test.spec)
-			deleteText(t, handler, issue.PrimaryArtifactID, test.deleted)
-			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
-				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
-				"suggestion": map[string]string{"replace_with": test.with}, "actor": sessionActor(),
-			})
-			if created.Code != http.StatusCreated {
-				t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
-			}
-			comment := decodeBody[model.Comment](t, created)
-			before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
-			if err != nil {
-				t.Fatal(err)
-			}
-			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-			if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_OP"`) || !strings.Contains(accepted.Body.String(), test.says) {
-				t.Fatalf("accept: status=%d body=%s, want 400 INVALID_OP saying %q", accepted.Code, accepted.Body.String(), test.says)
-			}
-			after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
-			if err != nil || after != before {
-				t.Fatalf("after refused accept = %q (%v), want unchanged %q", after, err, before)
-			}
-			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
-			if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
-				t.Fatalf("suggestion after refusal: status=%d body=%s, want it open", read.Code, read.Body.String())
-			}
+			checkAccept(t, handler, documentService, "N"+string(rune('A'+index)), test)
 		})
 	}
 }

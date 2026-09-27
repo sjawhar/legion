@@ -11,8 +11,8 @@ import (
 // accept whose document would not read back as the live tree is refused, naming replace_with, with
 // nothing written and the suggestion left open. applySuggestion runs these in order: settleAccepted,
 // then outside an ask refuseUnreadableAccept and refuseReshapedAccept over each document-level block
-// the accept changed, the write's block-id check, refuseBrokenAsks, refuseTypedAcceptRoundTrip, and
-// last refuseMisreadAccept over the whole document.
+// the accept changed, the write's block-id check, refuseBrokenAsks, and last refuseMisreadAccept
+// over the whole document.
 
 // settleAccepted makes the blocks an accept changed hold what their markdown reads back as where
 // that is unambiguous (pmdoc.AgreeWithReadBack): the empty halves a block replacement leaves of the
@@ -60,42 +60,12 @@ func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textb
 	return &ErrInvalidOp{Field: "replace_with", Reason: acceptRefusal(before, after, match, at, with, replacement, broke)}
 }
 
-// refuseTypedAcceptRoundTrip checks every non-ask typed block an accept changed, from the
-// innermost one out. A typed block's content rule decides whether a replacement fits, but it
-// cannot see how the block's markdown reads back: two lists of one kind side by side in it read
-// back as one. A shape that was already broken is not this accept's refusal; a changed readable
-// block that renders back differently is.
-func refuseTypedAcceptRoundTrip(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
-	for _, beforeBlock := range at.Ancestors {
-		if beforeBlock.Type == "ask" || !pmdoc.IsTypedBlock(beforeBlock.Type) || pmdoc.BlockShapeError(beforeBlock) != nil {
-			continue
-		}
-		id := blockID(beforeBlock)
-		var afterBlock *pmdoc.Node
-		pmdoc.Walk(after, func(node *pmdoc.Node) bool {
-			if node.Type == beforeBlock.Type && blockID(node) == id {
-				afterBlock = node
-				return false
-			}
-			return true
-		})
-		if afterBlock == nil {
-			continue
-		}
-		if broke := pmdoc.BlockShapeError(afterBlock); broke != nil {
-			return &ErrInvalidOp{Field: "replace_with", Reason: acceptRefusal(before, after, match, at, with, replacement, broke)}
-		}
-	}
-	return nil
-}
-
 // refuseMisreadAccept refuses an accept whose document reads back otherwise where the accept
 // reached (pmdoc.NewMisread): a block it changed, or one beside them that read back as written
-// before, such as a list a list written beside it joins, and attributes and text as well as
-// blocks. What already read back otherwise before the accept, a block or an attribute, is not the
-// accept's. The checks before it read one block at a time; this one reads the blocks beside each
-// other. The refusal names what reads back and advises only rejecting: where the accept removes
-// what stood between two lists, no text over the match keeps them apart.
+// before, its attributes and text as well as its blocks, such as a task item emptied to `- [ ]`,
+// which reads back as a plain item. What already read back otherwise before the accept, a block or
+// an attribute, is not the accept's. The checks before it read one block at a time; this one reads
+// the blocks beside each other. The refusal names what reads back and advises rejecting.
 func refuseMisreadAccept(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
 	first, last, lastAfter, err := changedBlocks(before, after, match)
 	if err != nil {
