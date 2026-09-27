@@ -100,7 +100,7 @@ func TestConnectWithContextBoundsMultipleUnresponsiveServers(t *testing.T) {
 	result := make(chan error, 1)
 	started := time.Now()
 	go func() {
-		conn, err := connectWithContext(ctx, "deadline-test", urls, nil, nil)
+		conn, err := connectWithContext(ctx, "deadline-test", urls, nil, nil, nil)
 		if conn != nil {
 			conn.Close()
 		}
@@ -129,7 +129,7 @@ func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 	connectCtx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
 	defer cancel()
 	reconnected := make(chan struct{}, 1)
-	conn, err := connectWithContext(connectCtx, "reconnect-dialer-test", []string{uri}, func(*nats.Conn) {
+	conn, err := connectWithContext(connectCtx, "reconnect-dialer-test", []string{uri}, nil, func(*nats.Conn) {
 		reconnected <- struct{}{}
 	}, nil)
 	if err != nil {

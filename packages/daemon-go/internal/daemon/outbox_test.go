@@ -134,27 +134,6 @@ func TestOutboxMessagePostsItsMarkerAndReturnsReadFailure(t *testing.T) {
 	}
 }
 
-func TestOutboxNoticePublishesIssueAndTreeTopics(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-1", Title: "Child", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
-	row := mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now())
-	row.ID = 56
-	publisher := &outboxPublisher{}
-
-	if err := (&outbox{pool: pool, dispatchProject: "LEGION", records: records, notices: publisher}).execute(context.Background(), row); err != nil {
-		t.Fatalf("execute notice: %v", err)
-	}
-	if got := publisher.topics(); fmt.Sprint(got) != "[notifications.legion.legion.LEGION-2 notifications.legion.legion.LEGION-1]" { // the LEGION_PROJECT token panes subscribe under
-		t.Fatalf("notice topics = %v, want issue then root topics", got)
-	}
-	for _, dedupe := range publisher.keys() {
-		if dedupe != "legion-outbox:56" {
-			t.Fatalf("notice dedupe key = %q, want outbox row key", dedupe)
-		}
-	}
-}
-
 // A controller notice row goes to the controller topic of the daemon's own project, the one its
 // controller subscribes to, and to no issue topic, under the row's own key, as the Notice it is.
 func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {
@@ -182,8 +161,9 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-2", Title: "Root", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
 	row := mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now())
 	publisher := &outboxPublisher{err: errors.New("listener unavailable")}
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 
-	if err := (&outbox{pool: pool, dispatchProject: "LEGION", records: records, notices: publisher}).execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
+	if err := (&outbox{pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup}).execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
 		t.Fatalf("notice failure = %v, want listener failure", err)
 	}
 }

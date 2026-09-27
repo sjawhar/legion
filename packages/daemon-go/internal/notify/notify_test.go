@@ -10,9 +10,11 @@ import (
 	"testing"
 )
 
-func TestTopicUsesPersistentIssueAddress(t *testing.T) {
-	if got := Topic("LEGION", "LEGION-208"); got != "notifications.legion.LEGION.LEGION-208" {
-		t.Fatalf("Topic = %q, want persistent issue topic", got)
+// The controller topic is the one the plugin's controller subscribes to
+// (legionControllerNoticeSubject, packages/contracts/src/subject.ts), byte for byte.
+func TestControllerTopicIsTheControllersNoticeSubject(t *testing.T) {
+	if got := ControllerTopic("legion"); got != "notifications.legion.legion.controller" {
+		t.Fatalf("ControllerTopic = %q, want the controller's notice subject", got)
 	}
 }
 

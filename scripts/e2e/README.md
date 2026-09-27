@@ -231,7 +231,11 @@ NATS the GitHub bridge subscribes on by its fully-qualified name on the operator
 domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-container-alias-that-is-momentarily-unheld-resolves-through-the-tailnet-to-production.md));
 `prerequisites` refuses a run without
 either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
-neither value. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
+neither value. The bridge connects to that upstream as the nkey user `NATS_NKEY_SEED_FILE` or
+`NATS_NKEY_SEED` in the operator's environment names, and without a credential when neither is set. Every process the rigs start against their own no-auth NATS (the listener, the Envoy Dispatch
+server, the Go daemon; stage 2 and the other local rigs unset both variables outright) runs without
+`NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
+users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, keeps the operator's seed. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
 anyway). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
@@ -290,16 +294,22 @@ no bash command first, once their last grant is over 60 s old — a grant's life
 the read's own `Created:` line back, judged from the transcript: Oh My Pi serves the read by
 running `gh` with the environment it copied at its start, so this passes only when the pane named
 `LEGION_GRANT_FILE` from that start and the plugin minted a grant for the read itself (LEGION-262).
+`notices-reach-architects-alone` reads every phase-worker session in the isolated profile (a
+session's role is its newest Envoy role claim) and fails on any workflow notice delivered to one:
+every notice kind is for the architect that owns its issue, on that architect's role topic, and the
+run's `pr-blocked`, production-check `phase-finished` and `worker-died` are each checked in their
+architect's session where they are written.
 After the sign-off the proof human removes
 every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
 fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
 loop before Stage 7, so the proof's reviewer approves a head that still carries `.legion/`, and
 without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
 Each check is named in the transcript;
-six negative controls demonstrate that the status-actor, held-worker, re-closed-gate, and idle-read
-assertions reject deliberately corrupted observations before the captured observations pass again
-(the idle read's three: its result refused as it was before LEGION-262, the read inside its previous
-grant's lifetime, and a bash command before it).
+seven negative controls demonstrate that the status-actor, held-worker, re-closed-gate, idle-read
+and worker-notice assertions reject deliberately corrupted observations before the captured
+observations pass again (the idle read's three: its result refused as it was before LEGION-262, the
+read inside its previous grant's lifetime, and a bash command before it; the worker notice's: a copy
+of one phase-worker session with a `pr-blocked` delivery appended).
 Once every agent is gone, `model-turns-through-the-gateway` runs
 [`lib/check-model-route.sh`](#libcheck-model-routesh) over every agent session in the isolated
 profile, each subagent's included: it fails on any assistant turn or model selection that is not

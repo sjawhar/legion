@@ -44,12 +44,16 @@ export function SnoozeControl({
     onLive(askId, true);
     return () => onLive(askId, false);
   }, [askId, live, onLive]);
+  // `basis-full` inside the header's wrapping row: a refusal is wider than the badge it
+  // replaces, so it takes a line of its own rather than drawing over the issue key.
   const failure = write.failed ? (
-    <QueryError
-      message={write.error ?? `Could not snooze ${label}.`}
-      onRetry={write.retry}
-      retrying={write.pending}
-    />
+    <div className="basis-full">
+      <QueryError
+        message={write.error ?? `Could not snooze ${label}.`}
+        onRetry={write.retry}
+        retrying={write.pending}
+      />
+    </div>
   ) : null;
   // Which band the row sits in is the optimistic update's answer and is right either way -
   // a snooze in flight already shows the return time it is saving. What the row cannot say is

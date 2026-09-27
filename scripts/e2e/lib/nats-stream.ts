@@ -13,6 +13,7 @@
 //     deletes one durable consumer and prints "deleted"; one that does not exist is already gone:
 //     it prints "absent" and exits 0 too, so a caller says which it was
 import { connect, DeliverPolicy } from "nats";
+import { natsAuthOptions } from "../../../packages/envoy-client/src/nats-auth";
 
 function refuse(message: string): never {
   process.stderr.write(`nats-stream: ${message}\n`);
@@ -26,7 +27,13 @@ if (!command || !url || !stream || !argument) {
   );
 }
 
-const nc = await connect({ servers: url, timeout: 10_000, name: "legion-e2e-nats-stream" });
+// Production NATS: the operator's nkey user, when the server requires one.
+const nc = await connect({
+  servers: url,
+  timeout: 10_000,
+  name: "legion-e2e-nats-stream",
+  ...natsAuthOptions(process.env),
+});
 try {
   if (command === "last") {
     const seconds = Number(extra ?? "10");

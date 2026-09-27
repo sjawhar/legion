@@ -247,8 +247,10 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
+  // An issue route: the shell's margin controls only exist where the route has a margin, and
+  // this test is about the collapse preferences surviving a remount, not about the Inbox.
   const first = render(
-    <MemoryRouter initialEntries={["/"]}>
+    <MemoryRouter initialEntries={["/issues/CORE-1"]}>
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
       >
@@ -279,7 +281,7 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
   }
 
   const second = render(
-    <MemoryRouter initialEntries={["/"]}>
+    <MemoryRouter initialEntries={["/issues/CORE-1"]}>
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
       >

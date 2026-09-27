@@ -84,8 +84,10 @@ Evidence remains in `packages/envoy/out/e2e/` after the run:
 - `rendered-go.txt` is the equivalent Go `Deliverer.Text` output.
 
 Set `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` when the default local
-ports are occupied. The driver removes only its literal `envoy-e2e-nats`
-container.
+ports are occupied, and `E2E_NATS_CONTAINER` when another run holds the
+`envoy-e2e-nats` container name. The driver removes only the container it
+started. CI runs it as the `envoy-e2e-local` job of
+`.github/workflows/envoy-and-contracts.yaml`.
 
 ## Contract source of truth
 
