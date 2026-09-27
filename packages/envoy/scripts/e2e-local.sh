@@ -500,11 +500,11 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
 
     const tsFirst = readFileSync(renderedTSFile, "utf8").split("\n\nenvoy:")[0];
     const goFirst = readFileSync(renderedGoFile, "utf8").split("\n[NOTIFICATION")[0];
+    // The direct summary is the message head, so both renderers drop the separate summary line
+    // and print the full message once: the summary text appears only where the message opens.
     const assertDirectRender = (rendered, fullMessage, renderer) => {
-      const summaryAt = rendered.indexOf(directSummary);
-      const bodyAt = rendered.indexOf(fullMessage);
-      require(summaryAt >= 0 && summaryAt < bodyAt, `${renderer} direct summary is not first`);
       require(rendered.split(fullMessage).length === 2, `${renderer} did not render the full direct message exactly once`);
+      require(rendered.split(directSummary).length === 2, `${renderer} repeats the direct summary outside the message it opens`);
     };
     assertDirectRender(tsFirst, `message: ${JSON.stringify(directBody)}`, "TypeScript");
     assertDirectRender(goFirst, `Message:\n${directBody}`, "Go");
