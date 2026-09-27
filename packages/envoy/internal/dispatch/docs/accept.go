@@ -3,6 +3,7 @@ package docs
 import (
 	"fmt"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -14,17 +15,57 @@ import (
 // the accept changed, the write's block-id check, refuseBrokenAsks, and last refuseMisreadAccept
 // over the whole document.
 
-// settleAccepted makes the blocks an accept changed hold what their markdown reads back as where
-// that is unambiguous (pmdoc.AgreeWithReadBack): the empty halves a block replacement leaves of the
-// textblock it lands in go where the renderer does not write them, and a list's spread is the one
-// its markdown reads back with. An empty replacement keeps the paragraph it empties, which the
-// renderer does not write beside other blocks.
+// settleAccepted makes what an accept wrote hold what its markdown reads back as where that is
+// unambiguous (pmdoc.AgreeWithReadBack): the empty halves a block replacement leaves of the
+// textblock it lands in go where the renderer does not write them, and a list or list item the
+// accept changed takes the spread its markdown reads back with. An empty replacement keeps the
+// paragraph it empties, which the renderer does not write beside other blocks. Everything else,
+// block, mark and node, stays as it was.
 func settleAccepted(before, after *pmdoc.Node, match pmdoc.Range, with string) (*pmdoc.Node, error) {
 	first, _, lastAfter, err := changedBlocks(before, after, match)
 	if err != nil {
 		return nil, err
 	}
-	return pmdoc.AgreeWithReadBack(after, first, lastAfter, with != ""), nil
+	return pmdoc.AgreeWithReadBack(before, after, first, lastAfter, with != ""), nil
+}
+
+// acceptedCode is the code text an accepted suggestion writes over match in the code block at,
+// as that code reads back, so the accept stores what reads back without touching code it does not
+// write. Markdown drops the line breaks that end code, so where the match reaches the code's end
+// the text loses them; in a list item's code a line holding only whitespace reads back empty, so a
+// whole line of the text holding only whitespace is written empty.
+func acceptedCode(with string, at pmdoc.TextblockAt, match pmdoc.Range) string {
+	if match.To == at.Content.To {
+		with = strings.TrimRight(with, "\n")
+	}
+	if with == "" || !insideListItem(at) {
+		return with
+	}
+	var text strings.Builder
+	for _, child := range at.Node.Children {
+		text.WriteString(child.Text)
+	}
+	code := utf16.Encode([]rune(text.String()))
+	from, to := match.From-at.Content.From, match.To-at.Content.From
+	startsLine := from == 0 || code[from-1] == '\n'
+	endsLine := to == len(code) || code[to] == '\n'
+	lines := strings.Split(with, "\n")
+	for index, line := range lines {
+		whole := (index > 0 || startsLine) && (index < len(lines)-1 || endsLine)
+		if whole && strings.TrimSpace(line) == "" {
+			lines[index] = ""
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func insideListItem(at pmdoc.TextblockAt) bool {
+	for _, ancestor := range at.Ancestors {
+		if ancestor.Type == "list_item" {
+			return true
+		}
+	}
+	return false
 }
 
 // insideAsk reports whether an accepted suggestion lands in an ask. refuseBrokenAsks is the ask

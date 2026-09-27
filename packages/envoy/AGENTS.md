@@ -143,8 +143,10 @@ Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOpera
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
 (`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
 breaks at the end of the code's text and a line holding only whitespace in a list item's code read
-back without them, and an accepted suggestion stores its code without the line breaks that end
-it, as it reads back. A line of colons in code inside a typed block is kept: the browser editor's
+back without them, and an accepted suggestion writes its code as it reads back: without the line
+breaks that end it where it reaches the code's end, and with a whole line of it that holds only
+whitespace written empty in a list item's code, while code it does not write stays as it was
+(`acceptedCode`). A line of colons in code inside a typed block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
 them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -
@@ -161,11 +163,12 @@ suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestio
 `docs/accept.go`) writes blocks, so it stores what reads back as the live document, and refuses
 what cannot, naming `replace_with`. It first settles the blocks it changed (`settleAccepted`,
 `pmdoc.AgreeWithReadBack`): the empty halves a block replacement leaves of the textblock it lands
-in, which carry no block id, go where the renderer does not write them, code text loses the line
-breaks that end it, which markdown drops, and each list's and list item's spread becomes the one
-its markdown reads back with, paired as far down as the read-back check pairs blocks, so two
-paragraphs in a tight list item leave the item spread, in a list that already reads back otherwise
-too, and a block over an item's text leaves no empty line before its nested list. An empty replacement keeps the paragraph it empties, which is not written beside other
+in, which carry no block id, go where the renderer does not write them, and each list and list
+item the accept changed takes the spread its markdown reads back with, paired as far down as the
+read-back check pairs blocks, so two paragraphs in a tight list item leave the item spread, in a
+list that already reads back otherwise too, and a block over an item's text leaves no empty line
+before its nested list. Every other block, mark and node stays as it was, a list item beside the
+accepted text keeping even a spread its markdown does not carry. An empty replacement keeps the paragraph it empties, which is not written beside other
 blocks. Outside an ask it then runs, over every document-level block it changed,
 `refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison
 (`refuseReshapedAccept`: `pmdoc.BlockShapeError`). A non-empty replacement inside a typed block is
