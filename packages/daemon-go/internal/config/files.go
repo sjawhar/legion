@@ -36,10 +36,9 @@ func ReadSecretPointer(variable, file string) (string, error) {
 // flag as the operator wrote it (`operator_token_file`, `--operator-token-file`,
 // `nats_nkey_seed_file`). The file is opened once, and the open descriptor must be a regular file
 // whose mode grants its group and others nothing before its trimmed, non-empty contents are read
-// from that same descriptor, so nothing swapped in between a check and a read is ever read
-// (packages/daemon/src/cli/controller-start.ts:177-199, which stats and reads separately). The
-// open does not block, so a FIFO is refused rather than waited on. The contents never appear in an
-// error.
+// from that same descriptor, so nothing swapped in between a check and a read is ever read, as
+// readOwnerOnlySecretPointer in packages/daemon/src/daemon/secrets.ts does. The open does not
+// block, so a FIFO is refused rather than waited on. The contents never appear in an error.
 func ReadPrivateSecretPointer(variable, file string) (string, error) {
 	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {

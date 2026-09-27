@@ -57,7 +57,8 @@ type ControllerConfig struct {
 // It is never the daemon's loader, which runs both GitHub Apps' private_key_command and demands
 // keys the controller never uses. Relative paths resolve against the file's directory; `~` is not
 // expanded. daemonURL, when not "", is `--daemon-url`, which replaces the file's daemon_url and is
-// validated the same way (packages/daemon/src/cli/controller-start.ts:75-175, 291-300).
+// validated the same way (loadControllerStartConfig and cmdControllerStart's --daemon-url check,
+// packages/daemon/src/cli/controller-start.ts).
 func LoadController(path, daemonURL string) (ControllerConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

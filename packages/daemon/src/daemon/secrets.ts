@@ -14,53 +14,53 @@ export function readSecretPointer(variable: string, file: string): string {
 
 /** `readSecretPointer` for a file only its owner may read — both NATS seeds and the operator token:
  * `file` must be a regular file whose mode grants its group and others nothing. The file is opened
- * once, checked with `fstat` on that descriptor, and read from the same descriptor, so nothing
- * swapped in at the path between the check and the read is ever read; a symlink resolves to its
- * target. Refusals: `<variable> names <file>, which is not a regular file`, `<variable> <file> is
- * readable by its group or others (mode 0640); chmod 0600 it`, and `readSecretPointer`'s. */
+ * once without blocking (a FIFO nobody writes cannot hang the caller), checked with `fstat` on that
+ * descriptor (`requireOwnerOnly`), and read from the same descriptor, so nothing swapped in at the
+ * path between the check and the read is ever read; a symlink resolves to its target. Refusals:
+ * `<variable> names <file>, which is not a regular file`, `<variable> <file> is readable by its
+ * group or others (mode 0640); chmod 0600 it`, and `readSecretPointer`'s. */
 export function readOwnerOnlySecretPointer(variable: string, file: string): string {
-  const fd = openOwnerOnly(variable, file);
-  if (typeof fd !== "number") throw unreadableSecret(variable, file, fd);
+  let fd: number;
   try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  } catch (error) {
+    throw unreadableSecret(variable, file, error);
+  }
+  try {
+    requireOwnerOnly(variable, file, fd);
     return readTrimmedSecret(variable, file, fd);
   } finally {
     closeSync(fd);
   }
 }
 
-/** `readOwnerOnlySecretPointer`'s file checks without reading the file, for `legion start
- * --check-config`: an open file that is not a regular owner-only file is refused the same way, and
- * a file that cannot be opened is left to the boot that reads it (the config may be checked on a
- * host that does not hold the secret). */
+/** `readOwnerOnlySecretPointer` without reading the contents, for `legion start --check-config`:
+ * the file is opened and checked the same way, so a file boot could not open (missing, a dangling
+ * symlink, one this user may not read), or one that is not a regular owner-only file, is refused in
+ * boot's words. Opening a file has no side effect; only what it holds is left unread. */
 export function checkOwnerOnlySecretPointer(variable: string, file: string): void {
-  const fd = openOwnerOnly(variable, file);
-  if (typeof fd === "number") closeSync(fd);
-}
-
-/** `file` opened once for reading without blocking, so a FIFO nobody writes cannot hang the caller,
- * and required through `fstat` on that descriptor to be a regular file only its owner may read.
- * Returns the descriptor, or the error opening it raised — each caller words an unopenable file its
- * own way; a file that opens but fails the check is closed and its refusal thrown. */
-function openOwnerOnly(variable: string, file: string): number | Error {
   let fd: number;
   try {
     fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
   } catch (error) {
-    return error instanceof Error ? error : new Error(String(error));
+    throw unreadableSecret(variable, file, error);
   }
   try {
-    const stats = fstatSync(fd);
-    if (!stats.isFile()) throw new Error(`${variable} names ${file}, which is not a regular file`);
-    const permissions = stats.mode & 0o777;
-    if ((permissions & 0o077) !== 0) {
-      throw new Error(
-        `${variable} ${file} is readable by its group or others (mode 0${permissions.toString(8)}); chmod 0600 it`
-      );
-    }
-    return fd;
-  } catch (error) {
+    requireOwnerOnly(variable, file, fd);
+  } finally {
     closeSync(fd);
-    throw error;
+  }
+}
+
+/** Throws unless `fd`, open on `file`, is a regular file only its owner may read (`fstat`). */
+function requireOwnerOnly(variable: string, file: string, fd: number): void {
+  const stats = fstatSync(fd);
+  if (!stats.isFile()) throw new Error(`${variable} names ${file}, which is not a regular file`);
+  const permissions = stats.mode & 0o777;
+  if ((permissions & 0o077) !== 0) {
+    throw new Error(
+      `${variable} ${file} is readable by its group or others (mode 0${permissions.toString(8)}); chmod 0600 it`
+    );
   }
 }
 

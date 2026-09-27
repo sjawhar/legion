@@ -45,7 +45,7 @@ func TestReadSecretPointer(t *testing.T) {
 // The operator bearer buys a controller capability and opens every operator route, so the file
 // holding it is held to what the open file is: a regular file only its owner can read, with a
 // token in it. A group- or other-readable copy is refused naming the path and the mode, and a FIFO
-// is refused rather than waited on (packages/daemon/src/cli/controller-start.ts:177-199).
+// is refused rather than waited on (readOwnerOnlySecretPointer, packages/daemon/src/daemon/secrets.ts).
 func TestReadPrivateSecretPointer(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, contents string, mode os.FileMode) string {

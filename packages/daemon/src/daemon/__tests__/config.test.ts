@@ -1541,6 +1541,9 @@ describe("daemon config", () => {
       // A FIFO nobody writes: a reader that opened it blocking, or read it before checking what it
       // is, would hang here instead of refusing it.
       execFileSync("mkfifo", ["-m", "0644", path.join(configDir, "fifo")]);
+      fs.symlinkSync("gone", path.join(configDir, "dangling"));
+      fs.writeFileSync(path.join(configDir, "locked"), `${userSeed}\n`, { mode: 0o000 });
+      fs.chmodSync(path.join(configDir, "locked"), 0o000);
       const tmuxYaml = (...lines: string[]) =>
         loadConfigFromFile(
           ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
@@ -1644,18 +1647,32 @@ describe("daemon config", () => {
         }
       });
 
-      it("under --check-config (resolveSecrets: false) never reads the file, but refuses one others may read", () => {
-        const check = (line: string) =>
-          resolveDaemonConfig({
-            configFile: tmuxYaml(line),
-            env: requiredEnv,
-            cliOverrides: overrides,
-            resolveSecrets: false,
-          }).config[seed.field];
-        expect(check(`${seed.fileKey}: ./nope`)).toBe("(not executed)");
-        expect(() => check(`${seed.fileKey}: ./shared`)).toThrow(
-          `${seed.fileKey} ${path.join(configDir, "shared")} is readable by its group or others (mode 0640); chmod 0600 it`
-        );
+      it("under --check-config (resolveSecrets: false) never reads the file, but refuses whatever boot refuses about it", () => {
+        const load = (line: string, resolveSecrets: boolean) => {
+          try {
+            return resolveDaemonConfig({
+              configFile: tmuxYaml(line),
+              env: requiredEnv,
+              cliOverrides: overrides,
+              resolveSecrets,
+            }).config[seed.field];
+          } catch (error) {
+            return error instanceof Error ? error.message : String(error);
+          }
+        };
+        // Missing, a dangling symlink, one it may not open (root opens a 0000 file), one its group
+        // may read, and a FIFO: boot refuses each, and --check-config the same way, word for word.
+        const refused = ["nope", "dangling", "shared", "fifo"];
+        if (process.getuid?.() !== 0) refused.push("locked");
+        for (const name of refused) {
+          const line = `${seed.fileKey}: ./${name}`;
+          const refusal = load(line, true);
+          expect(refusal).toStartWith(`${seed.fileKey} `);
+          expect(load(line, false)).toBe(refusal);
+        }
+        // A file it may open is never read: garbage boot would refuse passes the check.
+        expect(load(`${seed.fileKey}: ./garbage`, false)).toBe("(not executed)");
+        expect(load(`${seed.fileKey}: ./seed`, false)).toBe("(not executed)");
       });
     });
   }
