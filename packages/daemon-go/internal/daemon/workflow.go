@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -157,7 +158,7 @@ func (w *workflowRuntime) bind(url, token string) {
 // notification stream refuses boot rather than leaving a daemon that reads no events. Boot runs it
 // before reconcile, whose Dispatch listing covers only what precedes a consumer created now.
 func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error {
-	conn, err := nats.Connect(strings.Join(cfg.NatsURLs, ","))
+	conn, err := natsauth.Connect(cfg.NatsURLs, os.LookupEnv)
 	if err != nil {
 		return fmt.Errorf("connect Envoy NATS: %w", err)
 	}

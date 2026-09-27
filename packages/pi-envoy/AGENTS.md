@@ -6,8 +6,12 @@ Tracked Oh My Pi (`pi-*`) extension package for Envoy messaging.
 
 This package owns Pi-specific tool registration, direct NATS subscriptions, targeted Dispatch
 delivery, and self-subscription registration for every session. HTTP transport, tool metadata, and
-subject construction come from the Envoy core packages. `@legion/envoy-client/delivery` is the sole
-inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
+subject construction come from the Envoy core packages. Both NATS connections (the agent subjects
+in `extensions/envoy.ts`, Legion's control subject in `extensions/legion.ts`) connect as the nkey
+user `@legion/envoy-client/nats-auth` reads from `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, and
+without a credential when neither is set; an unusable seed fails the connect naming the variable,
+and a Legion daemon strips both from every pane it launches. `@legion/envoy-client/delivery` is
+the sole inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
 Dispatch **BTW** frame runs `pi.askEphemeral` and posts its body or error to the correlated delivery
 attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective delivery mode. Role claims
 are routed by the listener: this extension receives a receipt-backed request on its direct agent
