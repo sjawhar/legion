@@ -204,3 +204,21 @@ A list in a quote in a callout in a quote:
 > >
 > p
 > :::
+
+A definition[^tq] whose quote holds a callout with a list, and blank lines after the callout:
+
+[^tq]: > :::callout{#tq kind="note" title="T"}
+    > - a
+    > - b
+    > :::
+    >
+    >
+    > tail
+
+And one whose quote goes on with a quote[^tr]:
+
+[^tr]: > :::callout{#tr kind="note" title="T"}
+    > - a
+    > :::
+    >
+    > > q

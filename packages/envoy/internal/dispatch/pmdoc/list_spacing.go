@@ -241,9 +241,11 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		return "a blank line after a list item that ends in a footnote definition, in a quote, which the browser editor reads as spacing the item by what follows it"
 	}
 	switch {
-	case typed && footnoted && quoted && isAncestor(definition, directive) && isAncestor(directive, quote):
-		// A quote inside a typed block in a footnote definition keeps the typed block's rule, and
-		// holds no blank line.
+	case typed && footnoted:
+		// A list with a typed block and a footnote definition around it, whatever quotes stand
+		// between, is spread by nothing: a blank line at or after it in a typed block in a
+		// definition is refused above, and a definition in a typed block is refused where the tree
+		// is read (parseBlocks).
 		setSpread(list, false, spreadsNothing)
 	case quoted && footnoted:
 		spread, lastSpread, reason := footnotedQuoteListSpread(list, quote, definition, lines)
@@ -269,8 +271,6 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 			return reason
 		}
 		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, anyBlock) })
-	case footnoted && typed:
-		setSpread(list, false, spreadsNothing)
 	case footnoted:
 		setSpread(list, false, func(item ast.Node) bool {
 			return blankBetweenBlocksBut(item, startsContainer) || blankAfterItem(item, definition)
