@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"errors"
 	"fmt"
 	"html"
 	"reflect"
@@ -282,41 +283,10 @@ func BlockShapeError(block *Node) error {
 	if err != nil {
 		return err
 	}
-	if want, got := shapeDifference(doc, back); want != "" {
-		return fmt.Errorf("%s reads back as %s", want, got)
+	if reason := readDifference(doc, back, shapeOnly); reason != "" {
+		return errors.New(reason)
 	}
 	return nil
-}
-
-// shapeDifference names the first block of want that got holds as another kind, or holds where
-// want has none, or lacks; both are empty when the two have the same shape. An empty paragraph is
-// not written, so it is not expected back, except where the parser reads one as the browser editor
-// does (emptyParagraphFirst): as its container's only child, and ahead of a list item's first
-// block when that block is not a paragraph.
-func shapeDifference(want, got *Node) (string, string) {
-	if want.Type != got.Type {
-		return blockName(want.Type), blockName(got.Type)
-	}
-	if isTextblock(want.Type) {
-		return "", ""
-	}
-	written := writtenChildren(want)
-	for index := 0; index < max(len(written), len(got.Children)); index++ {
-		switch {
-		case index >= len(written):
-			if (want.Type == "bullet_list" || want.Type == "ordered_list") && got.Children[index].Type == "list_item" {
-				// A list of the same kind right after it continues it.
-				return blockName(want.Type) + " beside another of its kind", "one list"
-			}
-			return endOf(want.Type), blockName(got.Children[index].Type)
-		case index >= len(got.Children):
-			return blockName(written[index].Type), "nothing"
-		}
-		if w, g := shapeDifference(written[index], got.Children[index]); w != "" {
-			return w, g
-		}
-	}
-	return "", ""
 }
 
 // endOf names where a block's children end, as a reader names it.

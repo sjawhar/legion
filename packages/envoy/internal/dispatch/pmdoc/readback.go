@@ -7,11 +7,16 @@ import (
 	"sort"
 )
 
-// skip names the attributes a comparison leaves aside, or all of them.
+// skip names what a comparison leaves aside: the attributes it names, or all of them, and with
+// text a textblock's inline content.
 type skip struct {
 	names map[string]bool
 	all   bool
+	text  bool
 }
+
+// shapeOnly compares blocks alone, their kinds and how they nest.
+var shapeOnly = skip{all: true, text: true}
 
 func (s skip) has(name string) bool { return s.all || s.names[name] }
 
@@ -372,7 +377,7 @@ func readDifference(want, got *Node, ignore skip) string {
 		}
 	}
 	if isTextblock(want.Type) {
-		if !inlineEqual(want.Children, got.Children) {
+		if !ignore.text && !inlineEqual(want.Children, got.Children) {
 			return fmt.Sprintf("%s reads back holding %q, not %q", blockName(want.Type), textContent(got), textContent(want))
 		}
 		return ""
