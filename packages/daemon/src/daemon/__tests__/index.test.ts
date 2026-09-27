@@ -861,6 +861,10 @@ describe("startDaemon", () => {
                 response = await fetch(`http://127.0.0.1:${port}/legion/v1/state`).catch(
                   () => undefined
                 );
+                // A refused dial returns in well under a millisecond, so without this the loop
+                // would spin at full CPU for the whole deadline instead of the ~100 attempts a
+                // real bind takes; 2 ms matches ci-fixtures.ts's `waitFor` poll.
+                if (response === undefined) await Bun.sleep(2);
               }
               expect(response.status).toBe(200);
               const body = (await response.json()) as DaemonStateResponse;
