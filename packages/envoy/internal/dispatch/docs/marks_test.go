@@ -155,6 +155,59 @@ func TestRejectSuggestionInCodeGivesBackTheCode(t *testing.T) {
 	waitForDocumentText(t, service, artifactID, ":::callout{#c1 kind=\"note\" title=\"T\"}\n```\nabc\n```\n:::\n")
 }
 
+// Rejecting a browser insert deletes its text as the browser editor's reject does, and the
+// document reads back as the live tree with no mark left. Runs of it that meet across a block
+// boundary, nothing but the boundary between them, are one range, so the blocks join, which undoes
+// the split an insert made (Enter typed while suggesting), and a table the range cuts keeps its
+// width, its short row padded as the browser pads it. Runs with other text between them are each
+// deleted where they stand, keeping that text, which the browser's reject deletes too. Each want
+// is the browser editor's result, written as this renderer writes it.
+func TestRejectSuggestionDeletesTheInsertsText(t *testing.T) {
+	const (
+		table    = "\n\n| ZZNext | b |\n| --- | --- |\n| c | d |\n"
+		narrowed = "\n\n|  | b |\n| :--- | :--- |\n| c | d |\n"
+	)
+	for _, test := range []struct {
+		name, spec string
+		runs       []string
+		want       string
+	}{
+		{"code into a table cell", "Intro.\n\n```\nabcQQ\n```" + table, []string{"QQ", "ZZ"}, "Intro.\n\n```\nabcNext\n```" + narrowed},
+		{"code in a callout into a table cell", ":::callout{#c1 kind=\"note\" title=\"T\"}\n```\nabcQQ\n```\n:::" + table, []string{"QQ", "ZZ"}, ":::callout{#c1 kind=\"note\" title=\"T\"}\n```\nabcNext\n```\n:::" + narrowed},
+		{"code into a whole table cell", "Intro.\n\n```\nabcQQ\n```\n\n| ZZ | b |\n| --- | --- |\n| c | d |\n", []string{"QQ", "ZZ"}, "Intro.\n\n```\nabc\n```" + narrowed},
+		{"a paragraph into a table cell", "Intro QQ" + table, []string{"QQ", "ZZ"}, "Intro Next" + narrowed},
+		{"a paragraph split by the insert", "HelloQQ\n\nZZ world.\n", []string{"QQ", "ZZ"}, "Hello world.\n"},
+		{"a list item split by the insert", "- HelloQQ\n- ZZ world.\n", []string{"QQ", "ZZ"}, "- Hello world.\n"},
+		{"a heading split by the insert", "# HelloQQ\n\n# ZZ world.\n", []string{"QQ", "ZZ"}, "# Hello world.\n"},
+		{"a heading into a paragraph", "# HelloQQ\n\nZZ world.\n", []string{"QQ", "ZZ"}, "# Hello world.\n"},
+		{"two runs in one paragraph, text between them", "keep QQ this ZZ drop\n", []string{"QQ", "ZZ"}, "keep  this  drop\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, test.spec)
+			for _, run := range test.runs {
+				browserMarkWithAttrs(t, service, artifactID, "proofSuggestion", run, pmdoc.Attrs{
+					"id": "ins", "by": "user:bob", "kind": "insert",
+				})
+			}
+			if err := service.RejectSuggestion(context.Background(), artifactID, "ins", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+				t.Fatalf("reject: %v", err)
+			}
+			waitForDocumentText(t, service, artifactID, test.want)
+			live := liveTree(t, service, artifactID)
+			for _, block := range live.Children {
+				if err := pmdoc.BlockShapeError(block); err != nil {
+					t.Errorf("after the reject a %s reads back otherwise: %v", block.Type, err)
+				}
+			}
+			if len(pmdoc.ListMarks(live)) != 0 {
+				t.Fatal("the insert's mark survived the reject")
+			}
+		})
+	}
+}
+
 func TestRejectSuggestionIsKindAware(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
