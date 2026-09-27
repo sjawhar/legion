@@ -13,7 +13,14 @@ import {
   patchIssue,
   resolveAsk,
 } from "./api";
-import { actionBar, documentEditor, selectEditorText } from "./editor";
+import {
+  type Clipboard,
+  copy,
+  documentEditor,
+  openWithCaret,
+  paste,
+  selectEditorText,
+} from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -56,36 +63,11 @@ async function indexedBlockAsk(issueKey: string, blockId: string) {
   return blockAsk;
 }
 
-interface Clipboard {
-  html: string;
-  text: string;
-}
-
-/** Copies the whole document through the editor's own copy handler: ProseMirror serializes the
- * selection into the copy event's clipboardData, which is what a browser's clipboard receives. */
+/** Copies the whole document through the editor's own copy handler. */
 async function copyWholeDocument(page: Page): Promise<Clipboard> {
-  const editor = documentEditor(page);
-  await editor.click();
+  await documentEditor(page).click();
   await page.keyboard.press("ControlOrMeta+A");
-  return editor.evaluate((root) => {
-    const data = new DataTransfer();
-    root.dispatchEvent(
-      new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData: data })
-    );
-    return { html: data.getData("text/html"), text: data.getData("text/plain") };
-  });
-}
-
-/** Pastes clipboard contents at the caret, through the editor's own paste handler. */
-async function paste(page: Page, clipboard: Clipboard): Promise<void> {
-  await documentEditor(page).evaluate((root, { html, text }) => {
-    const data = new DataTransfer();
-    data.setData("text/html", html);
-    data.setData("text/plain", text);
-    root.dispatchEvent(
-      new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data })
-    );
-  }, clipboard);
+  return copy(page);
 }
 
 /** Pastes clipboard contents at the start of the text `quote`. */
@@ -114,27 +96,6 @@ async function openAnsweredDecision(browser: Browser) {
   const decision = documentEditor(page).locator('[data-dispatch-ask-block="decision"]');
   await expect((await expectHosted(decision)).getByText("Go A.")).toBeVisible();
   return { alice, blockAsk, issue, page };
-}
-
-/** Opens `spec` as alice, with the caret collapsed at the start or the end of the text `quote`:
- * the selection bar is gone once the selection collapses, and a paste before that replaces the
- * selected text. */
-async function openWithCaret(
-  browser: Browser,
-  title: string,
-  spec: string,
-  quote: string,
-  caret: "start" | "end"
-) {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", spec, title });
-  const alice = await asUser(browser, "alice");
-  const page = await alice.newPage();
-  await page.goto(`/issues/${issue.key}`);
-  await selectEditorText(page, quote);
-  await page.keyboard.press(caret === "start" ? "ArrowLeft" : "ArrowRight");
-  await expect(actionBar(page)).toBeHidden();
-  return { alice, issue, page };
 }
 
 /** Opens a spec holding only "End.", with the caret at its start or its end. */
@@ -977,35 +938,63 @@ for (const [target, spec, quote, pasted, stored] of [
   });
 }
 
-// Where nothing inside the caret's typed block can hold the pasted block, the paste is what it was
-// before blocks were kept closed. A callout pasted into an ask's question once split the ask: the
-// question stayed, the callout went after it, and the options moved to a new ask under an empty
-// question.
-test("a lone callout pasted as plain text into an ask's question leaves the ask whole", async ({
-  browser,
-}) => {
-  const { alice, issue, page } = await openWithCaret(
+// Where nothing inside the caret's typed block can hold the pasted block, the pasted text joins the
+// text at the caret. A lone callout, a lone ask, a list or a table pasted into an ask's question, as
+// plain text or as HTML, joins the question as text, since an ask holds only its question and one
+// options list. Each once split the ask, and the ask's own options moved to a new ask under an
+// empty question. Text joining a bold question takes the bold only when it is one line, as a
+// one-line paste does anywhere else: a lone callout or a list pasted there once came out bold too.
+const question = "Which here?";
+// It ends on a letter: after "?" the closing ** would sit between punctuation and a letter, where
+// pmdoc writes it but doesn't read it back as closing the bold.
+const boldQuestion = "**Which here**";
+const calloutText = { html: "", text: loneCallout };
+const listText = { html: "", text: "- x\n- y\n" };
+const tableHtml = {
+  html: "<table><tr><th>one</th><th>two</th></tr><tr><td>1</td><td>2</td></tr></table>",
+  text: "one\ttwo\n1\t2",
+};
+for (const [shape, before, clipboard, stored] of [
+  ["a lone callout as plain text", question, calloutText, "Which here?Careful."],
+  ["a lone ask as plain text", question, { html: "", text: loneAsk }, "Which here?Which one? A B"],
+  ["a list as plain text", question, listText, "Which here?x y"],
+  [
+    "a list as HTML",
+    question,
+    { html: "<ul><li>x</li><li>y</li></ul>", text: "x\ny" },
+    "Which here?x y",
+  ],
+  ["a table as HTML", question, tableHtml, "Which here?one two 1 2"],
+  ["one line as plain text", boldQuestion, { html: "", text: "x" }, "**Which herex**"],
+  ["a lone callout as plain text", boldQuestion, calloutText, "**Which here**Careful."],
+  ["a list as plain text", boldQuestion, listText, "**Which here**x y"],
+] as const) {
+  test(`${shape} pasted after the question ${JSON.stringify(before)} stores ${JSON.stringify(stored)}`, async ({
     browser,
-    "Paste into a question",
-    ':::ask{#q1 urgency="med" multiple="false"}\nWhich here?\n\n- X\n- Y\n:::\n',
-    "Which here?",
-    "end"
-  );
-  try {
-    await paste(page, { html: "", text: loneCallout });
+  }) => {
+    const { alice, issue, page } = await openWithCaret(
+      browser,
+      "Paste into a question",
+      `:::ask{#q1 urgency="med" multiple="false"}\n${before}\n\n- X\n- Y\n:::\n`,
+      before.replaceAll("*", ""),
+      "end"
+    );
+    try {
+      await paste(page, clipboard);
 
-    await expect
-      .poll(async () =>
-        withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
-      )
-      .toBe(":::ask{#q1}\nWhich here?Careful.\n\n- X\n- Y\n:::\n");
-    await expect
-      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.block_id))
-      .toEqual(["q1"]);
-  } finally {
-    await alice.close();
-  }
-});
+      await expect
+        .poll(async () =>
+          withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
+        )
+        .toBe(`:::ask{#q1}\n${stored}\n\n- X\n- Y\n:::\n`);
+      await expect
+        .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.block_id))
+        .toEqual(["q1"]);
+    } finally {
+      await alice.close();
+    }
+  });
+}
 
 // Plain text that holds no typed block pastes as it always has: its first paragraph or list item
 // joins the text before the caret and its last one the text after it.
