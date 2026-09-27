@@ -172,7 +172,9 @@ export function ArtifactHeader({
               </label>
             ) : null}
             {toolbar === undefined ? null : (
-              <>
+              // The dot says whether this page is live on the document these actions write to,
+              // so it wraps with them as one group and never onto a line of its own.
+              <div className="flex items-center gap-3">
                 <button
                   className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
                   disabled={isClosed || toolbar.isNamingVersion}
@@ -191,7 +193,7 @@ export function ArtifactHeader({
                   </button>
                 )}
                 <ConnectionDot connection={toolbar.connection} />
-              </>
+              </div>
             )}
           </div>
         ) : null}

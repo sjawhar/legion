@@ -202,3 +202,38 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await alice.close();
   }
 });
+
+// The connection dot belongs to the version actions it sits after. At 390 px the Version picker,
+// Name version and the dot are 8 px wider than the header card, and the dot alone would wrap onto a
+// line of its own under the picker.
+test("a document's connection dot stays on the line with its version actions", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createProjectDocument("CORE", {
+    content: "# Ask blocks design\n\nThe ask is a node.\n",
+    name: "ask-blocks-design.md",
+  });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ height: 900, width: 1280 });
+  }
+  try {
+    await page.goto("/projects/CORE/documents/ask-blocks-design-md");
+    const header = page.getByTestId("artifact-header");
+    const dot = header.getByRole("status", { name: "connected" });
+    await expect(dot).toHaveText("connected");
+    const nameVersion = await header.getByRole("button", { name: "Name version" }).boundingBox();
+    const dotBox = await dot.boundingBox();
+    if (nameVersion === null || dotBox === null) {
+      throw new Error("the version actions are not visible");
+    }
+    const dotMiddle = dotBox.y + dotBox.height / 2;
+    expect(dotMiddle).toBeGreaterThan(nameVersion.y);
+    expect(dotMiddle).toBeLessThan(nameVersion.y + nameVersion.height);
+    expect(dotBox.x).toBeGreaterThan(nameVersion.x + nameVersion.width);
+  } finally {
+    await context.close();
+  }
+});
