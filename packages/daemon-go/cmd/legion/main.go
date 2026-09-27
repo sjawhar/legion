@@ -22,7 +22,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
-	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 )
 
@@ -103,24 +102,15 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 // checkStartConfig is `legion start --check-config`: every refusal the configuration's read at
 // boot makes, through the loader that runs neither GitHub App's private_key_command nor any
-// secretsd read, then the refusal of operator configuration colliding with Legion's own
-// (daemon.CheckOperatorConfig: a provider key naming a launch secret, and under runtime: kubernetes
-// the operator's pod, sandbox.CheckPod), then every launch secret read as boot reads them
-// (daemon.ReadLaunchSecrets over the same environment: the Envoy bearer's file and the NATS nkey
-// seed), and nothing else — no store, no team, no process. The OK line names the seed's public key
-// when there is one, never the seed.
+// secretsd read, then every refusal boot makes from the configuration, the environment and the
+// files they name before it writes anything or runs a command (daemon.CheckStart, the reads boot's
+// own prepare starts with), and nothing else — no store, no team, no process, no file written. The
+// OK line names the NATS nkey seed's public key when there is one, never the seed.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
-	if err == nil {
-		err = daemon.CheckOperatorConfig(cfg, os.LookupEnv)
-	}
-	var secrets map[string]string
-	if err == nil {
-		secrets, err = daemon.ReadLaunchSecrets(cfg, os.LookupEnv)
-	}
 	natsUser := ""
-	if seed := secrets[natsauth.SeedVariable]; err == nil && seed != "" {
-		natsUser, err = natsauth.PublicKey(seed)
+	if err == nil {
+		natsUser, err = daemon.CheckStart(cfg, os.LookupEnv)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)

@@ -354,7 +354,13 @@ Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_ur
 `omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. Every address a pod is handed must be one a pod can reach, so
 `bind`, `daemon_url`, `envoy_url`, `dispatch_url` and each `nats_urls` entry may be neither loopback
 nor the unspecified address. `legion start --check-config` runs all of it without starting the
-daemon or running a key command.
+daemon, writing a file or running a key command, and then every refusal boot makes from the files
+and the environment before its first write, in boot's words: the operator, Envoy and Dispatch
+bearers' files, the NATS nkey seed, the instructions file, the role prompts, and the runtime's own
+reads (the kubeconfig and every value's translation; under tmux, the OMP invocation, through `mise
+where` when it names a `mise` tool, and the host's `gh`, `git` and `jj`). What it does not do is
+what boot writes or runs: the state directory, secretsd's provider keys, the plugin gate and the
+image probe.
 
 The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
 directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
@@ -364,9 +370,8 @@ naming the key and the path. One exception: when another uid owns the file, its 
 since a daemon running as a non-root uid in a pod reads a mounted Secret — root's — only through the
 pod's `fsGroup`. Mount it with `defaultMode: 0440`, never the kubelet's default `0644`, which others
 can read; a seed file the daemon's own uid owns stays 0600. `legion start --check-config` reads the
-seed and the Envoy bearer's file exactly as boot does and refuses with boot's words; its OK line
-then names the seed's user by public key (`Config OK: project=<project> nats-nkey-user=U…`), never
-the seed. With one, every pod's
+seed as boot does, and its OK line then names the seed's user by public key
+(`Config OK: project=<project> nats-nkey-user=U…`), never the seed. With one, every pod's
 `NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the providers Secret's own
 `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`,
 whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same

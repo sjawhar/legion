@@ -125,13 +125,19 @@ func ReadDeploymentInstructions(instructionsPath string) ([]byte, error) {
 // (packages/daemon/src/daemon/deployment-instructions.ts:29-46). legionID is `project` as the
 // operator wrote it.
 //
-// A file ReadDeploymentInstructions refuses writes nothing. Boot calls this once, before the first
-// pane opens.
+// A file ReadDeploymentInstructions refuses writes nothing.
 func MaterializeDeploymentInstructions(instructionsPath, stateDir, legionID string) (string, error) {
 	contents, err := ReadDeploymentInstructions(instructionsPath)
 	if err != nil {
 		return "", err
 	}
+	return WriteDeploymentInstructions(contents, stateDir, legionID)
+}
+
+// WriteDeploymentInstructions is MaterializeDeploymentInstructions' write, of contents
+// ReadDeploymentInstructions answered: boot reads the file with every other refusal before it
+// writes anything, and writes this copy once, before the first pane opens.
+func WriteDeploymentInstructions(contents []byte, stateDir, legionID string) (string, error) {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return "", fmt.Errorf("create state directory %s: %w", stateDir, err)
 	}

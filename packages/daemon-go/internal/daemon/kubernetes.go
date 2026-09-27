@@ -42,35 +42,49 @@ var workerImageTools = sandbox.Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git
 // deterministic refusal as a boot that never ends.
 var imageProbeRetry = bootprobe.Image
 
-// prepareSandbox is what Agent Sandbox needs before anything is opened (C1's translation, C3):
-// the cluster's client from runtime.kubernetes' kubeconfig, the Options every value of the
-// configuration becomes, the worker stream on tcp://<bind>:<worker_stream_port> (the address
-// every pod's shim dials), and the image probe. None of the host's own agent machinery runs: no Oh
-// My Pi invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a
-// pod reads its bearer from its claim's Secret), no secretsd provider keys (a pod mounts its keys
-// from the providers Secret), and no host gh, git, or jj (a pod runs the image's).
-func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, p *plan) error {
+// sandboxReads is what Agent Sandbox needs that readBoot reads: the cluster's client and the
+// runtime's Options.
+type sandboxReads struct {
+	client *rest.Config
+	opts   sandbox.Options
+}
+
+// readSandbox is Agent Sandbox's share of readBoot (C1's translation, C3): the cluster's client from
+// runtime.kubernetes' kubeconfig, and the Options every value of the configuration becomes, with
+// the worker stream on tcp://<bind>:<worker_stream_port> (the address every pod's shim dials) and,
+// when the daemon has a NATS nkey seed, its user's public key, which the image probe holds the
+// providers Secret's seed to. None of the host's own agent machinery is read: no Oh My Pi
+// invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a pod
+// reads its bearer from its claim's Secret), no secretsd provider keys (a pod mounts its keys from
+// the providers Secret), and no host gh, git, or jj (a pod runs the image's).
+func readSandbox(cfg config.Config, project, dispatchToken, seed string, lookup func(string) (string, bool), log *slog.Logger) (sandboxReads, error) {
 	k := *cfg.Runtime.Kubernetes
 	rc, err := kubeClient(k)
 	if err != nil {
-		return err
+		return sandboxReads{}, err
 	}
-	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
-	opts, err := sandboxOptions(cfg, k, p.project, p.stream, dispatchToken, environLookup(o.environment()), log)
+	stream := "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
+	opts, err := sandboxOptions(cfg, k, project, stream, dispatchToken, lookup, log)
 	if err != nil {
-		return err
+		return sandboxReads{}, err
 	}
-	if seed := p.secrets[natsauth.SeedVariable]; seed != "" {
+	if seed != "" {
 		// The probe refuses a providers Secret whose NATS_NKEY_SEED is any other user's seed.
 		if opts.NATSUser, err = natsauth.PublicKey(seed); err != nil {
-			return err
+			return sandboxReads{}, err
 		}
 	}
+	return sandboxReads{client: rc, opts: opts}, nil
+}
+
+// prepareSandbox is the runtime over readSandbox's client and Options, and the image probe.
+func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan) error {
+	p.stream = reads.opts.StreamURL
 	if o.runtime != nil {
 		p.newRuntime, p.probe = o.runtime, o.probe
 		return nil
 	}
-	p.newRuntime = sandboxRuntime(rc, opts, cfg.SlowCommandTimeout)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, cfg.SlowCommandTimeout)
 	p.probe = func(ctx context.Context, rt runtime.Runtime) error {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {
