@@ -114,8 +114,11 @@ export function IssueList({ project }: { project: string }): ReactNode {
             key={currentStatus}
             open={currentStatus !== "done"}
           >
+            {/* No `flex`: it would set `display: flex` on the summary and take the native
+                disclosure marker with it, leaving a collapsed band looking like a plain
+                heading with nothing to say it opens. */}
             <summary
-              className={`flex min-h-11 cursor-pointer items-center text-xs font-semibold tracking-wide uppercase ${textMutedOnCanvas}`}
+              className={`min-h-11 cursor-pointer py-3.5 text-xs font-semibold tracking-wide uppercase ${textMutedOnCanvas}`}
             >
               {statusLabel(currentStatus)} ({grouped.length})
             </summary>

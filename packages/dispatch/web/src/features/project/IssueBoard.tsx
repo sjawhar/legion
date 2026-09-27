@@ -204,7 +204,9 @@ const BoardColumnView = memo(function BoardColumnView({
         // status had no work, and the droppable - which is the whole section - was 52 px tall.
         // A dashed body keeps the column's width and its drop area visible.
         <div
-          className={`mt-3 min-h-40 rounded-xl border border-dashed px-3 py-6 text-center text-xs ${borderStrong} ${textMutedOnCanvas}`}
+          className={`mt-3 min-h-40 rounded-xl border border-dashed px-3 py-6 text-center text-xs ${textMutedOnCanvas} ${
+            isOver ? selectedCardBorder : borderStrong
+          }`}
         >
           Nothing here
         </div>
