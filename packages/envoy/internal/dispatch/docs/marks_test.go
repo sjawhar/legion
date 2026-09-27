@@ -213,22 +213,33 @@ func TestRejectSuggestionDeletesTheInsertsText(t *testing.T) {
 // A reject whose removal would join blocks the document cannot hold together is refused in the
 // words of a reject, naming the suggestion's anchor, and the document stays as it was: an insert
 // running from the text before into a callout or an ask, which the join would leave empty, and one
-// running from one table into the next, which the browser joins into one table.
+// running from one table into the next, which the browser joins into one table, and one whose
+// removal leaves a task item the renderer cannot write.
 func TestRejectSuggestionRefusesARemovalTheDocumentCannotHold(t *testing.T) {
 	const callout = ":::callout{#c1 kind=\"note\" title=\"T\"}\nZZ world.\n:::\n"
-	for _, test := range []struct{ name, spec, says string }{
-		{"a paragraph into a callout", "HelloQQ\n\n" + callout, "runs into an ask or callout"},
-		{"a list item into a callout in it", "- HelloQQ\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  ZZ world.\n  :::\n", "runs into an ask or callout"},
-		{"a paragraph into an ask", "HelloQQ\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nZZ Which?\n:::\n", "runs into an ask or callout"},
-		{"a callout into a callout", ":::callout{#c0 kind=\"note\" title=\"U\"}\nHelloQQ\n:::\n\n" + callout, "runs into an ask or callout"},
-		{"code into a callout", "```\nabcQQ\n```\n\n" + callout, "runs into an ask or callout"},
-		{"one table into the next", "| a |\n| --- |\n| bQQ |\n\n| ZZc |\n| --- |\n| d |\n", "from one table into the next"},
+	for _, test := range []struct {
+		name, spec string
+		runs       []string
+		says       string
+	}{
+		{"a paragraph into a callout", "HelloQQ\n\n" + callout, nil, "runs into an ask or callout"},
+		{"a list item into a callout in it", "- HelloQQ\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  ZZ world.\n  :::\n", nil, "runs into an ask or callout"},
+		{"a paragraph into an ask", "HelloQQ\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nZZ Which?\n:::\n", nil, "runs into an ask or callout"},
+		{"a callout into a callout", ":::callout{#c0 kind=\"note\" title=\"U\"}\nHelloQQ\n:::\n\n" + callout, nil, "runs into an ask or callout"},
+		{"code into a callout", "```\nabcQQ\n```\n\n" + callout, nil, "runs into an ask or callout"},
+		{"one table into the next", "| a |\n| --- |\n| bQQ |\n\n| ZZc |\n| --- |\n| d |\n", nil, "from one table into the next"},
+		{"a task item's whole text, before a nested list", "- [ ] QQ\n  - child\n", []string{"QQ"}, "a task item whose first paragraph is empty"},
+		{"a task item's whole text, before a second paragraph", "- [ ] QQ\n\n  more\n", []string{"QQ"}, "a task item whose first paragraph is empty"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := newTestService(t)
 			service.settle = time.Hour
 			seedServiceText(t, service, artifactID, test.spec)
-			for _, run := range []string{"QQ", "ZZ"} {
+			runs := test.runs
+			if runs == nil {
+				runs = []string{"QQ", "ZZ"}
+			}
+			for _, run := range runs {
 				browserMarkWithAttrs(t, service, artifactID, "proofSuggestion", run, pmdoc.Attrs{
 					"id": "ins", "by": "user:bob", "kind": "insert",
 				})
