@@ -1,0 +1,622 @@
+// Command agent-secrets is the box/pod-side client for the AGENTC-833 secrets broker: it
+// requests and reads back secret grants and — in its most common shape — requests one or more
+// secrets and execs a command with them in its environment. Contract v9: enrolling a runtime and
+// minting a launcher credential are Plan B/C helper-socket operations, not this CLI's own
+// subcommands (nothing on a devbox can enroll until Plan B lands).
+//
+//	agent-secrets keygen --out <dir>
+//	agent-secrets renew
+//	agent-secrets request NAME... [--reason TEXT] [--json]
+//	agent-secrets status <request_id> [--json]
+//	agent-secrets cancel <request_id>
+//	agent-secrets revoke <grant_id>
+//	agent-secrets self [--json]
+//	agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
+//
+// Environment: AGENT_SECRETS_URL (the broker's base URL) and AGENT_SECRETS_KEY_DIR (holds
+// key.pem and enrollment, the two files keygen writes and every session-authenticated
+// subcommand reads; a runtime's enrollment is provisioned out of band, not by this CLI).
+package main
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/broker/proof"
+)
+
+// Exit codes for the "request" and NAME...-- <command> forms: 75 (EX_TEMPFAIL) and 77
+// (EX_NOPERM) follow BSD sysexits.h, chosen so a caller can tell "still waiting" from "refused"
+// without parsing stderr.
+const (
+	exitUsageError = 2
+	exitPending    = 75
+	exitDenied     = 77
+)
+
+func main() {
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprint(stderr, usage())
+		return exitUsageError
+	}
+	switch args[0] {
+	case "-h", "--help", "help":
+		fmt.Fprint(stdout, usage())
+		return 0
+	case "keygen":
+		return cmdKeygen(args[1:], stdout, stderr)
+	case "launcher":
+		fmt.Fprintln(stderr, "agent-secrets: launcher login is now a Plan B helper-socket command; this CLI no longer holds a bearer launcher token")
+		return exitUsageError
+	case "renew":
+		return cmdRenew(args[1:], stdout, stderr)
+	case "request":
+		return cmdRequest(args[1:], stdout, stderr)
+	case "status":
+		return cmdStatus(args[1:], stdout, stderr)
+	case "cancel":
+		return cmdCancel(args[1:], stdout, stderr)
+	case "revoke":
+		return cmdRevoke(args[1:], stdout, stderr)
+	case "self":
+		return cmdSelf(args[1:], stdout, stderr)
+	default:
+		return cmdExec(args, stdout, stderr)
+	}
+}
+
+func usage() string {
+	return `usage:
+  agent-secrets keygen --out <dir>
+  agent-secrets renew
+  agent-secrets request NAME... [--reason TEXT] [--json]
+  agent-secrets status <request_id> [--json]
+  agent-secrets cancel <request_id>
+  agent-secrets revoke <grant_id>
+  agent-secrets self [--json]
+  agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
+`
+}
+
+func exitUsage(err error) int {
+	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
+	return exitUsageError
+}
+
+// splitArgs partitions args into recognized "--flag"/"--flag value" tokens (as declared by
+// takesValue, keyed by flag name without its leading dashes) and every other bare token, so a
+// subcommand can accept secret names or ids before, after, or between its optional flags — the
+// stdlib flag package alone stops parsing at the first non-flag token, which would misparse
+// "agent-secrets request NAME --reason TEXT". A token absent from takesValue is treated as a
+// boolean flag consuming no value (e.g. --json).
+func splitArgs(args []string, takesValue map[string]bool) (flagArgs, positional []string) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		name := strings.TrimLeft(a, "-")
+		if !strings.HasPrefix(a, "-") || name == "" || name == a {
+			positional = append(positional, a)
+			continue
+		}
+		flagArgs = append(flagArgs, a)
+		if takesValue[name] && i+1 < len(args) {
+			i++
+			flagArgs = append(flagArgs, args[i])
+		}
+	}
+	return flagArgs, positional
+}
+
+func readTrimmed(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func loadKey(path string) (*ecdsa.PrivateKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("%s: not a PEM file", path)
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	key, ok := parsed.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("%s: not an ECDSA private key", path)
+	}
+	return key, nil
+}
+
+// sessionContext resolves the broker URL, enrollment id, and signing key every session-
+// authenticated subcommand (renew, request, status, cancel, revoke, self, and the exec form)
+// needs, from AGENT_SECRETS_URL and the key.pem/enrollment files under AGENT_SECRETS_KEY_DIR.
+func sessionContext() (base, enrollmentID string, key *ecdsa.PrivateKey, err error) {
+	base = strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
+	if base == "" {
+		return "", "", nil, errors.New("AGENT_SECRETS_URL is required")
+	}
+	dir := os.Getenv("AGENT_SECRETS_KEY_DIR")
+	if dir == "" {
+		return "", "", nil, errors.New("AGENT_SECRETS_KEY_DIR is required")
+	}
+	if key, err = loadKey(filepath.Join(dir, "key.pem")); err != nil {
+		return "", "", nil, err
+	}
+	if enrollmentID, err = readTrimmed(filepath.Join(dir, "enrollment")); err != nil {
+		return "", "", nil, err
+	}
+	if enrollmentID == "" {
+		return "", "", nil, fmt.Errorf("%s: empty", filepath.Join(dir, "enrollment"))
+	}
+	return base, enrollmentID, key, nil
+}
+
+// writeVerbatim writes exactly raw, nothing more and nothing less: --json's contract is "the
+// response body verbatim ... one JSON object on stdout and nothing else", so this must never
+// append a newline the broker's own response didn't already end with.
+func writeVerbatim(w io.Writer, raw []byte) {
+	w.Write(raw)
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// nextBackoff advances the 2s -> 10s backoff every poll loop in this package uses.
+func nextBackoff(cur time.Duration) time.Duration {
+	next := cur * 2
+	if next > 10*time.Second {
+		next = 10 * time.Second
+	}
+	return next
+}
+
+// ---------------------------------------------------------------------------
+// keygen
+// ---------------------------------------------------------------------------
+
+func cmdKeygen(args []string, stdout, stderr io.Writer) int {
+	flagArgs, positional := splitArgs(args, map[string]bool{"out": true})
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets keygen: unexpected argument %q\n", positional[0])
+		return exitUsageError
+	}
+	flags := flag.NewFlagSet("agent-secrets keygen", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	out := flags.String("out", os.Getenv("AGENT_SECRETS_KEY_DIR"), "directory to write key.pem into")
+	if err := flags.Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if *out == "" {
+		fmt.Fprintln(stderr, "agent-secrets keygen: --out (or AGENT_SECRETS_KEY_DIR) is required")
+		return exitUsageError
+	}
+	key, err := proof.NewKey()
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets keygen: generate key: %v\n", err)
+		return 1
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets keygen: marshal key: %v\n", err)
+		return 1
+	}
+	if err := os.MkdirAll(*out, 0o700); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets keygen: %v\n", err)
+		return 1
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	if err := os.WriteFile(filepath.Join(*out, "key.pem"), pemBytes, 0o600); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets keygen: %v\n", err)
+		return 1
+	}
+	thumb, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets keygen: thumbprint: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, thumb)
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// renew
+// ---------------------------------------------------------------------------
+
+func cmdRenew(args []string, stdout, stderr io.Writer) int {
+	flagArgs, positional := splitArgs(args, nil)
+	if len(positional) > 0 || len(flagArgs) > 0 {
+		fmt.Fprintln(stderr, "agent-secrets renew: no arguments are accepted")
+		return exitUsageError
+	}
+	base, enrollmentID, key, err := sessionContext()
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
+		return exitUsageError
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	c := newClient(base)
+	backoff := 2 * time.Second
+	for {
+		expires, err := c.RenewEnrollment(ctx, key, enrollmentID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return 0
+			}
+			// The broker answering with a refusal (401 PROOF_INVALID: the enrollment is gone) is
+			// final; anything else — a restart, a network blip, a 5xx — is retried until the lease
+			// would be lost anyway.
+			var refused *apiError
+			if errors.As(err, &refused) && refused.Status/100 == 4 {
+				fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
+				return 1
+			}
+			fmt.Fprintf(stderr, "agent-secrets renew: %v; retrying in %s\n", err, backoff)
+			select {
+			case <-ctx.Done():
+				return 0
+			case <-time.After(backoff):
+			}
+			backoff = nextBackoff(backoff)
+			continue
+		}
+		backoff = 2 * time.Second
+		lease := time.Until(expires)
+		if lease <= 0 {
+			lease = time.Second
+		}
+		select {
+		case <-ctx.Done():
+			return 0
+		case <-time.After(lease / 3):
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// request
+// ---------------------------------------------------------------------------
+
+func cmdRequest(args []string, stdout, stderr io.Writer) int {
+	flagArgs, names := splitArgs(args, map[string]bool{"reason": true})
+	flags := flag.NewFlagSet("agent-secrets request", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	reason := flags.String("reason", "", "why these secrets are needed")
+	asJSON := flags.Bool("json", false, "print the response body verbatim")
+	if err := flags.Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(names) == 0 {
+		fmt.Fprintln(stderr, "agent-secrets request: at least one secret NAME is required")
+		return exitUsageError
+	}
+	base, enrollmentID, key, err := sessionContext()
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
+		return exitUsageError
+	}
+	result, raw, err := newClient(base).CreateRequest(context.Background(), key, enrollmentID, names, *reason, "")
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
+		return 1
+	}
+	if *asJSON {
+		writeVerbatim(stdout, raw)
+	} else {
+		fmt.Fprintf(stdout, "request_id: %s\nstate: %s\n", result.RequestID, result.State)
+	}
+	switch result.State {
+	case "pending":
+		return exitPending
+	case "denied":
+		return exitDenied
+	default:
+		return 0
+	}
+}
+
+// ---------------------------------------------------------------------------
+// status
+// ---------------------------------------------------------------------------
+
+func cmdStatus(args []string, stdout, stderr io.Writer) int {
+	flagArgs, positional := splitArgs(args, nil)
+	flags := flag.NewFlagSet("agent-secrets status", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	asJSON := flags.Bool("json", false, "print the response body verbatim")
+	if err := flags.Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(positional) != 1 {
+		fmt.Fprintln(stderr, "agent-secrets status: exactly one request_id is required")
+		return exitUsageError
+	}
+	base, enrollmentID, key, err := sessionContext()
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets status: %v\n", err)
+		return exitUsageError
+	}
+	result, raw, err := newClient(base).GetRequest(context.Background(), key, enrollmentID, positional[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets status: %v\n", err)
+		return 1
+	}
+	if *asJSON {
+		writeVerbatim(stdout, raw)
+		return 0
+	}
+	fmt.Fprintf(stdout, "state: %s\n", result.State)
+	if result.GrantID != nil {
+		fmt.Fprintf(stdout, "grant_id: %s\n", *result.GrantID)
+	}
+	if result.Decision != nil {
+		fmt.Fprintf(stdout, "decided_by: %s\n", result.Decision.By)
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// cancel
+// ---------------------------------------------------------------------------
+
+func cmdCancel(args []string, stdout, stderr io.Writer) int {
+	flagArgs, positional := splitArgs(args, nil)
+	if len(flagArgs) > 0 || len(positional) != 1 {
+		fmt.Fprintln(stderr, "agent-secrets cancel: exactly one request_id is required")
+		return exitUsageError
+	}
+	base, enrollmentID, key, err := sessionContext()
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets cancel: %v\n", err)
+		return exitUsageError
+	}
+	if err := newClient(base).CancelRequest(context.Background(), key, enrollmentID, positional[0]); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets cancel: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "cancelled")
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// revoke
+// ---------------------------------------------------------------------------
+
+func cmdRevoke(args []string, stdout, stderr io.Writer) int {
+	flagArgs, positional := splitArgs(args, nil)
+	if len(flagArgs) > 0 || len(positional) != 1 {
+		fmt.Fprintln(stderr, "agent-secrets revoke: exactly one grant_id is required")
+		return exitUsageError
+	}
+	base, enrollmentID, key, err := sessionContext()
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets revoke: %v\n", err)
+		return exitUsageError
+	}
+	if err := newClient(base).RevokeGrant(context.Background(), key, enrollmentID, positional[0]); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets revoke: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, "revoked")
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// self
+// ---------------------------------------------------------------------------
+
+func cmdSelf(args []string, stdout, stderr io.Writer) int {
+	flagArgs, positional := splitArgs(args, nil)
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets self: unexpected argument %q\n", positional[0])
+		return exitUsageError
+	}
+	flags := flag.NewFlagSet("agent-secrets self", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	asJSON := flags.Bool("json", false, "print the response body verbatim")
+	if err := flags.Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	base, enrollmentID, key, err := sessionContext()
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets self: %v\n", err)
+		return exitUsageError
+	}
+	result, raw, err := newClient(base).Self(context.Background(), key, enrollmentID)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets self: %v\n", err)
+		return 1
+	}
+	if *asJSON {
+		writeVerbatim(stdout, raw)
+		return 0
+	}
+	operator := ""
+	if result.Operator != nil {
+		operator = *result.Operator
+	}
+	fmt.Fprintf(stdout, "enrollment_id: %s\nkind: %s\noperator: %s\nlease_expires_at: %s\n",
+		result.EnrollmentID, result.Kind, operator, result.LeaseExpiresAt.Format(time.RFC3339))
+	for _, g := range result.Grants {
+		fmt.Fprintf(stdout, "grant: %s (request %s, expires %s)\n", g.GrantID, g.RequestID, g.ExpiresAt.Format(time.RFC3339))
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// NAME... -- <command> [args...]
+// ---------------------------------------------------------------------------
+
+// cmdExec implements the default "agent-secrets NAME... [--reason TEXT]
+// [--wait DURATION] -- <command> [args...]" form: it requests the named secrets, waits out a
+// pending decision, and syscall.Execs the command with the granted values in its environment.
+// Nothing runs when no NAME is given, and nothing runs while any requested secret is still
+// pending or was denied — a denial of any single name denies the whole request (requests.Machine
+// aggregates the decision), so this never partially execs with some secrets missing.
+func cmdExec(args []string, stdout, stderr io.Writer) int {
+	sep := -1
+	for i, a := range args {
+		if a == "--" {
+			sep = i
+			break
+		}
+	}
+	if sep < 0 {
+		fmt.Fprint(stderr, usage())
+		return exitUsageError
+	}
+	before, command := args[:sep], args[sep+1:]
+	if len(command) == 0 {
+		fmt.Fprintln(stderr, "agent-secrets: a command is required after --")
+		return exitUsageError
+	}
+
+	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true})
+	flags := flag.NewFlagSet("agent-secrets", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	reason := flags.String("reason", "", "why these secrets are needed")
+	wait := flags.Duration("wait", 30*time.Minute, "how long to wait for a pending request")
+	if err := flags.Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if len(names) == 0 {
+		fmt.Fprintln(stderr, "agent-secrets: at least one secret NAME is required")
+		return exitUsageError
+	}
+
+	base, enrollmentID, key, err := sessionContext()
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		return exitUsageError
+	}
+	c := newClient(base)
+	ctx := context.Background()
+	result, _, err := c.CreateRequest(ctx, key, enrollmentID, names, *reason, "")
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		return 1
+	}
+
+	state, grantID, requestID := result.State, result.GrantID, result.RequestID
+	if state == "pending" {
+		deadline := time.Now().Add(*wait)
+		backoff := 2 * time.Second
+		for state == "pending" {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				break
+			}
+			time.Sleep(minDuration(backoff, remaining))
+			status, _, err := c.GetRequest(ctx, key, enrollmentID, requestID)
+			if err != nil {
+				fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+				return 1
+			}
+			state, grantID = status.State, status.GrantID
+			backoff = nextBackoff(backoff)
+		}
+	}
+	switch state {
+	case "granted":
+	case "pending":
+		fmt.Fprintf(stderr, "agent-secrets: request %s is still waiting for approval; nothing was run. Check it with: agent-secrets status %s\n", requestID, requestID)
+		return exitPending
+	case "denied":
+		fmt.Fprintf(stderr, "agent-secrets: request %s was denied\n", requestID)
+		return exitDenied
+	case "cancelled", "expired":
+		fmt.Fprintf(stderr, "agent-secrets: request %s was %s\n", requestID, state)
+		return 1
+	default:
+		fmt.Fprintf(stderr, "agent-secrets: request %s is in unexpected state %q\n", requestID, state)
+		return 1
+	}
+	if grantID == nil {
+		fmt.Fprintf(stderr, "agent-secrets: request %s was granted but its grant is no longer live; request it again\n", requestID)
+		return 1
+	}
+
+	values, err := c.GrantValues(ctx, key, enrollmentID, *grantID)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		return 1
+	}
+	var missing []string
+	for _, name := range names {
+		if _, ok := values.Values[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets: %s not released (proxy-delivery or otherwise unavailable)\n", strings.Join(missing, ", "))
+		return 1
+	}
+
+	path, err := exec.LookPath(command[0])
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		return 1
+	}
+	if err := syscall.Exec(path, command, buildChildEnv(os.Environ(), values.Values)); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: exec %s: %v\n", command[0], err)
+		return 1
+	}
+	return 0 // unreachable: syscall.Exec replaces this process on success
+}
+
+// buildChildEnv is the exec form's child environment: the inherited environment with every
+// AGENT_SECRETS_* variable stripped (this CLI's own configuration is never the child's business)
+// and, for every released secret name, its inherited entry ALSO stripped before that name's
+// granted value is appended. Without that second strip, a duplicate key from the inherited
+// environment could shadow the broker-released value under an execve implementation that keeps
+// the first occurrence of a repeated key rather than the last.
+func buildChildEnv(environ []string, values map[string]string) []string {
+	envp := make([]string, 0, len(environ)+len(values))
+	for _, e := range environ {
+		key, _, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(key, "AGENT_SECRETS_") {
+			continue
+		}
+		if _, released := values[key]; released {
+			continue
+		}
+		envp = append(envp, e)
+	}
+	for name, value := range values {
+		envp = append(envp, name+"="+value)
+	}
+	return envp
+}
