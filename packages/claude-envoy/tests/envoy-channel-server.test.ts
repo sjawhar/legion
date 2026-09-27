@@ -563,7 +563,9 @@ test("follows the session id its Claude process hands off: new subject first, th
 
     const reregister = "subscribe ses_new [aside]"
     // A tick that fired before the handoff file landed only re-registered the old id.
-    const handoffCalls = calls.filter((call) => call !== "subscribe ses_old [aside]")
+    const handoffCalls = calls.filter(
+      (call) => call !== "subscribe ses_old [aside]" && call !== "getInterest",
+    )
     expect(handoffCalls.slice(0, 6)).toEqual([
       "nats.subscribe notifications.agent.ses_new",
       "unregister ses_old",
@@ -651,7 +653,9 @@ test("two channel servers under different Claude processes rebind independently"
     expect(identityB.id).toBe("ses_b")
     expect(callsA).toContain("unregister ses_a")
     expect(heartbeatsB).toBeGreaterThan(0)
-    expect(callsB.filter((call) => call !== "subscribe ses_b")).toEqual([])
+    expect(
+      callsB.filter((call) => call !== "subscribe ses_b" && call !== "getInterest"),
+    ).toEqual([])
   } finally {
     await serverA.shutdown()
     await serverB.shutdown()
@@ -1160,15 +1164,28 @@ test("a registration in flight when Dispatch removes a subscription cannot write
   }
 })
 
-test("a registry removal that fails is retried on the next heartbeat", async () => {
+test("a registry removal that fails is reconciled by the next heartbeat, without stripping a topic re-followed since", async () => {
   const stateDirectory = await scratchState()
   const nats = new FakeNats()
-  let attempts = 0
+  const entry = new Set<string>([directSubject])
+  let failNextUnsubscribe = false
   const client = recordingClient([], {
-    unsubscribe: async () => {
-      attempts++
-      if (attempts === 1) throw new Error("registry unavailable")
+    subscribe: async (input) => {
+      for (const topic of input.topics) entry.add(topic)
+      return noInterest()
     },
+    unsubscribe: async (input) => {
+      if (failNextUnsubscribe) {
+        failNextUnsubscribe = false
+        throw new Error("registry unavailable")
+      }
+      for (const topic of input.topics) entry.delete(topic)
+    },
+    getInterest: async (sessionID) => ({
+      ...noInterest(),
+      session_id: sessionID,
+      topics: [...entry],
+    }),
   })
   const session = await startChannelSession(
     sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
@@ -1177,15 +1194,16 @@ test("a registry removal that fails is retried on the next heartbeat", async () 
       heartbeatMs: 20,
     }),
   )
-  const removed = "notifications.dispatch.issue.DSP-3"
+  const staysRemoved = "notifications.dispatch.issue.DSP-3"
+  const reFollowed = "notifications.dispatch.issue.DSP-9"
 
   try {
-    await session.follow([removed])
-    // The first attempt, fired from `deliver` itself, fails; nobody awaits it.
+    await session.follow([staysRemoved, reFollowed])
+    failNextUnsubscribe = true
     nats.emit(
       directSubject,
       JSON.stringify({
-        event_id: "remove-retry",
+        event_id: "remove-reconcile",
         source: "dispatch",
         payload: JSON.stringify({
           issue_key: "DSP-3",
@@ -1194,14 +1212,18 @@ test("a registry removal that fails is retried on the next heartbeat", async () 
           payload: {
             session_id: "ses_claude",
             by: { kind: "user", id: "alice" },
-            topics: [removed],
+            topics: [staysRemoved, reFollowed],
           },
         }),
       }),
     )
-    await waitFor(async () => attempts >= 1, "the failing registry removal attempt")
-    // A later heartbeat retries it, and this attempt succeeds.
-    await waitFor(async () => attempts >= 2, "the heartbeat's retry")
+    await waitFor(async () => !failNextUnsubscribe, "the removal's own registry write to fail once")
+    // Both are already out of local state; re-follow one before any heartbeat
+    // reconciles. A stale retry replaying the failure-time topic list would strip
+    // it right back out; reconciliation, driven by live forwarder.topics(), must not.
+    await session.follow([reFollowed])
+    await waitFor(async () => !entry.has(staysRemoved), "the heartbeat to reconcile the stale entry")
+    expect([...entry].sort()).toEqual([directSubject, reFollowed])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

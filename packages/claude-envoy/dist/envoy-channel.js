@@ -44167,30 +44167,31 @@ async function startChannelSession(options) {
     });
     return result;
   };
-  const pendingRegistryRemovals = new Map;
   const forwarder = createChannelForwarder(options.connection, {
     deliver: async (message) => {
       const removedTopics = subscriptionRemovedTopics(message.raw, identity.id);
       if (removedTopics !== undefined && removedTopics.length > 0) {
         for (const topic of removedTopics)
           userTopics.delete(topic);
-        forwarder.unfollow(removedTopics).catch((error48) => {
+        const { dropping, unsubscribing } = dropFromForwarderAndRegistry(removedTopics);
+        dropping.catch((error48) => {
           process.stderr.write(`envoy-channel: could not drop a removed subscription \u2014 ${messageFor(error48)}
 `);
         });
-        const removalSessionID = identity.id;
-        serialized(() => options.client.unsubscribe({ sessionID: removalSessionID, topics: removedTopics })).catch((error48) => {
-          process.stderr.write(`envoy-channel: could not drop a removed subscription from the registry \u2014 ${messageFor(error48)}; retrying every heartbeat
+        unsubscribing.catch((error48) => {
+          process.stderr.write(`envoy-channel: could not drop a removed subscription from the registry \u2014 ${messageFor(error48)}; the next heartbeat reconciles it
 `);
-          const pending = pendingRegistryRemovals.get(removalSessionID) ?? new Set;
-          for (const topic of removedTopics)
-            pending.add(topic);
-          pendingRegistryRemovals.set(removalSessionID, pending);
         });
       }
       await enqueueChannelMessage(delivery, options.connection, directSubject, message);
     }
   });
+  function dropFromForwarderAndRegistry(topics) {
+    return {
+      dropping: forwarder.unfollow(topics),
+      unsubscribing: serialized(() => options.client.unsubscribe({ sessionID: identity.id, topics }))
+    };
+  }
   const register = async () => {
     await options.client.subscribe({
       sessionID: identity.id,
@@ -44263,7 +44264,6 @@ async function startChannelSession(options) {
     }
     identity.set(next);
     directSubject = nextSubject;
-    pendingRegistryRemovals.delete(previous);
     forwarder.unfollow([previousSubject]);
     roleTransferFrom ??= previous;
     await register();
@@ -44278,15 +44278,13 @@ async function startChannelSession(options) {
     await restoreRole(roleTransferFrom);
     roleTransferFrom = undefined;
   };
-  const retryPendingRegistryRemovals = async () => {
-    for (const [sessionID, topics] of pendingRegistryRemovals) {
-      if (topics.size === 0) {
-        pendingRegistryRemovals.delete(sessionID);
-        continue;
-      }
-      await options.client.unsubscribe({ sessionID, topics: [...topics] });
-      pendingRegistryRemovals.delete(sessionID);
-    }
+  const reconcileRegisteredInterests = async () => {
+    const registry2 = await options.client.getInterest(identity.id);
+    const followed = new Set(forwarder.topics());
+    const drifted = registry2.topics.filter((topic) => topic !== directSubject && !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic));
+    if (drifted.length === 0)
+      return;
+    await options.client.unsubscribe({ sessionID: identity.id, topics: drifted });
   };
   let heartbeatInFlight = false;
   let heartbeatRequested = false;
@@ -44302,7 +44300,7 @@ async function startChannelSession(options) {
         outageReported = false;
         await reassertRole();
         await transferRole();
-        await retryPendingRegistryRemovals();
+        await reconcileRegisteredInterests();
       });
     } catch (error48) {
       if (outageReported)
@@ -44310,6 +44308,7 @@ async function startChannelSession(options) {
       outageReported = true;
       process.stderr.write(`envoy-channel: registry heartbeat failed (${messageFor(error48)}); retrying every heartbeat
 `);
+      requestHeartbeat();
     } finally {
       heartbeatInFlight = false;
       if (heartbeatRequested) {
@@ -44375,8 +44374,8 @@ async function startChannelSession(options) {
       const removed = requested.filter((topic) => userTopics.delete(topic));
       if (removed.length === 0)
         return [];
-      const dropping = forwarder.unfollow(removed);
-      await serialized(() => options.client.unsubscribe({ sessionID: identity.id, topics: removed }));
+      const { dropping, unsubscribing } = dropFromForwarderAndRegistry(removed);
+      await unsubscribing;
       await dropping;
       return removed;
     },

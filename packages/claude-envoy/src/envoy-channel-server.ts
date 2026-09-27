@@ -405,44 +405,53 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     return result
   }
 
-  /**
-   * Topics whose registry-side removal (the `deliver` handler's Dispatch-driven
-   * path, below) failed and must be retried, keyed by the session id the
-   * removal targeted since a handoff can move the identity on before a retry
-   * runs. The heartbeat's serialized block re-issues every entry and drops it
-   * once the listener accepts; `adoptHandoff` drops an id's entry outright once
-   * that id's whole registry entry is gone.
-   */
-  const pendingRegistryRemovals = new Map<string, Set<string>>()
-
   const forwarder: ChannelForwarder = createChannelForwarder(options.connection, {
     deliver: async (message) => {
       const removedTopics = subscriptionRemovedTopics(message.raw, identity.id)
       // An empty list would mean "every topic" to both unfollow and the listener.
       if (removedTopics !== undefined && removedTopics.length > 0) {
         for (const topic of removedTopics) userTopics.delete(topic)
-        void forwarder.unfollow(removedTopics).catch((error: unknown) => {
+        const { dropping, unsubscribing } = dropFromForwarderAndRegistry(removedTopics)
+        dropping.catch((error: unknown) => {
           process.stderr.write(
             `envoy-channel: could not drop a removed subscription — ${messageFor(error)}\n`,
           )
         })
         // Dispatch has already removed them from the entry, but a registration in
-        // flight at that moment adds them back; removing them again behind it undoes that.
-        const removalSessionID = identity.id
-        void serialized(() =>
-          options.client.unsubscribe({ sessionID: removalSessionID, topics: removedTopics }),
-        ).catch((error: unknown) => {
+        // flight at that moment adds them back; removing them again behind it undoes
+        // that. A failure here is not retried by name: the heartbeat's own interest
+        // reconciliation (below) brings the entry back in line with what this session
+        // actually follows, whatever caused the drift.
+        unsubscribing.catch((error: unknown) => {
           process.stderr.write(
-            `envoy-channel: could not drop a removed subscription from the registry — ${messageFor(error)}; retrying every heartbeat\n`,
+            `envoy-channel: could not drop a removed subscription from the registry — ${messageFor(error)}; the next heartbeat reconciles it\n`,
           )
-          const pending = pendingRegistryRemovals.get(removalSessionID) ?? new Set<string>()
-          for (const topic of removedTopics) pending.add(topic)
-          pendingRegistryRemovals.set(removalSessionID, pending)
         })
       }
       await enqueueChannelMessage(delivery, options.connection, directSubject, message)
     },
   })
+
+  /**
+   * Drops `topics` from the forwarder's subscriptions and the registry entry — the two
+   * steps every removal here takes once a caller has already taken them out of
+   * `userTopics`. `forwarder.unfollow` runs first and removes from `following`
+   * before its first await, so no registration queued behind either promise
+   * advertises a dropped topic again. Both callers here — `deliver`'s own
+   * best-effort removal and the public `unfollow` below — take these same two
+   * steps in this order; only whether they wait for them differs.
+   */
+  function dropFromForwarderAndRegistry(topics: readonly string[]): {
+    readonly dropping: Promise<void>
+    readonly unsubscribing: Promise<void>
+  } {
+    return {
+      dropping: forwarder.unfollow(topics),
+      unsubscribing: serialized(() =>
+        options.client.unsubscribe({ sessionID: identity.id, topics }),
+      ),
+    }
+  }
 
   /** Advertise the current id and topics; runs only inside `serialized`. */
   const register = async (): Promise<void> => {
@@ -537,9 +546,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     }
     identity.set(next)
     directSubject = nextSubject
-    // The old id's whole registry entry is gone: any removal still pending
-    // against it can never succeed and would otherwise retry forever.
-    pendingRegistryRemovals.delete(previous)
     // `unfollow` removes the subject from the topic list before it first awaits.
     // What it then awaits is the drain of deliveries already in flight, and the
     // handoff does not wait for it: a stuck notification would otherwise hold
@@ -563,21 +569,30 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   }
 
   /**
-   * Re-issues a registry-side removal the `deliver` handler could not make
-   * stick the first time. Runs only inside `serialized`, so it never races the
-   * removal it retries; a topic drops out once the listener accepts it, and a
-   * session id whose whole entry is already gone (a handoff moved past it) is
-   * never queued here again after `adoptHandoff` clears it.
+   * Brings the registry entry's topics back in line with what this session
+   * actually follows. A topic the entry still lists but `forwarder.topics()`
+   * no longer names — because a `deliver`-time removal's registry write
+   * failed, or for any other reason — is unsubscribed. Comparing live state
+   * each heartbeat, rather than replaying a topic list a failure was recorded
+   * against, means a topic re-followed since a failed removal is never
+   * stripped (it is already back in `forwarder.topics()`), and one topic's
+   * registry outage cannot block reconciliation of any other: there is no
+   * per-topic queue to starve, only ever this session's own current entry.
+   * Runs only inside `serialized`, so it never races a concurrent
+   * registration. Not quiet on failure: unlike startup's
+   * `recoverRegisteredInterests`, an outage here is exactly what the
+   * heartbeat's own report exists to surface, and the next heartbeat
+   * reconciles fully again regardless.
    */
-  const retryPendingRegistryRemovals = async (): Promise<void> => {
-    for (const [sessionID, topics] of pendingRegistryRemovals) {
-      if (topics.size === 0) {
-        pendingRegistryRemovals.delete(sessionID)
-        continue
-      }
-      await options.client.unsubscribe({ sessionID, topics: [...topics] })
-      pendingRegistryRemovals.delete(sessionID)
-    }
+  const reconcileRegisteredInterests = async (): Promise<void> => {
+    const registry = await options.client.getInterest(identity.id)
+    const followed = new Set(forwarder.topics())
+    const drifted = registry.topics.filter(
+      (topic) =>
+        topic !== directSubject && !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic),
+    )
+    if (drifted.length === 0) return
+    await options.client.unsubscribe({ sessionID: identity.id, topics: drifted })
   }
 
   // One tick at a time: a tick that outlives the interval (a slow listener, a
@@ -597,7 +612,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         outageReported = false
         await reassertRole()
         await transferRole()
-        await retryPendingRegistryRemovals()
+        await reconcileRegisteredInterests()
       })
     } catch (error) {
       if (outageReported) return
@@ -605,6 +620,12 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       process.stderr.write(
         `envoy-channel: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat\n`,
       )
+      // A handoff that unregistered the old id and then failed to register the new
+      // one leaves the session unreachable under both until the next attempt: one
+      // immediate retry, not the full heartbeat interval, closes that window. Bounded
+      // to once per outage: a further failure here hits the `outageReported` guard
+      // above before ever reaching this line.
+      requestHeartbeat()
     } finally {
       heartbeatInFlight = false
       if (heartbeatRequested) {
@@ -676,12 +697,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       const requested = topics.length === 0 ? [...userTopics] : expandSubscriptionTopics(topics)
       const removed = requested.filter((topic) => userTopics.delete(topic))
       if (removed.length === 0) return []
-      // Out of the topic list at once, so no registration queued behind this
-      // removal advertises the topics again.
-      const dropping = forwarder.unfollow(removed)
-      await serialized(() =>
-        options.client.unsubscribe({ sessionID: identity.id, topics: removed }),
-      )
+      const { dropping, unsubscribing } = dropFromForwarderAndRegistry(removed)
+      await unsubscribing
       await dropping
       return removed
     },
