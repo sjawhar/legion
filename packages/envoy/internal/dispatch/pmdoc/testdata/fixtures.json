@@ -7845,6 +7845,436 @@
     "rendered_by_milkdown": "![Fixture image](https://example.com/image.png \"Image title\")\n"
   },
   {
+    "name": "indented-code-tab-lines",
+    "markdown": "Indented code whose blank lines hold tabs, measured from the column each tab stands at.\n\nNext.\n\n    a\n  \t\n    b\n\nNext.\n\n    a\n \t  \n    b\n\nNext.\n\n- x\n  \n      a\n   \t\n      b\n\nNext.\n\n- x\n  \n      a\n  \t  \n      b\n\nNext.\n\n- x\n  \n      a\n   \t   \n      b\n\nNext.\n\n- x\n  \n      a\n\t\t\n      b\n\nNext.\n\n1. x\n   \n       a\n   \t \n       b\n\nNext.\n\n> - x\n>   \n>       a\n>    \t\n>       b\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Indented code whose blank lines hold tabs, measured from the column each tab stands at."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "a\n\nb"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "a\n  \nb"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000008"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000009"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000010"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000013"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000014"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000015"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000016"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000017"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000018"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000019"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000020"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n \nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000021"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000023"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000024"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000025"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n  \nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000026"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 1,
+            "spread": false,
+            "blockId": "b-000027"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000028"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000029"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000030"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a\n\nb"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000031"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000032"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000033"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": true,
+                    "checked": null,
+                    "blockId": "b-000034"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000035"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000036"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a\n\nb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AY8BAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBV0luZGVudGVkIGNvZGUgd2hvc2UgYmxhbmsgbGluZXMgaG9sZCB0YWJzLCBtZWFzdXJlZCBmcm9tIHRoZSBjb2x1bW4gZWFjaCB0YWIgc3RhbmRzIGF0LigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAFaBgQAAVsFTmV4dC4oAAFaB2Jsb2NrSWQBdwhiLTAwMDAwMocBWgMKY29kZV9ibG9jawcAAWIGBAABYwRhCgpiKAABYgdibG9ja0lkAXcIYi0wMDAwMDOHAWIDCXBhcmFncmFwaAcAAWkGBAABagVOZXh0LigAAWkHYmxvY2tJZAF3CGItMDAwMDA0hwFpAwpjb2RlX2Jsb2NrBwABcQYEAAFyBmEKICAKYigAAXEHYmxvY2tJZAF3CGItMDAwMDA1hwFxAwlwYXJhZ3JhcGgHAAF6BgQAAXsFTmV4dC4oAAF6B2Jsb2NrSWQBdwhiLTAwMDAwNocBegMLYnVsbGV0X2xpc3QHAAGCAQMJbGlzdF9pdGVtBwABgwEDCXBhcmFncmFwaAcAAYQBBgQAAYUBAXgoAAGEAQdibG9ja0lkAXcIYi0wMDAwMDmHAYQBAwpjb2RlX2Jsb2NrBwABiAEGBAABiQEEYQoKYigAAYgBB2Jsb2NrSWQBdwhiLTAwMDAxMCgAAYMBBWxhYmVsAXcD4oCiKAABgwEIbGlzdFR5cGUBdwZidWxsZXQoAAGDAQZzcHJlYWQBeCgAAYMBB2Jsb2NrSWQBdwhiLTAwMDAwOCgAAYIBBnNwcmVhZAF5KAABggEHYmxvY2tJZAF3CGItMDAwMDA3hwGCAQMJcGFyYWdyYXBoBwABlQEGBAABlgEFTmV4dC4oAAGVAQdibG9ja0lkAXcIYi0wMDAwMTGHAZUBAwtidWxsZXRfbGlzdAcAAZ0BAwlsaXN0X2l0ZW0HAAGeAQMJcGFyYWdyYXBoBwABnwEGBAABoAEBeCgAAZ8BB2Jsb2NrSWQBdwhiLTAwMDAxNIcBnwEDCmNvZGVfYmxvY2sHAAGjAQYEAAGkAQRhCgpiKAABowEHYmxvY2tJZAF3CGItMDAwMDE1KAABngEFbGFiZWwBdwPigKIoAAGeAQhsaXN0VHlwZQF3BmJ1bGxldCgAAZ4BBnNwcmVhZAF4KAABngEHYmxvY2tJZAF3CGItMDAwMDEzKAABnQEGc3ByZWFkAXkoAAGdAQdibG9ja0lkAXcIYi0wMDAwMTKHAZ0BAwlwYXJhZ3JhcGgHAAGwAQYEAAGxAQVOZXh0LigAAbABB2Jsb2NrSWQBdwhiLTAwMDAxNocBsAEDC2J1bGxldF9saXN0BwABuAEDCWxpc3RfaXRlbQcAAbkBAwlwYXJhZ3JhcGgHAAG6AQYEAAG7AQF4KAABugEHYmxvY2tJZAF3CGItMDAwMDE5hwG6AQMKY29kZV9ibG9jawcAAb4BBgQAAb8BBWEKIApiKAABvgEHYmxvY2tJZAF3CGItMDAwMDIwKAABuQEFbGFiZWwBdwPigKIoAAG5AQhsaXN0VHlwZQF3BmJ1bGxldCgAAbkBBnNwcmVhZAF4KAABuQEHYmxvY2tJZAF3CGItMDAwMDE4KAABuAEGc3ByZWFkAXkoAAG4AQdibG9ja0lkAXcIYi0wMDAwMTeHAbgBAwlwYXJhZ3JhcGgHAAHMAQYEAAHNAQVOZXh0LigAAcwBB2Jsb2NrSWQBdwhiLTAwMDAyMYcBzAEDC2J1bGxldF9saXN0BwAB1AEDCWxpc3RfaXRlbQcAAdUBAwlwYXJhZ3JhcGgHAAHWAQYEAAHXAQF4KAAB1gEHYmxvY2tJZAF3CGItMDAwMDI0hwHWAQMKY29kZV9ibG9jawcAAdoBBgQAAdsBBmEKICAKYigAAdoBB2Jsb2NrSWQBdwhiLTAwMDAyNSgAAdUBBWxhYmVsAXcD4oCiKAAB1QEIbGlzdFR5cGUBdwZidWxsZXQoAAHVAQZzcHJlYWQBeCgAAdUBB2Jsb2NrSWQBdwhiLTAwMDAyMygAAdQBBnNwcmVhZAF5KAAB1AEHYmxvY2tJZAF3CGItMDAwMDIyhwHUAQMJcGFyYWdyYXBoBwAB6QEGBAAB6gEFTmV4dC4oAAHpAQdibG9ja0lkAXcIYi0wMDAwMjaHAekBAwxvcmRlcmVkX2xpc3QHAAHxAQMJbGlzdF9pdGVtBwAB8gEDCXBhcmFncmFwaAcAAfMBBgQAAfQBAXgoAAHzAQdibG9ja0lkAXcIYi0wMDAwMjmHAfMBAwpjb2RlX2Jsb2NrBwAB9wEGBAAB+AEEYQoKYigAAfcBB2Jsb2NrSWQBdwhiLTAwMDAzMCgAAfIBBWxhYmVsAXcD4oCiKAAB8gEIbGlzdFR5cGUBdwZidWxsZXQoAAHyAQZzcHJlYWQBeCgAAfIBB2Jsb2NrSWQBdwhiLTAwMDAyOCgAAfEBBW9yZGVyAX0BKAAB8QEGc3ByZWFkAXkoAAHxAQdibG9ja0lkAXcIYi0wMDAwMjeHAfEBAwlwYXJhZ3JhcGgHAAGFAgYEAAGGAgVOZXh0LigAAYUCB2Jsb2NrSWQBdwhiLTAwMDAzMYcBhQIDCmJsb2NrcXVvdGUHAAGNAgMLYnVsbGV0X2xpc3QHAAGOAgMJbGlzdF9pdGVtBwABjwIDCXBhcmFncmFwaAcAAZACBgQAAZECAXgoAAGQAgdibG9ja0lkAXcIYi0wMDAwMzWHAZACAwpjb2RlX2Jsb2NrBwABlAIGBAABlQIEYQoKYigAAZQCB2Jsb2NrSWQBdwhiLTAwMDAzNigAAY8CBWxhYmVsAXcD4oCiKAABjwIIbGlzdFR5cGUBdwZidWxsZXQoAAGPAgZzcHJlYWQBeCgAAY8CB2Jsb2NrSWQBdwhiLTAwMDAzNCgAAY4CBnNwcmVhZAF5KAABjgIHYmxvY2tJZAF3CGItMDAwMDMzKAABjQIHYmxvY2tJZAF3CGItMDAwMDMyAA==",
+    "rendered_by_milkdown": "Indented code whose blank lines hold tabs, measured from the column each tab stands at.\n\nNext.\n\n```\na\n\nb\n```\n\nNext.\n\n```\na\n  \nb\n```\n\nNext.\n\n* x\n\n  ```\n  a\n\n  b\n  ```\n\nNext.\n\n* x\n\n  ```\n  a\n\n  b\n  ```\n\nNext.\n\n* x\n\n  ```\n  a\n   \n  b\n  ```\n\nNext.\n\n* x\n\n  ```\n  a\n    \n  b\n  ```\n\nNext.\n\n1. x\n\n   ```\n   a\n\n   b\n   ```\n\nNext.\n\n> * x\n>\n>   ```\n>   a\n>\n>   b\n>   ```\n"
+  },
+  {
     "name": "inline-code-backticks",
     "markdown": "Internal ``a ` b`` and edge `` `edge` ``.\n",
     "pm_json": {

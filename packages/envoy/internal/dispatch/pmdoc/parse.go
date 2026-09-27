@@ -49,7 +49,8 @@ var blockReader = markdownReader{md: goldmark.New(
 
 // blockParsers is goldmark's default block parsers with its list parser held off an empty item
 // that would interrupt a paragraph (emptyItemGuard), its list, list item, setext heading and
-// fenced code parsers reading a tab in a line's indentation as the columns it spans, and every one
+// fenced code parsers reading a tab in a line's indentation as the columns it spans, its indented
+// code parser measuring a blank line's columns as a line of code's (codeColumns), and every one
 // placing the block it opens where its text starts (tabIndented).
 func blockParsers() []util.PrioritizedValue {
 	parsers := parser.DefaultBlockParsers()
@@ -57,6 +58,7 @@ func blockParsers() []util.PrioritizedValue {
 	listItemParser := reflect.TypeOf(parser.NewListItemParser())
 	setextParser := reflect.TypeOf(parser.NewSetextHeadingParser())
 	fenceParser := reflect.TypeOf(parser.NewFencedCodeBlockParser())
+	codeParser := reflect.TypeOf(parser.NewCodeBlockParser())
 	for index, prioritized := range parsers {
 		block := prioritized.Value.(parser.BlockParser)
 		switch reflect.TypeOf(block) {
@@ -68,6 +70,8 @@ func blockParsers() []util.PrioritizedValue {
 			parsers[index].Value = tabIndented{block, setextUnderline}
 		case fenceParser:
 			parsers[index].Value = tabIndented{fenceClosure{block}, fenceStart}
+		case codeParser:
+			parsers[index].Value = tabIndented{codeColumns{block}, nil}
 		default:
 			parsers[index].Value = tabIndented{block, nil}
 		}

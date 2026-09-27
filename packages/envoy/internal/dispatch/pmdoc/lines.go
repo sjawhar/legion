@@ -333,6 +333,35 @@ func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Co
 	return state
 }
 
+// codeColumns is goldmark's indented code parser measuring a blank line's indentation from the
+// column it stands at, as it measures a line of code's: four columns are the code's indentation,
+// and what the line holds past them, a tab split there written as the columns it has left, is the
+// code's text. Goldmark counts every tab on a blank line as four columns wherever it stands, so in
+// a list item, where the line starts past the item's columns, a tab short of the code's indentation
+// left a space in the code (`- x\n  \n      a\n   \t\n      b` read `a\n \nb`).
+type codeColumns struct{ parser.BlockParser }
+
+func (p codeColumns) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	line, segment := reader.PeekLine()
+	if !util.IsBlank(line) {
+		return p.BlockParser.Continue(node, reader, pc)
+	}
+	if position, padding := util.IndentPosition(line, reader.LineOffset(), 4); position >= 0 {
+		reader.AdvanceAndSetPadding(position, padding)
+		_, segment = reader.PeekLine()
+	} else {
+		// Nothing past the code's indentation: the line is empty but for its line feed.
+		start := segment.Stop
+		if start > segment.Start && reader.Source()[start-1] == '\n' {
+			start--
+		}
+		segment = gmtext.NewSegment(start, segment.Stop)
+	}
+	node.Lines().Append(segment)
+	reader.AdvanceToEOL()
+	return parser.Continue | parser.NoChildren
+}
+
 // setPadding sets reader's padding and drops the line it has peeked, which goldmark's
 // SetPadding keeps: a zero advance drops it.
 func setPadding(reader gmtext.Reader, padding int) {
