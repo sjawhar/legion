@@ -15,6 +15,7 @@ echo ""
 echo "=== Building envoy:${TAG} ==="
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
+  --build-arg "LEGION_COMMIT=${TAG}" \
   -t "${REGISTRY}/envoy:${TAG}" \
   -f packages/envoy/docker/Dockerfile \
   --push \

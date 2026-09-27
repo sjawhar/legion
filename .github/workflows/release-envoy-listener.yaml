@@ -78,6 +78,10 @@ jobs:
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # envoy-dispatch's /healthz reports this as the commit it was built from; the
+          # Dockerfile refuses anything but a full sha.
+          build-args: |
+            LEGION_COMMIT=${{ github.sha }}
           tags: |
             ghcr.io/sjawhar/legion/envoy:${{ github.sha }}
 

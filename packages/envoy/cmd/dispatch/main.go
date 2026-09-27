@@ -42,6 +42,12 @@ const (
 	idleTimeout       = 2 * time.Minute
 )
 
+// buildCommit is the legion commit this binary was built from. Only the image build stamps it
+// (packages/envoy/docker/Dockerfile passes its LEGION_COMMIT build argument through -ldflags -X,
+// and refuses anything but a full commit sha); every other build leaves it empty, and /healthz
+// then reports the commit as null rather than naming one it cannot vouch for.
+var buildCommit string
+
 type bootConfig struct {
 	DatabaseURL      string
 	AgentToken       string
@@ -264,7 +270,7 @@ func main() {
 
 	go architecture.Run(ctx, appCtx.Architecture())
 
-	handler := dispatchHandler(routes.New(appCtx), database, natsClient)
+	handler := dispatchHandler(routes.New(appCtx), database, natsClient, buildCommit)
 	listenAddr, err := listenAddress()
 	if err != nil {
 		slog.Error("dispatch: resolve listen address", "error", err)
@@ -492,9 +498,9 @@ func parsePositiveInt(raw string) (int, error) {
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
 // route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
 // longer pattern, so "GET /healthz" wins over the router's "/".
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client) http.Handler {
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, commit string) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthzHandler(database, natsClient))
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient, commit))
 	mux.Handle("/", handler)
 	return mux
 }
@@ -503,17 +509,31 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 // health pool's own connection, and NATS is connected where it is configured. Nothing here
 // waits on the shared pool, and Healthy bounds its own wait at store.healthProbeTimeout, which
 // records why a probe that answers late is as bad as one that never answers.
-func healthzHandler(database *store.Store, natsClient *bus.Client) http.HandlerFunc {
+//
+// Beside those it reports what is deployed: `commit`, the legion commit the binary was built
+// from (null when the build did not stamp one), and `schema_version`, the highest migration
+// the database has applied, read by the same probe (null when the database did not answer).
+// A deploy check compares the two with the commit its image pin names and that commit's
+// migrations, so neither is ever filled with a guess.
+func healthzHandler(database *store.Store, natsClient *bus.Client, commit string) http.HandlerFunc {
+	var reportedCommit *string
+	if commit != "" {
+		reportedCommit = &commit
+	}
 	return func(w http.ResponseWriter, req *http.Request) {
 		databaseOK := database != nil && database.Pool != nil
+		var schemaVersion *int
 		if databaseOK {
 			// A 503 that records no reason works against the point of the probe: a closed
 			// pool, a deadline on a stalled link, an authentication failure and a refused
 			// dial are four incidents with four next steps, and the body distinguishes
 			// none of them. One line per failed poll, for as long as the outage lasts.
-			if err := database.Pool.Healthy(req.Context()); err != nil {
+			version, err := database.Pool.Healthy(req.Context())
+			if err != nil {
 				slog.Warn("dispatch: health probe failed", "error", err)
 				databaseOK = false
+			} else {
+				schemaVersion = &version
 			}
 		}
 		var natsOK *bool
@@ -529,10 +549,12 @@ func healthzHandler(database *store.Store, natsClient *bus.Client) http.HandlerF
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(struct {
-			OK   bool  `json:"ok"`
-			DB   bool  `json:"db"`
-			NATS *bool `json:"nats"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK})
+			OK            bool    `json:"ok"`
+			DB            bool    `json:"db"`
+			NATS          *bool   `json:"nats"`
+			Commit        *string `json:"commit"`
+			SchemaVersion *int    `json:"schema_version"`
+		}{OK: ok, DB: databaseOK, NATS: natsOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
 	}
 }
 

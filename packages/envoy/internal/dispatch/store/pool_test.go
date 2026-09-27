@@ -49,7 +49,7 @@ func TestPoolRefusesASecondConnectionInsideATransaction(t *testing.T) {
 	}
 	// Healthy is the deliberate exception: it probes its own pool, so it cannot close the
 	// cycle the guard prevents and must answer even for a caller holding a connection.
-	if err := database.Pool.Healthy(ctx); err != nil {
+	if _, err := database.Pool.Healthy(ctx); err != nil {
 		t.Fatalf("health probe inside a transaction: %v, want success", err)
 	}
 	if _, err := database.Pool.Acquire(ctx); !errors.Is(err, ErrNestedAcquire) {

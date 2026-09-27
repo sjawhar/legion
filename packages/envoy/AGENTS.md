@@ -471,9 +471,10 @@ with it. Everything the load needs comes from that pool, `onLoadDocument`'s issu
 waited for the shared pool would close the same cycle without a transaction of its own. The
 pool belongs to the store rather than to each `PgVersioned`, so a caller that constructs one to
 read a document borrows those connections instead of opening more. The load balancer's probe
-takes the other one: `store.Pool.Healthy` pings the health pool (one connection, used by
-nothing else) under a `store.healthProbeTimeout` deadline derived from the caller's context,
-two seconds covering dial and query, and `/healthz` answers with the result. That constant's
+takes the other one: `store.Pool.Healthy` reads the highest applied schema version from the
+health pool (one connection, used by nothing else) under a `store.healthProbeTimeout` deadline
+derived from the caller's context, two seconds covering dial and query, and `/healthz` answers
+with the result, reporting that version as `schema_version`. That constant's
 doc owns the argument for the bound: every prober reads silence as a dead process, the
 tightest of them allows three seconds (`deploy/compose/dispatch.compose.yml`,
 `deploy/scripts/autodeploy.sh`) against the ALB's five, and nothing else bounds the wait
