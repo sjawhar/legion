@@ -224,6 +224,10 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective bool, lines sourceLines) (bool, string) {
 	// Blank lines after an item that ends in a list are that list's. In a typed block inside the
 	// quote, one after an item that ends in a quote is that quote's, and more spread the list.
+	// A blank line of a quote around the list's own holds fewer markers, and the list's quote has
+	// ended at it.
+	depth := quoteDepth(list)
+	blank := quoteBlankLineAt(depth)
 	least := func(item ast.Node) int {
 		if _, endsInQuote := item.LastChild().(*ast.Blockquote); inDirective && endsInQuote {
 			return 2
@@ -232,7 +236,7 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 	}
 	for item := list.FirstChild(); item.NextSibling() != nil; item = item.NextSibling() {
 		next := item.NextSibling()
-		if blankBefore(next) && !endsWithList(item) && lines.blanksBefore(startOf(next), quoteBlankLine) >= least(item) {
+		if blankBefore(next) && !endsWithList(item) && lines.blanksBefore(startOf(next), blank) >= least(item) {
 			return true, ""
 		}
 	}
@@ -248,7 +252,7 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 	next := nextBlock(list)
 	if _, enclosingItem := next.(*ast.ListItem); enclosingItem {
 		// The next item of a list around this one.
-		return lines.blanksBefore(startOf(next), quoteBlankLine) >= threshold, ""
+		return lines.blanksBefore(startOf(next), blank) >= threshold, ""
 	}
 	within := quote
 	if inDirective {
@@ -256,13 +260,15 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 	}
 	if next == nil || !isAncestor(within, next) {
 		// At the end of the quote, or of a typed block inside it before its closing fence.
-		blanks := lines.blanksEnding(next, quoteBlankLine)
+		blanks := lines.blanksEnding(next, func(line []byte) bool {
+			return whitespaceLine(line) || quoteBlankLine(line) && bytes.Count(line, []byte(">")) < depth
+		}, blank)
 		if typed, ok := within.(*typedDirective); ok && typed.Closed {
-			blanks = lines.blanksBefore(typed.closer, quoteBlankLine)
+			blanks = lines.blanksBefore(typed.closer, blank)
 		}
 		return blanks >= 2, ""
 	}
-	blanks := lines.blanksBefore(startOf(next), quoteBlankLine)
+	blanks := lines.blanksBefore(startOf(next), blank)
 	switch {
 	case blanks == 0:
 		return false, ""
@@ -296,7 +302,7 @@ func footnotedQuoteListSpread(list *ast.List, quote, definition ast.Node, lines 
 		return !quoteInside && spaced, quoteInside && spaced, ""
 	}
 	if next == nil || !isAncestor(within, next) {
-		if lines.blanksEnding(next, quoteBlankLine) > 0 {
+		if lines.blanksEnding(next, whitespaceLine, quoteBlankLine) > 0 {
 			return false, false, "a blank line at the end of a quote or a footnote definition after a list, which the browser editor reads as spacing the list"
 		}
 		return false, false, ""
@@ -512,14 +518,15 @@ func (l sourceLines) blanksBefore(position int, blank func([]byte) bool) int {
 }
 
 // blanksEnding is how many blank lines end the container before next (nil for the source's
-// end): the lines blank(line) holds that come right before the whitespace-only lines, if any,
-// right before next's line.
-func (l sourceLines) blanksEnding(next ast.Node, blank func([]byte) bool) int {
+// end): the lines blank(line) holds that come right before the lines past(line) holds, if any,
+// right before next's line - the whitespace-only lines, or those and the blank lines of the
+// quotes around the container.
+func (l sourceLines) blanksEnding(next ast.Node, past, blank func([]byte) bool) int {
 	line := len(l.starts) - 1
 	if next != nil {
 		line = l.lineOf(startOf(next)) - 1
 	}
-	for line >= 0 && whitespaceLine(l.text(line)) {
+	for line >= 0 && past(l.text(line)) {
 		line--
 	}
 	count := 0
@@ -551,6 +558,25 @@ func markersOrWhitespace(line []byte) bool {
 
 func whitespaceLine(line []byte) bool {
 	return len(bytes.Trim(line, " \t\n")) == 0
+}
+
+// quoteBlankLineAt is quoteBlankLine in depth quotes: a line blank but for exactly depth quote
+// markers.
+func quoteBlankLineAt(depth int) func([]byte) bool {
+	return func(line []byte) bool {
+		return bytes.Count(line, []byte(">")) == depth && quoteBlankLine(line)
+	}
+}
+
+// quoteDepth is how many quotes node stands in.
+func quoteDepth(node ast.Node) int {
+	depth := 0
+	for parent := node.Parent(); parent != nil; parent = parent.Parent() {
+		if _, quote := parent.(*ast.Blockquote); quote {
+			depth++
+		}
+	}
+	return depth
 }
 
 // quoteBlankLine reports whether line is a blank line inside a quote: quote markers and whitespace.

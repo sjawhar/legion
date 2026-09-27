@@ -164,3 +164,25 @@ After a typed block in a definition[^6].
     :::
 
     After the callout.
+
+A list in a nested quote, before the outer quote's blank lines:
+
+> > - p
+>
+>
+> tail
+
+And at the outer quote's end:
+
+> > - a
+> > - b
+>
+>
+
+The inner quote's own blank lines, then the outer's:
+
+> > - s
+> >
+> >
+>
+> tail
