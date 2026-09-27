@@ -17,8 +17,9 @@ var (
 	commitID            = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
-// createWorkspace ports workspace.ts's createWorkspace. It resolves a bookmark before pruning or
-// adding a workspace: a conflicted bookmark must not leave a registered working copy behind.
+// createWorkspace ports workspace.ts's createWorkspace. It resolves a bookmark before deleting a
+// stale git worktree entry or adding a workspace: a conflicted bookmark must not leave a registered
+// working copy behind.
 //
 // One read of the issue's bookmark legion/<KEY>, its local row and origin's (readBookmark),
 // decides where the workspace starts:
@@ -129,8 +130,15 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 	if err := os.MkdirAll(filepath.Dir(workspace.Dir), 0o700); err != nil {
 		return fmt.Errorf("create workspace parent: %w", err)
 	}
-	prune := []string{"git", "--git-dir=" + filepath.Join(cloneDir, ".git"), "worktree", "prune"}
-	_, _ = runCommand(ctx, run, prune, nil, "")
+	// Provision adds a workspace only when it finds no directory, so an entry git still registers
+	// for this one is stale: the directory went while jj still registered the workspace (a crash
+	// inside Remove), or jj forgot the workspace after its directory went, which leaves the
+	// colocated worktree, and `jj workspace add` would stop at git's `missing but already registered
+	// worktree`. Only that entry goes: a bare `git worktree prune` also deletes the entry of every
+	// other workspace whose directory this process cannot see.
+	if err := removeGitWorktree(cloneDir, workspace.Dir); err != nil {
+		return err
+	}
 
 	// The one jj command on the shared clone not built by onClone: `jj workspace add` refuses
 	// --ignore-working-copy (on 0.44 and 0.45, after registering the workspace and creating its
@@ -149,10 +157,10 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		if !registeredWorkspace.MatchString(result.Stderr) {
 			return commandFailure(add, result)
 		}
+		// The add failed before creating a git worktree, and the stale entry went above.
 		if _, err := RunChecked(ctx, run, onClone(cloneDir, "workspace", "forget", workspaceName), nil, ""); err != nil {
 			return err
 		}
-		_, _ = runCommand(ctx, run, prune, nil, "")
 		if _, err := RunChecked(ctx, run, add, nil, ""); err != nil {
 			return err
 		}
@@ -385,7 +393,9 @@ func ownCommitsRevset(workspaceName string) string {
 }
 
 // Remove ports workspace.ts's removeIssueWorkspace. The workspace directory goes first so a crash
-// leaves the registered-but-missing state that Provision repairs with forget, prune, and add.
+// leaves the registered-but-missing state that Provision repairs with forget and add. jj's forget
+// leaves the colocated worktree of a directory already gone, so Remove deletes that entry itself,
+// also when the workspace is neither registered nor present (a crash after the forget).
 // workspace is Location's, which names the clone; any other is refused before anything is removed.
 func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	if !located(workspace) {
@@ -417,13 +427,6 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		}
 		commits = nonEmptyLines(own.Stdout)
 	}
-	directoryExists, err := pathExists(workspace.Dir)
-	if err != nil {
-		return err
-	}
-	if !registered && !directoryExists {
-		return nil
-	}
 	if err := os.RemoveAll(workspace.Dir); err != nil {
 		return fmt.Errorf("remove workspace directory: %w", err)
 	}
@@ -438,7 +441,7 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		}
 	}
 	if cloneExists {
-		if _, err := RunChecked(ctx, run, []string{"git", "--git-dir=" + filepath.Join(cloneDir, ".git"), "worktree", "prune"}, nil, ""); err != nil {
+		if err := removeGitWorktree(cloneDir, workspace.Dir); err != nil {
 			return err
 		}
 	}
