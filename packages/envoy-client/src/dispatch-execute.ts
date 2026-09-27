@@ -1001,6 +1001,18 @@ async function resolveArtifact(
   return { owner, issue, artifact };
 }
 
+/** The id of the document an issue carries under `reference`: its artifact id, slug, or filename,
+ * or `spec` for its primary document, resolved as the Dispatch tools resolve an issue's `artifact`
+ * argument. A reference that names no document, or a filename two documents share, throws the
+ * same hint the Dispatch tools give. */
+export async function resolveIssueDocumentId(
+  client: DispatchClient,
+  issue: string,
+  reference: string
+): Promise<string> {
+  return (await resolveArtifact(client, { kind: "issue", issue }, reference)).artifact.id;
+}
+
 const documentHintLimit = 8;
 
 function documentReferenceProblem(

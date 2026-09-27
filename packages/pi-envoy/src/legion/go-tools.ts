@@ -46,6 +46,9 @@ const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   read_record: ["issue"],
 };
 
+/** A Dispatch document id, which the daemon's gate registration takes as it is. */
+const DOCUMENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
   toolSuccess(JSON.stringify(details), details);
 
@@ -64,7 +67,10 @@ function toolSchema(pi: PiApi): unknown {
       ...HANDOFF_OPERATIONS,
     ]),
     issue: z.string().optional(),
-    artifactId: z.string().optional(),
+    artifactId: z
+      .string()
+      .describe("register_gate's root spec document: its artifact id, slug, or filename, as the Dispatch tools take it")
+      .optional(),
     version: z.number().optional(),
     issues: z.array(z.string()).optional(),
     to: z.enum(LEGION_GO_WORKFLOW_PHASES).optional(),
@@ -121,8 +127,11 @@ export function createGoLegionTool(deps: {
   readonly session: (context: SessionContext) => GoLegionToolSession;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
+  /** The id of the document `issue` carries under `reference`, a slug or filename, looked up in
+   * Dispatch as the Dispatch tools do; throws naming the reference when none matches. */
+  readonly resolveDocument: (issue: string, reference: string) => Promise<string>;
 }): RegisteredTool {
-  const { pi, daemon, session, onPhaseCompleted } = deps;
+  const { pi, daemon, session, onPhaseCompleted, resolveDocument } = deps;
   return {
     name: "legion",
     label: "legion",
@@ -166,13 +175,14 @@ export function createGoLegionTool(deps: {
             ) {
               throw new Error("register_gate requires a positive integer version");
             }
+            // The daemon takes the document's id alone; a slug or filename, the reference the
+            // Dispatch tools accept, is looked up first, so the architect's first call names the
+            // document however it knows it.
+            const issue = requiredString(parameters, operation, "issue");
+            const reference = requiredString(parameters, operation, "artifactId");
+            const artifactId = DOCUMENT_ID.test(reference) ? reference : await resolveDocument(issue, reference);
             const grantId = await grantFor(client, active);
-            await client.gateRegister({
-              grantId,
-              issue: requiredString(parameters, operation, "issue"),
-              artifactId: requiredString(parameters, operation, "artifactId"),
-              version,
-            });
+            await client.gateRegister({ grantId, issue, artifactId, version });
             return jsonSuccess({});
           }
           case "release_children": {

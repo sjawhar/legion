@@ -67,6 +67,9 @@ test("the Go Legion tool exposes only the workflow operations each role owns", a
       pi,
       daemon: daemonWithState as never,
       onPhaseCompleted: () => undefined,
+      resolveDocument: async (_issue: string, reference: string) => {
+        throw new Error(`no document lookup expected for "${reference}"`);
+      },
       session: () => ({
         kind,
         sessionId: "ses_208",
@@ -155,6 +158,9 @@ test("a Go Legion workflow refusal tells the agent both its code and message", a
       signOff: async () => Promise.reject(refusal),
     })) as never,
     onPhaseCompleted: () => undefined,
+    resolveDocument: async (_issue: string, reference: string) => {
+      throw new Error(`no document lookup expected for "${reference}"`);
+    },
     session: () => ({
       kind: "architect",
       sessionId: "ses_208",
@@ -171,4 +177,65 @@ test("a Go Legion workflow refusal tells the agent both its code and message", a
     isError: true,
     details: {},
   });
+});
+
+test("register_gate takes the document reference the Dispatch tools take, and registers its id", async () => {
+  const spec = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093";
+  const registered: unknown[] = [];
+  const resolved: Array<readonly [string, string]> = [];
+  const daemon = () =>
+    ({
+      grant: async () => ({ grantId: "grant-208" }),
+      gateRegister: async (input: object) => {
+        registered.push(input);
+        return {};
+      },
+    }) as never;
+  const run = (artifactId: string) =>
+    createGoLegionTool({
+      pi,
+      daemon,
+      onPhaseCompleted: () => undefined,
+      resolveDocument: async (issue: string, reference: string) => {
+        resolved.push([issue, reference]);
+        if (reference === "spec" || reference === "spec-md" || reference === "spec.md") return spec;
+        throw new Error(`No document "${reference}" on ${issue}`);
+      },
+      session: () => ({
+        kind: "architect",
+        sessionId: "ses_208",
+        tree: "LEGION-208",
+        issue: "LEGION-208",
+        secret: "claim-secret",
+      }),
+    }).execute(
+      "",
+      { op: "register_gate", issue: "LEGION-208", artifactId, version: 2 },
+      undefined,
+      undefined,
+      context()
+    );
+
+  for (const reference of ["spec", "spec-md", "spec.md", spec]) {
+    await expect(run(reference)).resolves.toMatchObject({ details: {} });
+  }
+  expect(registered).toEqual(
+    Array.from({ length: 4 }, () => ({
+      grantId: "grant-208",
+      issue: "LEGION-208",
+      artifactId: spec,
+      version: 2,
+    }))
+  );
+  // A document id goes to the daemon as it is; only a slug or filename is looked up.
+  expect(resolved).toEqual([
+    ["LEGION-208", "spec"],
+    ["LEGION-208", "spec-md"],
+    ["LEGION-208", "spec.md"],
+  ]);
+
+  const refused = await run("notes");
+  expect(refused.isError).toBe(true);
+  expect(JSON.stringify(refused.content)).toContain('No document \\"notes\\" on LEGION-208');
+  expect(registered).toHaveLength(4);
 });

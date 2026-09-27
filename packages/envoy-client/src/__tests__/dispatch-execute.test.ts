@@ -5,7 +5,12 @@ import * as path from "node:path";
 import { dispatchToolSpecs, type IssueComponents, zodSchemaApi } from "@legion/contracts";
 import { z } from "zod";
 import type { ExecFn } from "../dispatch-cwd";
-import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
+import {
+  type DispatchToolResult,
+  executeDispatchTool,
+  resolveIssueDocumentId,
+} from "../dispatch-execute";
+import { DispatchClient } from "../dispatch-http";
 import { dispatchFollowNotice } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 
@@ -5973,3 +5978,33 @@ for (const { tool, args, writes } of askWriteTools) {
     expect(requests).toEqual([...writes]);
   });
 }
+
+// resolveIssueDocumentId takes the reference the Dispatch tools take for an issue's document: `spec`
+// for its primary document, its id, its slug, or its filename; one that names no document throws.
+test("an issue document reference resolves to the document's id as the Dispatch tools resolve it", async () => {
+  const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+    const target = new URL(String(url));
+    if (target.pathname !== "/api/v1/issues/DSP-42")
+      throw new Error(`unexpected request: ${target.pathname}`);
+    return response({
+      key: "DSP-42",
+      primary_artifact_id: "artifact-42",
+      artifacts: [
+        { id: "artifact-42", slug: "spec-md", name: "spec.md", primary: true },
+        { id: "artifact-43", slug: "notes-md", name: "notes.md", primary: false },
+      ],
+    });
+  };
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  for (const [reference, id] of [
+    ["spec", "artifact-42"],
+    ["spec-md", "artifact-42"],
+    ["spec.md", "artifact-42"],
+    ["artifact-43", "artifact-43"],
+    ["notes-md", "artifact-43"],
+    ["notes.md", "artifact-43"],
+  ] as const) {
+    expect(await resolveIssueDocumentId(client, "DSP-42", reference)).toBe(id);
+  }
+  await expect(resolveIssueDocumentId(client, "DSP-42", "plan.md")).rejects.toThrow(/plan\.md/);
+});
