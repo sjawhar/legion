@@ -577,3 +577,37 @@ func TestANoticeToALiveClaimThatHearsNothingKeepsItsSchedule(t *testing.T) {
 		t.Fatalf("forwards at %v, dropped at %s; want the original, one copy at once, then copies 2 and 6 minutes apart, dropped only at the cap after them", sent, dropped)
 	}
 }
+
+// A later copy whose report names a session other than the one the claim is ready on went to a
+// session the role has since left, so it is due at once, as the first copy is: waiting its delay
+// would hold the live architect's later notices behind it. Only a later copy that failed on the
+// claim's own ready session keeps its delay, since that session may be the one hearing nothing.
+func TestALaterCopyToAnArchitectBackOnAnotherSessionIsDueAtOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name, recipient string
+		due             time.Duration
+	}{
+		{"the report names the session the role left", "ses_stopped", 0},
+		{"the report names the claim's own ready session", "ses_new", noticeReholdDelays[1]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			architectClaimOn(t, sup, "LEGION-1", supervise.StateReady, "ses_new")
+			clock := time.Now()
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: record.NewStore(), supervisor: sup, project: "legion", now: func() time.Time { return clock }}
+			copied := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts", Resends: 1}
+			report := laneReport{"evt-exception", "receipt_timeout", architectTopic(t, "LEGION-1"), "pr-blocked on LEGION-2", copied, "legion-outbox:7", tc.recipient}
+			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+				t.Fatalf("rehold: %v", err)
+			}
+			var nextAt time.Time
+			if err := pool.QueryRow(context.Background(), "select next_at from outbox where kind = 'notice'").Scan(&nextAt); err != nil {
+				t.Fatalf("read the re-held row: %v", err)
+			}
+			if !nextAt.Equal(clock.Add(tc.due).Truncate(time.Microsecond)) {
+				t.Fatalf("the second copy is due %s; want %s", nextAt, clock.Add(tc.due))
+			}
+		})
+	}
+}
