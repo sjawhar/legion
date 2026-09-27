@@ -1151,8 +1151,10 @@ keeping nothing until the daemon has answered, the command:
    `--append-system-prompt`, no `--resume`, no `--mode rpc`) with the controller's environment
    (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_API=go`, `LEGION_DAEMON_URL`,
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, the Envoy and Dispatch
-   endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it), and
-   exits with Oh My Pi's exit code.
+   endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
+   of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE`
+   (the controller is pane-side, and never gets the daemon's seed), and exits with Oh My Pi's exit
+   code.
 
 A refusal before the secret is written removes the directories made for the probe, so the state
 directory is as it was.

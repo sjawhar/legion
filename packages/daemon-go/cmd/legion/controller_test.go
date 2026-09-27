@@ -844,6 +844,29 @@ func TestControllerStartProbesUnderTheControllersEnvironment(t *testing.T) {
 	}
 }
 
+// The controller is pane-side: the daemon's own NATS seed, by value or by pointer, exported in the
+// operator's shell, reaches neither its load probe nor its Oh My Pi, while its pane seed pointer does.
+func TestControllerStartDropsTheDaemonSeedFromTheControllersEnvironment(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	const seed = "SUAMDAEMONSEEDVALUEFORTHECONTROLLERTEST"
+	t.Setenv("NATS_DAEMON_NKEY_SEED", seed)
+	t.Setenv("NATS_DAEMON_NKEY_SEED_FILE", filepath.Join(c.dir, "daemon-seed"))
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	for kind, env := range map[string]map[string]string{"load probe": c.probeEnv(), "controller": c.env()} {
+		for name, value := range env {
+			if strings.HasPrefix(name, "NATS_DAEMON_NKEY_SEED") || strings.Contains(value, seed) {
+				t.Errorf("the %s's environment carries the daemon seed: %s", kind, name)
+			}
+		}
+		if env["NATS_NKEY_SEED_FILE"] != filepath.Join(c.dir, "nats-seed") {
+			t.Errorf("the %s's NATS_NKEY_SEED_FILE = %q, want the pane seed's file", kind, env["NATS_NKEY_SEED_FILE"])
+		}
+	}
+}
+
 // `project: sjawhar/Legion`, copied from the daemon's legion.yaml, names the daemon's own token in
 // the state directory, the secret file, the grant file, and LEGION_PROJECT.
 func TestControllerStartSanitizesTheProjectAsTheDaemonDoes(t *testing.T) {
