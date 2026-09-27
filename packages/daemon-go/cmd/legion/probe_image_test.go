@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
 // imageOmp is an `omp` that passes the image's three probes as a working image's Oh My Pi does:
@@ -140,6 +141,31 @@ func TestProbeImageWithSkipAgentModelsSaysSoOnTheOKLine(t *testing.T) {
 
 	if want := "probe-image: OK (" + omp + ") session-storage=probed agent-models=skipped go-daemon-api-version=" + thisBinarysContract + "\n"; code != 0 || stdout != want {
 		t.Fatalf("probe-image --skip-agent-models = %d %q %q, want %q", code, stdout, stderr, want)
+	}
+}
+
+// A probe pod's NATS_NKEY_SEED_FILE names the providers Secret's seed: the command names that seed's
+// user, by its public key alone, on the line before the OK line, for the daemon to compare with its
+// own; a seed that is not a user's is refused before any probe runs. Neither output carries a seed.
+func TestProbeImageNamesTheUserOfTheSeedItsPointerNames(t *testing.T) {
+	omp := imageOmp(t)
+	root := inImage(t, thisBinarysContract, omp)
+	seed, public := testnats.User(t)
+	t.Setenv("NATS_NKEY_SEED_FILE", testnats.SeedFile(t, seed+"\n"))
+
+	code, stdout, stderr := probeImage("--plugin-root", root)
+
+	want := "probe-image: nats-nkey-user=" + public + "\nprobe-image: OK (" + omp + ") session-storage=probed agent-models=resolved go-daemon-api-version=" + thisBinarysContract + "\n"
+	if code != 0 || stdout != want || strings.Contains(stdout+stderr, seed) {
+		t.Fatalf("probe-image with a user seed = %d %q %q, want %q and no seed", code, stdout, stderr, want)
+	}
+
+	account := testnats.Account(t)
+	file := testnats.SeedFile(t, account)
+	t.Setenv("NATS_NKEY_SEED_FILE", file)
+	code, stdout, stderr = probeImage("--plugin-root", root)
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "NATS_NKEY_SEED_FILE ("+file+") holds an nkey seed that is not a user's") || strings.Contains(stderr, account) {
+		t.Fatalf("probe-image with an account seed = %d %q %q, want exit 1 naming the pointer, no OK line and no seed", code, stdout, stderr)
 	}
 }
 

@@ -67,13 +67,13 @@ func (c *operatorCall) parse(args []string, required ...string) bool {
 }
 
 // connect reads the bearer --operator-token-file names, when the command was given one, by
-// config.ReadOperatorTokenFile's rules — a file that cannot be read, holds nothing, or that its
+// config.ReadPrivateSecretPointer's rules — a file that cannot be read, holds nothing, or that its
 // group or others can read is refused naming its path, never its contents — and finds the daemon
 // the way `legion state` does (daemonAddress).
 func (c *operatorCall) connect() (operator, bool) {
 	var bearer string
 	if *c.tokenFile != "" {
-		read, err := config.ReadOperatorTokenFile("--operator-token-file", *c.tokenFile)
+		read, err := config.ReadPrivateSecretPointer("--operator-token-file", *c.tokenFile)
 		if err != nil {
 			fmt.Fprintf(c.stderr, "%s: %v\n", c.name, err)
 			return operator{}, false

@@ -530,7 +530,7 @@ func (r *rig) spec(tree, issue string, role claim.Role) runtime.SpawnSpec {
 		Generation: 1,
 		BootToken:  bootToken,
 		Env:        map[string]string{"PATH": "/legion-test-path-marker:" + os.Getenv("PATH")},
-		Secrets:    map[string]string{"ENVOY_TOKEN": "envoy-" + randomHex(r.t, 8)},
+		Secrets:    map[string]string{"ENVOY_TOKEN": "envoy-" + randomHex(r.t, 8), "NATS_NKEY_SEED": "SU" + randomHex(r.t, 8)},
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            []string{r.rolePrompt},
 			Addressing:                 `Your topic is "notifications.role.` + token + `"; $HOME stays literal.`,
@@ -754,19 +754,21 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		"LEGION_GRANT_FILE":      filepath.Join(secrets, string(spec.Claim)+"-grant"),
 		"LEGION_BOOT_TOKEN_FILE": filepath.Join(secrets, string(spec.Claim)),
 		"ENVOY_TOKEN_FILE":       filepath.Join(secrets, string(spec.Claim)+"-envoy_token"),
+		"NATS_NKEY_SEED_FILE":    filepath.Join(secrets, string(spec.Claim)+"-nats_nkey_seed"),
 	} {
 		if env[name] != want {
 			t.Errorf("OMP's %s = %q, want %q", name, env[name], want)
 		}
 	}
 	for name, value := range env {
-		if value == spec.BootToken || value == spec.Secrets["ENVOY_TOKEN"] {
+		if value == spec.BootToken || value == spec.Secrets["ENVOY_TOKEN"] || strings.Contains(value, spec.Secrets["NATS_NKEY_SEED"]) {
 			t.Errorf("OMP's %s carries a secret's value", name)
 		}
 	}
 	for pointer, want := range map[string]string{
 		"LEGION_BOOT_TOKEN_FILE": spec.BootToken,
 		"ENVOY_TOKEN_FILE":       spec.Secrets["ENVOY_TOKEN"],
+		"NATS_NKEY_SEED_FILE":    spec.Secrets["NATS_NKEY_SEED"],
 	} {
 		if info, err := os.Stat(env[pointer]); err != nil {
 			t.Errorf("%s file %s: %v", pointer, env[pointer], err)
@@ -784,7 +786,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	}
 	for _, argv := range r.recorded() {
 		for i, word := range argv {
-			if strings.Contains(word, spec.BootToken) || strings.Contains(word, spec.Secrets["ENVOY_TOKEN"]) {
+			if strings.Contains(word, spec.BootToken) || strings.Contains(word, spec.Secrets["ENVOY_TOKEN"]) || strings.Contains(word, spec.Secrets["NATS_NKEY_SEED"]) {
 				t.Errorf("a secret reached tmux's argv: %q", argv[3])
 			}
 			if word == "-e" && i+1 < len(argv) && strings.HasPrefix(argv[i+1], "PATH=") {

@@ -85,11 +85,12 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 7) is the contract with `packages/daemon-go`: the claim,
+`legion.goDaemonApiVersion` (currently 8) is the contract with `packages/daemon-go`: the claim,
 credential, workflow, controller, and state shapes `src/legion/go-daemon-client.ts` parses strictly
 through `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
-`LEGION_GRANT_FILE`, `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, the Envoy variables, and
+`LEGION_GRANT_FILE`, `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, the Envoy variables,
+`NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and
 `DISPATCH_URL`/`DISPATCH_TOKEN_FILE` when the daemon has `dispatch_url` configured.
 Contract 4 adds the operator-launched controller: `POST /legion/v1/controller/secret` (the CLI's
 call, never this extension's), a controller registration on `claims/register` answered with the
@@ -121,6 +122,15 @@ Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` whil
 architect escalated stays held in a tree that runs, absent otherwise (a tree that lingers or is
 closed shows none until it is re-admitted). The controller skill reads it at every start,
 since the escalation's wake reaches only a controller running when it is published (#1420).
+Contract 8 adds `NATS_NKEY_SEED_FILE` to the Go pane's environment (LEGION-279): when the daemon
+has the `legion-pane` NATS nkey seed (`nats_nkey_seed_file`, else `NATS_NKEY_SEED_FILE`, else
+`NATS_NKEY_SEED` in its own environment), every root and worker pane's pointer names a 0600
+`<role token>-nats_nkey_seed` file under the daemon's `<state_dir>/secrets`, pruned with the pane's
+other secret files, and every Sandbox pod's names the providers Secret's own `NATS_NKEY_SEED` file;
+the Go `legion controller start` sets it to the operator file's `nats_nkey_seed_file`. The
+extension's Envoy connections read the seed from it (`@legion/envoy-client`'s `nats-auth.ts`), so
+they authenticate as that nkey user once production NATS stops admitting credential-less clients.
+With no seed there is no pointer, and the connections carry no credential, as before.
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My
