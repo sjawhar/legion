@@ -1,13 +1,19 @@
 // packages/envoy/cmd/agent-secrets/client.go
 //
-// client is agent-secrets's own thin HTTP client for the broker routes it needs (the AGENTC-393
-// overview contract). Session routes — everything but enrollment issuance/revocation and
-// launcher-credential issuance — are signed per call with proof.Sign on a Proof header, exactly
-// as internal/broker/proof.Verifier expects; the enrollment and launcher-credential routes carry
-// a launcher bearer token instead, and POST/GET /v1/launcher-credentials carry no credential at
-// all (a launcher has none yet). Every method that a subcommand may need to print verbatim under
-// --json (request, status, self) returns both its decoded result and the exact raw response
-// bytes the broker sent, so main.go never re-marshals a Go struct in place of the wire body.
+// client is agent-secrets's own thin HTTP client for the broker routes it needs (contract v9,
+// the AGENTC-393 overview document). Session routes — everything but enrollment issuance/
+// revocation and launcher-credential issuance — are signed per call with proof.Sign on a Proof
+// header, exactly as internal/broker/proof.Verifier expects; CreateRequest and
+// RequestLauncherCredential additionally build and sign a credential-request object
+// (record.Sign) that carries the requested secrets or launcher identifier inside the request
+// body itself, since contract v9 moved authorization_details, reason, and (for a machine login)
+// login_hint out of plain top-level JSON fields and into that signed object. POST/GET
+// /v1/launcher-credentials still carry no session or launcher credential at all (a launcher has
+// none yet); no route ever returns a bearer launcher token — contract v9 issues launcher
+// credentials keyed on the caller's own signing key instead. Every method that a subcommand may
+// need to print verbatim under --json (request, status, self) returns both its decoded result
+// and the exact raw response bytes, so main.go never re-marshals a Go struct in place of the
+// wire body.
 package main
 
 import (
@@ -21,6 +27,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
 type client struct {
@@ -121,20 +128,37 @@ type RequestResult struct {
 	State     string           `json:"state"`
 	Secrets   []SecretDecision `json:"secrets"`
 	GrantID   *string          `json:"grant_id"`
-	AskRef    *string          `json:"ask"`
+	RecordID  *string          `json:"record_id"`
+	Coalesced bool             `json:"coalesced,omitempty"`
 }
 
+// createRequestBody is POST /v1/requests's exact contract v9 shape: a signed request object plus
+// an optional, unsigned session_id (wake-only). The v8 top-level "secrets"/"reason"/"issue"
+// fields are gone — they live inside the signed request object instead.
 type createRequestBody struct {
-	Secrets   []string `json:"secrets"`
-	Reason    string   `json:"reason,omitempty"`
-	Issue     string   `json:"issue,omitempty"`
-	SessionID string   `json:"session_id,omitempty"`
+	Request   string  `json:"request"`
+	SessionID *string `json:"session_id"`
 }
 
-// CreateRequest calls POST /v1/requests and returns both the decoded result and the exact raw
-// response bytes, for --json's "print the response body verbatim" requirement.
-func (c *client) CreateRequest(ctx context.Context, key *ecdsa.PrivateKey, enrollmentID string, names []string, reason, issue, sessionID string) (RequestResult, []byte, error) {
-	body, err := json.Marshal(createRequestBody{Secrets: names, Reason: reason, Issue: issue, SessionID: sessionID})
+// CreateRequest builds and signs a credential-request object naming one agent_secret
+// authorization_detail per requested name (record.Sign, audience == the broker's own base URL),
+// then calls POST /v1/requests with that object nested in the body and the outer call still
+// authenticated with a session Proof header. It returns both the decoded result and the exact
+// raw response bytes, for --json's "print the response body verbatim" requirement.
+func (c *client) CreateRequest(ctx context.Context, key *ecdsa.PrivateKey, enrollmentID string, names []string, reason, sessionID string) (RequestResult, []byte, error) {
+	details := make([]record.AuthorizationDetail, len(names))
+	for i, name := range names {
+		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: name, Actions: []string{"inject"}}
+	}
+	requestObject, err := record.Sign(key, c.baseURL, details, reason, "", time.Now())
+	if err != nil {
+		return RequestResult{}, nil, fmt.Errorf("sign request object: %w", err)
+	}
+	var sessionIDPtr *string
+	if sessionID != "" {
+		sessionIDPtr = &sessionID
+	}
+	body, err := json.Marshal(createRequestBody{Request: requestObject, SessionID: sessionIDPtr})
 	if err != nil {
 		return RequestResult{}, nil, err
 	}
@@ -158,9 +182,9 @@ type requestDecision struct {
 type RequestStatus struct {
 	State     string           `json:"state"`
 	GrantID   *string          `json:"grant_id"`
+	RecordID  *string          `json:"record_id"`
 	DecidedAt *time.Time       `json:"decided_at"`
 	Decision  *requestDecision `json:"decision"`
-	Detail    *string          `json:"detail"`
 }
 
 func (c *client) GetRequest(ctx context.Context, key *ecdsa.PrivateKey, enrollmentID, id string) (RequestStatus, []byte, error) {
@@ -256,20 +280,15 @@ func (c *client) RenewEnrollment(ctx context.Context, key *ecdsa.PrivateKey, enr
 
 // --- POST /v1/enrollments, DELETE /v1/enrollments/{id} (launcher bearer) ---
 
-type approverBody struct {
-	Kind  string  `json:"kind"`
-	Issue *string `json:"issue,omitempty"`
-}
-
-// EnrollBody is POST /v1/enrollments's exact request shape.
+// EnrollBody is POST /v1/enrollments's exact contract v9 request shape: the v8 "approver" field
+// is gone — the rules pick a request's approver at request time, never at enrollment.
 type EnrollBody struct {
-	Kind       string       `json:"kind"`
-	RuntimeID  string       `json:"runtime_id"`
-	Operator   *string      `json:"operator"`
-	Approver   approverBody `json:"approver"`
-	Thumbprint string       `json:"thumbprint"`
-	SessionID  *string      `json:"session_id,omitempty"`
-	PodToken   *string      `json:"pod_token,omitempty"`
+	Kind       string  `json:"kind"`
+	RuntimeID  string  `json:"runtime_id"`
+	Operator   *string `json:"operator"`
+	Thumbprint string  `json:"thumbprint"`
+	SessionID  *string `json:"session_id,omitempty"`
+	PodToken   *string `json:"pod_token,omitempty"`
 }
 
 // EnrollResult is POST /v1/enrollments's response shape.
@@ -301,16 +320,30 @@ func (c *client) DeleteEnrollment(ctx context.Context, launcherToken, enrollment
 
 // --- POST /v1/launcher-credentials, GET /v1/launcher-credentials/{pending} (no auth at all) ---
 
+// requestLauncherCredentialBody is POST /v1/launcher-credentials's exact contract v9 shape: a
+// signed request object naming login_hint (the approving operator) and one launcher_credential
+// detail. The v8 plain "operator"/"host"/"service" fields are gone.
 type requestLauncherCredentialBody struct {
-	Operator string  `json:"operator"`
-	Host     string  `json:"host"`
-	Service  *string `json:"service,omitempty"`
+	Request string `json:"request"`
 }
 
-// RequestLauncherCredential opens a launcher-credential request and returns its pending id and
-// the confirmation code its Dispatch ask shows.
-func (c *client) RequestLauncherCredential(ctx context.Context, operator, host string, service *string) (pendingID, code string, err error) {
-	body, err := json.Marshal(requestLauncherCredentialBody{Operator: operator, Host: host, Service: service})
+// RequestLauncherCredential builds and signs a credential-request object naming one
+// launcher_credential authorization_detail for host (with service set for a service credential)
+// and login_hint set to operator (required for a machine login per contract v9: the broker has
+// no other way to know which operator's approval it needs), then opens the launcher-credential
+// request and returns its pending id and the confirmation code its Dispatch ask shows. key is
+// the credential-to-be's own signing key — its thumbprint becomes the launcher credential's
+// pinned identity — and audience is the broker's own base URL, matching BROKER_PUBLIC_URL.
+func (c *client) RequestLauncherCredential(ctx context.Context, key *ecdsa.PrivateKey, audience, operator, host string, service *string) (pendingID, code string, err error) {
+	detail := record.AuthorizationDetail{Type: "launcher_credential", Identifier: host}
+	if service != nil {
+		detail.Service = *service
+	}
+	requestObject, err := record.Sign(key, audience, []record.AuthorizationDetail{detail}, "", operator, time.Now())
+	if err != nil {
+		return "", "", fmt.Errorf("sign request object: %w", err)
+	}
+	body, err := json.Marshal(requestLauncherCredentialBody{Request: requestObject})
 	if err != nil {
 		return "", "", err
 	}
@@ -319,37 +352,33 @@ func (c *client) RequestLauncherCredential(ctx context.Context, operator, host s
 		return "", "", err
 	}
 	var result struct {
-		PendingID        string `json:"pending_id"`
-		ConfirmationCode string `json:"confirmation_code"`
+		PendingID string `json:"pending_id"`
+		Code      string `json:"code"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
 		return "", "", fmt.Errorf("decode launcher credential request response: %w", err)
 	}
-	return result.PendingID, result.ConfirmationCode, nil
+	return result.PendingID, result.Code, nil
 }
 
-// ReadLauncherCredential polls a pending launcher-credential request. token is non-empty exactly
-// once, on the first read that observes state "issued". credentialID names the launcher
-// credential whenever state is "issued", whether or not token is present: when it isn't (another
-// reader already collected it), credentialID is the only thing the caller can act on.
-func (c *client) ReadLauncherCredential(ctx context.Context, pendingID string) (state, token, credentialID string, err error) {
+// ReadLauncherCredential polls a pending launcher-credential request. Contract v9: no token is
+// ever returned — the minted credential is usable only with proofs signed by the key the request
+// object embedded (proof.SignLauncher). credentialID names the launcher credential once state is
+// "issued"; every other state carries nothing beyond state itself.
+func (c *client) ReadLauncherCredential(ctx context.Context, pendingID string) (state, credentialID string, err error) {
 	raw, err := c.doBearer(ctx, "", http.MethodGet, "/v1/launcher-credentials/"+pendingID, nil)
 	if err != nil {
-		return "", "", "", err
+		return "", "", err
 	}
 	var result struct {
 		State        string  `json:"state"`
-		Token        *string `json:"token"`
 		CredentialID *string `json:"credential_id"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", "", "", fmt.Errorf("decode launcher credential response: %w", err)
-	}
-	if result.Token != nil {
-		token = *result.Token
+		return "", "", fmt.Errorf("decode launcher credential response: %w", err)
 	}
 	if result.CredentialID != nil {
 		credentialID = *result.CredentialID
 	}
-	return result.State, token, credentialID, nil
+	return result.State, credentialID, nil
 }

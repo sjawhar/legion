@@ -1,23 +1,21 @@
 // Command agent-secrets is the box/pod-side client for the AGENTC-833 secrets broker: it
-// enrolls a runtime, requests and reads back secret grants, and — in its most common shape —
-// requests one or more secrets and execs a command with them in its environment.
+// requests and reads back secret grants and — in its most common shape — requests one or more
+// secrets and execs a command with them in its environment. Contract v9: enrolling a runtime and
+// minting a launcher credential are Plan B/C helper-socket operations, not this CLI's own
+// subcommands (nothing on a devbox can enroll until Plan B lands).
 //
 //	agent-secrets keygen --out <dir>
-//	agent-secrets enroll --launcher-token-file <path> --kind box|host --runtime-id <id> --operator <login> --thumbprint <tp> [--approver-issue <KEY>] [--session-id <id>]
-//	agent-secrets enroll --launcher-token-file <path> --kind pod --runtime-id <pod uid> --pod-token-file <path> --approver-issue <KEY> --thumbprint <tp> [--session-id <id>]
-//	agent-secrets unenroll --launcher-token-file <path> --enrollment <id>
-//	agent-secrets launcher login --operator <login> --host <name> [--service <name>] --out <path>
 //	agent-secrets renew
-//	agent-secrets request NAME... [--reason TEXT] [--issue KEY] [--json]
+//	agent-secrets request NAME... [--reason TEXT] [--json]
 //	agent-secrets status <request_id> [--json]
 //	agent-secrets cancel <request_id>
 //	agent-secrets revoke <grant_id>
 //	agent-secrets self [--json]
-//	agent-secrets NAME... [--reason TEXT] [--issue KEY] [--wait DURATION] -- <command> [args...]
+//	agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
 //
 // Environment: AGENT_SECRETS_URL (the broker's base URL) and AGENT_SECRETS_KEY_DIR (holds
-// key.pem and enrollment, the two files keygen and enroll write and every session-authenticated
-// subcommand reads).
+// key.pem and enrollment, the two files keygen writes and every session-authenticated
+// subcommand reads; a runtime's enrollment is provisioned out of band, not by this CLI).
 package main
 
 import (
@@ -64,12 +62,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "keygen":
 		return cmdKeygen(args[1:], stdout, stderr)
-	case "enroll":
-		return cmdEnroll(args[1:], stdout, stderr)
-	case "unenroll":
-		return cmdUnenroll(args[1:], stdout, stderr)
 	case "launcher":
-		return cmdLauncher(args[1:], stdout, stderr)
+		fmt.Fprintln(stderr, "agent-secrets: launcher login is now a Plan B helper-socket command; this CLI no longer holds a bearer launcher token")
+		return exitUsageError
 	case "renew":
 		return cmdRenew(args[1:], stdout, stderr)
 	case "request":
@@ -90,17 +85,13 @@ func run(args []string, stdout, stderr io.Writer) int {
 func usage() string {
 	return `usage:
   agent-secrets keygen --out <dir>
-  agent-secrets enroll --launcher-token-file <path> --kind box|host --runtime-id <id> --operator <login> --thumbprint <tp> [--approver-issue <KEY>] [--session-id <id>]
-  agent-secrets enroll --launcher-token-file <path> --kind pod --runtime-id <pod uid> --pod-token-file <path> --approver-issue <KEY> --thumbprint <tp> [--session-id <id>]
-  agent-secrets unenroll --launcher-token-file <path> --enrollment <id>
-  agent-secrets launcher login --operator <login> --host <name> [--service <name>] --out <path>
   agent-secrets renew
-  agent-secrets request NAME... [--reason TEXT] [--issue KEY] [--json]
+  agent-secrets request NAME... [--reason TEXT] [--json]
   agent-secrets status <request_id> [--json]
   agent-secrets cancel <request_id>
   agent-secrets revoke <grant_id>
   agent-secrets self [--json]
-  agent-secrets NAME... [--reason TEXT] [--issue KEY] [--wait DURATION] -- <command> [args...]
+  agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
 `
 }
 
@@ -258,224 +249,6 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 }
 
 // ---------------------------------------------------------------------------
-// enroll / unenroll (launcher side, bearer launcher token)
-// ---------------------------------------------------------------------------
-
-func cmdEnroll(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, map[string]bool{
-		"launcher-token-file": true, "kind": true, "runtime-id": true, "operator": true,
-		"thumbprint": true, "approver-issue": true, "session-id": true, "pod-token-file": true,
-	})
-	if len(positional) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
-		return exitUsageError
-	}
-	flags := flag.NewFlagSet("agent-secrets enroll", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	launcherTokenFile := flags.String("launcher-token-file", "", "path to the launcher bearer token")
-	kind := flags.String("kind", "", `"box", "host" or "pod"`)
-	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
-	operator := flags.String("operator", "", "the operator's GitHub login")
-	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
-	approverIssue := flags.String("approver-issue", "", "approve requests through this issue's assignee instead of the operator")
-	sessionID := flags.String("session-id", "", "the Envoy session id to wake on a decision")
-	podTokenFile := flags.String("pod-token-file", "", "path to the pod's projected service-account token")
-	if err := flags.Parse(flagArgs); err != nil {
-		return exitUsage(err)
-	}
-	if *launcherTokenFile == "" || *kind == "" || *runtimeID == "" || *thumbprint == "" {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --launcher-token-file, --kind, --runtime-id and --thumbprint are required")
-		return exitUsageError
-	}
-	switch *kind {
-	case "box", "host":
-		if *operator == "" || *podTokenFile != "" {
-			fmt.Fprintf(stderr, "agent-secrets enroll: --kind %s needs --operator and takes no --pod-token-file\n", *kind)
-			return exitUsageError
-		}
-	case "pod":
-		// A pod has no operator: its service launcher enrolls it with its projected token, and an
-		// issue's assignee approves its requests.
-		if *operator != "" || *podTokenFile == "" || *approverIssue == "" {
-			fmt.Fprintln(stderr, "agent-secrets enroll: --kind pod needs --pod-token-file and --approver-issue and takes no --operator")
-			return exitUsageError
-		}
-	default:
-		fmt.Fprintln(stderr, `agent-secrets enroll: --kind must be "box", "host" or "pod"`)
-		return exitUsageError
-	}
-	base := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
-	if base == "" {
-		fmt.Fprintln(stderr, "agent-secrets enroll: AGENT_SECRETS_URL is required")
-		return exitUsageError
-	}
-	dir := os.Getenv("AGENT_SECRETS_KEY_DIR")
-	if dir == "" {
-		fmt.Fprintln(stderr, "agent-secrets enroll: AGENT_SECRETS_KEY_DIR is required")
-		return exitUsageError
-	}
-	token, err := readTrimmed(*launcherTokenFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
-		return 1
-	}
-	body := EnrollBody{Kind: *kind, RuntimeID: *runtimeID, Thumbprint: *thumbprint, Approver: approverBody{Kind: "operator"}}
-	if *operator != "" {
-		body.Operator = operator
-	}
-	if *approverIssue != "" {
-		body.Approver = approverBody{Kind: "issue_assignee", Issue: approverIssue}
-	}
-	if *sessionID != "" {
-		body.SessionID = sessionID
-	}
-	if *podTokenFile != "" {
-		podToken, err := readTrimmed(*podTokenFile)
-		if err != nil {
-			fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
-			return 1
-		}
-		body.PodToken = &podToken
-	}
-	result, err := newClient(base).CreateEnrollment(context.Background(), token, body)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
-		return 1
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
-		return 1
-	}
-	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(result.EnrollmentID+"\n"), 0o600); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
-		return 1
-	}
-	fmt.Fprintln(stdout, result.EnrollmentID)
-	return 0
-}
-
-func cmdUnenroll(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, map[string]bool{"launcher-token-file": true, "enrollment": true})
-	if len(positional) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets unenroll: unexpected argument %q\n", positional[0])
-		return exitUsageError
-	}
-	flags := flag.NewFlagSet("agent-secrets unenroll", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	launcherTokenFile := flags.String("launcher-token-file", "", "path to the launcher bearer token")
-	enrollmentID := flags.String("enrollment", "", "the enrollment id to revoke")
-	if err := flags.Parse(flagArgs); err != nil {
-		return exitUsage(err)
-	}
-	if *launcherTokenFile == "" || *enrollmentID == "" {
-		fmt.Fprintln(stderr, "agent-secrets unenroll: --launcher-token-file and --enrollment are required")
-		return exitUsageError
-	}
-	base := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
-	if base == "" {
-		fmt.Fprintln(stderr, "agent-secrets unenroll: AGENT_SECRETS_URL is required")
-		return exitUsageError
-	}
-	token, err := readTrimmed(*launcherTokenFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets unenroll: %v\n", err)
-		return 1
-	}
-	if err := newClient(base).DeleteEnrollment(context.Background(), token, *enrollmentID); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets unenroll: %v\n", err)
-		return 1
-	}
-	return 0
-}
-
-// ---------------------------------------------------------------------------
-// launcher login
-// ---------------------------------------------------------------------------
-
-func cmdLauncher(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "login" {
-		fmt.Fprintln(stderr, `agent-secrets launcher: only "login" is supported`)
-		return exitUsageError
-	}
-	flagArgs, positional := splitArgs(args[1:], map[string]bool{"operator": true, "host": true, "service": true, "out": true})
-	if len(positional) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets launcher login: unexpected argument %q\n", positional[0])
-		return exitUsageError
-	}
-	flags := flag.NewFlagSet("agent-secrets launcher login", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	operator := flags.String("operator", "", "the operator who approves this launcher's issuance")
-	host := flags.String("host", "", "this launcher's host name")
-	service := flags.String("service", "", `mint a service credential (e.g. "legion-daemon") instead of a personal one`)
-	out := flags.String("out", "", "path to write the launcher token")
-	if err := flags.Parse(flagArgs); err != nil {
-		return exitUsage(err)
-	}
-	if *operator == "" || *host == "" || *out == "" {
-		fmt.Fprintln(stderr, "agent-secrets launcher login: --operator, --host and --out are required")
-		return exitUsageError
-	}
-	base := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
-	if base == "" {
-		fmt.Fprintln(stderr, "agent-secrets launcher login: AGENT_SECRETS_URL is required")
-		return exitUsageError
-	}
-	var servicePtr *string
-	if *service != "" {
-		servicePtr = service
-	}
-
-	c := newClient(base)
-	ctx := context.Background()
-	pendingID, code, err := c.RequestLauncherCredential(ctx, *operator, *host, servicePtr)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
-		return 1
-	}
-	fmt.Fprintf(stdout, "confirmation code: %s\napprove the Dispatch ask on %s's standing secrets issue only if it shows this code\n", code, *operator)
-	backoff := 2 * time.Second
-	for {
-		state, token, credentialID, err := c.ReadLauncherCredential(ctx, pendingID)
-		if err != nil {
-			fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
-			return 1
-		}
-		switch state {
-		case "issued":
-			if token == "" {
-				// The one-time token was already handed to another reader of this pending id:
-				// whoever holds it, it is not this process, so this login did not succeed. There
-				// is no self-service way to revoke a launcher credential today; naming it is the
-				// most this CLI can do, and an operator has to act on it by hand.
-				if credentialID != "" {
-					fmt.Fprintf(stderr, "agent-secrets launcher login: a launcher credential was already issued for this request by someone else (credential id %s); this login did NOT succeed and nothing was written. Contact an operator to investigate and revoke launcher credential %s before retrying.\n", credentialID, credentialID)
-				} else {
-					fmt.Fprintln(stderr, "agent-secrets launcher login: a launcher credential was already issued for this request by someone else; this login did NOT succeed and nothing was written. Contact an operator to investigate before retrying.")
-				}
-				return 1
-			}
-			if err := os.MkdirAll(filepath.Dir(*out), 0o700); err != nil {
-				fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
-				return 1
-			}
-			if err := os.WriteFile(*out, []byte(token+"\n"), 0o600); err != nil {
-				fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
-				return 1
-			}
-			return 0
-		case "denied":
-			fmt.Fprintln(stderr, "agent-secrets launcher login: request was denied")
-			return 1
-		case "expired":
-			fmt.Fprintln(stderr, "agent-secrets launcher login: request expired before it was answered")
-			return 1
-		}
-		time.Sleep(backoff)
-		backoff = nextBackoff(backoff)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // renew
 // ---------------------------------------------------------------------------
 
@@ -535,11 +308,10 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 // ---------------------------------------------------------------------------
 
 func cmdRequest(args []string, stdout, stderr io.Writer) int {
-	flagArgs, names := splitArgs(args, map[string]bool{"reason": true, "issue": true})
+	flagArgs, names := splitArgs(args, map[string]bool{"reason": true})
 	flags := flag.NewFlagSet("agent-secrets request", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	reason := flags.String("reason", "", "why these secrets are needed")
-	issue := flags.String("issue", "", "the Dispatch issue to open the ask on")
 	asJSON := flags.Bool("json", false, "print the response body verbatim")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
@@ -553,7 +325,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return exitUsageError
 	}
-	result, raw, err := newClient(base).CreateRequest(context.Background(), key, enrollmentID, names, *reason, *issue, "")
+	result, raw, err := newClient(base).CreateRequest(context.Background(), key, enrollmentID, names, *reason, "")
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return 1
@@ -705,7 +477,7 @@ func cmdSelf(args []string, stdout, stderr io.Writer) int {
 // NAME... -- <command> [args...]
 // ---------------------------------------------------------------------------
 
-// cmdExec implements the default "agent-secrets NAME... [--reason TEXT] [--issue KEY]
+// cmdExec implements the default "agent-secrets NAME... [--reason TEXT]
 // [--wait DURATION] -- <command> [args...]" form: it requests the named secrets, waits out a
 // pending decision, and syscall.Execs the command with the granted values in its environment.
 // Nothing runs when no NAME is given, and nothing runs while any requested secret is still
@@ -729,11 +501,10 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "issue": true, "wait": true})
+	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true})
 	flags := flag.NewFlagSet("agent-secrets", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	reason := flags.String("reason", "", "why these secrets are needed")
-	issue := flags.String("issue", "", "the Dispatch issue to open the ask on")
 	wait := flags.Duration("wait", 30*time.Minute, "how long to wait for a pending request")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
@@ -750,14 +521,13 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	}
 	c := newClient(base)
 	ctx := context.Background()
-	result, _, err := c.CreateRequest(ctx, key, enrollmentID, names, *reason, *issue, "")
+	result, _, err := c.CreateRequest(ctx, key, enrollmentID, names, *reason, "")
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return 1
 	}
 
 	state, grantID, requestID := result.State, result.GrantID, result.RequestID
-	var detail *string
 	if state == "pending" {
 		deadline := time.Now().Add(*wait)
 		backoff := 2 * time.Second
@@ -772,18 +542,9 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 				return 1
 			}
-			state, grantID, detail = status.State, status.GrantID, status.Detail
+			state, grantID = status.State, status.GrantID
 			backoff = nextBackoff(backoff)
 		}
-	}
-	if state != "pending" && state != "granted" && detail == nil {
-		if status, _, err := c.GetRequest(ctx, key, enrollmentID, requestID); err == nil {
-			detail = status.Detail
-		}
-	}
-	why := "no reason recorded"
-	if detail != nil {
-		why = *detail
 	}
 	switch state {
 	case "granted":
@@ -791,10 +552,10 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets: request %s is still waiting for approval; nothing was run. Check it with: agent-secrets status %s\n", requestID, requestID)
 		return exitPending
 	case "denied":
-		fmt.Fprintf(stderr, "agent-secrets: request %s was denied: %s\n", requestID, why)
+		fmt.Fprintf(stderr, "agent-secrets: request %s was denied\n", requestID)
 		return exitDenied
 	case "cancelled", "expired":
-		fmt.Fprintf(stderr, "agent-secrets: request %s was %s: %s\n", requestID, state, why)
+		fmt.Fprintf(stderr, "agent-secrets: request %s was %s\n", requestID, state)
 		return 1
 	default:
 		fmt.Fprintf(stderr, "agent-secrets: request %s is in unexpected state %q\n", requestID, state)

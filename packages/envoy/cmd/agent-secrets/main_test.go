@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
 // testEnrollmentID is the enrollment id these tests' key dir fixture "issues" (writes into the
@@ -48,77 +49,83 @@ type brokerCounters struct {
 	getRequest    int32
 }
 
-// fakeBroker serves just enough of the AGENTC-393 contract for the exec-form and --json tests:
-// POST /v1/requests routes on the requested secret name to a canned granted/pending/denied/
-// proxy-only/no-trailing-newline response, GET /v1/requests/{id} answers the pending case's own
-// request id with the same never-resolving pending state (and 404s any other id, since a
-// granted-immediately response must never be polled), POST /v1/grants/{id}/values releases one
-// canned value (or, for the proxy-only case, none at all), and GET /v1/enrollments/self echoes
-// testEnrollmentID. It does not verify the Proof header or launcher bearer at all —
-// proof.Verifier's own behavior is covered by internal/broker/proof and internal/broker/api's
-// test suites, not this package's.
+// fakeBroker serves just enough of the AGENTC-393 contract (v9) for the exec-form and --json
+// tests: POST /v1/requests decodes the signed request object CreateRequest posts (verifying it
+// with record.VerifyRequestObject against the fake's own URL as audience — a real, non-stubbed
+// check, since the wire shape under test IS that signed object) and routes on its first
+// authorization_detail's identifier to a canned granted/pending/denied/proxy-only/no-trailing-
+// newline response, GET /v1/requests/{id} answers the pending case's own request id with the
+// same never-resolving pending state (and 404s any other id, since a granted-or-denied-
+// immediately response must never be polled), POST /v1/grants/{id}/values releases one canned
+// value (or, for the proxy-only case, none at all), and GET /v1/enrollments/self echoes
+// testEnrollmentID. It does not verify the outer Proof header at all — proof.Verifier's own
+// behavior is covered by internal/broker/proof and internal/broker/api's test suites, not this
+// package's.
 func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	t.Helper()
 	counters := &brokerCounters{}
+	var audience string
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/requests", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&counters.createRequest, 1)
 		var body struct {
-			Secrets []string `json:"secrets"`
+			Request   string  `json:"request"`
+			SessionID *string `json:"session_id"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Secrets) == 0 {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Request == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		switch name := body.Secrets[0]; name {
+		obj, err := record.VerifyRequestObject(body.Request, audience, time.Minute, time.Now())
+		if err != nil || len(obj.Details) == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch name := obj.Details[0].Identifier; name {
 		case "GRANT_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-granted", "state": "granted",
 				"secrets":  []map[string]string{{"name": name, "decision": "automatic", "delivery": "inject"}},
-				"grant_id": "grant-granted", "ask": nil,
+				"grant_id": "grant-granted", "record_id": nil,
 			})
 		case "PENDING_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-pending", "state": "pending",
 				"secrets":  []map[string]string{{"name": name, "decision": "approval", "delivery": "inject"}},
-				"grant_id": nil, "ask": "dispatch://AGENTC-1/ask/1",
+				"grant_id": nil, "record_id": "rec-pending-1",
 			})
 		case "DENY_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-denied", "state": "denied",
 				"secrets":  []map[string]string{{"name": name, "decision": "deny", "delivery": "inject"}},
-				"grant_id": nil, "ask": nil,
+				"grant_id": nil, "record_id": nil,
 			})
 		case "PROXY_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-proxy", "state": "granted",
 				"secrets":  []map[string]string{{"name": name, "decision": "automatic", "delivery": "proxy"}},
-				"grant_id": "grant-proxy", "ask": nil,
+				"grant_id": "grant-proxy", "record_id": nil,
 			})
 		case "NONEWLINE_ME":
 			// Written with http.ResponseWriter.Write directly, with NO trailing newline, unlike
 			// every other case (which goes through writeJSON's json.Encoder, always "\n"
 			// terminated) — this is the fixture for the writeVerbatim byte-exact test.
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic","delivery":"inject"}],"grant_id":"grant-nonewline","ask":null}`))
+			_, _ = w.Write([]byte(`{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic","delivery":"inject"}],"grant_id":"grant-nonewline","record_id":null}`))
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 		}
 	})
 	mux.HandleFunc("GET /v1/requests/{id}", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&counters.getRequest, 1)
-		if r.PathValue("id") == "req-denied" {
-			writeJSON(w, map[string]any{"state": "denied", "grant_id": nil, "decided_at": time.Now(), "decision": nil, "detail": "policy denies at least one requested secret"})
-			return
-		}
 		if r.PathValue("id") != "req-pending" {
-			// A request the fake granted immediately must never be polled; failing loudly here
-			// (rather than serving it) is the reuse-transparency test's proof that cmdExec does
-			// not enter its pending-wait loop for an already-granted response.
+			// A request the fake decided immediately (granted or denied) must never be polled;
+			// failing loudly here (rather than serving it) is the reuse-transparency test's proof
+			// that cmdExec does not enter its pending-wait loop for an already-decided response.
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		writeJSON(w, map[string]any{"state": "pending", "grant_id": nil, "decided_at": nil, "decision": nil})
+		writeJSON(w, map[string]any{"state": "pending", "grant_id": nil, "record_id": "rec-pending-1", "decided_at": nil, "decision": nil})
 	})
 	mux.HandleFunc("POST /v1/grants/grant-granted/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
@@ -147,7 +154,9 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 			"lease_expires_at": time.Now().Add(time.Hour), "grants": []any{},
 		})
 	})
-	return httptest.NewServer(mux), counters
+	srv := httptest.NewServer(mux)
+	audience = srv.URL
+	return srv, counters
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -303,8 +312,8 @@ func TestExecFormDeniedExitsSeventySevenWithNoChild(t *testing.T) {
 	if strings.Contains(stdout, "ran-the-child") {
 		t.Fatalf("child ran for a denied request: stdout=%q", stdout)
 	}
-	if !strings.Contains(stderr, "req-denied was denied: policy denies at least one requested secret") {
-		t.Fatalf("stderr = %q, want the denial's reason", stderr)
+	if !strings.Contains(stderr, "req-denied was denied") {
+		t.Fatalf("stderr = %q, want it to name the denied request", stderr)
 	}
 }
 
@@ -436,7 +445,7 @@ func TestRequestJSONPrintsExactlyOneContractObject(t *testing.T) {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
 	obj := oneJSONObject(t, stdout)
-	want := map[string]bool{"request_id": true, "state": true, "secrets": true, "grant_id": true, "ask": true}
+	want := map[string]bool{"request_id": true, "state": true, "secrets": true, "grant_id": true, "record_id": true}
 	if got := keySet(obj); !mapsEqual(got, want) {
 		t.Fatalf("keys = %v, want %v", got, want)
 	}
@@ -454,7 +463,7 @@ func TestRequestJSONIsByteIdenticalToTheBrokerResponse(t *testing.T) {
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	const wantExact = `{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic","delivery":"inject"}],"grant_id":"grant-nonewline","ask":null}`
+	const wantExact = `{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic","delivery":"inject"}],"grant_id":"grant-nonewline","record_id":null}`
 	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "request", "NONEWLINE_ME", "--json")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
@@ -484,109 +493,92 @@ func TestSelfJSONPrintsExactlyOneContractObjectNamingTheIssuedEnrollment(t *test
 	}
 }
 
-// launcherBroker serves POST /v1/launcher-credentials with a fixed pending id and confirmation
-// code, and answers GET /v1/launcher-credentials/{pending} as state "issued" carrying token, or,
-// when token is empty (another reader already collected it), with no token field at all but a
-// fixed credential_id so the CLI can name it.
-func launcherBroker(t *testing.T, token string) *httptest.Server {
-	t.Helper()
+// TestRequestSignsARequestObject pins contract v9's core wire-shape change: POST /v1/requests
+// posts a signed request object (record.Sign) instead of plain top-level "secrets"/"reason"/
+// "issue" fields. The fake broker asserts the body is exactly {"request": <jws>, "session_id":
+// null}, verifies the JWS with record.VerifyRequestObject against its own URL as audience, and
+// checks the request object's authorization_details name exactly the argv secret names with the
+// reason carried inside the signed object rather than as a top-level field.
+func TestRequestSignsARequestObject(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+
+	var gotBody map[string]any
+	var gotObj record.RequestObject
+	var verifyErr error
+	var audience string
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/launcher-credentials", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusAccepted)
-		writeJSON(w, map[string]any{"pending_id": "pending-1", "confirmation_code": "KQ7M-X4PZ"})
-	})
-	mux.HandleFunc("GET /v1/launcher-credentials/pending-1", func(w http.ResponseWriter, r *http.Request) {
-		body := map[string]any{"state": "issued"}
-		if token != "" {
-			body["token"] = token
-		} else {
-			body["credential_id"] = "cred-already-collected-1"
+	mux.HandleFunc("POST /v1/requests", func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
-		writeJSON(w, body)
+		compact, _ := gotBody["request"].(string)
+		gotObj, verifyErr = record.VerifyRequestObject(compact, audience, time.Minute, time.Now())
+		writeJSON(w, map[string]any{
+			"request_id": "req-signed", "state": "granted",
+			"secrets":  []map[string]string{{"name": "GRANT_ME", "decision": "automatic", "delivery": "inject"}},
+			"grant_id": "grant-signed", "record_id": nil,
+		})
 	})
 	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return srv
-}
+	defer srv.Close()
+	audience = srv.URL
 
-// TestLauncherLoginPrintsConfirmationCodeAndWritesToken pins the successful login: the terminal
-// shows the confirmation code the ask carries, and the token lands in --out.
-func TestLauncherLoginPrintsConfirmationCodeAndWritesToken(t *testing.T) {
-	binary := buildAgentSecrets(t)
-	broker := launcherBroker(t, "launcher-token-value")
-	out := filepath.Join(t.TempDir(), "launcher-token")
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, t.TempDir(), nil,
-		"launcher", "login", "--operator", "sjawhar", "--host", "devbox", "--out", out)
+	stdout, stderr, exit := runAgentSecrets(t, binary, srv.URL, keyDir, nil,
+		"request", "GRANT_ME", "--reason", "need it for the build")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "KQ7M-X4PZ") {
-		t.Fatalf("stdout = %q, want it to show the confirmation code", stdout)
+	sessionID, present := gotBody["session_id"]
+	if !present || sessionID != nil {
+		t.Fatalf(`request body["session_id"] = %v (present=%v), want a present null`, sessionID, present)
 	}
-	data, err := os.ReadFile(out)
-	if err != nil || strings.TrimSpace(string(data)) != "launcher-token-value" {
-		t.Fatalf("token file: err=%v, matches the issued token=%v", err, strings.TrimSpace(string(data)) == "launcher-token-value")
+	if verifyErr != nil {
+		t.Fatalf("record.VerifyRequestObject(request): %v", verifyErr)
 	}
-}
-
-// TestLauncherLoginRefusesAnAlreadyCollectedToken pins that "issued" with no token — the one-time
-// token already went to another reader of this pending id — is a loud failure, never an empty
-// token file and exit 0. The message names the actual credential id and points at an operator,
-// not at a self-service revoke this repo does not implement.
-func TestLauncherLoginRefusesAnAlreadyCollectedToken(t *testing.T) {
-	binary := buildAgentSecrets(t)
-	broker := launcherBroker(t, "")
-	out := filepath.Join(t.TempDir(), "launcher-token")
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, t.TempDir(), nil,
-		"launcher", "login", "--operator", "sjawhar", "--host", "devbox", "--out", out)
-	if exit == 0 {
-		t.Fatalf("exit = 0, want a failure: stdout=%q stderr=%q", stdout, stderr)
+	if len(gotObj.Details) != 1 || gotObj.Details[0].Type != "agent_secret" || gotObj.Details[0].Identifier != "GRANT_ME" {
+		t.Fatalf("authorization_details = %+v, want exactly one agent_secret detail naming GRANT_ME", gotObj.Details)
 	}
-	if !strings.Contains(stderr, "did NOT succeed") {
-		t.Fatalf("stderr = %q, want it to say the login did not succeed", stderr)
-	}
-	if !strings.Contains(stderr, "cred-already-collected-1") {
-		t.Fatalf("stderr = %q, want it to name the credential id an operator can revoke", stderr)
-	}
-	if !strings.Contains(stderr, "Contact an operator") {
-		t.Fatalf("stderr = %q, want it to point at an operator rather than implying a self-service remedy", stderr)
-	}
-	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("token file stat = %v, want no file written", err)
+	if gotObj.Reason != "need it for the build" {
+		t.Fatalf("reason = %q, want the --reason text", gotObj.Reason)
 	}
 }
 
-// TestEnrollPodSendsNoOperator pins the pod path of enroll: it sends no operator (the broker
-// refuses a pod enrollment carrying one), sends the projected token and the approving issue, and
-// refuses --operator for a pod outright.
-func TestEnrollPodSendsNoOperator(t *testing.T) {
+// TestLauncherSubcommandIsGone pins that "launcher login" is refused outright: Plan B's
+// helper-socket command replaces it, and this CLI holds no bearer launcher token to offer.
+func TestLauncherSubcommandIsGone(t *testing.T) {
 	binary := buildAgentSecrets(t)
-	var got map[string]any
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&got)
-		w.WriteHeader(http.StatusCreated)
-		writeJSON(w, map[string]any{"enrollment_id": "enr-pod-1", "lease_expires_at": time.Now().Add(time.Hour)})
-	})
-	broker := httptest.NewServer(mux)
-	defer broker.Close()
-	dir := t.TempDir()
-	tokenFile, podTokenFile := filepath.Join(dir, "launcher"), filepath.Join(dir, "pod-token")
-	os.WriteFile(tokenFile, []byte("launcher-token\n"), 0o600)
-	os.WriteFile(podTokenFile, []byte("projected.jwt.value\n"), 0o600)
-	keyDir := t.TempDir()
+	keyDir := newKeyDir(t)
 
-	_, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "enroll", "--launcher-token-file", tokenFile, "--kind", "pod",
-		"--runtime-id", "pod-uid-1", "--pod-token-file", podTokenFile, "--approver-issue", "LEGION-9", "--thumbprint", "tp-pod")
-	if exit != 0 {
-		t.Fatalf("enroll --kind pod exit = %d: %s", exit, stderr)
+	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused.invalid", keyDir, nil,
+		"launcher", "login", "--operator", "sjawhar", "--host", "devbox", "--out", filepath.Join(t.TempDir(), "token"))
+	if exit != exitUsageError {
+		t.Fatalf("agent-secrets launcher login: exit = %d, want %d (usage error): stdout=%q stderr=%q", exit, exitUsageError, stdout, stderr)
 	}
-	approver, _ := got["approver"].(map[string]any)
-	if op, present := got["operator"]; !present || op != nil || got["pod_token"] != "projected.jwt.value" || approver["kind"] != "issue_assignee" || approver["issue"] != "LEGION-9" {
-		t.Fatalf("enrollment body = %v, want operator null, the pod token, and issue_assignee LEGION-9", got)
+	if !strings.Contains(stderr, "Plan B") {
+		t.Fatalf("stderr = %q, want it to name Plan B's helper-socket replacement", stderr)
 	}
-	if _, _, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "enroll", "--launcher-token-file", tokenFile, "--kind", "pod",
-		"--runtime-id", "pod-uid-1", "--pod-token-file", podTokenFile, "--approver-issue", "LEGION-9", "--thumbprint", "tp-pod", "--operator", "sjawhar"); exit != exitUsageError {
-		t.Fatalf("enroll --kind pod --operator exit = %d, want a usage error", exit)
+}
+
+// TestEnrollWithLauncherTokenFileIsGone pins that "enroll --launcher-token-file ..." no longer
+// enrolls anything: with no "enroll" case left in run()'s dispatch table, it falls through to
+// the exec form, which requires a "--" command separator this invocation never supplies, so it
+// refuses as a usage error rather than silently trying to run "--launcher-token-file" as a
+// secret name.
+func TestEnrollWithLauncherTokenFileIsGone(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := newKeyDir(t)
+	tokenFile := filepath.Join(t.TempDir(), "launcher-token")
+	if err := os.WriteFile(tokenFile, []byte("launcher-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused.invalid", keyDir, nil,
+		"enroll", "--launcher-token-file", tokenFile, "--kind", "box", "--runtime-id", "box-1",
+		"--operator", "sjawhar", "--thumbprint", "tp-1")
+	if exit != exitUsageError {
+		t.Fatalf("agent-secrets enroll: exit = %d, want %d (usage error, no enroll subcommand remains): stdout=%q stderr=%q", exit, exitUsageError, stdout, stderr)
 	}
 }
