@@ -121,9 +121,14 @@ export function sanitizeSubjectSegment(value: string): string {
 
 type SubjectSegmentReplaced = "." | " " | "\t" | "\r" | "\n" | "*" | ">";
 
-type SanitizedSubjectSegment<Value extends string> = Value extends `${infer Head}${infer Tail}`
-  ? `${Head extends SubjectSegmentReplaced ? "_" : Head}${SanitizedSubjectSegment<Tail>}`
-  : Value;
+// Tail-recursive through an accumulator, so the compiler takes a literal of any practical length
+// rather than stopping at its instantiation depth after about 100 characters.
+type SanitizedSubjectSegment<
+  Value extends string,
+  Done extends string = "",
+> = Value extends `${infer Head}${infer Tail}`
+  ? SanitizedSubjectSegment<Tail, `${Done}${Head extends SubjectSegmentReplaced ? "_" : Head}`>
+  : `${Done}${Value}`;
 
 export type SlackThreadSubject<
   Team extends string = string,

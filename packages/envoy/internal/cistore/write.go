@@ -12,13 +12,19 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 )
 
-// maxRecordBytes bounds a head's record. GitHub allows 50,000 check runs in one check suite, so the
-// number of check names a head collects has no bound of GitHub's own, and the record, like the
-// settlement published from it, goes to NATS whole. A settlement names each check at most three
-// times (its run, its status group, a failure's entry) at up to seven bytes a character, and the
-// record names it twice at up to six, so a record at this bound settles in under 700 KiB, inside
-// the server's 1 MiB default. About 1,300 checks of ordinary names fit.
-const maxRecordBytes = 384 << 10
+// maxRecordBytes and maxSettlementBytes bound a head's record and the settlement published from
+// it, each of which goes to NATS whole. GitHub allows 50,000 check runs in one check suite, so the
+// number of check names a head collects has no bound of GitHub's own. The record is kept well under
+// the server's 1 MiB default, since it is written whole on every observation; about 1,300 checks of
+// ordinary names fit. The settlement needs its own bound, because a name costs more there: a
+// failing check is named three times to the record's two, inside a JSON string in the envelope's
+// JSON, so a `"` costs 12 bytes a character in the settlement against 4 in the record. Its bound
+// leaves room under 1 MiB for the topic and the few bytes a later settlement of the same record
+// adds (a generation, `superseded_settlement`).
+const (
+	maxRecordBytes     = 384 << 10
+	maxSettlementBytes = 1<<20 - 64<<10
+)
 
 // write applies mutate to the current state of identity's record, a new one carrying only the
 // identity when there is none, and writes it with a compare-and-swap. A lost compare-and-swap or a
@@ -28,9 +34,10 @@ const maxRecordBytes = 384 << 10
 // refused. A lasting error fails it at once. Each attempt takes the handle the latest Rewatch
 // installed, and each KV call is given up on if the store is rewatched before it is answered.
 //
-// A write that would take the record past maxRecordBytes is refused with bus.ErrTooLarge, which a
-// redelivery would meet again: the record is written as it was, marked Overflowed, so it never
-// settles on the checks it could not hold.
+// A write that would take the record past maxRecordBytes, or its settlement past
+// maxSettlementBytes, is refused with bus.ErrTooLarge, which a redelivery would meet again: the
+// record is written as it was, marked Overflowed, so it never settles on the checks it could not
+// hold.
 func (s *Store) write(identity State, mutate func(*State) bool) error {
 	key := Key(identity.Owner, identity.Repo, identity.Number, identity.SHA)
 	deadline := time.Now().Add(recordBudget)
@@ -72,10 +79,20 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 		if err != nil {
 			return err
 		}
+		settlement, err := settlementSize(st)
+		if err != nil {
+			return err
+		}
 		var refused error
-		if len(buf) > maxRecordBytes {
+		switch {
+		case len(buf) > maxRecordBytes:
 			refused = fmt.Errorf("%w: head %s's record would be %d bytes, past its %d-byte bound",
 				bus.ErrTooLarge, key, len(buf), maxRecordBytes)
+		case settlement > maxSettlementBytes:
+			refused = fmt.Errorf("%w: head %s's settlement would be %d bytes, past its %d-byte bound",
+				bus.ErrTooLarge, key, settlement, maxSettlementBytes)
+		}
+		if refused != nil {
 			stored := identity
 			if rev != 0 {
 				if err := json.Unmarshal(entry.Value(), &stored); err != nil {
@@ -108,6 +125,20 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 			retryErr = err
 		}
 	}
+}
+
+// settlementSize is the size of the settlement st would publish, encoded with its topic as the
+// summary loop sends it.
+func settlementSize(st State) (int, error) {
+	env, err := settlementEnvelope(st, time.Now().UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return 0, err
+	}
+	return len(data) + len(env.Topic), nil
 }
 
 // errKVRewatched is what a KV call answers when the store was rewatched before its answer came.

@@ -803,6 +803,19 @@ func (s *Store) MarkSettled(key string, generation uint64) (bool, error) {
 	return marked, err
 }
 
+// markOverflowed marks key's record overflowed, so it never settles: NATS refused its settlement,
+// which it would refuse on every tick.
+func (s *Store) markOverflowed(key string) error {
+	_, _, err := s.casState(key, func(state *State) (bool, error) {
+		if state.Overflowed {
+			return false, nil
+		}
+		state.Overflowed = true
+		return true, nil
+	})
+	return err
+}
+
 func (s *Store) durableHeadMatches(state State) (bool, error) {
 	kv := s.watcher.KV()
 	entry, err := kv.Get(headKey(state.Owner, state.Repo, state.Number))
