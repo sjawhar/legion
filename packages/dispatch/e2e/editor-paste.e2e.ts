@@ -2,6 +2,7 @@ import { type Browser, expect, type Page, test } from "@playwright/test";
 
 import { getArtifactText, getIssue } from "./api";
 import { copy, documentEditor, openIssue, openWithCaret, paste, selectEditorText } from "./editor";
+import { engineTables, goReadBack } from "./read-back";
 import { resetDatabase } from "./seed";
 
 test.beforeEach(async () => {
@@ -594,3 +595,63 @@ test("a soft line break in markdown written through the API is a space in the ed
     await alice.close();
   }
 });
+
+// A pasted table whose first or last row is empty keeps its table and its cells. With an empty first
+// row the paste hung the page: prosemirror-tables' fixTables filled the cell-less header row with
+// body cells, which Milkdown's header row can't hold, so ProseMirror fitted them as a new row and
+// fixTables ran again, forever. With an empty last row, preset-gfm's paste rule counted the table's
+// columns in that row, found none, and replaced the table with an empty paragraph.
+const tableRows = (header: string, body: string, indent = "") =>
+  [header, "| :--- | :--- |", body].map((line) => `${indent}${line}\n`).join("");
+for (const [row, html, header, body] of [
+  ["first", "<table><tr></tr><tr><td>a</td><td>b</td></tr></table>", ["", ""], ["a", "b"]],
+  ["last", "<table><tr><td>a</td><td>b</td></tr><tr></tr></table>", ["a", "b"], ["", ""]],
+] as const) {
+  const lines = [header, body].map((cells) => `| ${cells.join(" | ")} |`);
+  for (const [context, spec, stored] of [
+    ["a paragraph", "Intro end.\n", `Intro\n\n${tableRows(lines[0], lines[1])}\n&#32;end.\n`],
+    [
+      "a callout",
+      ':::callout{#k1 kind="note"}\nIntro end.\n:::\n',
+      `:::callout{#k1 kind="note" title=""}\nIntro\n\n${tableRows(lines[0], lines[1])}\n&#32;end.\n:::\n`,
+    ],
+    ["a heading", "# Intro end\n", `# Intro\n\n${tableRows(lines[0], lines[1])}\n# &#32;end\n`],
+    [
+      "a nested list",
+      "- top\n  - Intro end\n",
+      `- top\n  - Intro\n${tableRows(lines[0], lines[1], "    ")}    &#32;end\n`,
+    ],
+  ] as const) {
+    test(`a table whose ${row} row is empty, pasted into ${context}, keeps its cells`, async ({
+      browser,
+    }) => {
+      const { alice, issue, page } = await openWithCaret(
+        browser,
+        "Table paste",
+        spec,
+        "Intro",
+        "end"
+      );
+      try {
+        await paste(page, { html, text: "a\tb" });
+
+        await expect
+          .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+          .toBe(stored);
+        const [table] = engineTables(stored);
+        if (context === "a nested list") {
+          // pmdoc writes a tight list item's blocks one line apart, so the paragraph after the
+          // table reads back as one more table row, in Go as in the engine. That writer defect is
+          // the pmdoc lane's follow-up after #1464. The table's own rows still read back.
+          expect(table.slice(0, 2)).toEqual([header, body]);
+          expect(await goReadBack(stored)).toContain(tableRows(lines[0], lines[1], "    "));
+        } else {
+          expect(table).toEqual([header, body]);
+          expect(await goReadBack(stored)).toBe(stored);
+        }
+      } finally {
+        await alice.close();
+      }
+    });
+  }
+}
