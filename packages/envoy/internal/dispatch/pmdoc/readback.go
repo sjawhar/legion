@@ -403,7 +403,10 @@ func resync(written, back []*Node, i, j int, ignore skip) (int, int, bool) {
 }
 
 // attributeDrift is the attributes doc's blocks read back with other values where they read back
-// holding the same blocks and text.
+// holding the same blocks and text - but a task item's checked, which is its own item's: a task
+// item emptied of its text is written as a plain empty item and reads back with checked none, and
+// NewMisread tells a stale one from a new one by its block id, so the attribute drifting would hide
+// every other task item emptied.
 func attributeDrift(doc, back *Node) map[string]bool {
 	drift := map[string]bool{}
 	pairs, _ := alignBlocks(doc, back, skip{all: true})
@@ -411,6 +414,7 @@ func attributeDrift(doc, back *Node) map[string]bool {
 	for _, pair := range pairs {
 		collectDrift(written[pair[0]], back.Children[pair[1]], drift)
 	}
+	delete(drift, "checked")
 	return drift
 }
 

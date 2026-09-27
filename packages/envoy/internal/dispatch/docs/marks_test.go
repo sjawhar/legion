@@ -716,8 +716,9 @@ func repeatLiveBlockID(t *testing.T, service *Service, artifactID string) {
 	}
 }
 
-// A document a browser edit left unreadable, here with an emptied callout in a list item, is not
-// an accept's to refuse elsewhere: the accept stores and the callout stays as it was.
+// A document a browser edit left unreadable, here with a footnote definition moved into a callout
+// in a list item, is not an accept's to refuse elsewhere: the accept stores and the callout stays as
+// it was.
 func TestAcceptSuggestionBesideABlockTheParserAlreadyRefuses(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -725,7 +726,7 @@ func TestAcceptSuggestionBesideABlockTheParserAlreadyRefuses(t *testing.T) {
 	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
 		pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
 			if node.Type == "callout" {
-				node.Children = []*pmdoc.Node{{Type: "paragraph", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: "emptied"}}}
+				node.Children = []*pmdoc.Node{{Type: "footnote_definition", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: "moved", "label": "n"}, Children: node.Children}}
 				return false
 			}
 			return true
@@ -734,7 +735,7 @@ func TestAcceptSuggestionBesideABlockTheParserAlreadyRefuses(t *testing.T) {
 	})
 	before := liveTree(t, service, artifactID)
 	if _, err := pmdoc.ReadBack(before); err == nil {
-		t.Fatal("the emptied callout in a list item reads back; the test needs a document the parser refuses")
+		t.Fatal("the footnote definition in a callout reads back; the test needs a document the parser refuses")
 	}
 	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
 	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "Body.", nil); err != nil {
@@ -752,8 +753,8 @@ func TestAcceptSuggestionBesideABlockTheParserAlreadyRefuses(t *testing.T) {
 	}
 }
 
-// A footnote definition whose reference a browser edit removed already reads back as nothing,
-// which is not an accept's: an accept inside the definition stores.
+// A footnote definition whose reference a browser edit removed reads back as itself, as the
+// browser editor keeps a definition nothing refers to, and an accept inside it stores.
 func TestAcceptSuggestionInAFootnoteDefinitionWhoseReferenceIsGone(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -769,8 +770,8 @@ func TestAcceptSuggestionInAFootnoteDefinitionWhoseReferenceIsGone(t *testing.T)
 		intro.Children = kept
 		return tree
 	})
-	if back, err := pmdoc.ReadBack(liveTree(t, service, artifactID)); err != nil || len(back.Children) != 1 {
-		t.Fatalf("the unreferenced definition reads back as %#v (%v); the test needs one that reads back as nothing", back, err)
+	if back, err := pmdoc.ReadBack(liveTree(t, service, artifactID)); err != nil || len(back.Children) != 2 || back.Children[1].Type != "footnote_definition" {
+		t.Fatalf("the unreferenced definition reads back as %#v (%v), want the paragraph and the definition", back, err)
 	}
 	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
 	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "Body.", nil); err != nil {

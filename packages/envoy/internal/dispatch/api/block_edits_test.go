@@ -457,8 +457,8 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 		{"nothing between no-break spaces on a line of a list item's code", "- ```\n  \u00a0Body.\u00a0\n  ```\n", "", "- ```\n  \u00a0\u00a0\n  ```\n"},
 		{"text ending in a whitespace line at the end of a list item's code", "- ```\n  Body.\n  ```\n", "x\n  ", "- ```\n  x\n  ```\n"},
 		{"nothing over an indented line of a list item's code", "- item\n\n  ```\n    Body.\n  ```\n", "", "- item\n\n  ```\n  \n  ```\n"},
-		{"two paragraphs beside an item holding a nested list", "- Body.\n- two\n  - nested\n", "x\n\ny", "- x\n\n  y\n- two\n\n  - nested\n"},
-		{"two paragraphs beside an item holding a quote, in an ordered list", "1. Body.\n2. two\n   > q\n", "x\n\ny", "1. x\n\n   y\n2. two\n\n   > q\n"},
+		{"two paragraphs beside an item holding a nested list", "- Body.\n- two\n  - nested\n", "x\n\ny", "- x\n\n  y\n- two\n  - nested\n"},
+		{"two paragraphs beside an item holding a quote, in an ordered list", "1. Body.\n2. two\n   > q\n", "x\n\ny", "1. x\n\n   y\n2. two\n   > q\n"},
 		// An emptied footnote definition holds one empty paragraph, which reads back as the
 		// definition, so its reference stays a reference.
 		{"nothing in a footnote definition", footnote, "", "x[^1]\n\n[^1]: \n"},
@@ -606,12 +606,12 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 		{name: "a list consuming a callout beside a list", spec: "Intro.\n\n" + callout + "\n\n- After here.\n", quote: "Body. After", with: "- a", want: "Intro.\n\n- a\n\n* &#32;here.\n"},
 		{name: "nothing in a task item", spec: "- [ ] Body.\n- [x] two\n", quote: "Body.", says: task},
 		{name: "nothing in a task item, in a document already reading another back as a plain item", spec: "- [ ] Done\n\nIntro.\n\n- [ ] Body.\n", quote: "Body.", emptied: "Done", says: task},
-		{name: "text in a document already reading a task item back as a plain item", spec: "- [ ] Done\n\nBody.\n", quote: "Body.", emptied: "Done", with: "Changed.", want: "- [ ] \n\nChanged.\n"},
+		{name: "text in a document already reading a task item back as a plain item", spec: "- [ ] Done\n\nBody.\n", quote: "Body.", emptied: "Done", with: "Changed.", want: "- \n\nChanged.\n"},
 		// A block that already reads back otherwise the same way is not the accept's, though the
 		// accept changes it: text beside a stale break in it is stored, a new break is refused.
-		{name: "text beside a task item already read back as plain, in its list", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "Changed.", want: "- [ ] \n- [x] Changed.\n\nAfter.\n"},
+		{name: "text beside a task item already read back as plain, in its list", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "Changed.", want: "- \n- [x] Changed.\n\nAfter.\n"},
 		{name: "nothing in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n", quote: "Body.", emptied: "Gone.", says: task},
-		{name: "two paragraphs in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "two\n\nparas", want: "- [ ] \n- [x] two\n\n  paras\n\nAfter.\n"},
+		{name: "two paragraphs in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "two\n\nparas", want: "- \n- [x] two\n\n  paras\n\nAfter.\n"},
 		{name: "text from code into the paragraph after it", spec: "Intro.\n\n```\nabc\n```\n\nNext here.\n", quote: "abc Next", with: "x", want: "Intro.\n\n```\nx here.\n```\n"},
 		{name: "text from a list item's code into the next item", spec: "- ```\n  abc\n  ```\n- Next\n", quote: "abc Next", with: "x", want: "- ```\n  x\n  ```\n"},
 		{name: "text ending in a break over code that already ends in one", spec: "Intro.\n\n```\nabc\n```\n", quote: "abc", emptied: "abc", refill: "abc\n", with: "xyz\n", want: "Intro.\n\n```\nxyz\n\n```\n"},
@@ -625,8 +625,8 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 }
 
 // An empty accept inside a typed block stores the block holding the one empty paragraph it reads
-// back holding, and is refused where that does not read back, as in a list item, and for an ask,
-// whose question paragraph+ bullet_list? cannot be empty.
+// back holding, in a list item written as its fence pair alone, and is refused for an ask, whose
+// question paragraph+ bullet_list? cannot be empty.
 func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -640,7 +640,7 @@ func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
 		{"a top-level callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\n:::\n"},
 		{"a nested callout", "::::callout{#outer kind=\"note\" title=\"T\"}\n:::callout{#inner kind=\"note\" title=\"T\"}\nBody.\n:::\n::::\n", "", "::::callout{#outer kind=\"note\" title=\"T\"}\n:::callout{#inner kind=\"note\" title=\"T\"}\n\n:::\n::::\n"},
 		{"a callout in a blockquote", "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n", "", "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> \n> :::\n"},
-		{"a callout in a list item", "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n", "INVALID_OP", ""},
+		{"a callout in a list item", "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n", "", "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  :::\n"},
 		{"an ask", ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n:::\n", "INVALID_ASK_BLOCK", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -684,9 +684,10 @@ func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
 
 // An accept in or around a typed block is judged by what the typed block reads back as: lists of
 // one kind side by side in a callout are written with different markers, as they are in the
-// blockquote a callout rewritten under its own id stands in, and read back as written. Blocks a
-// same-id rewrite puts where the typed block stood are refused naming that block, a list item for
-// an empty callout, which cannot be written there.
+// blockquote a callout rewritten under its own id stands in, and read back as written, with no
+// blank line between them in a quote, where one would spread the first. Blocks a same-id rewrite
+// puts where the typed block stood are stored beside it, an empty callout in a list item as its
+// fence pair alone.
 func TestAcceptingASuggestionAroundATypedBlock(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -700,11 +701,12 @@ func TestAcceptingASuggestionAroundATypedBlock(t *testing.T) {
 	)
 	for index, test := range []acceptCase{
 		{name: "a list beside a list in a callout", spec: "Intro.\n\n" + callout + "Body.\n\n- y\n:::\n", quote: "Body.", with: "- x", want: "Intro.\n\n" + callout + "- x\n\n* y\n:::\n"},
-		{name: "a list beside a list in a blockquote inside a callout", spec: callout + "> Body.\n>\n> - y\n:::\n", quote: "Body.", with: "- x", want: callout + "> - x\n>\n> * y\n:::\n"},
+		{name: "a list beside a list in a blockquote inside a callout", spec: callout + "> Body.\n>\n> - y\n:::\n", quote: "Body.", with: "- x", want: callout + "> - x\n> * y\n:::\n"},
 		{name: "a callout rewritten beside a list in a blockquote", spec: "Intro.\n\n> " + callout + "> Body.\n> :::\n>\n> - y\n", quote: "Body.", with: rewrite,
-			want: "Intro.\n\n> " + callout + "> Body2.\n> :::\n>\n> - x\n>\n> * y\n"},
+			want: "Intro.\n\n> " + callout + "> Body2.\n> :::\n>\n> - x\n> * y\n"},
 		{name: "an empty callout beside a callout rewritten in a list item", spec: "- Lead.\n\n  " + callout + "  Body.\n  :::\n", quote: "Body.",
-			with: callout + "Re.\n:::\n\n:::callout{kind=\"note\" title=\"T\"}\n:::", says: "writes two callouts in this list item"},
+			with: callout + "Re.\n:::\n\n:::callout{#c2 kind=\"note\" title=\"T\"}\n:::",
+			want: "- Lead.\n\n  " + callout + "  Re.\n  :::\n\n  :::callout{#c2 kind=\"note\" title=\"T\"}\n  :::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			checkAccept(t, handler, documentService, "N"+string(rune('A'+index)), test)

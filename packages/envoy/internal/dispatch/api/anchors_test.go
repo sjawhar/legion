@@ -392,7 +392,7 @@ func TestSuggestionAcceptRewritesOnlyTheTypedBlockUnderItsOwnID(t *testing.T) {
 			quote: "A note.", replaceWith: ":::callout{kind=\"note\"}\nReworded.\n:::\n",
 			want: "Intro.\n\n::::callout{#c1 kind=\"note\" title=\"\"}\n:::callout{#<minted> kind=\"note\" title=\"\"}\nReworded.\n:::\n::::\n"},
 		{name: "a callout under no id, in a list item inside a callout",
-			spec:  ":::callout{#outer kind=\"note\" title=\"\"}\n- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"\"}\n  A note.\n  :::\n:::\n",
+			spec:  "::::callout{#outer kind=\"note\" title=\"\"}\n- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"\"}\n  A note.\n  :::\n::::\n",
 			quote: "A note.", replaceWith: ":::callout{kind=\"note\"}\nReworded.\n:::\n",
 			want: ":::::callout{#outer kind=\"note\" title=\"\"}\n- Lead.\n\n  ::::callout{#c1 kind=\"note\" title=\"\"}\n  :::callout{#<minted> kind=\"note\" title=\"\"}\n  Reworded.\n  :::\n  ::::\n:::::\n"},
 		{name: "a callout under no id, in a blockquote inside a callout",
