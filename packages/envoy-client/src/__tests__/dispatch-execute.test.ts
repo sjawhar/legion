@@ -3071,7 +3071,7 @@ describe("executeDispatchTool", () => {
       }
       throw new Error(`unexpected request: ${request.pathname}`);
     }) as typeof fetch;
-  const readProjectDocument = (args: Record<string, unknown>, fetchImpl: typeof fetch) =>
+  const readDocument = (args: Record<string, unknown>, fetchImpl: typeof fetch) =>
     executeDispatchTool({
       tool: "dispatch_doc_read",
       args,
@@ -3092,9 +3092,9 @@ describe("executeDispatchTool", () => {
     const fetchImpl = projectDispatch(documents, requests);
     const refusal =
       '"plan-v2" names 2 documents on this project; use the id: artifact-v2 (plan-v2, plan v2), artifact-v2-2 (plan-v2-2, plan-v2)';
-    await expect(
-      readProjectDocument({ project: "GREF", artifact: "plan-v2" }, fetchImpl)
-    ).rejects.toThrow(refusal);
+    await expect(readDocument({ project: "GREF", artifact: "plan-v2" }, fetchImpl)).rejects.toThrow(
+      refusal
+    );
     await expect(
       executeDispatchTool({
         tool: "dispatch_comment",
@@ -3113,7 +3113,7 @@ describe("executeDispatchTool", () => {
       ["plan-v2-2", "artifact-v2-2"],
       ["artifact-v2", "artifact-v2"],
     ] as const) {
-      const result = await readProjectDocument({ project: "GREF", artifact: reference }, fetchImpl);
+      const result = await readDocument({ project: "GREF", artifact: reference }, fetchImpl);
       expect(result.text).toBe(`# ${id}`);
     }
   });
@@ -3123,7 +3123,7 @@ describe("executeDispatchTool", () => {
       projectDocument("shared-reference", "notes", "notes.md"),
       projectDocument("artifact-other", "shared-reference", "other.md"),
     ];
-    const result = await readProjectDocument(
+    const result = await readDocument(
       { project: "GREF", artifact: "shared-reference" },
       projectDispatch(documents, [])
     );
@@ -3133,17 +3133,17 @@ describe("executeDispatchTool", () => {
   // A dispatch:// reference's document part is a slug, the address the dashboard and Dispatch's
   // own routes use, so it names one document even where the same text is another's filename.
   test("a dispatch:// document reference resolves by slug, never refused for a filename clash", async () => {
-    const paths: string[] = [];
+    const requests: string[] = [];
     const documents = [
       projectDocument("artifact-v2", "plan-v2", "plan v2"),
       projectDocument("artifact-v2-2", "plan-v2-2", "plan-v2"),
     ];
-    const project = await readProjectDocument(
+    const project = await readDocument(
       { ref: "dispatch://GREF/artifact/plan-v2" },
-      projectDispatch(documents, paths)
+      projectDispatch(documents, requests)
     );
     expect(project.text).toBe("# artifact-v2");
-    expect(paths).not.toContain("GET /api/v1/projects/GREF/artifacts?unlinked=true");
+    expect(requests).not.toContain("GET /api/v1/projects/GREF/artifacts?unlinked=true");
 
     const issueDispatch = (async (url: RequestInfo | URL): Promise<Response> => {
       const request = new URL(String(url));
@@ -3167,11 +3167,11 @@ describe("executeDispatchTool", () => {
       "dispatch://DSP-42/artifact/spec-v2",
       "http://dispatch.test/issues/DSP-42/artifacts/spec-v2",
     ]) {
-      const issue = await readProjectDocument({ ref }, issueDispatch);
+      const issue = await readDocument({ ref }, issueDispatch);
       expect(issue.text).toBe("# artifact-v2");
     }
     await expect(
-      readProjectDocument({ issue: "DSP-42", artifact: "spec-v2" }, issueDispatch)
+      readDocument({ issue: "DSP-42", artifact: "spec-v2" }, issueDispatch)
     ).rejects.toThrow('"spec-v2" names 2 documents on this issue; use the id');
   });
 
