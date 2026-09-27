@@ -34,10 +34,15 @@ func ReadBack(doc *Node) (*Node, error) {
 // read back as written, or is "" when it does not. A block the write changed is judged whatever
 // before held there; an unchanged one only when before read it back as written, and an attribute
 // before already read back with another value (a table cell's alignment) is not the write's. A
-// before whose markdown the parser refuses gives nothing to judge against, and is "".
+// before whose markdown the parser refuses (a browser edit can leave one) gives nothing to judge
+// against, and is "" whether or not after parses: the checks that read each changed block alone
+// still refuse one the write leaves unreadable.
 func NewMisread(before, after *Node, first, last, lastAfter int) (string, error) {
 	backAfter, err := ReadBack(after)
 	if err != nil {
+		if _, beforeErr := ReadBack(before); beforeErr != nil {
+			return "", nil
+		}
 		return err.Error(), nil
 	}
 	written := StripAnchorMarks(after)

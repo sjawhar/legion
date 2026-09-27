@@ -716,6 +716,42 @@ func repeatLiveBlockID(t *testing.T, service *Service, artifactID string) {
 	}
 }
 
+// A document a browser edit left unreadable, here with an emptied callout in a list item, is not
+// an accept's to refuse elsewhere: the accept stores and the callout stays as it was.
+func TestAcceptSuggestionBesideABlockTheParserAlreadyRefuses(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Gone.\n  :::\n\nIntro.\n\nBody.\n\nAfter.\n")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+			if node.Type == "callout" {
+				node.Children = []*pmdoc.Node{{Type: "paragraph", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: "emptied"}}}
+				return false
+			}
+			return true
+		})
+		return tree
+	})
+	before := liveTree(t, service, artifactID)
+	if _, err := pmdoc.ReadBack(before); err == nil {
+		t.Fatal("the emptied callout in a list item reads back; the test needs a document the parser refuses")
+	}
+	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
+	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "Body.", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("accept beside a block the parser already refuses: %v", err)
+	}
+	after := liveTree(t, service, artifactID)
+	if len(after.Children) != 4 || pmdoc.StripAnchorMarks(after.Children[2]).Children[0].Text != "Changed." {
+		t.Fatalf("after the accept the document holds %#v, want Changed. in place of Body.", after.Children)
+	}
+	if !after.Children[0].Equal(before.Children[0]) {
+		t.Fatal("the accept changed the list holding the emptied callout")
+	}
+}
+
 // A repeat the live document already holds is settlement's to repair, not a write's to refuse or
 // to repair: beside one, an accept whose replacement names no held id (inline, or a typed block
 // with an id of its own), the reject of a browser insert, and an upload of the document's own text
