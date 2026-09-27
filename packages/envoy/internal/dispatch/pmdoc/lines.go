@@ -58,15 +58,21 @@ func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Co
 	// The line opens a list whose first item could not interrupt a paragraph. The browser editor's
 	// parser opens none on a line that interrupts a paragraph, whether the paragraph is the block
 	// last opened or the line opens a container first, nor after an indented code block, blank
-	// lines between or not.
+	// lines between or not, which it keeps open to the line - except one right after a list. That
+	// list stays open across the blank lines before the code and does not continue its line, and
+	// that parser ends indented code at a line no open container continues, so the code has ended
+	// and the line interrupts nothing (which is also why it reads a second code line there as a
+	// second code block).
 	if last, paragraph := pc.LastOpenedBlock().Node.(*ast.Paragraph); paragraph && last.Parent() == parent {
 		return nil, parser.NoChildren
 	}
 	if parent.ChildCount() == 0 && interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
 		return nil, parser.NoChildren
 	}
-	if _, code := parent.LastChild().(*ast.CodeBlock); code {
-		return nil, parser.NoChildren
+	if code, ok := parent.LastChild().(*ast.CodeBlock); ok {
+		if _, afterList := code.PreviousSibling().(*ast.List); !afterList {
+			return nil, parser.NoChildren
+		}
 	}
 	return p.BlockParser.Open(parent, reader, pc)
 }
