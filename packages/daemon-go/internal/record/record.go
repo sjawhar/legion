@@ -56,6 +56,9 @@ type Issue struct {
 	Hold                *Hold
 	LastDispatchSeq     int64
 	ReadyPendingVersion *int
+	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
+	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
+	HandedOver bool
 }
 
 // Hold is a held issue's hold: the phase it left, and why it is held when the hold has a reason.

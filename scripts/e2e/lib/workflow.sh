@@ -69,10 +69,13 @@ dispatch_human() {
     curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
   fi
 }
+# new_issue TITLE [PARENT] creates an issue in the run's project and prints its key. A root carries
+# the `legion` label, which hands it to the Go daemon (it admits no unlabeled root); a child carries
+# none, since it runs under its root's tree.
 new_issue() {
   local title=$1 parent=${2:-} payload
   payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" \
-    'if $parent == "" then {project:$project,title:$title,force:true} else {project:$project,title:$title,parent:$parent,force:true} end')
+    'if $parent == "" then {project:$project,title:$title,labels:["legion"],force:true} else {project:$project,title:$title,parent:$parent,force:true} end')
   dispatch_human POST issues "$payload" | jq -er .key
 }
 set_status() { dispatch_human PATCH "issues/$1" "$(jq -cn --arg status "$2" '{status:$status}')" >/dev/null; }
