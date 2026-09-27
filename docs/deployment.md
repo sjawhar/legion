@@ -21,25 +21,29 @@ cannot tell which permitted `/tmp` directory belongs to this pane. It parses the
 parser and resolves each target as bash would: through `$HOME`, `~`, variables set earlier in the
 same command, `$(mktemp -d)`, `cd`, braces, command substitutions, and the scripts the command
 runs (`bash <file>`, `sh -c`, `source`, a heredoc fed to a shell, a script run by path,
-python/node/bun scripts); a target it cannot resolve, and a command the parser reports as malformed,
-are refused. `pkill`, `killall`, and `fuser -k` are refused outright. For `tmux kill-*`, the guard
-resolves the socket as tmux does (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`, then `$TMUX`, then
-the default socket) and refuses a resolved path outside the pane roots. `kill` only reaches a pid
-that `/proc` shows descending from the pane's own Oh My Pi process. Every refusal names the target,
-where it resolved, and the rule, so the agent can rewrite the command.
+python/node/bun scripts). A target with no proven path prefix is refused, as is a command the
+parser reports as malformed. An unknown trailing component under a prefix already proven inside a
+permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused outright. For `tmux
+kill-*`, the guard resolves the socket as tmux does (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`,
+then `$TMUX`, then the default socket) and refuses a resolved path outside the pane roots. `kill`
+only reaches a pid that `/proc` shows descending from the pane's own Oh My Pi process. Every refusal
+names the target, where it resolved, and the rule, so the agent can rewrite the command.
 
 The guard reads text before it runs, so it cannot see what is only decided at run time: a compiled
 program or anything a command runs without naming it on the command line (a `make` target, a test
 runner, `npm run`), a program whose name is itself a variable or a command's output
 (`$cmd`, `eval "$(tool)"`), Python or JavaScript whose paths or pids come from values it cannot
 evaluate (the `eval` tool's kernels included), commands outside the families above that overwrite
-a destination (`cp`, `rsync`, `dd`, `ln -f`, `install`), a directory reached through a `cd` that
-failed, and the `write` and `edit` tools. It also cannot distinguish one pane's allowed `/tmp`
-directory from another's. The documented residuals are `git -C <path> clean`, Python loop values,
-an aliased CommonJS `require`, an `eval` trap whose outer exit timing is not modeled, and a `TMUX`
-value that begins with a comma and therefore names no socket path. The pane itself still runs as
-the daemon's user, so a refusal is a guard against mistakes, not a sandbox; running panes as a
-separate user is LEGION-122, and the Kubernetes runtime's pod boundary is the hard one.
+a destination (`cp`, `dd`, `ln -f`, `install`), append writes (`>>`, `tee -a`, `sed -i`), a
+directory reached through a `cd` that failed, and the `write` and `edit` tools. The guard checks
+the destination of `rsync`, `tar`, and `unzip` when their command line names one.
+It also cannot distinguish one pane's allowed `/tmp` directory from another. A running shell
+started through `hub` can receive later unguarded input, and `xd://debug` can launch an unguarded
+program. The documented residuals are `git -C <path> clean`, Python loop values, an aliased CommonJS
+`require`, an `eval` trap whose outer exit timing is not modeled, and a `TMUX` value that begins
+with a comma and therefore names no socket path. This is a mistake-guard, not a sandbox: it exists
+because an agent probe deleted the operator's home directory. LEGION-122 and the Kubernetes pod
+boundary are the hard isolation controls.
 
 ## Current decision for the LEGION deployment
 

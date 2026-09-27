@@ -425,8 +425,9 @@ function evaluate(tokens: readonly Token[], scope: Scope): Value {
     else if (depth === 0 && (text === "+" || (scope.language === "py" && text === "/"))) {
       const left = evaluate(span.slice(0, k), scope);
       const right = evaluate(span.slice(k + 1), scope);
-      if (typeof left !== "string" || typeof right !== "string") return undefined;
-      return text === "+" ? left + right : joinPath([left, right]);
+      const leftText = typeof left === "string" ? left : `"$${UNKNOWN_MARKER}"`;
+      const rightText = typeof right === "string" ? right : `"$${UNKNOWN_MARKER}"`;
+      return text === "+" ? leftText + rightText : joinPath([leftText, rightText]);
     }
   }
   return evaluatePrimary(span, scope);
@@ -439,20 +440,49 @@ function evaluateInterpolated(token: Token, scope: Scope): Value {
   let out = chunks[0] ?? "";
   for (const [index, source] of interpolations.entries()) {
     const value = evaluate(tokenize(source, scope.language), scope);
-    if (typeof value !== "string") return undefined;
-    out += value + (chunks[index + 1] ?? "");
+    out += (typeof value === "string" ? value : `"$${UNKNOWN_MARKER}"`) + (chunks[index + 1] ?? "");
   }
   return out;
+}
+
+function unknownNames(text: string): readonly string[] {
+  return text.includes(UNKNOWN_MARKER) ? [UNKNOWN_MARKER] : [];
+}
+
+interface ShellText {
+  readonly text: string;
+  readonly unknown: readonly string[];
+}
+
+function shellText(
+  chunks: readonly string[],
+  interpolations: readonly string[],
+  scope: Scope
+): ShellText {
+  const unknown: string[] = [];
+  let text = chunks[0] ?? "";
+  for (const [index, source] of interpolations.entries()) {
+    const value = evaluate(tokenize(source, scope.language), scope);
+    if (typeof value === "string") text += `'${value.replaceAll("'", "'\\''")}'`;
+    else {
+      const placeholder = `LEGION_GUARD_UNKNOWN_${index}`;
+      unknown.push(placeholder);
+      text += `"$${placeholder}"`;
+    }
+    text += chunks[index + 1] ?? "";
+  }
+  return { text, unknown };
+}
+
+function evaluatedShellText(value: Value): ShellText | undefined {
+  return typeof value === "string" ? { text: value, unknown: unknownNames(value) } : undefined;
 }
 
 function evaluatePrimary(span: readonly Token[], scope: Scope): Value {
   const first = span[0];
   if (first === undefined) return undefined;
   if (span.length === 1) {
-    if (first.kind === "string") {
-      const value = evaluateInterpolated(first, scope);
-      return typeof value === "string" && value.includes(UNKNOWN_MARKER) ? undefined : value;
-    }
+    if (first.kind === "string") return evaluateInterpolated(first, scope);
     if (first.kind === "number") return first.text;
     if (first.kind === "name") return evaluateName(first.text, scope);
     return undefined;
@@ -837,19 +867,8 @@ export function scanCode(
     const after = tokens[j + 1];
     // `Bun.$\`...\`` / `$\`...\``: a tagged template is shell text.
     if (language === "js" && after?.template === true && (callee === "$" || callee === "Bun.$")) {
-      const unknown: string[] = [];
-      let text = after.chunks?.[0] ?? "";
-      for (const [index, source] of (after.interpolations ?? []).entries()) {
-        const value = evaluate(tokenize(source, "js"), scope);
-        if (typeof value === "string") text += `'${value.replaceAll("'", "'\\''")}'`;
-        else {
-          const placeholder = `LEGION_GUARD_UNKNOWN_${index}`;
-          unknown.push(placeholder);
-          text += `"$${placeholder}"`;
-        }
-        text += after.chunks?.[index + 1] ?? "";
-      }
-      sinks.shell(callee, text, unknown);
+      const text = shellText(after.chunks ?? [], after.interpolations ?? [], scope);
+      sinks.shell(callee, text.text, text.unknown);
       continue;
     }
     if (after?.text !== "(") continue;
@@ -954,8 +973,8 @@ function scanPythonProcessCall(
   sinks: CodeSinks
 ): void {
   if (callee === "os.system" || callee === "os.popen" || callee.endsWith("getoutput")) {
-    const text = value(0);
-    if (typeof text === "string") sinks.shell(callee, text, []);
+    const text = evaluatedShellText(value(0));
+    if (text !== undefined) sinks.shell(callee, text.text, text.unknown);
     return;
   }
   if (/^os\.exec[lv]p?e?$/.test(callee) || /^os\.spawn[lv]p?e?$/.test(callee)) {
@@ -968,9 +987,10 @@ function scanPythonProcessCall(
   const first = value(0);
   const shellSpan = args.keyword.get("shell");
   const shell = shellSpan !== undefined && shellSpan.map((t) => t.text).join("") === "True";
-  if (typeof first === "string") {
-    if (shell) sinks.shell(callee, first, []);
-    else sinks.argv(callee, [first]);
+  const shellTextValue = evaluatedShellText(first);
+  if (shellTextValue !== undefined) {
+    if (shell) sinks.shell(callee, shellTextValue.text, shellTextValue.unknown);
+    else sinks.argv(callee, [shellTextValue.text]);
     return;
   }
   const list = argvOf(first);
@@ -993,8 +1013,8 @@ function scanJsProcessCall(
 ): void {
   const base = callee.replace(/^(?:child_process|cp|childProcess)\./, "");
   if (base === "exec" || base === "execSync") {
-    const text = value(0);
-    if (typeof text === "string") sinks.shell(callee, text, []);
+    const text = evaluatedShellText(value(0));
+    if (text !== undefined) sinks.shell(callee, text.text, text.unknown);
     return;
   }
   if (["spawn", "spawnSync", "execFile", "execFileSync"].includes(base)) {
@@ -1046,8 +1066,8 @@ function scanJsProcessCall(
         depth -= 1;
       } else if (depth === 0 && text === ",") break;
     }
-    const text = evaluate(first.slice(command + 2, end), scope);
-    if (typeof text === "string") sinks.shell(callee, text, []);
+    const text = evaluatedShellText(evaluate(first.slice(command + 2, end), scope));
+    if (text !== undefined) sinks.shell(callee, text.text, text.unknown);
   }
 }
 

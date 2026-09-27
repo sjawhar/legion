@@ -27,6 +27,7 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "packages/dispatch/e2e/acceptance/omp-roundtrip.sh": "tmux kill-session",
   "packages/envoy/deploy/scripts/autodeploy.sh": "dispatch-backups",
   "packages/envoy/deploy/scripts/autodeploy_test.sh": "dumps[i]",
+  "packages/envoy/deploy/scripts/sync-host.sh": "$1",
   "packages/envoy/scripts/e2e-api.sh": "$sse_pid",
   "packages/envoy/scripts/verify-cluster.sh": "cannot parse",
   "packages/pi-envoy/scripts/grant-rig/setup.sh": "profiles/l12rig",
@@ -35,10 +36,12 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "scripts/e2e/controller-start-tmux.sh": "a loop variable",
   "scripts/e2e/lib/check-model-route.sh": "$control",
   "scripts/e2e/lib/install-model-gateway.sh": "realpath -m",
+  "scripts/e2e/lib/install-plugin-profile.sh": "realpath -m",
   "scripts/e2e/stage2-tmux-supervision.sh": "realpath -m",
   "scripts/e2e/stage3-4b13b-acceptance.sh": "prod_header_file",
   "scripts/e2e/stage3-devbox-workflow.sh": "prod_header_file",
   "scripts/e2e/stage4b-sandbox-tree.sh": "$p",
+  "scripts/sync-envoy-host.sh": "$1",
 };
 
 beforeAll(() => {
@@ -187,6 +190,29 @@ describe("resolution", () => {
     expect(bash("echo hi >> ~/.bashrc")).toBeUndefined();
     expect(bash("echo hi > ~/new-file-that-does-not-exist")).toBeUndefined();
   });
+
+  test("follows xargs shell text and multicall applets", () => {
+    for (const command of [
+      "echo x | xargs sh -c 'rm -rf \"$HOME\"'",
+      "echo x | xargs -I{} bash -c 'rm -rf $HOME/.ssh'",
+      "busybox rm -rf ~",
+      "toybox rm -rf ~",
+    ]) {
+      expect(bash(command), command).toContain(home);
+    }
+  });
+
+  test("refuses destructive synchronization and archive destinations", () => {
+    for (const command of [
+      'rsync -a --delete "$LEGION_WORKSPACE/build/" "$HOME/"',
+      'tar -xf fixture.tar -C "$HOME"',
+      'unzip -o fixture.zip -d "$HOME"',
+    ]) {
+      const reason = bash(command);
+      expect(reason, command).toBeDefined();
+      expect(reason ?? "", command).toContain(home);
+    }
+  });
   test("follows find -exec through a shell and execution wrappers", () => {
     for (const command of [
       "find ~ -type d -exec sh -c 'rm -rf \"$1\"' _ {} \\;",
@@ -206,6 +232,15 @@ describe("resolution", () => {
     expect(bash(`rm -rf {a,b,c,d,e,f,g,h,~}{/x,/y,/z,/w,/v,/u,/t,/s}`)).toContain(
       "more than 64 alternatives"
     );
+  });
+
+  test("refuses a bounded command walk before nested loops block the pane", () => {
+    const words = Array.from({ length: 16 }, (_, index) => String(index)).join(" ");
+    let command = ":";
+    for (const name of ["a", "b", "c", "d"]) {
+      command = `for ${name} in ${words}; do ${command}; done`;
+    }
+    expect(bash(`${command}; rm -rf "$HOME"`)).toContain("walk limit");
   });
 
   test("leaves ordinary work alone", () => {
@@ -284,6 +319,17 @@ describe("scripts a command runs", () => {
     const reason = bash(`bash ${outer}`);
     expect(reason).toContain(`line 4 of ${outer}`);
     expect(reason).toContain(`line 3 of ${inner}`);
+  });
+
+  test("attributes a sourced function body to its defining file", () => {
+    const sourced = script(
+      "source-function-defining-file.sh",
+      'cleanup() {\n  rm -rf "$HOME"\n}\n'
+    );
+    const parent = script("source-function-caller.sh", `. ${sourced}\ncleanup\n`);
+    const reason = bash(`bash ${parent}`);
+    expect(reason).toContain(`line 2 of ${sourced}`);
+    expect(reason).not.toContain(`line 2 of ${parent}`);
   });
 
   test("uses a shell function's echoed path in a command substitution", () => {
@@ -384,10 +430,14 @@ describe("scripts a command runs", () => {
           return reason === undefined ? [] : [[file, reason]];
         })
     );
+    const expected = Object.fromEntries(
+      Object.entries(EXPECTED_SCRIPT_REFUSALS).map(([file, reason]) => [
+        file,
+        expect.stringContaining(reason),
+      ])
+    );
+    expect(refusals).toMatchObject(expected);
     expect(Object.keys(refusals).sort()).toEqual(Object.keys(EXPECTED_SCRIPT_REFUSALS).sort());
-    for (const [file, reason] of Object.entries(EXPECTED_SCRIPT_REFUSALS)) {
-      expect(refusals[file], file).toContain(reason);
-    }
   });
 
   test("refuses the incident's shape: a probe script whose last line removes its work dir and $HOME", () => {
@@ -453,6 +503,16 @@ describe("scripts a command runs", () => {
     expect(bash(`bun run ${js}`)).toContain(home);
     expect(bash(`node ${js}`)).toContain(home);
     expect(bash(`python3 -c 'import shutil; shutil.rmtree("${home}")'`)).toContain(home);
+    expect(
+      bash(
+        "python3 -c 'import os, subprocess\nsuffix = unknown()\nsubprocess.run(f\"rm -rf {os.environ['\"'\"'HOME'\"'\"']}/{suffix}\", shell=True)'"
+      )
+    ).toContain(home);
+    expect(
+      bash(
+        'node -e \'const suffix = unknown(); require("child_process").execSync("rm -rf " + process.env.HOME + "/" + suffix)\''
+      )
+    ).toContain(home);
     expect(bash("bun test && bun run build")).toBeUndefined();
     // `python3 -` reads its program from the heredoc.
     expect(bash(`python3 - <<'PY'\nimport shutil\nshutil.rmtree("${home}")\nPY`)).toContain(home);
@@ -560,6 +620,14 @@ describe("signals", () => {
       const foreignTmux = bash("tmux -L scratch new-session -d; tmux -L scratch kill-server");
       expect(foreignTmux).toBeDefined();
       expect(foreignTmux ?? "").toContain("needs a socket");
+      for (const command of [
+        "tmux kill-serv",
+        "tmux killw",
+        "tmux killp",
+        "tmux respawn-pane -k",
+      ]) {
+        expect(bash(command), command).toContain("needs a socket");
+      }
       expect(bash(`echo ${process.ppid} | xargs kill`)).toContain("standard input");
       const pidFile = path.join(scratch, "mine", "child.pid");
       expect(

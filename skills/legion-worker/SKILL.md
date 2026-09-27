@@ -149,13 +149,13 @@ The extension refuses, before it runs, a `bash` command, `eval` code, or `hub` p
 redirection or `tee`, or `chmod -R`/`chown -R` anything outside `$LEGION_WORKSPACE` and any
 directory below `/tmp` except `/tmp` itself, a glob over it, and its tmux and ssh socket
 directories. It cannot tell which allowed `/tmp` directory belongs to your pane. It follows
-`$HOME`, `~`, variables, `cd`, and the scripts a command runs, and it refuses a target it cannot
-resolve (a variable read from input, a command's output), so name paths literally or under
-`$LEGION_WORKSPACE` or `$(mktemp -d)`. `pkill` and `killall` are refused, and `kill` only reaches
-a process you started (a descendant of your Oh My Pi process): stop your own long-running processes
-through the hub tool. The refusal names the target and the rule; rewrite the command to stay inside
-your roots, never around the guard. What it cannot read, a compiled program or code whose paths are
-only known at run time, is still yours to keep inside the workspace.
+`$HOME`, `~`, variables, `cd`, and the scripts a command runs. A target with no proven path prefix
+is refused; an unknown trailing component under a prefix already proven inside your workspace or
+permitted `/tmp` remains allowed. `pkill` and `killall` are refused, and `kill` only reaches a
+process you started (a descendant of your Oh My Pi process): stop your own long-running processes
+through the hub tool. The refusal names the target and the rule; do not rewrite a script just to
+silence it. This is a mistake-guard rather than a sandbox. What it cannot read, a compiled program
+or code whose paths are only known at run time, is still yours to keep inside the workspace.
 
 ## Phase work
 

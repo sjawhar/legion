@@ -997,15 +997,14 @@ export default function legionExtension(pi: PiApi): void {
     // pane guard are therefore judged from the pane's environment ahead of the subagent exemption
     // below -- the one gate that reaches a subagent -- and before any grant is minted. Classified
     // once per instance, on the first call: a throw for a malformed LEGION_ROLE stays inside the
-    // handler, never at load. The workspace is LEGION_WORKSPACE, which both daemons set on a phase
-    // worker's pane and the Go daemon on a root's; the TypeScript daemon's root, whose bash is
-    // already one `legion` command, has only the /tmp scratch root.
+    // Both daemons put a phase worker in LEGION_WORKSPACE. The TypeScript daemon names a root
+    // architect's workspace LEGION_ROOT_WORKSPACE, while the Go daemon uses LEGION_WORKSPACE.
     if (paneRules === undefined) {
       const { kind } = classifySession(process.env);
       paneRules = PANE_RULES[kind] ?? [];
       if (kind === "phase-worker" || kind === "root-architect") {
         paneGuard = createPaneGuard({
-          workspace: process.env.LEGION_WORKSPACE,
+          workspace: process.env.LEGION_WORKSPACE ?? process.env.LEGION_ROOT_WORKSPACE,
           ompPid: process.pid,
         });
       }

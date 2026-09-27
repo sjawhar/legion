@@ -80,6 +80,7 @@ interface Ctx {
   readonly env: NodeJS.ProcessEnv;
   readonly ompPid: number;
   readonly parentOf: (pid: number) => number | undefined;
+  readonly steps: { count: number };
 }
 
 interface State {
@@ -118,6 +119,7 @@ interface State {
 interface FunctionDefinition {
   readonly body: Node;
   readonly source: string;
+  readonly file: string | undefined;
 }
 
 interface Trap {
@@ -147,6 +149,7 @@ interface Site {
 }
 
 const MAX_DEPTH = 8;
+const MAX_WALK_STEPS = 10_000;
 const MAX_ALTERNATIVES = 64;
 const MAX_SCRIPT_BYTES = 1024 * 1024;
 const FRESH_TEMP_NAME = "tmp.XXXXXXXXXX";
@@ -319,7 +322,7 @@ function judgePath(
     .map((p) => p.text)
     .join("");
   const slash = prefix.lastIndexOf("/");
-  if (exp.some((p) => p.lenient)) return { ok: true };
+  if (exp.some((p) => p.lenient) && prefix === "") return { ok: true };
   if (piece.kind === "unknown" && prefix === "") {
     return { ok: false, resolution: piece.why ?? "a value the guard cannot know" };
   }
@@ -941,6 +944,14 @@ function outputChanged(
 }
 
 function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
+  if (++ctx.steps.count > MAX_WALK_STEPS) {
+    const site = siteOf(node, st);
+    throw new Refusal(
+      site.snippet,
+      site.line,
+      `the guard reached its walk limit of ${MAX_WALK_STEPS} nodes; run a smaller script`
+    );
+  }
   switch (node.type) {
     case "Statement": {
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
@@ -1068,7 +1079,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       return;
     }
     case "Function":
-      st.functions.set(node.name.value, { body: node.body, source: st.source });
+      st.functions.set(node.name.value, { body: node.body, source: st.source, file: st.script });
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
       return;
     case "Coproc": {
@@ -1327,6 +1338,7 @@ function unwrap(
       }
       return rest.slice(i);
     };
+    if ((base === "busybox" || base === "toybox") && rest[0] !== undefined) list = rest;
     if (base === "sudo" || base === "doas") list = skip("ughpCDrtUT", ["--user", "--group"]);
     else if (base === "nice") list = skip("n", ["--adjustment"]);
     else if (["nohup", "setsid", "builtin", "time"].includes(base)) list = skip("");
@@ -1422,9 +1434,15 @@ function runFunction(
     ...clone(outer),
     positional: args.map((arg) => arg.exp),
     source: definition.source,
+    script: definition.file ?? outer.script,
   };
   child.runningFunctions.add(name);
-  walkNode(definition.body, child, ctx, false);
+  try {
+    walkNode(definition.body, child, ctx, false);
+  } catch (error) {
+    if (!(error instanceof Refusal)) throw error;
+    throw new Refusal(error.snippet, error.line, error.detail, definition.file ?? error.file);
+  }
   outer.vars = child.vars;
   outer.exported = child.exported;
   outer.arrays.clear();
@@ -1449,10 +1467,16 @@ function functionOutput(
     ...clone(outer),
     positional: args.map((arg) => arg.exp),
     source: definition.source,
+    script: definition.file ?? outer.script,
     output: [],
   };
   child.runningFunctions.add(name);
-  walkNode(definition.body, child, ctx, false);
+  try {
+    walkNode(definition.body, child, ctx, false);
+  } catch (error) {
+    if (!(error instanceof Refusal)) throw error;
+    throw new Refusal(error.snippet, error.line, error.detail, definition.file ?? error.file);
+  }
   return child.output?.length === 0 ? undefined : child.output;
 }
 
@@ -1621,6 +1645,31 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       checkTargets("mv", "move", targets, false, st, ctx, site);
       return;
     }
+
+    case "rsync": {
+      const destination = operands(rest, "").operands.at(-1);
+      if (destination !== undefined) {
+        checkTargets("rsync", "synchronize and delete into", [destination], true, st, ctx, site);
+      }
+      return;
+    }
+    case "tar":
+    case "unzip": {
+      const targetDirectories: Arg[] = [];
+      const short = base === "tar" ? "-C" : "-d";
+      const long = base === "tar" ? "--directory" : "--destination";
+      for (const [index, arg] of rest.entries()) {
+        const text = literalText(arg.exp);
+        if (text === short || text === long) {
+          const target = rest[index + 1];
+          if (target !== undefined) targetDirectories.push(target);
+        } else if (text?.startsWith(`${long}=`)) {
+          targetDirectories.push({ text: arg.text, exp: [literal(text.slice(long.length + 1))] });
+        }
+      }
+      checkTargets(base, "extract and overwrite in", targetDirectories, true, st, ctx, site);
+      return;
+    }
     case "shred":
       checkTargets(
         "shred",
@@ -1710,9 +1759,27 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           socketIsPath = true;
         }
       }
-      const killing = rest.find((arg) =>
-        /^kill-(?:server|session|window|pane)$/.test(literalText(arg.exp) ?? "")
-      );
+      const killCommands = ["kill-server", "kill-session", "kill-window", "kill-pane"];
+      const respawnCommands = ["respawn-pane", "respawn-window"];
+      const respawning =
+        rest.some((arg) => {
+          const text = literalText(arg.exp);
+          if (text === undefined) return false;
+          const compact = text.replace("-", "");
+          return (
+            respawnCommands.filter((command) => command.replace("-", "").startsWith(compact))
+              .length === 1
+          );
+        }) && rest.some((arg) => literalText(arg.exp) === "-k");
+      const killing = rest.find((arg) => {
+        const text = literalText(arg.exp);
+        if (text === undefined) return false;
+        const compact = text.replace("-", "");
+        return (
+          killCommands.filter((command) => command.replace("-", "").startsWith(compact)).length ===
+            1 || respawning
+        );
+      });
       if (killing === undefined) return;
       let resolvedSocket: Expansion | undefined;
       if (socketIsPath) {
@@ -1945,7 +2012,13 @@ function checkXargs(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void
     "--eof",
     "--arg-file",
   ]);
-  const inner = unwrap(found.operands, st, ctx, site).argv;
+  const first = found.operands[0];
+  const inner = unwrap(
+    first === undefined ? [] : list.slice(list.indexOf(first)),
+    st,
+    ctx,
+    site
+  ).argv;
   const program = path.basename(literalText(inner[0]?.exp) ?? "");
   if (FILE_COMMANDS.has(program) || SIGNAL_COMMANDS.has(program)) {
     throw new Refusal(
@@ -1955,8 +2028,21 @@ function checkXargs(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void
         `the paths or pids on the command line (or use \`find <dir> -delete\`) so it can check them`
     );
   }
+  const invocation: Invocation = {
+    args: inner,
+    site,
+    overlay: new Map(),
+    redirects: [],
+    pipeIn: false,
+  };
+  if (SHELLS.has(program)) {
+    runShell(inner.slice(1), invocation, st, ctx);
+    return;
+  }
+  const interpreter = interpreterLanguage(program);
+  if (interpreter !== undefined)
+    runInterpreter(program, interpreter, inner.slice(1), invocation, st, ctx);
 }
-
 function checkKill(list: readonly Arg[], ctx: Ctx, site: Site): void {
   const words = list.map((arg) => literalText(arg.exp));
   if (
@@ -2524,6 +2610,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     env,
     ompPid: options.ompPid,
     parentOf: options.parentOf ?? procParent,
+    steps: { count: 0 },
   });
   const initial = (cwd: string, source: string): State => ({
     vars: new Map(),
