@@ -73,20 +73,51 @@ export interface TmuxTestServer {
   teardown(): Promise<void>;
 }
 
+/** Reaps this test's private tmux server the moment this process dies, even when that death is a
+ * SIGKILL past every `try`/`finally` and `afterAll` -- the one path where a killed `bun test`
+ * never runs its own teardown, leaving the pane's `legion worker-shim` (and the OMP stand-in
+ * behind it) to keep the private server alive forever. `setsid` is not asked to `--fork`: a
+ * process `Bun.spawn` opens is never its own process-group leader, so `setsid` calls `setsid()`
+ * in place rather than forking, and the pid this function returns is the actual watchdog loop,
+ * now in a session and process group of its own -- a SIGKILL to this test process's own group (or
+ * process tree) cannot reach it. The loop polls only this process's own liveness -- there is no
+ * server yet to check at arm time (`createTmuxTestServer`'s own doc comment: "There is no server
+ * until the test's first tmux command"), so a session-existence check here would exit the watchdog
+ * immediately, before the test ever creates one -- and `kill-server` is idempotent (tmux reports
+ * an already-exited or never-created server without creating one), so running it unconditionally
+ * once this process dies is safe whether or not a server ever existed. `teardown` below kills the
+ * watchdog outright once its own `kill-server` returns, so the watchdog never outlives both the
+ * test and the server it guards. */
+function armOrphanWatchdog(session: string) {
+  const parentPid = process.pid;
+  const script = [
+    `while kill -0 ${parentPid} 2>/dev/null; do sleep 3; done`,
+    `tmux -L ${session} kill-server 2>/dev/null`,
+  ].join("\n");
+  const watchdog = Bun.spawn(["setsid", "sh", "-c", script], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  watchdog.unref();
+  return watchdog;
+}
+
 /** Names one real-tmux test's private server/session from a UUID rather than a fixed label.
- * There is no server until the test's first tmux command; teardown kills only the named session,
- * never every session on its server. */
+ * There is no server until the test's first tmux command; teardown's `kill-server` addresses only
+ * this run's own minted socket, never another test's, and a watchdog reaps that same private
+ * server if this process dies before teardown runs (see `armOrphanWatchdog`). */
 export function createTmuxTestServer(label: string): TmuxTestServer {
   const project = `${label}${randomUUID().replaceAll("-", "")}`;
   const session = `legion-${project}`;
   const argv = (...rest: string[]) => ["tmux", "-L", session, ...rest];
+  const watchdog = armOrphanWatchdog(session);
   return {
     project,
     session,
     socket: session,
     argv,
     teardown: async () => {
-      await run(argv("kill-session", "-t", session));
+      await run(argv("kill-server"));
+      watchdog.kill();
     },
   };
 }

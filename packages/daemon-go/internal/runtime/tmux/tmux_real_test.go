@@ -88,6 +88,35 @@ func randomHex(t *testing.T, n int) string {
 	return hex.EncodeToString(raw)
 }
 
+// armOrphanWatchdog reaps this rig's private tmux server if the test binary itself dies before
+// t.Cleanup runs -- a SIGKILL past every deferred cleanup is exactly how an agent's tool timeout
+// ends a `go test` run, and the pane's `legion worker-shim` (and the stand-in OMP behind it) would
+// otherwise keep the server alive forever. setsid is not asked to --fork: a process os/exec starts
+// is never its own process-group leader, so setsid calls setsid() in place rather than forking,
+// and the returned Cmd's pid is the actual watchdog loop, now in a session and process group of
+// its own that a SIGKILL to this test binary's own process group cannot reach. The loop polls this
+// process's own liveness and the server's, exiting the moment either says there is nothing left to
+// watch; newRig's Cleanup kills it outright once its own kill-server returns, so the watchdog
+// never outlives both the test and the server it guards.
+func armOrphanWatchdog(t *testing.T, session string, env []string) *exec.Cmd {
+	t.Helper()
+	script := fmt.Sprintf(
+		"while kill -0 %d 2>/dev/null; do\n"+
+			"  tmux -L %s has-session -t %s 2>/dev/null || exit 0\n"+
+			"  sleep 3\n"+
+			"done\n"+
+			"tmux -L %s kill-server 2>/dev/null",
+		os.Getpid(), session, session, session,
+	)
+	cmd := exec.Command("setsid", "sh", "-c", script)
+	cmd.Env = env
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("arming the orphan watchdog: %v", err)
+	}
+	go func() { _ = cmd.Wait() }()
+	return cmd
+}
+
 // bootClaim is what a boot token stands for.
 type bootClaim struct {
 	token      claim.Token
@@ -433,11 +462,13 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 	}
 	r.environ = append(r.environ, "TMUX_TMPDIR="+r.tmuxDir)
 	r.project = "t" + randomHex(t, 4)
+	watchdog := armOrphanWatchdog(t, "legion-"+r.project, r.environ)
 	r.daemon = newFakeDaemon()
 	r.stream = newStreamStub(t, filepath.Join(dir, "stream.sock"), r.daemon)
 	r.rt = r.newRuntime(adjust...)
 	t.Cleanup(func() {
 		_, _ = r.tmux("kill-server")
+		_ = watchdog.Process.Kill()
 		r.stream.listener.Close()
 		r.daemon.server.Close()
 		os.RemoveAll(dir)
