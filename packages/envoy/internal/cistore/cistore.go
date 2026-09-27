@@ -697,7 +697,8 @@ func (s *Store) markOverflowed(key string) error {
 }
 
 // settlementReady reports whether st can settle: every check and suite it holds is terminal, one
-// check has a run id, and the record holds the whole head, which an overflowed one does not.
+// check has a run id, and the record holds every check of its commit, which an overflowed one does
+// not.
 func settlementReady(st State) bool {
 	if st.Overflowed || !terminal(st) {
 		return false

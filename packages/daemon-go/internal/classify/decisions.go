@@ -35,22 +35,29 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 // each changed only .legion/ and said which head they replaced (a handoff push can carry GitHub's
 // skip-checks trailer and start no CI of its own); otherwise none.
 func HeadVerdict(pr record.PullRequest) string {
-	if pr.CheckedHead == "" || (pr.CheckedHead != pr.HeadSHA && !carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead)) {
+	if pr.CheckedHead == "" || !carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead) {
 		return ""
 	}
 	return pr.Verdict
 }
 
-// SettlementFor says whether a CI settlement of head may stand for the pull request's current
-// head, and returns the pull request ready to apply it. It may when head is the current head, or a
-// head the current one replaced through pushes that each changed only .legion/, unless a recorded
-// verdict already stands for the current head from a head nearer it on that path, which outranks
-// it.
+// SettlementFor says whether a CI settlement of head, recording verdict, may stand for the pull
+// request's current head, and returns the pull request ready to apply it. It may when head is the
+// current head, or a head the current one replaced through pushes that each changed only .legion/,
+// unless a recorded verdict already stands for the current head from a head nearer it on that
+// path, which outranks it.
 // Every other settlement - an earlier code head's, a head a force push left - stands for nothing.
+// An absence of information never displaces information: a settlement that records no verdict
+// (its checks ended cancelled with none failed) is refused while a verdict stands, whichever head
+// it is for, since "some runs were cancelled" is not a result, and letting it overwrite one would
+// make the outcome depend on the order the two arrive in.
 // A settlement of a head other than the recorded one starts that head's fence afresh, since
 // check runs, generations and snapshots are each head's own.
-func SettlementFor(pr record.PullRequest, head string) (record.PullRequest, bool) {
-	if head != pr.HeadSHA && !carriedBack(pr.Pushes, pr.HeadSHA, head) {
+func SettlementFor(pr record.PullRequest, head, verdict string) (record.PullRequest, bool) {
+	if !carriedBack(pr.Pushes, pr.HeadSHA, head) {
+		return pr, false
+	}
+	if verdict == "" && HeadVerdict(pr) != "" {
 		return pr, false
 	}
 	if head == pr.CheckedHead {
@@ -223,13 +230,16 @@ func ApprovalStands(pr record.PullRequest, reviewed string) bool {
 			return false
 		}
 	}
-	return pr.HeadSHA == reviewed || carriedBack(pr.Pushes, pr.HeadSHA, reviewed)
+	return carriedBack(pr.Pushes, pr.HeadSHA, reviewed)
 }
 
-// carriedBack is whether walking back from head through pushes that carry an approval across
-// (carriesApproval) reaches earlier: every push between them changed only .legion/, so the two
-// heads' code is the same.
+// carriedBack is whether earlier is head, or walking back from head through pushes that carry an
+// approval across (carriesApproval) reaches it: every push between them changed only .legion/, so
+// the two heads' code is the same.
 func carriedBack(pushes []record.ClassifiedPush, head, earlier string) bool {
+	if head == earlier {
+		return true
+	}
 	reached := map[string]bool{head: true}
 	for frontier := []string{head}; len(frontier) > 0; {
 		current := frontier[0]
@@ -253,7 +263,7 @@ func carriedBack(pushes []record.ClassifiedPush, head, earlier string) bool {
 // at an exhausted count is the fix that worked. A zero BlockedAttempts means no count has been
 // reported, because fix attempts begin at one before they can exhaust a positive cap.
 func BlockFixAttempt(pr record.PullRequest, cap int) (record.PullRequest, bool) {
-	if cap <= 0 || pr.Verdict != "red" || pr.FixAttempts < cap || pr.BlockedAttempts == pr.FixAttempts {
+	if cap <= 0 || HeadVerdict(pr) != "red" || pr.FixAttempts < cap || pr.BlockedAttempts == pr.FixAttempts {
 		return pr, false
 	}
 	pr.BlockedAttempts = pr.FixAttempts

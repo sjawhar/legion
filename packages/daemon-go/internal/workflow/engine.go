@@ -448,14 +448,11 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	head := fact.HeadSHA
-	if head == "" {
-		head = pr.HeadSHA
-	}
 	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
-	// that stands for the head can be of the code head it replaced, arriving after it.
+	// that stands for the head can be of the code head it replaced, arriving after it. A
+	// settlement is for the commit it names, never the head by default.
 	var stands bool
-	if *pr, stands = classify.SettlementFor(*pr, head); !stands {
+	if *pr, stands = classify.SettlementFor(*pr, fact.HeadSHA, fact.Verdict); !stands {
 		return intake.Result{}, nil
 	}
 	var applied bool

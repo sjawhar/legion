@@ -101,7 +101,7 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 		}
 		if err := pub.Publish(env); err != nil {
 			if errors.Is(err, bus.ErrRefused) {
-				// NATS refuses this settlement on every tick, so the head never settles from here: its
+				// NATS refuses this settlement on every tick, so the commit never settles from here: its
 				// record is marked overflowed, as one past its bounds is, and the refusal logged once.
 				logger.Error("checks settlement refused",
 					slog.String("error", err.Error()),

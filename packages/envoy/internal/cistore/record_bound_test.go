@@ -16,16 +16,16 @@ import (
 
 const natsDefaultMaxPayload = 1 << 20
 
-// GitHub allows 50,000 check runs in one check suite, so a head's record, which holds the latest run
+// GitHub allows 50,000 check runs in one check suite, so a commit's record, which holds the latest run
 // of every check name GitHub reports on it, has no bound of GitHub's own below NATS's max payload,
 // and neither has the settlement published from it. The store bounds both: a check that would take
 // the record past maxRecordBytes, or its settlement past maxSettlementBytes, is refused with
 // bus.ErrTooLarge, which the webhook answers as a refusal, and the record says it overflowed, so the
-// listener never settles a head it could not record whole. Which bound a head meets first depends on
+// listener never settles a commit it could not record whole. Which bound a commit meets first depends on
 // the names: a `<` costs 6 bytes in the record, twice, and 7 in the settlement, three times over for
 // a failing check; a `"` costs 2 in the record and 4 in the settlement, since the settlement is a JSON
 // string inside the envelope's JSON.
-func TestAHeadRecordRefusesACheckPastItsBoundsAndNeverSettles(t *testing.T) {
+func TestACommitRecordRefusesACheckPastItsBoundsAndNeverSettles(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		char       string
@@ -92,7 +92,7 @@ func TestAHeadRecordRefusesACheckPastItsBoundsAndNeverSettles(t *testing.T) {
 			waitCacheChecks(t, store, owner, repo, number, sha, recorded)
 			runSummaryTick(store, pub, 0, logging.New("test"))
 			if pub.count() != 0 {
-				t.Fatalf("published %d settlements for a head whose record overflowed, want none", pub.count())
+				t.Fatalf("published %d settlements for a commit whose record overflowed, want none", pub.count())
 			}
 		})
 	}
@@ -118,7 +118,7 @@ func (p *refusingPub) count() int {
 }
 
 // NATS refuses a settlement the same way on every tick, so a refused one is terminal: the record is
-// marked overflowed and the head is not published again, where a publish that merely failed is
+// marked overflowed and the commit is not published again, where a publish that merely failed is
 // retried on the next tick. A server whose max payload is set below the store's bound refuses one
 // the store accepted.
 func TestASettlementNATSRefusesIsNotPublishedAgain(t *testing.T) {

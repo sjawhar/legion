@@ -182,6 +182,13 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "a code push delivered after the branch was reset to the approved head, then the reviewer's handoff push", steps: []string{"approve head", "sync", "sync head-3", "push code", "push handoff forced from=head-3 head", "sync head", "green head", "complete", "push handoff from=head head-4", "sync head-4", "green head-4"}, want: phase.Retro},
 		// A handoff push can carry GitHub's skip-checks trailer and start no CI, so the code head's
 		// settlement stands for the handoff head that replaced it, whenever it arrives.
+		// An absence of information never displaces information: a settlement whose checks all
+		// ended cancelled records no verdict, and the code head's green stands for the handoff head
+		// whether the cancelled one is the handoff head's own run, a re-settlement of the code head,
+		// or arrives first.
+		{name: "the handoff head's own run cancelled after the code head's green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled", "complete"}, want: phase.Retro, unsettled: true},
+		{name: "a cancelled re-settlement of the code head after its green", steps: []string{"green head", "approve head", "sync", "push handoff", "cancelled head", "complete"}, want: phase.Retro, unsettled: true},
+		{name: "the handoff head's own run cancelled before the code head's green", steps: []string{"approve head", "sync", "push handoff", "cancelled", "green head", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle after the reviewer's handoff head", steps: []string{"approve head", "sync", "push handoff", "green head", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push last", steps: []string{"green head", "approve head", "sync", "push handoff", "complete"}, want: phase.Retro, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push first", steps: []string{"green head", "approve head", "push handoff", "sync", "complete"}, want: phase.Retro, unsettled: true},
@@ -280,6 +287,10 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 				case "red":
 					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
 						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 3}}, Generation: 2, Snapshot: "red-" + head, Verdict: "red", Failing: []string{"ci"}}
+				case "cancelled":
+					// Every check ended cancelled and none failed: the listener's settlement records no verdict.
+					fact = intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
+						CheckRuns: []record.AttemptRun{{Name: "ci", ID: 4}}, Generation: 3, Snapshot: "cancelled-" + head, Verdict: "", Failing: []string{}}
 				case "complete":
 					fact = intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim",
 						Summary: "reviewed", Commit: "review-1"}
