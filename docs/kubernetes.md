@@ -414,7 +414,12 @@ mounts: in-cluster, put it in a Secret of its own, mounted into the daemon's pod
 `defaultMode: 0440` (0400 with no `fsGroup` for a daemon running as root, as above; on a host, a
 0600 file the daemon's uid owns), and name that file in
 `nats_daemon_nkey_seed_file`. No launch carries it, and a tmux pane's environment drops its
-variables with every other credential-shaped name. Every command the daemon itself starts (git and
+variables with every other credential-shaped name. That keeps the seed out of what the daemon
+hands a pane, not out of a pane's reach: on the tmux runtime every pane runs as the daemon's own
+uid, so a pane process can read the daemon's seed file, or `/proc/<daemon pid>/environ` when the
+raw `NATS_DAEMON_NKEY_SEED` is used. The daemon/pane split limits what a leaked pane seed can do,
+not what a pane process can do; the process boundary holds only when the daemon runs apart from
+its agents, as a user or in a pod of its own (the Kubernetes runtime). Every command the daemon itself starts (git and
 jj in a managed repository's checkout, `mise where`, a key command) runs without
 `NATS_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED`, so a seed passed by value never reaches a repository's
 tooling; still, prefer the file forms (`nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, or the
@@ -436,8 +441,13 @@ Rollout order for the server's `legion-daemon` user (AGENTC-759): the server adm
 every daemon gets it and restarts, and each boot line must read `paneUser=false`; only then is the
 `legion-pane` seed written. A clean boot line proves the user, not every grant: the check before
 the pane seed is written also has each daemon consume a Dispatch and a GitHub event with no error
-line, and, for a TypeScript daemon, send a control directive, since its `legion.ctl` publish is
-refused only when it first sends one (AGENTS.md). `legion-pane` is never granted the daemon's
+line, and searches each daemon's log for `NATS refused the daemon` (either daemon's line), since a missing
+grant on the exceptions lane (`notifications.envoy.exceptions.notifications.role.>`) still boots
+healthy and consumes both events, and that error line is its only sign. A TypeScript daemon reads a
+seed of its own only with #1494 (the TypeScript daemon's seed, `packages/daemon/src/daemon/AGENTS.md`);
+until that lands it connects as the pane seed, so its step waits for #1494. With it, the check also
+has it send a control directive, since its `legion.ctl` publish is refused only when it first sends
+one (`packages/daemon/src/daemon/AGENTS.md`). `legion-pane` is never granted the daemon's
 subjects above. Reversed, a daemon holding only the `legion-pane` seed connects as `legion-pane`,
 and each refused subject logs the error line above (a refused consumer or subscription never
 delivers).
