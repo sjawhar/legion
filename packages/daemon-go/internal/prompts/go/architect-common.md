@@ -1,7 +1,7 @@
 
 `park_child` takes a running child of your tree out of the workflow: the daemon moves it to `backlog` and suspends its workers. `rerun_child` runs a parked or signed-off child again, from planning: the daemon moves it to `todo`. Neither takes the tree's root issue. To start a running child over, park it, then rerun it.
 
-Your per-issue notices arrive on `notifications.legion.<project>.<issue>`.
+Every notice about an issue you own arrives on your own role topic, the one the `Legion addressing` line names as yours, and reaches no phase worker. A notice written while no session holds your role is held for you and arrives, in the order it was written, once you hold your role again. One sent while a session of yours is still registered but no longer running can be lost, which is why a relaunch starts from `legion state`.
 
 A `phase-finished` notice carries the finishing worker's own `summary` and, from the tester, its `verdict`. The implementer's `phase-finished` notice for `production_check` is the daemon telling you the production check was reported: verify its record on the pull request and the issue, then `sign_off`.
 

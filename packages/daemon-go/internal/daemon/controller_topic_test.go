@@ -22,12 +22,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
-// A planner whose launches run out holds its issue: the architect's issue topic takes the held and
+// A planner whose launches run out holds its issue: the architect's role topic takes the held and
 // worker-died notices once each, and the controller's topic takes the held one from an outbox row
 // of its own. Here the listener refuses the controller's topic twice first, as a stream outage
 // answers: only the controller's row retries, so the architect is sent the held notice once however
 // long the controller's topic keeps failing, and every try carries the one key the controller's
-// subscriber dedupes on. The controller reads the notice the issue topic carries, without the row's
+// subscriber dedupes on. The controller reads the notice the architect is sent, without the row's
 // routing.
 func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitects(t *testing.T) {
 	listener := newNoticeListener()
@@ -47,7 +47,11 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 		t.Fatal(err)
 	}
 	issue := cfg.Project + "-1"
-	issueTopic, controllerTopic := notify.Topic(token, issue), notify.ControllerTopic(token)
+	architect, err := claim.NewToken(token, issue, claim.RoleArchitect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	architectTopic, controllerTopic := roleTopicPrefix+string(architect), notify.ControllerTopic(token)
 	listener.refuseFirst(controllerTopic, 2)
 	pool, err := pgxpool.New(context.Background(), cfg.PostgresDSN)
 	if err != nil {
@@ -70,9 +74,9 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 		}
 		return rows == 0 && len(listener.acceptedOn(controllerTopic)) == 1
 	})
-	onIssue := listener.acceptedOn(issueTopic)
-	if len(onIssue) != 2 || onIssue[0].Message != "held on "+issue || onIssue[1].Message != "worker-died on "+issue {
-		t.Fatalf("the issue topic took %+v, want held then worker-died, once each", onIssue)
+	onArchitect := listener.acceptedOn(architectTopic)
+	if len(onArchitect) != 2 || onArchitect[0].Message != "held on "+issue || onArchitect[1].Message != "worker-died on "+issue {
+		t.Fatalf("the architect's role topic took %+v, want held then worker-died, once each", onArchitect)
 	}
 	refused, taken := listener.refusedOn(controllerTopic), listener.acceptedOn(controllerTopic)[0]
 	if len(refused) != 2 {

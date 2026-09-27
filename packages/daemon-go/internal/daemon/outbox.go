@@ -127,9 +127,15 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	}
 	for _, row := range rows {
 		if err := r.execute(ctx, row); err != nil {
-			// A task meeting the claim's own pending delivery is a wait, not a failure: the row runs
-			// again on the same backoff once that delivery's turn is over.
-			if errors.Is(err, supervise.ErrDeliveryPending) {
+			if errors.Is(err, errNoticeWaits) {
+				// A held notice is a wait for its architect, logged once for the row rather than on
+				// every attempt of its backoff.
+				if row.Attempts == 0 {
+					r.log.Info("outbox notice waits for its architect", "row", row.ID, "issue", row.Issue, "error", err)
+				}
+			} else if errors.Is(err, supervise.ErrDeliveryPending) {
+				// A task meeting the claim's own pending delivery is a wait, not a failure: the row
+				// runs again on the same backoff once that delivery's turn is over.
 				level := slog.LevelDebug
 				if row.Attempts >= pendingWaitWarnAttempts {
 					level = slog.LevelWarn
@@ -270,32 +276,56 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 	return nil
 }
 
+// notice publishes a notice row to the architect that owns its issue, on that architect's own role
+// topic, and to nothing else. Every notice kind is for an architect, and every issue topic is a
+// subject that issue's phase workers subscribe to (packages/pi-envoy/src/legion/go-bootstrap.ts),
+// so no issue topic carries one. The owner, the earlier notices it waits behind, and whether its
+// tree lingers are read from one snapshot of the tree (notice_routing.go). A notice waits
+// (errNoticeWaits) behind an earlier notice of its tree that is held for the same architect, so
+// each architect is told in the order the notices were written. A role topic with no live holder
+// refuses the publish (notify.ErrNoHolder): while the owning architect's claim can hold its role
+// again — relaunching, or a root the operator suspended and can resume — the row is held for it;
+// once nobody will hold that role for this notice — the claim has failed or retired, or its tree
+// lingers or has closed — the row finishes undelivered with one log line. So does a row whose
+// architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
+// notice either.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
 	}
-	issue, err := r.issue(ctx, row.Issue)
+	if r.supervisor == nil {
+		return errors.New("notice executor has no claim supervisor")
+	}
+	issue, tree, err := r.readNoticeTree(ctx, row)
+	if errors.Is(err, errNoticeUnroutable) {
+		r.log.Error("outbox notice finished undelivered: it has no architect", "row", row.ID, "kind", payload.Kind, "issue", row.Issue, "error", err)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	if issue.Tree == "" {
-		return fmt.Errorf("notice row %d issue %s has no tree root", row.ID, row.Issue)
+	runs := func(token claim.Token) bool { return claimRuns(r.claimState(token)) }
+	architect, err := owningArchitect(tree.project, tree.issues, issue, payload.Kind, runs)
+	if err != nil {
+		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
+	}
+	if earlier := earlierNoticeFor(tree, architect, runs); earlier != 0 {
+		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
 	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
-	dedupeKey := fmt.Sprintf("legion-outbox:%d", row.ID)
-	token, err := claim.ProjectToken(issue.Project)
-	if err != nil {
-		return fmt.Errorf("the notice topic of %s: %w", row.Issue, err)
+	published := r.notices.Publish(ctx, roleTopicPrefix+string(architect), message, payload, fmt.Sprintf("legion-outbox:%d", row.ID))
+	switch {
+	case published == nil:
+		return nil
+	case !errors.Is(published, notify.ErrNoHolder):
+		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
 	}
-	if err := r.notices.Publish(ctx, notify.Topic(token, row.Issue), message, payload, dedupeKey); err != nil {
-		return fmt.Errorf("publish issue notice for %s: %w", row.Issue, err)
+	if ended := architectEnded(tree, r.claimState(architect)); ended != "" {
+		r.log.Info("outbox notice finished undelivered: its architect will not hold its role again",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "because", ended)
+		return nil
 	}
-	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
-		if err := r.notices.Publish(ctx, notify.Topic(token, issue.Tree), message, payload, dedupeKey); err != nil {
-			return fmt.Errorf("publish tree notice for %s: %w", row.Issue, err)
-		}
-	}
-	return nil
+	return fmt.Errorf("%w: %s holds no role for %s: %w", errNoticeWaits, architect, row.Issue, published)
 }
 
 // mergeQueue publishes the merger's READY packet to the project's merge queue role, keyed by the
