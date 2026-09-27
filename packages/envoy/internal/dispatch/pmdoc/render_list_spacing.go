@@ -20,11 +20,12 @@ func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
 		return r.blanksAfterDefinitionItem(last, next), true
 	}
 	spaced, spacing := r.spacingAfterList(list, next)
-	typedInFootnote := r.inFootnote && r.typed != nil && r.quoteDepth == 0
+	frame := r.scope()
+	typedInFootnote := frame.footnote != nil && frame.typed != nil && frame.quotes == 0
 	switch {
 	case spaced != nil && spaced.Attrs["spread"] == true:
 		return spacing, true
-	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && spacing == 1 || typedInFootnote && spacedAfter(list, false).Attrs["spread"] != true || r.itemDepth > 0 && endsInEmptyItem(list)):
+	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && spacing == 1 || typedInFootnote && spacedAfter(list, false).Attrs["spread"] != true || r.scope().items > 0 && endsInEmptyItem(list)):
 		return 0, true
 	default:
 		return 1, false
@@ -41,7 +42,7 @@ func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
 // none.
 func (r *renderer) blanksAfterDefinitionItem(item, next *Node) int {
 	container := next != nil && quoteListOrDefinition(next)
-	if item.Attrs["spread"] == true && !spreadByItsOwnLines(item, true, r.itemDepth > 0) {
+	if item.Attrs["spread"] == true && !spreadByItsOwnLines(item, true, r.scope().items > 0) {
 		if container {
 			return 1
 		}
@@ -56,7 +57,7 @@ func (r *renderer) blanksAfterDefinitionItem(item, next *Node) int {
 // definitionEndsItem reports whether item ends in a footnote definition whose blank lines after it
 // are the definition's: in a quote, outside a footnote definition (blanksAfterDefinitionItem).
 func (r *renderer) definitionEndsItem(item *Node) bool {
-	return r.quoteDepth > 0 && !r.inFootnote && item.Children[len(item.Children)-1].Type == "footnote_definition"
+	return r.scope().quotes > 0 && !r.inFootnote() && item.Children[len(item.Children)-1].Type == "footnote_definition"
 }
 
 // quoteListOrDefinition reports whether block is a quote, a list or a footnote definition, which
@@ -90,18 +91,18 @@ func endsInClosedList(block *Node) bool {
 // quote or a list and two before anything else, which with the definition inside the quote space
 // the list instead.
 func (r *renderer) spacingAfterList(list, next *Node) (*Node, int) {
-	quotes := r.quoteDepth
+	quotes := r.scope().quotes
 	container := quoteListOrDefinition(next)
 	inTyped := r.inQuotedTypedBlock()
 	var spaced *Node
 	blanks := 1
 	switch {
-	case quotes > 0 && r.inFootnote && container:
+	case quotes > 0 && r.inFootnote() && container:
 		spaced = spacedAfter(list, false)
-	case quotes > 0 && r.inFootnote:
+	case quotes > 0 && r.inFootnote():
 		// The quote stands inside the definition when the definition's lines carry fewer quote
 		// markers than the list's.
-		spaced, blanks = spacedAfter(list, quotes == r.footnoteQuotes), 2
+		spaced, blanks = spacedAfter(list, quotes == r.scope().footnote.quotes), 2
 	case quotes > 0 && (container || inTyped):
 		spaced = spacedAfter(list, true)
 		// In a typed block inside the quote, a quote the last item ends in takes one blank line.
@@ -110,10 +111,10 @@ func (r *renderer) spacingAfterList(list, next *Node) (*Node, int) {
 		}
 	case quotes > 0:
 		spaced, blanks = spacedAfter(list, true), 2
-	case r.inFootnote && container:
+	case r.inFootnote() && container:
 		spaced = spacedAfter(list, false)
 	}
-	if spaced == nil || spreadByItsOwnLines(spaced, quotes > 0 && !r.inFootnote, r.itemDepth > 0) {
+	if spaced == nil || spreadByItsOwnLines(spaced, quotes > 0 && !r.inFootnote(), r.scope().items > 0) {
 		return nil, 0
 	}
 	return spaced, blanks
@@ -122,7 +123,8 @@ func (r *renderer) spacingAfterList(list, next *Node) (*Node, int) {
 // inQuotedTypedBlock reports whether the blocks being written stand in a quote and in a typed block
 // that stands inside a quote, whether their own quote holds the typed block or stands inside it.
 func (r *renderer) inQuotedTypedBlock() bool {
-	return r.quoteDepth > 0 && r.typed != nil && r.typed.quotes > 0
+	frame := r.scope()
+	return frame.quotes > 0 && frame.typed != nil && frame.typed.quotes > 0
 }
 
 // spreadByItsOwnLines reports whether a spread list or list item is written spread without a blank
@@ -181,10 +183,10 @@ func spacedAfter(list *Node, quoted bool) *Node {
 // typed block's fence where the list's last item ends in a quote, which takes one of them.
 func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string, atFence bool) {
 	last := blocks[len(blocks)-1]
-	if !isList(last) || r.inFootnote || r.quoteDepth == 0 {
+	if !isList(last) || r.inFootnote() || r.scope().quotes == 0 {
 		return
 	}
-	if spaced := spacedAfter(last, true); spaced.Attrs["spread"] == true && !spreadByItsOwnLines(spaced, true, r.itemDepth > 0) {
+	if spaced := spacedAfter(last, true); spaced.Attrs["spread"] == true && !spreadByItsOwnLines(spaced, true, r.scope().items > 0) {
 		blanks := 2
 		if item := spaced.Children[len(spaced.Children)-1]; atFence && r.inQuotedTypedBlock() && item.Children[len(item.Children)-1].Type == "blockquote" {
 			blanks = 3
@@ -264,23 +266,23 @@ func opensWithListThatCannotInterrupt(block *Node) bool {
 // (spreadByItsOwnLines); in a quote blank lines after an item that ends in a list are that list's,
 // two of them spreading the list it ends in (spacedAfter).
 func (r *renderer) writesBlankAfterItem(list, item *Node) bool {
-	quoted := r.quoteDepth > 0
+	quoted := r.scope().quotes > 0
 	switch last := item.Children[len(item.Children)-1]; {
-	case r.inFootnote && quoted && isList(last):
+	case r.inFootnote() && quoted && isList(last):
 		// The blank lines are the list's, spacing what they would after its last item there.
-		return spacedAfter(last, r.quoteDepth == r.footnoteQuotes).Attrs["spread"] == true
-	case r.inFootnote:
+		return spacedAfter(last, r.scope().quotes == r.scope().footnote.quotes).Attrs["spread"] == true
+	case r.inFootnote():
 		return item.Attrs["spread"] == true && !spreadByItsOwnLines(item, false, false)
 	case quoted && isList(last):
 		// A list spread by its own lines needs none.
 		spaced := spacedAfter(last, true)
 		return spaced.Attrs["spread"] == true && !spreadByItsOwnLines(spaced, true, true)
-	case quoted && r.itemDepth > 0 && holdsOnlyAnEmptyParagraph(item):
+	case quoted && r.scope().items > 0 && holdsOnlyAnEmptyParagraph(item):
 		// Goldmark ends the list item around this list at a blank line after an empty item
 		// (emptyItemEndsOuterItem); in a quote, blank lines after another item or after the list
 		// spread it instead (spreadByItsOwnLines).
 		return false
-	case r.itemDepth > 0 && holdsOnlyAnEmptyParagraph(item) && spreadAtAnotherItem(list):
+	case r.scope().items > 0 && holdsOnlyAnEmptyParagraph(item) && spreadAtAnotherItem(list):
 		// Goldmark ends the list item around this list at a blank line after an empty item
 		// (emptyItemEndsOuterItem), and one after another item spreads the list as well.
 		return false

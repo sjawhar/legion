@@ -17,30 +17,15 @@ type renderer struct {
 	// text node of that label. One node cannot judge it: what pairs with a bracket may sit in a
 	// sibling node of the same link.
 	labelBrackets labelBrackets
-	// typed is the innermost typed block the blocks being written stand in, or nil outside one
-	// (typedScope). A lone `:::` closes a three-colon block as a line less than four columns past
-	// the prefix its lines are written at (typedFenceReach), which a paragraph written there can
-	// produce.
-	typed *typedScope
 	// heldLineStart is the current line's first text character, held until the line is written.
 	heldLineStart *lineCandidate
 	// footnoteLineAt is where the last footnote definition's first line begins in the markdown,
 	// and footnoteLabel is its label as written, so that the line is read after a reference to it.
 	footnoteLineAt int
 	footnoteLabel  string
-	// inFootnote reports whether the blocks being written are inside a footnote definition,
-	// footnoteQuotes is how many quotes stand around that definition, and footnoteIndentAt is
-	// where its indentation starts in the prefix of every line written inside it.
-	inFootnote       bool
-	footnoteQuotes   int
-	footnoteIndentAt int
-	// itemDepth is how many list items the blocks being written stand in, and quoteDepth how many
-	// quotes, each a quote marker on their lines' prefix.
-	itemDepth  int
-	quoteDepth int
-	// containers is the list items, quotes, footnote definitions and typed blocks the blocks being
-	// written stand in, outermost first (scope).
-	containers []scope
+	// scopes is a frame for each container the blocks being written stand in, outermost first
+	// (scope).
+	scopes []scope
 	// asteriskRule makes the next rule written `***` rather than `---` (list).
 	asteriskRule bool
 	// otherListMarker makes the next list written with its kind's other marker (otherListMarkers).
@@ -281,10 +266,8 @@ func (r *renderer) block(n *Node, prefix string) {
 	case "blockquote":
 		r.writeSyntax("> ")
 		r.enter(n, prefix+"> ")
-		r.quoteDepth++
 		r.blocksNoTrailing(n.Children, prefix+"> ")
 		r.blanksEndingQuotedList(n.Children, prefix+"> ", false)
-		r.quoteDepth--
 		r.leave()
 	case "bullet_list", "ordered_list":
 		r.list(n, prefix)
@@ -334,11 +317,10 @@ func (r *renderer) block(n *Node, prefix string) {
 		} else {
 			r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
 		}
-		outer, outerQuotes, outerIndentAt := r.inFootnote, r.footnoteQuotes, r.footnoteIndentAt
-		r.inFootnote, r.footnoteQuotes, r.footnoteIndentAt = true, r.quoteDepth, len(prefix)
 		// The browser editor's parser reads the lines of a definition a list item holds as the
 		// item's, so in a tight item a blank line between two of its blocks would spread the item.
-		tightItem := len(r.containers) > 0 && r.containers[len(r.containers)-1].node.Type == "list_item" && r.containers[len(r.containers)-1].node.Attrs["spread"] != true
+		around := r.scope().node
+		tightItem := around != nil && around.Type == "list_item" && around.Attrs["spread"] != true
 		r.enter(n, prefix+definitionIndent)
 		if tightItem {
 			r.itemBlocks(n.Children, false, prefix, prefix+definitionIndent, false)
@@ -346,7 +328,6 @@ func (r *renderer) block(n *Node, prefix string) {
 			r.blocksNoTrailing(n.Children, prefix+definitionIndent)
 		}
 		r.leave()
-		r.inFootnote, r.footnoteQuotes, r.footnoteIndentAt = outer, outerQuotes, outerIndentAt
 	default:
 		typ, typed := typedBlock(n.Type)
 		if !typed {
@@ -368,102 +349,12 @@ func (r *renderer) block(n *Node, prefix string) {
 			return
 		}
 		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
-		outer := r.typed
-		r.typed = &typedScope{prefix: prefix, colons: colons, quotes: r.quoteDepth}
-		r.enter(n, prefix)
+		r.enterTyped(n, prefix, colons)
 		r.blocksNoTrailing(n.Children, prefix)
 		r.blanksEndingQuotedList(n.Children, prefix, true)
 		r.leave()
-		r.typed = outer
 		r.writeSyntax("\n" + prefix + fence)
 	}
-}
-
-// typedScope is a typed block the renderer is writing the blocks of: the prefix its lines are written
-// at, how many colons its fence has, and how many quotes stand around it.
-type typedScope struct {
-	prefix string
-	colons int
-	quotes int
-}
-
-// enter and leave bracket the writing of a container's blocks (containers).
-// scope is a container the blocks being written stand in, and the prefix its lines are written
-// behind: the prefix of the lines around it and its own columns, a list item's width, a quote's
-// `> `, a footnote definition's indentation, or none, a typed block's.
-type scope struct {
-	node   *Node
-	prefix string
-}
-
-func (r *renderer) enter(container *Node, prefix string) {
-	r.containers = append(r.containers, scope{node: container, prefix: prefix})
-}
-
-func (r *renderer) leave() { r.containers = r.containers[:len(r.containers)-1] }
-
-// definitionOpensOnALaterLine reports whether the footnote definition being written opens with
-// nothing past its `]:` and its first block on the next line, which the browser editor's parser
-// reads as a blank line of the list item holding the definition, spreading it. It is written so
-// where the definition is the only block a spread item writes and nothing else spreads the item:
-// no blank line between two of the definition's own blocks (spreadByItsOwnLines), and no quote
-// around the item, where the blank lines after it are the definition's (blanksAfterDefinitionItem).
-func (r *renderer) definitionOpensOnALaterLine() bool {
-	if len(r.containers) == 0 || r.quoteDepth > 0 || r.inFootnote {
-		return false
-	}
-	item := r.containers[len(r.containers)-1].node
-	return item.Type == "list_item" && item.Attrs["spread"] == true && !spreadByItsOwnLines(item, false, false)
-}
-
-// inItemBelowQuotes reports whether the blocks being written stand in a list item with no quote
-// between: a line holding only their prefix is a blank line in the item, which the browser editor
-// reads as spacing it, where with a quote between it is the quote's.
-func (r *renderer) inItemBelowQuotes() bool {
-	for index := len(r.containers) - 1; index >= 0; index-- {
-		switch r.containers[index].node.Type {
-		case "blockquote":
-			return false
-		case "list_item":
-			return true
-		}
-	}
-	return false
-}
-
-// emptyCodeWrittenBare reports whether an empty code block is written as its fences alone, with no
-// line between them, where no quote between takes a line holding only the prefix as its own: in a
-// footnote definition, where both parsers keep that line as the code's text, and in a typed block in
-// a list item, where it is a blank line the browser editor reads as spacing the nearest item. That
-// line is written there, as main wrote it, where the nearest item is spread and goldmark's
-// looseness, which this parser leaves that item's list to, reads the list's spread as it is
-// (loosenessReadsSpread), unless the document holds a shape this parser cannot decide the spacing
-// of (browserOnlyShape), where it is refused: render writes such a document again with the fences
-// alone (bareEmptyCode).
-func (r *renderer) emptyCodeWrittenBare() bool {
-	typed := false
-	items := 0
-	for index := len(r.containers) - 1; index >= 0; index-- {
-		switch r.containers[index].node.Type {
-		case "blockquote":
-			return false
-		case "footnote_definition":
-			return true
-		case "list_item":
-			if !typed {
-				items++
-				continue
-			}
-			if r.bareEmptyCode || r.containers[index].node.Attrs["spread"] != true || !r.listsReadLoose[len(r.listsReadLoose)-1-items] {
-				return true
-			}
-			r.wroteBlankEmptyCode = true
-			return false
-		default:
-			typed = true
-		}
-	}
-	return false
 }
 
 // loosenessReadsSpread reports whether goldmark's looseness reads list's and its items' spread as
@@ -580,11 +471,9 @@ func (r *renderer) list(n *Node, prefix string) {
 			}
 			children = children[1:]
 		}
-		r.itemDepth++
 		r.enter(item, indent)
 		r.itemBlocks(children, item.Attrs["spread"] == true, prefix, indent, skipped && marker != "* ")
 		r.leave()
-		r.itemDepth--
 	}
 }
 
@@ -633,7 +522,7 @@ func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string
 				case !isList(child) && !opensAfterParagraph(child) && endsInParagraph(previous):
 					blanks = 1
 				}
-			} else if previous.Type == "footnote_definition" && r.quoteDepth > 0 && child.Type != "blockquote" && child.Type != "footnote_definition" && !isList(child) {
+			} else if previous.Type == "footnote_definition" && r.scope().quotes > 0 && child.Type != "blockquote" && child.Type != "footnote_definition" && !isList(child) {
 				// In a quote the blank lines after a footnote definition are the definition's: one
 				// spreads the item only before a quote, a list or a definition, and two spread it
 				// before anything else (definitionBlanksInQuote), an empty definition's own line
@@ -744,10 +633,10 @@ func (r *renderer) writeCodeText(node *Node, prefix string) {
 // nothing with no indentation after the prefix's last quote marker (`> `) - the code's first line
 // as well as a later one.
 func (r *renderer) writeCodeLinePrefix(rest, prefix string) {
-	if r.inFootnote && r.quoteDepth == r.footnoteQuotes && blankLineAhead(rest) {
+	if frame := r.scope(); frame.footnote != nil && frame.quotes == frame.footnote.quotes && blankLineAhead(rest) {
 		switch marker := strings.LastIndex(prefix, "> "); {
 		case rest != "" && rest[0] != '\n':
-			prefix = prefix[:r.footnoteIndentAt] + prefix[r.footnoteIndentAt+len(definitionIndent):]
+			prefix = prefix[:frame.footnote.indentAt] + prefix[frame.footnote.indentAt+len(definitionIndent):]
 		case marker >= 0:
 			prefix = prefix[:marker+len("> ")]
 		default:

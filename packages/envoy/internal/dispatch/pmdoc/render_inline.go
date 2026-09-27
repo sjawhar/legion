@@ -318,7 +318,7 @@ func inlineCodePadding(value string) bool {
 func (r *renderer) takesCodeLineIndent(rest string) bool {
 	whitespace := len(rest) - len(strings.TrimLeft(rest, " \t"))
 	columns, taken, from := columnOf([]byte(rest[:whitespace])), 0, 0
-	for _, container := range r.containers {
+	for _, container := range r.scopes {
 		width := len(container.prefix) - from
 		from = len(container.prefix)
 		switch container.node.Type {
@@ -438,11 +438,12 @@ func markdownLineStart(written []byte, offset int) int {
 // endLine to judge once the line is written.
 func (r *renderer) holdLineStart(before string, char rune, position *inlinePosition, prefix string) {
 	r.writeText(before)
+	typed := r.scope().typed
 	r.heldLineStart = &lineCandidate{
 		at:          r.b.Len(),
 		char:        char,
 		afterLine:   position.afterLine,
-		closesTyped: r.typed != nil && (r.typed.prefix == prefix || r.typed.colons == 3 && typedFenceReach(r.typed.prefix, prefix)),
+		closesTyped: typed != nil && (typed.prefix == prefix || typed.colons == 3 && typedFenceReach(typed.prefix, prefix)),
 		prefix:      prefix,
 	}
 }
