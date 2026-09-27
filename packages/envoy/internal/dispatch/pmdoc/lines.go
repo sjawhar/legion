@@ -729,8 +729,11 @@ func withLineStarts(p parser.Parser, source []byte, context parser.Context) ast.
 // browser editor's parser reads it: each later line from just after the containers' prefix, where
 // goldmark's paragraph trimmed the whitespace before it - a line holding only whitespace before
 // the closer included, for which goldmark keeps no text at all - and then one space or line ending
-// taken from each end when both ends hold one, after the whole span is put together. ok is false
-// for a span on one line, whose goldmark reading stands.
+// taken from each end when both ends hold one and something else stands between, after the whole
+// span is put together. The columns left of a tab a container's marker took part of are written as
+// spaces, but that parser reads them as text, not spaces: they stand between the ends, and where
+// they end the span nothing is taken off. ok is false for a span on one line, whose goldmark
+// reading stands.
 func multilineCodeSpanText(span *ast.CodeSpan, source []byte) (text string, ok bool) {
 	first, _ := span.FirstChild().(*ast.Text)
 	last, _ := span.LastChild().(*ast.Text)
@@ -748,26 +751,35 @@ func multilineCodeSpanText(span *ast.CodeSpan, source []byte) (text string, ok b
 		return "", false
 	}
 	var content strings.Builder
+	split, endsSplit := false, false
+	indent := func(start int) {
+		columns, whitespace := untrimmedIndent(span, start, source)
+		content.WriteString(strings.Repeat(" ", columns) + whitespace)
+		split = split || columns > 0
+		endsSplit = columns > 0 && whitespace == ""
+	}
 	for child := span.FirstChild(); child != nil; child = child.NextSibling() {
 		line := child.(*ast.Text).Segment
 		from, to := line.Start, line.Stop
 		if child == span.FirstChild() && trimmed {
 			from--
 		} else if child != span.FirstChild() {
-			content.WriteString(untrimmedIndent(span, line.Start, source))
+			indent(line.Start)
 		}
 		if child == span.LastChild() && trimmed {
 			to++
 		}
 		content.Write(source[from:to])
+		endsSplit = endsSplit && from == to
 	}
 	if closerAlone {
+		endsSplit = false
 		if next := bytes.IndexByte(source[stop:], '`'); next >= 0 {
-			content.WriteString(untrimmedIndent(span, stop+next, source))
+			indent(stop + next)
 		}
 	}
 	text = content.String()
-	if codeSpanPadded(text) {
+	if !endsSplit && (codeSpanPadded(text) || split && len(text) >= 2 && isCodePadding(text[0]) && isCodePadding(text[len(text)-1])) {
 		text = text[1 : len(text)-1]
 	}
 	return text, true
@@ -783,8 +795,9 @@ func codeSpanPadded(text string) bool {
 func isCodePadding(char byte) bool { return char == ' ' || char == '\n' }
 
 // untrimmedIndent is the whitespace goldmark's paragraph trimmed from the line whose text now
-// starts at start: what lies between the containers' prefix and it (lineRecordingParagraph).
-func untrimmedIndent(node ast.Node, start int, source []byte) string {
+// starts at start: what lies between the containers' prefix and it (lineRecordingParagraph), as
+// the columns left of a tab a container's marker took part of, and the whitespace after them.
+func untrimmedIndent(node ast.Node, start int, source []byte) (columns int, whitespace string) {
 	root := node
 	for root.Parent() != nil {
 		root = root.Parent()
@@ -793,9 +806,9 @@ func untrimmedIndent(node ast.Node, start int, source []byte) string {
 	recorded, _ := attribute.(map[int]gmtext.Segment)
 	line, ok := recorded[start]
 	if !ok {
-		return ""
+		return 0, ""
 	}
-	return strings.Repeat(" ", line.Padding) + string(source[line.Start:start])
+	return line.Padding, string(source[line.Start:start])
 }
 
 // lineStart is where the line holding position begins in source.

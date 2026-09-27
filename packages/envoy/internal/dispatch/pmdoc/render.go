@@ -37,8 +37,8 @@ type renderer struct {
 	itemDepth  int
 	quoteDepth int
 	// containers is the list items, quotes, footnote definitions and typed blocks the blocks being
-	// written stand in, outermost first.
-	containers []*Node
+	// written stand in, outermost first (scope).
+	containers []scope
 	// asteriskRule makes the next rule written `***` rather than `---` (list).
 	asteriskRule bool
 	// otherListMarker makes the next list written with its kind's other marker (otherListMarkers).
@@ -278,7 +278,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.heading(n, prefix)
 	case "blockquote":
 		r.writeSyntax("> ")
-		r.enter(n)
+		r.enter(n, prefix+"> ")
 		r.quoteDepth++
 		r.blocksNoTrailing(n.Children, prefix+"> ")
 		r.blanksEndingQuotedList(n.Children, prefix+"> ", false)
@@ -336,8 +336,8 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.inFootnote, r.footnoteQuotes, r.footnoteIndentAt = true, r.quoteDepth, len(prefix)
 		// The browser editor's parser reads the lines of a definition a list item holds as the
 		// item's, so in a tight item a blank line between two of its blocks would spread the item.
-		tightItem := len(r.containers) > 0 && r.containers[len(r.containers)-1].Type == "list_item" && r.containers[len(r.containers)-1].Attrs["spread"] != true
-		r.enter(n)
+		tightItem := len(r.containers) > 0 && r.containers[len(r.containers)-1].node.Type == "list_item" && r.containers[len(r.containers)-1].node.Attrs["spread"] != true
+		r.enter(n, prefix+definitionIndent)
 		if tightItem {
 			r.itemBlocks(n.Children, false, prefix, prefix+definitionIndent, false)
 		} else {
@@ -368,7 +368,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
 		outer := r.typed
 		r.typed = &typedScope{prefix: prefix, colons: colons, quotes: r.quoteDepth}
-		r.enter(n)
+		r.enter(n, prefix)
 		r.blocksNoTrailing(n.Children, prefix)
 		r.blanksEndingQuotedList(n.Children, prefix, true)
 		r.leave()
@@ -386,7 +386,17 @@ type typedScope struct {
 }
 
 // enter and leave bracket the writing of a container's blocks (containers).
-func (r *renderer) enter(container *Node) { r.containers = append(r.containers, container) }
+// scope is a container the blocks being written stand in, and the prefix its lines are written
+// behind: the prefix of the lines around it and its own columns, a list item's width, a quote's
+// `> `, a footnote definition's indentation, or none, a typed block's.
+type scope struct {
+	node   *Node
+	prefix string
+}
+
+func (r *renderer) enter(container *Node, prefix string) {
+	r.containers = append(r.containers, scope{node: container, prefix: prefix})
+}
 
 func (r *renderer) leave() { r.containers = r.containers[:len(r.containers)-1] }
 
@@ -400,7 +410,7 @@ func (r *renderer) definitionOpensOnALaterLine() bool {
 	if len(r.containers) == 0 || r.quoteDepth > 0 || r.inFootnote {
 		return false
 	}
-	item := r.containers[len(r.containers)-1]
+	item := r.containers[len(r.containers)-1].node
 	return item.Type == "list_item" && item.Attrs["spread"] == true && !spreadByItsOwnLines(item, false, false)
 }
 
@@ -409,7 +419,7 @@ func (r *renderer) definitionOpensOnALaterLine() bool {
 // reads as spacing it, where with a quote between it is the quote's.
 func (r *renderer) inItemBelowQuotes() bool {
 	for index := len(r.containers) - 1; index >= 0; index-- {
-		switch r.containers[index].Type {
+		switch r.containers[index].node.Type {
 		case "blockquote":
 			return false
 		case "list_item":
@@ -432,7 +442,7 @@ func (r *renderer) emptyCodeWrittenBare() bool {
 	typed := false
 	items := 0
 	for index := len(r.containers) - 1; index >= 0; index-- {
-		switch r.containers[index].Type {
+		switch r.containers[index].node.Type {
 		case "blockquote":
 			return false
 		case "footnote_definition":
@@ -442,7 +452,7 @@ func (r *renderer) emptyCodeWrittenBare() bool {
 				items++
 				continue
 			}
-			if r.bareEmptyCode || r.containers[index].Attrs["spread"] != true || !r.listsReadLoose[len(r.listsReadLoose)-1-items] {
+			if r.bareEmptyCode || r.containers[index].node.Attrs["spread"] != true || !r.listsReadLoose[len(r.listsReadLoose)-1-items] {
 				return true
 			}
 			r.wroteBlankEmptyCode = true
@@ -569,7 +579,7 @@ func (r *renderer) list(n *Node, prefix string) {
 			children = children[1:]
 		}
 		r.itemDepth++
-		r.enter(item)
+		r.enter(item, indent)
 		r.itemBlocks(children, item.Attrs["spread"] == true, prefix, indent, skipped && marker != "* ")
 		r.leave()
 		r.itemDepth--

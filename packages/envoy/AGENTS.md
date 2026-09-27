@@ -715,8 +715,12 @@ feeds alone. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
-such a span sheds at each end (`codeSpanPadded`), and the writer pads a span whose text starts and
-ends with one. A lazy continuation line - one that
+such a span sheds at each end (`codeSpanPadded`) where something else stands between, and the
+writer pads a span whose text starts and ends with one. The columns left of a tab a container's
+marker took part of are text to that parser, not spaces, so they stand between, and a span ending
+in them sheds nothing. The writer writes a span's later line as it is, without the containers'
+prefix, except where a list item or footnote definition would take columns off the whitespace it
+opens with, and there behind the prefix (`takesCodeLineIndent`). A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
 prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM, and a table one
 would be a body row of is refused (`markLazyRows`): goldmark continues the paragraph the table is

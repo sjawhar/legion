@@ -309,6 +309,31 @@ func inlineCodePadding(value string) bool {
 	return codeSpanPadded(value)
 }
 
+// takesCodeLineIndent reports whether the containers around a code span would take columns off the
+// whitespace its later line, the first of rest, opens with, were the line written as it is, without
+// their prefix, as it is everywhere else: outermost first, each list item and footnote definition
+// takes its own columns while that whitespace reaches them, until a quote, which the line does not
+// continue, so the rest of the line is the paragraph's, whitespace and all. Where one would, the
+// line is written behind the prefix, which the containers take instead.
+func (r *renderer) takesCodeLineIndent(rest string) bool {
+	whitespace := len(rest) - len(strings.TrimLeft(rest, " \t"))
+	columns, taken, from := columnOf([]byte(rest[:whitespace])), 0, 0
+	for _, container := range r.containers {
+		width := len(container.prefix) - from
+		from = len(container.prefix)
+		switch container.node.Type {
+		case "blockquote":
+			return taken > 0
+		case "list_item", "footnote_definition":
+			if columns-taken < width {
+				return taken > 0
+			}
+			taken += width
+		}
+	}
+	return taken > 0
+}
+
 func (r *renderer) writeSyntax(value string) {
 	r.b.WriteString(value)
 }
@@ -337,6 +362,9 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			r.endLine(true)
 			r.writeText(value[lineEnd : lineEnd+1])
 			value = value[lineEnd+1:]
+			if r.takesCodeLineIndent(value) {
+				r.writeSyntax(prefix)
+			}
 			endsLine, position.afterLine = value == "", true
 		}
 		r.writeText(value)
