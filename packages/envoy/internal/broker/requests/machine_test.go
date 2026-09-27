@@ -397,6 +397,23 @@ func TestDenyOpensNoRecord(t *testing.T) {
 	}
 }
 
+// TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten pins contract v9's "identifier must
+// name a rule's secret (else 400 UNKNOWN_SECRET at record time)": a request naming a secret no
+// rule mentions at all aborts the whole Create call with rules.ErrUnknownSecret rather than
+// folding silently into an ordinary "deny" decision, and writes no request row at all.
+func TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+	_, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "NOT_A_REAL_SECRET"), "")
+	if !errors.Is(err, rules.ErrUnknownSecret) {
+		t.Fatalf("Create(unknown secret) error = %v, want rules.ErrUnknownSecret", err)
+	}
+	var count int
+	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from requests where enrollment_id=$1`, enr).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("requests rows for enrollment = %d, %v, want 0 (an unknown secret name aborts the whole Create call)", count, err)
+	}
+}
+
 func TestCoalescesIdenticalPendingAndReturnsTheFirstRecordID(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
@@ -797,10 +814,24 @@ func TestCoalescingComparesWholeNames(t *testing.T) {
 	}
 }
 
+// TestAuditSurvivesControlCharactersInSecretNames pins that the audit trail round-trips a secret
+// name containing control characters. The name is a rule's own secret (denied for everyone) so
+// this exercises the ordinary deny path rather than the unknown-secret refusal
+// (TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten covers that one, and an unknown name
+// aborts Create before anything is audited).
 func TestAuditSurvivesControlCharactersInSecretNames(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
 	name := "BELL\aNAME\vTAB"
+	withRules(t, m, `version: 1
+secrets:
+  "BELL\aNAME\vTAB":
+    source: dev1/agent-secrets/odd-name
+    owner: sjawhar
+    delivery: inject
+    max_lifetime_seconds: 43200
+    requesters: []
+`)
 	req, err := m.Create(ctx, enr, signRequest(t, m, key, "odd name", name), "")
 	if err != nil || req.State != "denied" {
 		t.Fatalf("Create = %+v, %v, want denied", req, err)

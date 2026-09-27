@@ -190,9 +190,7 @@ func (m *Machine) evaluate(set *rules.Set, names []string, requester rules.Reque
 	needsApproval, denied := false, false
 	for _, name := range names {
 		d, err := set.Evaluate(name, requester)
-		if errors.Is(err, rules.ErrUnknownSecret) {
-			d = rules.Decision{Outcome: "deny", Delivery: "inject", Source: ""}
-		} else if err != nil {
+		if err != nil {
 			return evaluation{}, err
 		}
 		switch {

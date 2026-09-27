@@ -9,6 +9,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/broker/rules"
 )
 
 // createRequestBody is POST /v1/requests's exact contract v9 shape: a signed request object plus
@@ -48,6 +49,9 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 		return
 	case errors.Is(err, requests.ErrMixedApprovers):
 		writeError(w, http.StatusBadRequest, "MIXED_APPROVERS", err.Error())
+		return
+	case errors.Is(err, rules.ErrUnknownSecret):
+		writeError(w, http.StatusBadRequest, "UNKNOWN_SECRET", err.Error())
 		return
 	case errors.Is(err, pgx.ErrNoRows):
 		// The proof was verified moments ago against a live enrollment, but it was revoked (or

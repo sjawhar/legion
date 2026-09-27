@@ -810,6 +810,24 @@ func TestCreateRequestWithProofTypJWSIs400(t *testing.T) {
 	}
 }
 
+// TestCreateRequestWithUnknownSecretNameIs400UnknownSecret pins contract v9's "identifier must
+// name a rule's secret (else 400 UNKNOWN_SECRET at record time)" over real HTTP: a request naming
+// a secret no rule mentions is refused, not folded into an ordinary deny decision.
+func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it", "NOT_A_REAL_SECRET")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": compact, "session_id": nil})
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST /v1/requests (unknown secret) = %d, want 400: %s", status, body)
+	}
+	werr := decode[wireError](t, body)
+	if werr.Code != "UNKNOWN_SECRET" {
+		t.Fatalf("code = %q, want UNKNOWN_SECRET", werr.Code)
+	}
+}
+
 // TestDenyThenApproveIsTerminal pins the deny path and the terminal-state guard: a valid assertion
 // signed over the *deny* challenge is refused by the approve route (403 ASSERTION_INVALID), a
 // correct deny succeeds, and a second decision on the now-terminal record is 409 RECORD_TERMINAL.

@@ -1234,10 +1234,10 @@ the caller's signed request object (`iss` must be the requesting enrollment's ow
 `login_hint` — a session never names its own approver, only the rules do), first checks for a
 still-live grant covering the exact same name set (`reuseLiveGrant`: no new request, no new record,
 as long as the current rules still allow it and the grant's whole chain still verifies), then
-evaluates the rules per name: any `deny` denies the whole request with no record written at all
-(this includes a name no rule mentions at all — `rules.ErrUnknownSecret` — folded silently into a
-`deny` decision rather than the `400 UNKNOWN_SECRET` contract v9 documents, a deviation from the
-wire contract this review flagged rather than fixed unilaterally; see the task 13 report); a name
+evaluates the rules per name: any `deny` denies the whole request with no record written at all; a
+name no rule mentions at all aborts the whole call with `rules.ErrUnknownSecret` (`400
+UNKNOWN_SECRET`, per contract v9) instead of being folded into an ordinary `deny` decision — no
+request row is written either, matching the "at record time" wording; a name
 needing approval that names a *different* approver than an already-approval-needing name in the
 same request is refused `400 MIXED_APPROVERS`; when every name is decided (`granted`/`denied`) with
 nothing pending, the request and, if granted, its grant are written with no record; a request
