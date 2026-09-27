@@ -218,7 +218,10 @@ test("resolve, reopen, then edit leaves one comment turn in its final state", as
     await expect(threadCard(alicePage, root.id)).toHaveCount(0);
     await expect(threadCard(bobPage, root.id)).toHaveCount(0);
 
-    await bobPage.getByRole("button", { name: "Resolved (1)" }).click();
+    await bobPage
+      .getByRole("tabpanel", { name: "Conversation" })
+      .getByRole("button", { name: "Resolved (1)" })
+      .click();
     const resolvedThread = await expandedThread(bobPage, root.id);
     await expect(resolvedThread).toContainText(/Resolved by alice/);
     await resolvedThread.getByRole("button", { name: "Reopen" }).click();
