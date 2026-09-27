@@ -86,7 +86,6 @@ const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABIL
   (capability) => capability !== "btw"
 );
 
-
 /**
  * Transcript entry recording the role this session holds. Successful claims
  * write `{ role }`; legacy `{ role: null }` release records remain authoritative
