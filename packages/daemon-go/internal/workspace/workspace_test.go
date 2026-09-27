@@ -649,17 +649,7 @@ func TestProvisioningAndRemovalTouchOnlyTheirOwnGitWorktree(t *testing.T) {
 		t.Errorf("provisioning left the new workspace's git worktree unlocked: %v", locked)
 	}
 	// An entry another process added carries no lock; this one is out of view, as another tree's is.
-	pointer, err := os.ReadFile(filepath.Join(other.Dir, ".git"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	admin, ok := strings.CutPrefix(strings.TrimSpace(string(pointer)), "gitdir: ")
-	if !ok {
-		t.Fatalf("the other workspace's .git names no git worktree: %q", pointer)
-	}
-	if err := os.Remove(filepath.Join(admin, "locked")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatal(err)
-	}
+	unlockGitWorktree(t, other.Dir)
 	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
 	if err := os.Rename(other.Dir, elsewhere); err != nil {
 		t.Fatal(err)
@@ -698,6 +688,48 @@ func TestProvisioningAndRemovalTouchOnlyTheirOwnGitWorktree(t *testing.T) {
 	}
 	if got := strings.TrimSpace(runSetup(t, other.Dir, "git", "rev-parse", "--show-toplevel")); got != other.Dir {
 		t.Errorf("git in the other workspace answers %q, want %q", got, other.Dir)
+	}
+}
+
+// A workspace provisioned before provisioning locked anything has an unlocked git worktree entry;
+// the next provisioning of it, which adds nothing, locks it.
+func TestProvisionLocksAnExistingUnlockedWorkspace(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	unlockGitWorktree(t, workspace.Dir)
+	if locked := gitWorktreeLocks(t, workspace.Clone); locked[workspace.Dir] {
+		t.Fatalf("the workspace is still locked after unlocking it: %v", locked)
+	}
+	before := len(run.Calls())
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("provision the existing workspace: %v", err)
+	}
+	if slices.ContainsFunc(run.Calls()[before:], func(call Command) bool { return commandWith(call.Argv, "jj", "workspace", "add") }) {
+		t.Fatalf("provisioning an existing workspace added it again")
+	}
+	if locked := gitWorktreeLocks(t, workspace.Clone); !locked[workspace.Dir] {
+		t.Errorf("provisioning left the existing workspace's git worktree unlocked: %v", locked)
+	}
+}
+
+// unlockGitWorktree deletes the lock of the git worktree the workspace at dir names in its .git
+// file, if it has one: the entry as a process that locks nothing leaves it.
+func unlockGitWorktree(t *testing.T, dir string) {
+	t.Helper()
+	pointer, err := os.ReadFile(filepath.Join(dir, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, ok := strings.CutPrefix(strings.TrimSpace(string(pointer)), "gitdir: ")
+	if !ok {
+		t.Fatalf("%s/.git names no git worktree: %q", dir, pointer)
+	}
+	if err := os.Remove(filepath.Join(admin, "locked")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
 	}
 }
 

@@ -54,6 +54,7 @@ exits 128 when git has no entry for the path, which would need stderr matching, 
 directory that unexpectedly exists it deletes the directory with whatever it holds; deleting the
 admin entry never touches a working tree.
 
-Each workspace provisioning adds is then locked (`<entry>/locked`, what `git worktree lock`
-writes; an existing lock and its reason are kept), so a bare prune anyone else runs on the clone
-skips it.
+Every provisioning then locks the workspace's entry, whether it added the workspace or found it
+already there, so a workspace added before provisioning locked anything is locked the next time
+Legion provisions it (`<entry>/locked`, what `git worktree lock` writes; an existing lock and its
+reason are kept). A bare prune anyone else runs on the clone then skips it.

@@ -136,8 +136,9 @@ not exist. In order:
 3. Delete this workspace's own stale git worktree entry, then the add. On `already
    registered|exists` (jj still registers the workspace but its directory is gone):
    `jj workspace forget <name> -R <clone>` (Go adds `--ignore-working-copy`), then the same add
-   again at the same revision. Once added, the workspace's git worktree entry is locked. The entry
-   is the one whose `gitdir` names the workspace; never a bare `git worktree prune`
+   again at the same revision. Provisioning then locks the workspace's git worktree entry, as it
+   does for a workspace it finds already there. The deleted and the locked entry are each the one
+   whose `gitdir` names the workspace; never a bare `git worktree prune`
    (docs/solutions/daemon/jj-git-worktree-interop.md). A brand-new workspace and a forgotten
    registration start from the same resolution — the two paths no longer differ in where they
    start.

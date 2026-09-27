@@ -21,7 +21,7 @@ var (
 
 // createWorkspace ports workspace.ts's createWorkspace. It resolves a bookmark before deleting a
 // stale git worktree entry or adding a workspace: a conflicted bookmark must not leave a registered
-// working copy behind. The workspace it adds has its git worktree entry locked.
+// working copy behind.
 //
 // One read of the issue's bookmark legion/<KEY>, its local row and origin's (readBookmark),
 // decides where the workspace starts:
@@ -166,9 +166,6 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		if _, err := RunChecked(ctx, run, add, nil, ""); err != nil {
 			return err
 		}
-	}
-	if err := lockGitWorktree(cloneDir, workspace.Dir); err != nil {
-		return err
 	}
 	if !fromMain {
 		return nil

@@ -65,6 +65,11 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 			return Workspace{}, err
 		}
 	}
+	// Every workspace provisioning touches has its git worktree entry locked, one added before
+	// provisioning locked any included, so a bare `git worktree prune` that cannot see it skips it.
+	if err := lockGitWorktree(workspace.Clone, workspace.Dir); err != nil {
+		return Workspace{}, err
+	}
 	if err := configureRepositoryCredential(ctx, run, workspace.Clone, request.CredentialHelper); err != nil {
 		return Workspace{}, err
 	}

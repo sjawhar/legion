@@ -220,21 +220,6 @@ function workspaceListCommand(repoCloneDir: string): string[] {
     repoCloneDir,
   ];
 }
-/** `git worktree list --porcelain` rows are `worktree <path>`: the directories git still knows. */
-async function gitWorktrees(repoCloneDir: string): Promise<string[]> {
-  const listed = await runCommand([
-    SYSTEM_GIT,
-    `--git-dir=${path.join(repoCloneDir, ".git")}`,
-    "worktree",
-    "list",
-    "--porcelain",
-  ]);
-  expect(listed.exitCode, listed.stderr).toBe(0);
-  return listed.stdout
-    .split("\n")
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => line.slice("worktree ".length));
-}
 /** Every linked worktree git registers in the clone, by path, and whether it is locked: git's own
  * account (`git worktree list --porcelain`), one block per worktree, the clone's own left out. */
 async function gitWorktreeLocks(repoCloneDir: string): Promise<Record<string, boolean>> {
@@ -261,6 +246,13 @@ async function gitToplevel(dir: string): Promise<string> {
   const toplevel = await runCommand([SYSTEM_GIT, "rev-parse", "--show-toplevel"], { cwd: dir });
   expect(toplevel.exitCode, `git rev-parse in ${dir}: ${toplevel.stderr}`).toBe(0);
   return toplevel.stdout.trim();
+}
+/** Deletes the lock of the git worktree the workspace at `dir` names in its `.git` file, if it has
+ * one: the entry as a process that locks nothing leaves it. */
+async function unlockGitWorktree(dir: string): Promise<void> {
+  const pointer = (await readFile(path.join(dir, ".git"), "utf8")).trim();
+  expect(pointer, `${dir}/.git`).toStartWith("gitdir: ");
+  await rm(path.join(pointer.slice("gitdir: ".length), "locked"), { force: true });
 }
 
 const JJ_BINARIES = [
@@ -2286,7 +2278,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       expect(existsSync(workspaceDir), name).toBeFalse();
       expect(await workspaceNames(), name).not.toContain("widgets-42");
       expect(await workspaceNames(), name).toContain("widgets-43");
-      expect(await gitWorktrees(repoCloneDir), name).not.toContain(workspaceDir);
+      expect(Object.keys(await gitWorktreeLocks(repoCloneDir)), name).not.toContain(workspaceDir);
       const afterRemoval = await logB();
       expect(afterRemoval, name).not.toContain(aWork);
       expect(afterRemoval, name).not.toContain(aWorkingCopy);
@@ -2433,9 +2425,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [other]: true });
     // An entry another process added carries no lock; this one is out of view, as another host's
     // or another tree's is: a bare `git worktree prune` here would take it for stale.
-    const pointer = (await readFile(path.join(other, ".git"), "utf8")).trim();
-    expect(pointer, name).toStartWith("gitdir: ");
-    await rm(path.join(pointer.slice("gitdir: ".length), "locked"), { force: true });
+    await unlockGitWorktree(other);
     const elsewhere = path.join(await temporaryDirectory(), "elsewhere");
     await rename(other, elsewhere);
 
@@ -2459,5 +2449,21 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
 
     await rename(elsewhere, other);
     expect(await gitToplevel(other), name).toBe(other);
+  }, 60_000);
+
+  test("locks the git worktree of an existing workspace provisioned before provisioning locked any, adding nothing", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { repoCloneDir, workspaceDir, calls, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    await unlockGitWorktree(workspaceDir);
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [workspaceDir]: false });
+    calls.length = 0;
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(
+      calls.some((cmd) => cmd[1] === "workspace" && cmd[2] === "add"),
+      name
+    ).toBeFalse();
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [workspaceDir]: true });
   }, 60_000);
 });

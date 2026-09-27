@@ -261,10 +261,9 @@ async function ensureRepoClone(
  *
  * A brand-new workspace and one jj still registers but whose directory is gone start from the same
  * resolution: on `already registered|exists` the registration is forgotten and the add repeated at
- * the same revision. Either way the new workspace's git worktree entry, when jj makes one, is
- * locked. Only when nothing resolved does the add end with `jj bookmark set legion/<KEY> -r @` in
- * the new workspace, and only when the registration had
- * to be forgotten is one line logged — a brand-new issue has no bookmark to miss. */
+ * the same revision. Only when nothing resolved does the add end with `jj bookmark set
+ * legion/<KEY> -r @` in the new workspace, and only when the registration had to be forgotten is
+ * one line logged — a brand-new issue has no bookmark to miss. */
 async function createWorkspace(
   deps: ProvisionIssueWorkspaceDeps,
   repoCloneDir: string,
@@ -354,7 +353,6 @@ async function createWorkspace(
     await runChecked(deps, ["jj", "workspace", "forget", workspaceName, "-R", repoCloneDir]);
     await runChecked(deps, addArgs);
   }
-  await lockGitWorktree(repoCloneDir, workspaceDir);
 
   if (bookmarkCommit !== undefined) return;
   if (forgotten) {
@@ -632,6 +630,9 @@ export async function provisionIssueWorkspace(
   if (!workspaceExists) {
     await createWorkspace(deps, repoCloneDir, workspaceDir, workspaceName, bookmark);
   }
+  // Every workspace provisioning touches has its git worktree entry locked, one added before
+  // provisioning locked any included, so a bare `git worktree prune` that cannot see it skips it.
+  await lockGitWorktree(repoCloneDir, workspaceDir);
 
   await runChecked(deps, [
     "git",
