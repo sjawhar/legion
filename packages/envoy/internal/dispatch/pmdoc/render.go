@@ -15,12 +15,11 @@ type renderer struct {
 	// text node of that label. One node cannot judge it: what pairs with a bracket may sit in a
 	// sibling node of the same link.
 	labelBrackets labelBrackets
-	// typedPrefix is the prefix the innermost typed block's lines are written at, or nil outside
-	// one, and typedColons is how many colons its fence has. A lone `:::` closes a three-colon block
+	// typed is the innermost typed block the blocks being written stand in, or nil outside one
+	// (typedScope). A lone `:::` closes a three-colon block
 	// as a line less than four columns past that prefix (typedFenceReach), which a paragraph written
 	// there can produce.
-	typedPrefix *string
-	typedColons int
+	typed *typedScope
 	// heldLineStart is the current line's first text character, held until the line is written.
 	heldLineStart *lineCandidate
 	// footnoteLineAt is where the last footnote definition's first line begins in the markdown,
@@ -28,11 +27,13 @@ type renderer struct {
 	footnoteLineAt int
 	footnoteLabel  string
 	// inFootnote reports whether the blocks being written are inside a footnote definition, and
-	// footnoteQuotes is how many quote markers that definition's lines carry before its own.
+	// footnoteQuotes is how many quotes stand around that definition.
 	inFootnote     bool
 	footnoteQuotes int
-	// itemDepth is how many list items the blocks being written stand in.
-	itemDepth int
+	// itemDepth is how many list items the blocks being written stand in, and quoteDepth how many
+	// quotes, each a quote marker on their lines' prefix.
+	itemDepth  int
+	quoteDepth int
 	// containers is the list items, quotes, footnote definitions and typed blocks the blocks being
 	// written stand in, outermost first.
 	containers []*Node
@@ -176,7 +177,7 @@ func (r *renderer) blocksNoTrailing(nodes []*Node, prefix string) {
 		if i > 0 {
 			blanks := 1
 			if previous := nodes[i-1]; isList(previous) {
-				blanks, _ = r.blanksAfterList(previous, n, prefix)
+				blanks, _ = r.blanksAfterList(previous, n)
 			}
 			r.writeSyntax("\n" + strings.Repeat(strings.TrimRight(prefix, " ")+"\n", blanks) + prefix)
 		}
@@ -266,8 +267,10 @@ func (r *renderer) block(n *Node, prefix string) {
 	case "blockquote":
 		r.writeSyntax("> ")
 		r.enter(n)
+		r.quoteDepth++
 		r.blocksNoTrailing(n.Children, prefix+"> ")
 		r.blanksEndingQuotedList(n.Children, prefix+"> ")
+		r.quoteDepth--
 		r.leave()
 	case "bullet_list", "ordered_list":
 		r.list(n, prefix)
@@ -309,7 +312,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.footnoteLineAt, r.footnoteLabel = r.b.Len(), escapeFootnoteLabel(label)
 		r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
 		outer, outerQuotes := r.inFootnote, r.footnoteQuotes
-		r.inFootnote, r.footnoteQuotes = true, strings.Count(prefix, ">")
+		r.inFootnote, r.footnoteQuotes = true, r.quoteDepth
 		r.enter(n)
 		r.blocksNoTrailing(n.Children, prefix+definitionIndent)
 		r.leave()
@@ -335,15 +338,23 @@ func (r *renderer) block(n *Node, prefix string) {
 			return
 		}
 		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
-		outer, outerColons := r.typedPrefix, r.typedColons
-		r.typedPrefix, r.typedColons = &prefix, colons
+		outer := r.typed
+		r.typed = &typedScope{prefix: prefix, colons: colons, quotes: r.quoteDepth}
 		r.enter(n)
 		r.blocksNoTrailing(n.Children, prefix)
 		r.blanksEndingQuotedList(n.Children, prefix)
 		r.leave()
-		r.typedPrefix, r.typedColons = outer, outerColons
+		r.typed = outer
 		r.writeSyntax("\n" + prefix + fence)
 	}
+}
+
+// typedScope is a typed block the renderer is writing the blocks of: the prefix its lines are written
+// at, how many colons its fence has, and how many quotes stand around it.
+type typedScope struct {
+	prefix string
+	colons int
+	quotes int
 }
 
 // enter and leave bracket the writing of a container's blocks (containers).
@@ -417,7 +428,7 @@ func (r *renderer) list(n *Node, prefix string) {
 		}
 		if index > 0 {
 			r.writeSyntax("\n" + prefix)
-			if r.writesBlankAfterItem(n, n.Children[index-1], prefix) {
+			if r.writesBlankAfterItem(n, n.Children[index-1]) {
 				r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + prefix)
 			}
 		}
@@ -466,7 +477,7 @@ func (r *renderer) list(n *Node, prefix string) {
 					blanks = 1
 				}
 				if previous := children[childIndex-1]; isList(previous) {
-					after, exact := r.blanksAfterList(previous, child, indent)
+					after, exact := r.blanksAfterList(previous, child)
 					switch {
 					case exact:
 						blanks = after

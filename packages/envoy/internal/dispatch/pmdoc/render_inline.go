@@ -414,7 +414,7 @@ func (r *renderer) holdLineStart(before string, char rune, position *inlinePosit
 		at:          r.b.Len(),
 		char:        char,
 		afterLine:   position.afterLine,
-		closesTyped: r.typedPrefix != nil && (*r.typedPrefix == prefix || r.typedColons == 3 && typedFenceReach(*r.typedPrefix, prefix)),
+		closesTyped: r.typed != nil && (r.typed.prefix == prefix || r.typed.colons == 3 && typedFenceReach(r.typed.prefix, prefix)),
 		prefix:      prefix,
 	}
 }

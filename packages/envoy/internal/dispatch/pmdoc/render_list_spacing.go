@@ -14,13 +14,13 @@ import "strings"
 // goldmark ends the list item around it or a quote the list stands in (emptyItemEndsOuterItem).
 // exact reports whether the count is one of those two; the one blank line everywhere else spaces
 // nothing, so a list item may write none instead.
-func (r *renderer) blanksAfterList(list, next *Node, prefix string) (blanks int, exact bool) {
-	spaced, spacing := r.spacingAfterList(list, next, prefix)
-	typedInFootnote := r.inFootnote && r.typedPrefix != nil && !strings.Contains(prefix, ">")
+func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
+	spaced, spacing := r.spacingAfterList(list, next)
+	typedInFootnote := r.inFootnote && r.typed != nil && r.quoteDepth == 0
 	switch {
 	case spaced != nil && spaced.Attrs["spread"] == true:
 		return spacing, true
-	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && spacing == 1 || typedInFootnote && spacedAfter(list, false).Attrs["spread"] != true || r.itemDepth > 0 && endsInEmptyItem(list) || strings.Contains(prefix, ">") && endsInDefinition(list)):
+	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && spacing == 1 || typedInFootnote && spacedAfter(list, false).Attrs["spread"] != true || r.itemDepth > 0 && endsInEmptyItem(list) || r.quoteDepth > 0 && endsInDefinition(list)):
 		return 0, true
 	default:
 		return 1, false
@@ -42,10 +42,10 @@ func endsInDefinition(list *Node) bool {
 // definition, its last item, one before a quote or a list; in both, the last item, one before a
 // quote or a list and two before anything else, which with the definition inside the quote space
 // the list instead.
-func (r *renderer) spacingAfterList(list, next *Node, prefix string) (*Node, int) {
-	quotes := strings.Count(prefix, ">")
+func (r *renderer) spacingAfterList(list, next *Node) (*Node, int) {
+	quotes := r.quoteDepth
 	container := next.Type == "blockquote" || next.Type == "footnote_definition" || isList(next)
-	inTyped := r.inQuotedTypedBlock(prefix)
+	inTyped := r.inQuotedTypedBlock()
 	var spaced *Node
 	blanks := 1
 	switch {
@@ -72,10 +72,10 @@ func (r *renderer) spacingAfterList(list, next *Node, prefix string) (*Node, int
 	return spaced, blanks
 }
 
-// inQuotedTypedBlock reports whether lines with prefix stand in a quote and in a typed block that
-// stands inside a quote, whether their own quote holds the typed block or stands inside it.
-func (r *renderer) inQuotedTypedBlock(prefix string) bool {
-	return strings.Contains(prefix, ">") && r.typedPrefix != nil && strings.Contains(*r.typedPrefix, ">")
+// inQuotedTypedBlock reports whether the blocks being written stand in a quote and in a typed block
+// that stands inside a quote, whether their own quote holds the typed block or stands inside it.
+func (r *renderer) inQuotedTypedBlock() bool {
+	return r.quoteDepth > 0 && r.typed != nil && r.typed.quotes > 0
 }
 
 // spreadByItsOwnLines reports whether a spread list or list item is written spread without a blank
@@ -119,7 +119,7 @@ func spacedAfter(list *Node, quoted bool) *Node {
 // inside one, spread the list its blocks end in, where nothing else does.
 func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string) {
 	last := blocks[len(blocks)-1]
-	if !isList(last) || r.inFootnote || !strings.Contains(prefix, ">") {
+	if !isList(last) || r.inFootnote || r.quoteDepth == 0 {
 		return
 	}
 	if spaced := spacedAfter(last, true); spaced.Attrs["spread"] == true && !spreadByItsOwnLines(spaced, true, r.itemDepth > 0) {
@@ -197,12 +197,12 @@ func opensWithListThatCannotInterrupt(block *Node) bool {
 // included, they spread the item, and are written only where its own lines do not already
 // (spreadByItsOwnLines); in a quote blank lines after an item that ends in a list are that list's,
 // two of them spreading the list it ends in (spacedAfter).
-func (r *renderer) writesBlankAfterItem(list, item *Node, prefix string) bool {
-	quoted := strings.Contains(prefix, ">")
+func (r *renderer) writesBlankAfterItem(list, item *Node) bool {
+	quoted := r.quoteDepth > 0
 	switch last := item.Children[len(item.Children)-1]; {
 	case r.inFootnote && quoted && isList(last):
 		// The blank lines are the list's, spacing what they would after its last item there.
-		return spacedAfter(last, strings.Count(prefix, ">") == r.footnoteQuotes).Attrs["spread"] == true
+		return spacedAfter(last, r.quoteDepth == r.footnoteQuotes).Attrs["spread"] == true
 	case r.inFootnote:
 		return item.Attrs["spread"] == true && !spreadByItsOwnLines(item, false, false)
 	case quoted && isList(last):
