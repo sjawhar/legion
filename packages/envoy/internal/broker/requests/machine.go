@@ -219,8 +219,14 @@ func (m *Machine) ApplyAnswer(ctx context.Context, id string, ask dispatch.Ask) 
 	if state != "pending" {
 		return false, nil
 	}
-	if ask.State == "open" {
+	switch ask.State {
+	case "open":
 		return false, nil
+	case "answered", "resolved":
+	default:
+		// Not a decision: an ask read this code cannot interpret leaves the request pending for
+		// the next poll rather than denying a request no human has refused.
+		return false, fmt.Errorf("ask %q has unrecognized state %q", ask.ID, ask.State)
 	}
 	next, detail := "denied", ""
 	switch {

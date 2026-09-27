@@ -313,6 +313,27 @@ func TestReadUnknownPendingID(t *testing.T) {
 	}
 }
 
+// TestReconcileLeavesRequestPendingOnUnrecognizedAskState pins that an ask read applyAsk cannot
+// interpret leaves the launcher request pending for the next Reconcile instead of denying it.
+func TestReconcileLeavesRequestPendingOnUnrecognizedAskState(t *testing.T) {
+	ctx := context.Background()
+	svc, fake := newTestService(t)
+
+	pendingID, err := svc.Request(ctx, "sjawhar", "odd-state-host", nil)
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	askID := fake.createCalls[0].askID
+	fake.asks[askID].State = ""
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	state, token, err := svc.Read(ctx, pendingID)
+	if err != nil || state != "pending" || token != "" {
+		t.Fatalf("Read = state=%q token_present=%v err=%v, want still pending", state, token != "", err)
+	}
+}
+
 // TestStandingSerializesConcurrentCreateForNewOperator pins the fix for the find-or-create race:
 // Dispatch's own issue creation has no unique constraint on (project, title, label), so two
 // concurrent Standing calls for the same never-before-seen operator could otherwise each observe

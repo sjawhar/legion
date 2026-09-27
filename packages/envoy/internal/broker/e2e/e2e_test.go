@@ -286,7 +286,14 @@ func (f *fakeDispatch) server(token string) *httptest.Server {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(dispatch.Ask{ID: a.id, State: a.state, EditedAt: a.editedAt, Answer: a.answer})
+		// Dispatch's own GET /api/v1/asks/{id} shape: the ask nested under "ask" beside its
+		// replies, edits and followers (internal/dispatch/api's getAsk).
+		json.NewEncoder(w).Encode(map[string]any{
+			"ask":       dispatch.Ask{ID: a.id, State: a.state, EditedAt: a.editedAt, Answer: a.answer},
+			"replies":   []any{},
+			"edits":     []any{},
+			"followers": []any{},
+		})
 	})
 	mux.HandleFunc("GET /api/v1/whoami", func(w http.ResponseWriter, r *http.Request) {
 		login := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")

@@ -220,8 +220,14 @@ func (s *Service) applyAsk(ctx context.Context, pendingHash []byte, ask dispatch
 		// and keeps this decision from silently depending on that alone.
 		service = nil
 	}
-	if ask.State == "open" {
+	switch ask.State {
+	case "open":
 		return nil
+	case "answered", "resolved":
+	default:
+		// Not a decision: an ask read this code cannot interpret leaves the request pending for
+		// the next Reconcile rather than denying a request no human has refused.
+		return fmt.Errorf("ask %q has unrecognized state %q", ask.ID, ask.State)
 	}
 	approved, denyReason := true, ""
 	switch {

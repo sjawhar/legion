@@ -22,7 +22,10 @@ func TestCreateAndGetAsk(t *testing.T) {
 			w.WriteHeader(201)
 			w.Write([]byte(`{"id":"ask-1","state":"open","edited_at":null,"answer":null}`))
 		case "GET /api/v1/asks/ask-1":
-			w.Write([]byte(`{"id":"ask-1","state":"answered","edited_at":null,"answer":{"user":"sjawhar","selected":["Approve"],"text":null,"at":"2026-09-26T05:00:00Z"}}`))
+			w.Write([]byte(`{"ask":{"id":"ask-1","state":"answered","edited_at":null,"answer":{"user":"sjawhar","selected":["Approve"],"text":null,"at":"2026-09-26T05:00:00Z"}},"replies":[],"edits":[],"followers":[]}`))
+		case "GET /api/v1/asks/ask-bare":
+			// The ask's fields at the top level instead of under "ask": not Dispatch's shape.
+			w.Write([]byte(`{"id":"ask-bare","state":"answered","edited_at":null,"answer":{"user":"sjawhar","selected":["Approve"],"text":null,"at":"2026-09-26T05:00:00Z"}}`))
 		default:
 			w.WriteHeader(404)
 		}
@@ -55,6 +58,9 @@ func TestCreateAndGetAsk(t *testing.T) {
 	}
 	if !ask.Answer.At.Equal(time.Date(2026, 9, 26, 5, 0, 0, 0, time.UTC)) {
 		t.Fatalf("answer at: %v", ask.Answer.At)
+	}
+	if _, err := c.GetAsk(context.Background(), "ask-bare"); err == nil {
+		t.Fatal("GetAsk decoded a response carrying no \"ask\" object, want an error naming the mismatch")
 	}
 }
 

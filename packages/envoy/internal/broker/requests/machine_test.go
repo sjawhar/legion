@@ -288,6 +288,33 @@ func TestEditedAskDenies(t *testing.T) {
 	}
 }
 
+// TestApplyAnswerLeavesRequestPendingOnUnrecognizedAskState pins that an ask read this package
+// cannot interpret — the zero Ask a mis-decoded Dispatch response produces, or a state Dispatch
+// adds later — is an error to retry on the next poll, never a denial of a request no human
+// refused.
+func TestApplyAnswerLeavesRequestPendingOnUnrecognizedAskState(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+
+	req, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, ask := range []dispatch.Ask{{}, {ID: "ask-1", State: "snoozed"}} {
+		changed, err := m.ApplyAnswer(ctx, req.ID, ask)
+		if err == nil || changed {
+			t.Fatalf("ApplyAnswer(%+v) = changed=%v err=%v, want an error and no change", ask, changed, err)
+		}
+	}
+	got, err := m.Get(ctx, req.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != "pending" {
+		t.Fatalf("state = %q, want still pending", got.State)
+	}
+}
+
 func TestLateApprovalAfterCancelChangesNothing(t *testing.T) {
 	m, _, _, enrA, _ := newFixture(t)
 	ctx := context.Background()

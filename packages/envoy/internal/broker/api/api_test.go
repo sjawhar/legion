@@ -119,8 +119,8 @@ func fixture(t *testing.T) (srv *httptest.Server, enrA, enrB enrolledAgent, laun
 	}
 
 	machine = &requests.Machine{
-		Store: st,
-		Rules: cur,
+		Store:    st,
+		Rules:    cur,
 		Dispatch: &fakeOpener{},
 		Secrets: secrets.Fake{
 			"dev1/agent-secrets/DEEL_API_KEY": "deel-v1",
