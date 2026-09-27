@@ -104,7 +104,7 @@ func TestFixturesAreWithinSchema(t *testing.T) {
 		"code-span-line-ends", "code", "directive-like-text", "emphasis", "empty-containers", "empty-items-before-a-block-outside-their-item", "empty", "escaped-block-markers", "escapes", "explicit-url-space",
 		"explicit-url-title",
 		"footnote-block-indents", "footnote-ending-in-a-block-in-an-item", "footnote-ending-in-a-block", "footnote-opening-on-a-later-line", "footnote-placement", "footnote-spread-inside-a-quoted-item", "footnote-unreferenced", "footnote", "frontmatter-empty", "frontmatter-fence-whitespace", "frontmatter-long-fence", "frontmatter", "heading-line-breaks", "headings", "hr", "html", "image-alt-line-ends", "image-delimiters", "image",
-		"indented-code-tab-lines", "inline-code-backticks", "inline-code-spaces", "item-opening-with-an-empty-definition-line", "link-delimiters", "links", "list-item-code-blank-lines", "list-spacing-in-containers", "lists-after-code-after-a-list", "lists", "long",
+		"indented-code-tab-lines", "inline-code-backticks", "inline-code-spaces", "item-opening-with-an-empty-definition-line", "link-delimiters", "links", "list-item-code-blank-lines", "list-spacing-in-containers", "lists-after-code-after-a-list", "lists-opening-in-a-container-after-code", "lists", "long",
 		"marks", "nested-code", "nested-empty-items", "ordered-list-prefixes", "paragraphs", "quoted-definition-first-items", "quoted-definition-items", "quoted-definitions-ending-in-lists", "softbreak", "tab-indented-list-markers", "table", "task-markers", "tasks",
 		"unicode",
 	}

@@ -47,7 +47,8 @@ var bareMarkerLine = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]*$`
 // and there lets an item numbered `01.` interrupt it; that parser also refuses one opening a
 // container on a line that already interrupted the paragraph, so `- a\n  - -` is an item holding
 // the text `-`, `- a\n  > -` a quote holding it, and `a\n> 2. b` a quote holding the paragraph
-// `2. b`.
+// `2. b`, and refuses one after indented code (interruptsOpenBlock), so `    code\n> 2. b` is a
+// quote holding that paragraph too.
 type emptyItemGuard struct{ parser.BlockParser }
 
 func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
@@ -55,24 +56,11 @@ func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Co
 	if !bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && !orderedCannotInterrupt(line) {
 		return p.BlockParser.Open(parent, reader, pc)
 	}
-	// The line opens a list whose first item could not interrupt a paragraph. The browser editor's
-	// parser opens none on a line that interrupts a paragraph, whether the paragraph is the block
-	// last opened or the line opens a container first, nor after an indented code block, blank
-	// lines between or not, which it keeps open to the line - except one right after a list. That
-	// list stays open across the blank lines before the code and does not continue its line, and
-	// that parser ends indented code at a line no open container continues, so the code has ended
-	// and the line interrupts nothing (which is also why it reads a second code line there as a
-	// second code block).
 	if last, paragraph := pc.LastOpenedBlock().Node.(*ast.Paragraph); paragraph && last.Parent() == parent {
 		return nil, parser.NoChildren
 	}
-	if parent.ChildCount() == 0 && interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
+	if interruptsOpenBlock(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
 		return nil, parser.NoChildren
-	}
-	if code, ok := parent.LastChild().(*ast.CodeBlock); ok {
-		if _, afterList := code.PreviousSibling().(*ast.List); !afterList {
-			return nil, parser.NoChildren
-		}
 	}
 	return p.BlockParser.Open(parent, reader, pc)
 }
@@ -443,20 +431,43 @@ func columnOf(text []byte) int {
 	return column
 }
 
-// interruptsParagraph reports whether container, opened on the line starting at start with the
-// containers above it that it opens first, follows a paragraph whose last line is the one before.
-func interruptsParagraph(container ast.Node, source []byte, start int) bool {
-	for node := container; node != nil && node.Kind() != ast.KindDocument; node = node.Parent() {
-		previous := node.PreviousSibling()
-		if previous == nil {
-			continue
-		}
-		paragraph, ok := previous.(*ast.Paragraph)
-		if !ok || paragraph.Lines().Len() == 0 {
+// interruptsOpenBlock reports whether a list opening in parent on the line starting at start
+// interrupts a block the browser editor's parser holds open there, other than a paragraph parent
+// holds, which goldmark names: a paragraph ending on the line before, reached across the containers
+// the line opens first, or an indented code block with only blank lines after it. That parser
+// decides once per line whether it interrupts, from the construct it holds open, before opening the
+// containers the line starts with, and keeps indented code open to the line - except code right
+// after a list. That list stays open across the blank lines before the code and does not continue
+// its line, and that parser ends indented code at a line no open container continues, so the code
+// has ended and the line interrupts nothing (which is also why it reads a second code line there as
+// a second code block). A container opened on a line after the code, such as a typed block's
+// fence, starts a flow of its own that holds nothing open.
+func interruptsOpenBlock(parent ast.Node, source []byte, start int) bool {
+	previous := parent.LastChild()
+	opensContainers := previous == nil
+	for node := parent; previous == nil && node != nil && node.Kind() != ast.KindDocument; node = node.Parent() {
+		previous = node.PreviousSibling()
+	}
+	switch previous := previous.(type) {
+	case *ast.Paragraph:
+		if !opensContainers || previous.Lines().Len() == 0 {
 			return false
 		}
-		last := paragraph.Lines().At(paragraph.Lines().Len() - 1)
+		last := previous.Lines().At(previous.Lines().Len() - 1)
 		return bytes.Count(source[last.Start:start], []byte("\n")) <= 1
+	case *ast.CodeBlock:
+		if _, afterList := previous.PreviousSibling().(*ast.List); afterList || previous.Lines().Len() == 0 {
+			return false
+		}
+		last := previous.Lines().At(previous.Lines().Len() - 1)
+		between := source[last.Start:start]
+		between = between[bytes.IndexByte(between, '\n')+1:]
+		for _, line := range bytes.Split(bytes.TrimSuffix(between, []byte("\n")), []byte("\n")) {
+			if len(line) > 0 && !markersOrWhitespace(line) {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }

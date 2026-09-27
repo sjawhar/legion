@@ -765,7 +765,11 @@ An empty list item that would interrupt a paragraph is not opened, as that parse
 whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`. Nor is
 an ordered item numbered anything but a lone `1` (`orderedCannotInterrupt`): goldmark takes the
 number's value and so lets `01.` interrupt a paragraph, where that parser reads `a` over `01. b` as one
-paragraph.
+paragraph. Neither is opened on a line after indented code, blank lines between or not, whatever
+containers the line opens first, since that parser holds the code open to that line and decides
+once per line whether it interrupts - except code right after a list, which that parser ends on its
+own line (`interruptsOpenBlock`): `    code\n> 2. b` is a quote holding the paragraph `2. b`, and
+`1.\n\n    code\n2. b` is two lists with the code between.
 
 Every document's lists are spaced as that parser reads them (`browserListSpacing`): outside
 quotes and footnote definitions a blank line between two items spreads the list, and one between
