@@ -102,8 +102,9 @@ committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legio
 5. `review.json`
 
 Read only files that precede the assigned phase. Every handoff is validated when it is read:
-`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the file, and the
-ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that fails validation as missing.
+`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts` in sjawhar/legion) checks the
+file, and the ledger (`packages/daemon/src/handoff/ledger.ts` in sjawhar/legion) treats a file that
+fails validation as missing.
 Undeclared fields pass validation untouched and reach the next worker; a declared field of the
 wrong type fails the whole file, so the `legion` tool's `handoff_read` returns null for that phase.
 Write the phase-specific fields the next phase and the architect need, consistent with what
@@ -161,14 +162,19 @@ assignment, since `jj split`/`jj describe` keep its author). Never set or overri
 `user.name`/`user.email` in any jj or Git scope — not `jj config set`, not `--config`, not
 `git config`: `--config` outranks the pane environment and would put the wrong App back on your
 commits, and the repository-scoped jj config is one file shared by every issue workspace of the
-clone. Before a push, check
+clone. Legion has two GitHub Apps, not one per role: your role's App is the **implement** App
+if you are the implementer or the merger, and the **review** App if you are the planner, tester,
+reviewer, or an architect (in Legion's own deployment, `legion-implementer[bot]` and
+`legion-reviewer[bot]`). A planner's commits authored by the review App are right. Before a push,
+check
 `jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'`
 shows your role's App in both columns **on every commit you made** — not on the whole list:
 earlier phases' commits are legitimately authored by their own role's App, and a conflict-forced
 rebase legitimately sets the committer of every rebased commit, other roles' included, to the
-rebaser. A wrong identity on your own commit is a pane-environment problem to report to the
-architect, not something to pin (`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`,
-Hazard 1). Your session receives the credential capability it needs; invoke GitHub through the
+rebaser. A wrong identity on your own commit, the other App or none, is a pane-environment
+problem to report to the architect, not something to pin (sjawhar/legion's
+`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`, Hazard 1).
+Your session receives the credential capability it needs; invoke GitHub through the
 credential helper:
 
 ```bash
@@ -176,7 +182,7 @@ legion gh -- <gh args…>
 ```
 
 Four facts about `gh` in a worker pane. The `gh` on your `PATH` is a shim
-(`<state_dir>/worker-bin/gh`, installed by the daemon at startup — `packages/daemon/src/daemon/worker-bin.ts`)
+(`<state_dir>/worker-bin/gh`, installed by the daemon at startup — `packages/daemon/src/daemon/worker-bin.ts` in sjawhar/legion)
 that execs `legion gh -- "$@"`, so `gh …` and `legion gh -- …` are the same call, and each call
 redeems a fresh token from your session's grant — identity is supplied per call, never stored.
 Never run `gh auth login` or `gh auth setup-git`; there is no login state to create. The shim
@@ -225,8 +231,8 @@ legion gh -- pr comment <pr-number> \
 
 The plan lives in `.legion/plan.json` and the Dispatch issue document; never commit a plan or spec file to the repository.
 No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
-and spec content goes into the issue, never into a PR (the root `AGENTS.md`'s `docs/plans/` row
-is human-authored design history, not a Legion artifact). A skill step that says "save the plan
+and spec content goes into the issue, never into a PR (sjawhar/legion's root `AGENTS.md`
+calls its own `docs/plans/` human-authored design history, not a Legion artifact). A skill step that says "save the plan
 to a file" is satisfied by the handoff write in the completion gate below; the planner's only
 commit is `plan: record handoff`.
 
@@ -310,7 +316,7 @@ this proof.
   `Accepted:` — the opener's own follow-up included — leaves the thread open, because resolution
   considers only the newest comment). The review App can reply on a thread but cannot resolve it:
   GitHub grants resolving a review thread to the pull request's author, and the implementer opens
-  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps).
+  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md` in sjawhar/legion, GitHub Apps).
   When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`; when neither is set, use `gh api graphql`
   with the session's GitHub credential and the fallback below.
   In a Legion pane, the **implementer** runs the command before every push that answers a review
@@ -450,7 +456,7 @@ this proof.
   in READY (an empty output is quoted as `no file changes above the approved head`); then the same
   with `'~docs/solutions'` appended, which must print nothing. The merger always posts
   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` (the shape
-  `packages/pi-envoy/roles/merger.md` defines), its summary, and the PR body's gate facts as a
+  `packages/pi-envoy/roles/merger.md` in sjawhar/legion defines), its summary, and the PR body's gate facts as a
   `dispatch_message` on the issue. When the `Legion addressing` line names a merge queue, it also
   publishes the same packet there with `envoy_publish`; a 404 means the Dispatch message remains
   the durable notice and the merger stays idle. The READY packet names both the implementer's and
@@ -560,7 +566,7 @@ cd -- "$LEGION_WORKSPACE" && \
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
 tests it wrote — advance the issue bookmark and push it with the provisioned credential helper,
 which authenticates as your role's App (`appRoleForLegionRole` in
-`packages/daemon/src/daemon/github-apps.ts`). `-r @-` puts the bookmark on the commit you just
+`packages/daemon/src/daemon/github-apps.ts` in sjawhar/legion). `-r @-` puts the bookmark on the commit you just
 split off: the working copy left above it has no description, and `jj git push` refuses a
 commit without one. `--allow-backwards` is for that local step alone: after a split the bookmark
 can sit on the undescribed working copy above `@-`. `--bookmark` also publishes the locally
