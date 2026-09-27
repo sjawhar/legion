@@ -31,8 +31,8 @@ them were green on a rerun.
 
 Most failures were a budget that covered more than the thing it was meant to bound, and the fix
 took that extra work out of the budget. The lock probe was different: it was missing a filter.
-This change raises no test budget; #1264 replaced the compaction waits' 5 s with a one-minute
-drain. The one timeout that changed is the documented dispatch checks recipe,
+This change raises no test budget; #1264 replaced the compaction waits' 5 s, and #1482 the
+shutdown tests' 1 s, with a one-minute drain. The one timeout that changed is the documented dispatch checks recipe,
 whose `-timeout 60s` could not fit `internal/dispatch/api` (71 s on CI) and now uses go test's
 default.
 
