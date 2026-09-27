@@ -1061,8 +1061,11 @@ is the complete shape: the same key names as `legion.yaml`, only the thirteen th
 controller configuration; legion controller start reads only … — see
 deploy/kubernetes/daemon/controller.yaml.example`); `nats_urls` is required; `dispatch_url` and
 `dispatch_token_file` go together; and relative paths resolve against the file's own directory, with
-no `~`. The operator token sits in a file only you can read: a group- or world-readable one is
-refused naming the path and mode (`… is readable by its group or others (mode 0640); chmod 0600 it`).
+no `~`. The operator token and the NATS nkey seed each sit in a file only you can read (mode 0600):
+a group- or world-readable one is refused naming the path and mode (`… is readable by its group or
+others (mode 0640); chmod 0600 it`). This is stricter than the daemon's own seed read, which lets
+the file's group read it ([Configuration](#configuration)): the controller's file is on your machine,
+not in a pod.
 
 **Starting it.** Run `legion controller start --config controller.yaml`, where `daemon_url` (or
 `--daemon-url <url>`, which replaces it) is the daemon's API as your machine reaches it. In order, and
