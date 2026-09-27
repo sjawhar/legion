@@ -1557,7 +1557,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         await gitConfig(rig.repoCloneDir, `url.${host.url}/acme/widgets.insteadOf`, rig.remoteDir);
         await gitConfig(rig.repoCloneDir, "http.sslVerify", "false");
         await gitConfig(rig.repoCloneDir, "core.askPass", witness);
-        return () => host.stop();
+        return host;
       },
     },
   ]) {
@@ -1573,15 +1573,16 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           `#!/bin/sh\nprintf 'witness token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\nexit 1\n`,
           { mode: 0o700 }
         );
-        const cleanup = await plant(rig, witness);
+        const planted = await plant(rig, witness);
         try {
           await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).rejects.toThrow(
             "jj git fetch"
           );
+          if (planted) expect(planted.requests.length, `${name}, ${route}`).toBeGreaterThan(0);
           const recorded = existsSync(sink) ? await readFile(sink, "utf8") : "";
           expect(recorded, `${name}, ${route}`).not.toContain("token=set");
         } finally {
-          await cleanup?.();
+          await planted?.stop();
         }
       }
     }, 60_000);
