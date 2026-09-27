@@ -28,6 +28,9 @@ import {
   sessionHandoffFile,
   writeSessionHandoff,
 } from "../src/session-identity"
+import { isolateDispatchEnvironment } from "./dispatch-environment"
+
+isolateDispatchEnvironment()
 
 interface Queue {
   readonly subject: string

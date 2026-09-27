@@ -209,12 +209,13 @@ tests registered real tools against the fixture's stub zod; `legion.test.ts` inh
 tree launch markers`. Both suites now clear the whole variable family in `beforeEach` (the existing `environmentKeys`
 list in `legion.test.ts`; `DISPATCH_TOKEN_FILE` beside `DISPATCH_URL`/`DISPATCH_TOKEN` in `envoy.test.ts`) and restore
 it in `afterEach`. Clear the variable *family the resolver consumes*, in its precedence order — clearing the familiar
-name and leaving the file-pointer alive disables nothing. The third package to carry the same leak is
-`packages/claude-envoy`: `tests/envoy-channel-server.test.ts` expects its fixture's `Bearer reply-token` on the
-reply it posts to Dispatch and, in a pane, receives the real token from `DISPATCH_TOKEN_FILE` instead (LEGION-131's
+name and leaving the file-pointer alive disables nothing. The third package to carry the same leak was
+`packages/claude-envoy`: `tests/envoy-channel-server.test.ts` expected its fixture's `Bearer reply-token` on the
+reply it posts to Dispatch and, in a pane, received the real token from `DISPATCH_TOKEN_FILE` instead (LEGION-131's
 implementer, rebuilding the claude-envoy bundles: `40 pass, 1 fail`; `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u
-DISPATCH_TOKEN bun test` → `41 pass`). Filed as LEGION-173; until it lands, run that package's suite with the three
-variables unset and say so in the proof.
+DISPATCH_TOKEN bun test` → `41 pass`). LEGION-173 fixed it: every claude-envoy test file that builds a Dispatch client
+from a fixture calls `isolateDispatchEnvironment()` from `tests/dispatch-environment.ts`, which clears the three
+variables before each test and restores them after, so the suite passes in a pane as it does in CI.
 
 Run it from `packages/daemon`, which is the `working-directory` of the `test` job in
 `.github/workflows/pr-and-main.yaml` (that job also sets `LEGION_E2E=1` and `LEGION_TMUX_LIVE=1`). There is no root
