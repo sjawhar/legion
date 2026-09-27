@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 

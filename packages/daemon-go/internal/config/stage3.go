@@ -13,7 +13,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
