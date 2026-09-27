@@ -37389,7 +37389,11 @@ var LegionDaemonApi = {
   },
   GitHubToken: {
     request: exports_external.strictObject({ grantId: nonEmptyString }),
-    response: exports_external.object({ token: nonEmptyString, appLogin: exports_external.string().endsWith("[bot]") })
+    response: exports_external.object({
+      token: nonEmptyString,
+      appLogin: exports_external.string().endsWith("[bot]"),
+      legionAppLogins: exports_external.array(exports_external.string().endsWith("[bot]")).optional()
+    })
   },
   GitCredential: {
     request: exports_external.strictObject({ grantId: nonEmptyString })
