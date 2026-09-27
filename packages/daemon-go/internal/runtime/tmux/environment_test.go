@@ -195,12 +195,14 @@ func TestPaneEnvironmentPutsWorkerBinAndTheLauncherFirstExactlyOnce(t *testing.T
 // bun (measured: bun 1.3.14, LEGION-198) resolves its install cache at $BUN_INSTALL_CACHE_DIR if
 // set, else $BUN_INSTALL/install/cache if set, else $XDG_CACHE_HOME/.bun/install/cache if set,
 // else $HOME/.bun/install/cache — and bun hardlinks that cache's files into every worktree's
-// node_modules, so two panes sharing one cache directory corrupt each other's node_modules on a
-// forced reinstall. Neither BUN_INSTALL nor BUN_INSTALL_CACHE_DIR is on paneEnvAllowList, and
-// PaneEnvironment always sets XDG_CACHE_HOME from stateDir (xdgDirectories), so a pane's bun
-// resolves its cache under its own deployment's state dir even when the daemon's own environment
-// — where an operator's interactive shell sets all three for their own use — carries values that
-// would otherwise point back at the operator's shared $HOME/.bun/install/cache.
+// node_modules, so any two panes sharing one cache directory corrupt each other's node_modules on
+// a forced reinstall. Neither BUN_INSTALL nor BUN_INSTALL_CACHE_DIR is on paneEnvAllowList, and
+// PaneEnvironment always sets XDG_CACHE_HOME from stateDir (xdgDirectories), so every pane of one
+// deployment shares that deployment's own cache under its state dir — sharing within a deployment
+// is intended; the isolation this locks is between deployments — even when the daemon's own
+// environment, where an operator's interactive shell sets all three for their own use, carries
+// values that would otherwise point every deployment back at the operator's one shared
+// $HOME/.bun/install/cache.
 func TestPaneEnvironmentGivesEachDeploymentItsOwnBunCache(t *testing.T) {
 	stateDir := "/var/lib/legion"
 	environ := []string{
