@@ -18,7 +18,7 @@ Before every push that answers a review — the corrective push and the `.legion
 
 ## Rebases
 
-For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Resolve a conflict with a forward merge, never a rewrite — every issue workspace shares one jj repository and operation log, and jj always rebases every descendant of a rewritten commit, including another tree's branch stacked on yours. Follow `skill://legion-worker`'s `jj new @ main@origin -m "<message>"` merge procedure, resolving any conflict in that one commit, then push with `skill://legion-worker`'s ordinary push procedure — it is a genuine fast-forward, never the procedure for rewritten commits.
+For the unchanged-diff fingerprint procedure, follow `skill://legion-worker`. Resolve a conflict with a forward merge, never a rewrite — every issue workspace shares one jj repository and operation log, and jj always rebases every descendant of a rewritten commit, including another tree's branch stacked on yours. Follow `skill://legion-worker`'s `jj new legion/<KEY> main@origin -m "<message>"` merge procedure (from the bookmark, never from `@`, which a handoff split leaves undescribed), resolving any conflict in that one commit, then push with `skill://legion-worker`'s ordinary push procedure — it is a genuine fast-forward, never the procedure for rewritten commits.
 
 ## Workspace restrictions
 

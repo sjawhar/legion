@@ -255,16 +255,20 @@ Preserve this order exactly:
    with options for its outcomes, and the issue waits for it.
 
 What returns the tree to review: a changed diff — a commit above the approved head that
-touches anything outside `docs/solutions/`, or a rebase whose fingerprint
+touches anything outside `docs/solutions/`, or a conflict-resolution merge whose fingerprint
 (`skill://legion-worker`'s unchanged-diff check) differs from the approved head's. What does not: retro's
-`docs/solutions/` commit, and a rebase forced by a GitHub-reported conflict whose fingerprint
-is unchanged. For that rebase the order is: the implementer rebases, pushes the rebased chain with
-`legion-worker`'s procedure for rewritten commits, and posts the before/after fingerprints; the tester re-runs the bare gates only; the reviewer confirms and approves the new
-head by SHA (or continues its round if it had not approved); the merger republishes READY.
-Retro does not re-run. A rebase happens only when GitHub reports `CONFLICTING`
+`docs/solutions/` commit, and a merge forced by a GitHub-reported conflict whose fingerprint
+is unchanged. For that merge the order is: the implementer merges the bookmark forward with the
+destination (`legion-worker`'s forward-merge procedure — `jj new legion/<KEY> <destination>`,
+never a rebase, since a rebase rewrites every descendant of the chain's fork point, including
+another tree's branch stacked on it), pushes it with the ordinary push procedure (a genuine
+fast-forward), and posts the before/after fingerprints; the tester re-runs the bare gates only;
+the reviewer confirms and approves the new head by SHA (or continues its round if it had not
+approved); the merger republishes READY. Retro does not re-run. This merge happens only when
+GitHub reports `CONFLICTING`
 (`legion gh -- pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
 wake — `pr-ready`, `pr-review`, `phase-complete`, `catchup-overseer` — because a `CONFLICTING`
-PR gets no CI and no wake announces it, and send the implementer to rebase the moment you see
+PR gets no CI and no wake announces it, and send the implementer to resolve it the moment you see
 it. Do not let the merger publish `READY` for an obsolete approval.
 
 If a worker reports that `legion threads resolve` exited 1 naming a review thread GitHub refused

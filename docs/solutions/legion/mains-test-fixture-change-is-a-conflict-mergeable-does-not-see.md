@@ -78,9 +78,10 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch
 # 1. before: the tip you are about to move
 jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | <tip>)" --to <tip> \
   --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum
-# 2. a forward merge, not a rewrite (LEGION-118: rebase forms rewrite descendants of a rewritten
-#    commit, including another tree's stacked branch; a merge is a genuine fast-forward instead)
-jj -R "$LEGION_WORKSPACE" new @ main@origin -m "merge: resolve conflict against main@origin"
+# 2. a forward merge from the bookmark, not a rewrite (LEGION-118: rebase forms rewrite
+#    descendants of a rewritten commit, including another tree's stacked branch; merging from
+#    `@` risks an undescribed handoff-split leftover, which `jj git push` refuses)
+jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
 # 3. merged-only: must EQUAL step 1 -- the text merge itself changed nothing in the product
 # 4. adapt, gates, one commit, then the fingerprint again: differs by that commit alone
 ```

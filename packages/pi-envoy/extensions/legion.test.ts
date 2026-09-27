@@ -2477,7 +2477,7 @@ describe("Legion OMP extension", () => {
       'jj -R "$LEGION_WORKSPACE" op log -n 5',
       "jj op show",
       'jj describe -m "undo this"',
-      'jj -R "$LEGION_WORKSPACE" new @ main@origin -m "merge: resolve conflict against main@origin"',
+      'jj -R "$LEGION_WORKSPACE" new legion/LEGION-1 main@origin -m "merge: resolve conflict against main@origin"',
       'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | abc123)" --to abc123 --git --context 0 \'~(.legion | docs/solutions)\' | sed -e \'/^@@/d\' -e \'/^index /d\' | sha256sum',
       'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
       'jj -R "$LEGION_WORKSPACE" log -r \'description(glob:"undo*")\'',

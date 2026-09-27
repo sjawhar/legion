@@ -153,9 +153,10 @@ match.
 
 1. Before merging: `jj git fetch`, then hash the current tip with the one-fileset command and
    keep the number.
-2. `jj -R "$LEGION_WORKSPACE" new @ main@origin -m "merge: resolve conflict against main@origin"`
-   — a forward merge, not a rewrite; the tester's and reviewer's handoff commits stay exactly
-   where they are.
+2. `jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"`
+   — a forward merge from the bookmark, not `@` (a handoff split leaves `@` empty and
+   undescribed, and `jj git push` refuses a commit with no description); the tester's and
+   reviewer's handoff commits stay exactly where they are.
 3. Resolve the conflict directly in that one merge commit (edit the markers; there is nothing to
    squash, since the merge is the only new commit). Never `jj op restore` in a shared workspace.
 4. `jj new`, run the package's tests, lint, and typecheck at the resolved tip, re-run every

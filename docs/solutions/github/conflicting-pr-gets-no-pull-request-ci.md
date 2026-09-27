@@ -72,14 +72,16 @@ another tree's branch whenever one happens to be stacked on this one (LEGION-118
 forward merge instead, which touches nothing that already exists:
 
 ```sh
-jj -R "$LEGION_WORKSPACE" new @ main@origin -m "merge: resolve conflict against main@origin"
+jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
 ```
 
-If it conflicts, resolve it directly in that one commit — edit the markers; there is nothing to
-squash, since the merge is the only new commit, and never `jj abandon` a stray working-copy commit
-in the shared workspace. It is a genuine fast-forward (the merge descends from both the branch's
-old tip and `main@origin`), so advance the bookmark onto it and push with the ordinary push
-procedure in `skills/legion-worker/SKILL.md`.
+Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed commit,
+and `jj git push` refuses to push any commit without a description. If it conflicts, resolve it
+directly in that one commit — edit the markers; there is nothing to squash, since the merge is
+the only new commit, and never `jj abandon` a stray working-copy commit in the shared workspace.
+It is a genuine fast-forward (the merge descends from both the bookmark's old position and
+`main@origin`), so advance the bookmark onto it and push with the ordinary push procedure in
+`skills/legion-worker/SKILL.md`.
 
 ## Related
 
