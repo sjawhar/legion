@@ -1078,3 +1078,86 @@ func TestPromotingAWaitingRootReentersAChildStrandedWhileItsLabelWasOff(t *testi
 		t.Fatalf("child after its root is promoted = %#v, want phase admitted, generation 2, kept in %s's tree", got, root)
 	}
 }
+
+// A waiting root whose newest Dispatch event is a comment is deferred at boot against a threshold
+// LastDispatchSeq alone could never reach, since only issue.created, issue.updated and issue.closed
+// advance it; every other Dispatch event of the issue — a comment, an ask, a claim — only advances
+// SeenDispatchSeq, which intake now records for those too (decodeDispatchFact's default case
+// yields a DispatchSeen fact instead of none). promote must compare against SeenDispatchSeq, not
+// LastDispatchSeq, or the hold never releases. Three facts about other issues must not release it;
+// the issue's own next Dispatch event, whatever its type, must.
+func TestPromotionReleasesAHoldOnceTheIssuesSeenSequenceCatchesUpEvenWithoutAFact(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	putIssue(t, pool, record.Issue{Key: "LEGION-W", Project: testProject, Title: "LEGION-W", Tree: "LEGION-W", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 2})
+
+	reconcile(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-W", Title: "LEGION-W", Status: "todo", Rank: "A", LastSeq: 3},
+	})
+	assertSlots(t, pool, nil)
+
+	for _, unrelated := range []struct {
+		id   string
+		fact intake.Fact
+	}{
+		{"unrelated-1", intake.LingerExpired{Issue: "LEGION-UNRELATED-1", Generation: 1}},
+		{"unrelated-2", intake.LingerExpired{Issue: "LEGION-UNRELATED-2", Generation: 1}},
+		{"unrelated-3", intake.LingerExpired{Issue: "LEGION-UNRELATED-3", Generation: 1}},
+	} {
+		if _, err := intake.ApplyFact(context.Background(), pool, "timer", unrelated.id, unrelated.fact, engineStub{}, admission); err != nil {
+			t.Fatalf("ApplyFact %s: %v", unrelated.id, err)
+		}
+	}
+	assertSlots(t, pool, nil)
+
+	// The trailing comment itself, as intake now decodes it: a DispatchSeen fact naming the
+	// issue's own key and the same seq Dispatch's log was already at.
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "comment-seen", intake.DispatchSeen{Key: "LEGION-W", Seq: 3}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact comment: %v", err)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-W", Index: 0, AdmittedAt: fixedNow}})
+}
+
+// The hold survives a restart: a fresh Admission rebuilds pending from the same boot read (its own
+// in-memory state gone), and the deferred root's own next Dispatch event still releases it, since
+// SeenDispatchSeq is durable on the record, not on the Admission that first deferred the root.
+func TestPromotionSurvivesARestartOnceTheIssuesSeenSequenceCatchesUp(t *testing.T) {
+	pool := migratedPool(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	admission := newAdmission(t, 1, log)
+	putIssue(t, pool, record.Issue{Key: "LEGION-W", Project: testProject, Title: "LEGION-W", Tree: "LEGION-W", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 2})
+
+	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-W", Title: "LEGION-W", Status: "todo", Rank: "A", LastSeq: 3}})
+	assertSlots(t, pool, nil)
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "timer", "unrelated", intake.LingerExpired{Issue: "LEGION-OTHER", Generation: 1}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact unrelated: %v", err)
+	}
+	assertSlots(t, pool, nil)
+
+	// Restart: a fresh Admission, the same boot read.
+	admission = newAdmission(t, 1, log)
+	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-W", Title: "LEGION-W", Status: "todo", Rank: "A", LastSeq: 3}})
+	assertSlots(t, pool, nil)
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "comment-seen", intake.DispatchSeen{Key: "LEGION-W", Seq: 3}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact comment: %v", err)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-W", Index: 0, AdmittedAt: fixedNow}})
+}
+
+// promote drops a pending entry naming a key its own issues list holds no record for, whatever
+// caused that: a phantom threshold serves nothing once the record it was measuring is gone, and
+// leaving it would hold that key back forever if it were ever recorded again under the same key.
+func TestPromotionDropsAPendingEntryForARecordNoLongerFound(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	admission.pending["LEGION-GHOST"] = 5
+	seedWaiting(t, pool, "LEGION-NEXT", "A")
+
+	apply(t, pool, admission, "unrelated", intake.DispatchIssue{Key: "LEGION-NEXT", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-NEXT", Rank: "A", Labels: handed}, engineStub{})
+
+	if _, held := admission.pending["LEGION-GHOST"]; held {
+		t.Fatalf("pending still holds LEGION-GHOST after its record was never found")
+	}
+}

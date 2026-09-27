@@ -49,6 +49,7 @@ const (
 // DispatchArtifact records one review or version event for a registered design document.
 type DispatchArtifact struct {
 	Key        string
+	Seq        int64
 	ArtifactID string
 	Kind       DispatchArtifactKind
 	Version    int
@@ -56,6 +57,35 @@ type DispatchArtifact struct {
 }
 
 func (DispatchArtifact) isFact() {}
+
+// DispatchSeen is a Dispatch event of an issue that decodeDispatchFact does not otherwise turn
+// into a fact: a comment, an ask, a message, a claim — any type admission's own fields do not
+// track. Dispatch's own per-issue last_seq advances on these exactly as it does on
+// issue.created/updated/closed, so admission records this event's Seq too, to know how far the
+// stream has actually carried the issue regardless of what changed.
+type DispatchSeen struct {
+	Key string
+	Seq int64
+}
+
+func (DispatchSeen) isFact() {}
+
+// DispatchSeq returns the issue key and Dispatch event sequence a fact carries, when it does:
+// DispatchIssue, DispatchArtifact and DispatchSeen are Dispatch's own event stream, in the one
+// sequence space Dispatch's per-issue last_seq counts; every other fact (a pull request event, a
+// linger timer, a handoff) is not.
+func DispatchSeq(fact Fact) (key string, seq int64, ok bool) {
+	switch f := fact.(type) {
+	case DispatchIssue:
+		return f.Key, f.Seq, true
+	case DispatchArtifact:
+		return f.Key, f.Seq, true
+	case DispatchSeen:
+		return f.Key, f.Seq, true
+	default:
+		return "", 0, false
+	}
+}
 
 // PullRequestOpened registers a pull request whose branch or body identifies a Dispatch issue.
 type PullRequestOpened struct {

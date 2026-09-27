@@ -52,6 +52,11 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 	if err := a.releaseDoneSlots(ctx, tx); err != nil {
 		return intake.Result{}, err
 	}
+	if key, seq, ok := intake.DispatchSeq(fact); ok {
+		if err := a.observeSeen(ctx, tx, key, seq); err != nil {
+			return intake.Result{}, err
+		}
+	}
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
@@ -189,12 +194,38 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		Rank:            observation.Rank,
 		HandedOver:      record.CarriesLegionLabel(observation.Labels),
 		LastDispatchSeq: observation.Seq,
+		SeenDispatchSeq: observation.Seq,
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
 		return fmt.Errorf("record admitted root %s: %w", observation.Key, err)
 	}
 	if logOrphan && observation.Parent != "" {
 		a.log.Info("admission orphan", "issue", observation.Key, "parent", observation.Parent)
+	}
+	return nil
+}
+
+// observeSeen advances a recorded root's SeenDispatchSeq to seq, the one place any Dispatch event
+// of the issue reaches the record regardless of what else it changes — or whether it changes
+// anything at all admission or the workflow engine act on. Only promote's pending check ever reads
+// SeenDispatchSeq, and only a root or an admitted orphan (a root of its own) can ever wait in it, so
+// a live tree's child is left to the engine entirely, as every other admission write already does.
+// An unrecorded issue has nothing to advance; putNewRoot sets the field directly when it later
+// admits one.
+func (a *Admission) observeSeen(ctx context.Context, tx pgx.Tx, key string, seq int64) error {
+	if seq <= 0 {
+		return nil
+	}
+	stored, err := a.store.Issue(ctx, tx, key)
+	if err != nil {
+		return fmt.Errorf("read issue %s to advance its seen sequence: %w", key, err)
+	}
+	if stored == nil || !claim.IsTreeRoot(stored.Key, stored.Tree) || seq <= stored.SeenDispatchSeq {
+		return nil
+	}
+	stored.SeenDispatchSeq = seq
+	if err := a.store.PutIssue(ctx, tx, *stored); err != nil {
+		return fmt.Errorf("advance seen sequence of %s: %w", key, err)
 	}
 	return nil
 }
@@ -364,10 +395,14 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
-// waiting line empties. A candidate a.pending still names is held back: its record has not yet
-// reached the LastDispatchSeq Reconcile found Dispatch's own log ahead of it by, so the stream still
-// owes it the event that will promote or dequeue it properly. Once a candidate's record catches up,
-// its pending entry is dropped and it is promoted like any other.
+// waiting line empties. A candidate a.pending still names is held back: its record's SeenDispatchSeq
+// has not yet reached the Dispatch sequence Reconcile found the record behind by — comparing
+// Dispatch's own per-issue counter against the field that advances on every event of the issue, not
+// only the ones LastDispatchSeq tracks, so a candidate whose newest event never touched
+// LastDispatchSeq still catches up and releases. A satisfied candidate's entry is dropped only once
+// every step this call takes succeeds, never inside a loop iteration that might still fail and roll
+// the whole transaction back with it; a pending entry naming a record this call's own issues list no
+// longer holds is dropped outright, whatever caused that.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 	if a.cap <= 0 {
 		return nil
@@ -376,20 +411,32 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 	if err != nil {
 		return fmt.Errorf("list admission issues: %w", err)
 	}
+	if len(a.pending) > 0 {
+		present := make(map[string]struct{}, len(issues))
+		for _, issue := range issues {
+			present[issue.Key] = struct{}{}
+		}
+		for key := range a.pending {
+			if _, ok := present[key]; !ok {
+				delete(a.pending, key)
+			}
+		}
+	}
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("list admission slots: %w", err)
 	}
 	own := ownSlots(issues, slots)
 	waiting := record.Waiting(issues, own)
+	var released []string
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
 		if threshold, held := a.pending[candidate.Key]; held {
-			if candidate.LastDispatchSeq < threshold {
+			if candidate.SeenDispatchSeq < threshold {
 				continue
 			}
-			delete(a.pending, candidate.Key)
+			released = append(released, candidate.Key)
 		}
 		now := a.now()
 		index := nextSlotIndex(slots)
@@ -414,6 +461,9 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 			return err
 		}
 		slots, own = append(slots, slot), append(own, slot)
+	}
+	for _, key := range released {
+		delete(a.pending, key)
 	}
 	return nil
 }

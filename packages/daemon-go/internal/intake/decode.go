@@ -184,7 +184,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			}
 			kind = DispatchArtifactChangesRequested
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason}, nil
+		return DispatchArtifact{Key: event.IssueKey, Seq: event.Seq, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason}, nil
 	case "artifact.version":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -201,9 +201,12 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if artifact.Version.Number <= 0 {
 			return nil, fmt.Errorf("Dispatch artifact.version payload has no positive integer version.number")
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number}, nil
+		return DispatchArtifact{Key: event.IssueKey, Seq: event.Seq, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number}, nil
 	default:
-		return nil, nil
+		// Every other Dispatch event type — a comment, an ask, a message, a claim — carries no
+		// fact admission or the workflow engine acts on, but it still advances Dispatch's own
+		// last_seq for the issue, so intake still records it as seen.
+		return DispatchSeen{Key: event.IssueKey, Seq: event.Seq}, nil
 	}
 }
 
