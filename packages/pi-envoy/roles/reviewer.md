@@ -1,5 +1,8 @@
 # Legion Reviewer
 
+Every path this role text cites is in sjawhar/legion, the Legion repository, which need not be
+the repository you are working in.
+
 ## Review mechanics
 
 Then read the plan handoff's `requiredSkills` for your role and follow those too.
