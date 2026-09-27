@@ -374,3 +374,42 @@ func TestPutClaimAndDeliveryWritesBothOrNeither(t *testing.T) {
 			stored.State, stored.Pending)
 	}
 }
+
+func TestAClaimsEnrollmentRoundTrips(t *testing.T) {
+	s := migratedStore(t)
+	ctx := context.Background()
+	c := supervise.Claim{
+		Token: "legion-LEGION-209-implementer", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleImplementer, Generation: 3, State: supervise.StateRegistered,
+		Locator: &runtime.Locator{Runtime: runtime.RuntimeSandbox, Claim: "legion-LEGION-209-implementer", Incarnation: "pod-uid-3",
+			Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209-implementer"}},
+		Enrollment: &supervise.Enrollment{ID: "enr-1", Incarnation: "pod-uid-3"},
+	}
+	if err := s.PutClaim(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := s.Claims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Enrollment == nil || *claims[0].Enrollment != *c.Enrollment {
+		t.Fatalf("read back %+v", claims)
+	}
+	c.Enrollment = nil
+	if err := s.PutClaim(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	claims, _ = s.Claims(ctx)
+	if claims[0].Enrollment != nil {
+		t.Fatalf("a cleared enrollment read back as %+v", claims[0].Enrollment)
+	}
+}
+
+func TestAnEnrollmentWithoutAnIncarnationIsRefusedByTheSchema(t *testing.T) {
+	s := migratedStore(t)
+	c := supervise.Claim{Token: "legion-LEGION-209-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleTester, State: supervise.StateQueued, Enrollment: &supervise.Enrollment{ID: "enr-1"}}
+	if err := s.PutClaim(context.Background(), c); err == nil {
+		t.Fatal("an enrollment naming no incarnation was stored")
+	}
+}

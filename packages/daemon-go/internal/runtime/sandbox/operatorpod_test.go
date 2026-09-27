@@ -77,7 +77,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		}}, want: "runtime.kubernetes.pod.volumes[1].name boot is a volume Legion puts in every pod"},
 		{name: "a mount at a path Legion mounts", pod: mountAt("/var/run/legion/boot"), want: overlaps("/var/run/legion/boot", "/var/run/legion/boot", false)},
 		{name: "a mount under a path Legion mounts", pod: mountAt("/legion/operator"), want: overlaps("/legion/operator", "/legion", false)},
-		{name: "a mount above a path Legion mounts", pod: mountAt("/var/run/legion"), want: overlaps("/var/run/legion", "/var/run/legion/boot", false)},
+		{name: "a mount above a path Legion mounts", pod: mountAt("/var/run/legion"), want: overlaps("/var/run/legion", "/var/run/legion/agent-secrets", false)},
 		{name: "a mount above the sessions Legion mounts", pod: mountAt("/home/legion/.omp/profiles/legion/agent"),
 			want: overlaps("/home/legion/.omp/profiles/legion/agent", "/home/legion/.omp/profiles/legion/agent/sessions", false)},
 		{name: "a mount at the root", pod: mountAt("/"), want: overlaps("/", "/home/legion/.config", false)},

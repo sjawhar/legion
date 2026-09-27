@@ -24,8 +24,9 @@ type RuntimeObservation struct{ Observation runtime.Observation }
 
 // StreamHello is the shim connecting with this claim's boot token, resolved to its generation.
 type StreamHello struct {
-	Claim      claim.Token
-	Generation uint64
+	Claim        claim.Token
+	Generation   uint64
+	AgentSecrets *AgentSecretsIdentity
 }
 
 // StreamTurnStart is the agent's turn starting. Oh My Pi's own agent_start carries no delivery id;
@@ -370,8 +371,7 @@ func fillTable(t *builder) {
 
 	// The shim.
 	t.row(onHello, "the shim connected", helloed, []ClaimState{StateShimConnected}, StateLaunching)
-	t.ignore(onHello, "the shim reconnected before its agent registered", StateShimConnected)
-	t.ignore(onHello, "the shim reconnected, or its agent's registration overtook its hello", StateRegistered)
+	t.row(onHello, "the shim reconnected before ready: hand it the enrollment if it lacks one", enrolledOnly, nil, StateShimConnected, StateRegistered)
 	t.row(onHello, "the shim reconnected: send what is pending", reconnected, []ClaimState{StateWorking}, prompted...)
 	t.row(onHello, "the shim reconnected mid-turn: after a restart, ask whether the turn is still running",
 		reconnectedMidTurn, []ClaimState{StateIdle, StateWorking}, StateWorking)
@@ -544,17 +544,33 @@ func (b *builder) ignore(kind eventKind, reason string, states ...ClaimState) {
 // connection — when nothing else will come: the retry is bounded by the sweep's interval and by
 // the prompt budget, never made on the spot.
 func observe(m *Machine, ctx context.Context, ev Event) error {
-	return m.judge(ctx, ev.(RuntimeObservation).Observation, m.sendPending, TimerProbe, m.deps.Timeouts.Probe)
+	return m.judge(ctx, ev.(RuntimeObservation).Observation, func(ctx context.Context) error {
+		if err := m.ensureEnrolled(ctx); err != nil {
+			return err
+		}
+		return m.sendPending(ctx)
+	}, TimerProbe, m.deps.Timeouts.Probe)
 }
 
 func helloed(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateShimConnected
-	return m.persist(ctx)
+	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	return m.ensureEnrolled(ctx)
 }
+
+// enrolledOnly is a hello in a state the reconnect changes nothing about — the shim connected or
+// the agent registered, not yet ready — except that the reconnected shim may need the enrollment
+// it never received, or the resumed claim its first one.
+func enrolledOnly(m *Machine, ctx context.Context, _ Event) error { return m.ensureEnrolled(ctx) }
 
 func reconnected(m *Machine, ctx context.Context, _ Event) error {
 	if m.send != nil {
 		m.helloDuringSend = true
+	}
+	if err := m.ensureEnrolled(ctx); err != nil {
+		return err
 	}
 	return m.sendPending(ctx)
 }
@@ -564,6 +580,9 @@ func reconnected(m *Machine, ctx context.Context, _ Event) error {
 // may be waiting on an agent_end an earlier daemon received and never recorded, so its first
 // hello asks.
 func reconnectedMidTurn(m *Machine, ctx context.Context, ev Event) error {
+	if err := m.ensureEnrolled(ctx); err != nil {
+		return err
+	}
 	if !m.askFirst {
 		return nil
 	}
@@ -813,7 +832,10 @@ func register(m *Machine, ctx context.Context, ev Event) error {
 	m.claim.State = StateRegistered
 	m.disarm(TimerBoot)
 	m.disarm(TimerRegistration)
-	return m.persist(ctx)
+	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	return m.ensureEnrolled(ctx)
 }
 
 func reregister(m *Machine, ctx context.Context, ev Event) error {

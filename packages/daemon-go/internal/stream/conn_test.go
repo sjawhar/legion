@@ -661,3 +661,38 @@ func TestAdoptWorkingCopyAsksTheShimAndReadsItsResult(t *testing.T) {
 		t.Fatal("AdoptWorkingCopy sent a frame with no identity")
 	}
 }
+
+func TestAgentSecretsEnrollmentIsAnsweredByTheShim(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	result := async(func() error { return h.conn().AgentSecretsEnrollment(context.Background(), "enr-1") })
+	request := p.expect(shimwire.TypeAgentSecretsEnrollment).(shimwire.AgentSecretsEnrollment)
+	if request.EnrollmentID != "enr-1" || request.ID == "" {
+		t.Fatalf("the shim received %+v", request)
+	}
+	p.send(shimwire.AgentSecretsEnrollmentResult{ID: request.ID, OK: true})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentSecretsEnrollmentRefusalIsARefusedError(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	result := async(func() error { return h.conn().AgentSecretsEnrollment(context.Background(), "enr-1") })
+	request := p.expect(shimwire.TypeAgentSecretsEnrollment).(shimwire.AgentSecretsEnrollment)
+	p.send(shimwire.AgentSecretsEnrollmentResult{ID: request.ID, OK: false, Error: "key dir is read-only"})
+	err := awaitResult(t, result)
+	var refused *RefusedError
+	if !errors.As(err, &refused) || refused.Command != shimwire.TypeAgentSecretsEnrollment || refused.Reason != "key dir is read-only" {
+		t.Fatalf("err = %v, want a RefusedError with the shim's reason", err)
+	}
+}
+
+func TestAgentSecretsEnrollmentNeedsAnID(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	h.connect(testToken)
+	if err := h.conn().AgentSecretsEnrollment(context.Background(), ""); err == nil || !errors.Is(err, shimwire.ErrMalformedFrame) {
+		t.Fatalf("err = %v, want the frame's own refusal", err)
+	}
+}

@@ -26,8 +26,10 @@ type Scheduling struct {
 
 // Tools are absolute paths inside the worker image. GH, Git, and JJ reach the agent as
 // LEGION_GH_PATH, LEGION_GIT_PATH, and LEGION_JJ_PATH; Legion is the Go `legion` every container
-// runs (/opt/legion/go/bin/legion), whose directory also leads the pod's PATH.
-type Tools struct{ GH, Git, JJ, Legion string }
+// runs (/opt/legion/go/bin/legion), whose directory also leads the pod's PATH. AgentSecrets is
+// the `agent-secrets` client (/opt/legion/go/bin/agent-secrets), which the shim runs only for a
+// pod the runtime enrolls with the secrets broker (Options.AgentSecrets).
+type Tools struct{ GH, Git, JJ, Legion, AgentSecrets string }
 
 // Pod is what the operator adds to every pod Legion runs, the image probe's included
 // (runtime.kubernetes.pod): variables and volume mounts for the agent's container (the worker's,
@@ -76,6 +78,8 @@ type Options struct {
 	// NATSURLs are ENVOY_NATS_URL, comma-joined; none leaves it unset.
 	NATSURLs []string
 	Tools    Tools
+	// AgentSecrets enrolls every pod with the secrets broker; nil enrolls none. See AgentSecrets.
+	AgentSecrets *AgentSecrets
 	// Pod is the operator's pod configuration, added to every worker pod and to the probe pod.
 	Pod Pod
 	// ProviderKeys maps each variable Oh My Pi reads to the key of the providers Secret
@@ -125,6 +129,15 @@ type Options struct {
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.
 	Log *slog.Logger
+}
+
+// AgentSecrets is the secrets broker the runtime enrolls every pod with (AGENTC-393): the URL the
+// pod's `agent-secrets` client calls, and the audience and lifetime of the projected token each
+// pod carries for it. Nil enrolls none, and no pod carries the token, the key volume, the
+// variables, or the shim flags.
+type AgentSecrets struct {
+	URL, Audience string
+	TokenExpiry   time.Duration
 }
 
 // InstallRef names the pieces of Agent Sandbox a cluster must have: the Sandbox CRD, and the

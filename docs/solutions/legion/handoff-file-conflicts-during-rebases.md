@@ -20,6 +20,14 @@ symptoms:
 
 # .legion/ Handoff File Conflicts During Concurrent Rebases
 
+**Superseded 2026-09-27 (LEGION-118):** the legion-worker skill's own conflict/retarget step is
+now a forward merge (`jj new legion/<KEY> <destination> -m "<message>"`, one new commit, never a
+rebase of the chain), so this multi-ancestor-commit `.legion/` conflict pattern no longer arises
+there — a merge reconciles the whole accumulated diff once, not commit by commit. What follows
+records the earlier, rebase-based mechanics; it stays useful for a genuine multi-commit rebase
+outside that step (an operator restructuring a stack by hand, say), where the same
+`.legion/plan.json`-per-issue-data conflict and its bottom-up resolution still apply.
+
 ## The Pattern
 
 When rebasing a feature branch onto main after a concurrent issue merges, `.legion/plan.json` conflicts across **multiple ancestor commits**. Resolving the deepest ancestor causes descendants to re-conflict due to jj's automatic descendant rebasing.
@@ -69,6 +77,11 @@ The only cost is a new PR number. Use this when:
 - The code diff is small relative to the conflict surface
 
 ## Prevention
+
+**Superseded 2026-09-27 (LEGION-118):** this list is prevention for the multi-commit rebase
+conflict above, which the worker's own conflict/retarget step no longer produces (it merges,
+one commit, once — see the file-level note above). Still useful for a genuine multi-commit
+rebase outside that step.
 
 - **Squash before rebasing**: If the branch has multiple commits touching `.legion/`, squash them into one first. One conflict to resolve instead of N.
 - **Rebase frequently**: Don't let branches diverge from main for long.

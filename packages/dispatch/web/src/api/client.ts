@@ -16,6 +16,7 @@ import type {
   AskRead,
   AskSnooze,
   AuthenticatedUser,
+  AuthenticationResponseJSON,
   BlockSchema,
   BroadcastCreated,
   BroadcastRead,
@@ -33,6 +34,13 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  CredentialCeremonyBeginResponse,
+  CredentialCeremonyFinishResponse,
+  CredentialDecisionResponse,
+  CredentialGrantsResponse,
+  CredentialKeysResponse,
+  CredentialPendingResponse,
+  CredentialRecord,
   DispatchUser,
   EditCommentInput,
   Event,
@@ -47,6 +55,7 @@ import type {
   MessageDelivery,
   MessageRead,
   Project,
+  RegistrationResponseJSON,
   RepoProject,
   SearchResponse,
   Subscriber,
@@ -122,6 +131,14 @@ export function isForbidden(error: unknown): boolean {
 // ordinary project page log a failed request.
 export function isSourceNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
+}
+
+// A launcher-credential machine-lookup record never carries a `code` UI; a broker deployed
+// without credential requests configured answers every credential route with this 404 —
+// definitive like an auth outcome (retrying changes nothing), and the one case the inbox's
+// credential section treats as "not configured", never as a failure.
+export function isCredentialFeatureOff(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && error.code === "FEATURE_OFF";
 }
 
 // The retry policy every query in the app shares: an auth outcome (401/403) or a missing
@@ -647,6 +664,105 @@ export class DispatchApiClient {
 
   githubGraphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
     return this.post<T>("/api/github/graphql", { query, variables });
+  }
+
+  /** `GET /api/v1/credential-requests?approver=me`: every request waiting on the viewer, as
+   *  the Inbox's credential-requests section lists them. */
+  getCredentialPending(): Promise<CredentialPendingResponse> {
+    return this.json<CredentialPendingResponse>(
+      pathWithQuery("/api/v1/credential-requests", { approver: "me" })
+    );
+  }
+
+  getCredentialRecord(recordId: string): Promise<CredentialRecord> {
+    return this.json<CredentialRecord>(`/api/v1/credential-requests/${pathSegment(recordId)}`);
+  }
+
+  approveCredentialRecord(
+    recordId: string,
+    body: { assertion: AuthenticationResponseJSON; code?: string }
+  ): Promise<CredentialDecisionResponse> {
+    return this.post<CredentialDecisionResponse>(
+      `/api/v1/credential-requests/${pathSegment(recordId)}/approve`,
+      body
+    );
+  }
+
+  denyCredentialRecord(
+    recordId: string,
+    body: { assertion: AuthenticationResponseJSON }
+  ): Promise<CredentialDecisionResponse> {
+    return this.post<CredentialDecisionResponse>(
+      `/api/v1/credential-requests/${pathSegment(recordId)}/deny`,
+      body
+    );
+  }
+
+  /** A machine (`launcher_credential`) record's challenges only ever come from this route,
+   *  never from `getCredentialRecord` — the code the operator types in is what proves which
+   *  pending request they mean. */
+  lookupMachineCredential(code: string): Promise<CredentialRecord> {
+    return this.post<CredentialRecord>("/api/v1/credential-requests/machine-lookup", { code });
+  }
+
+  getCredentialKeys(login: string): Promise<CredentialKeysResponse> {
+    return this.json<CredentialKeysResponse>(`/api/v1/credential-keys/${pathSegment(login)}`);
+  }
+
+  beginCredentialKeyRegistration(login: string): Promise<CredentialCeremonyBeginResponse> {
+    return this.post<CredentialCeremonyBeginResponse>(
+      `/api/v1/credential-keys/${pathSegment(login)}/register/begin`,
+      {}
+    );
+  }
+
+  finishCredentialKeyRegistration(
+    login: string,
+    body: { ceremony_id: string; response: RegistrationResponseJSON }
+  ): Promise<CredentialCeremonyFinishResponse> {
+    return this.post<CredentialCeremonyFinishResponse>(
+      `/api/v1/credential-keys/${pathSegment(login)}/register/finish`,
+      body
+    );
+  }
+
+  beginCredentialKeyEndorsement(
+    login: string,
+    body: { credential_id: string; key_hash: string }
+  ): Promise<CredentialCeremonyBeginResponse> {
+    return this.post<CredentialCeremonyBeginResponse>(
+      `/api/v1/credential-keys/${pathSegment(login)}/endorse/begin`,
+      body
+    );
+  }
+
+  finishCredentialKeyEndorsement(
+    login: string,
+    body: { ceremony_id: string; response: AuthenticationResponseJSON }
+  ): Promise<CredentialCeremonyFinishResponse> {
+    return this.post<CredentialCeremonyFinishResponse>(
+      `/api/v1/credential-keys/${pathSegment(login)}/endorse/finish`,
+      body
+    );
+  }
+
+  /** `GET /api/v1/credential-grants?approver=me`: every grant the viewer approved, for the
+   *  revoke-list page a later task adds. */
+  getCredentialGrants(): Promise<CredentialGrantsResponse> {
+    return this.json<CredentialGrantsResponse>(
+      pathWithQuery("/api/v1/credential-grants", { approver: "me" })
+    );
+  }
+
+  async revokeCredentialGrant(
+    grantId: string,
+    body: { assertion: AuthenticationResponseJSON }
+  ): Promise<void> {
+    await this.response(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {
+      body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
   }
 }
 

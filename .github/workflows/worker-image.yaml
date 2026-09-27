@@ -34,9 +34,11 @@ on:
   # builds from: the root manifest, lockfile, patches and every root workspace's package.json (the cli
   # stage's frozen install); the packages it copies whole — the compiled CLI (packages/daemon, with the
   # Dockerfile), the plugin (packages/pi-envoy, packages/envoy-client, packages/contracts), the
-  # provisioning code (packages/workspace), the skills; the Go module and its build inputs; the
-  # context's .dockerignore; and this workflow. The final `legion probe-image` runs the image's own
-  # CLI and plugin, so a PR that breaks either fails here instead of merging and publishing nothing.
+  # provisioning code (packages/workspace), the skills, the Go module and its build inputs
+  # (packages/daemon-go, go.work, go.work.sum), and packages/envoy (copied whole for its
+  # agent-secrets binary, AGENTC-393); the context's .dockerignore; and this workflow. The final
+  # `legion probe-image` runs the image's own CLI and plugin, so a PR that breaks either fails here
+  # instead of merging and publishing nothing.
   # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a file the
   # image build reads.
   pull_request:
@@ -60,8 +62,7 @@ on:
       - packages/daemon-go/**
       - go.work
       - go.work.sum
-      - packages/envoy/go.mod
-      - packages/envoy/go.sum
+      - packages/envoy/**
       - .dockerignore
       - .github/workflows/worker-image.yaml
 

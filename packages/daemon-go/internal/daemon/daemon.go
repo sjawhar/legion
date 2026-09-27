@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/sjawhar/legion/daemon/internal/agentsecrets"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
@@ -339,6 +340,13 @@ type plan struct {
 	probe       func(ctx context.Context, rt runtime.Runtime) error
 	clock       supervise.Clock
 	orphanSweep time.Duration
+	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
+	// (newSecretsLogin); nil when the deployment enrolls no pod.
+	secretsEnroller supervise.Enroller
+	// secretsLogin is the same machine login's client, read-only, for the state route to show its
+	// current status (source.State, agentsecrets.Client.LoginStatus); nil when the deployment
+	// enrolls no pod.
+	secretsLogin *agentsecrets.Client
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
@@ -378,10 +386,12 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if orphanSweep == 0 {
 		orphanSweep = orphanSweepInterval
 	}
+	secretsEnroller, secretsLogin := newSecretsLogin(cfg, log)
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, rolesDir: reads.rolesDir, roleReferences: reads.roleReferences,
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
+		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
@@ -540,6 +550,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			identity: p.identity, designGate: cfg.Gates.Design,
 		},
 		Identity:     p.identity,
+		Secrets:      p.secretsEnroller,
 		PhaseHolds:   p.phaseHolds,
 		TreeClosable: p.treeClosable,
 		VolumeLost:   sup.volumeLost,
@@ -759,6 +770,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			runtime:      cfg.Runtime.Name,
 			admissionCap: cfg.AdmissionCap,
 			startedAt:    startedAt,
+			secretsLogin: p.secretsLogin,
 		},
 		StateTransactions: st,
 		Supervisor:        s.supervisor,
@@ -854,6 +866,9 @@ type source struct {
 	runtime      string
 	admissionCap int
 	startedAt    time.Time
+	// secretsLogin is the daemon's own agent-secrets machine login client (newSecretsLogin), read
+	// through LoginStatus for the state route; nil when the deployment enrolls no pod.
+	secretsLogin *agentsecrets.Client
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -911,6 +926,10 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		return api.State{}, err
 	}
 	state.ControllerLocator = api.ControllerLocatorOf(s.runtime, controller)
+	if s.secretsLogin != nil {
+		login := s.secretsLogin.LoginStatus()
+		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: login.State, Code: login.Code}
+	}
 	return state, nil
 }
 

@@ -221,7 +221,7 @@ describe("scripts a command runs", () => {
   });
 
   test("reads every tracked shell script from its repository workspace", () => {
-    const listed = spawnSync("jj", ["file", "list", "-r", "@-", "glob:**/*.sh"], {
+    const listed = spawnSync("jj", ["file", "list", "-r", "@", "glob:**/*.sh"], {
       cwd: repository,
       encoding: "utf8",
     });

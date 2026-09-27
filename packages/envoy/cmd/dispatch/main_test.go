@@ -108,6 +108,114 @@ func TestResolveBootConfigDefaultsAndValidatesEnvoyURL(t *testing.T) {
 	}
 }
 
+// The credential-request UI feature is off by default (no broker URL configured), and
+// resolveBootConfig must not require a token when the URL is unset.
+func TestResolveBootConfigLeavesAgentSecretsOffByDefault(t *testing.T) {
+	boot, err := resolveBootConfig(envGetter(map[string]string{
+		"DATABASE_URL":            "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":    "agent-token",
+		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
+		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
+	}))
+	if err != nil || boot.AgentSecretsURL != "" || boot.AgentSecretsToken != "" {
+		t.Fatalf("boot=%#v err=%v, want the feature off", boot, err)
+	}
+}
+
+func TestResolveBootConfigAcceptsAgentSecretsURLAndToken(t *testing.T) {
+	boot, err := resolveBootConfig(envGetter(map[string]string{
+		"DATABASE_URL":                 "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":         "agent-token",
+		"DISPATCH_IDENTITY":            "header:X-Dispatch-User",
+		"DISPATCH_ALLOWED_LOGINS":      "sjawhar",
+		"DISPATCH_AGENT_SECRETS_URL":   "https://broker.internal/",
+		"DISPATCH_AGENT_SECRETS_TOKEN": "ui-bearer",
+	}))
+	if err != nil {
+		t.Fatalf("resolve boot config: %v", err)
+	}
+	if boot.AgentSecretsURL != "https://broker.internal" {
+		t.Fatalf("AgentSecretsURL = %q, want the trailing slash trimmed", boot.AgentSecretsURL)
+	}
+	if boot.AgentSecretsToken != "ui-bearer" {
+		t.Fatalf("AgentSecretsToken = %q, want ui-bearer", boot.AgentSecretsToken)
+	}
+}
+
+// DISPATCH_AGENT_SECRETS_URL must be an absolute http(s) URL with no path, matching the
+// ENVOY_URL check but additionally refusing a path component: the broker's client builds every
+// call by appending a fixed path to this base.
+func TestResolveBootConfigRejectsAgentSecretsURLWithPathOrBadScheme(t *testing.T) {
+	base := map[string]string{
+		"DATABASE_URL":                 "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":         "agent-token",
+		"DISPATCH_IDENTITY":            "header:X-Dispatch-User",
+		"DISPATCH_ALLOWED_LOGINS":      "sjawhar",
+		"DISPATCH_AGENT_SECRETS_TOKEN": "ui-bearer",
+	}
+	for _, badURL := range []string{"broker.internal:9090", "https://broker.internal/v1"} {
+		env := map[string]string{}
+		for key, value := range base {
+			env[key] = value
+		}
+		env["DISPATCH_AGENT_SECRETS_URL"] = badURL
+		if _, err := resolveBootConfig(envGetter(env)); err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_URL") {
+			t.Fatalf("URL=%q: err = %v, want a DISPATCH_AGENT_SECRETS_URL rejection", badURL, err)
+		}
+	}
+}
+
+// A broker URL with no token at all -- bare or file-backed -- must refuse to boot rather than
+// construct a client that authenticates with an empty bearer.
+func TestResolveBootConfigRequiresTokenWhenAgentSecretsURLSet(t *testing.T) {
+	_, err := resolveBootConfig(envGetter(map[string]string{
+		"DATABASE_URL":               "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":       "agent-token",
+		"DISPATCH_IDENTITY":          "header:X-Dispatch-User",
+		"DISPATCH_ALLOWED_LOGINS":    "sjawhar",
+		"DISPATCH_AGENT_SECRETS_URL": "https://broker.internal",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_TOKEN") {
+		t.Fatalf("err = %v, want a token-required rejection", err)
+	}
+}
+
+// DISPATCH_AGENT_SECRETS_TOKEN_FILE wins over the bare variable, and a set-but-unreadable file
+// refuses to boot naming the path rather than silently falling back to the bare variable.
+func TestResolveBootConfigAgentSecretsTokenFileWinsOverBareVariable(t *testing.T) {
+	dir := t.TempDir()
+	tokenPath := dir + "/agent-secrets-token"
+	if err := os.WriteFile(tokenPath, []byte("  file-token\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	boot, err := resolveBootConfig(envGetter(map[string]string{
+		"DATABASE_URL":                      "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":              "agent-token",
+		"DISPATCH_IDENTITY":                 "header:X-Dispatch-User",
+		"DISPATCH_ALLOWED_LOGINS":           "sjawhar",
+		"DISPATCH_AGENT_SECRETS_URL":        "https://broker.internal",
+		"DISPATCH_AGENT_SECRETS_TOKEN":      "bare-token",
+		"DISPATCH_AGENT_SECRETS_TOKEN_FILE": tokenPath,
+	}))
+	if err != nil {
+		t.Fatalf("resolve boot config: %v", err)
+	}
+	if boot.AgentSecretsToken != "file-token" {
+		t.Fatalf("AgentSecretsToken = %q, want the file's trimmed contents to win", boot.AgentSecretsToken)
+	}
+
+	if _, err := resolveBootConfig(envGetter(map[string]string{
+		"DATABASE_URL":                      "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":              "agent-token",
+		"DISPATCH_IDENTITY":                 "header:X-Dispatch-User",
+		"DISPATCH_ALLOWED_LOGINS":           "sjawhar",
+		"DISPATCH_AGENT_SECRETS_URL":        "https://broker.internal",
+		"DISPATCH_AGENT_SECRETS_TOKEN_FILE": dir + "/missing",
+	})); err == nil || !strings.Contains(err.Error(), "DISPATCH_AGENT_SECRETS_TOKEN_FILE") {
+		t.Fatalf("unreadable file: err = %v, want a DISPATCH_AGENT_SECRETS_TOKEN_FILE rejection", err)
+	}
+}
+
 // The issuer and the audience are one setting in two variables: half of it is a
 // misconfiguration a deployment must not boot with, and neither means the server
 // verifies no service-account token at all.

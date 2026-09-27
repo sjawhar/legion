@@ -53,10 +53,21 @@
 
 ### Fixed
 
+- The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
+  (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
+  passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot
+  reach refuses the call naming the lookup and the reference, and a call from anyone but the tree
+  root's own architect for its own issue is refused before any lookup (LEGION-208).
+- The Dispatch tools refuse a bare document reference that is one document's slug and another's
+  filename, on an issue or a project, naming both ids, where they took the slug's document; on a
+  project an id also outranks another document's slug. A `dispatch://` document reference, or a
+  dashboard document URL, still resolves by its slug.
 - A phase worker's or root architect's pane, and any `task` subagent it spawns, no longer runs a
   command that would delete, move, truncate, overwrite an existing file, or recursively `chmod`
-  or `chown` a path outside its issue workspace and a `/tmp` directory of its own, nor one that
-  signals a process it did not start (LEGION-121). On 2026-09-13 a worker's probe script ended in
+  or `chown` a path outside its issue workspace or a permitted directory below `/tmp`. `/tmp`
+  itself, a glob over it, and its tmux and ssh socket directories remain out of bounds; the guard
+  cannot identify which other `/tmp` directory belongs to the pane. It also refuses a signal to a
+  process the pane did not start (LEGION-121). On 2026-09-13 a worker pane's probe script ended in
   `rm -rf "$work" "$HOME"` and deleted the operator's SSH and commit-signing keys, stopping every
   agent on the machine; the same day a subagent's `pkill -x sleep` killed other agents' processes.
   The `tool_call` hook parses each `bash` command, `eval` code, and `hub` process start

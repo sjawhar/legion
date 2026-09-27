@@ -172,6 +172,64 @@ func TestListIssuesOrdersByRankRegardlessOfPriority(t *testing.T) {
 	assertPriorityIssueOrder(t, decodeBody[[]priorityIssue](t, pinnedResponse), p3.Key, unset.Key, p0.Key)
 }
 
+// The priority filter is what makes an owner's P0/P1 audit one call: repeated values union, "none"
+// matches an issue with no priority, and it composes with the pinned list's own filter.
+func TestListIssuesFiltersByPriority(t *testing.T) {
+	handler := newTestHandler(t)
+	for _, project := range []string{"CORE", "OTHER"} {
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+			"key": project, "name": project,
+		}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("create project %s: status=%d body=%s", project, response.Code, response.Body.String())
+		}
+	}
+	create := func(project, title string, priority any) string {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": project, "title": title, "priority": priority,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[priorityIssue](t, response).Key
+	}
+	p0 := create("CORE", "P0", 0)
+	p1 := create("CORE", "P1", 1)
+	p2 := create("CORE", "P2", 2)
+	p3 := create("CORE", "P3", 3)
+	unset := create("CORE", "Unset", nil)
+	create("OTHER", "Other project P1", 1)
+
+	list := func(query string) []priorityIssue {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?"+query, nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("list %s: status=%d body=%s", query, response.Code, response.Body.String())
+		}
+		return decodeBody[[]priorityIssue](t, response)
+	}
+	assertPriorityIssueOrder(t, list("project=CORE&priority=0&priority=1"), p0, p1)
+	assertPriorityIssueOrder(t, list("project=CORE&priority=2"), p2)
+	assertPriorityIssueOrder(t, list("project=CORE&priority=none"), unset)
+	assertPriorityIssueOrder(t, list("project=CORE&priority=3&priority=none"), p3, unset)
+	assertPriorityIssueOrder(t, list("project=CORE"), p0, p1, p2, p3, unset)
+
+	for _, key := range []string{p0, p2} {
+		response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+key+"/state", map[string]bool{"pinned": true}, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("pin %s: status=%d body=%s", key, response.Code, response.Body.String())
+		}
+	}
+	assertPriorityIssueOrder(t, list("pinned=true&priority=0&priority=1"), p0)
+
+	for _, value := range []string{"4", "-1", "P0", "1.5", ""} {
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=CORE&priority="+value, nil, "alice")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_PRIORITY"`) {
+			t.Fatalf("priority filter %q: status=%d body=%s", value, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestInboxOrdersOpenAsksByIssuePriority(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{

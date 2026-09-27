@@ -105,14 +105,15 @@ func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullReq
 }
 
 // ApplySettlement applies a listener CI settlement only when the exported fence classifiers say
-// it is newer or a refresh. It returns false for stale, duplicate, and conflicting observations.
+// it is newer or a refresh, merging its attempt set into the fence. It returns false for stale,
+// duplicate, and conflicting observations.
 func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
 	classification := ClassifySettlement(pr, candidate)
 	if classification != SettlementNewer && classification != SettlementRefresh {
 		return pr, false
 	}
 	outcome := EffectiveOutcome(pr, candidate)
-	pr.CheckRuns = append([]record.AttemptRun(nil), candidate.CheckRuns...)
+	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, candidate.CheckRuns)
 	pr.Generation = candidate.Generation
 	pr.Snapshot = candidate.Snapshot
 	pr.Verdict = outcome.Verdict

@@ -63,6 +63,11 @@ type bootConfig struct {
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
 	OIDCAudience string
+	// AgentSecretsURL is DISPATCH_AGENT_SECRETS_URL, the secrets broker's UI-bearer API; empty
+	// means the credential-request feature is off. AgentSecretsToken is the resolved UI bearer
+	// (required when AgentSecretsURL is set).
+	AgentSecretsURL   string
+	AgentSecretsToken string
 }
 
 func main() {
@@ -238,6 +243,9 @@ func main() {
 		OIDC:           serviceTokens,
 		AgentStream:    agentStream,
 		Lifetime:       ctx,
+
+		AgentSecretsURL:   boot.AgentSecretsURL,
+		AgentSecretsToken: boot.AgentSecretsToken,
 
 		TestHooksEnabled: boot.TestHooksEnabled,
 	})
@@ -428,7 +436,42 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 
+	agentSecretsURL := strings.TrimSuffix(strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_URL")), "/")
+	if agentSecretsURL != "" {
+		parsed, err := url.Parse(agentSecretsURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
+			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
+		}
+		boot.AgentSecretsURL = agentSecretsURL
+		boot.AgentSecretsToken, err = agentSecretsToken(getenv)
+		if err != nil {
+			return bootConfig{}, err
+		}
+		if boot.AgentSecretsToken == "" {
+			return bootConfig{}, errors.New("DISPATCH_AGENT_SECRETS_TOKEN_FILE or DISPATCH_AGENT_SECRETS_TOKEN is required when DISPATCH_AGENT_SECRETS_URL is set")
+		}
+	}
+
 	return boot, nil
+}
+
+// agentSecretsToken resolves the secrets broker's UI bearer, reading
+// DISPATCH_AGENT_SECRETS_TOKEN_FILE (trimmed contents) ahead of
+// DISPATCH_AGENT_SECRETS_TOKEN; a set-but-unreadable or blank file is an error naming both,
+// never a silent fallback to the bare variable.
+func agentSecretsToken(getenv func(string) string) (string, error) {
+	if path := strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_TOKEN_FILE")); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which could not be read: %w", path, err)
+		}
+		value := strings.TrimSpace(string(data))
+		if value == "" {
+			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which is empty", path)
+		}
+		return value, nil
+	}
+	return strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_TOKEN")), nil
 }
 
 // validateDefaultProject confirms DISPATCH_DEFAULT_PROJECT names a project

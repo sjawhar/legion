@@ -880,18 +880,27 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC" },
+    example: { project: "AGENTC", priority: [0, 1] },
     description:
       "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " +
       "its status, priority, parent, labels, and open-ask count, so you can see backlog shape without " +
-      "opening every issue. Optionally filter by status, parent, label, or how recently it changed. Do " +
-      "not use it to search by keyword or phrase; dispatch_search remains the keyword surface. Rows are " +
-      "capped at limit (default 50, max 250), applied to the response here, not by the server.",
+      "opening every issue. Optionally filter by status, parent, label, priority, or how recently it " +
+      "changed; priority takes one or more of 0-3 (P0-P3) and null for an issue with no priority, so " +
+      "an owner's P0/P1 audit is priority [0, 1]. Do not use it to search by keyword or phrase; " +
+      "dispatch_search remains the keyword surface. Rows are capped at limit (default 50, max 250), " +
+      "applied to the response here, not by the server.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
       parent: z.string().describe("Optional parent issue key filter.").optional(),
       label: z.string().describe("Optional label filter.").optional(),
+      priority: z
+        .array(z.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 })
+        .describe(
+          "Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " +
+            "for an issue with no priority; an issue matching any listed value is returned."
+        )
+        .optional(),
       updated_since: z
         .string()
         .describe("Optional RFC3339 timestamp; only issues updated at or after it.")

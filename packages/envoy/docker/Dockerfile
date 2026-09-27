@@ -58,7 +58,11 @@ RUN if [ -n "$LEGION_COMMIT" ] && ! printf '%s' "$LEGION_COMMIT" | grep -Eqx '[0
     && CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
     go build -o /out/envoy-listener ./cmd/listener \
     && CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
-    go build -ldflags "-X main.buildCommit=${LEGION_COMMIT}" -o /out/envoy-dispatch ./cmd/dispatch
+    go build -ldflags "-X main.buildCommit=${LEGION_COMMIT}" -o /out/envoy-dispatch ./cmd/dispatch \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
+    go build -o /out/envoy-broker ./cmd/broker \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
+    go build -o /out/agent-secrets ./cmd/agent-secrets
 
 # Minimal runtime — static binary, no shell needed.
 # curl is included for HEALTHCHECK and operational debugging.
@@ -73,6 +77,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=build /out/envoy-listener /usr/local/bin/envoy-listener
 COPY --from=build /out/envoy-dispatch /usr/local/bin/envoy-dispatch
+COPY --from=build /out/envoy-broker /usr/local/bin/envoy-broker
+COPY --from=build /out/agent-secrets /usr/local/bin/agent-secrets
 COPY --from=web --chown=envoy:envoy /repo/packages/dispatch/web/dist /srv/dispatch-web
 
 # The same commit envoy-dispatch reports on /healthz, as the image's own label. Its presence is how

@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -37,6 +38,14 @@ const (
 	tempVolume      = "tmp"
 	configVolume    = "config"
 	providersVolume = "providers"
+)
+
+// The agent-secrets volumes: agentSecretsTokenVolume alone carries the projected token for the
+// broker's audience, and agentSecretsKeyVolume the memory-backed directory the client keeps its
+// key and enrollment id in. Neither exists when the runtime enrolls no pod.
+const (
+	agentSecretsKeyVolume   = "agent-secrets-key"
+	agentSecretsTokenVolume = "agent-secrets-token"
 )
 
 // maxArgBytes is Linux's MAX_ARG_STRLEN, the largest single argv string exec accepts, counting
@@ -68,20 +77,26 @@ var runtimeOwned = map[string]bool{
 	"PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true, "LEGION_GRANT_FILE": true,
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
+	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true,
 }
 
 // legionVolumeNames are the volumes Legion puts in a pod, a worker's or the probe's, whose names
-// the operator's volumes may not take.
+// the operator's volumes may not take. The agent-secrets volumes are reserved whether or not this
+// deployment enrolls: an operator's pod may never claim them.
 func legionVolumeNames() []string {
-	names := []string{treeVolume, bootVolume, provisionVolume, feedVolume, stateVolume, tempVolume, configVolume, providersVolume}
+	names := []string{
+		treeVolume, bootVolume, provisionVolume, feedVolume, stateVolume, tempVolume, configVolume, providersVolume,
+		agentSecretsTokenVolume, agentSecretsKeyVolume,
+	}
 	slices.Sort(names)
 	return names
 }
 
 // legionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
 // the worker's and the image probe's: an operator's mount may be neither at, under, nor above one.
+// AgentSecretsKeyDir and AgentSecretsTokenDir are reserved whether or not this deployment enrolls.
 func legionMountPaths() []string {
-	paths := []string{TreeRoot, ompSessionsDir, BootDir, StateDir, xdgConfigHome, ProvidersDir}
+	paths := []string{TreeRoot, ompSessionsDir, BootDir, StateDir, xdgConfigHome, ProvidersDir, AgentSecretsKeyDir, AgentSecretsTokenDir}
 	slices.Sort(paths)
 	return paths
 }
@@ -291,6 +306,11 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	if len(providersMounts) > 0 {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}
+	if r.agentSecrets != nil {
+		shim = append(shim, "--agent-secrets-key-dir", AgentSecretsKeyDir,
+			"--pod-token-file", AgentSecretsTokenDir+"/"+AgentSecretsTokenFile,
+			"--agent-secrets-bin", r.tools.AgentSecrets)
+	}
 	spec := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyNever,
 		TerminationGracePeriodSeconds: new(int64(math.Ceil(r.terminationGrace.Seconds()))),
@@ -348,7 +368,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 				{Name: bootVolume, MountPath: BootDir, ReadOnly: true},
 				{Name: stateVolume, MountPath: StateDir},
 				{Name: configVolume, MountPath: xdgConfigHome},
-			}, providersMounts, r.pod.VolumeMounts),
+			}, providersMounts, r.agentSecretsMounts(), r.pod.VolumeMounts),
 			Resources:       resources,
 			SecurityContext: restrictedContainer(),
 		}},
@@ -410,7 +430,43 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 		{Name: stateVolume, VolumeSource: memory},
 		{Name: tempVolume, VolumeSource: memory},
 		{Name: configVolume, VolumeSource: memory},
-	}, providers, r.pod.Volumes)
+	}, r.agentSecretsVolumes(), providers, r.pod.Volumes)
+}
+
+// agentSecretsVolumes are the two volumes an enrolled pod carries: the projected token for the
+// broker's audience — one source, alone in its volume, the shape agent-c's legion-sandbox-pods
+// policy admits per token — and the memory-backed key directory. None when the runtime enrolls no
+// pod.
+func (r *Runtime) agentSecretsVolumes() []corev1.Volume {
+	a := r.agentSecrets
+	if a == nil {
+		return nil
+	}
+	expiry := int64(math.Ceil(a.TokenExpiry.Seconds()))
+	return []corev1.Volume{
+		{Name: agentSecretsTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+			DefaultMode: new(int32(0o440)),
+			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+				Audience: a.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile,
+			}}},
+		}}},
+		{Name: agentSecretsKeyVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+			Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(1<<20, resource.BinarySI),
+		}}},
+	}
+}
+
+// agentSecretsMounts are the worker container's mounts of the two agent-secrets volumes: the
+// token read-only, and the key directory writable so the client can persist its key and
+// enrollment id across a pod's own lifetime. Neither when the runtime enrolls no pod.
+func (r *Runtime) agentSecretsMounts() []corev1.VolumeMount {
+	if r.agentSecrets == nil {
+		return nil
+	}
+	return []corev1.VolumeMount{
+		{Name: agentSecretsTokenVolume, MountPath: AgentSecretsTokenDir, ReadOnly: true},
+		{Name: agentSecretsKeyVolume, MountPath: AgentSecretsKeyDir},
+	}
 }
 
 // providers are the providers Secret's volume and its read-only mount at ProvidersDir: the
@@ -564,6 +620,10 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	add("PI_SHELL_PREFIX", shellprefix.For(workerBin, legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
 	add("LEGION_GRANT_FILE", runtime.GrantFile(StateDir, spec.Claim))
+	if r.agentSecrets != nil {
+		add("AGENT_SECRETS_URL", r.agentSecrets.URL)
+		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
+	}
 	env = append(env, xdgEnvironment()...)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},

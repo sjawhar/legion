@@ -296,7 +296,7 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Fast-follow:** <one named cleanup item and where it will land>, or "none".
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
-**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, record the pushed tip, rebase onto the new base, and push with `legion-worker`'s procedure for rewritten commits — the new head runs Tests against the new merge result — and cite that run in the PR body.
+**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, merge the bookmark onto the new base (`jj new legion/<KEY> <new base> -m "<message>"`) and push with `legion-worker`'s ordinary push procedure — a genuine fast-forward, never the procedure for rewritten commits — the new head runs Tests against the new merge result — and cite that run in the PR body.
 ```
 
 **A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
@@ -378,9 +378,30 @@ this proof.
   the fingerprint at the current tip; after pushing the rebased branch, record it at the new
   tip; post one PR comment (Legion footer):
   `rebase <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
-  Rebase the whole chain — `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin` —
-  so the tester's and reviewer's commits move with yours. Record the pushed tip before it and
-  push the rebased chain with the push procedure (*Rewriting pushed commits*, below).
+  Every issue workspace is a `jj workspace` of the same shared repository and operation log, and
+  jj always rebases every descendant of any commit it rewrites — a revset naming the root of your
+  own chain and rewriting it in place also rewrites whatever another tree has stacked on that root,
+  whichever selector chose it (`-s`, `-b`, and `-r` all rewrite descendants; `-r` only re-parents
+  them to fill the hole, which is worse). This is what happened in LEGION-118: one issue's own
+  conflict step moved a second issue's twelve commits and its bookmark onto a conflicted copy.
+  Resolve the conflict with a forward merge instead of a rewrite — merge the branch's own
+  bookmark with the destination in one new commit, so nothing existing is rewritten and nothing
+  built on your prior commits, in this tree or another, ever moves:
+
+  ```bash
+  jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
+  ```
+
+  Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed
+  commit above the described one the bookmark already names, and `jj git push` refuses to push
+  any commit without a description — merging from `@` drags that undescribed commit into the
+  ancestry and the push fails (`Won't push commit … since it has no description`); the bookmark
+  is always on a described, already-pushed commit. If the merge conflicts, resolve it in that
+  one commit — edit the markers directly; there is nothing to squash, since the merge is the
+  only new commit. Then `jj -R "$LEGION_WORKSPACE" new` to move off it, and push with the one
+  push procedure (*Every role pushes its own commits*, below): the merge descends from both the
+  bookmark's old position and the destination, so it is a genuine fast-forward and *Rewriting
+  pushed commits* never applies — nothing was rewritten, so there is no tip to record first.
 - **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." The `Fast-follow:`
   field names naming, duplication, or wording cleanup only; anything that changes behaviour,
   hides an error, or breaks a gate lands in this PR.
@@ -602,8 +623,8 @@ remote branch sideways onto your commit and drops theirs (jj 0.45.1:
 `bookmark: legion/K [move sideways from <theirs> to <yours>]`). A clone that has not seen the other
 push is refused by jj itself (`unexpectedly moved on the remote`).
 
-**Rewriting pushed commits** — the conflict-forced rebase, the rebase after a retarget, or a
-`jj squash --into` a commit already on GitHub — leaves the pushed tip outside `::@-`, so record
+**Rewriting pushed commits** — a `jj squash --into` a commit already on GitHub, or any other
+rewrite of a commit you already pushed — leaves the pushed tip outside `::@-`, so record
 that tip first, after a fetch and while your chain still descends from it:
 
 ```bash
