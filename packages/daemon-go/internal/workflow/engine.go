@@ -410,8 +410,10 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	}
 	if recorded != nil && recorded.Repo == fact.Repo && recorded.Number == fact.Number {
 		// GitHub sends opened once per pull request, so an opened for one already recorded is a
-		// redelivery whatever its clock; a reopen is fenced by its clock.
-		if !fact.Reopened || classify.LateLifecycle(fact.UpdatedAt, recorded.HeadUpdatedAt) {
+		// redelivery whatever its clock; a reopen is fenced by its clock. GitHub never reopens a
+		// merged pull request, so a reopen of one is older than the merge, which carries no clock
+		// to fence it.
+		if !fact.Reopened || recorded.State == record.PullRequestMerged || classify.LateLifecycle(fact.UpdatedAt, recorded.HeadUpdatedAt) {
 			return intake.Result{}, nil
 		}
 		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
@@ -669,7 +671,7 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if err != nil || pr == nil || pr.State == record.PullRequestMerged || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
-	already := pr.State == record.PullRequestClosed && !fact.UpdatedAt.After(pr.HeadUpdatedAt)
+	already := classify.RepeatedClose(*pr, fact.UpdatedAt)
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}

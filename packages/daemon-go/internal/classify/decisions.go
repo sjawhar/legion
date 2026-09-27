@@ -131,6 +131,15 @@ func LateLifecycle(observed, applied time.Time) bool {
 	return !observed.IsZero() && !applied.IsZero() && observed.Before(applied)
 }
 
+// RepeatedClose reports whether a close at observed repeats the close already applied to pr: pr is
+// recorded closed and the close's clock is not after the recorded one, or the close has none. A
+// later close is a second one, whose reopen between the two has not been delivered yet. Unlike
+// LateLifecycle, an equal clock is the same event here: a second close in the same second as the
+// first goes unreported only when the reopen between them was never observed.
+func RepeatedClose(pr record.PullRequest, observed time.Time) bool {
+	return pr.State == record.PullRequestClosed && !observed.After(pr.HeadUpdatedAt)
+}
+
 // LatestClock is the clock a pull request keeps after applying an observation at observed: the
 // later of the two. An observation with no clock is applied but never lowers the stored one, which
 // would let an older observation redelivered after it pass LateLifecycle.

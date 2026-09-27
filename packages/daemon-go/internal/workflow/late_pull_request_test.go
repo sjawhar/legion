@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -26,6 +28,13 @@ type pullRequestView struct {
 // round is approved, with lateApplied as its clock. It applies facts and reads both records back.
 func afterEvents(t *testing.T, state record.PullRequestState, facts ...intake.Fact) pullRequestView {
 	t.Helper()
+	return pullRequestAt(t, appliedEvents(t, state, facts...))
+}
+
+// appliedEvents is afterEvents' database: the seeded issue and pull request, with facts applied in
+// order.
+func appliedEvents(t *testing.T, state record.PullRequestState, facts ...intake.Fact) *pgxpool.Pool {
+	t.Helper()
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: state, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208",
@@ -38,6 +47,12 @@ func afterEvents(t *testing.T, state record.PullRequestState, facts ...intake.Fa
 			t.Fatalf("step %d: %v", i, err)
 		}
 	}
+	return pool
+}
+
+// pullRequestAt reads back the pull request and the reviewer round's decision.
+func pullRequestAt(t *testing.T, pool *pgxpool.Pool) pullRequestView {
+	t.Helper()
 	var got pullRequestView
 	if err := pool.QueryRow(context.Background(), `select pr.head_sha, pr.verdict, coalesce(reviewer.decision ->> 'state', ''), pr.state
 		from pull_requests pr left join phases reviewer on reviewer.issue = pr.issue and reviewer.role = $1
