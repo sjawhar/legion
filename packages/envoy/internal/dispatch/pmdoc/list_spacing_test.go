@@ -27,9 +27,8 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			refused: "- t\n\n  -\n\n  para\n",
 		},
 		{
-			name:     "a blank line at the end of a quote after a list",
-			refused:  "-\n\n> - a\n>\n\nAfter.\n",
-			readable: "> - a\n>\n\nAfter.\n",
+			name:    "a blank line at the end of a quote holding a footnote definition, after a list",
+			refused: "x[^1]\n\n> [^1]: t\n>\n>     - a\n>\n\nAfter.\n",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

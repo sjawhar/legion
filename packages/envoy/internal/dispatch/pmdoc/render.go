@@ -160,9 +160,6 @@ func (r *renderer) blocksNoTrailing(nodes []*Node, prefix string) {
 			blanks := 1
 			if previous := nodes[i-1]; isList(previous) {
 				blanks = r.blanksAfterList(previous, n, prefix)
-				// A rule on the line after a list is written `***`: `---` there can underline
-				// the item's paragraph.
-				r.asteriskRule = blanks == 0 && n.Type == "hr"
 			}
 			r.writeSyntax("\n" + strings.Repeat(strings.TrimRight(prefix, " ")+"\n", blanks) + prefix)
 		}
@@ -208,16 +205,20 @@ func listItemMarker(ordered bool, number int, other bool) string {
 
 // blanksAfterList is how many blank lines separate list from next, the block after it: as many as
 // spread what they space there (spacingAfterList) when it is spread, and one everywhere else,
-// which spaces nothing - but none where next opens on the line after the list
-// (opensAfterParagraph) and a single blank line would spread what it spaces, or, inside a list
-// item, where the list ends in an empty item, at a blank line after which goldmark ends the list
-// item around it or a quote the list stands in (emptyItemEndsOuterItem).
+// which spaces nothing - but none where next can stand on the line after the list, since it is a
+// list, which opens there whatever its first item, or opens after a paragraph as well
+// (opensAfterParagraph), or the list ends in no paragraph it would continue (endsInParagraph), and
+// either a single blank line would spread what it spaces, or the list stands in a typed block in
+// a footnote definition outside quotes, where the browser editor reads any blank line after it as
+// spreading it, or, inside a list item, the list ends in an empty item, at a blank line after which
+// goldmark ends the list item around it or a quote the list stands in (emptyItemEndsOuterItem).
 func (r *renderer) blanksAfterList(list, next *Node, prefix string) int {
 	spaced, blanks := r.spacingAfterList(list, next, prefix)
+	typedInFootnote := r.inFootnote && r.typedPrefix != nil && !strings.Contains(prefix, ">")
 	switch {
 	case spaced != nil && spaced.Attrs["spread"] == true:
 		return blanks
-	case opensAfterParagraph(next) && (spaced != nil && blanks == 1 || r.itemDepth > 0 && endsInEmptyItem(list)):
+	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && blanks == 1 || typedInFootnote || r.itemDepth > 0 && endsInEmptyItem(list)):
 		return 0
 	default:
 		return 1
@@ -234,7 +235,8 @@ func (r *renderer) blanksAfterList(list, next *Node, prefix string) int {
 // the list instead.
 func (r *renderer) spacingAfterList(list, next *Node, prefix string) (*Node, int) {
 	quotes := strings.Count(prefix, ">")
-	container := next.Type == "blockquote" || isList(next)
+	container := next.Type == "blockquote" || next.Type == "footnote_definition" || isList(next)
+	inTyped := r.inQuotedTypedBlock(prefix)
 	var spaced *Node
 	blanks := 1
 	switch {
@@ -244,24 +246,35 @@ func (r *renderer) spacingAfterList(list, next *Node, prefix string) (*Node, int
 		// The quote stands inside the definition when the definition's lines carry fewer quote
 		// markers than the list's.
 		spaced, blanks = spacedAfter(list, quotes == r.footnoteQuotes), 2
-	case quotes > 0 && (container || r.typedPrefix != nil && strings.Count(*r.typedPrefix, ">") == quotes):
+	case quotes > 0 && (container || inTyped):
 		spaced = spacedAfter(list, true)
+		// In a typed block inside the quote, a quote the last item ends in takes one blank line.
+		if last := spaced.Children[len(spaced.Children)-1]; inTyped && last.Children[len(last.Children)-1].Type == "blockquote" {
+			blanks = 2
+		}
 	case quotes > 0:
 		spaced, blanks = spacedAfter(list, true), 2
 	case r.inFootnote && container:
 		spaced = spacedAfter(list, false)
 	}
-	if spaced == nil || spreadByItsOwnLines(spaced, quotes > 0 && !r.inFootnote) {
+	if spaced == nil || spreadByItsOwnLines(spaced, quotes > 0 && !r.inFootnote, r.itemDepth > 0) {
 		return nil, 0
 	}
 	return spaced, blanks
 }
 
+// inQuotedTypedBlock reports whether lines with prefix stand in a typed block inside a quote, with
+// no quote opened inside the typed block.
+func (r *renderer) inQuotedTypedBlock(prefix string) bool {
+	quotes := strings.Count(prefix, ">")
+	return quotes > 0 && r.typedPrefix != nil && strings.Count(*r.typedPrefix, ">") == quotes
+}
+
 // spreadByItsOwnLines reports whether a spread list or list item is written spread without a blank
 // line after it: an item by a blank line between two of its blocks, and a list in a quote outside
-// footnote definitions (quoted) by one after an item that does not end in a quote or a list
-// (blankAfterItem).
-func spreadByItsOwnLines(spaced *Node, quoted bool) bool {
+// footnote definitions (quoted) by one after an item that neither ends in a list nor, in a list
+// item (nested), is empty (blankAfterItem).
+func spreadByItsOwnLines(spaced *Node, quoted, nested bool) bool {
 	if spaced.Attrs["spread"] != true {
 		return false
 	}
@@ -272,7 +285,7 @@ func spreadByItsOwnLines(spaced *Node, quoted bool) bool {
 		return false
 	}
 	for _, item := range spaced.Children[:len(spaced.Children)-1] {
-		if last := item.Children[len(item.Children)-1]; !isList(last) && last.Type != "blockquote" {
+		if !isList(item.Children[len(item.Children)-1]) && !(nested && isEmptyItem(item)) {
 			return true
 		}
 	}
@@ -281,14 +294,12 @@ func spreadByItsOwnLines(spaced *Node, quoted bool) bool {
 
 // spacedAfter is what the browser editor's parser spaces by blank lines after list: in a quote, the
 // list, and in a footnote definition, its last item - or, when the last item ends in a list, what
-// that list's blank lines space, and nothing when it ends in a quote, which takes them.
+// that list's blank lines space.
 func spacedAfter(list *Node, quoted bool) *Node {
 	last := list.Children[len(list.Children)-1]
 	switch inner := last.Children[len(last.Children)-1]; {
 	case isList(inner):
 		return spacedAfter(inner, quoted)
-	case inner.Type == "blockquote":
-		return nil
 	case quoted:
 		return list
 	default:
@@ -296,10 +307,41 @@ func spacedAfter(list *Node, quoted bool) *Node {
 	}
 }
 
+// blanksEndingQuotedList writes the two blank lines that, at the end of a quote or of a typed block
+// inside one, spread the list its blocks end in, where nothing else does.
+func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string) {
+	last := blocks[len(blocks)-1]
+	if !isList(last) || r.inFootnote || !strings.Contains(prefix, ">") {
+		return
+	}
+	if spaced := spacedAfter(last, true); spaced.Attrs["spread"] == true && !spreadByItsOwnLines(spaced, true, r.itemDepth > 0) {
+		r.writeSyntax(strings.Repeat("\n"+strings.TrimRight(prefix, " "), 2))
+	}
+}
+
+// endsInParagraph reports whether list's last item ends in a paragraph holding text, directly or in
+// a list or quote it ends in, which a line of text after the list would continue.
+func endsInParagraph(list *Node) bool {
+	last := list.Children[len(list.Children)-1]
+	return blockEndsInParagraph(last.Children[len(last.Children)-1])
+}
+
+// blockEndsInParagraph reports whether block is a paragraph holding text, or a list or quote whose
+// last block ends in one.
+func blockEndsInParagraph(block *Node) bool {
+	switch {
+	case isList(block):
+		return endsInParagraph(block)
+	case block.Type == "blockquote":
+		return blockEndsInParagraph(block.Children[len(block.Children)-1])
+	default:
+		return block.Type == "paragraph" && len(block.Children) > 0
+	}
+}
+
 // endsInEmptyItem reports whether list's last item holds only an empty paragraph.
 func endsInEmptyItem(list *Node) bool {
-	last := list.Children[len(list.Children)-1]
-	return len(last.Children) == 1 && last.Children[0].Type == "paragraph" && len(last.Children[0].Children) == 0
+	return isEmptyItem(list.Children[len(list.Children)-1])
 }
 
 func isList(n *Node) bool {
@@ -307,15 +349,15 @@ func isList(n *Node) bool {
 }
 
 // opensAfterParagraph reports whether block opens on the line after a paragraph without a blank
-// line: a quote, a code block (written fenced), a heading written on one line, a rule (written
-// `***`), a typed block, a bullet list, or an ordered list starting at one, whose first item holds
-// something (an empty item interrupts no paragraph, emptyItemGuard).
+// line: a quote, a code block (written fenced), a heading written on one line, a rule, a typed
+// block, a footnote definition, a bullet list, or an ordered list starting at one, whose first item
+// holds something (an empty item interrupts no paragraph, emptyItemGuard).
 func opensAfterParagraph(block *Node) bool {
 	if _, typed := typedBlock(block.Type); typed {
 		return true
 	}
 	switch block.Type {
-	case "blockquote", "code_block", "hr":
+	case "blockquote", "code_block", "hr", "footnote_definition":
 		return true
 	case "heading":
 		return !holdsHardBreak(block.Children)
@@ -323,8 +365,7 @@ func opensAfterParagraph(block *Node) bool {
 		if block.Type == "ordered_list" && int(num(block.Attrs["order"], 1)) != 1 {
 			return false
 		}
-		first := block.Children[0]
-		return len(first.Children) > 0 && (first.Children[0].Type != "paragraph" || len(first.Children[0].Children) > 0)
+		return !isEmptyItem(block.Children[0])
 	}
 	return false
 }
@@ -371,6 +412,7 @@ func (r *renderer) block(n *Node, prefix string) {
 	case "blockquote":
 		r.writeSyntax("> ")
 		r.blocksNoTrailing(n.Children, prefix+"> ")
+		r.blanksEndingQuotedList(n.Children, prefix+"> ")
 	case "bullet_list", "ordered_list":
 		r.list(n, prefix)
 	case "code_block":
@@ -426,6 +468,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		outer := r.typedPrefix
 		r.typedPrefix = &prefix
 		r.blocksNoTrailing(n.Children, prefix)
+		r.blanksEndingQuotedList(n.Children, prefix)
 		r.typedPrefix = outer
 		r.writeSyntax("\n" + prefix + fence)
 	}
@@ -493,21 +536,26 @@ func (r *renderer) list(n *Node, prefix string) {
 			// editor's writer puts a blank line between two paragraphs (the item then reads back
 			// spread) and writes a rule `***`, and so does this renderer.
 			afterParagraph := childIndex > 0 && children[childIndex-1].Type == "paragraph"
-			tightAfterList := false
 			if childIndex > 0 {
 				blanks := 0
 				if item.Attrs["spread"] == true || afterParagraph && child.Type == "paragraph" {
 					blanks = 1
 				}
 				if previous := children[childIndex-1]; isList(previous) {
-					if after := r.blanksAfterList(previous, child, indent); after != 1 {
+					after := r.blanksAfterList(previous, child, indent)
+					spaced, _ := r.spacingAfterList(previous, child, indent)
+					switch {
+					case after != 1:
 						blanks = after
+					// One blank line spreads what it spaces, or keeps a block that cannot open
+					// on the line after a paragraph off the paragraph the list ends in.
+					case spaced != nil && spaced.Attrs["spread"] == true || !isList(child) && !opensAfterParagraph(child) && endsInParagraph(previous):
+						blanks = 1
 					}
-					tightAfterList = blanks == 0
 				}
 				r.writeSyntax("\n" + strings.Repeat(strings.TrimRight(prefix, " ")+"\n", blanks) + indent)
 			}
-			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0 && marker != "* " || tightAfterList)
+			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0 && marker != "* ")
 			r.otherListMarker = otherMarkers[childIndex]
 			r.block(child, indent)
 		}
@@ -518,21 +566,50 @@ func (r *renderer) list(n *Node, prefix string) {
 // blankAfterItem reports whether blank lines follow item, before the next item of list. The
 // browser editor's parser reads them as spreading the list, except where the lines carry a quote's
 // or a footnote definition's prefix: in a footnote definition, a quote around it or inside it
-// included, they spread the item, and in a quote blank lines after an item that ends in a quote or
-// a list are that block's, two of them spreading the list it ends in (spacedAfter).
+// included, they spread the item, and are written only where its own lines do not already
+// (spreadByItsOwnLines); in a quote blank lines after an item that ends in a list are that list's,
+// two of them spreading the list it ends in (spacedAfter).
 func (r *renderer) blankAfterItem(list, item *Node, prefix string) bool {
 	quoted := strings.Contains(prefix, ">")
 	switch last := item.Children[len(item.Children)-1]; {
+	case r.inFootnote && quoted && isList(last):
+		// The blank lines are the list's, spacing what they would after its last item there.
+		return spacedAfter(last, strings.Count(prefix, ">") == r.footnoteQuotes).Attrs["spread"] == true
 	case r.inFootnote:
-		return item.Attrs["spread"] == true
+		return item.Attrs["spread"] == true && !spreadByItsOwnLines(item, false, false)
 	case quoted && isList(last):
-		spaced := spacedAfter(last, true)
-		return spaced != nil && spaced.Attrs["spread"] == true
-	case quoted && last.Type == "blockquote":
+		return spacedAfter(last, true).Attrs["spread"] == true
+	case quoted && r.itemDepth > 0 && isEmptyItem(item):
+		// Goldmark ends the list item around this list at a blank line after an empty item
+		// (emptyItemEndsOuterItem); in a quote, blank lines after another item or after the list
+		// spread it instead (spreadByItsOwnLines).
+		return false
+	case r.itemDepth > 0 && isEmptyItem(item) && spreadAtAnotherItem(list):
+		// Goldmark ends the list item around this list at a blank line after an empty item
+		// (emptyItemEndsOuterItem), and one after another item spreads the list as well.
 		return false
 	default:
 		return list.Attrs["spread"] == true
 	}
+}
+
+// isEmptyItem reports whether item holds only an empty paragraph.
+func isEmptyItem(item *Node) bool {
+	return len(item.Children) == 1 && item.Children[0].Type == "paragraph" && len(item.Children[0].Children) == 0
+}
+
+// spreadAtAnotherItem reports whether list is spread and one of its items but the last is neither
+// empty nor ends in a list, so that blank lines after it spread the list.
+func spreadAtAnotherItem(list *Node) bool {
+	if list.Attrs["spread"] != true {
+		return false
+	}
+	for _, item := range list.Children[:len(list.Children)-1] {
+		if !isEmptyItem(item) && !isList(item.Children[len(item.Children)-1]) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *renderer) table(table *Node, prefix string) {

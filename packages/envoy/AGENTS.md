@@ -612,7 +612,11 @@ a loose list's items holding more than one block are spread, the list when none 
 the documents Dispatch stores were read.
 
 A footnote definition is read where it is written, as that parser keeps it: inside another block,
-ahead of other blocks, in any order, and whether or not anything refers to it. Goldmark gathers
+ahead of other blocks, in any order, and whether or not anything refers to it. One inside another
+footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner
+one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text, and so
+is one inside a typed block, which that parser's references reach only from inside a typed block or
+after it. Goldmark gathers
 the definitions it keeps at the document's end in the order of their first references and drops
 the rest, so the parser puts each back where it was written (`definitionsInPlace`).
 

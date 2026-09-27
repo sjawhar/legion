@@ -526,6 +526,12 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		// Proof's doc accepts blocks only, while html is an inline atom.
 		return nil, ErrBlockHTML
 	case *extensionast.Footnote:
+		if _, nested := ancestor[*extensionast.Footnote](current); nested {
+			return nil, fmt.Errorf("%w: a footnote definition inside another footnote definition, where the browser editor reads a line of = or - continuing the inner one's paragraph as a heading's underline", ErrSchema)
+		}
+		if _, typed := ancestor[*typedDirective](current); typed {
+			return nil, fmt.Errorf("%w: a footnote definition inside a typed block, which the browser editor refers to only from inside a typed block or after it", ErrSchema)
+		}
 		children, err := parseBlocks(current, source, footnotes)
 		if err != nil {
 			return nil, err

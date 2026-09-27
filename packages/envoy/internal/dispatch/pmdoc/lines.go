@@ -243,11 +243,20 @@ func (s *footnoteSlot) Kind() ast.NodeKind { return kindFootnoteSlot }
 
 func (s *footnoteSlot) Dump(source []byte, level int) { ast.DumpHelper(s, source, level, nil, nil) }
 
+// Close leaves a slot where the definition is written and hands goldmark the definition from the
+// document's level, where goldmark puts the list it gathers definitions in when it closes the first
+// one: a list put inside a definition would leave the document with the definition that holds it,
+// and goldmark reads no text in blocks outside the document.
 func (p footnoteDefinitionParser) Close(node ast.Node, reader gmtext.Reader, pc parser.Context) {
 	slot := &footnoteSlot{definition: node}
 	node.Parent().InsertBefore(node.Parent(), node, slot)
 	slots, _ := pc.Get(footnoteSlotsKey).([]*footnoteSlot)
 	pc.Set(footnoteSlotsKey, append(slots, slot))
+	root := node.Parent()
+	for root.Parent() != nil {
+		root = root.Parent()
+	}
+	root.AppendChild(root, node)
 	p.BlockParser.Close(node, reader, pc)
 }
 
