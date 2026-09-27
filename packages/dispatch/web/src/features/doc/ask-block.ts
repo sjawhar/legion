@@ -6,7 +6,7 @@ import {
 import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 
-import type { AskOption, AskUrgency, BlockSchema } from "../../api/types";
+import type { AskOption, AskUrgency, BlockSchema, BlockTypeSchema } from "../../api/types";
 import {
   askBlockTint,
   askUrgencyAccent,
@@ -17,13 +17,78 @@ import {
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
 
 /**
- * Draws a document's host-owned typed blocks other than `ask`, which `AskBlockView` owns: the
- * block's name and attributes as a header the reader sees, above its content. It is the node
- * view's drawing (`typedBlockView`), never the node's `toDOM`: HTML of the document - a copy, a
- * drag, or the editor's plain-text paste, which renders the markdown it parsed through `toDOM` -
- * carries only the block's section and content, which is all its parse rule reads.
+ * `blockId` is the block's own identity rather than one of its schema attributes, so it is the
+ * one name this function knows. Everything else it hides comes from the block type's own
+ * schema: a hand-written list is a copy of that flag that goes stale the moment a type gains a
+ * server-owned attribute (LEGION-67).
  */
-export function renderTypedBlock(node: ProseMirrorNode): DOMOutputSpec {
+const BLOCK_IDENTITY_ATTRIBUTE = "blockId";
+
+function attributeValue(value: unknown): string {
+  return Array.isArray(value) ? JSON.stringify(value) : String(value);
+}
+
+/**
+ * Draws a document's host-owned typed blocks other than `ask`, which `AskBlockView` owns: the
+ * block's kind and the author's own attributes as a header the reader sees, above its content.
+ * The header reads as a label rather than a dump: the block's name is an eyebrow, a `kind` is a
+ * badge beside it, a `title` is the header's own text, and any other attribute the author wrote
+ * follows as a quiet name/value pair. What the author did not write never appears - the block's
+ * identity, and every attribute the type's schema marks `server`, which is where the parser's
+ * complaint and a decision's recorded state live. `type` is that schema entry; without one
+ * (a node whose type the schema no longer describes) only the identity is hidden. It is the
+ * node view's drawing (`typedBlockView`), never the node's `toDOM`: HTML of the document - a
+ * copy, a drag, or the editor's plain-text paste, which renders the markdown it parsed through
+ * `toDOM` - carries only the block's section and content, which is all its parse rule reads.
+ */
+export function renderTypedBlock(
+  node: ProseMirrorNode,
+  type?: BlockTypeSchema | undefined
+): DOMOutputSpec {
+  const shown = Object.entries(node.attrs).filter(
+    ([name, value]) =>
+      name !== BLOCK_IDENTITY_ATTRIBUTE &&
+      type?.attributes[name]?.server !== true &&
+      value !== null &&
+      value !== undefined &&
+      value !== ""
+  );
+  const title = shown.find(([name]) => name === "title");
+  const kind = shown.find(([name]) => name === "kind");
+  const rest = shown.filter(([name]) => name !== "title" && name !== "kind");
+  const badge: DOMOutputSpec[] =
+    kind === undefined
+      ? []
+      : [
+          [
+            "span",
+            { "data-proof-block-attribute": "kind", "data-proof-block-badge": "" },
+            attributeValue(kind[1]),
+          ],
+        ];
+  const heading: DOMOutputSpec[] =
+    title === undefined
+      ? []
+      : [
+          [
+            "span",
+            { "data-proof-block-attribute": "title", "data-proof-block-title": "" },
+            attributeValue(title[1]),
+          ],
+        ];
+  const others: DOMOutputSpec[] =
+    rest.length === 0
+      ? []
+      : [
+          [
+            "dl",
+            { "data-proof-block-attributes": "" },
+            ...rest.flatMap(([name, value]) => [
+              ["dt", {}, name],
+              ["dd", { "data-proof-block-attribute": name }, attributeValue(value)],
+            ]),
+          ],
+        ];
   return [
     "section",
     {
@@ -34,18 +99,9 @@ export function renderTypedBlock(node: ProseMirrorNode): DOMOutputSpec {
       "header",
       { contenteditable: "false", "data-proof-block-summary": "" },
       ["span", { "data-proof-block-name": "" }, node.type.name],
-      [
-        "dl",
-        { "data-proof-block-attributes": "" },
-        ...Object.entries(node.attrs).flatMap(([name, value]) => [
-          ["dt", {}, name],
-          [
-            "dd",
-            { "data-proof-block-attribute": name },
-            Array.isArray(value) ? JSON.stringify(value) : String(value),
-          ],
-        ]),
-      ],
+      ...badge,
+      ...heading,
+      ...others,
     ],
     ["div", { "data-proof-block-content": "" }, 0],
   ];
@@ -55,8 +111,12 @@ export function renderTypedBlock(node: ProseMirrorNode): DOMOutputSpec {
  * under the block's id. It stamps `data-block-id` the way `AskBlockView` does, from the node's
  * attribute, since a value import from the editor library would pull the library out of
  * `editor.ts`'s lazy chunk into every page that loads this module. */
-function typedBlockView(node: ProseMirrorNode, document: Document): NodeView {
-  const { dom, contentDOM } = DOMSerializer.renderSpec(document, renderTypedBlock(node));
+function typedBlockView(
+  node: ProseMirrorNode,
+  document: Document,
+  type: BlockTypeSchema
+): NodeView {
+  const { dom, contentDOM } = DOMSerializer.renderSpec(document, renderTypedBlock(node, type));
   const blockId = node.attrs.blockId;
   if (typeof blockId === "string" && blockId !== "") {
     (dom as HTMLElement).dataset.blockId = blockId;
@@ -310,7 +370,7 @@ export function installTypedBlocks(
           .filter((type) => type.name !== "ask")
           .map((type) => [
             type.name,
-            (node: ProseMirrorNode) => typedBlockView(node, view.dom.ownerDocument),
+            (node: ProseMirrorNode) => typedBlockView(node, view.dom.ownerDocument, type),
           ])
       ),
       ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
