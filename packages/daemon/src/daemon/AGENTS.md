@@ -505,9 +505,18 @@ on stderr, since the server reports a refusal asynchronously and nothing else su
 Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
 every daemon gets it and restarts, and each boot line must name the daemon user; only then is the
-`legion-pane` seed written. `legion-pane` is never granted the daemon's subjects (its JetStream
-consumers, the exceptions lane, role publishes). Reversed, a daemon holding only the `legion-pane`
-seed connects as `legion-pane` and each refused subject logs the error line above.
+`legion-pane` seed written. `legion-pane` is never granted the daemon's subjects. On NATS, the
+TypeScript daemon subscribes `notifications.slack.*.*.mention` and
+`notifications.envoy.exceptions.notifications.role.>` (`events.ts:1007-1012`) and `_INBOX.>` (its
+request replies and pull deliveries). It runs two durable pull consumers on `ENVOY_NOTIFICATIONS`,
+`legion-<project>-github` and `legion-<primary project key>-dispatch` (`events.ts:991-1006`), so it
+needs `$JS.API.>` for their info, create, update and pulls, and `$JS.ACK.>` for their acks. It
+requests on `legion.ctl.<tree>.<generation>` to reach a root architect (`processes.ts:3444-3445`;
+reclaim-architect, shutdown). It makes no role publishes on NATS: `publishRole` goes to the
+Envoy listener over HTTP (`index.ts:570-575`). Reversed, a daemon holding only the `legion-pane`
+seed connects as `legion-pane` and each refused subject logs the error line above. nats.js drops a
+subscription the server refuses and never sends it again, so after granting a missing subject,
+restart the daemon.
 `legion gh` refuses every merge-shaped command, while the repository's GitHub branch protection,
 CODEOWNERS requirements, and human merge enforce the merge fence.
 
