@@ -102,6 +102,55 @@ func TestReadPrivateSecretPointer(t *testing.T) {
 	}
 }
 
+// ReadGroupSecretPointer holds its file to ReadPrivateSecretPointer's rules except the group's
+// bits: a file its group can read is read, one others can read is refused naming the path and the
+// mode, and a FIFO is still refused rather than waited on.
+func TestReadGroupSecretPointer(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name string, mode os.FileMode) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(" seed\n"), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, mode := range []os.FileMode{0o600, 0o440, 0o640} {
+		if got, err := ReadGroupSecretPointer("nats_nkey_seed_file", write(mode.String(), mode)); err != nil || got != "seed" {
+			t.Errorf("ReadGroupSecretPointer(%#o) = %q, %v; want the trimmed secret", mode, got, err)
+		}
+	}
+	for _, tc := range []struct{ name, path, want string }{
+		{"other-readable", write("other", 0o604), "nats_nkey_seed_file %s is readable by others (mode 0604); chmod o-rwx it"},
+		{"the kubelet's default mode", write("default", 0o644), "nats_nkey_seed_file %s is readable by others (mode 0644); chmod o-rwx it"},
+		{"a FIFO", fifo, "nats_nkey_seed_file names %s, which is not a regular file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan error, 1)
+			go func() {
+				_, err := ReadGroupSecretPointer("nats_nkey_seed_file", tc.path)
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				if want := strings.Replace(tc.want, "%s", tc.path, 1); err == nil || err.Error() != want {
+					t.Fatalf("err = %v, want %q", err, want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("ReadGroupSecretPointer is still waiting on the file")
+			}
+		})
+	}
+}
+
 // The copy every pane's prompt `$(cat)`s: a heading naming the legion as the operator wrote it,
 // a blank line, and the operator's file verbatim (deployment-instructions.ts:37-46).
 func TestMaterializeDeploymentInstructionsWritesTheHeadedCopy(t *testing.T) {

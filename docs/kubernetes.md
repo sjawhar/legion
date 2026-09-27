@@ -359,8 +359,10 @@ daemon or running a key command.
 The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
 directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
 `legion-pane` user the daemon's own NATS connection authenticates as. A set source that is empty,
-missing, unreadable, blank, readable by its group or others (the file wants mode 0600), or not an
-nkey user seed refuses boot, naming the key and the path. With one, every pod's
+missing, unreadable, blank, readable by others, or not an nkey user seed refuses boot, naming the
+key and the path. Its group may read the file: a daemon running as a non-root uid in a pod reads a
+mounted Secret only through the pod's `fsGroup` (the kubelet's file is root's), so mount it with
+`defaultMode: 0440`, never the kubelet's default `0644`, which others can read. With one, every pod's
 `NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the providers Secret's own
 `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`,
 whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same

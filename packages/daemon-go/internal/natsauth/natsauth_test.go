@@ -134,8 +134,8 @@ func TestAnUnusableSeedIsAnErrorNamingItsSource(t *testing.T) {
 	notASeed := testnats.SeedFile(t, "SUNOTASEED")
 	accountSeed := testnats.SeedFile(t, testnats.Account(t))
 	good := testnats.SeedFile(t, userSeed)
-	shared := testnats.SeedFile(t, userSeed)
-	if err := os.Chmod(shared, 0o640); err != nil {
+	public := testnats.SeedFile(t, userSeed)
+	if err := os.Chmod(public, 0o604); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -155,9 +155,9 @@ func TestAnUnusableSeedIsAnErrorNamingItsSource(t *testing.T) {
 		{"a file holding an account seed", "", map[string]string{"NATS_NKEY_SEED_FILE": accountSeed}, "NATS_NKEY_SEED_FILE (" + accountSeed + ") holds an nkey seed that is not a user's"},
 		{"a blank variable", "", map[string]string{"NATS_NKEY_SEED": "  "}, "NATS_NKEY_SEED is set but empty"},
 		{"a variable holding no seed", "", map[string]string{"NATS_NKEY_SEED": "hunter2"}, "NATS_NKEY_SEED does not hold a valid nkey seed"},
-		{"a key file its group can read", shared, nil, "nats_nkey_seed_file " + shared + " is readable by its group or others (mode 0640); chmod 0600 it"},
-		{"a file its group can read", "", map[string]string{"NATS_NKEY_SEED_FILE": shared, "NATS_NKEY_SEED": userSeed},
-			"NATS_NKEY_SEED_FILE " + shared + " is readable by its group or others (mode 0640); chmod 0600 it"},
+		{"a key file others can read", public, nil, "nats_nkey_seed_file " + public + " is readable by others (mode 0604); chmod o-rwx it"},
+		{"a file others can read", "", map[string]string{"NATS_NKEY_SEED_FILE": public, "NATS_NKEY_SEED": userSeed},
+			"NATS_NKEY_SEED_FILE " + public + " is readable by others (mode 0604); chmod o-rwx it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			seed, err := natsauth.Seed(tc.key, env(tc.env))
@@ -169,6 +169,46 @@ func TestAnUnusableSeedIsAnErrorNamingItsSource(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), userSeed) || strings.Contains(err.Error(), "hunter2") {
 				t.Fatalf("error %q carries the seed", err)
+			}
+		})
+	}
+}
+
+// Seed, the daemon's reader, takes a file its group can read and refuses one others can: a daemon
+// running as a non-root uid in a pod reads a kubelet-mounted Secret file only through the pod's
+// fsGroup, the file being root's and group-readable. SeedFile, which `legion controller start`
+// reads on the operator's own machine, refuses either.
+func TestTheDaemonReadsAGroupReadableSeedAndTheControllerDoesNot(t *testing.T) {
+	userSeed, _ := testnats.User(t)
+	withMode := func(mode os.FileMode) string {
+		t.Helper()
+		path := testnats.SeedFile(t, userSeed+"\n")
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	shared, public := withMode(0o640), withMode(0o604)
+
+	if got, err := natsauth.Seed(shared, env(nil)); err != nil || got != userSeed {
+		t.Errorf("Seed(0640 key file) = %v; want its seed", err)
+	}
+	if got, err := natsauth.Seed("", env(map[string]string{"NATS_NKEY_SEED_FILE": shared})); err != nil || got != userSeed {
+		t.Errorf("Seed(0640 NATS_NKEY_SEED_FILE) = %v; want its seed", err)
+	}
+	for _, tc := range []struct {
+		name, path, want string
+	}{
+		{"its group can read", shared, "nats_nkey_seed_file " + shared + " is readable by its group or others (mode 0640); chmod 0600 it"},
+		{"others can read", public, "nats_nkey_seed_file " + public + " is readable by its group or others (mode 0604); chmod 0600 it"},
+	} {
+		t.Run("SeedFile refuses a file "+tc.name, func(t *testing.T) {
+			seed, err := natsauth.SeedFile(tc.path)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("SeedFile = %v, want %q", err, tc.want)
+			}
+			if seed != "" || strings.Contains(err.Error(), userSeed) {
+				t.Fatalf("SeedFile answered or carried the seed: %v", err)
 			}
 		})
 	}

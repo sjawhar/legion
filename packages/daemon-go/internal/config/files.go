@@ -32,15 +32,40 @@ func ReadSecretPointer(variable, file string) (string, error) {
 
 // ReadPrivateSecretPointer is ReadSecretPointer for a secret a group- or other-readable copy of
 // would be a second way in — the operator bearer, which buys a controller capability and opens every
-// operator route, and the NATS nkey seed every agent authenticates with — `variable` is the key or
-// flag as the operator wrote it (`operator_token_file`, `--operator-token-file`,
-// `nats_nkey_seed_file`). The file is opened once, and the open descriptor must be a regular file
-// whose mode grants its group and others nothing before its trimmed, non-empty contents are read
-// from that same descriptor, so nothing swapped in between a check and a read is ever read
-// (packages/daemon/src/cli/controller-start.ts:177-199, which stats and reads separately). The
-// open does not block, so a FIFO is refused rather than waited on. The contents never appear in an
-// error.
+// operator route, and the NATS nkey seed file `legion controller start` hands its Oh My Pi —
+// `variable` is the key or flag as the operator wrote it (`operator_token_file`,
+// `--operator-token-file`, `nats_nkey_seed_file`). The file is opened once, and the open descriptor
+// must be a regular file whose mode grants its group and others nothing before its trimmed,
+// non-empty contents are read from that same descriptor, so nothing swapped in between a check and
+// a read is ever read (packages/daemon/src/cli/controller-start.ts:177-199, which stats and reads
+// separately). The open does not block, so a FIFO is refused rather than waited on. The contents
+// never appear in an error.
 func ReadPrivateSecretPointer(variable, file string) (string, error) {
+	return ownerOnly.read(variable, file)
+}
+
+// ReadGroupSecretPointer is ReadPrivateSecretPointer for a secret its group may read too: the NATS
+// nkey seed the daemon reads. A daemon running as a non-root uid in a pod reads a kubelet-mounted
+// Secret file only through the pod's fsGroup — the file is root's, and group-readable — so only a
+// mode that grants others something is refused.
+func ReadGroupSecretPointer(variable, file string) (string, error) {
+	return ownerAndGroup.read(variable, file)
+}
+
+// secretMode is the mode a secret file must keep: forbidden holds the permission bits refused, and
+// readers and fix word the refusal.
+type secretMode struct {
+	forbidden    os.FileMode
+	readers, fix string
+}
+
+var (
+	ownerOnly     = secretMode{0o077, "its group or others", "chmod 0600 it"}
+	ownerAndGroup = secretMode{0o007, "others", "chmod o-rwx it"}
+)
+
+// read is ReadPrivateSecretPointer's open, check, and read, refusing the bits m forbids.
+func (m secretMode) read(variable, file string) (string, error) {
 	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("%s names %s, which could not be read: %w", variable, file, err)
@@ -53,8 +78,8 @@ func ReadPrivateSecretPointer(variable, file string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("%s names %s, which is not a regular file", variable, file)
 	}
-	if mode := info.Mode().Perm(); mode&0o077 != 0 {
-		return "", fmt.Errorf("%s %s is readable by its group or others (mode %#o); chmod 0600 it", variable, file, mode)
+	if mode := info.Mode().Perm(); mode&m.forbidden != 0 {
+		return "", fmt.Errorf("%s %s is readable by %s (mode %#o); %s", variable, file, m.readers, mode, m.fix)
 	}
 	contents, err := io.ReadAll(f)
 	if err != nil {
