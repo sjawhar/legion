@@ -390,7 +390,7 @@ type positionReader interface {
 	DispatchPosition(ctx context.Context) (intake.DispatchConsumerPosition, error)
 }
 
-// pollHoldRelease is the boot-owned release B1 replaces intake's per-delivery hook with: while
+// pollHoldRelease is the boot-owned release that replaces intake's per-delivery hook with: while
 // admission holds anything back, it re-reads the Dispatch consumer's own position on a ticker and
 // applies each changed reading as a synthetic fact, independent of any message delivery. A quiet
 // stream after its last backlog message delivers nothing further to trigger a release the old
@@ -437,15 +437,19 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 		if !w.admission.Held() {
 			haveLast, heldSince, warnedAt = false, time.Time{}, time.Time{}
 			if wasHeld {
-				// The hold just cleared: a record B6's own held-key recording put down between an
+				// The hold just cleared: a record a held key's own recording put down between an
 				// earlier release's commit and its AfterCommit (which cleared pending) may still be
 				// sitting in the waiting line, held back by that same release's own promote, which
 				// ran before pending was actually cleared. One more pass, now that pending is
 				// provably empty, promotes it without waiting on an unrelated fact to notice. A
 				// fresh, never-reused event id (a closing pass never repeats a boot's own position
 				// reading) keeps ApplyFact from treating it as the duplicate of whatever position
-				// last released the hold.
-				w.promoteAfterHoldClears(ctx)
+				// last released the hold. A failure is retried on the poll's own schedule, same as
+				// a failed position apply: wasHeld only clears once the pass actually succeeds.
+				if err := w.promoteAfterHoldClears(ctx); err != nil {
+					w.log.Warn("apply the post-release promote failed", "error", err)
+					continue
+				}
 			}
 			wasHeld = false
 			continue
@@ -484,14 +488,13 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 // promoteAfterHoldClears applies one synthetic DispatchConsumerPosition fact, its event id never
 // reused, once nothing is held: Admission.Apply routes any DispatchConsumerPosition straight to
 // release, which — with pending now provably empty — promotes exactly as a normal promote() would,
-// picking up any candidate a held key's own recording left waiting behind it (N8). The position's
+// picking up any candidate a held key's own recording left waiting behind it. The position's
 // own values do not matter here: caughtUp is false whenever pending is empty, so release only
 // reaches its own promoteHolds call, never re-applies a summary.
-func (w *workflowRuntime) promoteAfterHoldClears(ctx context.Context) {
+func (w *workflowRuntime) promoteAfterHoldClears(ctx context.Context) error {
 	eventID := fmt.Sprintf("dispatch-position:%s:%s:closing:%d", w.dispatchProject, w.bootID, time.Now().UnixNano())
-	if _, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, intake.DispatchConsumerPosition{}, w.handlers...); err != nil {
-		w.log.Warn("apply the post-release promote failed", "error", err)
-	}
+	_, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, intake.DispatchConsumerPosition{}, w.handlers...)
+	return err
 }
 
 func (w *workflowRuntime) stop() {

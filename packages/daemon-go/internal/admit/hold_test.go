@@ -52,7 +52,7 @@ func TestReconcileLeavesAnIssueTheStreamHoldsNewerEventsFor(t *testing.T) {
 
 	// The same issue once the Dispatch consumer has actually caught up to the same event: nothing
 	// newer is coming, so the summary — genuinely newer than the record's own sequence — applies
-	// through the engine (B5/D: level with what is already recorded would instead leave it alone).
+	// through the engine (level with what is already recorded would instead leave it alone).
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-ACTIVE", Title: "active", Status: "done", Rank: "A", LastSeq: 11},
 	}, 11, 11, true)
@@ -195,9 +195,9 @@ func TestPromotionHoldsADeferredRootAcrossUnrelatedFactsUntilTheStreamPositionCa
 // otherwise defer immediately, in that same Reconcile call, rather than wait for an ack floor that
 // can never reach a target past the consumer's own last matching message: a fresh consumer with
 // nothing pending or unacknowledged has already delivered everything it owes.
-// B is discovered by an earlier boot's Reconcile — whose own putNewRoot records no sequence — so
-// this restart's boot read finds Dispatch's log ahead of B's record; with the consumer idle, that
-// must not hold B back once A's slot frees.
+// B's record is genuinely behind Dispatch's own log on the restart's boot read (the second
+// listing shows a newer sequence than what the first boot recorded for it); with the consumer
+// idle, that must not hold B back once A's slot frees.
 func TestReconcileReleasesImmediatelyWhenTheDispatchConsumerIsIdle(t *testing.T) {
 	pool := migratedPool(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -216,7 +216,7 @@ func TestReconcileReleasesImmediatelyWhenTheDispatchConsumerIsIdle(t *testing.T)
 	admission = newAdmission(t, 1, log)
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-A", Title: "A", Status: "in_progress", Rank: "A", HandedOver: handed, LastSeq: 5},
-		{Key: "LEGION-B", Title: "B", Status: "todo", Rank: "B", HandedOver: handed, LastSeq: 7},
+		{Key: "LEGION-B", Title: "B", Status: "todo", Rank: "B", HandedOver: handed, LastSeq: 8},
 	}, 0, 0, true)
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-A", Index: 0, AdmittedAt: fixedNow}})
 
@@ -288,14 +288,13 @@ func TestReconcileHoldsAnUnrecordedKeyBehindTheStreamWhateverItsListedStatus(t *
 	assertSlots(t, pool, nil)
 }
 
-// P2, thread 4114574427, and B6 (reverting N6's collapse, which reintroduced the same class of
-// loss for a different reason — see the daemon package's own test of the exact commit/AfterCommit
-// race that motivated the revert): while a key is held, Apply dropped every event for it, including
-// newer than the summary it is held on — so an owner labeling the root after boot could never
-// reach the record, and the stale unlabeled listing snapshot applied at release was the last word
-// forever. Only a replay at or behind the held summary's own sequence is stale; a newer event is
-// recorded normally — promote still holds the candidate back until release, and applySummary
-// leaves a record already past its summary alone.
+// While a key is held, Apply dropped every event for it, including ones newer than the summary it
+// is held on — so an owner labeling the root after boot could never reach the record, and the
+// stale unlabeled listing snapshot applied at release was the last word forever. Only a replay at
+// or behind the held summary's own sequence is stale; a newer event is recorded normally — promote
+// still holds the candidate back until release, and applySummary leaves a record already past its
+// summary alone (see the daemon package's own test of the exact commit/AfterCommit race this
+// depends on).
 func TestALabelAddedWhileAKeyIsHeldReachesTheRecordAndIsAdmittedAfterRelease(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -376,12 +375,12 @@ func (f *failingSlotsStore) Slots(ctx context.Context, tx pgx.Tx) ([]record.Slot
 	return f.Store.Slots(ctx, tx)
 }
 
-// P2/B4: the held check at Apply's unrecorded branch used to run before the triage wake, so a
-// labeled triage root created while the daemon was down — held because Reconcile's boot listing
-// now covers every status — never woke the controller: its replayed issue.created (seq at or
-// behind the held summary) returned before the wake branch ever ran. The held check now gates
-// only the todo record-and-admit path below it; the triage wake runs on every observation of an
-// unrecorded root, held or not.
+// The held check at Apply's unrecorded branch used to run before the triage wake, so a labeled
+// triage root created while the daemon was down — held because Reconcile's boot listing now covers
+// every status — never woke the controller: its replayed issue.created (seq at or behind the held
+// summary) returned before the wake branch ever ran. The held check now gates only the todo
+// record-and-admit path below it; the triage wake runs on every observation of an unrecorded root,
+// held or not.
 func TestATriageRootIsWokenEvenWhileItsKeyIsHeld(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -402,10 +401,10 @@ func TestATriageRootIsWokenEvenWhileItsKeyIsHeld(t *testing.T) {
 	}
 }
 
-// Deep review B: a newer event that creates no record for a held unrecorded key was lost — an
-// event moving the key out of todo, or taking its label off, records nothing, so release then
-// applied the stale boot summary as if that event had never arrived. The held summary now updates
-// to match a newer event even when the event itself creates no record.
+// A newer event that creates no record for a held unrecorded key was lost — an event moving the
+// key out of todo, or taking its label off, records nothing, so release then applied the stale
+// boot summary as if that event had never arrived. The held summary now updates to match a newer
+// event even when the event itself creates no record.
 func TestANewerEventThatCreatesNoRecordRefreshesTheHeldSummary(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))

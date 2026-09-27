@@ -14,7 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// Deep review finding A / oracle: a snapshot that moves a recorded issue's status wrote it
+// A snapshot that moves a recorded issue's status wrote it
 // straight through recordObservation, with no suspend, no linger, and no linger_close — the
 // engine's own leave/beginLinger never ran, so a root parked while the daemon was down kept its
 // workers with no slot and no linger close, and the record's LastDispatchSeq moved to the
@@ -109,7 +109,7 @@ func TestReconcileAppliesASnapshotThatLeavesTheWorkflowThroughTheEngineWhenTheCo
 	}
 }
 
-// Quality review B5: routing a snapshot's status change through the engine only for
+// Routing a snapshot's status change through the engine only for
 // record.OutOfWorkflow statuses pre-filtered a decision Engine.dispatchIssue already makes on its
 // own sequence fence, which also re-enters a child set back to todo (ReenterChild). A parked
 // child — recorded todo at phase done under a live tree because its own live todo event never
@@ -136,7 +136,7 @@ func TestReconcileReentersAParkedChildSetBackToTodoInABootSummary(t *testing.T) 
 	}
 }
 
-// Deep review D, sharpened by review feedback: an agent writes an issue's Dispatch status directly
+// An agent writes an issue's Dispatch status directly
 // (agentStatusWrite records it, LastDispatchSeq included, but never changes issue.Status — the
 // daemon reasserts its own through the outbox instead). A boot listing taken before that reassert
 // lands still shows the agent's own out-of-workflow write, level with what the daemon already
@@ -171,7 +171,7 @@ func TestReconcileLeavesSlotStateUnchangedWhenALevelSnapshotEchoesAnAgentsOutOfW
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-AGENT", Index: 0, AdmittedAt: fixedNow}})
 }
 
-// F: putNewRoot, called from applySummary's stored==nil branch at release, never carried the
+// putNewRoot, called from applySummary's stored==nil branch at release, never carried the
 // summary's own sequence, so a freshly created root's LastDispatchSeq was always 0 regardless of
 // what the summary actually showed. An older, already-superseded event reaching Apply later then
 // passed applyObservation's own sequence fence (observation.Seq <= stored.LastDispatchSeq, since 0

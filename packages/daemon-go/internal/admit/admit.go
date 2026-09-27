@@ -128,12 +128,12 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 			// own publish backoff — decides nothing. release applies that summary once the
 			// consumer catches up. A newer event, past the sequence the summary was taken at, is
 			// not a stale replay: it is recorded normally below, even while the key is still
-			// technically held — B6: a release that has already committed but not yet run its
+			// technically held — a release that has already committed but not yet run its
 			// AfterCommit (which clears pending) still shows this key as held, and dropping this
 			// event here would lose it once that AfterCommit clears pending out from under it, the
 			// event already acknowledged as processed. promote's own pending membership check —
 			// not this one — is what still holds the freshly recorded candidate back from a slot
-			// until pending is actually clear (N8 covers the pass that follows).
+			// until pending is actually clear; a later pass once the hold clears promotes it.
 			return intake.Result{}, nil
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {

@@ -25,7 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
-// B1: pollHoldRelease is a boot-owned ticker, not a per-delivery hook, precisely because a
+// pollHoldRelease is a boot-owned ticker, not a per-delivery hook, precisely because a
 // per-delivery hook depends on a message arriving to trigger its own re-check — and Ack() does not
 // wait for the server, so a check taken immediately after a delivery's own ack can still see the
 // previous position. This seeds a root behind a real, empty JetStream stream (nothing is ever
@@ -140,7 +140,7 @@ func TestPollHoldReleaseRetriesAFailedPositionRead(t *testing.T) {
 	}
 }
 
-// P2, thread 4114574429: pollHoldReleaseWith adopted a position as last before ApplyFact ran on
+// pollHoldReleaseWith adopted a position as last before ApplyFact ran on
 // it, so a failed apply of an unchanged reading was never retried — the next tick saw the same
 // position and skipped it, and a quiet stream's position never changes again to unstick it. A
 // handler that fails the position fact once, then succeeds, proves the poll retries the same
@@ -266,7 +266,7 @@ func (d *filteringDispatch) Approval(context.Context, string) (dispatch.Approval
 	return dispatch.Approval{}, nil
 }
 
-// P2, thread 4114574424: reconcile's boot listing read only todo through retro, so a root moved to
+// reconcile's boot listing read only todo through retro, so a root moved to
 // backlog while the daemon was down fell out of the window entirely — nothing held its key. The
 // replayed labeled issue.created that follows then takes Apply's unrecorded, unheld branch and is
 // promoted, and the backlog event that actually explains its current state only stops it
@@ -333,8 +333,8 @@ func TestReconcileHoldsAKeyTheBootListingShowsOutOfTheWorkflowStatusWindow(t *te
 
 // The pilot's actual shape: a fresh database, a newly opened consumer, other projects' events
 // already sitting on the shared notification stream, one labeled todo root and a labeled root in
-// backlog. Exactly the labeled todo root is admitted, and quickly — this regression row is the one
-// oracle's own run confirmed and asked to keep.
+// backlog. Exactly the labeled todo root is admitted, and quickly — this regression row is one
+// worth keeping.
 func TestReconcileOnThePilotsShapeAdmitsOnlyTheLabeledTodoRootQuickly(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	url := workflowNATS(t)
@@ -470,16 +470,16 @@ func TestPollHoldReleaseWarnsWhenAHoldPersistsPastItsBound(t *testing.T) {
 	}
 }
 
-// Quality review B6 + N8: the collapsed held-key rule an earlier round shipped returned for every
+// A collapsed held-key rule an earlier round shipped returned for every
 // event on a held unrecorded key, a newer labeled todo included — but ApplyFact's advisory lock is
 // transaction-scoped and frees at commit, before AfterCommit runs (which clears pending), so an
 // event applying in that exact window still saw the key held and, under the collapsed rule,
 // dropped it: refreshed a summary about to be deleted and was acknowledged without recording
-// anything, unrecorded until its next event. B6 restores admit.go's stale-only check, so a
-// genuinely newer event still records in that window regardless of the doomed pending entry. N8:
-// even so, that record is skipped by the same transaction's own promote, which still sees the key
-// held (pending has not cleared yet); nothing else promotes it once AfterCommit finally does clear
-// it. pollHoldReleaseWith's one more pass, once Held() turns false, closes that gap — no database
+// anything, unrecorded until its next event. admit.go's stale-only check now instead lets a
+// genuinely newer event still record in that window regardless of the doomed pending entry. Even
+// so, that record is skipped by the same transaction's own promote, which still sees the key held
+// (pending has not cleared yet); nothing else promotes it once AfterCommit finally does clear it.
+// pollHoldReleaseWith's one more pass, once Held() turns false, closes that gap — no database
 // table of held keys, no later event of any kind needed.
 func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsAfterCommitIsRecordedThenPromoted(t *testing.T) {
 	pool := isolatedOutboxPool(t)
@@ -497,6 +497,20 @@ func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsAfterCommitIsRe
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind unlabeled record, want it held")
 	}
+
+	// The real ticker runs the whole time, on its own short schedule, against a reader that
+	// always fails: its own held-phase reads never reach ApplyFact, but it still observes Held()
+	// true on every tick — driving the wasHeld bookkeeping this test needs — before this test
+	// clears the hold by hand below.
+	w := &workflowRuntime{
+		pool: pool, admission: admission, handlers: []intake.Handler{engine, admission},
+		dispatchProject: "CAPTURE", bootID: "test-boot", log: log, holdPollInterval: 5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { w.pollHoldReleaseWith(ctx, &failingPositionReader{failures: 1 << 20}); close(done) }()
+	time.Sleep(10 * w.holdPollInterval)
 
 	// release's own transaction commits here — its advisory lock is transaction-scoped and frees
 	// right at commit — but its AfterCommit, which clears pending, has not run yet: the exact
@@ -543,15 +557,90 @@ func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsAfterCommitIsRe
 		t.Fatal("Held() = true after AfterCommit ran, want the hold cleared")
 	}
 
-	// N8: the pass pollHoldReleaseWith runs once Held() turns false promotes LEGION-RACE — no
-	// later event of any kind arrives.
-	w := &workflowRuntime{pool: pool, admission: admission, handlers: []intake.Handler{engine, admission}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log}
-	w.promoteAfterHoldClears(context.Background())
+	// Driven through the real ticker: the running poll's own next tick, having observed
+	// Held() true throughout, sees it turn false and promotes LEGION-RACE — no later event of any
+	// kind arrives.
+	testwait.Eventually(t, "the running poll's closing pass promotes LEGION-RACE with no later event", func() bool {
+		var slotted bool
+		if err := pool.QueryRow(context.Background(), "select exists(select 1 from slots where issue = $1)", "LEGION-RACE").Scan(&slotted); err != nil {
+			return false
+		}
+		return slotted
+	})
+	cancel()
+	<-done
+}
 
-	if err := pool.QueryRow(context.Background(), "select exists(select 1 from slots where issue = $1)", "LEGION-RACE").Scan(&slotted); err != nil {
-		t.Fatalf("query LEGION-RACE slot after the closing pass: %v", err)
+// promoteAfterHoldClears only logged a failed ApplyFact and wasHeld reset unconditionally, so a
+// transient failure (a lock contention, a connection hiccup) permanently lost the one promote it
+// exists to guarantee — the poll never tried again. promoteAfterHoldClears now returns its error,
+// and wasHeld only clears once the closing pass actually succeeds, so the poll retries it on its
+// own schedule exactly as a failed position apply already does.
+func TestPollHoldReleaseRetriesAFailedClosingPass(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
+
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return admission.Reconcile(context.Background(), tx, []dispatch.IssueSummary{
+			{Key: "LEGION-RACE", Title: "race", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
+		}, 10, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
+	}); err != nil {
+		t.Fatalf("reconcile: %v", err)
 	}
-	if !slotted {
-		t.Fatal("LEGION-RACE still unslotted after the closing pass, want it promoted with no later event")
+	if !admission.Held() {
+		t.Fatal("Held() = false after seeding a behind unlabeled record, want it held")
 	}
+
+	// failing fails its very first Apply call — reserved for the closing pass below, since the
+	// always-failing reader keeps every held-phase tick from ever reaching ApplyFact at all.
+	failing := &failingOnceHandler{}
+	w := &workflowRuntime{
+		pool: pool, admission: admission, handlers: []intake.Handler{engine, admission, failing},
+		dispatchProject: "CAPTURE", bootID: "test-boot", log: log, holdPollInterval: 5 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { w.pollHoldReleaseWith(ctx, &failingPositionReader{failures: 1 << 20}); close(done) }()
+	time.Sleep(10 * w.holdPollInterval)
+
+	// The exact commit/AfterCommit window leaves LEGION-RACE recorded but unpromoted once
+	// pending clears.
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin release tx: %v", err)
+	}
+	result, err := admission.Apply(context.Background(), tx, intake.DispatchConsumerPosition{AckFloorStream: 10})
+	if err != nil {
+		t.Fatalf("apply position fact: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit release tx: %v", err)
+	}
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "label-added-in-race-window", intake.DispatchIssue{
+		Key: "LEGION-RACE", Seq: 2, Type: "issue.updated", Status: "todo", Title: "race", Rank: "A", HandedOver: true,
+	}, engine, admission); err != nil {
+		t.Fatalf("apply the racing event: %v", err)
+	}
+	for _, after := range result.AfterCommit {
+		after()
+	}
+	if admission.Held() {
+		t.Fatal("Held() = true after AfterCommit ran, want the hold cleared")
+	}
+
+	// The first closing pass fails (failing's one failure, never consumed by the held phase); the
+	// poll retries on its own schedule and the second succeeds, admitting LEGION-RACE with no
+	// later event.
+	testwait.Eventually(t, "the poll retries a failed closing pass and eventually promotes LEGION-RACE", func() bool {
+		var slotted bool
+		if err := pool.QueryRow(context.Background(), "select exists(select 1 from slots where issue = $1)", "LEGION-RACE").Scan(&slotted); err != nil {
+			return false
+		}
+		return slotted
+	})
+	cancel()
+	<-done
 }

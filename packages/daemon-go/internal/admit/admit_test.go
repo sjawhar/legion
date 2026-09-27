@@ -847,9 +847,9 @@ func TestReconcileFillsRaisedCapInRankOrderAndIsIdempotent(t *testing.T) {
 	}
 }
 
-// B5/D: a status change applies through Reconcile only when the summary's own sequence is
-// genuinely newer than the record's, and the consumer has caught up to it — otherwise it is either
-// deferred (behind) or, level with what is already recorded, left alone (see hold_test.go's
+// A status change applies through Reconcile only when the summary's own sequence is genuinely
+// newer than the record's, and the consumer has caught up to it — otherwise it is either deferred
+// (behind) or, level with what is already recorded, left alone (see hold_test.go's
 // TestReconcileLeavesAnIssueTheStreamHoldsNewerEventsFor and applySummary).
 func TestReconcileReleasesSlotWhoseDispatchStatusLeftActiveSet(t *testing.T) {
 	pool := migratedPool(t)
