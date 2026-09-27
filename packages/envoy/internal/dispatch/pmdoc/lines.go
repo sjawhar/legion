@@ -151,30 +151,52 @@ func (p footnoteReferenceParser) Parse(parent ast.Node, block gmtext.Reader, pc 
 		return nil
 	}
 	label := line[start+1 : start+1+closure]
-	key := footnoteLabelKey(string(label))
+	definition := footnoteDefinitionsByKey(pc)[footnoteLabelKey(string(label))]
+	if definition == nil {
+		return nil
+	}
+	if definition.Index < 0 {
+		list := definition.Parent().(*extensionast.FootnoteList)
+		list.Count++
+		definition.Index = list.Count
+	}
+	block.Advance(start + 1 + closure + 1)
+	link := extensionast.NewFootnoteLink(definition.Index)
+	link.SetAttribute(referenceLabelAttr, string(label))
+	if line[0] == '!' {
+		parent.AppendChild(parent, ast.NewTextSegment(gmtext.NewSegment(segment.Start, segment.Start+1)))
+	}
+	return link
+}
+
+// footnoteKeysKey holds a parse's footnoteDefinitionsByKey.
+var footnoteKeysKey = parser.NewContextKey()
+
+// footnoteDefinitionsByKey is each footnote definition in goldmark's list by its label's key
+// (footnoteLabelKey), the first in the document where two share one. It is built once per parse,
+// on the first reference goldmark's parser leaves unresolved: inline text is parsed after every
+// block has closed, so each definition has its slot by then.
+func footnoteDefinitionsByKey(pc parser.Context) map[string]*extensionast.Footnote {
+	if byKey, ok := pc.Get(footnoteKeysKey).(map[string]*extensionast.Footnote); ok {
+		return byKey
+	}
 	slots, _ := pc.Get(footnoteSlotsKey).([]*footnoteSlot)
+	byKey := make(map[string]*extensionast.Footnote, len(slots))
 	for _, slot := range slots {
 		definition, ok := slot.definition.(*extensionast.Footnote)
-		if !ok || footnoteLabelKey(string(definition.Ref)) != key {
-			continue
-		}
-		list, ok := definition.Parent().(*extensionast.FootnoteList)
 		if !ok {
 			continue
 		}
-		if definition.Index < 0 {
-			list.Count++
-			definition.Index = list.Count
+		if _, listed := definition.Parent().(*extensionast.FootnoteList); !listed {
+			continue
 		}
-		block.Advance(start + 1 + closure + 1)
-		link := extensionast.NewFootnoteLink(definition.Index)
-		link.SetAttribute(referenceLabelAttr, string(label))
-		if line[0] == '!' {
-			parent.AppendChild(parent, ast.NewTextSegment(gmtext.NewSegment(segment.Start, segment.Start+1)))
+		key := footnoteLabelKey(string(definition.Ref))
+		if _, first := byKey[key]; !first {
+			byKey[key] = definition
 		}
-		return link
 	}
-	return nil
+	pc.Set(footnoteKeysKey, byKey)
+	return byKey
 }
 
 // setPadding sets reader's padding and drops the line it has peeked, which goldmark's
