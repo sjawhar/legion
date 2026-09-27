@@ -499,7 +499,7 @@ it, else as the pane seed, else with no credential (`daemonNatsIdentity`), loggi
 `[legion] daemon NATS connects as nkey user U…, …` line that names the user and whether it is the
 pane user. Either seed file must be owner-only (0600): one its group or others may read is refused
 as `<key> <path> is readable by its group or others (mode 0640); chmod 0600 it`, by
-`--check-config` too, which checks the mode without reading the file; the TypeScript daemon runs on
+`--check-config` too, which checks the mode without reading the file. The reader opens the file once without blocking, `fstat`s that descriptor, refuses anything but a regular file (`… which is not a regular file`, a FIFO included), and reads the same descriptor, so a file swapped in at the path between check and read is never read; the TypeScript daemon runs on
 tmux alone, so no kubelet-mounted Secret needs the group to read it. No `SpawnSpec` secret, pane
 variable, or secret file carries the daemon's seed. That keeps it out of what the daemon hands a
 pane, not out of a pane's reach: on tmux every pane runs as the daemon's own uid, so a pane process

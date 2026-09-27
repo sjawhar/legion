@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1533,6 +1534,9 @@ describe("daemon config", () => {
         fs.writeFileSync(path.join(configDir, name), `${userSeed}\n`);
         fs.chmodSync(path.join(configDir, name), mode);
       }
+      // A FIFO nobody writes: a reader that opened it blocking, or read it before checking what it
+      // is, would hang here instead of refusing it.
+      execFileSync("mkfifo", ["-m", "0644", path.join(configDir, "fifo")]);
       const tmuxYaml = (...lines: string[]) =>
         loadConfigFromFile(
           ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
@@ -1610,6 +1614,11 @@ describe("daemon config", () => {
             undefined,
             { [seed.fileVariable]: at("world") },
             `${seed.fileVariable} ${at("world")} is readable by its group or others (mode 0604); chmod 0600 it`,
+          ],
+          [
+            tmuxYaml(`${seed.fileKey}: ./fifo`),
+            { [seed.variable]: userSeed },
+            `${seed.fileKey} names ${at("fifo")}, which is not a regular file`,
           ],
         ];
         for (const [configFile, env, message] of cases) {

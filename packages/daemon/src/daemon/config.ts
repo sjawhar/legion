@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { type Stats, statSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -1206,9 +1206,8 @@ function resolveNatsSeed(
   if (pointer.value !== undefined) {
     const key = pointer.source === "env" ? names.fileVariable : names.fileKey;
     if (pointer.value === "") throw new Error(`${key} is set but empty`);
-    refuseSharedSeedFile(key, pointer.value);
-    if (!resolveSecrets) return "(not executed)";
-    const seed = readSecretPointer(key, pointer.value);
+    const seed = readOwnerOnlySeedFile(key, pointer.value, resolveSecrets);
+    if (seed === undefined) return "(not executed)";
     validateNatsUserSeed(seed, `${key} (${pointer.value})`);
     return seed;
   }
@@ -1220,20 +1219,39 @@ function resolveNatsSeed(
   return seed;
 }
 
-/** Refuses a regular seed file its group or others may read. Only the owner may read either seed:
- * the TypeScript daemon runs on tmux alone, so it has no kubelet-mounted Secret to let the group
- * read. A path it cannot stat, or one that is not a regular file, is left to the read, which names
- * why it fails. */
-function refuseSharedSeedFile(key: string, file: string): void {
-  let stats: Stats;
+/** The trimmed seed in `file`, which must be a regular file only its owner may read: opened once
+ * (without blocking, so a FIFO cannot hang the daemon), checked with `fstat` on that descriptor,
+ * and read from the same descriptor, so nothing swapped in at the path between the check and the
+ * read is ever read. A symlink resolves to its target. Only the owner may read either seed: the
+ * TypeScript daemon runs on tmux alone, so no kubelet-mounted Secret needs the group to read it.
+ * `--check-config` (`resolveSecrets` false) checks the file but reads nothing, returning
+ * undefined, and leaves a file it cannot open to the boot that reads it. */
+function readOwnerOnlySeedFile(
+  key: string,
+  file: string,
+  resolveSecrets: boolean
+): string | undefined {
+  let fd: number;
   try {
-    stats = statSync(file);
-  } catch {
-    return;
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  } catch (error) {
+    if (!resolveSecrets) return undefined;
+    throw new Error(
+      `${key} names ${file}, which could not be read: ${error instanceof Error ? error.message : String(error)}`
+    );
   }
-  if (!stats.isFile()) return;
-  const refusal = ownerOnlyModeRefusal(key, file, stats.mode);
-  if (refusal !== undefined) throw new Error(refusal);
+  try {
+    const stats = fstatSync(fd);
+    if (!stats.isFile()) throw new Error(`${key} names ${file}, which is not a regular file`);
+    const refusal = ownerOnlyModeRefusal(key, file, stats.mode);
+    if (refusal !== undefined) throw new Error(refusal);
+    if (!resolveSecrets) return undefined;
+    const seed = readFileSync(fd, "utf8").trim();
+    if (!seed) throw new Error(`${key} names ${file}, which is empty`);
+    return seed;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function resolveDaemonConfig(
