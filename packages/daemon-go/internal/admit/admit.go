@@ -25,6 +25,12 @@ type Admission struct {
 	project string
 	log     *slog.Logger
 	now     func() time.Time
+	// pending holds, for a key Reconcile found Dispatch's own log ahead of the record, the
+	// smallest LastDispatchSeq that record must reach before promote treats it as a candidate
+	// again. It survives across calls on this Admission, since the stream can take any number of
+	// unrelated Apply calls — a non-Dispatch fact, another issue's event — to deliver the one that
+	// catches this record up, and every promote in between must still hold the candidate back.
+	pending map[string]int64
 }
 
 var _ intake.Handler = (*Admission)(nil)
@@ -34,7 +40,7 @@ func New(store record.Store, cap int, project string, log *slog.Logger) *Admissi
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Admission{store: store, cap: cap, project: project, log: log, now: time.Now}
+	return &Admission{store: store, cap: cap, project: project, log: log, now: time.Now, pending: make(map[string]int64)}
 }
 
 // Apply records root and orphan todo observations of issues handed to Legion and every newer
@@ -49,7 +55,7 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
-		if err := a.promote(ctx, tx, nil); err != nil {
+		if err := a.promote(ctx, tx); err != nil {
 			return intake.Result{}, err
 		}
 		return intake.Result{}, nil
@@ -91,7 +97,7 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 	if err := a.releaseInactiveSlots(ctx, tx); err != nil {
 		return intake.Result{}, err
 	}
-	if err := a.promote(ctx, tx, nil); err != nil {
+	if err := a.promote(ctx, tx); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, nil
@@ -115,7 +121,6 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		slotted[slot.Issue] = struct{}{}
 	}
 
-	deferred := make(map[string]struct{})
 	for _, summary := range summaries {
 		stored, err := a.store.Issue(ctx, tx, summary.Key)
 		if err != nil {
@@ -140,7 +145,9 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		if summary.LastSeq > stored.LastDispatchSeq {
 			a.log.Info("admission reconcile: the stream holds newer events for this issue; leaving it to them",
 				"issue", stored.Key, "applied", stored.LastDispatchSeq, "dispatch", summary.LastSeq)
-			deferred[stored.Key] = struct{}{}
+			if existing, ok := a.pending[stored.Key]; !ok || summary.LastSeq > existing {
+				a.pending[stored.Key] = summary.LastSeq
+			}
 			continue
 		}
 
@@ -166,7 +173,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 	if err := a.releaseInactiveSlots(ctx, tx); err != nil {
 		return err
 	}
-	return a.promote(ctx, tx, deferred)
+	return a.promote(ctx, tx)
 }
 
 func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intake.DispatchIssue, logOrphan bool) error {
@@ -357,11 +364,11 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
-// waiting line empties. deferred excludes candidates this call must not promote: Reconcile passes
-// the keys whose record is behind Dispatch's own log, so a record that still reads waiting here is
-// left for the stream's own Apply to promote or dequeue once it delivers the event already on its
-// way.
-func (a *Admission) promote(ctx context.Context, tx pgx.Tx, deferred map[string]struct{}) error {
+// waiting line empties. A candidate a.pending still names is held back: its record has not yet
+// reached the LastDispatchSeq Reconcile found Dispatch's own log ahead of it by, so the stream still
+// owes it the event that will promote or dequeue it properly. Once a candidate's record catches up,
+// its pending entry is dropped and it is promoted like any other.
+func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 	if a.cap <= 0 {
 		return nil
 	}
@@ -378,8 +385,11 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx, deferred map[string]
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
-		if _, ok := deferred[candidate.Key]; ok {
-			continue
+		if threshold, held := a.pending[candidate.Key]; held {
+			if candidate.LastDispatchSeq < threshold {
+				continue
+			}
+			delete(a.pending, candidate.Key)
 		}
 		now := a.now()
 		index := nextSlotIndex(slots)

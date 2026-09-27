@@ -988,3 +988,93 @@ func TestReconcilePromotionSkipsARootTheStreamHoldsANewerEventFor(t *testing.T) 
 	assertWaiting(t, pool, nil)
 	assertSlots(t, pool, nil)
 }
+
+// The deferred set must hold a candidate back across every promote until its own pending event
+// arrives, not only the Reconcile call that first found the stream ahead of it: any other fact —
+// a non-Dispatch one, or an unrelated issue's Dispatch event — also ends in a promote call, and
+// that must not admit the still-pending candidate either. Once its own event lands, it is dequeued
+// (here, a label removal) as that event says.
+func TestPromotionKeepsHoldingBackADeferredRootAcrossOtherFactsUntilItsOwnEventArrives(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		replay func(t *testing.T, pool *pgxpool.Pool, admission *Admission)
+	}{
+		{
+			name: "a non-Dispatch fact",
+			replay: func(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
+				if _, err := intake.ApplyFact(context.Background(), pool, "timer", "unrelated-linger", intake.LingerExpired{Issue: "LEGION-UNRELATED", Generation: 1}, engineStub{}, admission); err != nil {
+					t.Fatalf("ApplyFact linger: %v", err)
+				}
+			},
+		},
+		{
+			name: "another recorded tree's issue.updated",
+			replay: func(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
+				apply(t, pool, admission, "other-rename", intake.DispatchIssue{Key: "LEGION-OTHER", Seq: 2, Type: "issue.updated", Status: "in_progress", Title: "renamed", Rank: "Z"}, engineStub{})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			seedSlotted(t, pool, "LEGION-OTHER", "Z")
+			putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+
+			reconcile(t, pool, admission, []dispatch.IssueSummary{
+				{Key: "LEGION-EDGE", Title: "LEGION-EDGE", Status: "todo", Rank: "A", LastSeq: 2},
+			})
+			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-OTHER", Index: 0, AdmittedAt: fixedNow}})
+
+			tc.replay(t, pool, admission)
+
+			if got := issue(t, pool, "LEGION-EDGE"); got.Status != "todo" {
+				t.Fatalf("LEGION-EDGE promoted by an unrelated fact while its own event was still pending = %#v", got)
+			}
+			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-OTHER", Index: 0, AdmittedAt: fixedNow}})
+
+			apply(t, pool, admission, "edge-label-removed", intake.DispatchIssue{Key: "LEGION-EDGE", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-EDGE", Rank: "A"}, engineStub{})
+			assertWaiting(t, pool, nil)
+		})
+	}
+}
+
+// A child stranded while its root merely waits, not lingers — the root's label taken off drops its
+// tree from live, and a reopen of the child without its own label is declined the same way — is
+// re-entered once the root's label returns and the root is actually promoted, the same path that
+// re-enters one stranded under a re-admitted lingering root: promote's reenterStrandedChildren does
+// not care why the tree was not live before, only that the candidate it is promoting now makes it so.
+func TestPromotingAWaitingRootReentersAChildStrandedWhileItsLabelWasOff(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	seedSlotted(t, pool, "LEGION-ACTIVE", "A")
+	const root, child = "LEGION-WAIT", "LEGION-CHILD"
+	parent := root
+	putIssue(t, pool, record.Issue{Key: root, Project: testProject, Title: root, Tree: root, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", HandedOver: true, LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: child, Project: testProject, Title: "child", Tree: root, Parent: &parent, Phase: phase.Done, Generation: 1, Status: "done", Rank: "C", LastDispatchSeq: 1})
+
+	// The root's label is taken off: it drops from the waiting line, and its tree is no longer live.
+	apply(t, pool, admission, "root-unlabeled", intake.DispatchIssue{Key: root, Seq: 2, Type: "issue.updated", Status: "todo", Title: root, Rank: "B"}, engine)
+	assertWaiting(t, pool, nil)
+
+	// The child is reopened without its own label while the tree is not live: declined, not an
+	// orphan, and left stranded exactly as a lingering tree's would be.
+	apply(t, pool, admission, "child-reopened-unlabeled", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "C"}, engine)
+	if got := issue(t, pool, child); got.Tree != root || got.Phase != phase.Done || got.Status != "todo" {
+		t.Fatalf("child reopened without the label while its root's tree is not live = %#v, want it left todo, phase done, in %s's tree", got, root)
+	}
+
+	// The root's label comes back, but the root still holds no slot: the child is not yet re-entered.
+	apply(t, pool, admission, "root-relabeled", intake.DispatchIssue{Key: root, Seq: 3, Type: "issue.updated", Status: "todo", Title: root, Rank: "B", Labels: handed}, engine)
+	if got := issue(t, pool, child); got.Phase != phase.Done {
+		t.Fatalf("child before its root is promoted = %#v, want it still phase done", got)
+	}
+
+	// The active slot frees, the waiting root is promoted, and its stranded child is re-entered too.
+	apply(t, pool, admission, "active-done", intake.DispatchIssue{Key: "LEGION-ACTIVE", Seq: 2, Type: "issue.updated", Status: "done", Title: "LEGION-ACTIVE", Rank: "A"}, engine)
+	assertSlots(t, pool, []record.Slot{{Issue: root, Index: 0, AdmittedAt: fixedNow}})
+	got := issue(t, pool, child)
+	if got.Tree != root || got.Phase != phase.Admitted || got.Generation != 2 {
+		t.Fatalf("child after its root is promoted = %#v, want phase admitted, generation 2, kept in %s's tree", got, root)
+	}
+}
