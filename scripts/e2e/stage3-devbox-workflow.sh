@@ -751,7 +751,8 @@ primary_issue() {
       # A CI bot's review thread: the proof human is a GitHub App, a bot account that is none of
       # Legion's role Apps. The implementer answers it with a disposition, and its legion threads
       # resolve closes it, as no Accepted: from a bot ever would.
-      bot_thread=$(post_bot_thread) || fail "the proof human could not open a bot review thread on pull request #$pr_number"
+      bot_thread=$(post_bot_thread 2>"$work/bot-thread.err") ||
+        fail "the proof human could not open a bot review thread on pull request #$pr_number: $(cat "$work/bot-thread.err")"
       bot_note=" A bot also left one review thread on the pull request asking whether the file change is needed: answer it as your role says for a bot's thread (it is needed: the spec asks for it), before the push that answers this review."
     fi
     send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round.$bot_note"

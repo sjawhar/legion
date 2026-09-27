@@ -366,13 +366,21 @@ assert_handoff_committer() {
 }
 # post_bot_thread opens one file-level review thread on the proof's pull request as the proof human,
 # a GitHub App and so a bot account, as a CI bot is, and none of Legion's role Apps; it prints the
-# thread's first comment's node id.
+# thread's first comment's node id. The account is the devbox gh's, which acts as the user when its
+# App routing fails; a person's thread stays open on the implementer's disposition, so the thread's
+# author is read back and anything but a bot outside Legion's Apps is refused, naming it.
 post_bot_thread() {
-  local head
+  local head posted id login type
   head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
-  jq -cn --arg head "$head" --arg path "$smoke_file" \
+  posted=$(jq -cn --arg head "$head" --arg path "$smoke_file" \
     '{commit_id:$head, path:$path, subject_type:"file", body:"Stage 3 proof bot: is this file change needed?"}' |
-    timeout 60 gh api --method POST "repos/$repo/pulls/$pr_number/comments" --input - --jq .node_id
+    timeout 60 gh api --method POST "repos/$repo/pulls/$pr_number/comments" --input - --jq '"\(.node_id) \(.user.login) \(.user.type)"') || return 1
+  read -r id login type <<<"$posted"
+  if [ "$type" != Bot ] || [ "$login" = "$(role_app implementer)" ] || [ "$login" = "$(role_app reviewer)" ]; then
+    echo "the thread was opened by $login ($type), not a bot account outside Legion's role Apps: the devbox gh is not acting as its App" >&2
+    return 1
+  fi
+  printf '%s\n' "$id"
 }
 # bot_thread_resolved COMMENT: the review thread whose first comment is COMMENT is resolved on GitHub.
 bot_thread_resolved() {
