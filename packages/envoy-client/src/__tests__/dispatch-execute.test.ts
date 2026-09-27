@@ -6008,3 +6008,33 @@ test("an issue document reference resolves to the document's id as the Dispatch 
   }
   await expect(resolveIssueDocumentId(client, "DSP-42", "plan.md")).rejects.toThrow(/plan\.md/);
 });
+
+// Dispatch suffixes a slug two documents would share, so on one issue a document's filename can be
+// another's slug: `spec v2` has slug `spec-v2`, and a document named `spec-v2` gets `spec-v2-2`.
+// Such a reference names two documents, so it is refused rather than taken by slug, and the hint
+// names each document's id. A reference only one document answers to still resolves.
+test("a reference that is one document's slug and another's filename is refused as ambiguous", async () => {
+  const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+    response({
+      key: "DSP-42",
+      primary_artifact_id: "artifact-spec",
+      artifacts: [
+        { id: "artifact-spec", slug: "spec", name: "spec.md", primary: true },
+        { id: "artifact-notes", slug: "notes-md", name: "notes.md", primary: false },
+        { id: "artifact-v2", slug: "spec-v2", name: "spec v2", primary: false },
+        { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", primary: false },
+      ],
+    });
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  await expect(resolveIssueDocumentId(client, "DSP-42", "spec-v2")).rejects.toThrow(
+    '"spec-v2" names 2 documents on this issue; use the id: artifact-v2 (spec-v2, spec v2), artifact-v2-2 (spec-v2-2, spec-v2)'
+  );
+  for (const [reference, id] of [
+    ["spec v2", "artifact-v2"],
+    ["spec-v2-2", "artifact-v2-2"],
+    ["artifact-v2-2", "artifact-v2-2"],
+    ["spec", "artifact-spec"],
+  ] as const) {
+    expect(await resolveIssueDocumentId(client, "DSP-42", reference)).toBe(id);
+  }
+});

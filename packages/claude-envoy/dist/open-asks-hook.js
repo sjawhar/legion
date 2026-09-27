@@ -16044,12 +16044,20 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, pro
   return { args: { ...args, issue: issue2 }, ref, owner: { kind: "issue", issue: issue2 } };
 }
 function artifactByReference(artifacts, artifactReference, owner) {
-  const byIdOrSlug = artifacts.find((candidate) => candidate.id === artifactReference) ?? artifacts.find((candidate) => candidate.slug === artifactReference);
-  if (byIdOrSlug !== undefined)
-    return byIdOrSlug;
+  const byId = artifacts.find((candidate) => candidate.id === artifactReference);
+  if (byId !== undefined)
+    return byId;
+  const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
   const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
+  if (bySlug !== undefined) {
+    const named = byName.filter((candidate) => candidate.id !== bySlug.id);
+    if (named.length > 0) {
+      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
+    }
+    return bySlug;
+  }
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -16090,10 +16098,10 @@ async function resolveArtifact(client, owner, artifactReference) {
   return { owner, issue: issue2, artifact };
 }
 var documentHintLimit = 8;
-function documentReferenceProblem(reference, documents, owner, ambiguous = false) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
+function documentReferenceProblem(reference, documents, owner, use) {
+  const hints = documents.slice(0, documentHintLimit).map((document) => use === "id" ? `${document.id} (${document.slug}, ${document.name})` : `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
+  return use === undefined ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}` : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
 }
 var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {

@@ -31,6 +31,11 @@ const pi = {
   registerMessageRenderer: () => undefined,
 } as unknown as PiApi;
 
+/** The document lookup of a tool that must never look a document up. */
+const noDocumentLookup = async (_issue: string, reference: string): Promise<string> => {
+  throw new Error(`no document lookup expected for "${reference}"`);
+};
+
 test("the Go Legion tool exposes only the workflow operations each role owns", async () => {
   const calls: Array<readonly [string, object | undefined]> = [];
   const daemon = () =>
@@ -67,9 +72,7 @@ test("the Go Legion tool exposes only the workflow operations each role owns", a
       pi,
       daemon: daemonWithState as never,
       onPhaseCompleted: () => undefined,
-      resolveDocument: async (_issue: string, reference: string) => {
-        throw new Error(`no document lookup expected for "${reference}"`);
-      },
+      resolveDocument: noDocumentLookup,
       session: () => ({
         kind,
         sessionId: "ses_208",
@@ -158,9 +161,7 @@ test("a Go Legion workflow refusal tells the agent both its code and message", a
       signOff: async () => Promise.reject(refusal),
     })) as never,
     onPhaseCompleted: () => undefined,
-    resolveDocument: async (_issue: string, reference: string) => {
-      throw new Error(`no document lookup expected for "${reference}"`);
-    },
+    resolveDocument: noDocumentLookup,
     session: () => ({
       kind: "architect",
       sessionId: "ses_208",
@@ -191,51 +192,54 @@ test("register_gate takes the document reference the Dispatch tools take, and re
         return {};
       },
     }) as never;
-  const run = (artifactId: string) =>
+  const run = (artifactId: string, issue = "LEGION-208", sessionIssue = "LEGION-208") =>
     createGoLegionTool({
       pi,
       daemon,
       onPhaseCompleted: () => undefined,
       resolveDocument: async (issue: string, reference: string) => {
         resolved.push([issue, reference]);
-        if (reference === "spec" || reference === "spec-md" || reference === "spec.md") return spec;
-        throw new Error(`No document "${reference}" on ${issue}`);
+        if (reference === "notes") throw new Error(`No document "notes" on ${issue}`);
+        return spec;
       },
       session: () => ({
         kind: "architect",
         sessionId: "ses_208",
         tree: "LEGION-208",
-        issue: "LEGION-208",
+        issue: sessionIssue,
         secret: "claim-secret",
       }),
     }).execute(
       "",
-      { op: "register_gate", issue: "LEGION-208", artifactId, version: 2 },
+      { op: "register_gate", issue, artifactId, version: 2 },
       undefined,
       undefined,
       context()
     );
+  const registration = { grantId: "grant-208", issue: "LEGION-208", artifactId: spec, version: 2 };
 
-  for (const reference of ["spec", "spec-md", "spec.md", spec]) {
-    await expect(run(reference)).resolves.toMatchObject({ details: {} });
+  // A reference is looked up and its id registered; an id goes to the daemon as it is.
+  await expect(run("spec")).resolves.toMatchObject({ details: {} });
+  await expect(run(spec)).resolves.toMatchObject({ details: {} });
+  expect(registered).toEqual([registration, registration]);
+  expect(resolved).toEqual([["LEGION-208", "spec"]]);
+
+  // A reference the lookup refuses registers nothing. So does a call from anyone but the tree
+  // root's own architect, refused before any lookup: a sub-architect, or the root architect
+  // naming another issue.
+  const root = "the design gate belongs to the tree root LEGION-208";
+  const refusals = [
+    [await run("notes"), 'No document \\"notes\\" on LEGION-208'],
+    [await run("spec", "LEGION-208", "LEGION-209"), `${root}; its root architect registers it`],
+    [await run("spec", "LEGION-209"), `${root}; register it there`],
+  ] as const;
+  for (const [result, message] of refusals) {
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain(message);
   }
-  expect(registered).toEqual(
-    Array.from({ length: 4 }, () => ({
-      grantId: "grant-208",
-      issue: "LEGION-208",
-      artifactId: spec,
-      version: 2,
-    }))
-  );
-  // A document id goes to the daemon as it is; only a slug or filename is looked up.
+  expect(registered).toHaveLength(2);
   expect(resolved).toEqual([
     ["LEGION-208", "spec"],
-    ["LEGION-208", "spec-md"],
-    ["LEGION-208", "spec.md"],
+    ["LEGION-208", "notes"],
   ]);
-
-  const refused = await run("notes");
-  expect(refused.isError).toBe(true);
-  expect(JSON.stringify(refused.content)).toContain('No document \\"notes\\" on LEGION-208');
-  expect(registered).toHaveLength(4);
 });

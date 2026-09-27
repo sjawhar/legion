@@ -943,13 +943,22 @@ function artifactByReference(
   artifactReference: string,
   owner: "issue" | "project"
 ): Artifact {
-  const byIdOrSlug =
-    artifacts.find((candidate) => candidate.id === artifactReference) ??
-    artifacts.find((candidate) => candidate.slug === artifactReference);
-  if (byIdOrSlug !== undefined) return byIdOrSlug;
+  const byId = artifacts.find((candidate) => candidate.id === artifactReference);
+  if (byId !== undefined) return byId;
+  const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
   const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
+  // Dispatch suffixes a slug two documents would share, so one document's filename can be
+  // another's slug; a reference both answer to names two documents, and only an id tells them
+  // apart.
+  if (bySlug !== undefined) {
+    const named = byName.filter((candidate) => candidate.id !== bySlug.id);
+    if (named.length > 0) {
+      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
+    }
+    return bySlug;
+  }
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -1015,19 +1024,26 @@ export async function resolveIssueDocumentId(
 
 const documentHintLimit = 8;
 
+/** The refusal of a document reference: none matched, or several did, in which case `use` names
+ * what tells them apart (a slug, when several share a filename; the id, when one's slug is
+ * another's filename). */
 function documentReferenceProblem(
   reference: string,
-  documents: readonly Pick<Artifact, "slug" | "name">[],
+  documents: readonly Pick<Artifact, "id" | "slug" | "name">[],
   owner: "issue" | "project",
-  ambiguous = false
+  use?: "slug" | "id"
 ): string {
   const hints = documents
     .slice(0, documentHintLimit)
-    .map((document) => `${document.slug} (${document.name})`);
+    .map((document) =>
+      use === "id"
+        ? `${document.id} (${document.slug}, ${document.name})`
+        : `${document.slug} (${document.name})`
+    );
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return ambiguous
-    ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}`
-    : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
+  return use === undefined
+    ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`
+    : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
 }
 
 const askHintLimit = 8;
