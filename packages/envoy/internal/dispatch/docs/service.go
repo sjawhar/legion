@@ -75,6 +75,9 @@ type Service struct {
 	shutdownRooms     sync.Map
 	nextConnection    atomic.Uint64
 	stopping          atomic.Bool
+	// quiescing holds off every settlement while Quiesce empties the rooms, so a timer that
+	// fires mid-quiesce cannot re-arm the room Quiesce just closed.
+	quiescing atomic.Bool
 	// afterSettleWarm runs after settleRoom has warmed the live document and before it
 	// reads it. Nil outside tests; tests use it to evict the room in that window.
 	afterSettleWarm func(room string)
@@ -478,8 +481,44 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
+// Quiesce closes every live document room, flushing each through the store, and waits for the
+// settlements already in flight to finish. Unlike Shutdown it leaves the service able to load
+// rooms again, so the next document read starts from what the database now holds.
+//
+// Nothing in production calls it. It exists so the browser-test harness can truncate its
+// database between scenarios without racing a settlement midway through its own transaction:
+// a settlement locks the document's owner row and then reads artifact_versions, while TRUNCATE
+// takes an exclusive lock on every table in its own order, and PostgreSQL resolves the crossing
+// by aborting one of them (LEGION-168).
+func (s *Service) Quiesce(ctx context.Context) error {
+	s.quiescing.Store(true)
+	defer s.quiescing.Store(false)
+	s.stopAllSettleTimers()
+	var firstErr error
+	s.rooms.Range(func(key, value any) bool {
+		room := key.(string)
+		state := value.(*roomState)
+		state.mu.Lock()
+		// A settlement whose timer already fired reads the generation it was armed with, so
+		// bumping it here ends that settlement before it opens a transaction.
+		state.gen++
+		s.stopSettleTimer(state.settle)
+		state.mu.Unlock()
+		if err := s.evictRoom(room, state); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		return true
+	})
+	s.waitSettles(ctx)
+	s.waitEvictions(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return firstErr
+}
+
 func (s *Service) scheduleSettle(room string) {
-	if s.stopping.Load() || s.shuttingDown(room) {
+	if s.stopping.Load() || s.quiescing.Load() || s.shuttingDown(room) {
 		return
 	}
 	state := s.room(room)
@@ -493,7 +532,7 @@ func (s *Service) scheduleSettleLocked(room string, state *roomState) {
 }
 
 func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay time.Duration) {
-	if s.stopping.Load() || s.shuttingDown(room) || state.closed || state.failed != nil {
+	if s.stopping.Load() || s.quiescing.Load() || s.shuttingDown(room) || state.closed || state.failed != nil {
 		return
 	}
 	if state.liveWriter != nil {

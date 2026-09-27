@@ -1142,3 +1142,18 @@ func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifac
 		}
 	}
 }
+
+// quiesceDocuments closes every live document, flushing each through the store, and waits for
+// the settlements in flight. Test-only: mounted by routes() only when Deps.TestHooksEnabled is
+// set, so a browser-test harness can reset its database between scenarios without its TRUNCATE
+// crossing lock order with a settlement's transaction.
+func (s *server) quiesceDocuments(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	if err := s.deps.Docs.Quiesce(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}

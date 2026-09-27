@@ -45,11 +45,15 @@ absolute `http` or `https` URL with no path, and is the exact browser origin
 used for GitHub OAuth. It must equal the URL humans type into the browser, with
 `<DISPATCH_SERVER_URL>/auth/callback` registered on the GitHub App. Host
 adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
-`DISPATCH_TEST_HOOKS=1` mounts `POST /api/v1/events/_test/disconnect` (closes
-every open SSE connection, as if the server had restarted) — unset in every real
-deployment; e2e's `run-server.sh` sets it so the web client's
-reconnect-from-lastId path can be exercised without seeding thousands of
-events to trip the SSE replay cap.
+`DISPATCH_TEST_HOOKS=1` mounts two test-only routes — unset in every real
+deployment. `POST /api/v1/events/_test/disconnect` closes every open SSE
+connection, as if the server had restarted; e2e's `run-server.sh` sets the flag
+so the web client's reconnect-from-lastId path can be exercised without seeding
+thousands of events to trip the SSE replay cap. `POST
+/api/v1/artifacts/_test/quiesce` closes every live document, flushing each
+through the store, and waits for the settlements in flight, leaving the service
+able to load documents again; `e2e/seed.ts` calls it before truncating so its
+`TRUNCATE` cannot cross lock order with a settlement.
 
 With NATS configured and the GitHub App private key loaded, startup also runs the webhook
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
@@ -201,6 +205,7 @@ the table says human only.
 | `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before}}`. |
 | `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation for this user: `{cleared_before: <RFC3339>}`, 400 `INVALID_STATE` when malformed or more than a minute ahead of the server clock. |
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
+| `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. |
 
