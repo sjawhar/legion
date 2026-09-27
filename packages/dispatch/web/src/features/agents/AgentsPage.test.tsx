@@ -1009,6 +1009,70 @@ test("an agent's unread reply shows on its row and in the navigation until its c
   }
 });
 
+// The count sums every session that answered the viewer, and a session often answers and then
+// exits. A reply from a session no longer in the live list still has a row, whose Open reads it,
+// so the badge is always one the viewer can clear.
+test("a reply from a session that has ended keeps a row that opens its conversation", async () => {
+  const ended = "01a0e52e-0000-7000-8000-00000000abcd";
+  const page = renderAgents({
+    agentState: { [ended]: { unread_replies: 1 } },
+    listedAgents: [],
+  });
+
+  try {
+    await expect(screen.findByRole("link", { name: "New reply 1" })).resolves.toBeTruthy();
+    const region = await screen.findByRole("region", { name: "Replied, no longer connected" });
+    const open = within(region).getByRole("link", { name: "Open session:01a0e52e…" });
+    expect(open.getAttribute("href")).toBe(`/agents/${ended}/live`);
+    expect(within(region).getByText("New reply 1")).toBeTruthy();
+    expect(screen.getByLabelText("Agents empty state")).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// Opening a row marks the conversation read through its newest reply, and a read mark covers
+// every older reply too. So each exchange holding an unread reply is shown when the row opens,
+// not folded behind "Show N older" where the viewer would never see what was just marked read.
+test("opening a row shows an older exchange's unread follow-up instead of folding it", async () => {
+  const page = renderAgents({
+    agentState: { "planner-session": { unread_replies: 1 } },
+    messages: [
+      exchange("m3", "Third question", "2026-09-14T03:00:00Z"),
+      exchange("m2", "Second question", "2026-09-14T02:00:00Z"),
+      exchange("m1", "First question", "2026-09-14T01:00:00Z", {
+        body: "First answer, followed up",
+        createdAt: "2026-09-14T04:00:00Z",
+      }),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    fireEvent.click(
+      await within(planner).findByRole("button", { name: "Planner replied: 1 unread" })
+    );
+    await expect(within(planner).findByText("First answer, followed up")).resolves.toBeTruthy();
+    expect(within(planner).getByText("Third question")).toBeTruthy();
+    expect(within(planner).queryByText("Second question")).toBeNull();
+    expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
+    await waitFor(() =>
+      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
+        read_through: "2026-09-14T04:00:00Z",
+      })
+    );
+    await waitFor(() =>
+      expect(within(planner).queryByRole("button", { name: /unread/ })).toBeNull()
+    );
+    // Read now, and still on screen: marking it read does not fold it away again.
+    expect(within(planner).getByText("First answer, followed up")).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 test("Agents renders no fold for a single exchange", async () => {
   const page = renderAgents({
     messages: [exchange("m1", "Only question", "2026-09-14T01:00:00Z")],

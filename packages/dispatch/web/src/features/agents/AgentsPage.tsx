@@ -1,10 +1,10 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useId, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { inboxQuery, userAgentStateQuery } from "../../api/queries";
+import { inboxQuery, userAgentStateQuery, whoAmIQuery } from "../../api/queries";
 import type {
   Agent,
   Message,
@@ -382,15 +382,59 @@ function AgentMessageList({
     queryKey: ["agents", agent.session_id, "messages"],
   });
   const agentState = useQuery(userAgentStateQuery());
-  useMarkRepliesRead(agent.session_id, messages.data);
   const [showOlder, setShowOlder] = useState(false);
   const [showCleared, setShowCleared] = useState(false);
+  // Exchanges shown because they held an unread reply when the row opened. They stay shown once
+  // read, so marking a reply read never folds it away from the viewer who is reading it.
+  const [revealed, setRevealed] = useState<ReadonlySet<string>>(() => new Set());
+  const clearedBefore = agentState.data?.[agent.session_id]?.cleared_before;
+  const readThrough = agentState.data?.[agent.session_id]?.read_through;
+  const all = messages.data ?? [];
+  const unread = exchangesAfter(all, clearedBefore);
+  const visible = showCleared ? all : unread;
+  const [newest, ...older] = visible;
+  // A read mark covers every reply up to it, so each of the viewer's own exchanges with a reply
+  // newer than the mark is shown when the row opens, not left behind "Show N older" while it is
+  // marked read. Only the viewer's own direct messages count toward their unread replies.
+  const viewer = useQuery(whoAmIQuery()).data;
+  const viewerLogin = viewer?.kind === "user" ? viewer.login.toLowerCase() : undefined;
+  const watermark = Math.max(
+    clearedBefore === undefined ? Number.NEGATIVE_INFINITY : Date.parse(clearedBefore),
+    readThrough === undefined ? Number.NEGATIVE_INFINITY : Date.parse(readThrough)
+  );
+  const serverUnread = agentState.data?.[agent.session_id]?.unread_replies ?? 0;
+  const holdsUnread = (read: MessageRead) =>
+    serverUnread > 0 &&
+    read.message.issue_key === null &&
+    read.message.author.kind === "user" &&
+    read.message.author.id.toLowerCase() === viewerLogin &&
+    read.replies.some(
+      (reply) =>
+        reply.author.kind === "session" &&
+        reply.author.id === agent.session_id &&
+        Date.parse(reply.created_at) > watermark
+    );
+  const olderShown = older.filter((read) => revealed.has(read.message.id) || holdsUnread(read));
+  const olderFolded = older.filter((read) => !olderShown.includes(read));
+  const rendered =
+    newest === undefined ? [] : [newest, ...olderShown, ...(showOlder ? olderFolded : [])];
+  const toReveal = olderShown
+    .filter((read) => !revealed.has(read.message.id))
+    .map((read) => read.message.id)
+    .join(" ");
+  useEffect(() => {
+    if (toReveal === "") return;
+    setRevealed((current) => new Set([...current, ...toReveal.split(" ")]));
+  }, [toReveal]);
+  useMarkRepliesRead(
+    agent.session_id,
+    messages.isPending || agentState.isPending ? undefined : rendered
+  );
   // The cutoff is the newest visible message's own timestamp, not the browser clock: both are
   // compared against `created_at` (the server's clock), so a slow browser clock would otherwise
   // make Clear a silent no-op. This hides exactly what the viewer saw.
   const clear = useMutation({
-    mutationFn: (clearedBefore: string) =>
-      api.putAgentState(agent.session_id, { cleared_before: clearedBefore }),
+    mutationFn: (cutoff: string) => api.putAgentState(agent.session_id, { cleared_before: cutoff }),
     onSuccess: (next) => {
       setShowCleared(false);
       queryClient.setQueryData<UserAgentStates>(userAgentStateQuery().queryKey, (current) => ({
@@ -404,46 +448,36 @@ function AgentMessageList({
   if (messages.isError || agentState.isError) {
     return <p className={`mt-3 text-sm ${dangerText}`}>Could not load this conversation.</p>;
   }
-  if (messages.data.length === 0) return null;
-  const clearedBefore = agentState.data[agent.session_id]?.cleared_before;
-  const unread = exchangesAfter(messages.data, clearedBefore);
-  const visible = showCleared ? messages.data : unread;
-  const [newest, ...older] = visible;
+  if (all.length === 0) return null;
+  const row = (read: MessageRead) => (
+    <AgentTargetedMessage
+      agent={agent}
+      key={read.message.id}
+      liveAgents={liveAgents}
+      onReply={onReply}
+      read={read}
+    />
+  );
   return (
     <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
       {newest === undefined ? null : (
         <ol aria-label={`Conversation with ${label}`} className="space-y-2">
-          <AgentTargetedMessage
-            agent={agent}
-            key={newest.message.id}
-            liveAgents={liveAgents}
-            onReply={onReply}
-            read={newest}
-          />
-          {older.length === 0 ? null : (
+          {row(newest)}
+          {olderShown.map(row)}
+          {olderFolded.length === 0 ? null : (
             <li>
               <DisclosureToggle
                 expanded={showOlder}
-                label={`Show ${older.length} older`}
+                label={`Show ${olderFolded.length} older`}
                 onToggle={() => setShowOlder((open) => !open)}
               />
             </li>
           )}
-          {showOlder
-            ? older.map((read) => (
-                <AgentTargetedMessage
-                  agent={agent}
-                  key={read.message.id}
-                  liveAgents={liveAgents}
-                  onReply={onReply}
-                  read={read}
-                />
-              ))
-            : null}
+          {showOlder ? olderFolded.map(row) : null}
         </ol>
       )}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-        {clearedBefore === undefined || unread.length === messages.data.length ? null : (
+        {clearedBefore === undefined || unread.length === all.length ? null : (
           <p className={`flex flex-wrap items-center gap-x-1 text-sm ${textMutedOnCanvas}`}>
             <span>
               Cleared <Timestamp at={clearedBefore} />
@@ -798,6 +832,52 @@ function AgentFold({
         </section>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * Sessions that answered the viewer and are no longer in the live list. The unread count sums
+ * every session that replied, and a session often answers and then exits, so each of them keeps
+ * a row here whose Open reads its replies in the live view: the badge is always one the viewer
+ * can clear, and a reply is never lost because its session ended.
+ */
+function EndedAgentsWithReplies({ live }: { live: readonly Agent[] }): ReactNode {
+  const states = useQuery(userAgentStateQuery()).data ?? {};
+  const ended = Object.entries(states).filter(
+    ([sessionID, state]) =>
+      state.unread_replies > 0 && !live.some((agent) => agent.session_id === sessionID)
+  );
+  if (ended.length === 0) return null;
+  const title = "Replied, no longer connected";
+  return (
+    <section aria-label={title} className="mt-5 space-y-3">
+      <h2 className={`text-xs font-semibold uppercase ${textMutedOnCanvas}`}>{title}</h2>
+      {ended.map(([sessionID, state]) => {
+        const label = sessionLabel(sessionID, "");
+        const to = `/agents/${encodeURIComponent(sessionID)}/live`;
+        return (
+          <article
+            className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border px-3 py-1.5 ${card} ${borderDefault}`}
+            key={sessionID}
+          >
+            <span className={`min-w-0 truncate text-sm font-semibold ${textPrimaryOnCanvas}`}>
+              {label}
+            </span>
+            <Link
+              aria-label={`Open ${label}`}
+              className={`min-h-11 rounded-lg border px-2 text-xs font-medium whitespace-nowrap md:min-h-7 md:leading-7 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+              title={`Read ${label}'s replies`}
+              to={to}
+            >
+              Open
+            </Link>
+            <span className="ml-auto">
+              <LabelPill selected>{unreadRepliesLabel(state.unread_replies)}</LabelPill>
+            </span>
+          </article>
+        );
+      })}
+    </section>
   );
 }
 
@@ -1205,6 +1285,7 @@ export function AgentsPage(): ReactNode {
           )}
         </>
       )}
+      <EndedAgentsWithReplies live={agents} />
     </section>
   );
 }
