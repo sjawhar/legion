@@ -28,7 +28,7 @@ func TestAWebhookIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 		secret    = "bind-window-secret"
 		delivery  = "delivery-bind-window"
 	)
-	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}

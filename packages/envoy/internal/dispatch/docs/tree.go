@@ -85,3 +85,29 @@ func renderTree(tree *pmdoc.Node) (string, error) {
 	}
 	return markdown, nil
 }
+
+// renderDocument is what doc renders now, or the error that stopped it being read or rendered.
+func renderDocument(doc *crdt.Doc) (string, error) {
+	tree, err := treeOf(doc)
+	if err != nil {
+		return "", err
+	}
+	return renderTree(tree)
+}
+
+// closureChangedMarkdown reports whether a document closure that produced after changed the
+// canonical markdown a version stores, given what the document rendered before it ran (before,
+// beforeErr). It is the measure `content_changed` records for every other write, applied to
+// settlement's own: stamping a block id or restoring an ask block's server-owned attributes
+// moves the stored Proof state while the rendered document stays as it was.
+//
+// A document that did not render before the closure counts as changed - the closure is what made
+// it renderable - and so does one that does not render after it, since the text a version stores
+// has moved out of reach either way.
+func closureChangedMarkdown(before string, beforeErr error, after *pmdoc.Node) bool {
+	if beforeErr != nil {
+		return true
+	}
+	rendered, err := renderTree(after)
+	return err != nil || rendered != before
+}

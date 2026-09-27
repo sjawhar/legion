@@ -94,6 +94,7 @@ restarts only `dispatch`.
 | --- | --- | --- |
 | `ENVOY_MACHINE_ID` | yes | Logical machine name used in published metadata. |
 | `NATS_URLS` | yes | Comma-separated NATS URLs. |
+| `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The listener owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback `NATS_URLS`, naming the URL. `compose/listener.compose.yml` sets it. |
 | `ENVOY_LISTENER_PORT` | no | Defaults to `9020`. |
 | `ENVOY_LISTEN_HOST` | no | Defaults to `127.0.0.1`. |
 | `ENVOY_API_TOKEN` | conditional | Required when `ENVOY_LISTEN_HOST` is not loopback and no OIDC pair is set; matching bearer token for Listener API requests. Empty no longer opens `/v1` while a verifier is configured. |
@@ -130,6 +131,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database). The compose runs no Postgres of its own. |
 | `DISPATCH_SERVER_URL` | yes | Public browser origin and GitHub OAuth callback origin. It must be the URL humans type into their browser; the GitHub App must list `<DISPATCH_SERVER_URL>/auth/callback`. |
 | `NATS_URLS` | yes | Comma-separated NATS URLs for Dispatch. |
+| `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |
 | `DISPATCH_AGENT_TOKEN` | yes | Shared devbox fallback bearer token; per-person tokens minted in Dispatch Settings are preferred for individual agents. |
 | `DISPATCH_ALLOWED_LOGINS` | human identity | Cookie identity requires it at startup; header identity accepts only included logins. |
 | `DISPATCH_LISTEN_HOST` | no | Defaults to `127.0.0.1`; for direct tailnet access, set it to `$(tailscale ip -4)`, never `0.0.0.0`. |

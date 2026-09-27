@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 /**
  * Dispatch "ask" mark — a Proof span anchor introduced by the @sjawhar/proof-editor
  * library, additional to (not part of) Proof's own unified marks system in
@@ -21,6 +19,8 @@
 import { $markSchema, $markAttr, $remark } from '@milkdown/kit/utils';
 import type { Attrs, Mark as ProseMirrorMark, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
 import type { EditorView } from '@milkdown/kit/prose/view';
+import type { Root } from '@milkdown/kit/transformer';
+import type { Transformer } from 'unified';
 
 import { generateMarkId } from 'proof-sdk-upstream/src/formats/marks.js';
 import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-marks.js';
@@ -348,7 +348,7 @@ export function remarkDispatchMarks() {
 }
 
 /** Milkdown-wrapped remark plugin — use in `.use()` alongside `remarkProofMarksPlugin` (browser). */
-export const remarkDispatchMarksPlugin = $remark('remarkDispatchMarks', () => () => remarkDispatchMarks());
+export const remarkDispatchMarksPlugin = $remark('remarkDispatchMarks', () => () => remarkDispatchMarks() as unknown as Transformer<Root, Root>);
 
 function escapeAttr(value: string): string {
   return value

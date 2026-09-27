@@ -298,7 +298,7 @@ func lineStartMarker(value string, offset int, char rune) bool {
 func taskCheckboxText(value string, offset int) bool {
 	rest := value[offset:]
 	return len(rest) >= 3 && rest[0] == '[' && strings.ContainsRune(" xX", rune(rest[1])) && rest[2] == ']' &&
-		(len(rest) == 3 || strings.IndexByte(" \t\r\n", rest[3]) >= 0)
+		(len(rest) == 3 || strings.IndexByte(" \t\n", rest[3]) >= 0)
 }
 
 // closesTypedBlock reports whether line, written at the prefix of the typed block around it, is
@@ -667,8 +667,8 @@ func orderedListMarkerPunctuation(value string, offset int, lineStart int) bool 
 // text or ends the image, and a line ending ends a table row or starts a line that can open a
 // block. The alt text is written with its `]` escaped, as it always was, where that reads back,
 // and otherwise with every ASCII punctuation character escaped as the text writer escapes it and
-// each line feed and carriage return written as a character reference, which both parsers read
-// back as the character. That is kept only if it reads back, so an alt that fails for another
+// each line feed written as a character reference, which both parsers read back as the
+// character. That is kept only if it reads back, so an alt that fails for another
 // reason keeps the bytes it had, as inlineWithEscapes does.
 func imageAlt(alt string, context inlineContext) string {
 	written := escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), context.tableCell)
@@ -680,8 +680,6 @@ func imageAlt(alt string, context inlineContext) string {
 		switch {
 		case alt[index] == '\n':
 			out.WriteString("&#10;")
-		case alt[index] == '\r':
-			out.WriteString("&#13;")
 		case isASCIIPunctuation(alt[index]) && (alt[index] != '|' || !context.tableCell):
 			out.WriteString(escaped(rune(alt[index])))
 		default:

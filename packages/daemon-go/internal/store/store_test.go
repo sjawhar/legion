@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 )
 
@@ -516,6 +517,87 @@ func TestTheServingRunBackfillsForClaimsBetweenTurns(t *testing.T) {
 	}
 }
 
+// A tree close and a workspace removal name the root generation of the linger they expire, and
+// the outbox decodes rows strictly. 0016 gives each one queued in the older shape (a close naming
+// no linger, a removal naming its issue's generation) the generation of its tree's root when that
+// root still lingers, so the row goes on to expire that linger, and deletes the rest: their linger
+// has ended, and a row that never decodes would fail every tick and every promotion of its tree.
+func TestQueuedLingerRowsOfTheOlderShapeNameTheirLingerOrGo(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	migrateThrough(t, store, 13)
+
+	for _, issue := range []struct {
+		key, tree  string
+		generation int
+		lingers    bool
+	}{
+		{key: "LEGION-208", tree: "LEGION-208", generation: 4, lingers: true},
+		{key: "LEGION-209", tree: "LEGION-208", generation: 1},
+		{key: "LEGION-300", tree: "LEGION-300", generation: 2},
+		{key: "LEGION-301", tree: "LEGION-300", generation: 1},
+	} {
+		var lingerUntil *time.Time
+		if issue.lingers {
+			until := time.Now().Add(time.Hour)
+			lingerUntil = &until
+		}
+		if _, err := store.pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, linger_until, last_dispatch_seq)
+			values ($1, $2, 'LEGION', $1, 'testing', $3, 'in_progress', 'V', $4, 0)`, issue.key, issue.tree, issue.generation, lingerUntil); err != nil {
+			t.Fatalf("seed %s: %v", issue.key, err)
+		}
+	}
+	type row struct{ kind, issue, payload string }
+	for _, seeded := range []row{
+		{kind: "supervise", issue: "LEGION-209", payload: `{"op": "tree_close", "tree": "LEGION-208", "role": "tester", "generation": 1}`},
+		{kind: "workspace_remove", issue: "LEGION-209", payload: `{"generation": 1}`},
+		{kind: "supervise", issue: "LEGION-301", payload: `{"op": "tree_close", "tree": "LEGION-300", "role": "tester", "generation": 1}`},
+		{kind: "workspace_remove", issue: "LEGION-301", payload: `{"generation": 1}`},
+		{kind: "supervise", issue: "LEGION-301", payload: `{"op": "start", "tree": "LEGION-300", "role": "tester", "generation": 1, "phase": "testing", "task": "Test it."}`},
+	} {
+		if _, err := store.pool.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, $2, $3, 0, now(), '')`,
+			seeded.kind, seeded.issue, seeded.payload); err != nil {
+			t.Fatalf("seed the %s row of %s: %v", seeded.kind, seeded.issue, err)
+		}
+	}
+
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate the rest: %v", err)
+	}
+
+	rows, err := store.pool.Query(ctx, "select id, kind, issue, payload from outbox order by id")
+	if err != nil {
+		t.Fatalf("read the outbox: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var queued record.OutboxRow
+		var kind string
+		if err := rows.Scan(&queued.ID, &kind, &queued.Issue, &queued.Payload); err != nil {
+			t.Fatalf("scan an outbox row: %v", err)
+		}
+		queued.Kind = record.OutboxKind(kind)
+		payload, err := record.DecodeOutboxPayload(queued)
+		if err != nil {
+			t.Fatalf("the migrated %s row of %s does not decode: %v", kind, queued.Issue, err)
+		}
+		switch value := payload.(type) {
+		case record.SuperviseRequest:
+			got = append(got, fmt.Sprintf("%s %s linger=%d", queued.Issue, value.Op, value.Linger))
+		case record.WorkspaceRemove:
+			got = append(got, fmt.Sprintf("%s workspace_remove linger=%d", queued.Issue, value.Linger))
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the outbox: %v", err)
+	}
+	want := []string{"LEGION-209 tree_close linger=4", "LEGION-209 workspace_remove linger=4", "LEGION-301 start linger=0"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("outbox after 0016 = %q, want %q", got, want)
+	}
+}
+
 // A worker whose process died mid-task leaves a claim launching, shim_connected or
 // launch_uncertain: the relaunch resumes that session and is given no task, because the claim
 // already holds one. 0014 gives such a claim the issue's run. A first launch has no session and
@@ -576,6 +658,57 @@ func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
 				}
 				if serving != want.serving {
 					t.Fatalf("%s serves run %d, want %d", want.token, serving, want.serving)
+				}
+			}
+		})
+	}
+}
+
+// Every outbox kind the daemon writes is one the schema's check admits, on a fresh database and on
+// one that recorded every migration through 0020 except 0016, with a controller notice queued. 0016
+// (merge_queue_publish) and 0020 (controller_notice) would each redefine the check with the other's
+// kind missing, and a database past 0020 applies the lower 0016 late, where a check without
+// controller_notice would refuse the queued row and the upgrade: neither sets the list, 0021 does,
+// after both.
+func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.T) {
+	all, err := migrations.All()
+	if err != nil {
+		t.Fatalf("read the embedded migrations: %v", err)
+	}
+	kinds := []record.OutboxKind{record.OutboxKindDispatchStatus, record.OutboxKindDispatchMessage, record.OutboxKindNotice, record.OutboxKindControllerNotice,
+		record.OutboxKindSupervise, record.OutboxKindGateSeed, record.OutboxKindLingerClose, record.OutboxKindWorkspaceRemove, record.OutboxKindMergeQueuePublish}
+	insert := "insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, 'LEGION-208', '{}', 0, now(), '')"
+	for _, tc := range []struct {
+		name  string
+		first func(migrations.Migration) bool
+	}{
+		{"a fresh database", func(migrations.Migration) bool { return false }},
+		{"a database that ran 0020 before 0016", func(m migrations.Migration) bool { return m.Version <= 20 && m.Version != 16 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := emptyStore(t)
+			for _, migration := range all {
+				if !tc.first(migration) {
+					continue
+				}
+				if _, err := store.apply(ctx, migration); err != nil {
+					t.Fatalf("apply %s: %v", migration.Name, err)
+				}
+			}
+			if version, err := store.SchemaVersion(ctx); err != nil {
+				t.Fatalf("read the schema version: %v", err)
+			} else if version >= 20 {
+				if _, err := store.pool.Exec(ctx, insert, string(record.OutboxKindControllerNotice)); err != nil {
+					t.Fatalf("queue a controller notice at schema %d: %v", version, err)
+				}
+			}
+			if _, err := store.Migrate(ctx); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+			for _, kind := range kinds {
+				if _, err := store.pool.Exec(ctx, insert, string(kind)); err != nil {
+					t.Errorf("an outbox row of kind %s: %v", kind, err)
 				}
 			}
 		})

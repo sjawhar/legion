@@ -539,7 +539,9 @@ func (s *flakyOutboxStore) failedFinishes() int {
 func TestOutboxTreeCloseRowEndsTheTreesRootClaim(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
+	// A tree's close is the expiry of its linger, so the tree lingers when the row runs.
+	until := time.Now().Add(-time.Minute)
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, issue)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	token, err := claim.NewToken("legion", issue.Key, claim.RoleArchitect)
@@ -554,7 +556,7 @@ func TestOutboxTreeCloseRowEndsTheTreesRootClaim(t *testing.T) {
 	}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
 
-	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}, time.Now())); err != nil {
+	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation, Linger: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("stop the root at its tree's close: %v", err)
 	}
 
@@ -574,7 +576,8 @@ func TestOutboxTreeCloseRowEndsTheTreesRootClaim(t *testing.T) {
 func TestTheWorkflowsTreeCloseIsNotPutToTheOperatorsPredicate(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done"}
+	until := time.Now().Add(-time.Minute)
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, issue)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.TreeClosable = (&workflowRuntime{pool: pool, records: records}).treeClosable // exactly what daemon.go wires in production
@@ -602,7 +605,7 @@ func TestTheWorkflowsTreeCloseIsNotPutToTheOperatorsPredicate(t *testing.T) {
 	// The workflow's own close of that same tree goes through and releases the root.
 	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
 	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{
-		Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation,
+		Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation, Linger: issue.Generation,
 	}, time.Now())); err != nil {
 		t.Fatalf("the workflow's tree close: %v", err)
 	}

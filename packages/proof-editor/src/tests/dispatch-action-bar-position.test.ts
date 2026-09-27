@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 import { test } from './harness.js';
 import { dispatchActionBarPlugin, positionBar } from '../dispatch-action-bar.js';
 import type { MarkRange } from 'proof-sdk-upstream/src/editor/plugins/marks.js';
@@ -152,9 +150,9 @@ function installActionBarDom(coarse: boolean) {
   (globalThis as { document: unknown }).document = document;
   globalThis.setTimeout = ((callback: TimerHandler) => {
     if (typeof callback !== 'function') throw new Error('Expected a function timer callback');
-    lastTimer = callback;
+    lastTimer = callback as () => void;
     const timer = nextTimer++;
-    timers.set(timer, callback);
+    timers.set(timer, callback as () => void);
     return timer;
   }) as unknown as typeof setTimeout;
   globalThis.clearTimeout = ((timer: number) => {
@@ -313,7 +311,7 @@ await test('coarse-pointer selections dock after the selection settles', async (
   try {
     const controller = await createActionBarController(fixture.view);
     controller.update(fixture.view);
-    const bar = fixture.actionBar();
+    const bar = fixture.actionBar()!;
     assert(bar !== undefined, 'Expected action bar element to be attached');
     assert(bar.style.display === 'none', 'Expected touch selection bar to stay hidden before selection settles');
 
@@ -339,7 +337,7 @@ await test('fine-pointer selections still appear immediately above their selecti
   try {
     const controller = await createActionBarController(fixture.view);
     controller.update(fixture.view);
-    const bar = fixture.actionBar();
+    const bar = fixture.actionBar()!;
     assert(bar !== undefined, 'Expected action bar element to be attached');
     assert(bar.style.display === 'flex', 'Expected fine-pointer selection bar to show immediately');
     assert(bar.dataset.touch === undefined, 'Expected fine-pointer selection bar to remain unmarked as touch');
@@ -385,12 +383,12 @@ await test('hides the selection bar when focus leaves the editor', async () => {
     const controller = await createActionBarController(fixture.view);
     controller.update(fixture.view);
     fixture.runTimers();
-    const bar = fixture.actionBar();
+    const bar = fixture.actionBar()!;
     assert(bar !== undefined, 'Expected action bar element to be attached');
     assert(bar.style.display === 'flex', 'Expected the settled touch selection bar to be visible');
 
     const editorDom = fixture.view.dom as unknown as FakeElement;
-    editorDom.dispatch('focusout', { relatedTarget: fixture.document.body } as FocusEvent);
+    editorDom.dispatch('focusout', { relatedTarget: fixture.document.body } as unknown as FocusEvent);
     assert(bar.style.display === 'none', 'Expected selection bar to hide when the editor loses focus');
     controller.destroy();
   } finally {
@@ -402,11 +400,11 @@ await test('fine-pointer focus loss leaves the action bar visible until its edit
   try {
     const controller = await createActionBarController(fixture.view);
     controller.update(fixture.view);
-    const bar = fixture.actionBar();
+    const bar = fixture.actionBar()!;
     assert(bar !== undefined, 'Expected action bar element to be attached');
 
     const editorDom = fixture.view.dom as unknown as FakeElement;
-    editorDom.dispatch('focusout', { relatedTarget: fixture.document.body } as FocusEvent);
+    editorDom.dispatch('focusout', { relatedTarget: fixture.document.body } as unknown as FocusEvent);
     assert(bar.style.display === 'flex', 'Expected fine-pointer focus loss to leave the action bar unchanged');
     controller.destroy();
   } finally {
@@ -419,7 +417,7 @@ await test('a mouse selection overrides a coarse-pointer media query', async () 
   try {
     const controller = await createActionBarController(fixture.view);
     controller.update(fixture.view);
-    const bar = fixture.actionBar();
+    const bar = fixture.actionBar()!;
     assert(bar !== undefined, 'Expected action bar element to be attached');
 
     const editorDom = fixture.view.dom as unknown as FakeElement;
@@ -441,7 +439,7 @@ await test('a cancelled touch debounce cannot show a destroyed action bar', asyn
   try {
     const controller = await createActionBarController(fixture.view);
     controller.update(fixture.view);
-    const bar = fixture.actionBar();
+    const bar = fixture.actionBar()!;
     assert(bar !== undefined, 'Expected action bar element to be attached');
 
     controller.destroy();

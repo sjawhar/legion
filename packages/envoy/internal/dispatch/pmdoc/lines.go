@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"bytes"
+	"regexp"
 	"strings"
 
 	"github.com/yuin/goldmark"
@@ -32,6 +33,43 @@ func segmentsText(segments *gmtext.Segments, source []byte) string {
 // parse parses source.
 func (reader markdownReader) parse(source []byte) ast.Node {
 	return withLineStarts(reader.md.Parser(), source, parser.NewContext())
+}
+
+// bareMarkerLine is a line holding only a list marker.
+var bareMarkerLine = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]*$`)
+
+// emptyItemGuard is a list parser that opens no empty list item - a marker with nothing after it
+// on its line - that would interrupt a paragraph, as the browser editor's parser reads it. Goldmark
+// refuses one only while the paragraph is the block last opened; that parser also refuses one
+// opening a container on a line that already interrupted the paragraph, so `- a\n  - -` is an item
+// holding the text `-`, and `- a\n  > -` a quote holding it.
+type emptyItemGuard struct{ parser.BlockParser }
+
+func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	line, segment := reader.PeekLine()
+	if bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && parent.ChildCount() == 0 &&
+		interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
+		return nil, parser.NoChildren
+	}
+	return p.BlockParser.Open(parent, reader, pc)
+}
+
+// interruptsParagraph reports whether container, opened on the line starting at start with the
+// containers above it that it opens first, follows a paragraph whose last line is the one before.
+func interruptsParagraph(container ast.Node, source []byte, start int) bool {
+	for node := container; node != nil && node.Kind() != ast.KindDocument; node = node.Parent() {
+		previous := node.PreviousSibling()
+		if previous == nil {
+			continue
+		}
+		paragraph, ok := previous.(*ast.Paragraph)
+		if !ok || paragraph.Lines().Len() == 0 {
+			return false
+		}
+		last := paragraph.Lines().At(paragraph.Lines().Len() - 1)
+		return bytes.Count(source[last.Start:start], []byte("\n")) <= 1
+	}
+	return false
 }
 
 // footnotes is goldmark's footnote extension with its definition parser taking every space and
@@ -84,15 +122,10 @@ func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Con
 	}
 	rest := line[3:]
 	blank := len(rest) - len(bytes.TrimLeft(rest, " \t"))
-	run := len(rest) - len(bytes.TrimLeft(rest, " \t\r"))
 	width := 4
 	switch {
-	case bytes.IndexByte(rest[:run], '\r') >= 0 && run < len(rest) && rest[run] != '\n':
-		// A carriage return in the whitespace after the marker ends its line in the browser
-		// editor's parser, and goldmark's marker took it with the whitespace around it.
-		width = 3 + run
 	case blank > 0 && !util.IsBlank(rest):
-	case rest[blank] == '\n' || rest[blank] == '\r':
+	case rest[blank] == '\n':
 		row, segment := block.Position()
 		block.AdvanceLine()
 		next, _ := block.PeekLine()
@@ -111,9 +144,29 @@ func (taskMarkerParser) Parse(parent ast.Node, block gmtext.Reader, _ parser.Con
 	return extensionast.NewTaskCheckBox(line[1] == 'x' || line[1] == 'X')
 }
 
+// openedDefinitionsKey holds every footnote definition the parser opens while a document parses,
+// and openedDefinitionsAttr on the document root afterwards (withLineStarts): goldmark's
+// transformer moves each referenced definition to the document's end and drops the rest.
+var (
+	openedDefinitionsKey  = parser.NewContextKey()
+	openedDefinitionsAttr = []byte("pmdoc-opened-definitions")
+)
+
+// openedDefinition is a footnote definition as the parser opened it: nested when it opened inside
+// another block rather than at the document's level.
+type openedDefinition struct {
+	node   ast.Node
+	nested bool
+}
+
 func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	node, state := p.BlockParser.Open(parent, reader, pc)
-	if node != nil && state&parser.HasChildren != 0 {
+	if node == nil {
+		return node, state
+	}
+	opened, _ := pc.Get(openedDefinitionsKey).([]openedDefinition)
+	pc.Set(openedDefinitionsKey, append(opened, openedDefinition{node, parent.Kind() != ast.KindDocument}))
+	if state&parser.HasChildren != 0 {
 		line, _ := reader.PeekLine()
 		skip := 0
 		for skip < len(line) && (line[skip] == ' ' || line[skip] == '\t') {
@@ -168,12 +221,15 @@ func recordLine(line gmtext.Segment, source []byte, pc parser.Context) {
 	recorded[line.TrimLeftSpace(source).Start] = line
 }
 
-// withLineStarts parses source with context and leaves the lines lineRecordingParagraph recorded on
-// the document root.
+// withLineStarts parses source with context and leaves the lines lineRecordingParagraph recorded
+// and the footnote definitions footnoteDefinitionParser opened on the document root.
 func withLineStarts(p parser.Parser, source []byte, context parser.Context) ast.Node {
 	root := p.Parse(gmtext.NewReader(source), parser.WithContext(context))
 	if recorded := context.Get(untrimmedLinesKey); recorded != nil {
 		root.SetAttribute(untrimmedLinesAttr, recorded)
+	}
+	if opened := context.Get(openedDefinitionsKey); opened != nil {
+		root.SetAttribute(openedDefinitionsAttr, opened)
 	}
 	return root
 }
@@ -220,31 +276,20 @@ func multilineCodeSpanText(span *ast.CodeSpan, source []byte) (text string, ok b
 		}
 	}
 	text = content.String()
-	if head, tail, padded := codeSpanPadded(text); padded {
-		text = text[head : len(text)-tail]
+	if codeSpanPadded(text) {
+		text = text[1 : len(text)-1]
 	}
 	return text, true
 }
 
-// codeSpanPadded reports whether a code span's text is one the parser takes its padding off: both
-// ends a space or a line ending (codePadding), with something else between, and how long the
-// padding at each end is.
-func codeSpanPadded(text string) (head, tail int, padded bool) {
-	head, tail = codePadding(text, true), codePadding(text, false)
-	padded = head > 0 && tail > 0 && head+tail <= len(text) && strings.Trim(strings.ReplaceAll(text, "\r\n", "\n"), " \n") != ""
-	return head, tail, padded
+// codeSpanPadded reports whether a code span's text is one the parser takes a character off each
+// end of: both ends a space or a line feed, and something else between.
+func codeSpanPadded(text string) bool {
+	return len(text) >= 2 && isCodePadding(text[0]) && isCodePadding(text[len(text)-1]) && strings.Trim(text, " \n") != ""
 }
 
-// codePadding is the length of the space or the line ending - a line feed, or a carriage return
-// and a line feed - that a code span sheds at the start (atStart) or the end of text, or 0.
-func codePadding(text string, atStart bool) int {
-	for _, padding := range []string{"\r\n", "\n", " "} {
-		if atStart && strings.HasPrefix(text, padding) || !atStart && strings.HasSuffix(text, padding) {
-			return len(padding)
-		}
-	}
-	return 0
-}
+// isCodePadding reports whether char is a space or a line feed, what a code span sheds at each end.
+func isCodePadding(char byte) bool { return char == ' ' || char == '\n' }
 
 // untrimmedIndent is the whitespace goldmark's paragraph trimmed from the line whose text now
 // starts at start: what lies between the containers' prefix and it (lineRecordingParagraph).
@@ -280,19 +325,6 @@ func insideImage(node ast.Node) bool {
 	return false
 }
 
-// lineEndingAfter is the line ending that ends the line at stop, past the spaces and tabs before
-// it: a carriage return and line feed, or a line feed.
-func lineEndingAfter(source []byte, stop int) string {
-	for stop < len(source) && (source[stop] == ' ' || source[stop] == '\t') {
-		stop++
-	}
-	switch {
-	case stop+1 < len(source) && source[stop] == '\r' && source[stop+1] == '\n':
-		return "\r\n"
-	}
-	return "\n"
-}
-
 // parseFrontmatterBlock reads the front matter a document opens with in source, as the
 // browser editor's parser does: a first line that is `---` and any spaces or tabs opens it, and
 // the first later line that is the same closes it. The node's text is the lines between, joined
@@ -306,7 +338,7 @@ func parseFrontmatterBlock(source []byte) (front *Node, rest int) {
 		if next := bytes.IndexByte(source[start:], '\n'); next >= 0 {
 			end = start + next + 1
 		}
-		line := strings.TrimRight(string(bytes.TrimSuffix(bytes.TrimSuffix(source[start:end], []byte("\n")), []byte("\r"))), " \t")
+		line := strings.TrimRight(string(bytes.TrimSuffix(source[start:end], []byte("\n"))), " \t")
 		switch {
 		case index == 0 && line != "---":
 			return nil, 0
@@ -317,7 +349,7 @@ func parseFrontmatterBlock(source []byte) (front *Node, rest int) {
 			}
 			return &Node{Type: "frontmatter", Children: []*Node{{Type: "text", Text: text}}}, end
 		case index > 0:
-			content = append(content, string(bytes.TrimSuffix(bytes.TrimSuffix(source[start:end], []byte("\n")), []byte("\r"))))
+			content = append(content, string(bytes.TrimSuffix(source[start:end], []byte("\n"))))
 		}
 		start = end
 	}

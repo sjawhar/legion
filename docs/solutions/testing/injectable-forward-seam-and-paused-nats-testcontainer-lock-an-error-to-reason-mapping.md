@@ -109,7 +109,7 @@ exercises the receipt-wait exit. Drive the flush branch for real:
 
 ```go
 ctr, uri := startNATS(t)                       // the package's own nats:2.10 testcontainer
-client, _ := bus.Connect([]string{uri})
+client, _ := bus.ConnectOwningStream([]string{uri})
 // … subscribe a responder on the subject and prove one receipted round trip as the control …
 
 docker, err := testcontainers.NewDockerClientWithOpts(ctx)

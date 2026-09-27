@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 /**
  * Margin-mode mark events: when a host renders comment threads itself it passes `onMarkClick`
  * and/or `onMarkHover`; this plugin replaces the mark popover. A click inside a proof or

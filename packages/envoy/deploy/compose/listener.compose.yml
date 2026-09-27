@@ -22,6 +22,10 @@ services:
       ENVOY_API_TOKEN: ${ENVOY_API_TOKEN:-}
       ENVOY_MACHINE_ID: ${ENVOY_MACHINE_ID}
       NATS_URLS: ${NATS_URLS}
+      # This listener owns ENVOY_NOTIFICATIONS on the NATS above, which is the fleet's shared
+      # server rather than this host's. Every connect refuses a NATS that is not the machine's
+      # own without this (packages/envoy/internal/bus/reach.go).
+      ENVOY_ALLOW_REMOTE_NATS: "1"
       ENVOY_HOST_BRIDGE: 127.0.0.1
       ENVOY_WEBHOOKS: ${ENVOY_WEBHOOKS:-}
       ENVOY_GITHUB_WEBHOOK_SECRET: ${ENVOY_GITHUB_WEBHOOK_SECRET:-}

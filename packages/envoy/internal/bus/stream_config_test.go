@@ -168,7 +168,7 @@ func TestEnsureStreamWithConfig_updatesMaxAgeWhenExistingStreamDiffers(t *testin
 	}
 }
 
-func TestConnectMigratesExistingStreamDuplicatesWindow(t *testing.T) {
+func TestConnectOwningStreamMigratesExistingStreamDuplicatesWindow(t *testing.T) {
 	uri := testnats.URL(t)
 	legacyConn := testnats.Connect(t, uri)
 	t.Cleanup(legacyConn.Close)
@@ -182,7 +182,7 @@ func TestConnectMigratesExistingStreamDuplicatesWindow(t *testing.T) {
 		t.Fatalf("create legacy stream: %v", err)
 	}
 
-	client, err := Connect([]string{uri})
+	client, err := ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect and migrate stream: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestEnsureStreamWithConfigPurgesRoleMessagesPublishedDuringMigration(t *tes
 	}
 }
 
-func TestConnectPurgesLegacyRoleMessagesBeforeDurableConsumerRestart(t *testing.T) {
+func TestConnectOwningStreamPurgesLegacyRoleMessagesBeforeDurableConsumerRestart(t *testing.T) {
 	uri := testnats.URL(t)
 	legacyConn := testnats.Connect(t, uri)
 	legacyJS, err := legacyConn.JetStream()
@@ -282,7 +282,7 @@ func TestConnectPurgesLegacyRoleMessagesBeforeDurableConsumerRestart(t *testing.
 	_ = legacySub
 	legacyConn.Close()
 
-	client, err := Connect([]string{uri})
+	client, err := ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("migrate stream: %v", err)
 	}
@@ -352,7 +352,7 @@ func TestEnsureStreamWithConfigReplacesTheLegacyRoleLaneCatchAll(t *testing.T) {
 // Several deployments ensure one stream: the listener and Dispatch run from one image but deploy
 // separately, and a rollback or a restart during a rollout starts a binary compiled with a
 // different subject list. Whichever starts must leave every subject the other still needs.
-func TestConnectKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds(t *testing.T) {
+func TestConnectOwningStreamKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds(t *testing.T) {
 	uri := testnats.URL(t)
 	// The other deployment was compiled before notifications.legion.> existed and carries a
 	// subject this binary does not know.
@@ -373,7 +373,7 @@ func TestConnectKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds(t *testing.T) 
 		t.Fatalf("the other deployment creates the stream: %v", err)
 	}
 
-	client, err := Connect([]string{uri})
+	client, err := ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("this binary connects: %v", err)
 	}
