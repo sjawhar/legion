@@ -8,6 +8,8 @@ import type { InboxRow, IssueDetails } from "../api/types";
 import { AuthGate } from "../app";
 
 const issue: IssueDetails = {
+  route_status: null,
+  route_holder: null,
   artifacts: [
     {
       created_at: "2026-09-10T00:00:00Z",
@@ -78,6 +80,9 @@ function renderShellAt(width: number, inbox: InboxRow[] = []): void {
   api.whoAmI = async () => ({ kind: "user", login: "alice" });
   api.listIssues = async () => [
     {
+      route: null,
+      route_status: null,
+      route_holder: null,
       key: issue.key,
       open_asks: 0,
       last_seq: 0,

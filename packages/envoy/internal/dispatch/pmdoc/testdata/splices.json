@@ -2348,6 +2348,479 @@
           }
         ]
       }
+    },
+    {
+      "name": "callout-paragraph-and-code",
+      "markdown": "Intro.\n\n:::callout{#c1}\nWhich one?\n:::\n",
+      "from": "Which",
+      "to": "one?",
+      "replacement": "Which?\n\n```\ncode\n```\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "attrs": {
+              "blockId": "b-000214"
+            },
+            "content": [
+              {
+                "type": "text",
+                "text": "Intro."
+              }
+            ]
+          },
+          {
+            "type": "callout",
+            "attrs": {
+              "kind": "note",
+              "title": "",
+              "blockId": "c1"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "b-000216"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Which?"
+                  }
+                ]
+              },
+              {
+                "type": "code_block",
+                "attrs": {
+                  "language": null,
+                  "blockId": "b-000217"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "code"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "callout-paragraph-and-list",
+      "markdown": ":::callout{#c1}\nWhich one?\n:::\n",
+      "from": "Which",
+      "to": "one?",
+      "replacement": "Which?\n\n- X\n- Y\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "kind": "note",
+              "title": "",
+              "blockId": "c1"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "b-000219"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Which?"
+                  }
+                ]
+              },
+              {
+                "type": "bullet_list",
+                "attrs": {
+                  "spread": false,
+                  "blockId": "b-000220"
+                },
+                "content": [
+                  {
+                    "type": "list_item",
+                    "attrs": {
+                      "label": "•",
+                      "listType": "bullet",
+                      "spread": false,
+                      "checked": null,
+                      "blockId": "b-000221"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000222"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "X"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "type": "list_item",
+                    "attrs": {
+                      "label": "•",
+                      "listType": "bullet",
+                      "spread": false,
+                      "checked": null,
+                      "blockId": "b-000223"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000224"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Y"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "callout-paragraph-and-heading",
+      "markdown": ":::callout{#c1}\nWhich one?\n:::\n",
+      "from": "Which",
+      "to": "one?",
+      "replacement": "Which?\n\n## Heading\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "kind": "note",
+              "title": "",
+              "blockId": "c1"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "b-000226"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Which?"
+                  }
+                ]
+              },
+              {
+                "type": "heading",
+                "attrs": {
+                  "id": "",
+                  "level": 2,
+                  "blockId": "b-000227"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Heading"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "callout-in-list-item-code",
+      "markdown": "- item\n\n  :::callout{#c1}\n  Which one?\n  :::\n",
+      "from": "Which",
+      "to": "one?",
+      "replacement": "Which?\n\n```\ncode\n```\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "bullet_list",
+            "attrs": {
+              "spread": false,
+              "blockId": "b-000228"
+            },
+            "content": [
+              {
+                "type": "list_item",
+                "attrs": {
+                  "label": "•",
+                  "listType": "bullet",
+                  "spread": true,
+                  "checked": null,
+                  "blockId": "b-000229"
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "attrs": {
+                      "blockId": "b-000230"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "item"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "callout",
+                    "attrs": {
+                      "kind": "note",
+                      "title": "",
+                      "blockId": "c1"
+                    },
+                    "content": [
+                      {
+                        "type": "paragraph",
+                        "attrs": {
+                          "blockId": "b-000232"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Which?"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "code_block",
+                        "attrs": {
+                          "language": null,
+                          "blockId": "b-000233"
+                        },
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "code"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "callout-in-blockquote-code",
+      "markdown": "> :::callout{#c1}\n> Which one?\n> :::\n",
+      "from": "Which",
+      "to": "one?",
+      "replacement": "Which?\n\n```\ncode\n```\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "blockquote",
+            "attrs": {
+              "blockId": "b-000234"
+            },
+            "content": [
+              {
+                "type": "callout",
+                "attrs": {
+                  "kind": "note",
+                  "title": "",
+                  "blockId": "c1"
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "attrs": {
+                      "blockId": "b-000236"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Which?"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "code_block",
+                    "attrs": {
+                      "language": null,
+                      "blockId": "b-000237"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "code"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "nested-callout-code",
+      "markdown": ":::callout{#outer}\nOuter.\n\n:::callout{#inner}\nWhich one?\n:::\n",
+      "from": "Which",
+      "to": "one?",
+      "replacement": "Which?\n\n```\ncode\n```\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "kind": "note",
+              "title": "",
+              "blockId": "outer"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "b-000238"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "Outer."
+                  }
+                ]
+              },
+              {
+                "type": "callout",
+                "attrs": {
+                  "kind": "note",
+                  "title": "",
+                  "blockId": "inner"
+                },
+                "content": [
+                  {
+                    "type": "paragraph",
+                    "attrs": {
+                      "blockId": "b-000240"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "Which?"
+                      }
+                    ]
+                  },
+                  {
+                    "type": "code_block",
+                    "attrs": {
+                      "language": null,
+                      "blockId": "b-000241"
+                    },
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "code"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "callout-across-paragraphs-code",
+      "markdown": ":::callout{#c1}\nFirst tail.\n\nhead second.\n:::\n",
+      "from": "tail",
+      "to": "head",
+      "replacement": "X\n\n```\ncode\n```\n",
+      "pm_json": {
+        "type": "doc",
+        "content": [
+          {
+            "type": "callout",
+            "attrs": {
+              "kind": "note",
+              "title": "",
+              "blockId": "c1"
+            },
+            "content": [
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "b-000242"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "First "
+                  }
+                ]
+              },
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "b-000244"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "X"
+                  }
+                ]
+              },
+              {
+                "type": "code_block",
+                "attrs": {
+                  "language": null,
+                  "blockId": "b-000245"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": "code"
+                  }
+                ]
+              },
+              {
+                "type": "paragraph",
+                "attrs": {
+                  "blockId": "b-000243"
+                },
+                "content": [
+                  {
+                    "type": "text",
+                    "text": " second."
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

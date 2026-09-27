@@ -6,7 +6,7 @@ coordinator — unit tests do not gate a stage, these do; others prove one capab
 against the world it will run in. A later stage's script lands beside these; `lib/` holds what
 the stage scripts share: standalone helpers they run, and the files they source
 ([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh),
-[`lib/namespace-rig.sh`](#libnamespace-rigsh)), which `shellcheck` follows from this directory
+[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/omp-home.sh`](#libomp-homesh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
 | script | proves |
@@ -116,31 +116,35 @@ workflow's `changes` filter (`daemon_go`: `packages/daemon-go/**`, `go.work`, `s
 ## stage2-tmux-supervision.sh
 
 ```sh
-bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about four minutes
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about four minutes
 ```
 
 **Devbox only.** It runs a real Oh My Pi that calls a real model, so it needs `go`, `docker`,
 `jq`, `curl`, `ss`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
 missing), the `secrets` CLI holding `GEMINI_API_KEY_TESTS` (agent tier: no YubiKey touch), and
-the operator's model gateway access: `hawk-token` on `PATH`, their `hawk login`, and the GNOME
-keyring holding it unlocked (every reboot locks it; the `unlock-keyring` skill). CI runs the unit
-and integration tests, not this script; what only this run proves is OMP's real RPC frames,
-`--resume`'s same-agent behaviour, the one-word `--append-system-prompt`, the plugin's strict
-parse of the Go daemon's answers, the plugin gate against an installed manifest, the provider-key
-path, a pane's model turn through the gateway, and the Envoy role claim.
+the operator's model gateway access: `LEGION_E2E_MODEL_GATEWAY_URL` naming the gateway's Anthropic
+endpoint (required; [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), `hawk-token` on
+`PATH`, their `hawk login`, and the GNOME keyring holding it unlocked (every reboot locks it; the
+`unlock-keyring` skill). CI runs the unit and integration tests, not this script; what only this
+run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word
+`--append-system-prompt`, the plugin's strict parse of the Go daemon's answers, the plugin gate
+against an installed manifest, the provider-key path, a pane's model turn through the gateway, and
+the Envoy role claim.
 
 What it stands up, all of it the run's own:
 
 - **Postgres**: `LEGION_E2E_PG_DSN` when set; otherwise a `postgres:16` container on tmpfs
   (`legion-e2e2-pg-<pid>`) on an ephemeral loopback port — tmpfs rather than the image's anonymous
   volume, which a box whose docker volume subsystem stalls would hang on.
-- **NATS and the Envoy listener**, as `scripts/kind-smoke/up.sh` runs them on the host: a
-  `nats:2.10 -js` container (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener`
-  built into the work directory and started with a fresh API bearer, which reaches every pane as
-  the 0600 file `envoy_token_file` names.
+- **NATS and the Envoy listener** on the host: a `nats:2.10 -js` container
+  (`legion-e2e2-nats-<pid>`), and `packages/envoy`'s `cmd/listener` built into the work directory
+  and started with a fresh API bearer, which reaches every pane as the 0600 file `envoy_token_file`
+  names.
 - **The plugin**: this checkout's `pi-legion-envoy`, packed as the release packs it, installed into
-  the OMP profile `legion-e2e2-<pid>-<epoch>` by `lib/install-plugin-profile.sh`. The daemons run
-  with `OMP_PROFILE` naming it, so the gate and every pane load it.
+  the OMP profile `legion-e2e2-<pid>-<epoch>` by `lib/install-plugin-profile.sh`, under the run's
+  own Oh My Pi home `<work>/omp-home` ([`lib/omp-home.sh`](#libomp-homesh)). The daemons run with
+  that `HOME` and with `OMP_PROFILE` naming the profile, so the gate and every pane load it, and the
+  operator's `~/.omp/profiles` holds none of the run; `profile-stays-in-the-run` checks that last.
 - **OMP**: `omp_invocation: mise x <pin> -- omp`, the pin read from
   `packages/daemon/src/daemon/omp-pin.ts`. At boot the daemon asks `mise where <pin>` for the
   configured tool's executable, then runs that absolute binary under `mise x <pin>` for every boot
@@ -150,7 +154,7 @@ What it stands up, all of it the run's own:
   cannot replace the configured build while mise still supplies the tool's activation.
 - **The model route**: Anthropic through the Hawk model gateway, installed into the profile by
   [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) at setup, while the script's shell
-  still holds the operator's XDG directories. Its preflight mint refuses a locked keyring by name.
+  still holds the operator's HOME and XDG directories. Its preflight mint refuses a locked keyring by name.
   Every model role of every pane is `anthropic/claude-opus-4-8`, and `anthropic` is the one
   provider a pane may use, keyed by the operator's hawk login through
   `<work>/model-gateway/hawk-token`, whose log records each mint; no Anthropic key reaches a pane.
@@ -190,7 +194,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `restart-readopts-the-live-panes` | SIGTERM, then start again: `boots` +1, both claims keep their generation, incarnation and pane, no pane opens or closes, and a task delivered after the restart runs once — over the connection the shim's reconnect hello opened |
 | `omp-child-environment` | the boot log names the resolved pinned OMP binary for both probes and panes; the pane's process is `/bin/sh -c`; walking first children from it to `argv[0] == omp` finds that exact executable, never the OMP wrapper that remains first on the ordinary daemon PATH; the pane's shell and that OMP carry all four XDG base directories under `<state_dir>/home` and no `DBUS_SESSION_BUS_ADDRESS` (LEGION-206 P1, with the gateway route in place); OMP carries `GEMINI_API_KEY` (length only) that its shim does not, and no `ANTHROPIC_API_KEY`, `GEMINI_API_KEY_TESTS`, `SOPS_AGE_KEY_FILE` or `SECRETSD_CONFIG` |
 | `stray-pane-reaped-after-the-grace` | opens a window marked as the daemon's (`@legion_owner`) holding no recorded pane, and an unmarked one beside it: the periodic orphan sweep (every 60 s, 120 s grace) reaps the marked one no sooner than 120 s after it opened, and keeps the unmarked window and both claims' panes |
-| `stop` | `legion claims stop` of the root architect is refused — 409, "the tree's root claim ends only when its tree closes; suspend it to stop its process" — and moves nothing: its state, generation, and pane are what they were; `legion claims suspend` suspends the root; `legion claims stop` of a second worker, S2-3's tester, retires it and its pane is gone; no workflow issue backs S2-1, so `legion claims close` of its root closes the tree while its first worker is still live: the root and the worker are both retired and the worker's pane is gone; `legion stop` ends the daemon with exit 0 |
+| `stop` | `legion claims stop` of the root architect is refused — 409, "the tree's root claim ends only when its tree closes; suspend it to stop its process; no workflow issue backs its tree, so legion claims close ends it" — and moves nothing: its state, generation, and pane are what they were; `legion claims suspend` suspends the root; `legion claims stop` of a second worker, S2-3's tester, retires it and its pane is gone; no workflow issue backs S2-1, so `legion claims close` of its root closes the tree while its first worker is still live: the root and the worker are both retired and the worker's pane is gone; `legion stop` ends the daemon with exit 0 |
 | `every-turn-through-the-gateway` | [`lib/check-model-route.sh`](#libcheck-model-routesh) over every session in the isolated profile, each subagent's included: every assistant turn was served by the `anthropic` provider, the gateway's; and its negative control, a copy of one captured session with a turn rewritten as Bedrock's, is refused |
 
 Every wait is bounded and names what it waited for; a failed assertion prints
@@ -213,15 +217,28 @@ Three things the run had to learn about its surface:
 ## stage3-devbox-workflow.sh
 
 ```sh
-bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 \
+  bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
 ```
 
 **Devbox only; CI does not run this script.** It runs real Oh My Pi agents and real GitHub Apps,
 then squash-merges one disposable pull request as the proof human into `sjawhar/legion-smoke`.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
-`secrets` CLI, and the operator's model gateway access: `hawk-token` on `PATH`, their `hawk login`,
-and the GNOME keyring holding it unlocked (every reboot locks it; the `unlock-keyring` skill). The
-proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
+`secrets` CLI, and the operator's model gateway access: `LEGION_E2E_MODEL_GATEWAY_URL` naming the
+gateway's Anthropic endpoint (required; [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)),
+`hawk-token` on `PATH`, their `hawk login`, and the GNOME keyring holding it unlocked (every reboot
+locks it; the `unlock-keyring` skill). `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
+NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet
+(`nats://envoy-nats.<tailnet>.ts.net:4222`), never a bare alias, which only a resolver's search
+domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-container-alias-that-is-momentarily-unheld-resolves-through-the-tailnet-to-production.md));
+`prerequisites` refuses a run without
+either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
+neither value. The bridge connects to that upstream as the nkey user `NATS_NKEY_SEED_FILE` or
+`NATS_NKEY_SEED` in the operator's environment names, and without a credential when neither is set. Every process the rigs start against their own no-auth NATS (the listener, the Envoy Dispatch
+server, the Go daemon; stage 2 and the other local rigs unset every variable below outright) runs without
+`NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, and the Go daemon also without the daemon seed's
+`NATS_DAEMON_NKEY_SEED`/`NATS_DAEMON_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
+users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, keeps the operator's seed. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
 anyway). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
@@ -257,16 +274,20 @@ that names the rig's project key, then reads the operator's Envoy listener (`GET
 audit uses the Dispatch token already in `~/.config/opencode/envoy.json` and writes nothing.
 
 It proves admission order and slotless children, then drives a root from `todo` through an
-architect's spec and gate registration, the human approval, planner, implementer pull request,
+architect's spec and gate registration, which the architect does on its own (the proof never
+prompts it: its first turn is the daemon's `catch-up` notice, and the root's primary document is
+the proof's one-file smoke spec), the human approval, planner, implementer pull request,
 tester, reviewer, retro, merger READY, the ordinary human squash merge, production check, and
-architect sign-off. It also proves three changes-requested rounds, each naming one concrete
-correction the spec permits (a distinct line appended to the smoke file, the one product file the
+architect sign-off. It also proves three changes-requested rounds, each posted by the reviewer
+pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
+the round returns to implementing only once the reviewer's handoff is recorded, authored and
+committed by the review App — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
 implementer's pull request changed, which the run records and requires to be exactly one; the
 correction counts only in that file's patch on the pull request) and reaching testing only on
 that round's own implementer handoff (the daemon's phase record must hold the implementer's
 handoff for that round when the issue reaches testing, and the commit carrying every planner,
-implementer, and tester handoff is authored and committed by that role's own App, read from the
-issue's workspace),
+implementer, tester, and reviewer handoff is authored and committed by that role's own App, read
+from the issue's workspace),
 and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
 worker after its launch budget and the architect's retry relaunching it, restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
@@ -278,16 +299,22 @@ no bash command first, once their last grant is over 60 s old — a grant's life
 the read's own `Created:` line back, judged from the transcript: Oh My Pi serves the read by
 running `gh` with the environment it copied at its start, so this passes only when the pane named
 `LEGION_GRANT_FILE` from that start and the plugin minted a grant for the read itself (LEGION-262).
+`notices-reach-architects-alone` reads every phase-worker session in the isolated profile (a
+session's role is its newest Envoy role claim) and fails on any workflow notice delivered to one:
+every notice kind is for the architect that owns its issue, on that architect's role topic, and the
+run's `pr-blocked`, production-check `phase-finished` and `worker-died` are each checked in their
+architect's session where they are written.
 After the sign-off the proof human removes
 every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
 fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
 loop before Stage 7, so the proof's reviewer approves a head that still carries `.legion/`, and
 without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
 Each check is named in the transcript;
-six negative controls demonstrate that the status-actor, held-worker, re-closed-gate, and idle-read
-assertions reject deliberately corrupted observations before the captured observations pass again
-(the idle read's three: its result refused as it was before LEGION-262, the read inside its previous
-grant's lifetime, and a bash command before it).
+seven negative controls demonstrate that the status-actor, held-worker, re-closed-gate, idle-read
+and worker-notice assertions reject deliberately corrupted observations before the captured
+observations pass again (the idle read's three: its result refused as it was before LEGION-262, the
+read inside its previous grant's lifetime, and a bash command before it; the worker notice's: a copy
+of one phase-worker session with a `pr-blocked` delivery appended).
 Once every agent is gone, `model-turns-through-the-gateway` runs
 [`lib/check-model-route.sh`](#libcheck-model-routesh) over every agent session in the isolated
 profile, each subagent's included: it fails on any assistant turn or model selection that is not
@@ -327,11 +354,36 @@ directory and prints its path. For a run that did not pass, the trap also closes
 pull requests, best effort: it prints each close to stderr, and a close GitHub refuses leaves that
 pull request open and prints gh's reason, with a line saying some may still be open.
 
+## stage3-4b13b-acceptance.sh
+
+```sh
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 \
+ACCEPT_PG_CONTAINER=<postgres container> ACCEPT_PG_PORT=<its host port> ACCEPT_NATS_BIN=<nats-server> \
+  bash scripts/e2e/stage3-4b13b-acceptance.sh     # → "acceptance 4b.13b: PASS at <head>", exit 0
+```
+
+**Devbox only; CI does not run this script.** The live acceptance of LEGION-208 task 4b.13b. It
+stands up the Stage 3 rig from the same `lib/rig.sh` and `lib/workflow.sh`, with the same two
+required inputs and the same model route and proof human as
+[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), but creates no Docker container: the daemon
+and Dispatch take their own databases in the running Postgres container `ACCEPT_PG_CONTAINER` names
+(user `postgres`, password `ci`), and NATS is the native `ACCEPT_NATS_BIN`. Real agents drive the
+task's surfaces through it: a Go prompt part a restart rewrites, the refused root stops, the pane's
+refusal of `legion handoff complete` from a shell in every pane kind, park and re-run, the
+phase-finished notice's summary and verdict, the daemon posting and publishing the merger's READY
+(directly, across a refused gate, with and without a merge queue holder, and refused at
+`record.MessagePostLimit` one unit over), and the early-merge and closed-unmerged notices. Every
+proof pull request is retargeted to a scratch base before any merge (the one merged at
+`awaiting_merge` to a base of its own, cut from the same main commit), so the smoke main is never
+merged into, and both bases are deleted at the end. The evidence is kept in `ACCEPT_EVIDENCE_DIR`
+(default the kept scratch work directory's `evidence/`).
+
 ## stage4a-sandbox-runtime.sh
 
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 ```
 
@@ -350,12 +402,14 @@ Every pod carries the operator fixture's pod,
 [`fixtures/operator-route/pod.yml`](fixtures/operator-route/pod.yml), read through the daemon's
 own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
 audience `middleman-legion`, and a ConfigMap holding the fixture's `models.yml` (anthropic through
-production's middleman, keyed by that token) and `overlay.yml` (every role Legion's prompts
-reach, `enabledModels` holding each session to the gateway's aliases, and each provider a pod could
-reach without the gateway disabled). Legion holds none of it. Before the harness runs, the script creates the
-run's own copy of that ConfigMap as the operator, `legion-operator-route-<project>`, labelled
-with the run's project; the harness points the pods at it, so another run in the namespace can
-neither see nor delete this one's route. It also creates the run's providers Secret,
+the operator's model gateway, `LEGION_E2E_MODEL_GATEWAY_URL`, keyed by that token) and
+`overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to the
+gateway's aliases, and each provider a pod could reach without the gateway disabled). Legion holds
+none of it. Before the harness runs, the script creates the run's own copy of that ConfigMap as the
+operator, `legion-operator-route-<project>`, labelled with the run's project, its `models.yml` with
+`LEGION_E2E_MODEL_GATEWAY_URL` put in place of the fixture's `${LEGION_E2E_MODEL_GATEWAY_URL}`
+placeholder; the harness points the pods at it, so another run in the namespace can neither see nor
+delete this one's route. It also creates the run's providers Secret,
 `legion-<project>-providers`, with one key (`stage4a`, a random value no model route reads) that the
 harness's `provider_keys` hands every agent as `STAGE4A_PROVIDER_KEY`, so every pod and the probe run
 with the providers Secret mounted, as a deployment with `provider_keys` does.
@@ -366,8 +420,27 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `LEGION_E2E_RUNTIME_KUBECONFIG` | `~/.kube/legion-daemon-production` | the kubeconfig file holding that context, kept apart from the devbox's own |
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
+| `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
+| `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker, `https://secrets.internal.trajectorylabs.com` (Plan D), never a development slot (below) |
+| `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the login this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator approves it with his own YubiKey during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
+| `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into `production/agent-secrets/legion-e2e-auto` (rule `LEGION_E2E_AUTO`: pod, automatic, inject) — the harness never sees the value itself, only its hash |
+| `LEGION_E2E_AGENT_SECRETS_BIN` | `$work/agent-secrets` (built by the script; not read from the environment) | the checkout's `agent-secrets` CLI (`packages/envoy/cmd/agent-secrets`), run directly from the devbox for the `secrets-old-uid-and-revocation` check's before/after-revocation reads |
+
+**Why the production broker, with dummy rules, and not a development slot.** A dispatch-project
+development slot cannot host this proof, for three reasons Plan D established: its broker verifies
+tokens of the *staging* cluster's issuer, and the pods this harness launches carry the production
+cluster's; it lives in the staging VPC and cannot reach production Dispatch; and it may not run a
+Dispatch of its own (the GitHub App's credentials cannot cross accounts), so it can issue no
+launcher credential — nothing, the daemon included, can enroll against it. Instead the proof runs
+against the **production broker** with a rules file carrying only two throwaway secrets
+(`LEGION_E2E_AUTO`: pod, automatic, inject; `LEGION_E2E_APPROVAL`: pod, approval by
+`login:<name>` naming the same login as `LEGION_E2E_AGENT_SECRETS_OPERATOR`, inject — contract v9
+permits only `operator` or `login:<name>` approvers, never `issue_assignee`; both 3600 s, Sami's
+values seeded after Plan D's apply) —
+"before any real secret moves" is exactly this state, and it is what spec Acceptance 2's "a live
+worker pod on a development slot" means here.
 
 Two identities, so the runtime is proven under exactly the RBAC it ships with. The runtime and
 the harness's own reads use the restricted one; the admin context only runs what an operator does
@@ -403,16 +476,23 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `provider-key` | the stub agent's environment (`/proc/<pid>/environ`) carries `STAGE4A_PROVIDER_KEY` equal to the run's providers Secret's `stage4a` key, read back through the admin context and never printed; the shim's (pid 1) carries no such variable |
 | `adopt-working-copy` | `AdoptWorkingCopy` with the implement App's bot identity; `jj log -r @ -T author` in `$LEGION_WORKSPACE` shows it |
 | `worker-colocated` | a worker spawned while the root runs requires the tree's node (podAffinity on `legion.dev/tree`, topology `kubernetes.io/hostname`) and runs there |
+| `secrets-two-pods-enrolled` | the root and the colocated worker — two pods on the operator's one ServiceAccount — are each enrolled with the broker on their hello, with the pod uid the runtime recorded; each carries exactly one projected token for audience `agent-secrets` (alone in its volume, the middleman token untouched beside it) and a 0600 `key.pem` and enrollment id owned by `legion`; `agent-secrets self --json` answers each with its own enrollment id and kind `pod`; the two ids differ |
+| `secrets-automatic-grant` | the root's `agent-secrets LEGION_E2E_AUTO -- …` runs with the automatic rule's value (proven by its sha256 against the operator's `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256`, never the value itself); the root's and the worker's separate `request`s each grant, with two distinct grant ids |
+| `secrets-cross-pod-negative` | the worker's `agent-secrets status`/`revoke` naming the root's request or grant id is 403 `NOT_YOURS`, and the root's grant still works after the attempt; the worker's own key beside a copy of the root's enrollment id is 401 `PROOF_INVALID` (the proof's thumbprint is not the enrollment's) |
+| `secrets-copied-token-negative` | an enrollment naming the worker's pod uid and thumbprint but the root's projected token is refused 403 `POD_IDENTITY_MISMATCH` — a copied token alone binds nothing |
+| `secrets-self-enroll-negative` | from inside the root's pod, an enroll attempt bearing the pod's own boot token as if it were a launcher credential is refused 401, and the pod's enrollment (`agent-secrets self`) is unchanged after |
+| `secrets-approval-ask` | a request for the approval-gated secret comes back pending with a credential-request record id (ruling 16: the broker's rules pick the approver at request time, naming no issue); the harness prints `STAGE4A: approve credential request <record id> for LEGION_E2E_APPROVAL on the Dispatch credential page as <operator>` and polls, exactly as the machine login does, for up to 10 minutes until the operator's real approval settles it granted (success), denied, or expired (both failures) — always attended, with no cancel-and-cleanup path |
 | `suspend` | Suspend of the worker: when it returns the runtime's watch no longer holds the claim; Sandbox `Suspended`, pod gone, tree PVC `Bound`, `Probe(recorded)` gone; over the settle window Observe delivers no observation of the worker evaluated after Suspend returned (an observation's `At` is stamped as its evaluation ends, and Observe re-reads the recorded incarnation before it sends) |
 | `no-affinity` | with the root suspended and no tree pod scheduled, a second worker carries no affinity, runs, and mounts the tree PVC; suspended, the resumed root carries none either |
 | `resume` | Resume of the first worker: the affinity is back, a new incarnation, a hello at the next generation with its token, and the marker holds exactly the old and new pod uids |
 | `same-agent-negative` | a Resume naming a session file the volume lacks: the init container refuses (`Refusing to start S4A-1 fresh`), observed as gone with the init log; resumed correctly, the marker holds two agents and never the refused pod |
 | `kill-pod` | `kubectl exec … sh -c 'kill 1'` on the worker: gone with the old uid and the main container's exit code; `Resume(prev=dead)` relaunches through `Suspended` (the Sandbox's generation moves by exactly two) |
 | `stale-incarnation` | across that relaunch, every observation carrying the new uid is alive or uncertain, the gone carried the old uid, and `Suspend(old)` leaves the Sandbox `Running` on the same pod |
+| `secrets-old-uid-and-revocation` | the worker's pod is killed and its claim resumed to a new uid. Before the kill, a copy of its key directory (the harness's instrument — the accepted boundary is that whoever holds a pod's key *is* that pod until the daemon revokes it or the lease ends) works from the devbox; after the daemon's revocation (on the observed `Gone`) the same copy is 401 `PROOF_INVALID`. An enrollment for the new pod naming the *old* uid is refused 403 `POD_IDENTITY_MISMATCH`; enrolled on its own hello instead, the resumed pod gets a fresh automatic grant |
 | `respawn-before-register` | a claim spawned on a token the resolver withholds, suspended before any hello, spawns again over its Sandbox: a new uid, the Secret's boot token rotated to generation 2's, and generation 2 registered |
 | `concurrent-provision` | a new tree's root and a child worker spawned at once: both provision their workspace, the two `workspace-init` runs do not overlap (the runtime serializes them; `flock` does not reach across gVisor pods), and the volume holds one clone, with both jj workspaces, that passes `git fsck --connectivity-only` |
 | `re-adopt` | the listener and runtime closed, one worker killed while none runs, then a fresh listener and `sandbox.New` with `ReconcileOrphans(known)`: the living claims are alive with their recorded incarnations and unchanged pods and Sandbox generations, the killed one is gone with its recorded uid, and every living shim says hello again with its current token |
-| `orphan-sweep` | a running claim left out of `known` survives a sweep with a 1-hour grace and is deleted by one with a 1-second grace; the suspended claim's Sandbox and every known one survive both |
+| `orphan-sweep` | a running claim left out of `known` survives a sweep with a 1-hour grace, and one with a 1-second grace while it is the sweeping runtime's own unreleased launch (a claim launched after the daemon read its claims); once the runtime and listener are replaced, as a crash before the claim was persisted would leave them, a 1-second sweep deletes it. The suspended claim's Sandbox and every known one survive each sweep, and every running claim says hello again to the replaced runtime |
 | `release-tree` | Release of every claim, the suspended one with a nil locator: no Sandbox, `-boot` Secret, pod, or tree PVC of the run is left (the operator's providers Secret stays for the teardown: Release never deletes an operator's object) |
 | `namespace-clean` | the script's last step, after the teardown and outside the harness: the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps that carry the run's project label or none are exactly the snapshot taken before the run |
 
@@ -439,6 +519,145 @@ What the run had to learn about production:
   on a node of at least 4 vCPUs with room for the tree, and no pod requests anything.
 - gVisor on production reports `4.19.0-gvisor` from `uname -r`.
 - The worker image has no `kill` binary; the exec runs the shell's builtin.
+
+## stage4b-sandbox-tree.sh
+
+Stage 4b's gate for the Go coordinator: the Go daemon drives real issue trees on the Agent Sandbox
+runtime. It runs in the production cluster's namespace `legion`, against production Dispatch, the
+production Envoy listener and production NATS, in the disposable Dispatch project LEGSMOKE and the
+smoke repository `sjawhar/legion-smoke`. The daemon runs on the devbox as the Legion daemon's
+restricted identity, and its pods dial its worker stream on the devbox's private address.
+
+```sh
+LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+  LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_DISPATCH_URL=https://<dispatch> \
+  LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
+  bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
+STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
+```
+
+The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
+Anthropic endpoint (checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), which the
+run writes into its copy of the operator fixture's `models.yml` and the controller's profile.
+`LEGION_E2E_DISPATCH_URL`, `LEGION_E2E_ENVOY_URL` and `LEGION_E2E_NATS_URL` are production
+Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified names
+for them. `prerequisites` refuses a value that is unset, names a bare alias, or carries a path,
+naming the variable and never its value.
+
+`STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
+refused without `STAGE4B_UNTIL`, runs none of `controller`'s checks and only takes tree 3 out, printing `CHECK controller: SKIPPED (…)`,
+so a development run can reach a later checkpoint while a defect of the controller's own is unfixed. `STAGE4B_EVIDENCE_DIR`
+keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the transcript, the
+daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
+every agent transcript (the tree pods' and, under `transcripts/controller/`, the operator's
+controller's), the interest samples, the audit files and the negative controls. What the
+run built is printed by [`lib/built-from.sh`](#libbuilt-fromsh).
+
+Three roots are set todo under `admission_cap: 2`:
+- Tree 1 runs the whole workflow with real agents to `done`, lingers, and closes.
+- Tree 2 runs through its planner beside tree 1's implementer, on its own node, carrying the
+  repository-configuration fixture, and is then moved to backlog.
+- Tree 3 is admitted when tree 2 leaves the line. It supplies the held phase the controller
+  checkpoint needs, and is taken out from an operator shell.
+- Tree 4 is admitted when tree 3 has been taken out. It supplies the deaths of a worker whose task
+  is outstanding, and is taken out the same way.
+
+**One run at a time.** The project, the durable consumer names, ports 13370 and 13371 and the
+namespace label `legion.dev/project=legsmoke` are shared.
+- The run takes `~/.local/state/legion/e2e/stage4b.lock`, one path whatever `XDG_STATE_HOME` says.
+- It owns the shared objects only after four checks pass: the lock, both ports free, no leftover
+  `legsmoke` object in the namespace, and no `legion-go-LEGSMOKE-` consumer on the stream.
+- A run refused at any of the four removes nothing.
+
+**What the run touches in production**, all of it removed by the `EXIT`/`INT`/`TERM`/`HUP` trap of
+the run that owns it. A signal to the whole process group does not stop the removal:
+- a closed pane, a Ctrl-C, or `timeout`'s TERM;
+- the transcript's `tee` ignores those signals;
+- the teardown ignores a second signal and SIGPIPE;
+- the teardown writes to the transcript even when the signal interrupted a command whose output
+  went to `/dev/null`;
+- a teardown command that fails prints `cleanup warning: line N exited S`, never a check's `FAIL`
+  line, and leaves the exit status the checks set.
+- **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's two durable consumers. They are
+  named by the Dispatch key: `legion-go-LEGSMOKE-dispatch` (`notifications.dispatch.issue.>`) and
+  `legion-go-LEGSMOKE-github` (`notifications.github.sjawhar.legion-smoke.>`).
+  - The teardown deletes both by exact name and prints `deleted` or `absent` for each.
+  - `hygiene` fails if either remains, and the preflight refuses to start while either exists.
+  - A SIGKILLed driver runs no trap, and the next run's preflight names what it left.
+- **Production Dispatch, project LEGSMOKE**: three root issues per run. The preflight moves stale
+  todo roots to backlog. The proof human's writes use the agents' bearer and name the session
+  `legion-e2e4b-proof-human-<pid>` as their actor, which production Dispatch requires; it holds no
+  claim, so the workflow reads its status writes as a human's.
+- **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, and tree 1's pull request, which
+  the proof human merges. The teardown closes any pull request the run left open, such as one from a
+  run that stopped before the merge, and deletes each tree's branch `legion/<tree>`.
+- **Namespace `legion`**: the run's Sandboxes, pods, Secrets and PVCs, its control pods, and its
+  copy of the operator fixture's ConfigMap, `legion-operator-route-legsmoke`, all labelled
+  `legsmoke`. [`lib/namespace-rig.sh`](#libnamespace-rigsh)'s teardown and
+  `namespace-clean` hold the namespace to its snapshot.
+
+`production-audit` checks the run's own writes. Its window opens, to the nanosecond, just before
+the daemon starts. It lists every production issue outside LEGSMOKE updated since then, and keeps
+those whose events name one of the run's writers: its agents' sessions, `legion-daemon:LEGSMOKE`,
+and the proof human. Event times are compared as instants, not strings.
+
+It also audits the Envoy interests the run's sessions held, which are sampled every 5 s and at
+every checkpoint while the daemon runs. The run fails when:
+- a registered session has no sample the listener answered;
+- the listener left one session's samples unanswered 3 times in a row. That leaves a gap of at
+  least 20 s against the sampler's 5 s. One or two failures in a row are a blip, kept in
+  `interests-outcomes.txt`, and their count is in the checkpoint's note;
+- a listener restart outlasted its bound. While a release restarts the listener it answers
+  `503 {"error":"service starting"}`, interleaved with answers from the task it replaces. Those
+  503s count toward no run of unanswered samples, inside a restart episode: it opens at a
+  session's first such 503, takes every such 503 within 300 s of it, and ends at the session's
+  next answered sample. The run fails when a session does not answer again within 300 s of the
+  episode's start, or has a second episode within 600 s of the first. Any other error, and a 503
+  with another body, counts as unanswered. Each episode's start, end and sample count is in
+  `listener-restarts.json`, and the checkpoint's note names the listener release whose run spans
+  them, when one does;
+- any sampled topic falls outside the run. The run's topics name LEGSMOKE, its subject space `notifications.legion.legsmoke.`, its repository's GitHub subjects (`notifications.github.sjawhar.legion-smoke.`, where an agent follows its own pull request), operator-close's tree, a `legion-legsmoke-` role, or the session itself.
+
+Four controls show the audit can fail. The verdict is given a synthetic outside issue and must
+refuse it. The interest filter is given the run's samples plus one outside topic and must catch
+it. The unanswered-sample rule passes two failures in a row and fails three, passes a restart
+answered within its bound, and fails a 310 s restart and three 503s of another body. The
+collector, on the run's real
+window, is given one actor that did write outside LEGSMOKE, and must find that actor's events. An
+event is dated by Dispatch's `created_at`; one without it stops the audit, never counts as older.
+
+| checkpoint | what it holds |
+| :--- | :--- |
+| `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
+| `preflight` | the runtime identity is `production-legion-daemon` and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
+| `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
+| `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`fixtures/operator-route`](fixtures/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
+| `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
+| `spec-posted` | each admitted architect, prompted by nothing but the daemon's `catch-up` notice, posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
+| `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node |
+| `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
+| `issue-cap-moves` | tree 2 to backlog frees its slot, tree 3 is admitted, and tree 2's pods are gone |
+| `tree-moved` | tree 1 runs planner, implementer, tester, reviewer and retro to merging with real agents; the tester's adoption leaves a new empty change and keeps the implementer's author; once both of the reviewer's thermonuclear dispatches have an outcome, the reviewer's session, its subagents' sessions and each dispatch are kept under `review-pair/` |
+| `review-pair` | the reviewer dispatched `thermonuclear-deep-review` and `thermonuclear-code-quality` by name, and one run of each completed. A run completes by the task-result block the reviewer received, whether by async delivery or a hub wait or jobs snapshot, saying `completed`. With no block, the subagent's own session beside the reviewer's must end in an accepted yield. Every turn of that session runs on the fixture overlay's `review` target: the task executor runs a subagent on its parent's model, silently, when the subagent's own does not resolve. A refusal (`Unknown agent`, `No model selected`) in a task result or in a run that did not complete fails with its text. tree-moved keeps the reviewer's session and the subagents' sessions as the pair settles, reading the tree volume, not the daemon |
+| `first-turns` | every role on tree 1 completed a first turn in its pod |
+| `token-rotation` | a pod's projected operator token (`/var/run/operator/token`, 3600 s, renewed by the kubelet at 80 %) is renewed: the token in the file was issued (its `iat`) after the pod started, in the same pod by uid. An exec that does not answer is never a token. A model turn after the renewal still runs on the gateway's aliases |
+| `idle-suspend` | a finished worker's Sandbox is Suspended with its pod gone and the tree volume bound |
+| `kill-pod-resume` | once the merger's pod is running, a killed merger pod is relaunched on its session |
+| `fence` | a pod the controller recreates on its own is never adopted. Once the relaunch's boot token is in the Secret, the replaced generation's token is refused, and the daemon logs `worker-stream: rejected hello (stale worker generation)` |
+| `daemon-relaunch-count` | the daemon relaunched the merger, `resumed`, once for each pod the driver ended |
+| `restart-mid-tree` | a daemon restart re-adopts the merger's pod and session |
+| `controller` | `legion controller start` registers with the Sandbox daemon; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3 is held by one of its planner claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its planner's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's delete, registration, death and charge; a deleted pod that is still starting can register, and even take its task, before it is stopped. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon-go/internal/supervise/budgets_test.go` |
+| `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out |
+| `done` | the merger's READY, the proof human's merge, the production check and sign-off take tree 1 to `done` |
+| `node-release` | after the pool's consolidation, tree 1's node is gone while its Sandboxes stay Suspended and its volume Bound |
+| `close` | at linger expiry tree 1's Sandboxes and tree volume are deleted |
+| `re-admission` | tree 1 set todo again: the daemon logs `supervise: the tree volume was lost with the session; relaunching a fresh session` exactly once, and the fresh architect's workspace holds `.legion/workspace-recovered.json` naming `legion/<tree 1>` |
+| `operator-close` | `legion claims close` on the Sandbox runtime: the close of re-admitted tree 1's live root is refused 409, and its claims, Sandboxes and pods are unchanged; an operator-spawned tree closes with its worker live, the root and the worker are retired, and the tree's Sandboxes, pods and volume are gone |
+| `pod-shape` | every Sandbox pod whose worker the pod watch ever saw ready is judged from the spec the watch recorded for it, deleted pods included, so no poll has to reach it: gVisor, the operator's ServiceAccount and one projected token, the run's route ConfigMap mounted as the profile's `models.yml`, the pool, Pod Security restricted, split provisioning. No pod's command, args or environment carries a value its Sandbox's `-boot` Secret held at any point in the run (`lib/secret-leaks.ts`), and every pod's Secret was seen. The watch is complete: every pod uid the shape watcher read, the driver ended, or the daemon launched is in it. Negative controls: a recorded pod with another runtime class, and a pod the watch never recorded |
+| `pod-watch-verdict` | the pod watch is complete (as at `pod-shape`); no pod of the run was Evicted or had a container OOMKilled, and every claim process the daemon found dead (`supervise: process died`) was one the driver ended. The resume that finds the tree volume lost is the exception, by its detail (`the tree volume was lost: …`), counted by `re-admission`. The memory hog was OOMKilled. Synthetic OOMKilled and process-died controls both fail |
+| `hygiene` | the daemon stopped, the teardown ran, and the run's consumers are gone; `namespace-clean` follows it |
+| `namespace-clean` | the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps that carry the run's project label or none are exactly the snapshot taken before the run |
+| `production-audit` | no write by the run outside LEGSMOKE and no interest outside it; the verdict refuses a synthetic outside issue, and the collector finds a real outside writer's events |
 
 ## controller-start-tmux.sh
 
@@ -567,25 +786,59 @@ It exits non-zero, printing the reason on stderr and nothing on stdout, when:
   room above 20000`).
 - 50 draws find no free port (`no free port found below <n>`).
 
+## lib/built-from.sh
+
+Prints what a stage proof ran, so a run can be tied to a commit after its scratch directory, and
+the binary in it, are gone. Stage 1, Stage 2, Stage 3, Stage 4a and Stage 4b print it through their own
+`note`.
+
+```sh
+bash scripts/e2e/lib/built-from.sh "$root" "$work/legion"
+# source: <commit> on <parent>                     (jj: the working copy and its parent; git: HEAD)
+# legion: sha256 <hash>, stamped <commit> modified=<true|false>
+```
+
+When the working copy has changes, as in a negative control, which runs a base with the new
+script copied in, the source line says so. The next line gives the sha256 of the diff, followed by
+its `--stat`, so the run shows what it held and not only that something changed.
+- Under jj the diff is `jj diff --git`.
+- Under git it is `git diff HEAD`, taken against a copy of the index in which every untracked file
+  is added as intent-to-add. The copied-in script is therefore in it, and the checkout's own index
+  is never written. Without jj, or outside a jj workspace, it reads git, which is
+what CI's checkout is.
+
+Each binary is tied to that source by the stamp the Go toolchain writes at build time. The stamp has
+two fields: `vcs.revision`, the commit the checkout's git HEAD named, and `vcs.modified`, whether the
+tree differed from it. Under jj, HEAD is the working copy's first parent. The helper fails, naming
+both sides, when a binary:
+- carries no stamp (`-buildvcs=false`, or built outside a checkout);
+- was stamped with a commit that is not the source's;
+- has a modified flag that disagrees with the tree now.
+
+The stamp does not hash a changed tree, so an edit made after the build to a tree that was already
+changed goes unseen. Every caller runs the helper right after its build.
+
 ## lib/install-plugin-profile.sh
 
 Installs this checkout's `@sjawhar/pi-legion-envoy` into a named OMP profile, packed the way the
 release packs it, so a stage proof or a boot-gate test runs the branch-built plugin and the user's
-default profile is never touched.
+own profiles are never touched.
 
 ```sh
 bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
-manifest=$(scripts/e2e/lib/install-plugin-profile.sh --profile legion-e2e-$$ --dest "$(mktemp -d)")
-# → ~/.omp/profiles/legion-e2e-<pid>/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json
+. scripts/e2e/lib/omp-home.sh && make_omp_home "$work/omp-home"
+manifest=$(scripts/e2e/lib/install-plugin-profile.sh --profile legion-e2e-$$ --home "$work/omp-home" --dest "$work/plugin")
+# → $work/omp-home/.omp/profiles/legion-e2e-<pid>/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json
 ```
 
 | flag | meaning |
 | :--- | :--- |
 | `--profile <name>` | the OMP profile to install into (`OMP_PROFILE=<name>`). Refused when OMP would read it as its default profile — empty, all whitespace, or `default` — since that is the profile every plain `omp` uses. Any other name goes to OMP as given, and OMP refuses one it cannot use. |
+| `--home <dir>` | the `HOME` Oh My Pi runs under for the profile, which is then `<dir>/.omp/profiles/<name>`: the run's own home from [`make_omp_home`](#libomp-homesh). Refused when it is the caller's own `HOME`, when `HOME` is unset or empty (it could not be compared), and when `<dir>/.omp` does not exist. |
 | `--dest <dir>` | where the tarball is unpacked. `omp plugin install` links this directory into the profile rather than copying it, so it **is** the installed plugin and must outlive the run. Refused inside the checkout (jj would snapshot it, symlinks resolved first) and when it exists and is not an empty directory (an unpack over an earlier build would keep that build's stale files). |
 
-Both flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
-installed manifest's path as `OMP_PROFILE=<name> omp plugin list --json` reports the plugin; that is
+All three flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
+installed manifest's path as `HOME=<home> OMP_PROFILE=<name> omp plugin list --json` reports the plugin; that is
 the manifest both daemons' contract gates read under the same profile — the TypeScript daemon's
 (`getPluginsNodeModules()`, `packages/daemon/src/daemon/boot-probes.ts`) and the Go daemon's
 (`pluginManifestPath`, `packages/daemon-go/internal/daemon/bootgate.go`). Every step's own output
@@ -611,6 +864,10 @@ because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` t
 7. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the checkout's version,
    enabled, and resolving to `<dir>`.
 
+Steps 6 and 7 run the Oh My Pi both daemons pin (`omp-pin.ts`, through `mise x <pin>`) under
+`HOME=<home>`, from `<dir>`, rather than the `omp` on the caller's `PATH`: an operator's wrapper
+there (the devbox's `~/.dotfiles/shims/omp`) reads its own files from `HOME`, which is the run's.
+
 Each step cites its source by what it runs, never by line number: the lines move with every edit
 above them.
 
@@ -632,9 +889,9 @@ rewritten saves that rewrite as its "before" and puts it back at its own exit: b
 jj snapshots the rewritten `package.json`. `go test ./...` runs package test binaries in parallel,
 so two callers at once is the expected case.
 
-The script creates the profile and `<dir>` and removes neither; the caller does, with
-`rm -rf ~/.omp/profiles/<name> <dir>` (the profile holds `plugins/` — the link and
-`omp-plugins.lock.json` — and OMP's `logs/`).
+The script creates the profile and `<dir>` and removes neither; the caller does, with its work
+directory, which holds both (the profile holds `plugins/` — the link and `omp-plugins.lock.json` —
+and OMP's `logs/`).
 
 ### The natives download
 
@@ -643,38 +900,66 @@ OMP's native modules (`pi_natives.linux-x64-{baseline,modern}.node`, ~350 MB) li
 exists — and every profile under that `HOME` shares them (`getNativesDir`,
 `@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own. OMP writes them
 on its first run under a `HOME` that has not run this OMP version, and in this script that run is
-`omp plugin install`. So a fresh CI runner, a container, or a newly bumped OMP pin pays ~350 MB there,
-once; on a box where the pinned OMP has already run, a fresh profile pays nothing. Measured on the
+`omp plugin install`. The run's own home links `.omp/natives` to the operator's
+([`lib/omp-home.sh`](#libomp-homesh)), so a fresh CI runner, a container, or a newly bumped OMP pin
+pays ~350 MB there, once, into the operator's cache; on a box where the pinned OMP has already run,
+a fresh profile pays nothing. Measured on the
 devbox with OMP 18.2.2: build, pack, install and verify took 2 s into a new profile, the profile got
 no `natives/` directory, and `~/.omp/natives/18.2.2/` was untouched.
+
+## lib/model-gateway-url.sh
+
+Prints `LEGION_E2E_MODEL_GATEWAY_URL`, the model gateway's Anthropic endpoint, once it is one a
+stage proof can use. [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (Stage 2 and
+Stage 3) and Stage 4a read the variable through it. The repository carries no default: the operator
+sets it to the `baseUrl` of the `anthropic` provider in their own gateway route
+(`~/.omp/agent/models.yml`).
+
+```sh
+gateway=$(bash scripts/e2e/lib/model-gateway-url.sh)
+```
+
+The URL is written into an Oh My Pi `models.yml` as one plain YAML scalar, so the helper exits 1
+when the variable is unset, holds a character other than letters, digits and `:/._~-`, ends in a
+colon (which YAML reads as a mapping key), or is not an `https://` URL. Its refusal names the
+variable on stderr and never prints the value, which names production infrastructure; the scripts
+that use it print that the route comes from the variable, not the URL.
 
 ## lib/install-model-gateway.sh
 
 Routes a named OMP profile's model turns to the Hawk model gateway (middleman) on the operator's
 own hawk login, the route every devbox agent session uses (`~/.omp/agent/models.yml`:
 `X-Api-Key: !hawk-token`), so the tmux stage proofs' panes reach Anthropic with no provider key.
-Stage 2 and Stage 3 run it before they move any XDG directory of their own.
+Stage 2 and Stage 3 run it under the operator's own `HOME`, before they move any XDG directory of
+their own.
 
 ```sh
-key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e-$$ --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache")
+export LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
+key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e-$$ --home "$work/omp-home" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache")
 # → $work/model-gateway/hawk-token
 ```
+
+`LEGION_E2E_MODEL_GATEWAY_URL` is required: the gateway's Anthropic endpoint, the one
+`hawk-token`'s default `HAWK_API_URL` mints keys for, read through
+[`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh).
 
 | flag | meaning |
 | :--- | :--- |
 | `--profile <name>` | the OMP profile to route. Refused when OMP would read it as its default profile (empty, all whitespace, or `default`), and when its `agent/models.yml` or `agent/config.yml` already exists. |
+| `--home <dir>` | the `HOME` Oh My Pi runs under for the profile, whose files then go under `<dir>/.omp/profiles/<name>/agent`: the run's own home from [`make_omp_home`](#libomp-homesh). Refused when it is the caller's own `HOME`, when `HOME` is unset or empty (it could not be compared), and when `<dir>/.omp` does not exist. |
 | `--dest <dir>` | where the key command and its log are written; created `0700`. Refused when it exists and is not an empty directory, and when its path holds a character other than letters, digits, `/`, `.`, `_` or `-`, since it is written into YAML as one `!command` word. |
 | `--cache-dir <dir>` | where the key command keeps the key it minted; created `0700`. Refused when it exists and is not an empty directory, so a key left there is never served. A private directory of the run, never its evidence: the key is a live gateway credential. |
 
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
-caller's `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset is
-unset for it), for that one command. It appends one line per invocation, one per mint, and
-`hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout carries the key alone. The profile's `agent/models.yml`
-points the `anthropic` provider at `https://middleman.hawk.internal.trajectorylabs.com/anthropic`
-with `apiKey` and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every
-model role (`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`) to
-`anthropic/claude-opus-4-8`, sets `enabledModels: [anthropic/*]`, and disables `amazon-bedrock`,
-`bedrock-mantle`, `google`, `ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
+caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset
+is unset for it), for that one command. It appends one line per invocation, one per mint, and
+`hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout carries the key alone. The profile's
+`agent/models.yml` points the `anthropic` provider at `LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey`
+and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every model role
+(`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`, and `review` and
+`oracle`, the roles Legion's task agents name) to `anthropic/claude-opus-4-8`, sets
+`enabledModels: [anthropic/*]`, and disables `amazon-bedrock`, `bedrock-mantle`, `google`,
+`ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
 
 A pane cannot run `hawk-token` itself, which is why the command, and only it, gets the operator's
 environment. Measured in a Go pane at `f1749048` whose profile named `!hawk-token` directly, by
@@ -682,7 +967,9 @@ running `hawk-token` under that OMP process's exact environment: it fails on mis
 set for shim: uv`), because the pane's `XDG_CONFIG_HOME` is the daemon's own (LEGION-206 P1) and
 mise's global config is not there; with the operator's XDG directories it fails on the login (`no
 usable hawk login`), because the pane carries no `DBUS_SESSION_BUS_ADDRESS`, the only address the
-keyring client reads (`jeepney/bus.py`, `find_session_bus`); with both it mints. Panes run as the
+keyring client reads (`jeepney/bus.py`, `find_session_bus`); with both it mints. A pane's `HOME` is
+the run's own ([`lib/omp-home.sh`](#libomp-homesh)), where neither mise's global config nor the hawk
+login is, so the command gets the operator's `HOME` too. Panes run as the
 operator's uid and can reach `/run/user/<uid>/bus` anyway, so the command gains nothing a pane
 lacks, and every pane's environment stays as it is.
 
@@ -701,7 +988,8 @@ with no key. Every role is the one model because the gateway answers `claude-hai
 model OMP gave that Stage 3 scout once Bedrock failed it, with `404 model not found`.
 
 Its first mint is the preflight, before any pane exists. It exits 1 naming the cause when
-`hawk-token` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when the keyring is locked
+`hawk-token` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when
+`lib/model-gateway-url.sh` refuses `LEGION_E2E_MODEL_GATEWAY_URL`, when the keyring is locked
 (`the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the
 unlock-keyring skill) and rerun`), and when `hawk-token` prints anything but one JWT (quoting the
 last line of its stderr); an argument refusal exits 2. The mint also runs `hawk-token`'s own periodic
@@ -719,7 +1007,7 @@ tell Oh My Pi's retry after a 401 from a first call: OMP runs it through `/bin/s
 has a fresh parent process.)
 
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
-caller does, with `rm -rf ~/.omp/profiles/<name> <dir> <cache-dir>`.
+caller does, with its work directory and `<cache-dir>`.
 
 ## lib/check-model-route.sh
 
@@ -731,7 +1019,7 @@ process has stopped and before it copies the transcripts, then again over the co
 hold the same turns, sessions and subagents.
 
 ```sh
-bash scripts/e2e/lib/check-model-route.sh --sessions ~/.omp/profiles/<profile>/agent/sessions --control "$work/model-route-control"
+bash scripts/e2e/lib/check-model-route.sh --sessions "$work/omp-home/.omp/profiles/<profile>/agent/sessions" --control "$work/model-route-control"
 # → 74 assistant turns in 5 agent sessions (0 of them subagents'), every one on the anthropic provider (the gateway); negative control: … refused
 ```
 
@@ -769,13 +1057,71 @@ timed-out wait runs before it fails), and defines `note` and `fail`, which exits
 
 | function | does |
 | :--- | :--- |
-| `until_true SECONDS WHAT CMD…` | runs CMD every half second until it succeeds; after SECONDS it runs `timeout_hook` and fails naming WHAT. A guard that writes `$evidence/pane-endpoint-violation.txt` makes the next wait abort, naming the violation |
+| `until_true SECONDS WHAT CMD…` | runs CMD every half second until it succeeds. After SECONDS of wall time, each poll's own run included, it runs `timeout_hook` and fails naming WHAT. It says what it waits for on entry and every 60 s. A poll that never returns would hold the wait, so callers bound their remote calls. A guard that writes `$evidence/pane-endpoint-violation.txt` makes the next wait abort, naming the violation |
 | `pick_port VAR` | assigns VAR a port from [`lib/free-port.sh`](#libfree-portsh) that no earlier pick of the run returned. It assigns in place: a command substitution would run it in a subshell and lose the run's set of picks |
 | `start_process NAME CMD…` | starts CMD in the background, appending to NAME's log, and sets `NAME_pid` |
 | `log_size NAME` | the size of NAME's log, the offset `await_start` reads a start's own lines from |
 | `await_start NAME PID OFFSET SECONDS WHAT CMD…` | waits, bounded, for CMD to succeed while PID lives. It returns 2 when the service exited on `address already in use` after OFFSET, the one race a pick before the bind cannot close, so the caller picks again; any other exit fails naming the log |
-| `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed |
+| `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed. An empty PID does nothing; a PID that cannot name one process of the run (0 however spelled, so any value with a leading zero, 1, a negative or non-numeric value, the calling shell or its process group's leader) is refused with a printed line, since `kill 0` signals the caller's whole process group |
+| `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. It signals a pid only while its parent is the calling shell, so a pid the watcher left and another process reused is never hit, and refuses the same pids `stop_pid` does: `kill -STOP 0` would freeze the whole driver and a later `kill -KILL 0` end it. Stage 3's and Stage 4b's watchers are stopped with it |
 | `run_processes` | prints every pid whose working directory or command line names `$work` |
+
+## lib/omp-home.sh
+
+The run's own `HOME` for Oh My Pi, so a stage proof's isolated profile lives in its work directory
+and the operator's `~/.omp/profiles` is never written or deleted. Stage 2, Stage 3, the 4b.13b
+acceptance, Stage 4b's controller and the controller proof source it.
+
+```sh
+. "$root/scripts/e2e/lib/omp-home.sh"     # sourced, never run
+make_omp_home "$work/omp-home"
+```
+
+Oh My Pi places a profile from the home directory alone: `os.homedir()/.omp/profiles/<name>`
+(`getProfileConfigRoot`, `@oh-my-pi/pi-utils` `dirs.ts`). `XDG_DATA_HOME` moves only a named
+profile's data, and only once `$XDG_DATA_HOME/omp/profiles/<name>` exists, so the profile's
+`agent/models.yml` and `config.yml` would stay in the operator's home; `PI_CONFIG_DIR` reaches no
+pane, since neither daemon's pane allow-list carries it. So the driver runs every Oh My Pi process
+of the run under `HOME=<dir>`: the daemon, and through the pane allow-list every pane, the
+controller, and each `omp` the libs run (`--home`).
+
+`make_omp_home DIR` creates `DIR/.omp` and links `DIR/.omp/natives` to the operator's native module
+cache ([The natives download](#the-natives-download)), so the run downloads nothing and removing
+`DIR` removes the link, never the cache. A second call on the same `DIR` replaces the link rather
+than writing one inside the cache through it (`ln -sfT`), and a real directory at `DIR/.omp/natives`
+fails the call. It first exports `MISE_DATA_DIR` and `XDG_CONFIG_HOME` as
+the operator's own, the paths each already resolves to, so what the daemon itself runs under `DIR`
+finds what it did under the operator's `HOME`: `mise` the same pinned Oh My Pi, `secrets` its
+secretsd config (the daemon resolves `provider_keys` with it), gh and jj their config. Panes are
+unaffected, since the daemon moves their four XDG base directories under `<state_dir>/home`
+(LEGION-206 P1).
+
+A proof's panes and controller therefore see none of the operator's `~/.gitconfig`, `~/.claude`,
+`~/.codex` or `~/.aws`, which is what a Sandbox pod sees. The gateway key command alone runs under
+the operator's `HOME` ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+
+## lib/leftovers.sh
+
+A driver that dies with no chance to clean up (SIGKILL, a crashed host) leaves its daemon, listener,
+agents and containers running. `refuse_leftovers PREFIX` is how the next run of the same stage
+notices: Stage 2 (`legion-e2e2`), Stage 3 (`legion-e2e3`), Stage 4b (`legion-e2e4b`) and the
+controller proof (`legion-e2e-controller`) run it before they start anything.
+
+```sh
+. "$root/scripts/e2e/lib/leftovers.sh"     # sourced, never run
+refuse_leftovers legion-e2e3
+```
+
+Everything a run starts carries its driver's pid: each container is named `<prefix>-<role>-<pid>`,
+and every process of the run holds its work directory, `/tmp/<prefix>.<pid>.<random>`, in its argv,
+its working directory (an agent) or its environment (a bridge handed the run's state directories).
+The check fails, through the caller's `fail`, naming each container and process whose driver is no
+longer alive and the command that removes it (`docker rm -f -v <name>`, `kill <pid>`). A driver
+counts as alive only while its pid is a live, non-zombie process that started no later than the
+container or process it would own, since pids are reused. Only processes in the caller's own pid
+namespace are read, since a pid means nothing across namespaces (an agent box's run is its own).
+What a live run started is left alone, since Stages 2 and 3 take no lock and two lanes may run one
+at once.
 
 ## lib/workflow.sh
 
@@ -800,6 +1146,10 @@ where an agent runs:
 | `assert_claim_endpoints ISSUE ROLE` | fails the check when the claim's process could reach a service outside the rig; every instruction runs it first |
 | `claim_session_text ISSUE ROLE` | prints the claim's session file, and fails when there is none |
 | `workspace_jj ISSUE ARGS…` | runs `jj ARGS…` in the issue's workspace |
+
+`new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
+`legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
+none, since it runs under its root's tree.
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own
@@ -828,14 +1178,40 @@ it.
 . "$root/scripts/e2e/lib/namespace-rig.sh"     # sourced, never run
 ```
 
-The caller sets `operator` (the admin kubectl context), `namespace`, `project` (the run's
-`legion.dev/project` label), `project_prefix` (the prefix every run project of the proof carries,
-`s4a-`), `record` (a file with one Sandbox name per line), `work`, `evidence`, and `torn_down` and
+The caller sets `operator` (the admin kubectl context), `namespace`, `run_label` (the run's
+`legion.dev/project` label, named apart from `lib/workflow.sh`'s `project`, the Dispatch project
+key), and either `label_prefix` (the prefix every run label of the proof carries, Stage 4a's
+`s4a-`) or `label_exact` (the one fixed label the proof owns while it holds its run lock, Stage
+4b's `legsmoke`), `record` (a file with one Sandbox name per line), `work`, `evidence`, and `torn_down` and
 `compared` empty; it defines `begin`, `note`, `pass` and `fail`, which exits.
 
 | function | does |
 | :--- | :--- |
-| `op ARGS…` | `kubectl --context $operator -n $namespace ARGS…` |
+| `op ARGS…` | `kubectl --context $operator -n $namespace ARGS…`, bounded at 300 s (`timeout --foreground`, so a Ctrl-C still reaches kubectl) |
 | `snapshot FILE` | writes the namespace's Sandboxes, Secrets, PVCs, pods and ConfigMaps (`kinds`) that carry the run's project label or none, sorted |
-| `teardown` | runs once and never fails. It refuses a project without `project_prefix`, so a mistyped project cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes and ConfigMaps labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
+| `teardown` | runs once and never fails. It refuses a label without `label_prefix`, or other than `label_exact`, so a mistyped label cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes and ConfigMaps labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
 | `namespace_clean` | the check `namespace-clean`: a fresh snapshot, written to `$evidence/namespace-after.txt`, must equal `$evidence/namespace-before.txt` |
+
+## lib/secret-leaks.ts
+
+Stage 4b's check that no pod carried a value of its Sandbox's Secret in a container's command, args
+or environment. A pod's `-boot` Secret holds the next generation's token after each relaunch, and the
+pod watch records no Secret value, so a check made from a later read would judge the wrong values or
+none. The helper watches the run's Secrets from `pod-watch` on and keeps every value each one held
+in memory only. It never prints or writes a value.
+
+```sh
+bun scripts/e2e/lib/secret-leaks.ts <context> <namespace> <label-selector> <pod-watch> <verdict> &
+kill -TERM $!    # judges the recorded pods and writes <verdict>, then exits 0
+```
+
+On SIGTERM it reads `<pod-watch>` (one watch event a line) and writes one JSON line to `<verdict>`:
+`pods`, `secrets` and `values` are counts, `leaks` names each pod whose worker ran ready and one of
+whose containers carries a value `<pod>-boot` held, and `unseen` names each such pod whose `-boot`
+Secret the watch never saw. Each entry is `{uid, pod, secret}`. `unreadable` counts the lines of
+`<pod-watch>` before its last that do not parse; the last may be one the watch is still writing, and
+is skipped. Each watch asks the server to end it within 300 s and resumes from the last
+resourceVersion; a watch that delivered nothing is resumed after a pause, and a line that does not
+parse ends that watch. On 410 Gone it lists the Secrets again, so a value a Secret held only between
+the last version seen and that list is not seen; every value a list or a watch event shows is. It
+exits 2 when it cannot start.

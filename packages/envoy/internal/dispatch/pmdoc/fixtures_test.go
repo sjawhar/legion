@@ -100,12 +100,12 @@ func loadSpliceFixtures(t *testing.T) []spliceFixture {
 func TestFixturesAreWithinSchema(t *testing.T) {
 	fixtures := loadFixtures(t)
 	wantNames := []string{
-		"ask-answered", "ask", "bare-url", "blockquote", "callout-blocks", "callout", "code-directive-example", "code-fence",
-		"code", "directive-like-text", "emphasis", "empty", "escapes", "explicit-url-space",
+		"adjacent-lists", "ask-answered", "ask", "bare-url", "blockquote", "browser-list-spacing", "callout-blocks", "callout-nested", "callout", "code-directive-example", "code-fence",
+		"code-span-line-ends", "code", "directive-like-text", "emphasis", "empty-containers", "empty", "escaped-block-markers", "escapes", "explicit-url-space",
 		"explicit-url-title",
-		"footnote", "frontmatter", "headings", "hr", "html", "image-delimiters", "image",
+		"footnote-block-indents", "footnote-ending-in-a-block", "footnote", "frontmatter-empty", "frontmatter-fence-whitespace", "frontmatter-long-fence", "frontmatter", "headings", "hr", "html", "image-alt-line-ends", "image-delimiters", "image",
 		"inline-code-backticks", "inline-code-spaces", "link-delimiters", "links", "lists", "long",
-		"marks", "nested-code", "ordered-list-prefixes", "paragraphs", "softbreak", "table", "tasks",
+		"marks", "nested-code", "nested-empty-items", "ordered-list-prefixes", "paragraphs", "softbreak", "table", "task-markers", "tasks",
 		"unicode",
 	}
 	if len(fixtures) != len(wantNames) {
@@ -137,7 +137,7 @@ func TestSpliceFixturesHaveRequiredCoverage(t *testing.T) {
 		"insert-inline-after-quote", "insert-inline-at-textblock-start", "insert-inline-at-textblock-end",
 		"insert-blocks-after-quote-splits-paragraph", "insert-block-at-doc-start", "insert-block-at-doc-end",
 		"insert-block-after-heading-textblock", "insert-block-before-heading-textblock",
-		"insert-paragraph-after-list-item-textblock",
+		"insert-paragraph-after-list-item-textblock", "callout-paragraph-and-code", "callout-paragraph-and-list", "callout-paragraph-and-heading", "callout-in-list-item-code", "callout-in-blockquote-code", "nested-callout-code", "callout-across-paragraphs-code",
 	}
 	if len(fixtures) != len(wantNames) {
 		t.Fatalf("splice fixture count = %d, want %d", len(fixtures), len(wantNames))

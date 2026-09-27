@@ -263,13 +263,18 @@ func (s *supervisor) helloResolver(tokens *api.BootTokens, timeout time.Duration
 func superviseEvent(ev stream.Event) (supervise.Event, error) {
 	switch ev := ev.(type) {
 	case stream.Hello:
-		return supervise.StreamHello{Claim: ev.Claim, Generation: ev.Generation}, nil
+		hello := supervise.StreamHello{Claim: ev.Claim, Generation: ev.Generation}
+		if ev.AgentSecrets != nil {
+			hello.AgentSecrets = &supervise.AgentSecretsIdentity{Thumbprint: ev.AgentSecrets.Thumbprint, PodToken: ev.AgentSecrets.PodToken}
+		}
+		return hello, nil
 	case stream.TurnStart:
 		return supervise.StreamTurnStart{Claim: ev.Claim, DeliveryID: ev.DeliveryID}, nil
 	case stream.TurnEnd:
 		return supervise.StreamTurnEnd{Claim: ev.Claim}, nil
 	case stream.LateRefusal:
-		return supervise.StreamLateRefusal{Claim: ev.Claim, DeliveryID: ev.DeliveryID, Error: ev.Error}, nil
+		return supervise.StreamLateRefusal{Claim: ev.Claim, DeliveryID: ev.DeliveryID, Error: ev.Error, Replayed: ev.Replayed,
+			ConnSequence: ev.ConnSequence}, nil
 	case stream.Closed:
 		return supervise.StreamClosed{Claim: ev.Claim}, nil
 	}

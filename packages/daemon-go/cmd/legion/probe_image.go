@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
@@ -40,8 +41,12 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // shim starts Oh My Pi (podsafety.Apply), its overlay written to a fresh temporary directory since
 // the probe pod mounts no state volume; with --provider-env-dir, each provider key exported after
 // it as the shim exports them (shim.ReadProviderEnv); and with --role-references, the references
-// of the role prompts the daemon inlines into its pods (promptrefs.Roles), resolved beside the
-// plugin's own. Without it the image's own role prompts are encoded and resolved the same way.
+// of the role prompts the daemon inlines into its pods (promptrefs.Encode's encoding, decoded as the
+// flags are read), resolved beside the plugin's own. Without it the image's own role prompts are
+// read and resolved the same way. When its environment names a NATS nkey seed (a probe pod's
+// NATS_NKEY_SEED_FILE, the providers Secret's key), that seed is read as the daemon reads its own
+// (natsauth.Seed) and must be a user's, and the line before the OK line names that user's public
+// key (bootprobe.NATSUserLine), never the seed, for the daemon to compare with its own.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -63,6 +68,26 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintln(stderr, "legion probe-image: --plugin-root is required: the plugin directory a pod loads as its one explicit extension, which the load probe loads the same way")
 		return 2
 	}
+	// The role prompts a pod is handed: the daemon's, when it passes their references, else the
+	// image's own.
+	var references promptrefs.Names
+	if *roleReferences != "" {
+		decoded, err := promptrefs.Decode(*roleReferences)
+		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: --role-references: %v\n", err)
+			return 1
+		}
+		references = decoded
+	} else {
+		rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
+		if err == nil {
+			references, err = promptrefs.Roles(rolesDir)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+			return 1
+		}
+	}
 	invocation := *omp
 	if invocation == "" {
 		invocation = os.Getenv("LEGION_OMP_PATH")
@@ -81,15 +106,15 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
-	// The role prompts a pod is handed: the daemon's, when it passes their references, else the
-	// image's own.
-	references := *roleReferences
-	if references == "" {
-		rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
-		if err == nil {
-			references, err = promptrefs.Roles(rolesDir)
-		}
-		if err != nil {
+	// The seed a pod's Envoy connections authenticate with: a probe pod's NATS_NKEY_SEED_FILE names
+	// the providers Secret's NATS_NKEY_SEED, which must be a user's seed, and whose user the daemon
+	// compares with its own seed's. The image build's probe names none.
+	natsUser := ""
+	if seed, err := natsauth.Seed("", os.LookupEnv); err != nil {
+		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+		return 1
+	} else if seed != "" {
+		if natsUser, err = natsauth.PublicKey(seed); err != nil {
 			fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 			return 1
 		}
@@ -132,6 +157,9 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	agentModels := bootprobe.AgentModelsResolved
 	if *skipAgentModels {
 		agentModels = bootprobe.AgentModelsSkipped
+	}
+	if natsUser != "" {
+		fmt.Fprintln(stdout, bootprobe.NATSUserLine(natsUser))
 	}
 	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected, agentModels))
 	return 0

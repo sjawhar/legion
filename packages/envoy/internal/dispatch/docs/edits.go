@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -359,11 +358,67 @@ func removedBlockError(blockID string, removal batchRemoval) error {
 }
 
 // editBatch is what a resolved batch of operations produced: the tree to write, the token of the
-// document before the batch, and every operation that left the tree as it was.
+// document before the batch, every operation that left the tree as it was, and what each
+// operation wrote (see writes).
 type editBatch struct {
 	tree      *pmdoc.Node
 	before    string
 	unchanged []int
+	// operations is how many operations the batch resolved, which is what tells the one-operation
+	// batch - every insertion is that operation's, with nothing to diff - from the rest.
+	operations int
+	written    []operationWrite
+}
+
+// operationWrite is one operation's W: the blocks whose own inline content it wrote. A block the
+// batch created without an id of its own is not one: EnsureBlockIDs stamps the tree before the
+// write, so every block the update reaches carries an id, and a block that still has none holds
+// no text a caller could address (editBatch.writes attributes it to the batch).
+type operationWrite struct {
+	ids []string
+}
+
+// writes resolves each operation's W: which of the blocks the write actually inserted text into
+// (candidates, read from the Yjs update the batch made) each operation wrote. It runs after the
+// caller's EnsureBlockIDs, which is where a block an operation created without an id gets one.
+//
+// A one-operation batch needs no diff at all: every run that operation's own update inserted is
+// that operation's, whichever block it landed in. That is the case the uncontended path pays for,
+// so the batch does not walk the tree for it (applyOperationsWithValidation).
+//
+// Every candidate is attributed, including the ones no operation's own text change claims. A
+// batch writes one Yjs update, and pmdoc.Update rewrites a block it passes over in place when an
+// operation inserts or removes a block above it - that untouched paragraph's text is re-inserted
+// under the same block id, and a concurrent deletion can take it exactly as it takes an
+// operation's own. Nothing in the batch can say which operation caused a collateral rewrite, and
+// the batch is atomic, so each such block belongs to every operation: dropping it instead would
+// let the paragraph vanish while the edit answered success, which is the report this whole check
+// exists to prevent.
+func (b editBatch) writes(candidates map[string]struct{}) []map[string]struct{} {
+	if b.operations == 1 {
+		return []map[string]struct{}{candidates}
+	}
+	written := make([]map[string]struct{}, len(b.written))
+	claimed := map[string]struct{}{}
+	for index, write := range b.written {
+		written[index] = make(map[string]struct{}, len(write.ids))
+		for _, id := range write.ids {
+			if _, wanted := candidates[id]; !wanted {
+				continue
+			}
+			written[index][id] = struct{}{}
+			claimed[id] = struct{}{}
+		}
+	}
+	for id := range candidates {
+		if _, named := claimed[id]; named {
+			continue
+		}
+		for index := range written {
+			written[index][id] = struct{}{}
+		}
+	}
+	return written
 }
 
 // outcome is the batch's verdict, taken once the caller has stamped the block ids the write
@@ -374,13 +429,14 @@ type editBatch struct {
 // so such a batch writes a version whose markdown equals the previous one's and stales an
 // approval pinned to it; without a summary SnapshotVersion compares renderings and writes
 // nothing. LEGION-260's follow-up makes the route version on the rendered markdown and keep
-// this verdict as its report to the agent.
+// this verdict as its report to the agent. That same post-batch token is the verdict's Token,
+// the document precondition the caller's next edit passes.
 func (b editBatch) outcome(applied int) (EditOutcome, error) {
 	after, err := nodeToken(b.tree)
 	if err != nil {
 		return EditOutcome{}, err
 	}
-	return EditOutcome{Applied: applied, Changed: after != b.before, Unchanged: b.unchanged}, nil
+	return EditOutcome{Applied: applied, Changed: after != b.before, Unchanged: b.unchanged, Token: after}, nil
 }
 
 // applyOperations applies each operation to its predecessor's tree so a
@@ -396,6 +452,17 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 	}
 	removed := make(map[string]batchRemoval)
 	var unchanged []int
+	written := make([]operationWrite, len(ops))
+	// Which blocks each operation wrote, told apart only when there is more than one operation to
+	// tell apart: blockText is every block's own inline content, carried forward operation by
+	// operation so each is compared with the tree its predecessor left rather than with the
+	// batch's input. A walk of a thousand-block tree per operation is real work on the
+	// uncontended path, and a one-operation batch needs none of it (editBatch.writes).
+	tellOperationsApart := len(ops) > 1
+	var blockText map[string]string
+	if tellOperationsApart {
+		blockText = pmdoc.BlockText(tree)
+	}
 	for index, op := range ops {
 		if removal, alreadyRemoved := removed[op.Block]; op.Block != "" && alreadyRemoved {
 			return editBatch{}, stampOperation(index, removedBlockError(op.Block, removal))
@@ -422,6 +489,9 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 		if next.Equal(tree) {
 			unchanged = append(unchanged, index)
 		}
+		if tellOperationsApart {
+			written[index].ids, blockText = pmdoc.BlocksGainingText(blockText, next)
+		}
 		for _, blockID := range removedIDs {
 			removed[blockID] = batchRemoval{
 				operation: index,
@@ -431,7 +501,13 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 		}
 		tree = next
 	}
-	return editBatch{tree: tree, before: before, unchanged: unchanged}, nil
+	return editBatch{
+		tree:       tree,
+		before:     before,
+		unchanged:  unchanged,
+		operations: len(ops),
+		written:    written,
+	}, nil
 }
 
 func hasTableAnchorMutation(ops []model.EditOp) bool {
@@ -678,6 +754,12 @@ func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis s
 }
 
 func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
+	// Every text an operation writes - a replace's with, an insert's markdown, whether it becomes
+	// blocks or table rows, and a retype's attributes - reaches the document with line feeds
+	// alone (pmdoc.LineFeeds), before any check below reads it.
+	op.With = pmdoc.LineFeeds(op.With)
+	op.Markdown = pmdoc.LineFeeds(op.Markdown)
+	op.Attributes = pmdoc.LineFeedAttrs(op.Attributes)
 	switch op.Op {
 	case "replace":
 		if op.Find == "" {
@@ -687,19 +769,45 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		replacement, level, err := replacementMarkdown(tree, r, op.Find, op.With)
-		if err != nil {
-			return nil, err
+		at, _ := pmdoc.ContainingTextblock(tree, r.From)
+		code := at.Node.Type == "code_block"
+		var with *pmdoc.Node
+		level := 0
+		if code {
+			with = codeReplacement(op.With)
+		} else {
+			var replacement string
+			if replacement, level, err = replacementMarkdown(tree, r, op.Find, op.With); err != nil {
+				return nil, err
+			}
+			if with, err = inlineReplacement(replacement, edgesOf(at, r)); err != nil {
+				return nil, err
+			}
 		}
-		with, err := inlineReplacement(replacement)
-		if err != nil {
-			return nil, err
+		if hasHardBreak(with) && at.OneLine() {
+			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+				"with %q carries a hard break, which a heading or a table cell cannot hold: it is written on one line, so the break would end the block there; write the text without the break, or insert a new block after this one",
+				op.With,
+			)}
 		}
+		// The text written over the match stays inside every ask and comment anchor the match lay
+		// wholly inside, so each anchor's quote is still the whole text it covers.
+		pmdoc.AddMarks(with, pmdoc.AnchorMarksCovering(tree, r))
 		next, err := pmdoc.Splice(tree, r, with)
-		if err != nil || level == 0 {
-			return next, err
+		err = invalidSchemaOp("with", err)
+		if err == nil && level != 0 {
+			next, err = pmdoc.SetHeadingLevel(next, r.From, level)
 		}
-		return pmdoc.SetHeadingLevel(next, r.From, level)
+		if err != nil {
+			return nil, err
+		}
+		if code {
+			return next, refuseCodeThatReshapesItsBlock(tree, next, r, at, "with", op.With)
+		}
+		if err := refuseUnreadableReplacement(tree, next, r, op.With); err != nil {
+			return nil, err
+		}
+		return next, refuseReshapedReplacement(tree, next, r, op.With)
 	case "delete":
 		if op.Block != "" {
 			if op.Find != "" {
@@ -722,7 +830,8 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return pmdoc.Splice(tree, r, empty)
+		out, err := pmdoc.Splice(tree, r, empty)
+		return out, invalidSchemaOp("find", err)
 	case "insert":
 		if op.Markdown == "" {
 			return nil, invalidOp("markdown")
@@ -738,13 +847,6 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if plainText && pmdoc.TargetSpansBlocks(tree, target) {
 			return nil, &ErrQuoteSpansBlocks{Quote: anchor}
 		}
-		with, err := parseInput(op.Markdown)
-		if err != nil {
-			return nil, invalidMarkdownOp("markdown", err)
-		}
-		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
-			return out, err
-		}
 		position := target.From
 		if after {
 			position = target.To
@@ -755,7 +857,22 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 				return nil, err
 			}
 		}
-		return pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+		// Front matter opens only the document's start, so only there does the insert read it.
+		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, position))
+		if err != nil {
+			return nil, invalidMarkdownOp("markdown", err)
+		}
+		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
+			return out, invalidSchemaOp("markdown", err)
+		}
+		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+		if err != nil {
+			return nil, invalidSchemaOp("markdown", err)
+		}
+		if err := pmdoc.RepeatedBlockID(tree, out, with); err != nil {
+			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
+		}
+		return out, nil
 	case "delete_row":
 		if op.Block == "" {
 			return nil, invalidOp("block")
@@ -1021,14 +1138,60 @@ func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdo
 	return r, true, nil
 }
 
+// refuseUnreadableReplacement refuses a replace that makes the document-level block it lands in
+// unreadable: one the parser read back before the replace and refuses after it. What markdown
+// reads as a block depends on where the text lands, so the rendered block decides it rather than
+// the replacement alone: `<div>x</div>` over a whole paragraph, at a list item's start or after a
+// hard break opens an HTML block the Proof schema does not carry, while the same HTML inside a
+// line, a table cell or a heading is inline HTML and is kept. A block that was already unreadable,
+// or another block that is, is no reason to refuse this replace.
+func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+	_, unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
+	if err != nil || unreadable == nil {
+		return err
+	}
+	return &ErrInvalidOp{Field: "with", Reason: unreadableReason(with, unreadable)}
+}
+
+// refuseReshapedReplacement refuses a replace whose text the document reads back as blocks of
+// another shape where it lands: a heading and a table cell are written on one line, so a line
+// break inside a code span or inline HTML there ends the block, as a hard break would
+// (hasHardBreak), and the document reads back a heading and a paragraph, or a row as two rows.
+func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
+	_, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	if err != nil || reshaped == nil {
+		return err
+	}
+	return &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf(
+		"with %q is text the document reads back as another block where it lands (%v); write it inside a line of text",
+		with, reshaped,
+	)}
+}
+
+// unreadableReason says why a replace left its block unreadable and what to do instead, by cause.
+func unreadableReason(with string, unreadable error) string {
+	if errors.Is(unreadable, pmdoc.ErrBlockHTML) {
+		return fmt.Sprintf(
+			"with %q is HTML that opens a block where it lands, and the Proof schema carries no block HTML; keep the HTML inside a line, where it opens no block",
+			with,
+		)
+	}
+	return fmt.Sprintf("with %q leaves markdown the document cannot read back where it lands (%v); write it inside a line of text, or insert the block you mean as its own block", with, unreadable)
+}
+
+func blockID(block *pmdoc.Node) string {
+	id, _ := block.Attrs[pmdoc.BlockIDAttr].(string)
+	return id
+}
+
 // inlineReplacement parses replace's `with` as one textblock's inline content:
 // a quote-anchored replace stays inside its textblock, so a leading list or
 // heading marker is text, never a new block.
-func inlineReplacement(markdown string) (*pmdoc.Node, error) {
+func inlineReplacement(markdown string, edges textEdges) (*pmdoc.Node, error) {
 	inline, err := pmdoc.ParseInline(markdown)
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
-			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf("replace is inline; %v (paragraphs: give each one its own replace, then insert any extra paragraphs after the last one you rewrote; a heading, list, table or code fence: replace keeps a block's kind, so insert it beside a paragraph you replace, and delete the old block only when no paragraph of the new text is left to take its place)", err)}
+			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf("replace is inline; %v (paragraphs: give each one its own replace, then add every extra paragraph in one insert anchored on the last paragraph you rewrote; an insert lands after the top-level block holding the quote, so beside a paragraph in a list it goes after the whole list; any block that is not a paragraph: replace keeps a block's kind, so insert it beside a paragraph you replace, and delete the old block only when no paragraph of the new text is left to take its place)", err)}
 		}
 		return nil, err
 	}
@@ -1049,7 +1212,7 @@ func inlineReplacement(markdown string) (*pmdoc.Node, error) {
 		)}
 	}
 	paragraph := &pmdoc.Node{Type: "paragraph", Children: inline}
-	continueText(paragraph, markdown)
+	continueText(paragraph, markdown, edges)
 	return pmdoc.StripAnchorMarks(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{paragraph}}), nil
 }
 
@@ -1067,6 +1230,18 @@ var (
 	hardBreakOrderedMarker    = regexp.MustCompile(`^[ \t]*0{0,8}1[.)][ \t]`)
 	hardBreakBlockquoteMarker = regexp.MustCompile(`^[ \t]*>`)
 )
+
+// hasHardBreak reports whether a parsed replacement carries a hard break.
+func hasHardBreak(with *pmdoc.Node) bool {
+	for _, paragraph := range with.Children {
+		for _, node := range paragraph.Children {
+			if node.Type == "hardbreak" {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // blockMarkerAfterHardBreak reports the block marker a `with` opens a line with after a hard line
 // break, and the kind of block that marker names. A hard break puts what follows it at a true
@@ -1098,41 +1273,95 @@ func blockMarkerAfterHardBreak(inline []*pmdoc.Node) (marker, kind string) {
 	return "", ""
 }
 
-// inlineAware parses a suggestion's replacement as blocks, keeping the edge
-// whitespace of a replacement that stays inline.
-func inlineAware(markdown string) (*pmdoc.Node, error) {
-	tree, err := parseInput(markdown)
+// inlineAware parses a suggestion's replacement as blocks written into the document, keeping the
+// edge whitespace of a replacement that stays inline. opensDocument says whether the replacement
+// lands where the document begins.
+func inlineAware(markdown string, edges textEdges, opensDocument bool) (*pmdoc.Node, error) {
+	tree, err := parseFragmentInput(markdown, opensDocument)
 	if err != nil {
 		return nil, err
 	}
 	if isInlineDocument(tree) {
-		continueText(tree.Children[0], markdown)
+		continueText(tree.Children[0], markdown, edges)
 	}
 	return tree, nil
 }
 
-// continueText restores the leading and trailing whitespace markdown parsing
-// drops so a replacement can continue the text around it.
-func continueText(paragraph *pmdoc.Node, markdown string) {
-	leading := markdown[:len(markdown)-len(strings.TrimLeftFunc(markdown, unicode.IsSpace))]
-	trailing := markdown[len(strings.TrimRightFunc(markdown, unicode.IsSpace)):]
-	if leading == "" && trailing == "" {
-		return
+// refuseCodeThatReshapesItsBlock refuses a replacement into a code block that leaves the
+// document-level block holding it reading back as blocks of another shape. A code block's text is
+// literal, so only the lines around it could read it differently, and the renderer writes a typed
+// block's fence longer than any line of colons in its code that the browser editor's parser, or
+// this one, could read as that fence (pmdoc's typedFence). Code that only reads back with
+// different whitespace keeps its shape and is not refused.
+func refuseCodeThatReshapesItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
+	_, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	if err != nil || reshaped == nil {
+		return err
 	}
-	var first, last *pmdoc.Node
-	for _, child := range paragraph.Children {
-		if child.Type == "text" {
-			if first == nil {
-				first = child
-			}
-			last = child
+	holder := "block"
+	for _, ancestor := range at.Ancestors {
+		if pmdoc.IsTypedBlock(ancestor.Type) {
+			holder = ancestor.Type
+			break
 		}
 	}
-	if first == nil {
+	return &ErrInvalidOp{Field: field, Reason: fmt.Sprintf(
+		"%s %q changes how the %s holding this code block reads back (%v); move the code block out of the %s",
+		field, with, holder, reshaped, holder,
+	)}
+}
+
+// codeReplacement is what a replacement landing in a code block splices in: a code block's text
+// is literal, whitespace, markdown syntax and references alike, so it is the replacement as sent.
+func codeReplacement(text string) *pmdoc.Node {
+	paragraph := &pmdoc.Node{Type: "paragraph"}
+	if text != "" {
+		paragraph.Children = []*pmdoc.Node{{Type: "text", Text: text}}
+	}
+	return &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{paragraph}}
+}
+
+// textEdges reports which of a replacement's edges meet the edges of the text it lands in, where
+// no text is left to continue and whitespace kept there is stripped on the next read, or, after a
+// footnote's marker, opens indented code.
+type textEdges struct{ start, end bool }
+
+func edgesOf(at pmdoc.TextblockAt, r pmdoc.Range) textEdges {
+	return textEdges{start: r.From == at.Content.From, end: r.To == at.Content.To}
+}
+
+// continueText restores the spaces and tabs parsing strips from a replacement's edges, so the
+// replacement continues the text around it. They go in unmarked text at the paragraph's own
+// edges - ` **x**` is a space and then bold, not a bold ` x`, and ` `c` ` leaves the code span's
+// text alone. A line break at an edge is no part of an inline replacement and is not restored,
+// and whitespace the parser keeps, such as a no-break space, is in the text already. An edge that
+// meets the edge of the text it lands in (textEdges) is left off.
+func continueText(paragraph *pmdoc.Node, markdown string, edges textEdges) {
+	if len(paragraph.Children) == 0 {
 		return
 	}
-	first.Text = leading + first.Text
-	last.Text += trailing
+	if leading := edgeSpace(markdown[:len(markdown)-len(strings.TrimLeft(markdown, markdownSpace))]); leading != "" && !edges.start {
+		if first := paragraph.Children[0]; first.Type == "text" && len(first.Marks) == 0 {
+			first.Text = leading + first.Text
+		} else {
+			paragraph.Children = append([]*pmdoc.Node{{Type: "text", Text: leading}}, paragraph.Children...)
+		}
+	}
+	if trailing := edgeSpace(markdown[len(strings.TrimRight(markdown, markdownSpace)):]); trailing != "" && !edges.end {
+		if last := paragraph.Children[len(paragraph.Children)-1]; last.Type == "text" && len(last.Marks) == 0 {
+			last.Text += trailing
+		} else {
+			paragraph.Children = append(paragraph.Children, &pmdoc.Node{Type: "text", Text: trailing})
+		}
+	}
+}
+
+// markdownSpace is the whitespace a paragraph's parse strips from its edges.
+const markdownSpace = " \t\n"
+
+// edgeSpace is an edge's whitespace without its line feeds.
+func edgeSpace(run string) string {
+	return strings.ReplaceAll(run, "\n", "")
 }
 
 func isInlineLeaf(node *pmdoc.Node) bool {

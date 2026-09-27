@@ -280,7 +280,7 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Fast-follow:** <one named cleanup item and where it will land>, or "none".
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
-**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, record the pushed tip, rebase onto the new base, and push with `legion-worker`'s procedure for rewritten commits — the new head runs Tests against the new merge result — and cite that run in the PR body.
+**Retarget:** Retargeting a pull request to a new base does not re-run Tests; after a retarget, merge the bookmark onto the new base (`jj new legion/<KEY> <new base> -m "<message>"`) and push with `legion-worker`'s ordinary push procedure — a genuine fast-forward, never the procedure for rewritten commits — the new head runs Tests against the new merge result — and cite that run in the PR body.
 ```
 
 **A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
@@ -307,18 +307,46 @@ this proof.
   reviewer answers each thread it opened with exactly one of `Accepted: fixed in <commit> — <one line>`,
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
   acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
-  `Accepted:` — the opener's own follow-up included — leaves the thread open, since the command
-  reads only the newest comment). The review App can reply on a thread but cannot resolve it:
+  `Accepted:` — the opener's own follow-up included — leaves the thread open, because resolution
+  considers only the newest comment). The review App can reply on a thread but cannot resolve it:
   GitHub grants resolving a review thread to the pull request's author, and the implementer opens
-  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). So the
-  **implementer** runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before every
-  push that answers a review (the corrective push and the final `.legion/` deletion push) and
-  pastes its output into the `Threads` section. The command resolves each unresolved thread
-  whose newest comment is the opener's own `Accepted:` reply, one `resolveReviewThread` per
-  thread, prints `resolved <url>` or `left open <url> — newest reply by <login> is not an acceptance`,
-  and exits 1 naming the thread's URL and GitHub's message when GitHub refuses one; report that
-  exit to the architect, which opens an ask for a human to resolve the thread by hand —
-  never skip it silently. The merger runs the same command once more before publishing READY
+  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps).
+  When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`; when neither is set, use `gh api graphql`
+  with the session's GitHub credential and the fallback below.
+  In a Legion pane, the **implementer** runs the command before every push that answers a review
+  (the corrective push and the final `.legion/` deletion push) and pastes its output into the
+  `Threads` section. The command resolves each unresolved thread whose newest submitted comment is
+  the opener's own `Accepted:` reply, one `resolveReviewThread` per thread, prints `resolved <url>`
+  or `left open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the
+  thread's URL and GitHub's message when GitHub refuses one.
+
+  Without a grant, page through `reviewThreads`, skip `isResolved: true`, and compare the opener
+  with the newest comment. Query shape, inside `repository { pullRequest { … } }`:
+
+  ```graphql
+  reviewThreads(first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id isResolved
+      opener: comments(first: 1) { nodes { author { login } } }
+      newest: comments(last: 1) { nodes { author { login } body state } }
+    }
+  }
+  ```
+
+  Resolve only when the newest comment is submitted, its `author { login }` equals the opener's,
+  and its `body`, after removing leading spaces, tabs, CR, and LF, begins `Accepted:`. For each
+  such thread:
+
+  ```graphql
+  mutation($threadId: ID!) {
+    resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
+  }
+  ```
+
+  Re-read `reviewThreads` and confirm that thread's `isResolved` is true. In either route, report
+  a refused resolution to the architect, which opens an ask for a human to resolve the thread by
+  hand — never skip it silently. The merger runs the command once more before publishing READY
   and does not publish while any `left open` line remains.
 - **Correctness fixes land in this PR; cleanup is one named fast-follow.** A finding that
   changes behavior, hides an error, or breaks a gate is fixed here — never deferred.
@@ -334,9 +362,30 @@ this proof.
   the fingerprint at the current tip; after pushing the rebased branch, record it at the new
   tip; post one PR comment (Legion footer):
   `rebase <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
-  Rebase the whole chain — `jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin` —
-  so the tester's and reviewer's commits move with yours. Record the pushed tip before it and
-  push the rebased chain with the push procedure (*Rewriting pushed commits*, below).
+  Every issue workspace is a `jj workspace` of the same shared repository and operation log, and
+  jj always rebases every descendant of any commit it rewrites — a revset naming the root of your
+  own chain and rewriting it in place also rewrites whatever another tree has stacked on that root,
+  whichever selector chose it (`-s`, `-b`, and `-r` all rewrite descendants; `-r` only re-parents
+  them to fill the hole, which is worse). This is what happened in LEGION-118: one issue's own
+  conflict step moved a second issue's twelve commits and its bookmark onto a conflicted copy.
+  Resolve the conflict with a forward merge instead of a rewrite — merge the branch's own
+  bookmark with the destination in one new commit, so nothing existing is rewritten and nothing
+  built on your prior commits, in this tree or another, ever moves:
+
+  ```bash
+  jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
+  ```
+
+  Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed
+  commit above the described one the bookmark already names, and `jj git push` refuses to push
+  any commit without a description — merging from `@` drags that undescribed commit into the
+  ancestry and the push fails (`Won't push commit … since it has no description`); the bookmark
+  is always on a described, already-pushed commit. If the merge conflicts, resolve it in that
+  one commit — edit the markers directly; there is nothing to squash, since the merge is the
+  only new commit. Then `jj -R "$LEGION_WORKSPACE" new` to move off it, and push with the one
+  push procedure (*Every role pushes its own commits*, below): the merge descends from both the
+  bookmark's old position and the destination, so it is a genuine fast-forward and *Rewriting
+  pushed commits* never applies — nothing was rewritten, so there is no tip to record first.
 - **No deferrals.** Sami, 2026-09-11, verbatim: "My rule is no deferrals." The `Fast-follow:`
   field names naming, duplication, or wording cleanup only; anything that changes behaviour,
   hides an error, or breaks a gate lands in this PR.
@@ -558,8 +607,8 @@ remote branch sideways onto your commit and drops theirs (jj 0.45.1:
 `bookmark: legion/K [move sideways from <theirs> to <yours>]`). A clone that has not seen the other
 push is refused by jj itself (`unexpectedly moved on the remote`).
 
-**Rewriting pushed commits** — the conflict-forced rebase, the rebase after a retarget, or a
-`jj squash --into` a commit already on GitHub — leaves the pushed tip outside `::@-`, so record
+**Rewriting pushed commits** — a `jj squash --into` a commit already on GitHub, or any other
+rewrite of a commit you already pushed — leaves the pushed tip outside `::@-`, so record
 that tip first, after a fetch and while your chain still descends from it:
 
 ```bash
@@ -602,6 +651,42 @@ ends with the phase still open gets one reminder.
 This publishes your phase's completion to the architect's role and clears the daemon's
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
 invent a different completion protocol — this is the whole contract.
+
+A reviewer's phase ends with its completion, not with its review: submit the review on GitHub
+first, then commit the handoff and complete. The daemon moves the issue once both are in — the
+decision GitHub reports and your completion, in either order — so a review posted without a
+completion leaves the issue in reviewing until you finish.
+
+**A refused completion is information, not a retry loop.** The daemon attributes your report to
+the run whose task you took, and answers with what it found. What each answer carries, and what to
+do:
+
+- `HANDOFF_STALE_GENERATION` — names the issue, the run it is on, and the run your completion
+  reported. The issue has moved to a newer run since your task was given, so the work you just
+  reported belongs to a run that is over. Nothing you can repeat changes that: stop, push nothing
+  further, and tell the architect what you completed and that its run has been superseded. A task
+  for the current run arrives in this same session if the phase still needs you. The same answer
+  comes when your turn started before the daemon recorded the current run's task as yours, so it
+  still holds you to the earlier run: that task is sent again. When a task arrives, do what it
+  asks; if the work it asks for is already committed, call `handoff_complete` again, and never redo
+  the work or write a second handoff.
+- `HANDOFF_NOT_CURRENT_PHASE` — names your role, the issue, and the phase it is in now. The issue
+  has left your phase; report to the architect rather than completing again.
+- `HANDOFF_NO_RUN` — names neither: it says this claim has taken no task, so the daemon cannot
+  tell which run you are reporting. Your pane is completing outside any assignment. Say so to the
+  architect; do not re-run the phase. The same answer comes when your turn started before your task
+  reached you: a notice or a message started it, and the task, refused while that turn ran, is sent
+  when the turn ends. When a task arrives, do what it asks; if the work it asks for is already
+  committed, call `handoff_complete` again, and never redo the work or write a second handoff.
+- `HANDOFF_ALREADY_RECORDED` — names your role, the phase, the review round and the commit. This
+  exact call was received before, and its first answer stands: accepted, or a refusal the daemon
+  records with the call — `HANDOFF_STALE_GENERATION`, `HANDOFF_NOT_CURRENT_PHASE`,
+  `READY_REQUIRED` or `HANDOFF_NOT_NEW`. `HANDOFF_NO_RUN` is never that first answer, since it is
+  given before anything is recorded. Sending it again changes nothing; if you did not see that
+  first answer, tell the architect so and quote this one.
+
+Quote the answer verbatim in what you tell the architect: with the run and phase it names, the
+difference between "my work is lost" and "my work belongs to the previous run" is visible.
 
 **Stay in this session afterward.** Your process does not exit when your phase completes;
 it goes idle in its pane, and after `worker_idle_retire_seconds` (default 600 s) idle with no

@@ -30,6 +30,8 @@ const issue: Issue = {
   updated_at: "2026-09-09T00:00:00Z",
 };
 const details: IssueDetails = {
+  route_status: null,
+  route_holder: null,
   ...issue,
   artifacts: [],
   children: [],
@@ -37,6 +39,9 @@ const details: IssueDetails = {
   referenced_by_count: 0,
 };
 const summary: IssueSummary = {
+  route: null,
+  route_status: null,
+  route_holder: null,
   key: issue.key,
   labels: [],
   last_seq: 1,

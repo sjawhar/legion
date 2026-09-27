@@ -20,6 +20,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
+// Unrecorded is what this route reads for an issue the workflow does not record, where an
+// operator's claim exists and an issue does not (LEGION-272). It is not a workflow phase: no
+// issue record holds it, the transition table never reaches it, and no role works it — so it
+// lives with the wire shape that carries it rather than in the domain's phases.
+const Unrecorded phase.Phase = "unrecorded"
+
 // State is the daemon's own facts, and nothing another system owns (spec: State and store).
 type State struct {
 	Daemon              DaemonInfo           `json:"daemon"`
@@ -29,6 +35,10 @@ type State struct {
 	// ControllerLocator is the project's controller, absent until a session registers with the
 	// capability `legion controller start` fetched.
 	ControllerLocator *ControllerLocator `json:"controllerLocator,omitempty"`
+	// AgentSecretsLogin is the daemon's own agent-secrets machine login
+	// (runtime.kubernetes.agent_secrets, AGENTC-393 Plan C), absent when the deployment configures
+	// no broker.
+	AgentSecretsLogin *AgentSecretsLoginView `json:"agentSecretsLogin,omitempty"`
 }
 
 // ControllerLocator is the external record of the project's controller (LEGION-206 Requirement
@@ -50,6 +60,16 @@ func ControllerLocatorOf(runtimeName string, record controller.Record) *Controll
 		return nil
 	}
 	return &ControllerLocator{Runtime: runtimeName, External: true, SessionID: record.Session, RegisteredAt: record.RegisteredAt}
+}
+
+// AgentSecretsLoginView is the daemon's own agent-secrets machine login's current status
+// (agentsecrets.Client.LoginStatus): State is one of "none" (no login has ever been started),
+// "pending", "issued", "denied", or "expired"; Code is the confirmation code shown on the
+// Dispatch credential page for a pending login, "" otherwise. Never a key or a launcher
+// credential — those live only in the daemon's process memory.
+type AgentSecretsLoginView struct {
+	State string `json:"state"`
+	Code  string `json:"code"`
 }
 
 // MarshalJSON keeps `issues` an object on the wire: a nil Go map is `null`, which the plugin's
@@ -102,8 +122,12 @@ type Issue struct {
 	Generation uint64      `json:"generation"`
 	Phase      phase.Phase `json:"phase"`
 	// Status is the last Dispatch status the daemon observed for the issue.
-	Status    string     `json:"status"`
-	Architect *ClaimView `json:"architect,omitempty"`
+	Status string `json:"status"`
+	// HoldReason is why a held issue is held, when its hold has one: `escalated` once its architect
+	// sent it to the controller. Absent otherwise, and absent while the issue's tree lingers or is
+	// closed: the record keeps the reason, and the view shows it again once the tree is re-admitted.
+	HoldReason string     `json:"holdReason,omitempty"`
+	Architect  *ClaimView `json:"architect,omitempty"`
 	// Workers is keyed by the role that holds the claim; the vocabulary of a claim belongs to
 	// `internal/claim`, which the runtime, the worker stream, and the supervisor all speak
 	// without importing this package.
@@ -143,6 +167,11 @@ type PhaseView struct {
 }
 
 // PullRequestView is the issue's pull request as the daemon observes it from GitHub.
+// ReviewDecision is the latest review round's decision (changes_requested or approved), the one
+// the workflow ends the round on when the reviewer completes. It shows from the review that
+// decided it until the next round opens or a new generation clears it, so a request for changes
+// stays through implementing and testing, and an approval through retro and every phase after
+// it; absent until a review in a round decides.
 type PullRequestView struct {
 	Number         int    `json:"number"`
 	Head           string `json:"head"`

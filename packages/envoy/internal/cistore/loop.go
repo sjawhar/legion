@@ -3,11 +3,13 @@ package cistore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
@@ -76,31 +78,10 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 		if !claimed {
 			continue
 		}
-		sum := renderSummary(state)
-		issuedAt := contracts.NowMillis()
-		sum.SettledAt = issuedAt
-		payload, err := json.Marshal(sum)
+		env, err := settlementEnvelope(state, contracts.NowMillis())
 		if err != nil {
 			logger.Error("checks payload failed", slog.String("error", err.Error()))
 			continue
-		}
-		env := contracts.Envelope{
-			EventID:       id.New(),
-			Source:        "github",
-			SourceEventID: id.New(),
-			Topic:         contracts.GithubSubject(state.Owner, state.Repo, "pr."+state.Number+".checks"),
-			DedupeKey: fmt.Sprintf(
-				"github.checks.%s/%s.pr.%s.%s.g%d",
-				state.Owner,
-				state.Repo,
-				state.Number,
-				state.SHA,
-				state.Generation,
-			),
-			IssuedAt:       issuedAt,
-			PayloadSummary: settledPayloadSummary(sum),
-			Payload:        string(payload),
-			TraceID:        id.New(),
 		}
 		if err := env.Validate(); err != nil {
 			logger.Error("checks invalid envelope", slog.String("error", err.Error()))
@@ -126,6 +107,19 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			continue
 		}
 		if err := pub.Publish(env); err != nil {
+			if errors.Is(err, bus.ErrRefused) {
+				// NATS refuses this settlement on every tick, so the head never settles from here: its
+				// record is marked overflowed, as one past its bounds is, and the refusal logged once.
+				logger.Error("checks settlement refused",
+					slog.String("error", err.Error()),
+					slog.String("topic", env.Topic),
+					slog.String("sha", state.SHA),
+				)
+				if err := store.markOverflowed(key); err != nil {
+					logger.Warn("checks overflow not recorded", slog.String("error", err.Error()), slog.String("sha", state.SHA))
+				}
+				continue
+			}
 			logger.Warn("checks publish failed",
 				slog.String("error", err.Error()),
 				slog.String("topic", env.Topic),
@@ -140,6 +134,34 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			logger.Warn("checks mark-settled failed", slog.String("error", err.Error()))
 		}
 	}
+}
+
+// settlementEnvelope is the checks envelope that settles state, issued at issuedAt.
+func settlementEnvelope(state State, issuedAt int64) (contracts.Envelope, error) {
+	sum := renderSummary(state)
+	sum.SettledAt = issuedAt
+	payload, err := json.Marshal(sum)
+	if err != nil {
+		return contracts.Envelope{}, err
+	}
+	return contracts.Envelope{
+		EventID:       id.New(),
+		Source:        "github",
+		SourceEventID: id.New(),
+		Topic:         contracts.GithubSubject(state.Owner, state.Repo, "pr."+state.Number+".checks"),
+		DedupeKey: fmt.Sprintf(
+			"github.checks.%s/%s.pr.%s.%s.g%d",
+			state.Owner,
+			state.Repo,
+			state.Number,
+			state.SHA,
+			state.Generation,
+		),
+		IssuedAt:       issuedAt,
+		PayloadSummary: settledPayloadSummary(sum),
+		Payload:        string(payload),
+		TraceID:        id.New(),
+	}, nil
 }
 
 func settledPayloadSummary(sum Summary) string {

@@ -183,3 +183,25 @@ export function resolveDispatchConfig(
   }
   return { enabled: true, url: url.url, token, error: null };
 }
+
+/** A resolution with Dispatch enabled: its URL and bearer token both resolved. */
+export type ActiveDispatchConfig = DispatchConfigResolution & {
+  readonly url: string;
+  readonly token: string;
+};
+
+/**
+ * The active Dispatch configuration (`resolveDispatchConfig`), or null when none is configured. A
+ * file, URL, or token that prevents Dispatch throws `dispatch config: <reason>` rather than reading
+ * as unconfigured.
+ */
+export function activeDispatchConfig(
+  env: DispatchEnvironment,
+  options: { readonly cwd?: string; readonly home?: string } = {}
+): ActiveDispatchConfig | null {
+  const config = resolveDispatchConfig(env, options);
+  if (config.error !== null) throw new Error(`dispatch config: ${config.error}`);
+  const { url, token } = config;
+  if (!config.enabled || url === null || token === null) return null;
+  return { ...config, url, token };
+}

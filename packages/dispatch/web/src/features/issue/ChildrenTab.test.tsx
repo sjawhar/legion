@@ -8,6 +8,8 @@ import type { IssueDetails } from "../../api/types";
 import { ChildrenTab } from "./ChildrenTab";
 
 const issue: IssueDetails = {
+  route_status: null,
+  route_holder: null,
   artifacts: [],
   children: [
     {

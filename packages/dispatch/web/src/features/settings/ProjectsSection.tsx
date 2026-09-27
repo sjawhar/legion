@@ -50,7 +50,7 @@ export function ProjectsSection(): ReactNode {
   };
 
   return (
-    <section aria-labelledby="projects-heading" className="mb-10">
+    <section aria-labelledby="projects-heading">
       <h2 className={`text-xl font-semibold ${textPrimaryOnCanvas}`} id="projects-heading">
         Projects
       </h2>

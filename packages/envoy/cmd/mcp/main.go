@@ -40,14 +40,6 @@ func main() {
 		}
 		port = p
 	}
-	replicas := 1
-	if v := strings.TrimSpace(os.Getenv("ENVOY_NATS_REPLICAS")); v != "" {
-		r, err := strconv.Atoi(v)
-		if err != nil {
-			log.Fatalf("invalid ENVOY_NATS_REPLICAS: %v", err)
-		}
-		replicas = r
-	}
 
 	// Load and validate config.
 	cfg, err := mcpbridge.LoadConfig(configPath)
@@ -55,8 +47,10 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
-	// Connect to NATS.
-	client, err := bus.Connect(natsURLs, bus.WithReplicas(replicas))
+	// Connect to NATS. The bridge publishes what its MCP servers report and owns nothing on the
+	// bus, so it never reconciles ENVOY_NOTIFICATIONS, and reaches only this machine's NATS
+	// unless ENVOY_ALLOW_REMOTE_NATS=1.
+	client, err := bus.Connect(natsURLs)
 	if err != nil {
 		log.Fatalf("nats: %v", err)
 	}

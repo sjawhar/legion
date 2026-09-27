@@ -106,7 +106,10 @@ A spec has two readers: the human who decides reads the **Summary** and **New si
   between two lanes or a halt condition, a question for the platform PO (see
   [Before you ask](#before-you-ask) under Asking).
 - Keep each section to one screen; work that exceeds one screen per section is two specs.
-- Update the spec as decisions land: the spec is the record, comments are the discussion.
+- Update the spec as decisions land: the spec is the record, comments are the discussion. It
+  records decisions and requirements, never progress: no status, timestamps, "Update HH:MMZ"
+  section, PR list, or handoff notes. Progress is not a Dispatch object at all; it lives in your
+  transcript and your pull request (see [Messages](#messages)).
 - Before sending it: no sections conflict, every requirement has exactly one reading, and the
   Summary and every ask block pass the phone test above.
 
@@ -147,8 +150,9 @@ See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-yo
 Every session works on an issue or project document. Legion pre-fills `issue` from `LEGION_ISSUE`: use a native issue key such as
 `LEGION-3`, an external `owner/repo#n` reference, or a bare positive number (resolved against the cwd repository). Otherwise pass
 exactly one owner to every owner-scoped tool: `issue` for an issue, or `project` and `artifact` for an unlinked project document (see
-[References](#references) for the resulting ref shape). On first use, an external issue reference creates its native issue in the
-project configured for that repository in Dispatch Settings, then falls back to `DISPATCH_DEFAULT_PROJECT`.
+[References](#references) for the resulting ref shape). An external issue reference addresses the existing Dispatch issue linked to
+that GitHub issue or pull request. Only `dispatch_issue` with `external` creates a native issue; if no issue is linked, call
+`dispatch_issue({ external: "owner/repo#n", project: "<project>", title: "<title>" })` before addressing it.
 
 Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with neighboring issue keys. They also include nullable coarse priority (`P0` highest through `P3` lowest) and `assignee`: the lowercase GitHub login of the human who answers the issue's asks, or `null` when nobody holds it. `dispatch_read` of an issue prints it as `Assignee: <login>` or `Assignee: unassigned`.
 
@@ -189,8 +193,8 @@ dashboard's **Unclaimed** filter is how you find work nobody is on.
   that session (its id is in the message; `envoy_send` reaches it) or pick up something else,
   and tell the human if you believe the work should be yours. When a **human** holds it, the
   refusal names the person and says nothing about a session running, because there is none to
-  message: ask them on the issue (`dispatch_message`) instead, and never assume their claim has
-  lapsed — only a human releases or forces a human's claim.
+  message: ask them with `dispatch_ask` instead, so the open ask appears in their Inbox, and
+  never assume their claim has lapsed — only a human releases or forces a human's claim.
 - **`409 CLAIM_CONTENDED` means the issue changed hands twice while your call ran**, so nothing
   was applied and nobody's liveness was checked. Read the issue and decide again; it is not a
   refusal by a live holder.
@@ -223,10 +227,18 @@ status is." Waiting for the deploy lane is not a status and is never announced.
 ```ts
 // PATCH /api/v1/issues/{key} — status, title, labels, priority, external_links (merged by URL), route, parent
 dispatch_issue_update({ issue: "AGENTC-175", status: "testing" })
+dispatch_issue_update({ issue: "AGENTC-175", status: "done", reason: "Shipped in owner/repo#7; verified on the production dashboard." })
 dispatch_issue_update({ issue: "AGENTC-175", priority: 1 }) // 0–3; see Priority is yours to set
 dispatch_issue_update({ issue: "AGENTC-175", external_links: ["https://github.com/owner/repo/pull/7"] })
 dispatch_issue_update({ issue: "AGENTC-175", parent: "AGENTC-170" }) // same-project key; "" clears the parent
 ```
+
+Closing takes a `reason`, and the tool refuses `status: "done"` without one: it posts the reason on
+the issue as a message, then closes it, because a closed issue refuses messages, comments, and
+artifacts, so a reason left for later has nowhere to go. When the close fails after the post, the
+error names the posted message; after a timeout or a server error it also says the close may have
+landed, so read the issue's status first. A retry points its reason at the posted message rather
+than repeating it.
 
 The two clears differ: `priority` clears with `null`, while `parent` and `route` clear with `""`.
 Guessing the other one is a refusal either way.
@@ -265,20 +277,88 @@ start with the issue key; standalone project-document hit lines start with
 
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
+The check compares title words only (shared stemmed terms), never meaning: "four tests that fail a
+merge" pairs with "four CI gates that cannot fail a merge". So when you force past a candidate, give
+the new issue a title that names what differs where you can, and open its spec's Summary with the
+distinction from the named issue, citing it (`dispatch://KEY`), for whoever reads the next pairing.
 
 ## Reading a project's backlog
 
 To see the shape of a project rather than find a phrase, list its issues:
 ```ts
-dispatch_issues({ project, status?, parent?, label?, updated_since?, limit? })
+dispatch_issues({ project, status?, parent?, label?, priority?, route_status?, updated_since?, limit? })
 ```
 Each row carries the issue key, title, status, priority, parent, labels, its open-ask count, and
 when it last changed — a roadmap or backlog pass without opening every issue. Filter with `status`
-(a lifecycle status), `parent` (one issue's children), `label`, or `updated_since` (an RFC3339
-timestamp, for "what moved this week"). `limit` caps the rows at 50 by default and 250 at most.
+(a lifecycle status), `parent` (one issue's children), `label`, `priority` (a list of `0`–`3`, with
+`null` for an issue with no priority: `[0, 1]` is every P0 and P1), `route_status` (below), or
+`updated_since` (an RFC3339 timestamp, for "what moved this week"). `limit` caps the rows at 50 by
+default and 250 at most.
 
 This is not search: it matches no text. Use `dispatch_search` for a keyword or phrase, and
 `dispatch_issues` when you want every issue in a project and its current state.
+
+### The owner audit
+
+As the owner of a surface, list your area's P0 and P1 issues and staff or close each one nobody
+has started:
+```ts
+dispatch_issues({ project, priority: [0, 1], limit: 250 })
+```
+Every unclaimed row in `triage`, `icebox`, `backlog` or `todo` is a decision: someone takes it and
+builds it, or it closes. A row in `in_progress`, `testing`, `needs_review` or `retro`, or one that
+carries a claim, is work under way ([Issue status is yours to move](#issue-status-is-yours-to-move))
+and is not re-staffed. A todo with a finished spec reads as queued work that nobody is doing
+(LEGION-173 sat in todo for two weeks with a complete spec; AGENTC-1010's v4 plan sat in backlog
+with nobody building it).
+
+A close that says the defect cannot happen cites the code that makes it impossible. An issue
+closed because a rewrite forecloses it names the file and line in the rewrite that does so; a
+close that cannot name one is not foreclosed, it is unread. The cheapest way for a rewrite to reach
+parity is to port the code, defect included: LEGION-211's bare `git worktree prune`, filed against
+the TypeScript daemon, had been ported into the Go coordinator and was live in production.
+
+The audit finds four shapes:
+
+- **Unstaffed work.** A plan or measurement exists, and no one is building it.
+- **Unrecorded delivery.** An issue not yet in `testing` or `done`, claimed or not, has a merged PR
+  naming it. Check the change live, then move the issue (AGENTC-1033 sat at `triage` after its fix,
+  agent-c #20367, merged).
+- **Unrecorded practice.** Someone does the issue's work by hand, more than once, while the issue
+  sits in backlog (OPS-132, done by hand on every migration merge). It leaves no plan and no PR to
+  find; the tell is your own messages. Doing something by hand more than once means an issue is
+  wearing the wrong status.
+- **Unreachable route.** An open issue whose route names a role nobody holds, or a session that is
+  not running, reaches nobody, whatever its priority, and the priority filter above never finds
+  it. List it on its own:
+  ```ts
+  dispatch_issues({ project, route_status: "no_holder", limit: 250 })
+  ```
+  Each row reads `route role:sre (nobody holds it right now)` or `route session:<id> (that session
+  is not running right now)`. That is one read of the listener, and one read is a restart gap as
+  often as a vacancy: an agent box that restarts or resumes keeps the session id, but the session
+  is absent from the listener for minutes, and its role with it. On 2026-09-27, 58 of 63 session
+  routes one read showed as unreachable pointed at a single session that was moving between boxes.
+  So a route is unowned only when it is `no_holder` on two reads at least ten minutes apart: list
+  again after ten minutes and act on the issues both lists name. Confirm with the second
+  `dispatch_issues` read, not `envoy_role_get`: a role lookup releases the claim of a holder whose
+  session is absent from the registry as it answers. Then staff the role, re-route the
+  issue to a live holder, or clear the route and assign it (AGENTC-1065, a P2 production listener
+  503, sat routed to an unheld `role:sre` with no assignee). `route_status: "unknown"` means the
+  listener did not answer, so a route could not be judged; a `no_holder` filter refuses rather
+  than answer an empty list then.
+
+Run the audit as a step of a coordinator's loop, at each checkpoint, not as a habit: these shapes
+are found by running the check, not by noticing them.
+
+### Symptom versus cause
+
+When a symptom and its cause sit on different issues, the work accrues to the cause's issue, and
+the symptom's issue carries a pointer to it. Before posting a measurement or finding, search
+Dispatch for the failing identity's or component's name, and post on the issue whose title names
+the fix, not the one naming the symptom. A symptom issue gathering messages with no human response
+is the tell. (The production freeze was iterated on AGENTC-546, the failing gate, while its cause
+and answer sat on AGENTC-1010.)
 
 ## Asking
 
@@ -298,10 +378,22 @@ production import). Every `dispatch_ask` passes four gates first:
    deletion or exposure of production data, anything that reaches a customer). The PO takes those
    to Sami as a Dispatch ask; you do not open one yourself, even as a permission ask under gate 2
    (Sami, 2026-09-25, AGENTC-34 §12).
-2. **Is there genuine uncertainty?** If not, it is a plan you execute. The one legitimate ask
-   without uncertainty is permission for an action only a human can authorise — a production
-   write, an external send, a console action — and then the question is that action in one
-   sentence, with options that name its outcomes (below).
+2. **Is there genuine uncertainty, and have you measured what you can?** If there is none, it is
+   a plan you execute. The one legitimate ask without uncertainty is permission for an action
+   only a human can authorise — a production write, an external send, a console action — and then
+   the question is that action in one sentence, with options that name its outcomes (below).
+   Measure before you write: how many are affected, whether anything reaches the path, what the
+   current state already is. The measurement decides whether a human is needed at all, and when
+   one is, it turns a research request he cannot answer into a decision he can — an ask whose
+   lead was "accept this or build a workaround", with nobody knowing whether anyone was affected,
+   was unanswerable until a measurement showed the usage could not be observed at all; the same
+   ask, carrying that and the size of the affected population, was answered at once, and another
+   lost an option outright when the measurement showed it could not repair most of the affected.
+   Report what the measurement could **not** establish, with its own control: "I found no
+   evidence" and "there is no evidence to find" read alike and mean opposite things, and a
+   control that shares the query's blind spot proves neither. Before you say you are waiting on
+   him, run `dispatch_open_asks` (below) — and the test for a new ask is not whether you asked on
+   this issue before, but whether it asks him to re-report something he has already answered.
 3. **Can someone who has not read the code answer it on a phone?** Write it as
    [Writing for the human](#writing-for-the-human) says — who can do what today and what changes
    for them, then two options with what each costs and your recommendation — and no slice or
@@ -315,10 +407,10 @@ production import). Every `dispatch_ask` passes four gates first:
    it nor build it — fixing the cause of the thing he named is delivering what he asked for, and
    is not what this forbids; changing something else is. An ask that turns his complaint about
    one control into a choice about another does not address what he asked, and changing that
-   other control is a change he never asked for. One thing is still an ask the moment you know
-   it, even before delivery: a
-   credential, an approval, a setting or a console action only he can take that the delivery
-   waits on — see "Anything that needs the human is an ask", further down.
+   other control is a change he never asked for. What is still an ask the moment you know it,
+   even before delivery, is anything "Anything that needs the human is an ask" (further down)
+   lists that the delivery waits on — including a conflict between what he asked for and another
+   of his rules, which this gate would otherwise bury as settled.
 
 The platform PO audits open asks. One that fails a gate — or that points at another message in
 prose instead of carrying its content (below) — is retracted, with the PO's answer as the record.
@@ -409,17 +501,16 @@ Before saying you are waiting for human input, call `dispatch_open_asks`. With n
 
 **Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A lane's schema decision or a platform-PO contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17). A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without an ask, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its ask comes before the commit that sets that shape.
 
-**Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
-a setting only they can change, a review click, a conflict between two of their own rules - if
-your work waits on it, open a `dispatch_ask` the moment you know, the action as the question. The
-exception is a halt condition from [Before you ask](#before-you-ask) gate 1, which goes to the
-platform PO over Envoy instead.
-Never write it into a spec, a comment reply, a message, or a
-pull-request body: nothing in those paths reaches the human's Inbox, and a human who is not
-reading your document does not know they are the blocker. Before asking, try to remove the
-step: a value already on the machine, a permission you already hold, an API that replaces the
-click. One ask per item, `urgency: "high"` when work is stopped on it; while it is open, keep
-working on everything that is not.
+**Anything you are blocked on a human for is an open ask.** An agent waits on a human only through
+an open ask. An approval, a credential or grant to renew, a setting only they can change, a review
+click, a decision, or a conflict between two of their own rules: open a `dispatch_ask` the moment
+you know, the action as the question. The exception is a halt condition from [Before you
+ask](#before-you-ask) gate 1, which goes to the platform PO over Envoy instead. Never write it
+into a spec, a comment reply, a message, or a pull-request body: nothing in those paths reaches
+the human's Inbox, and a human who is not reading your document does not know they are the
+blocker. Before asking, try to remove the step: a value already on the machine, a permission you
+already hold, an API that replaces the click. One ask per item, `urgency: "high"` when work is
+stopped on it; while it is open, keep working on everything that is not.
 
 A to-do handed to a human is an ordinary question: phrase the to-do as the question and give it
 the options that name its outcomes, in the human's words - there is no fixed vocabulary and the
@@ -452,8 +543,8 @@ is rewritten, so anchors inside the text you replaced move as they would for any
 writes a new version, which on a spec awaiting approval closes the design gate until the new version is approved. Editing the block
 with `dispatch_doc_edit` works too and is the way to change anything else about it, including adding formatting to a question.
 Re-sending a field unchanged rewrites nothing, so retrying the whole ask is safe.
-Two shapes the block cannot carry are refused outright, naming the field and writing nothing: an option label containing `": "`,
-which is what separates a label from its description, and a question with a line beginning `:::`. Blank lines separate paragraphs;
+Text the block cannot carry back unchanged is refused outright, naming the field and writing nothing - an option label containing
+`": "`, the separator between a label and its description, is one example of text that cannot survive the round trip. Blank lines separate paragraphs;
 a single newline is kept as a line break.
 
 An ask stays open until a human answers, unless its question no longer needs that answer. Retract a moot or superseded question, or
@@ -528,9 +619,8 @@ the document's approval state; `stale` means it was approved and then edited - r
 ## The Spec
 
 The spec holds requirements, design, acceptance, decisions, and rejected alternatives, structured per [Writing a spec](#writing-a-spec).
-It changes only when a decision or requirement changes, and every version that records one is named with `summary`. Never write
-progress, status, timestamps, an "Update HH:MMZ" section, a PR list, or handoff notes into the spec. Progress is not a
-Dispatch object at all: it lives in your transcript and your pull request (see [Messages](#messages)).
+It changes only when a decision or requirement changes, and every version that records one is named with `summary`. What it
+never carries is in [Rules](#rules) under Writing a spec.
 
 Read the current document before changing it:
 
@@ -539,126 +629,14 @@ dispatch_doc_read({ issue?, project?, artifact?, version?, ref? })
 ```
 It returns live or versioned markdown with open marks. A live read ends with a document token; `issue` with an
 omitted `artifact` reads the issue specification; a project needs `artifact`; and a
-`dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the id, slug, or filename.
+`dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the slug (an id or a
+filename resolves when no document has that slug).
 
-```ts
-dispatch_doc_edit({ issue?, project?, artifact, ops, precondition?, summary? })
-```
-It returns issue or project-document owner details plus `applied`, optional `version`, `changed`, and
-`unchanged_ops`. `ops` is an array of this exact `EditOp` shape:
+Editing one is [Editing a document](references/document-edits.md): the shape of `dispatch_doc_edit`,
+how to quote the text you mean, one `replace` per paragraph, preconditions against a stale edit, and
+what each operation costs a block's id and its anchors.
 
-```ts
-type EditOp = {
-  op: "replace" | "delete" | "insert" | "retype" | "move" | "delete_row" | "delete_column";
-  find?: string;
-  with?: string;
-  occurrence?: number;
-  markdown?: string;
-  after?: string;
-  before?: string;
-  block?: string;
-  index?: number;
-  type?: string;
-  attributes?: Record<string, unknown>;
-};
-```
-
-An operation takes only these keys. A key it does not declare is refused before the call leaves
-your process, naming the operation and its keys, because every key but `op` is optional: a
-misspelled `with` would otherwise be dropped and the `replace` would delete the text you meant to
-rewrite.
-
-Target `replace`, `delete`, and quote insert anchors by a block's text as rendered: write inline
-code without backticks, bold without asterisks, and link text without link syntax. A table-cell
-anchor is its cell text. Quote code-block contents without their Markdown fences. A quote must stay
-within one textblock; split changes that span separate blocks into separate operations.
-
-`replace` requires `find` and `with`; `delete` requires `find` or `block`; `insert` requires `markdown` and exactly one of `after` or
-`before`; `move` requires `block` and exactly one of `after` or `before`; and `delete_row` / `delete_column` each require a table
-`block` plus a zero-based `index`. An insert or move anchor is a quote, `"start"`, `"end"`, `"heading:Title"`, or `"block:<id>"`.
-Ordinary inserts create a sibling block before or after the quote, heading, or block's enclosing document block, and a move lands the
-block at that same boundary; `"start"` and `"end"` select the document edges. At a table-cell quote, a body-row fragment (no header or
-delimiter rows) extends that table before or after the matched row instead; short rows are padded, wider rows are rejected, and deleting
-a cell's quoted text removes only that text. `delete_row` / `delete_column` instead mutate their named table in place, keeping the
-table's block id. A row index includes the header: row `0` is the header and its deletion promotes the first body row. The last body
-row and any row's last column cannot be deleted. An index is required. A missing, non-integer, negative, or out-of-range index is
-`INVALID_OP` on `index`, naming the supplied value and the table's actual dimensions before making any change. Markdown parsing
-canonicalizes short ragged rows by padding missing cells, so column deletion preserves every non-selected cell in the canonical table.
-`GET /api/v1/artifacts/<artifact UUID>/blocks` reports a table's own references plus its descendant cell anchors. A row or column
-deletion that would remove an open ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
-answered asks and resolved comments are history and do not block it. A `find` or quote anchor tolerates inline Markdown
-(`**bold**`, `` `code` ``) and a leading `# ` selects a heading by its text; a miss names the quote and the three nearest blocks so
-the next quote lands, and a `find` cut before a closing `**` or `` ` `` is refused as an unbalanced inline mark rather than reported
-as a miss. A `heading:` anchor matches the whole heading text exactly — a prefix of a longer heading is a miss, naming the anchor and
-the nearest headings. `replace` is inline: `with` is the new text of the matched span inside its block, so a marker of a *different*
-kind from the block's own (`4. Design` written into a heading, `# Title` into a paragraph) stays literal text and never turns the
-block into a list or heading. A `with` that opens with a marker of the *same* kind as the matched block's own would write it twice and
-is rejected (`INVALID_OP` on `with`) — including prose that merely looks like a marker (`1999. was a year` into an ordered item),
-which is written as text with a backslash escape (`1999\. was a year`) — omit the marker to replace the block's text, or use `insert`
-plus `delete` to change the block's kind, level or number. The one exception is a heading rename whose `find` carried a heading
-marker: `replace(find="## Old", with="## New")` gives `## New`. A different level in `with` applies only when `find` named the
-heading's actual level — `find="## Old"`, `with="### New"` retitles and makes it an h3 — because `# ` is the level-blind selector,
-so `find="# Old"` renames the text and keeps whatever level it selected. `with` that forms more than one
-paragraph is rejected (`INVALID_OP` on `with`) — see the recipe for a multi-paragraph rewrite below; so is any non-empty `with` that
-renders to no text, which a line indented four spaces or a tab does (markdown reads that as a code block), as does whitespace
-alone. An empty `with` is the one that deletes the matched text on purpose. Use zero-based `occurrence` for a
-repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
-
-**Rewriting several paragraphs is one `replace` per paragraph, then a read-back.** `replace` is inline:
-each `with` is the new text of one paragraph, and a `with` that forms two paragraphs is refused whatever the
-text says. Give each paragraph you rewrite its own `replace`, which keeps that paragraph's block id and every
-anchor outside the text you rewrite. A comment or ask anchored to the text you rewrite loses its quote but keeps
-its pin to the block, so the dashboard still shows it beside that paragraph; a delete (below) loses both. When
-the new text has more paragraphs than the old, `insert` the extra ones
-with `after` quoting the last paragraph you rewrote exactly as it now reads (the operations in one batch
-apply in order); they land after the top-level block that holds the quote, so beside a paragraph inside a
-list item or a typed block they go after the whole list or block. When it has fewer, `delete` each leftover
-paragraph, with its whole text as `find` or its id as `block`. All of that holds while the new text is
-paragraphs: `replace` keeps a block's kind, so a heading, list, table or code fence cannot be replaced into place —
-a heading, list or table marker is written as literal text, and a code fence becomes an inline code span with the
-fence gone. When the new text adds one beside paragraphs, `insert` it beside the paragraph you replaced, which keeps
-that paragraph's id; only when no paragraph of the new text is left to take the old block's place is it an `insert`
-of the new block plus a `delete` of the old, and a delete is what costs a block its id. Then read the document back with
-`dispatch_doc_read` and read the passage and its neighbours, not a grep for the words you added: an empty
-`with` deletes the matched text on purpose, so a `replace` whose `with` you meant to fill empties that
-paragraph — the block and its id stay, holding nothing — and only a read shows what the document now says.
-
-A batch that leaves the document's semantic identity unchanged — including its inline anchor marks, so an edit that only orphans a
-comment or ask anchor still mints its version — mints no version, named or not: the response carries
-`changed: false` with `unchanged_ops` naming each operation that did nothing, and the tool result says nothing changed. A `summary`
-does not force a version for such a batch; `POST /api/v1/artifacts/<id>/versions`, which names the current state on purpose, still does.
-
-A `delete` whose `find` is a block's entire text removes the block itself — the bullet, paragraph, or heading, not just its words — and
-a list emptied of every item disappears with it; a partial match keeps the block with its remaining text. Deleting the text of a bullet
-that holds a nested list hoists that list's items into the bullet's place (as an outliner does); a bullet with any other content
-(paragraphs, code, tables) is refused with `INVALID_OP` naming `delete {block:"<item id>"}`, which removes the item with its content.
-`delete` with `block` removes any block by id (paragraph, heading, list, list item, table, or typed block; deleting an open `ask` block
-retracts its ask, while an answered one keeps its answer as the record), and `move` with `block` relocates one, keeping its id and
-attributes — a moved `ask` keeps its ask and answer. Block ids are the `#id` a typed block renders
-(`:::ask{#5467e5ce-…}`) and, for every block including untyped ones, the `id` rows from
-`GET /api/v1/artifacts/<artifact UUID>/blocks` (or `/api/v1/issues/{key}/artifacts/{slug}/blocks`), each with its `type` and byte range
-in canonical markdown; the UUID route does not accept a slug. A later operation in the same atomic batch that names a block removed by
-an earlier `delete {block}` fails as `INVALID_OP` naming the earlier operation and the parent block that cascaded the removal. A move
-whose anchor lies inside the moved block, or a delete that would leave a typed block without the body its content rule requires, is
-`INVALID_OP` naming the field and the rule.
-
-`GET /api/v1/artifacts/<artifact UUID>/blocks` includes a full-state `token` on every block, including
-inline marks. To reject a stale edit, pass `precondition` with exactly one of
-`{ document: "<token from dispatch_doc_read>" }` or
-`{ blocks: [{ id: "<block id>", token: "<block token>" }] }`. The server resolves the whole batch before
-mutation: a block guard must cover every content block it changes, or Dispatch returns
-`400 INVALID_PRECONDITION` without applying anything. Use a document token for insert and move because they
-depend on document order. A block token lets other sections change concurrently; a new anchored ask or comment
-changes the relevant token. A stale guard returns `409 PRECONDITION_FAILED` with each mismatch and current
-token; Dispatch applies no part of that batch. It is the hashline `#TAG` property applied to stable block ids,
-not line numbers: canonical Markdown lines shift under concurrent edits and rendering changes, while block ids
-survive moves and retyping.
-
-`retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
-block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when
-an existing paragraph is the question that should become a decision.
-
-### A document that is reloading
+## A document that is reloading
 
 These calls can answer `DOC_SERVICE_UNAVAILABLE` (HTTP 503), because each writes a document inside its
 transaction: `dispatch_doc_edit`; `dispatch_ask` and `dispatch_comment` on a quote; a `dispatch_comment` reply
@@ -672,13 +650,24 @@ nothing and the document is intact. Nothing retries it for you: the Dispatch cli
 Wait a few seconds and make the same call again. A second refusal in a row is worth telling your human about,
 with the document's reference.
 
+`dispatch_doc_read` can answer it too, though it writes nothing: a read never opens a live room, and waits out
+a room that is reloading, so it is refused only when the document's durable copy cannot be read or decoded.
+Retry it the same way.
+
 ## Typed blocks
 
 The server declares typed document blocks at `GET /api/v1/schema/blocks`. Write one only with the
 container-directive form `:::name{#block-id key="value"}` on its own line, ordinary block children,
-and a closing `:::` at the same nesting. An unclosed typed block at document level is rejected. For
+and a closing line of as many colons at the same nesting. A typed block directly inside another needs the outer
+one's fence a colon longer (`::::callout{…}` around a `:::callout{…}`), and so does one whose code holds a `:::` line;
+Dispatch writes its fences that way. An unclosed typed block at document level is rejected. For
 a new typed block, omit `#block-id`; Dispatch mints it. When editing an existing typed block, retain
-its id and every rendered attribute.
+its id and every rendered attribute. Never copy an existing block's id into new markdown: an id
+names one block, so an insert, upload or suggestion whose markdown names an id the document holds
+outside the text it replaces is refused naming the id: `INVALID_OP` for an insert,
+`INVALID_MARKDOWN` for any other write. To rewrite such a block whole, `delete` it and then
+`insert` the new one carrying its id, anchored on the block before or after it, in that order and
+in one batch: an insert carrying an id the document still holds is refused.
 
 Use only the type names, content rule, attributes, and enum values returned by the schema. Values are
 quoted: `:::callout{kind="warning" title="Risk"}`. Do not write Pandoc-style `::: {.callout}`, leaf
@@ -688,7 +677,10 @@ its authoritative value at settlement.
 
 Questions about a document must be `ask` blocks, never an `Open questions` prose section. An ask
 body is one or more question paragraphs followed by an optional bullet list of options, where each
-item is `Label: description`. For example:
+item is `Label: description`. A spec, an uploaded document or an uploaded version holding an ask that
+breaks that shape - a code block, heading or quote in it, a paragraph after its options, a second
+list - is refused with `INVALID_ASK_BLOCK`; so is an edit that writes one. An ask someone left
+unreadable in the browser refuses nothing it is carried through unchanged by. For example:
 
 ```md
 :::ask{urgency="high" multiple="false"}
@@ -748,6 +740,14 @@ dispatch_suggest({ issue?, project?, artifact, ref?, quote, replace_with, body?,
 It returns issue or project-document owner details plus `comment`. A human accepts or rejects a suggestion.
 Errors: `TARGET_AMBIGUOUS` (add `occurrence`), `TARGET_NOT_FOUND` (re-read first), `INVALID_ANCHOR`/`ANCHOR_MISSING`/`ANCHOR_ORPHANED`
 (bad, unwritten, or stale quote), `INVALID_MARKDOWN`/`DOC_SCHEMA` (malformed content), `CAP_EXCEEDED`, `ISSUE_CLOSED`.
+Suggest only what the quoted block can hold. The accept, not the suggestion, checks that: an
+accept whose `replace_with` would break an ask block that was readable before it is refused with
+`INVALID_ASK_BLOCK` - a question given a code block, text after an ask's options, a second option
+list, or an emptied question; one that names an id the document holds outside the text it
+replaces, an ask under a held id included, with `INVALID_MARKDOWN`; and one no part of the
+document can hold where it sits (a code block over a table cell's whole text), or whose quote runs
+into an ask or callout from the text before it, with `INVALID_OP`. Either changes nothing: the human sees the reason with no Retry, and the suggestion
+stays open until someone rejects or replaces it.
 
 ## Artifacts
 
@@ -766,9 +766,11 @@ dispatch_artifact({ issue?, project?, name: "load-test-results.md", content: "# 
 Exactly one of `issue` and `project` is required. A project upload creates an unlinked project document; it must not include `artifact`.
 Exactly one of `path` and `content` is required. It returns issue or project-document owner details plus `artifact` and `version`.
 Uploading the same `name` creates its next version — so uploading `spec.md` **replaces the issue's own specification**
-with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [The Spec](#the-spec)). Address an existing
+with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [Editing a document](references/document-edits.md)). Address an existing
 artifact by the slug shown in the upload result or by its filename, and a project document by its artifact id, slug, or filename; the
-slug also arrives on `artifact.created` events.
+slug also arrives on `artifact.created` events. Dispatch suffixes a slug two documents would share, so one document's
+filename can be another's slug (`plan v2` takes `plan-v2`, then a document named `plan-v2` takes `plan-v2-2`): a bare
+`artifact` that names both is refused with each one's id, while a `dispatch://` reference's document part is always the slug.
 
 **Where a deliverable goes.** Text the human must read to decide — a draft message, a proposal,
 a summary — goes in the spec as a section: the spec is the one document they open. A separate
@@ -809,7 +811,7 @@ once.
 ## Messages
 
 Dispatch is a high-signal record for humans, not a log of what you are doing. A message is a reply to a human's message, or a
-change a human must know about now: a deliverable landed, a blocker only they can clear. Nothing else — no progress updates, no
+change a human must know about now: a deliverable landed. Nothing else — no progress updates, no
 "starting X", no "still working", no restating the spec, no status on a timer. Your transcript is where work is narrated; the
 pull request is where it is summarised. One message that a human reads beats ten that train them to skip you.
 
@@ -912,7 +914,9 @@ message ref, it returns that message and its reply chain. Reads do not subscribe
 Every read ends with two sections from the reference graph. `Referenced by:` lists what points at the node — every document, ask,
 comment, or message that cites it, plus its structure: child issues, attached documents, anchored and owned asks and comments, replies,
 followers — and `Links:` lists what it cites. Each row is `- <edge kind> <node kind> dispatch://… (<excerpt> · <when>)`; for a
-document source the excerpt is the block containing the mention. Cross-project, always: a message on another project's issue that
+document source the excerpt is the start of the block holding the mention, and a whole list is one block, so every issue named in
+one list previews the list's first item. When a document references many issues and each backlink should read right, give each
+issue its own paragraph (or block), not an item of one list. Cross-project, always: a message on another project's issue that
 cites an ask shows up under that ask. So "what led to this decision" is one `dispatch_read` on the ask, and "who relies on this
 document" one read on the document. Cite with `dispatch://` references (below) whenever you name a node in a body — a bare id or
 title is invisible to the graph.

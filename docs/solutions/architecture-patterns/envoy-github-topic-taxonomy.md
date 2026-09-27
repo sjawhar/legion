@@ -19,6 +19,9 @@ repository traffic.
 | `workflow_run` missing `path` | Dropped — no envelope |
 | CI event without an associated PR | Dropped — no state or envelope |
 
+`<owner>` and `<repo>` are each one segment, a dot written `_` (`sjawhar/.github`
+is `notifications.github.sjawhar._github`); the payload's `repo` is the exact name.
+
 `check_run` and `check_suite` webhook events do not publish raw envelopes.
 They update durable CI state; one `checks` envelope publishes after the PR
 head's CI is complete.

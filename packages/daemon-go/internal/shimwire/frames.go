@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 )
 
 // The frame type names, verbatim from the shipped protocol.
@@ -30,6 +32,13 @@ const (
 	TypeAdoptWorkingCopy       = "adopt-working-copy"
 	TypeAdoptWorkingCopyResult = "adopt-working-copy-result"
 	TypeRPCChunk               = "rpc_chunk"
+	// hello2 is the hello every shim sends since GoDaemonAPIVersion 8: the boot token and, under a
+	// runtime that enrolls pods with the secrets broker (AGENTC-393), the pod's key thumbprint and
+	// projected token. A daemon that predates it decodes it as Raw and refuses "malformed hello";
+	// this daemon refuses the v1 hello by name (internal/stream).
+	TypeHello2                       = "hello2"
+	TypeAgentSecretsEnrollment       = "agent-secrets-enrollment"
+	TypeAgentSecretsEnrollmentResult = "agent-secrets-enrollment-result"
 )
 
 // The protocol's sizes, verified against the shipped files: the largest plain line including its
@@ -63,6 +72,38 @@ type Frame interface {
 // minted for the pane (worker-stream-listener.ts:139-148).
 type Hello struct {
 	BootToken string `json:"bootToken"`
+}
+
+// AgentSecretsHello is the pod's session identity as the shim reports it: the base64url SHA-256
+// JWK thumbprint of the P-256 key `agent-secrets keygen` wrote into the pod's key directory, and
+// the projected service-account token for the broker's audience, read from its mount at the
+// hello. The daemon relays both to the broker and keeps neither past the enrollment.
+type AgentSecretsHello struct {
+	Thumbprint string `json:"thumbprint"`
+	PodToken   string `json:"podToken"`
+}
+
+// Hello2 authenticates a reverse-dialed shim: its first line, carrying the boot token the daemon
+// minted for the pane or pod, and the pod's identity when the shim was started with
+// --agent-secrets-key-dir (a tmux pane never is, and sends none).
+type Hello2 struct {
+	BootToken    string             `json:"bootToken"`
+	AgentSecrets *AgentSecretsHello `json:"agentSecrets,omitempty"`
+}
+
+// AgentSecretsEnrollment hands the shim the broker's enrollment id for this pod generation; the
+// shim writes it beside the key (`<key dir>/enrollment`, what `agent-secrets` reads) and starts
+// the lease renewer, then answers AgentSecretsEnrollmentResult with the same ID.
+type AgentSecretsEnrollment struct {
+	ID           string `json:"id"`
+	EnrollmentID string `json:"enrollmentId"`
+}
+
+// AgentSecretsEnrollmentResult answers AgentSecretsEnrollment.
+type AgentSecretsEnrollmentResult struct {
+	ID    string `json:"id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 // HelloAck accepts the hello. The shim spawns OMP only after it (worker-stream-listener.ts:14).
@@ -152,19 +193,22 @@ type Raw struct {
 	JSON json.RawMessage
 }
 
-func (Hello) FrameType() string                  { return TypeHello }
-func (HelloAck) FrameType() string               { return TypeHelloAck }
-func (NegotiateProtocol) FrameType() string      { return TypeNegotiateProtocol }
-func (Prompt) FrameType() string                 { return TypePrompt }
-func (Response) FrameType() string               { return TypeResponse }
-func (GetState) FrameType() string               { return TypeGetState }
-func (AgentStart) FrameType() string             { return TypeAgentStart }
-func (AgentEnd) FrameType() string               { return TypeAgentEnd }
-func (Shutdown) FrameType() string               { return TypeShutdown }
-func (AdoptWorkingCopy) FrameType() string       { return TypeAdoptWorkingCopy }
-func (AdoptWorkingCopyResult) FrameType() string { return TypeAdoptWorkingCopyResult }
-func (RPCChunk) FrameType() string               { return TypeRPCChunk }
-func (r Raw) FrameType() string                  { return r.Type }
+func (Hello) FrameType() string                        { return TypeHello }
+func (HelloAck) FrameType() string                     { return TypeHelloAck }
+func (NegotiateProtocol) FrameType() string            { return TypeNegotiateProtocol }
+func (Prompt) FrameType() string                       { return TypePrompt }
+func (Response) FrameType() string                     { return TypeResponse }
+func (GetState) FrameType() string                     { return TypeGetState }
+func (AgentStart) FrameType() string                   { return TypeAgentStart }
+func (AgentEnd) FrameType() string                     { return TypeAgentEnd }
+func (Shutdown) FrameType() string                     { return TypeShutdown }
+func (AdoptWorkingCopy) FrameType() string             { return TypeAdoptWorkingCopy }
+func (AdoptWorkingCopyResult) FrameType() string       { return TypeAdoptWorkingCopyResult }
+func (RPCChunk) FrameType() string                     { return TypeRPCChunk }
+func (r Raw) FrameType() string                        { return r.Type }
+func (Hello2) FrameType() string                       { return TypeHello2 }
+func (AgentSecretsEnrollment) FrameType() string       { return TypeAgentSecretsEnrollment }
+func (AgentSecretsEnrollmentResult) FrameType() string { return TypeAgentSecretsEnrollmentResult }
 
 func (f Hello) MarshalJSON() ([]byte, error) {
 	type plain Hello
@@ -219,6 +263,21 @@ func (f RPCChunk) MarshalJSON() ([]byte, error) {
 
 func (r Raw) MarshalJSON() ([]byte, error) { return r.JSON, nil }
 
+func (f Hello2) MarshalJSON() ([]byte, error) {
+	type plain Hello2
+	return marshalFrame(TypeHello2, plain(f))
+}
+
+func (f AgentSecretsEnrollment) MarshalJSON() ([]byte, error) {
+	type plain AgentSecretsEnrollment
+	return marshalFrame(TypeAgentSecretsEnrollment, plain(f))
+}
+
+func (f AgentSecretsEnrollmentResult) MarshalJSON() ([]byte, error) {
+	type plain AgentSecretsEnrollmentResult
+	return marshalFrame(TypeAgentSecretsEnrollmentResult, plain(f))
+}
+
 // Validate refuses a hello the listener would refuse (worker-stream-listener.ts:140-148).
 func (f Hello) Validate() error {
 	if f.BootToken == "" {
@@ -238,6 +297,43 @@ func (f AdoptWorkingCopy) Validate() error {
 		return fmt.Errorf("%w: adopt-working-copy carries no jj identity", ErrMalformedFrame)
 	case f.TimeoutMs <= 0:
 		return fmt.Errorf("%w: adopt-working-copy timeoutMs is %d", ErrMalformedFrame, f.TimeoutMs)
+	}
+	return nil
+}
+
+// thumbprintShape is a base64url-encoded SHA-256: 43 characters, no padding (RFC 7638).
+var thumbprintShape = regexp.MustCompile(`^[A-Za-z0-9_-]{43}$`)
+
+// Validate refuses a hello2 the listener refuses: no boot token, or an identity that is not a
+// thumbprint plus a JWT. The token is not verified here — the broker verifies it — only shaped.
+func (f Hello2) Validate() error {
+	if f.BootToken == "" {
+		return fmt.Errorf("%w: hello2 carries no bootToken", ErrMalformedFrame)
+	}
+	if f.AgentSecrets == nil {
+		return nil
+	}
+	switch id := f.AgentSecrets; {
+	case id.Thumbprint == "":
+		return fmt.Errorf("%w: hello2 agentSecrets carries no thumbprint", ErrMalformedFrame)
+	case !thumbprintShape.MatchString(id.Thumbprint):
+		return fmt.Errorf("%w: hello2 agentSecrets thumbprint is not a base64url SHA-256", ErrMalformedFrame)
+	case id.PodToken == "":
+		return fmt.Errorf("%w: hello2 agentSecrets carries no podToken", ErrMalformedFrame)
+	case strings.Count(id.PodToken, ".") != 2:
+		return fmt.Errorf("%w: hello2 agentSecrets podToken is not a JWT", ErrMalformedFrame)
+	}
+	return nil
+}
+
+// Validate refuses an enrollment frame with no request id or no enrollment id: the daemon is its
+// only sender, so either is a bug to name.
+func (f AgentSecretsEnrollment) Validate() error {
+	switch {
+	case f.ID == "":
+		return fmt.Errorf("%w: agent-secrets-enrollment carries no id", ErrMalformedFrame)
+	case f.EnrollmentID == "":
+		return fmt.Errorf("%w: agent-secrets-enrollment carries no enrollmentId", ErrMalformedFrame)
 	}
 	return nil
 }
@@ -284,6 +380,12 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[AdoptWorkingCopyResult](trimmed)
 	case TypeRPCChunk:
 		return decodeInto[RPCChunk](trimmed)
+	case TypeHello2:
+		return decodeInto[Hello2](trimmed)
+	case TypeAgentSecretsEnrollment:
+		return decodeInto[AgentSecretsEnrollment](trimmed)
+	case TypeAgentSecretsEnrollmentResult:
+		return decodeInto[AgentSecretsEnrollmentResult](trimmed)
 	default:
 		return Raw{Type: head.Type, JSON: bytes.Clone(trimmed)}, nil
 	}

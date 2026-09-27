@@ -18,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
@@ -45,26 +46,34 @@ func goldenOptions() Options {
 const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
 
 // manifestCases are the Sandboxes the goldens pin: the root, which owns the tree volume; a worker
-// placed beside a scheduled pod of its tree, and one placed with none; a resume; and a relaunch
-// whose workspace is recovered after its volume was lost. colocate is whether another pod of the
-// tree is scheduled when the launch runs.
+// placed beside a scheduled pod of its tree, and one placed with none; a resume; a relaunch
+// whose workspace is recovered after its volume was lost; and the root enrolled with the secrets
+// broker. colocate is whether another pod of the tree is scheduled when the launch runs, and
+// agentSecrets, set for root-enrolled alone, is the runtime's enrollment for that one case
+// (TestManifestGoldens, TestManifestMatchesTheSandboxCRD apply it to the shared runtime before
+// building that case's manifest, and restore nil after — every other case runs unenrolled).
 func manifestCases(t *testing.T) map[string]struct {
-	spec     runtime.SpawnSpec
-	colocate bool
+	spec         runtime.SpawnSpec
+	colocate     bool
+	agentSecrets *AgentSecrets
 } {
 	resume := workerSpec(t)
 	resume.Generation, resume.BootToken, resume.ResumeSessionFile = 2, "boot-g2", resumeSession
 	recovered := workerSpec(t)
 	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
 	return map[string]struct {
-		spec     runtime.SpawnSpec
-		colocate bool
+		spec         runtime.SpawnSpec
+		colocate     bool
+		agentSecrets *AgentSecrets
 	}{
-		"root":               {rootSpec(t), false},
-		"worker-affinity":    {workerSpec(t), true},
-		"worker-no-affinity": {workerSpec(t), false},
-		"resume":             {resume, true},
-		"recovered":          {recovered, true},
+		"root":               {rootSpec(t), false, nil},
+		"worker-affinity":    {workerSpec(t), true, nil},
+		"worker-no-affinity": {workerSpec(t), false, nil},
+		"resume":             {resume, true, nil},
+		"recovered":          {recovered, true, nil},
+		"root-enrolled": {rootSpec(t), false, &AgentSecrets{
+			URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour,
+		}},
 	}
 }
 
@@ -95,6 +104,7 @@ func TestManifestGoldens(t *testing.T) {
 	}
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
+			r.agentSecrets = tc.agentSecrets
 			var buffer bytes.Buffer
 			encoder := json.NewEncoder(&buffer)
 			encoder.SetEscapeHTML(false)
@@ -135,6 +145,7 @@ func TestManifestMatchesTheSandboxCRD(t *testing.T) {
 	schema := sandboxSchema(t)
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
+			r.agentSecrets = tc.agentSecrets
 			if found := schemaViolations(manifestOf(t, r, tc.spec, tc.colocate), schema, ""); len(found) > 0 {
 				t.Fatalf("the manifest has fields the CRD does not declare as sent:\n%s", strings.Join(found, "\n"))
 			}
@@ -271,6 +282,38 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	for _, volume := range pod.Volumes {
 		if volume.Name == shared && (volume.EmptyDir == nil || volume.EmptyDir.Medium != corev1.StorageMediumMemory) {
 			t.Fatalf("the config home's volume %q is not an in-memory emptyDir: %+v", shared, volume.VolumeSource)
+		}
+	}
+}
+
+// bun (measured: bun 1.3.14, LEGION-198) resolves its install cache at
+// $XDG_CACHE_HOME/.bun/install/cache when neither BUN_INSTALL nor BUN_INSTALL_CACHE_DIR is set —
+// neither is ever set here — and hardlinks that cache's files into every worktree's node_modules,
+// which is how one shared cache corrupted every checkout on a box at once (LEGION-198's spec). A
+// pod's XDG_CACHE_HOME is mounted from no volume of this pod's — not the tree volume, the boot
+// volume, the state volume, nor the in-memory config volume, at, above, or beneath it — so it
+// lives on the pod's own ephemeral container filesystem alone: private to this one pod, never
+// shared with the operator or another pod's, and gone with the pod. `overlaps` (operatorpod.go),
+// the package's own at/under/above predicate for exactly this question, catches a volume mounted
+// beneath the cache home (e.g. a tree-shared warm-cache volume at
+// $XDG_CACHE_HOME/.bun/install/cache) that a bare prefix-or-equal check would miss. No code
+// change is needed to keep the cache private; this test locks the absence of any overlapping
+// mount so a future volume addition cannot reintroduce sharing.
+func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := podOf(t, r, workerSpec(t), false)
+	main := containerNamed(t, pod, mainContainer)
+	cacheHome := envOf(main)["XDG_CACHE_HOME"]
+	if cacheHome == "" {
+		t.Fatal("the main container carries no XDG_CACHE_HOME")
+	}
+	for _, mount := range main.VolumeMounts {
+		if overlaps(mount.MountPath, cacheHome) {
+			t.Fatalf("XDG_CACHE_HOME %s overlaps volume %q's mount %q; bun's cache would then persist or share across pods",
+				cacheHome, mount.Name, mount.MountPath)
 		}
 	}
 }
@@ -417,8 +460,7 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 		edit func(*runtime.SpawnSpec)
 		want string
 	}{
-		"no repository":       {func(s *runtime.SpawnSpec) { s.Repository = "" }, "no repository"},
-		"not owner/repo":      {func(s *runtime.SpawnSpec) { s.Repository = "sjawhar/legion-smoke/extra" }, `workspace repository must be "owner/name"`},
+		"no repository":       {func(s *runtime.SpawnSpec) { s.Repository = ghrepo.Repository{} }, "no repository"},
 		"session off volume":  {func(s *runtime.SpawnSpec) { s.ResumeSessionFile = "/home/legion/elsewhere.jsonl" }, "cannot be resumed on this runtime"},
 		"runtime-owned env":   {func(s *runtime.SpawnSpec) { s.Env["PATH"] = "/bin" }, "Env sets PATH"},
 		"credential in env":   {func(s *runtime.SpawnSpec) { s.Env["GH_TOKEN"] = "x" }, "credential-shaped"},
@@ -473,6 +515,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -554,31 +597,123 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 	}
 }
 
-// A pod holds no token Legion projects: it runs as the operator's ServiceAccount, the namespace's
-// default when the operator names none, with the API server's own token never mounted and no
-// projected volume of Legion's (the one token a pod carries, if any, is the operator's own).
-func TestAPodRunsAsTheOperatorsAccountWithNoTokenOfLegions(t *testing.T) {
-	for name, account := range map[string]string{"the operator's account": "operator-worker", "none named": ""} {
+// Without agent_secrets a pod carries no projected token of Legion's (the one token a pod carries,
+// if any, is the operator's own); with it, exactly one — alone in its volume, for the configured
+// audience and lifetime, mounted read-only in the worker container alone — beside a memory-backed
+// key directory, the two AGENT_SECRETS_* variables, and the shim's three flags. The probe pod
+// carries none of it: it runs no shim and enrolls nothing.
+func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
+	for name, tc := range map[string]struct {
+		secrets *AgentSecrets
+		account string
+	}{
+		"not enrolled, the operator's account": {nil, "operator-worker"},
+		"not enrolled, no account":             {nil, ""},
+		"enrolled":                             {&AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}, "legion-worker"},
+	} {
 		t.Run(name, func(t *testing.T) {
 			opts := goldenOptions()
-			opts.Pod.ServiceAccount = account
+			opts.Pod.ServiceAccount = tc.account
+			opts.AgentSecrets = tc.secrets
 			r, err := configure(opts)
 			if err != nil {
 				t.Fatal(err)
 			}
-			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
-			for pod, spec := range map[string]corev1.PodSpec{"root": podOf(t, r, rootSpec(t), false), "worker": podOf(t, r, workerSpec(t), true), "probe": probe} {
-				if spec.ServiceAccountName != account {
-					t.Errorf("%s: serviceAccountName = %q, want %q", pod, spec.ServiceAccountName, account)
+			l, err := r.prepare(manifestCases(t)["root"].spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := r.podTemplate(l, false).Spec
+			if spec.ServiceAccountName != tc.account || spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+				t.Fatalf("serviceAccountName %q automount %v", spec.ServiceAccountName, spec.AutomountServiceAccountToken)
+			}
+			var tokens []corev1.Volume
+			for _, v := range spec.Volumes {
+				if v.Projected != nil && slices.ContainsFunc(v.Projected.Sources, func(s corev1.VolumeProjection) bool { return s.ServiceAccountToken != nil }) {
+					tokens = append(tokens, v)
 				}
-				if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
-					t.Errorf("%s: the API server's service account token is mounted", pod)
+			}
+			worker := spec.Containers[0]
+			env := map[string]string{}
+			for _, e := range worker.Env {
+				env[e.Name] = e.Value
+			}
+			if tc.secrets == nil {
+				if len(tokens) != 0 || env["AGENT_SECRETS_URL"] != "" || env["AGENT_SECRETS_KEY_DIR"] != "" || slices.Contains(worker.Command, "--agent-secrets-key-dir") {
+					t.Fatalf("an unenrolled pod carries agent-secrets pieces: tokens %d, env %v, command %v", len(tokens), env, worker.Command)
 				}
-				for _, volume := range spec.Volumes {
-					if volume.Projected != nil {
-						t.Errorf("%s: Legion projects volume %+v", pod, volume)
+				return
+			}
+			if len(tokens) != 1 || tokens[0].Name != agentSecretsTokenVolume || len(tokens[0].Projected.Sources) != 1 {
+				t.Fatalf("token volumes %+v, want exactly %s with one source", tokens, agentSecretsTokenVolume)
+			}
+			token := tokens[0].Projected.Sources[0].ServiceAccountToken
+			if token.Audience != "agent-secrets" || token.ExpirationSeconds == nil || *token.ExpirationSeconds != 3600 || token.Path != AgentSecretsTokenFile {
+				t.Fatalf("token source %+v", token)
+			}
+			mounts := map[string]corev1.VolumeMount{}
+			for _, m := range worker.VolumeMounts {
+				mounts[m.Name] = m
+			}
+			if m := mounts[agentSecretsTokenVolume]; m.MountPath != AgentSecretsTokenDir || !m.ReadOnly {
+				t.Fatalf("token mount %+v, want read-only at %s", m, AgentSecretsTokenDir)
+			}
+			if m := mounts[agentSecretsKeyVolume]; m.MountPath != AgentSecretsKeyDir || m.ReadOnly {
+				t.Fatalf("key mount %+v, want writable at %s", m, AgentSecretsKeyDir)
+			}
+			key := slices.IndexFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == agentSecretsKeyVolume })
+			if key < 0 || spec.Volumes[key].EmptyDir == nil || spec.Volumes[key].EmptyDir.Medium != corev1.StorageMediumMemory {
+				t.Fatalf("key volume %+v, want a memory-backed emptyDir", spec.Volumes[key])
+			}
+			for _, init := range spec.InitContainers {
+				for _, m := range init.VolumeMounts {
+					if m.Name == agentSecretsTokenVolume || m.Name == agentSecretsKeyVolume {
+						t.Fatalf("init container %s mounts %s", init.Name, m.Name)
 					}
 				}
+			}
+			if env["AGENT_SECRETS_URL"] != tc.secrets.URL || env["AGENT_SECRETS_KEY_DIR"] != AgentSecretsKeyDir {
+				t.Fatalf("env %v", env)
+			}
+			want := []string{"--agent-secrets-key-dir", AgentSecretsKeyDir, "--pod-token-file", AgentSecretsTokenDir + "/" + AgentSecretsTokenFile, "--agent-secrets-bin", opts.Tools.AgentSecrets}
+			joined := strings.Join(worker.Command, "\x00")
+			if !strings.Contains(joined, strings.Join(want, "\x00")) || strings.Index(joined, "--agent-secrets-key-dir") > strings.Index(joined, "\x00--\x00") {
+				t.Fatalf("shim command %v, want the three flags before --", worker.Command)
+			}
+			probe := r.probeManifest("legion-probe-test", ImageProbe{Contract: 7}, time.Now().Add(time.Hour)).Spec.PodTemplate.Spec
+			for _, v := range probe.Volumes {
+				if v.Name == agentSecretsTokenVolume || v.Name == agentSecretsKeyVolume {
+					t.Fatalf("the probe pod carries %s", v.Name)
+				}
+			}
+		})
+	}
+}
+
+// New refuses an agent-secrets configuration no pod could run: no broker URL, no token audience,
+// an expiry outside the API server's floor (10m) and agent-c's admission cap (1h), or the image's
+// agent-secrets binary missing.
+func TestNewRefusesAnAgentSecretsOptionNoPodCouldRun(t *testing.T) {
+	for name, tc := range map[string]struct {
+		edit func(*Options)
+		want string
+	}{
+		"no url":      {func(o *Options) { o.AgentSecrets = &AgentSecrets{Audience: "a", TokenExpiry: time.Hour} }, "agent secrets: no broker URL"},
+		"no audience": {func(o *Options) { o.AgentSecrets = &AgentSecrets{URL: "https://s", TokenExpiry: time.Hour} }, "agent secrets: no token audience"},
+		"expiry too long": {func(o *Options) {
+			o.AgentSecrets = &AgentSecrets{URL: "https://s", Audience: "a", TokenExpiry: 2 * time.Hour}
+		}, "agent secrets: token expiry 2h0m0s is not between 10m0s and 1h0m0s"},
+		"no binary": {func(o *Options) {
+			o.AgentSecrets = &AgentSecrets{URL: "https://s", Audience: "a", TokenExpiry: time.Hour}
+			o.Tools.AgentSecrets = ""
+		}, "the image's agent-secrets path \"\" is not absolute"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := goldenOptions()
+			tc.edit(&opts)
+			_, err := configure(opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("configure() = %v, want %q", err, tc.want)
 			}
 		})
 	}
@@ -668,36 +803,71 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 	}
 }
 
-// With provider keys, every pod Legion runs mounts exactly the configured keys of the providers
-// Secret — the TypeScript runtime's legion-<project token>-providers — each as a file named for the
-// variable Oh My Pi reads, read-only at ProvidersDir in the agent's container alone, and the
-// worker's shim exports that directory into Oh My Pi's environment (--provider-env-dir); with none,
-// no pod mounts the Secret and no shim is told a directory.
-func TestProviderKeysReachEveryPodAsTheProvidersSecretsFiles(t *testing.T) {
+// The providers Secret — the TypeScript runtime's legion-<project token>-providers — reaches every
+// pod Legion runs, a worker's and the image probe's alike, as exactly its configured keys, read-only
+// at ProvidersDir in the agent's container alone: each provider key as a file named for the variable
+// Oh My Pi reads, which the worker's shim exports into Oh My Pi's environment (--provider-env-dir),
+// and each providers secret (the NATS nkey seed) as a file of its own name that the container's
+// `<NAME>_FILE` names, so the shim exports it to no one. The pointer is the runtime's, not the
+// spec's: a spec that carries no seed still gets it, and the claim's Secret never holds a copy. With
+// neither, no pod mounts the Secret, no shim is told a directory, and there is no pointer.
+func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 	const providersSecret = "legion-" + testProject + "-providers"
-	for name, keys := range map[string]map[string]string{
-		"configured": {"GEMINI_API_KEY": "gemini", "ANTHROPIC_API_KEY": "anthropic"},
-		"none":       nil,
+	const seed = "SUAIBDPBAUTWCWBKIO6XHQNINK5FWJW4OHLXC3HQ2KFE4PEJUA44CNHTC4"
+	nats := []string{"NATS_NKEY_SEED"}
+	natsItem := corev1.KeyToPath{Key: "NATS_NKEY_SEED", Path: "NATS_NKEY_SEED"}
+	anthropic := corev1.KeyToPath{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}
+	for _, tc := range []struct {
+		name      string
+		keys      map[string]string
+		providers []string
+		specSeed  bool
+		items     []corev1.KeyToPath
+	}{
+		{"provider keys", map[string]string{"GEMINI_API_KEY": "gemini", "ANTHROPIC_API_KEY": "anthropic"}, nil, false,
+			[]corev1.KeyToPath{anthropic, {Key: "gemini", Path: "GEMINI_API_KEY"}}},
+		{"neither", nil, nil, false, nil},
+		{"the seed with provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, nats, true, []corev1.KeyToPath{anthropic, natsItem}},
+		{"the seed alone", nil, nats, true, []corev1.KeyToPath{natsItem}},
+		{"the seed, on a spec that carries none", nil, nats, false, []corev1.KeyToPath{natsItem}},
 	} {
-		t.Run(name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			opts := testOptions()
-			opts.ProviderKeys = keys
+			opts.ProviderKeys, opts.ProvidersSecrets = tc.keys, tc.providers
+			opts.LaunchSecrets = []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}
 			r, err := configure(opts)
 			if err != nil {
 				t.Fatal(err)
 			}
-			worker := podOf(t, r, workerSpec(t), false)
-			for _, tc := range []struct {
-				pod   corev1.PodSpec
-				agent string
-			}{
-				{worker, mainContainer},
-				{r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec, probeContainer},
-			} {
+			spec := workerSpec(t)
+			spec.Secrets = map[string]string{"ENVOY_TOKEN": "envoy-bearer"}
+			if tc.specSeed {
+				spec.Secrets["NATS_NKEY_SEED"] = seed
+			}
+			l, err := r.prepare(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, copied := l.secrets["NATS_NKEY_SEED"]; copied {
+				t.Errorf("the claim's Secret carries NATS_NKEY_SEED: %v", slices.Sorted(maps.Keys(l.secrets)))
+			}
+			worker := r.podTemplate(l, false).Spec
+			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
+			for _, pod := range []struct {
+				spec      corev1.PodSpec
+				container string
+			}{{worker, mainContainer}, {probe, probeContainer}} {
 				var volumes []corev1.Volume
-				for _, volume := range tc.pod.Volumes {
+				for _, volume := range pod.spec.Volumes {
 					if volume.Secret != nil && volume.Secret.SecretName == providersSecret {
 						volumes = append(volumes, volume)
+					}
+					if volume.Name == bootVolume {
+						for _, item := range volume.Secret.Items {
+							if item.Key == "NATS_NKEY_SEED" {
+								t.Errorf("%s's boot projection carries NATS_NKEY_SEED", pod.container)
+							}
+						}
 					}
 				}
 				mounted := func(c corev1.Container) []corev1.VolumeMount {
@@ -709,40 +879,60 @@ func TestProviderKeysReachEveryPodAsTheProvidersSecretsFiles(t *testing.T) {
 					}
 					return mounts
 				}
-				agent := containerNamed(t, tc.pod, tc.agent)
-				if keys == nil {
-					if len(volumes) != 0 || len(mounted(agent)) != 0 {
-						t.Errorf("%s: with no provider keys the pod has %+v and mounts %+v", tc.agent, volumes, mounted(agent))
-					}
-					continue
-				}
-				want := &corev1.SecretVolumeSource{
-					SecretName:  providersSecret,
-					Items:       []corev1.KeyToPath{{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}, {Key: "gemini", Path: "GEMINI_API_KEY"}},
-					DefaultMode: new(int32(0o440)),
-				}
-				if len(volumes) != 1 || !reflect.DeepEqual(volumes[0].Secret, want) {
-					t.Fatalf("%s's pod holds the providers Secret as %+v, want once as %+v", tc.agent, volumes, *want)
-				}
-				if got := mounted(agent); len(got) != 1 || got[0].MountPath != ProvidersDir || !got[0].ReadOnly || got[0].SubPath != "" {
-					t.Errorf("%s mounts the providers Secret as %+v, want once, read-only, at %s", tc.agent, got, ProvidersDir)
-				}
-				for _, init := range tc.pod.InitContainers {
+				agent := containerNamed(t, pod.spec, pod.container)
+				for _, init := range pod.spec.InitContainers {
 					if got := mounted(init); len(got) != 0 {
 						t.Errorf("%s mounts the providers Secret: %+v", init.Name, got)
 					}
+				}
+				if tc.items == nil {
+					if len(volumes) != 0 || len(mounted(agent)) != 0 {
+						t.Errorf("%s: with neither the pod has %+v and mounts %+v", pod.container, volumes, mounted(agent))
+					}
+				} else {
+					want := &corev1.SecretVolumeSource{SecretName: providersSecret, Items: tc.items, DefaultMode: new(int32(0o440))}
+					if len(volumes) != 1 || !reflect.DeepEqual(volumes[0].Secret, want) {
+						t.Errorf("%s's pod holds the providers Secret as %+v, want once as %+v", pod.container, volumes, *want)
+					}
+					if got := mounted(agent); len(got) != 1 || got[0].MountPath != ProvidersDir || !got[0].ReadOnly || got[0].SubPath != "" {
+						t.Errorf("%s mounts the providers Secret as %+v, want once, read-only, at %s", pod.container, got, ProvidersDir)
+					}
+				}
+				env := envOf(agent)
+				pointer, pointed := env["NATS_NKEY_SEED_FILE"]
+				if want := tc.providers != nil; pointed != want || (want && pointer != ProvidersDir+"/NATS_NKEY_SEED") {
+					t.Errorf("%s's NATS_NKEY_SEED_FILE = %q (set: %t), want %s/NATS_NKEY_SEED set %t", pod.container, pointer, pointed, ProvidersDir, want)
+				}
+				for name, value := range env {
+					if strings.Contains(value, seed) {
+						t.Errorf("%s's %s carries the seed", pod.container, name)
+					}
+				}
+				if _, set := env["NATS_NKEY_SEED"]; set {
+					t.Errorf("%s sets NATS_NKEY_SEED", pod.container)
 				}
 			}
 			main := containerNamed(t, worker, mainContainer)
 			shim := main.Command[:slices.Index(main.Command, "--")]
 			at := slices.Index(shim, "--provider-env-dir")
 			switch {
-			case keys == nil && at >= 0:
-				t.Errorf("with no provider keys the shim is told %v", shim)
-			case keys != nil && (at < 0 || at+1 == len(shim) || shim[at+1] != ProvidersDir):
+			case tc.items == nil && at >= 0:
+				t.Errorf("with neither the shim is told %v", shim)
+			case tc.items != nil && (at < 0 || at+1 == len(shim) || shim[at+1] != ProvidersDir):
 				t.Errorf("the shim runs as %v, want --provider-env-dir %s", shim, ProvidersDir)
 			}
 		})
+	}
+}
+
+// A providers secret must be a launch secret: CheckPod refuses a provider key or operator variable
+// colliding with a launch secret's pointer, which is what keeps a providers secret's file and
+// pointer the runtime's alone.
+func TestNewRefusesAProvidersSecretThatIsNoLaunchSecret(t *testing.T) {
+	opts := testOptions()
+	opts.LaunchSecrets, opts.ProvidersSecrets = []string{"ENVOY_TOKEN"}, []string{"NATS_NKEY_SEED"}
+	if _, err := configure(opts); err == nil || err.Error() != "sandbox runtime: providers secret NATS_NKEY_SEED is not a launch secret (ENVOY_TOKEN)" {
+		t.Fatalf("configure = %v, want the refusal naming NATS_NKEY_SEED", err)
 	}
 }
 
@@ -756,6 +946,7 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts := goldenOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)

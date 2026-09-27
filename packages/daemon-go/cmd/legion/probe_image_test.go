@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
 // imageOmp is an `omp` that passes the image's three probes as a working image's Oh My Pi does:
@@ -141,6 +144,51 @@ func TestProbeImageWithSkipAgentModelsSaysSoOnTheOKLine(t *testing.T) {
 	}
 }
 
+// A probe pod's NATS_NKEY_SEED_FILE names the providers Secret's seed: the command names that seed's
+// user, by its public key alone, on the line before the OK line, for the daemon to compare with its
+// own; a seed that is not a user's is refused before any probe runs. Neither output carries a seed.
+func TestProbeImageNamesTheUserOfTheSeedItsPointerNames(t *testing.T) {
+	omp := imageOmp(t)
+	root := inImage(t, thisBinarysContract, omp)
+	seed, public := testnats.User(t)
+	t.Setenv("NATS_NKEY_SEED_FILE", testnats.SeedFile(t, seed+"\n"))
+
+	code, stdout, stderr := probeImage("--plugin-root", root)
+
+	want := "probe-image: nats-nkey-user=" + public + "\nprobe-image: OK (" + omp + ") session-storage=probed agent-models=resolved go-daemon-api-version=" + thisBinarysContract + "\n"
+	if code != 0 || stdout != want || strings.Contains(stdout+stderr, seed) {
+		t.Fatalf("probe-image with a user seed = %d %q %q, want %q and no seed", code, stdout, stderr, want)
+	}
+
+	account := testnats.Account(t)
+	file := testnats.SeedFile(t, account)
+	t.Setenv("NATS_NKEY_SEED_FILE", file)
+	code, stdout, stderr = probeImage("--plugin-root", root)
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "NATS_NKEY_SEED_FILE ("+file+") holds an nkey seed that is not a user's") || strings.Contains(stderr, account) {
+		t.Fatalf("probe-image with an account seed = %d %q %q, want exit 1 naming the pointer, no OK line and no seed", code, stdout, stderr)
+	}
+}
+
+// The pointer is read as the daemon reads its seed (natsauth.Seed): the pod's mount, root's and
+// 0440 under fsGroup, is read through the group (config.ReadGroupSecretPointer's test; a test
+// cannot make a file root's), and a file the probe's own uid owns is held to 0600.
+func TestProbeImageReadsTheSeedPointerByTheDaemonsModeRule(t *testing.T) {
+	omp := imageOmp(t)
+	root := inImage(t, thisBinarysContract, omp)
+	seed, _ := testnats.User(t)
+	file := testnats.SeedFile(t, seed+"\n")
+	if err := os.Chmod(file, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NATS_NKEY_SEED_FILE", file)
+
+	code, stdout, stderr := probeImage("--plugin-root", root)
+
+	if want := "NATS_NKEY_SEED_FILE " + file + " is readable by its group or others (mode 0640); chmod 0600 it"; code != 1 || stdout != "" || !strings.Contains(stderr, want) || strings.Contains(stderr, seed) {
+		t.Fatalf("probe-image with a 0640 seed it owns = %d %q %q, want exit 1 saying %q and no seed", code, stdout, stderr, want)
+	}
+}
+
 // With --provider-env-dir, as the probe Sandbox runs it when provider keys are configured, every
 // probe's Oh My Pi gets each key as a worker's shim exports it, so an agent keyed only through the
 // providers Secret resolves as it would in a worker; a key the environment already names is refused
@@ -223,6 +271,26 @@ func TestProbeImageWithPodSafetyProbesOnThePodsBaseline(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A --role-references value that is not promptrefs.Encode's encoding is refused as the flags are
+// read, before any probe runs: resolving the image's own role prompts in its place would pass a
+// probe the daemon asked about its own.
+func TestProbeImageRefusesRoleReferencesItCannotDecode(t *testing.T) {
+	omp := imageOmp(t)
+	root := inImage(t, thisBinarysContract, omp)
+	seen := filepath.Join(t.TempDir(), "seen")
+	t.Setenv("LEGION_TEST_SEEN", seen)
+
+	code, stdout, stderr := probeImage("--plugin-root", root, "--role-references",
+		`{"LEGION_PROMPT_AGENTS":{},"LEGION_PROMPT_SKILLS":{},"LEGION_PROMPT_AGENTS":{}}`)
+
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--role-references") || !strings.Contains(stderr, "appears twice") {
+		t.Fatalf("probe-image with a repeated kind in --role-references = %d %q %q, want exit 1 naming the flag and the repeated key, and no OK line", code, stdout, stderr)
+	}
+	if _, err := os.Stat(seen); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Oh My Pi ran (%s: %v), want no probe", seen, err)
 	}
 }
 

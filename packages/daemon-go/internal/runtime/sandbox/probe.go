@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
 // The image probe (the in-cluster boot probe, packages/daemon/src/daemon/worker-image-probe.ts,
@@ -66,10 +67,13 @@ type ImageProbe struct {
 	Budget time.Duration
 	// Retry waits out the attempts that say nothing about the image: bootprobe.Daemon at boot.
 	Retry bootprobe.Retry
-	// RoleReferences are the task agents and skills the daemon's own role prompts name
-	// (promptrefs.Roles), required: the prompts every worker pod is handed, so the probe resolves
-	// those and their agents' models, not the image's copy (`legion probe-image --role-references`).
-	RoleReferences string
+	// RoleReferences are the task agents and skills the daemon's own role prompts name, required:
+	// the prompts every worker pod is handed, so the probe resolves those and their agents' models,
+	// not the image's copy. probeManifest encodes them for `legion probe-image --role-references`,
+	// and ProbeImage refuses, before any pod runs, a value whose encoding the image's Decode would
+	// refuse (the zero Names, a kind left nil, a name no prompt can write): a probe pod handed one
+	// would fail, and the failure would be blamed on the image.
+	RoleReferences promptrefs.Names
 	// Resources are the probe container's requests and limits (the TypeScript probe used the
 	// `small` profile): it runs Oh My Pi three times (pi.agents, the plugin's load, the
 	// session-storage setting) and exits. None when zero.
@@ -87,8 +91,14 @@ type ImageProbe struct {
 // transient: anything else, a pod the kubelet itself failed included, retried under p.Retry
 // (worker-image-probe.ts:318-338, 470-508).
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
-	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial || p.RoleReferences == "" {
-		return errors.New("image probe: a contract, a positive budget, a positive retry wait, and the role prompts' references are required")
+	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
+		return errors.New("image probe: a contract, a positive budget, and a positive retry wait are required")
+	}
+	if p.RoleReferences.Zero() {
+		return errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
+	}
+	if _, err := promptrefs.Decode(p.RoleReferences.Encode()); err != nil {
+		return fmt.Errorf("image probe: ImageProbe.RoleReferences: %w", err)
 	}
 	_, hex, _ := strings.Cut(r.image, "@sha256:")
 	if !digestHex.MatchString(hex) {
@@ -325,7 +335,7 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 		unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, reason)
 		return &unusable
 	}
-	if len(r.providerKeys) == 0 || pod.Status.Phase != corev1.PodPending || r.now().Sub(*mountRead) < providersMountRecheck {
+	if !r.mountsProviders() || pod.Status.Phase != corev1.PodPending || r.now().Sub(*mountRead) < providersMountRecheck {
 		return nil
 	}
 	*mountRead = r.now()
@@ -333,8 +343,10 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 	if failure == "" {
 		return nil
 	}
-	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, which provider_keys names (%s): %s",
-		name, ProvidersSecretName(r.project), strings.Join(slices.Sorted(maps.Values(r.providerKeys)), ", "), failure)}
+	keys := slices.Concat(slices.Collect(maps.Values(r.providerKeys)), r.providersSecrets)
+	slices.Sort(keys)
+	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, whose keys every pod mounts (%s): %s",
+		name, ProvidersSecretName(r.project), strings.Join(keys, ", "), failure)}
 	return &refused
 }
 
@@ -427,7 +439,12 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // image whose CLI predates the Go contract check prints none, having checked no contract, and is
 // refused, not waved through; one that confirmed another contract is refused naming both. And it
 // must say the prompt-named agents' models resolved: any other mark, or none, does not prove the
-// workers run their agents on their models. An image whose CLI predates a flag the probe command
+// workers run their agents on their models. When the daemon has a pane NATS nkey seed (Options.NATSUser),
+// the probe must also name the same user as the seed its pointer read (bootprobe.NATSUser), a
+// refusal otherwise. Naming none is the image's: a current CLI whose pointer holds a blank or
+// invalid seed exits 1 (natsauth.Seed), and a key the kubelet cannot mount never starts the
+// container, so only a CLI that predates the user line succeeds without one. Naming another is the
+// providers Secret holding another seed. An image whose CLI predates a flag the probe command
 // passes stops at the flags, and its Failed pod is refused naming the flag its CLI lacks.
 func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, logErr error, contract int) bootprobe.Outcome {
 	if why := kubeletFailure(pod); why != "" {
@@ -467,6 +484,17 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 		return imageRefusal(digest, "pod %s Succeeded without resolving the prompt-named agents' models (its OK line's agent-models mark: %s, where the daemon's probe requires %s) — log tail: %s",
 			name, mark, bootprobe.AgentModelsResolved, logTail)
 	}
+	if r.natsUser != "" {
+		switch got := bootprobe.NATSUser(logTail); got {
+		case r.natsUser:
+		case "":
+			return imageRefusal(digest, "pod %s named no nkey user, where the pane seed the daemon hands every pod is user %s: its legion CLI predates the probe's nats-nkey-user line: build the image from this daemon's commit — log tail: %s",
+				name, r.natsUser, logTail)
+		default:
+			return bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s read nkey user %s through its NATS_NKEY_SEED_FILE, the providers Secret %s's NATS_NKEY_SEED, where the pane seed the daemon hands every pod is user %s: put that seed in that key — log tail: %s",
+				name, got, ProvidersSecretName(r.project), r.natsUser, logTail)}
+		}
+	}
 	r.log.Info("sandbox runtime: the worker image passed its probe", "image", r.image, "sandbox", name, "log", logTail)
 	return bootprobe.Outcome{Passed: true}
 }
@@ -493,10 +521,11 @@ type probeSpec struct {
 // Secret's configured keys), and a single container running the image's Go `legion probe-image`
 // against p's contract as a worker runs: on the pod's baseline (--pod-safety), loading the plugin
 // from the root a pod loads it from (--plugin-root), with the providers Secret's keys exported as
-// the worker's shim exports them (--provider-env-dir) when any are configured, and resolving the
-// daemon's own role prompts' references (--role-references), which ProbeImage requires. Its
-// command and env are escaped against the kubelet's expansion as every worker container's are
-// (kubeletLiteral).
+// the worker's shim exports them (--provider-env-dir) when any are configured, each providers
+// secret's `<NAME>_FILE` pointing at its file there as a worker's does (so neither exports it),
+// and resolving the daemon's own role prompts' references (--role-references), which ProbeImage
+// requires. Its command and env are escaped against the kubelet's expansion as every worker
+// container's are (kubeletLiteral).
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
@@ -504,12 +533,12 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 	if len(providersMounts) > 0 {
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}
-	command = append(command, "--role-references", p.RoleReferences)
+	command = append(command, "--role-references", p.RoleReferences.Encode())
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,
 		Command:         command,
-		Env:             r.operatorEnv(),
+		Env:             slices.Concat(r.operatorEnv(), r.providersPointers()),
 		VolumeMounts:    slices.Concat(providersMounts, r.pod.VolumeMounts),
 		Resources:       p.Resources,
 		SecurityContext: restrictedContainer(),

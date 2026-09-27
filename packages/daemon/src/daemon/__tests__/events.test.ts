@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { controllerToken, roleTopic } from "@legion/contracts";
 import { EnvoyPublishError } from "../api/http";
 import { overseerCatchup } from "../catchup";
@@ -1472,18 +1474,53 @@ describe("core-NATS event pump", () => {
         published.push({ topic, payloadJson });
       })
     );
-    const payloadJson = JSON.stringify({ text: "@legion please investigate" });
+    const payloadJson = JSON.stringify({
+      text: "@legion please investigate",
+      repo: "acme/widgets",
+    });
 
     const acks: string[] = [];
     nats.emit(
       "notifications.github.acme.widgets.mention",
-      envelope({ text: "@legion please investigate" }, "github-mention-1"),
+      envelope({ text: "@legion please investigate", repo: "acme/widgets" }, "github-mention-1"),
       () => acks.push("ack-1")
     );
     await flush();
 
     expect(published).toEqual([{ topic: roleTopic(controllerToken("omp")), payloadJson }]);
     expect(acks).toEqual(["ack-1"]);
+    pump.stop();
+  });
+
+  // A subject spells a repository lossily, a dot as `_`, so `acme/a.b` mentions on `acme/a_b`'s
+  // subject: the payload's repository says whose mention it is, and another repository's is
+  // acknowledged without reaching the controller.
+  it("forwards only its configured repository's GitHub mentions", async () => {
+    const { state } = stateForIssue();
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const pump = startEventPump({
+      ...deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      }),
+      config: { ...config(), projects: { LEGSMOKE: { repo: "acme/a_b" } } },
+    });
+
+    const acks: string[] = [];
+    nats.emit(
+      "notifications.github.acme.a_b.mention",
+      envelope({ text: "@legion elsewhere", repo: "acme/a.b" }, "github-mention-foreign"),
+      () => acks.push("foreign")
+    );
+    nats.emit(
+      "notifications.github.acme.a_b.mention",
+      envelope({ text: "@legion here", repo: "acme/a_b" }, "github-mention-own"),
+      () => acks.push("own")
+    );
+    await pump.drain();
+
+    expect(published).toEqual([JSON.stringify({ text: "@legion here", repo: "acme/a_b" })]);
+    expect(acks).toEqual(["foreign", "own"]);
     pump.stop();
   });
 
@@ -1501,7 +1538,7 @@ describe("core-NATS event pump", () => {
       const acks: string[] = [];
       nats.emit(
         "notifications.github.acme.widgets.mention",
-        envelope({ text: "@legion please investigate" }, "github-mention-2"),
+        envelope({ text: "@legion please investigate", repo: "acme/widgets" }, "github-mention-2"),
         () => acks.push("ack-1")
       );
 
@@ -1638,5 +1675,64 @@ describe("truncateTermReason", () => {
     const bytes = new TextEncoder().encode(truncated).length;
     expect(bytes).toBeLessThanOrEqual(1_024);
     expect(truncated.endsWith("…")).toBe(true);
+  });
+});
+
+describe("GitHub subjects for a repository", () => {
+  // Envoy's goldens (packages/contracts/fixtures/github-envelopes, which its golden test writes from
+  // its webhook fixtures) are the subjects its listener publishes. For each, the daemon configured
+  // with the payload's repository filters on a prefix of the golden's topic: the two sides spell a
+  // repository's subject segments alike, a dotted name included.
+  const goldenDir = join(import.meta.dir, "../../../../contracts/fixtures/github-envelopes");
+  const goldens = readdirSync(goldenDir).filter((name) => name.endsWith(".json"));
+  it("reads Envoy's goldens", () => {
+    expect(goldens).toContain("pull-request-opened-dotted-repository.json");
+  });
+  for (const name of goldens) {
+    it(`filters on a prefix of ${name}'s topic`, () => {
+      const golden = JSON.parse(readFileSync(join(goldenDir, name), "utf8")) as {
+        topic: string;
+        payload: { repo: `${string}/${string}` };
+      };
+      const nats = new FakeNats();
+      const pump = startEventPump({
+        ...deps(newLegionState("omp", 4), nats, async () => {}),
+        config: { ...config(), projects: { GOLDEN: { repo: golden.payload.repo } } },
+      });
+      try {
+        const github = nats.durableConsumers.find((consumer) =>
+          consumer.durable.endsWith("-github")
+        );
+        expect(
+          github?.filterSubjects.some((filter) => golden.topic.startsWith(filter.slice(0, -1)))
+        ).toBe(true);
+      } finally {
+        pump.stop();
+      }
+    });
+  }
+
+  // A checks settlement names its pull request in its subject, where a dotted repository name is
+  // one segment, a dot as `_`: the settlement settles the pull request its payload names.
+  it("accepts a dotted repository's checks settlement", async () => {
+    const { state, issue } = stateForIssue();
+    state.prs["acme/wid.gets#7"] = checkPr(issue, { repo: "acme/wid.gets" });
+    const nats = new FakeNats();
+    const published: string[] = [];
+    const pump = startEventPump({
+      ...deps(state, nats, async (_topic, payloadJson) => {
+        published.push(payloadJson);
+      }),
+      config: { ...config(), projects: { LEGSMOKE: { repo: "acme/wid.gets" } } },
+    });
+
+    nats.emit(
+      "notifications.github.acme.wid_gets.pr.7.checks",
+      envelope(settledChecks({ repo: "acme/wid.gets" }))
+    );
+    await pump.drain();
+
+    expect(published).toEqual([JSON.stringify({ type: "ci-green", sha: "head-1" })]);
+    pump.stop();
   });
 });

@@ -11,7 +11,6 @@ import {
 import { ApiError, type ArtifactOwner, api } from "../../api/client";
 import type { Artifact, Version } from "../../api/types";
 import {
-  borderDefault,
   calloutInfoBg,
   calloutInfoBorder,
   dangerText,
@@ -153,7 +152,11 @@ export function useArtifactUpload(
 
 export function ArtifactUploadRow({ upload }: { upload: ArtifactUpload }): ReactNode {
   return (
-    <div className={`flex flex-wrap items-center gap-2 border-b py-2 ${borderDefault}`}>
+    // The host owns the strip this sits in, so the row carries no divider of its own: idle it
+    // is one button beside the filter, staging a file it takes the line.
+    <div
+      className={`flex min-w-0 flex-wrap items-center gap-2 ${upload.pendingFile === null ? "shrink-0" : "w-full"}`}
+    >
       {upload.pendingFile === null ? (
         <button
           className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}

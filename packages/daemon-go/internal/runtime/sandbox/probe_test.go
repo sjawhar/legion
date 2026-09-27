@@ -25,6 +25,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 )
 
 // The probe Sandbox testImage gets in testProject: the project, then the digest's first 12 hex.
@@ -107,7 +108,7 @@ func (g *probeRig) finishes(finish func(*corev1.Pod)) *probeRig {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.finish = func(p *corev1.Pod) {
-		p.Spec.NodeName = "ip-10-1-40-7"
+		p.Spec.NodeName = "ip-192-0-2-7"
 		finish(p)
 	}
 	return g
@@ -118,7 +119,7 @@ func (g *probeRig) waits(reason string) *probeRig {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.finish = func(p *corev1.Pod) {
-		p.Spec.NodeName = "ip-10-1-40-7"
+		p.Spec.NodeName = "ip-192-0-2-7"
 		p.Status = corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
 			Name: probeContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: reason}},
 		}}}
@@ -157,9 +158,13 @@ func (g *probeRig) containerAndCollector() {
 	}
 }
 
-// testRoleReferences are role prompts' references as promptrefs.Roles encodes them: the daemon
-// always hands the probe some.
-const testRoleReferences = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/planner.md"]},"LEGION_PROMPT_SKILLS":{}}`
+// testRoleReferences are role prompts' references, and testRoleReferencesJSON the encoding
+// Names.Encode writes for them: the daemon always hands the probe some.
+var testRoleReferences = promptrefs.Names{
+	promptrefs.TaskAgents: {"oracle": {"roles/core/planner.md"}}, promptrefs.Skills: {},
+}
+
+const testRoleReferencesJSON = `{"LEGION_PROMPT_AGENTS":{"oracle":["roles/core/planner.md"]},"LEGION_PROMPT_SKILLS":{}}`
 
 // probeOptions allow two attempts, so a definitive verdict shows as one attempt and a transient one
 // as two. Each attempt's budget is long enough that a pod the stand-ins answer at once is judged
@@ -194,6 +199,46 @@ func wantContains(t *testing.T, err error, wants ...string) {
 // prompt-named agents' models resolved.
 func okLine(contract int) string {
 	return bootprobe.OKLine("/opt/omp/bin/omp", contract, bootprobe.AgentModelsResolved)
+}
+
+// Role references whose encoding the image's Decode refuses would fail the probe pod, and the
+// failure would be blamed on the image, so ProbeImage refuses them before it creates anything: the
+// zero Names (every kind nil, written as `null`) by name, and with the decoder's own reason one
+// kind left nil and a name no prompt can write, which no check of the kinds alone would catch. The
+// rig's pod would pass each one.
+func TestProbeImageRefusesRoleReferencesTheImageWouldRefuseBeforeAnyPod(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		references promptrefs.Names
+		// want is the refusal's own words; empty, the image's decoder's refusal of the encoding.
+		want string
+	}{
+		{"zero", promptrefs.Names{}, "ImageProbe.RoleReferences is required"},
+		{"a kind left nil", promptrefs.Names{promptrefs.TaskAgents: {"oracle": {"roles/core/planner.md"}}}, ""},
+		{"a name no prompt can write", promptrefs.Names{
+			promptrefs.TaskAgents: {"not a name": {"roles/core/planner.md"}}, promptrefs.Skills: {},
+		}, ""},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			want := testCase.want
+			if want == "" {
+				_, decoded := promptrefs.Decode(testCase.references.Encode())
+				if decoded == nil {
+					t.Fatal("the image's decoder accepts these references, so the case proves nothing")
+				}
+				want = decoded.Error()
+			}
+			g := newProbeRig(t, nil)
+			g.succeeds(okLine(3) + "\n")
+			p := probeOptions(t)
+			p.RoleReferences = testCase.references
+
+			wantContains(t, g.probe(p), "ImageProbe.RoleReferences", want)
+			if n := g.creates.Load(); n != 0 {
+				t.Errorf("created the probe Sandbox %d times, want none: the references are refused first", n)
+			}
+		})
+	}
 }
 
 // The probe is a Sandbox named for the project and the image, running the image's Go `legion
@@ -268,6 +313,49 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 				t.Errorf("ran the probe %d times for a definitive answer, want once", n)
 			}
 			g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+		})
+	}
+}
+
+// With a NATS nkey seed, the probe passes only on a pod that named the user of the daemon's own
+// seed (Options.NATSUser, bootprobe.NATSUser): one that named none is an image whose CLI predates
+// the user line — a current CLI whose pointer holds a blank or invalid seed exits 1 instead, and a
+// missing key never mounts — so it is refused naming the rebuild; one that named another user is
+// refused naming both public keys; each once.
+func TestProbeImageHoldsTheProvidersSecretToTheDaemonsSeed(t *testing.T) {
+	const daemons, other = "UDAEMONSUSERPUBLICKEY", "UANOTHERUSERPUBLICKEY"
+	for _, testCase := range []struct {
+		name string
+		log  string
+		want []string
+	}{
+		{"the daemon's user", bootprobe.NATSUserLine(daemons) + "\n" + okLine(3), nil},
+		{"no user", okLine(3), []string{
+			"pod " + probeSandboxName + " named no nkey user, where the pane seed the daemon hands every pod is user " + daemons +
+				": its legion CLI predates the probe's nats-nkey-user line: build the image from this daemon's commit — log tail: ",
+		}},
+		{"another user", bootprobe.NATSUserLine(other) + "\n" + okLine(3),
+			[]string{"read nkey user " + other + " through its NATS_NKEY_SEED_FILE, the providers Secret legion-" + testProject + "-providers's NATS_NKEY_SEED", "where the pane seed the daemon hands every pod is user " + daemons}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) {
+				o.LaunchSecrets = append(o.LaunchSecrets, "NATS_NKEY_SEED")
+				o.ProvidersSecrets, o.NATSUser = []string{"NATS_NKEY_SEED"}, daemons
+			}))
+			g.succeeds(testCase.log + "\n")
+
+			err := g.probe(probeOptions(t))
+
+			if testCase.want == nil {
+				if err != nil {
+					t.Fatalf("ProbeImage = %v, want a pass", err)
+				}
+			} else {
+				wantContains(t, err, testCase.want...)
+			}
+			if n := g.creates.Load(); n != 1 {
+				t.Errorf("ran the probe %d times, want once", n)
+			}
 		})
 	}
 }
@@ -549,8 +637,8 @@ func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 		keys map[string]string
 		want []string
 	}{
-		{"no provider keys", nil, []string{"--role-references", testRoleReferences}},
-		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferences}},
+		{"no provider keys", nil, []string{"--role-references", testRoleReferencesJSON}},
+		{"provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"--provider-env-dir", ProvidersDir, "--role-references", testRoleReferencesJSON}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			opts := goldenOptions()

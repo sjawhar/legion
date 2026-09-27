@@ -9,14 +9,15 @@
 // longer exists; and migration-only keys, refused with the TypeScript loader's own message text so
 // an operator searching for those words finds the same answer. Anything else is a typo. Under
 // `runtime: kubernetes` the loader also refuses what a pod could not run with: the
-// `runtime.kubernetes` block's own values, and the keys outside it every pod needs. The TypeScript
-// in-cluster daemon's files (deploy/kubernetes/daemon) are that daemon's, not Go configurations.
+// `runtime.kubernetes` block's own values, and the keys outside it every pod needs.
 //
 // Load reads the file and nothing it names: a path key (`instructions`, `envoy_token_file`,
-// `operator_token_file`, `runtime.kubernetes.kubeconfig`) is resolved against the file's directory
-// and kept as a path. What sits at that path is read at boot, by ReadSecretPointer,
-// MaterializeDeploymentInstructions, and the runtime's client, so a configuration validates on a
-// machine that has none of the files it names.
+// `nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, `operator_token_file`,
+// `runtime.kubernetes.kubeconfig`) is resolved
+// against the file's directory and kept as a path. What sits at that path is read at boot, by
+// ReadSecretPointer, ReadDeploymentInstructions, and the runtime's client, so a configuration loads
+// on a machine that has none of the files it names; `legion start --check-config` then reads them
+// as boot does (daemon.CheckStart).
 package config
 
 import (
@@ -92,8 +93,9 @@ type Config struct {
 	// ProbeInterval is how often the runtime sweeps every recorded process.
 	ProbeInterval time.Duration
 
-	// The supervision budgets: launches that failed, prompts acknowledged without a turn, and
-	// panes retired for those, each before the claim is failed.
+	// The supervision budgets: launches that failed (and, under the same limit, deaths of a ready
+	// agent while it had work outstanding), prompts acknowledged without a turn, and panes retired
+	// for those, each before the claim is failed.
 	LaunchFailureLimit int
 	PromptFailureLimit int
 	PromptRetireLimit  int
@@ -106,6 +108,14 @@ type Config struct {
 	// EnvoyTokenFile is the Envoy bearer's file, "" when none; every pane receives the token as
 	// a 0600 file of its own.
 	EnvoyTokenFile string
+	// NatsNkeySeedFile is the file holding the NATS nkey user seed every pane receives, and the
+	// daemon connects as when it has no seed of its own, "" when the file names none (natsauth.Seed
+	// then reads NATS_NKEY_SEED_FILE or NATS_NKEY_SEED from the daemon's environment).
+	NatsNkeySeedFile string
+	// NatsDaemonNkeySeedFile is the file holding the NATS nkey user seed the daemon's own connection
+	// authenticates with, never handed to a pane, "" when the file names none (natsauth.DaemonSeed
+	// then reads NATS_DAEMON_NKEY_SEED_FILE or NATS_DAEMON_NKEY_SEED from the daemon's environment).
+	NatsDaemonNkeySeedFile string
 
 	// Stage 3's workflow dependencies. DispatchTokenFile remains a pointer here: boot reads the
 	// bearer only after every local configuration refusal has passed.
@@ -127,14 +137,15 @@ const (
 	defaultRuntimeName  = "tmux"
 	defaultEnvoyURL     = "http://127.0.0.1:9020"
 
-	// maxTimerSeconds is the shipped bound on every duration key (config.ts:303-308): the
-	// largest whole number of seconds whose milliseconds fit a signed 32-bit timer. Go's timers
-	// are not so bounded; the bound is kept so a file one daemon accepts, the other accepts too.
+	// maxTimerSeconds is the shipped bound on every duration key (config.ts MAX_TIMER_SECONDS):
+	// the largest whole number of seconds whose milliseconds fit a signed 32-bit timer. Go's
+	// timers are not so bounded; the bound is kept so a file one daemon accepts, the other
+	// accepts too.
 	maxTimerSeconds = 2_147_483
 )
 
-// durationKeys are the positive-second keys and their defaults (config.ts:297-312, and the new
-// probe interval). Every one of them is held to the timer bound.
+// durationKeys are the positive-second keys and their defaults (config.ts's DEFAULT_* constants,
+// and the new probe interval). Every one of them is held to the timer bound.
 var durationKeys = []struct {
 	key          string
 	defaultValue int
@@ -149,7 +160,8 @@ var durationKeys = []struct {
 }
 
 // countKeys are the positive-integer keys with no unit, and their defaults: the registration
-// deadline's interval count (config.ts:300) and the supervision budgets.
+// deadline's interval count (config.ts DEFAULT_WORKER_BOOT_REGISTRATION_DEADLINE_INTERVALS) and the
+// supervision budgets.
 var countKeys = []struct {
 	key          string
 	defaultValue int
@@ -177,11 +189,11 @@ var tossedKeys = map[string]string{
 	"resync_interval_seconds":    `the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, "Ported, and tossed")`,
 }
 
-// migrationKeys are the keys the TypeScript loader already refuses with a migration message,
-// mapped to that message verbatim (packages/daemon/src/daemon/config.ts:1316, 1320, 1327, 1330,
-// 1350, 1354). The text is kept exactly, including `worker_budget`'s pointer at `worker_cap`,
-// which this loader tosses in turn: an operator who hits the message searches for the same words
-// in either daemon, and the second refusal names the cap's own fate.
+// migrationKeys are the keys the TypeScript loader already refuses with a migration message, mapped
+// to that message verbatim (packages/daemon/src/daemon/config.ts, loadConfigFromFile's migration
+// refusals). The text is kept exactly, including `worker_budget`'s pointer at `worker_cap`, which
+// this loader tosses in turn: an operator who hits the message searches for the same words in
+// either daemon, and the second refusal names the cap's own fate.
 var migrationKeys = map[string]string{
 	"dispatch_mcp_url":  "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)",
 	"dispatch_project":  "dispatch_project was replaced by projects",
@@ -191,7 +203,7 @@ var migrationKeys = map[string]string{
 	"worker_budget":     "worker_budget was replaced by worker_cap",
 }
 
-// gatesMergeMessage is `parseGates`'s own refusal (config.ts:981).
+// gatesMergeMessage is `parseGates`'s own refusal (config.ts).
 const gatesMergeMessage = "gates.merge is not a Legion setting: human approval of a pull request is the repository's own branch protection or CODEOWNERS rule, which Legion never reads or writes"
 
 // fileConfig holds the modelled keys as they were read: a pointer per key, so a key the file
@@ -214,16 +226,19 @@ type fileConfig struct {
 	EnvoyURL          *string
 	NatsURLs          []string
 	EnvoyTokenFile    *string
-	DispatchURL       *string
-	DispatchTokenFile *string
-	Projects          map[string]Project
-	Gates             *Gates
-	GitHubApps        *GitHubApps
-	Linger            *time.Duration
-	ReviewRoundCap    *int
-	MaxFixAttempts    *int
-	Durations         map[string]int
-	Counts            map[string]int
+	NatsNkeySeedFile  *string
+	// NatsDaemonNkeySeedFile is `nats_daemon_nkey_seed_file`.
+	NatsDaemonNkeySeedFile *string
+	DispatchURL            *string
+	DispatchTokenFile      *string
+	Projects               map[string]Project
+	Gates                  *Gates
+	GitHubApps             *GitHubApps
+	Linger                 *time.Duration
+	ReviewRoundCap         *int
+	MaxFixAttempts         *int
+	Durations              map[string]int
+	Counts                 map[string]int
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -329,6 +344,10 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.NatsURLs, err = readNatsURLs(value, key)
 		case "envoy_token_file":
 			file.EnvoyTokenFile, err = readNonEmptyString(value, key)
+		case "nats_nkey_seed_file":
+			file.NatsNkeySeedFile, err = readNonEmptyString(value, key)
+		case "nats_daemon_nkey_seed_file":
+			file.NatsDaemonNkeySeedFile, err = readNonEmptyString(value, key)
 		case "dispatch_url":
 			file.DispatchURL, err = readString(value, key)
 		case "dispatch_token_file":
@@ -378,7 +397,8 @@ func isCountKey(key string) bool {
 }
 
 // readPositive reads a duration or count key into the file's map: a positive integer and, for a
-// duration, at most the timer bound (config.ts:480-487, 1367-1382).
+// duration, at most the timer bound (config.ts readPositiveInteger, and loadConfigFromFile's
+// lifecycle keys).
 func readPositive(value *yaml.Node, key string, file fileConfig) error {
 	read, err := readInt(value, key)
 	if err != nil || read == nil {
@@ -411,7 +431,7 @@ func classify(key string, value *yaml.Node) error {
 		return fmt.Errorf("unknown key %s", key)
 	}
 	// `gates` is the one known-later block walked a level, as the shipped loader walks it
-	// (config.ts:396-399): `merge` is a refusal, not a key a later stage models.
+	// (config.ts CONFIG_SCHEMA's gates): `merge` is a refusal, not a key a later stage models.
 	if key == "gates" {
 		if err := checkGates(value); err != nil {
 			return err
@@ -483,7 +503,7 @@ func readString(value *yaml.Node, key string) (*string, error) {
 }
 
 // readNonEmptyString is a string key whose blank value is a refusal rather than an unset key
-// (the shipped `requireNonEmpty`, config.ts:614-617).
+// (the shipped `requireNonEmpty`, config.ts).
 func readNonEmptyString(value *yaml.Node, key string) (*string, error) {
 	read, err := readString(value, key)
 	if err != nil || read == nil {
@@ -568,7 +588,7 @@ func readNatsURLs(value *yaml.Node, key string) ([]string, error) {
 }
 
 // dispatchBase is `dispatch_url`: a base URL, never its clients' `/mcp` endpoint, which the clients
-// append themselves (the shipped `requireNoMcpSuffix`, config.ts:754-760). A trailing slash is gone
+// append themselves (the shipped `requireNoMcpSuffix`, config.ts). A trailing slash is gone
 // by then, so `/mcp/` is caught too.
 func dispatchBase(value, key string) (string, error) {
 	base, err := baseURL(value, key)
@@ -582,7 +602,7 @@ func dispatchBase(value, key string) (string, error) {
 }
 
 // readStrings reads a sequence of non-empty strings, in order and with repeats — the shipped
-// `readArgv` (config.ts:452-461); a caller that wants a set dedupes it.
+// `readArgv` (config.ts); a caller that wants a set dedupes it.
 func readStrings(value *yaml.Node, key string) ([]string, error) {
 	if value.Tag == "!!null" {
 		return nil, nil
@@ -654,6 +674,9 @@ func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 		if envNode.Kind != yaml.ScalarNode || !envVarName.MatchString(env) {
 			return nil, fmt.Errorf("%s key %q (the variable OMP reads) %s", key, env, envNameRule)
 		}
+		if strings.HasPrefix(env, "AGENT_SECRETS_") {
+			return nil, fmt.Errorf("%s names %s: an AGENT_SECRETS_* variable is the runtime's (AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR) or the daemon's own agent-secrets machine login, and is never exported into an agent's environment", key, env)
+		}
 		if seen[env] {
 			return nil, fmt.Errorf("%s names %s twice", key, env)
 		}
@@ -707,7 +730,7 @@ func readLingerHours(value *yaml.Node, key string) (*time.Duration, error) {
 	return &linger, nil
 }
 
-// validURL is the shipped `validateUrl` (config.ts:627-634) for the URLs this daemon dials or
+// validURL is the shipped `validateUrl` (config.ts) for the URLs this daemon dials or
 // hands out: a scheme and a host, or the key is refused.
 func validURL(value, key string) (*url.URL, error) {
 	parsed, err := url.Parse(value)
@@ -717,7 +740,7 @@ func validURL(value, key string) (*url.URL, error) {
 	return parsed, nil
 }
 
-// baseURL is the shipped `normalizeBaseUrl` (config.ts:768-774): a URL a path is appended to, so
+// baseURL is the shipped `normalizeBaseUrl` (config.ts): a URL a path is appended to, so
 // a query or fragment is refused and trailing slashes are dropped.
 func baseURL(value, key string) (string, error) {
 	parsed, err := validURL(value, key)
@@ -822,8 +845,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 
 // resolveStage2 settles the keys Stage 2 models. Each is read from the file alone: the shipped
 // loader's environment twins (`LEGION_DAEMON_URL`, `ENVOY_NATS_URL`, `LEGION_WORKER_*_SECONDS`, …)
-// are not read, because a daemon started from inside a Legion pane inherits that pane's values
-// for exactly those names (config.ts:1497-1503 is the shipped loader working around it).
+// are not read, because a daemon started from inside a Legion pane inherits that pane's values for
+// exactly those names (resolveDaemonConfig's daemon_url rule in config.ts is the shipped loader
+// working around it).
 func resolveStage2(file fileConfig, configDir string, cfg *Config) error {
 	cfg.DaemonURL = fmt.Sprintf("http://127.0.0.1:%d", cfg.Port)
 	if file.DaemonURL != nil {
@@ -877,7 +901,7 @@ func resolveStage2(file fileConfig, configDir string, cfg *Config) error {
 		*c.field(cfg) = count
 	}
 	// The registration deadline is one timer for the product, so each factor fitting is not
-	// enough (config.ts:1854-1860).
+	// enough (resolveDaemonConfig in config.ts).
 	if int64(cfg.WorkerBootTimeout/time.Second)*int64(cfg.WorkerBootRegistrationDeadlineIntervals) > maxTimerSeconds {
 		return fmt.Errorf("worker_boot_timeout_seconds * worker_boot_registration_deadline_intervals must be at most %d", maxTimerSeconds)
 	}
@@ -894,6 +918,12 @@ func resolveStage2(file fileConfig, configDir string, cfg *Config) error {
 	cfg.NatsURLs = file.NatsURLs
 	if file.EnvoyTokenFile != nil {
 		cfg.EnvoyTokenFile = underConfig(*file.EnvoyTokenFile, configDir)
+	}
+	if file.NatsNkeySeedFile != nil {
+		cfg.NatsNkeySeedFile = underConfig(*file.NatsNkeySeedFile, configDir)
+	}
+	if file.NatsDaemonNkeySeedFile != nil {
+		cfg.NatsDaemonNkeySeedFile = underConfig(*file.NatsDaemonNkeySeedFile, configDir)
 	}
 	return nil
 }

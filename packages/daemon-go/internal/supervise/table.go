@@ -24,8 +24,9 @@ type RuntimeObservation struct{ Observation runtime.Observation }
 
 // StreamHello is the shim connecting with this claim's boot token, resolved to its generation.
 type StreamHello struct {
-	Claim      claim.Token
-	Generation uint64
+	Claim        claim.Token
+	Generation   uint64
+	AgentSecrets *AgentSecretsIdentity
 }
 
 // StreamTurnStart is the agent's turn starting. Oh My Pi's own agent_start carries no delivery id;
@@ -47,6 +48,16 @@ type StreamLateRefusal struct {
 	Claim      claim.Token
 	DeliveryID string
 	Error      string
+	// Replayed is a refusal the connection did not send the prompt for: the shim's backlog
+	// replaying what Oh My Pi answered while no daemon was connected. It answers an earlier prompt,
+	// possibly of the very delivery this connection is re-sending, so it charges nothing, and it
+	// clears the mark that prompt set. It takes the task back only when a turn not its own confirmed
+	// it and the task was not sent through the connection it arrived on or a newer one
+	// (takesBackConfirmed).
+	Replayed bool
+	// ConnSequence is the registration sequence of the connection the refusal arrived on
+	// (runtime.Conn.Sequence).
+	ConnSequence uint64
 }
 
 // PromptAcked is a send's prompt acknowledged, posted by the send's own goroutine.
@@ -328,6 +339,12 @@ var (
 	gone        = []ClaimState{StateSuspended, StateFailed, StateRetired}
 )
 
+// LiveStates are the states of a claim whose process is up or coming up: launched, and not
+// suspended, failed or retired. It is a copy, so no caller changes the table's own set.
+func LiveStates() []ClaimState {
+	return slices.Clone(live)
+}
+
 const (
 	noProcess     = "no process of this claim is running"
 	noSend        = "no prompt is sent in this state"
@@ -354,8 +371,7 @@ func fillTable(t *builder) {
 
 	// The shim.
 	t.row(onHello, "the shim connected", helloed, []ClaimState{StateShimConnected}, StateLaunching)
-	t.ignore(onHello, "the shim reconnected before its agent registered", StateShimConnected)
-	t.ignore(onHello, "the shim reconnected, or its agent's registration overtook its hello", StateRegistered)
+	t.row(onHello, "the shim reconnected before ready: hand it the enrollment if it lacks one", enrolledOnly, nil, StateShimConnected, StateRegistered)
 	t.row(onHello, "the shim reconnected: send what is pending", reconnected, []ClaimState{StateWorking}, prompted...)
 	t.row(onHello, "the shim reconnected mid-turn: after a restart, ask whether the turn is still running",
 		reconnectedMidTurn, []ClaimState{StateIdle, StateWorking}, StateWorking)
@@ -379,8 +395,8 @@ func fillTable(t *builder) {
 
 	t.row(onLateRefusal, "the agent refused an acknowledged prompt", lateRefused,
 		[]ClaimState{StateLaunching, StateFailed}, StateReady, StateIdle, StateWorking)
-	t.ignore(onLateRefusal, noSend, unready...)
-	t.ignore(onLateRefusal, noSend, gone...)
+	t.row(onLateRefusal, "a prompt was refused while no process can be prompted: the mark it set goes",
+		refusedUnprompted, nil, slices.Concat(unready, gone)...)
 
 	// Turns.
 	t.row(onTurnStart, "a turn started", turnStarted, []ClaimState{StateWorking}, prompted...)
@@ -528,17 +544,33 @@ func (b *builder) ignore(kind eventKind, reason string, states ...ClaimState) {
 // connection — when nothing else will come: the retry is bounded by the sweep's interval and by
 // the prompt budget, never made on the spot.
 func observe(m *Machine, ctx context.Context, ev Event) error {
-	return m.judge(ctx, ev.(RuntimeObservation).Observation, m.sendPending, TimerProbe, m.deps.Timeouts.Probe)
+	return m.judge(ctx, ev.(RuntimeObservation).Observation, func(ctx context.Context) error {
+		if err := m.ensureEnrolled(ctx); err != nil {
+			return err
+		}
+		return m.sendPending(ctx)
+	}, TimerProbe, m.deps.Timeouts.Probe)
 }
 
 func helloed(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateShimConnected
-	return m.persist(ctx)
+	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	return m.ensureEnrolled(ctx)
 }
+
+// enrolledOnly is a hello in a state the reconnect changes nothing about — the shim connected or
+// the agent registered, not yet ready — except that the reconnected shim may need the enrollment
+// it never received, or the resumed claim its first one.
+func enrolledOnly(m *Machine, ctx context.Context, _ Event) error { return m.ensureEnrolled(ctx) }
 
 func reconnected(m *Machine, ctx context.Context, _ Event) error {
 	if m.send != nil {
 		m.helloDuringSend = true
+	}
+	if err := m.ensureEnrolled(ctx); err != nil {
+		return err
 	}
 	return m.sendPending(ctx)
 }
@@ -548,6 +580,9 @@ func reconnected(m *Machine, ctx context.Context, _ Event) error {
 // may be waiting on an agent_end an earlier daemon received and never recorded, so its first
 // hello asks.
 func reconnectedMidTurn(m *Machine, ctx context.Context, ev Event) error {
+	if err := m.ensureEnrolled(ctx); err != nil {
+		return err
+	}
 	if !m.askFirst {
 		return nil
 	}
@@ -571,9 +606,9 @@ func reprobe(m *Machine, ctx context.Context, _ Event) error {
 func acked(m *Machine, ctx context.Context, _ Event) error {
 	m.helloDuringSend = false
 	p := m.claim.Pending
-	p.DeliveredAt = m.deps.Clock.Now()
+	m.markRead(p)
 	m.arm(TimerTurn, m.deps.Timeouts.RPC, p.ID)
-	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
+	return m.putPending(ctx)
 }
 
 // refused is a prompt that did not reach a turn from its own send: the agent refused it
@@ -591,7 +626,7 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 	m.helloDuringSend = false
 	if p := m.claim.Pending; !p.ConfirmedAt.IsZero() {
 		p.ConfirmedAt = time.Time{}
-		if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, *p); err != nil {
+		if err := m.putPending(ctx); err != nil {
 			return err
 		}
 	}
@@ -604,6 +639,66 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 		return m.sendPending(ctx)
 	}
 	return nil
+}
+
+// refusedElsewhere is the part of a late refusal every state shares, and it reports whether that
+// was all of it. Two kinds say only that a prompt this task was sent under never ran:
+//
+//   - A refusal naming a prompt other than the pending one. It is the prompt whose acknowledgement
+//     set the read mark (the fence lets no other through). The wait that gave up on it already
+//     re-queued the task under a new id and charged the prompt, so the mark goes and nothing else;
+//     rotating or charging again would spend the budget twice for one prompt.
+//   - A refusal the shim replayed from its backlog, answering a prompt an earlier connection sent.
+//     The pending id may be the very delivery this connection is re-sending, whose own answer is
+//     still to come, so it clears only the mark it set.
+//
+// A replayed refusal that takes back a task a turn not its own confirmed is the exception
+// (takesBackConfirmed): the task goes back unread, charged nothing, so that turn's end sends it
+// again rather than retiring it as served.
+func refusedElsewhere(m *Machine, ctx context.Context, r StreamLateRefusal) (bool, error) {
+	p := m.claim.Pending
+	switch {
+	case m.takesBackConfirmed(r):
+		m.log.Warn("supervise: a replayed refusal names the prompt a foreign turn confirmed; the task goes back unread",
+			"delivery", r.DeliveryID, "error", r.Error)
+		return true, m.takeBackPending(ctx, taskUnread)
+	case r.Replayed || r.DeliveryID != p.ID:
+		m.log.Warn("supervise: a refused prompt had marked the task as read; the mark is cleared",
+			"delivery", r.DeliveryID, "replayed", r.Replayed, "error", r.Error)
+		return true, m.markUnread(ctx)
+	}
+	return false, nil
+}
+
+// takesBackConfirmed is whether a replayed refusal of the pending prompt says the turn that
+// confirmed the task was not the task's. It is when no send is in flight and the task was not sent
+// through the connection the refusal arrived on or a newer one: then the confirmation came from a
+// turn the agent was already in, and the refused prompt was an older connection's. A send in
+// flight, or one through that connection or a later one, may be the prompt whose turn confirmed
+// the task, so the task stays confirmed and the refusal clears only the mark. Connections are
+// compared by the order they were registered in, not by the order the machine handles their
+// events in: a sweep can send through a connection before its hello is handled, the shim can redial
+// before the machine reaches the old connection's backlog, and an acknowledgement is handled by
+// its send's own goroutine.
+func (m *Machine) takesBackConfirmed(r StreamLateRefusal) bool {
+	p := m.claim.Pending
+	return r.Replayed && p != nil && r.DeliveryID == p.ID && !p.ConfirmedAt.IsZero() &&
+		m.send == nil && m.sentThrough < r.ConnSequence
+}
+
+// refusedUnprompted is a refusal landing while the claim cannot be prompted: relaunching after the
+// process that refused died, or stopped. Nothing is charged or re-sent here, since the process that
+// refused is not the one that will be prompted next. It still says the prompt never ran, so the
+// mark it set goes; a task still carrying that prompt's id also goes back under a new one, so the
+// next send is a new prompt that no refusal of the old one can name.
+func refusedUnprompted(m *Machine, ctx context.Context, ev Event) error {
+	r := ev.(StreamLateRefusal)
+	if done, err := refusedElsewhere(m, ctx, r); done {
+		return err
+	}
+	m.log.Warn("supervise: a prompt was refused while no process can be prompted; the task goes back unread",
+		"delivery", r.DeliveryID, "state", string(m.claim.State), "error", r.Error)
+	return m.takeBackPending(ctx, taskUnread)
 }
 
 // lateRefused is the agent refusing a prompt it had acknowledged. OMP answers that way when it
@@ -626,6 +721,9 @@ func refused(m *Machine, ctx context.Context, ev Event) error {
 // on the spot for ever against an agent that cannot start a turn at all.
 func lateRefused(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(StreamLateRefusal)
+	if done, err := refusedElsewhere(m, ctx, r); done {
+		return err
+	}
 	conn, connected := m.deps.Conns.Conn(m.claim.Token)
 	if m.claim.State == StateWorking || agentBusy(r.Error) || (connected && m.streaming(ctx, conn)) {
 		m.log.Warn("supervise: the agent refused an acknowledged prompt; it is in a turn of its own",
@@ -734,7 +832,10 @@ func register(m *Machine, ctx context.Context, ev Event) error {
 	m.claim.State = StateRegistered
 	m.disarm(TimerBoot)
 	m.disarm(TimerRegistration)
-	return m.persist(ctx)
+	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	return m.ensureEnrolled(ctx)
 }
 
 func reregister(m *Machine, ctx context.Context, ev Event) error {
@@ -792,12 +893,17 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 // stop ends one claim: the runtime releases it, and it retires. A release that fails changes
 // nothing, so the stop can be asked again. The tree's root claim ends only with its tree: a
 // retired root would leave the orphan sweep's known set, which would then take whatever the
-// runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused.
+// runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused,
+// naming the operator's close when it is that close which ends the tree.
 func stop(m *Machine, ctx context.Context, _ Event) error {
-	if m.claim.treeRoot() {
-		return &RefusedError{State: m.claim.State, Request: "stop", Err: rootStopRefusal(m.claim.State)}
+	if !m.claim.treeRoot() {
+		return m.end(ctx)
 	}
-	return m.end(ctx)
+	closable, err := m.treeClosable(ctx)
+	if err != nil {
+		return fmt.Errorf("stop %s: %w", m.claim.Token, err)
+	}
+	return &RefusedError{State: m.claim.State, Request: "stop", Err: rootStopRefusal(m.claim.State, closable)}
 }
 
 // treeClose is the workflow's close of the tree, which ends the root claim too. It is the
@@ -834,10 +940,7 @@ func (m *Machine) closeRefusal(ctx context.Context) error {
 		return &RefusedError{State: m.claim.State, Request: "close",
 			Err: fmt.Errorf("%s is not its tree's root claim; stop it instead", m.claim.Token)}
 	}
-	if m.deps.TreeClosable == nil {
-		return nil
-	}
-	closable, err := m.deps.TreeClosable(ctx, m.claim)
+	closable, err := m.treeClosable(ctx)
 	if err != nil {
 		return fmt.Errorf("close %s: %w", m.claim.Token, err)
 	}
@@ -846,6 +949,15 @@ func (m *Machine) closeRefusal(ctx context.Context) error {
 			Err: fmt.Errorf("%s is a workflow issue's tree, which closes when its linger expires", m.claim.Tree)}
 	}
 	return nil
+}
+
+// treeClosable is Deps.TreeClosable's answer for this claim's tree; with none, every tree closes.
+// Each caller names the request it answers when the read fails.
+func (m *Machine) treeClosable(ctx context.Context) (bool, error) {
+	if m.deps.TreeClosable == nil {
+		return true, nil
+	}
+	return m.deps.TreeClosable(ctx, m.claim)
 }
 
 // end releases the claim's process and retires the claim, which is what every stop and close does
@@ -858,16 +970,23 @@ func (m *Machine) end(ctx context.Context) error {
 }
 
 // rootStopRefusal is ErrRootStop with what stops the root's process in state instead: a suspension,
-// which takes a registered agent, and nothing where no process runs.
-func rootStopRefusal(state ClaimState) error {
+// which takes a registered agent, and nothing where no process runs. A tree no workflow issue backs
+// (closable) ends by the operator's close, which the refusal names; a workflow issue's tree ends
+// when its linger expires.
+func rootStopRefusal(state ClaimState, closable bool) error {
+	var err error
 	switch {
 	case slices.Contains(processless, state):
-		return fmt.Errorf("%w; %s", ErrRootStop, noProcess)
+		err = fmt.Errorf("%w; %s", ErrRootStop, noProcess)
 	case slices.Contains(booting, state):
-		return fmt.Errorf("%w; suspend it to stop its process once its agent has registered", ErrRootStop)
+		err = fmt.Errorf("%w; suspend it to stop its process once its agent has registered", ErrRootStop)
 	default:
-		return fmt.Errorf("%w; suspend it to stop its process", ErrRootStop)
+		err = fmt.Errorf("%w; suspend it to stop its process", ErrRootStop)
 	}
+	if closable {
+		return fmt.Errorf("%w; no workflow issue backs its tree, so legion claims close ends it", err)
+	}
+	return err
 }
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {

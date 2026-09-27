@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -37,6 +38,14 @@ const (
 	tempVolume      = "tmp"
 	configVolume    = "config"
 	providersVolume = "providers"
+)
+
+// The agent-secrets volumes: agentSecretsTokenVolume alone carries the projected token for the
+// broker's audience, and agentSecretsKeyVolume the memory-backed directory the client keeps its
+// key and enrollment id in. Neither exists when the runtime enrolls no pod.
+const (
+	agentSecretsKeyVolume   = "agent-secrets-key"
+	agentSecretsTokenVolume = "agent-secrets-token"
 )
 
 // maxArgBytes is Linux's MAX_ARG_STRLEN, the largest single argv string exec accepts, counting
@@ -68,20 +77,26 @@ var runtimeOwned = map[string]bool{
 	"PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true, "LEGION_GRANT_FILE": true,
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
+	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true,
 }
 
 // legionVolumeNames are the volumes Legion puts in a pod, a worker's or the probe's, whose names
-// the operator's volumes may not take.
+// the operator's volumes may not take. The agent-secrets volumes are reserved whether or not this
+// deployment enrolls: an operator's pod may never claim them.
 func legionVolumeNames() []string {
-	names := []string{treeVolume, bootVolume, provisionVolume, feedVolume, stateVolume, tempVolume, configVolume, providersVolume}
+	names := []string{
+		treeVolume, bootVolume, provisionVolume, feedVolume, stateVolume, tempVolume, configVolume, providersVolume,
+		agentSecretsTokenVolume, agentSecretsKeyVolume,
+	}
 	slices.Sort(names)
 	return names
 }
 
 // legionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
 // the worker's and the image probe's: an operator's mount may be neither at, under, nor above one.
+// AgentSecretsKeyDir and AgentSecretsTokenDir are reserved whether or not this deployment enrolls.
 func legionMountPaths() []string {
-	paths := []string{TreeRoot, ompSessionsDir, BootDir, StateDir, xdgConfigHome, ProvidersDir}
+	paths := []string{TreeRoot, ompSessionsDir, BootDir, StateDir, xdgConfigHome, ProvidersDir, AgentSecretsKeyDir, AgentSecretsTokenDir}
 	slices.Sort(paths)
 	return paths
 }
@@ -94,8 +109,9 @@ type launch struct {
 	// (workspace.Location under TreeRoot).
 	workspace string
 	// secrets are the claim Secret's keys beside the provisioning token, each reaching the main
-	// container as a `<NAME>_FILE` pointer: the boot token, the spec's, and the Dispatch bearer
-	// when Dispatch is configured.
+	// container as a `<NAME>_FILE` pointer: the boot token, the spec's but the providers Secret's
+	// own (Options.ProvidersSecrets, which the runtime points at the providers mount whatever the
+	// spec carries), and the Dispatch bearer when Dispatch is configured.
 	secrets map[string]string
 	// root is the tree's root claim, whose Sandbox owns the tree volume; isRoot is spec's claim
 	// being it.
@@ -125,7 +141,7 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if _, ok := spec.Secrets[provisionTokenKey]; ok {
 		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
-	if spec.Repository == "" {
+	if spec.Repository.IsZero() {
 		return launch{}, refuse("no repository: a pod's init container provisions the issue's workspace from one")
 	}
 	working, err := workspace.Location(TreeRoot, spec.Repository, spec.Issue)
@@ -143,6 +159,9 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	secrets := maps.Clone(spec.Secrets)
 	if secrets == nil {
 		secrets = map[string]string{}
+	}
+	for _, name := range r.providersSecrets {
+		delete(secrets, name)
 	}
 	secrets[bootTokenKey] = spec.BootToken
 	if r.dispatchToken != "" {
@@ -202,7 +221,7 @@ func systemPrompt(parts runtime.PromptParts) (string, error) {
 // initSessionPath is where the workspace-init container sees a main-container session file: the
 // volume's sessions directory is mounted at Oh My Pi's sessions directory in the main container and
 // sits under TreeRoot in the workspace-init container. A session anywhere else is not on the volume, so no pod
-// can resume it (k8s-manifests.ts:168-181).
+// can resume it (initContainerSessionPath, k8s-manifests.ts).
 func initSessionPath(file string) (string, error) {
 	rest, ok := strings.CutPrefix(file, ompSessionsDir+"/")
 	if !ok || rest == "" || filepath.Clean(rest) != rest || strings.HasPrefix(rest, "../") {
@@ -287,6 +306,11 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 	if len(providersMounts) > 0 {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}
+	if r.agentSecrets != nil {
+		shim = append(shim, "--agent-secrets-key-dir", AgentSecretsKeyDir,
+			"--pod-token-file", AgentSecretsTokenDir+"/"+AgentSecretsTokenFile,
+			"--agent-secrets-bin", r.tools.AgentSecrets)
+	}
 	spec := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyNever,
 		TerminationGracePeriodSeconds: new(int64(math.Ceil(r.terminationGrace.Seconds()))),
@@ -305,7 +329,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 		InitContainers: []corev1.Container{{
 			Name:       fetchContainer,
 			Image:      r.image,
-			Command:    []string{legion, "workspace-init", "fetch", "--repo", l.spec.Repository, "--feed", FeedDir},
+			Command:    []string{legion, "workspace-init", "fetch", "--repo", l.spec.Repository.String(), "--feed", FeedDir},
 			Env:        fetchEnvironment(),
 			WorkingDir: FeedDir,
 			VolumeMounts: []corev1.VolumeMount{
@@ -319,7 +343,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 			Name:  initContainer,
 			Image: r.image,
 			Command: []string{
-				legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository, "--root", TreeRoot,
+				legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository.String(), "--root", TreeRoot,
 				"--credential-helper", helper, "--feed", FeedDir,
 			},
 			Env:        r.initEnvironment(l),
@@ -344,7 +368,7 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 				{Name: bootVolume, MountPath: BootDir, ReadOnly: true},
 				{Name: stateVolume, MountPath: StateDir},
 				{Name: configVolume, MountPath: xdgConfigHome},
-			}, providersMounts, r.pod.VolumeMounts),
+			}, providersMounts, r.agentSecretsMounts(), r.pod.VolumeMounts),
 			Resources:       resources,
 			SecurityContext: restrictedContainer(),
 		}},
@@ -406,25 +430,83 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 		{Name: stateVolume, VolumeSource: memory},
 		{Name: tempVolume, VolumeSource: memory},
 		{Name: configVolume, VolumeSource: memory},
-	}, providers, r.pod.Volumes)
+	}, r.agentSecretsVolumes(), providers, r.pod.Volumes)
+}
+
+// agentSecretsVolumes are the two volumes an enrolled pod carries: the projected token for the
+// broker's audience — one source, alone in its volume, the shape agent-c's legion-sandbox-pods
+// policy admits per token — and the memory-backed key directory. None when the runtime enrolls no
+// pod.
+func (r *Runtime) agentSecretsVolumes() []corev1.Volume {
+	a := r.agentSecrets
+	if a == nil {
+		return nil
+	}
+	expiry := int64(math.Ceil(a.TokenExpiry.Seconds()))
+	return []corev1.Volume{
+		{Name: agentSecretsTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+			DefaultMode: new(int32(0o440)),
+			Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+				Audience: a.Audience, ExpirationSeconds: &expiry, Path: AgentSecretsTokenFile,
+			}}},
+		}}},
+		{Name: agentSecretsKeyVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+			Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(1<<20, resource.BinarySI),
+		}}},
+	}
+}
+
+// agentSecretsMounts are the worker container's mounts of the two agent-secrets volumes: the
+// token read-only, and the key directory writable so the client can persist its key and
+// enrollment id across a pod's own lifetime. Neither when the runtime enrolls no pod.
+func (r *Runtime) agentSecretsMounts() []corev1.VolumeMount {
+	if r.agentSecrets == nil {
+		return nil
+	}
+	return []corev1.VolumeMount{
+		{Name: agentSecretsTokenVolume, MountPath: AgentSecretsTokenDir, ReadOnly: true},
+		{Name: agentSecretsKeyVolume, MountPath: AgentSecretsKeyDir},
+	}
 }
 
 // providers are the providers Secret's volume and its read-only mount at ProvidersDir: the
 // configured keys alone, each a file named for the variable Oh My Pi reads, which is what the shim
-// exports into Oh My Pi's environment (--provider-env-dir, shim.ReadProviderEnv). Neither without
-// provider keys, so a deployment with none needs no such Secret.
+// exports into Oh My Pi's environment (--provider-env-dir, shim.ReadProviderEnv), and each
+// providers secret (Options.ProvidersSecrets), a file of its own name that the shim skips, since
+// the container's `<NAME>_FILE` points at it (providersPointers). Neither without provider keys or
+// providers secrets, so a deployment with none needs no such Secret.
 func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
-	if len(r.providerKeys) == 0 {
+	if !r.mountsProviders() {
 		return nil, nil
 	}
 	var items []corev1.KeyToPath
 	for _, variable := range sortedKeys(r.providerKeys) {
 		items = append(items, corev1.KeyToPath{Key: r.providerKeys[variable], Path: variable})
 	}
+	for _, name := range r.providersSecrets {
+		items = append(items, corev1.KeyToPath{Key: name, Path: name})
+	}
 	return []corev1.Volume{{Name: providersVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 			SecretName: ProvidersSecretName(r.project), Items: items, DefaultMode: new(int32(0o440)),
 		}}}},
 		[]corev1.VolumeMount{{Name: providersVolume, MountPath: ProvidersDir, ReadOnly: true}}
+}
+
+// mountsProviders reports whether every pod mounts the providers Secret: some provider key or
+// providers secret is configured.
+func (r *Runtime) mountsProviders() bool {
+	return len(r.providerKeys) > 0 || len(r.providersSecrets) > 0
+}
+
+// providersPointers are the `<NAME>_FILE` pointer of each providers secret to its file in the
+// providers mount, in the worker's container and the image probe's alike: set by the runtime for
+// every pod that mounts the Secret, whatever a spec carries, so the shim never exports the secret.
+func (r *Runtime) providersPointers() []corev1.EnvVar {
+	var env []corev1.EnvVar
+	for _, name := range r.providersSecrets {
+		env = append(env, corev1.EnvVar{Name: name + "_FILE", Value: ProvidersDir + "/" + name})
+	}
+	return env
 }
 
 // operatorEnv is the operator's variables for the agent's container, in name order.
@@ -492,14 +574,15 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 // initWaitSeconds bounds a wait on another pod's workspace-init: ceil(boot timeout) × (intervals
 // + 1), the whole time the daemon tolerates a pod that is alive but unregistered, plus one
 // interval, so no wait gives up while the daemon would still allow the pod it waits on
-// (runtime-kubernetes.ts:390-399).
+// (KubernetesRuntime.workspaceInitLockWaitSeconds, runtime-kubernetes.ts).
 func (r *Runtime) initWaitSeconds() int64 {
 	return int64(math.Ceil(r.bootTimeout.Seconds())) * int64(r.bootIntervals+1)
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every
 // tmux pane is told (runtime/tmux/spawn.go, panePairs), then the operator's (runtime.kubernetes.pod),
-// then the spec's own, then one `<NAME>_FILE` pointer per secret into the boot projection. None of
+// then the spec's own, then one `<NAME>_FILE` pointer per secret into the boot projection, then one
+// per providers secret into the providers mount. None of
 // them repeats another: the runtime refuses a spec naming one of its own (runtimeOwned), and the
 // daemon an operator's variable naming one of the runtime's or a spec's. LEGION_GRANT_FILE names
 // runtime.GrantFile on the state volume, which is empty at start: the extension makes its
@@ -537,6 +620,10 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	add("PI_SHELL_PREFIX", shellprefix.For(workerBin, legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
 	add("LEGION_GRANT_FILE", runtime.GrantFile(StateDir, spec.Claim))
+	if r.agentSecrets != nil {
+		add("AGENT_SECRETS_URL", r.agentSecrets.URL)
+		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
+	}
 	env = append(env, xdgEnvironment()...)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
@@ -548,7 +635,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	for _, name := range sortedKeys(l.secrets) {
 		add(name+"_FILE", BootDir+"/"+name)
 	}
-	return env
+	return append(env, r.providersPointers()...)
 }
 
 // nodeSelector is the Legion pool's label and the configured selector, which configure keeps off
@@ -599,7 +686,7 @@ func (r *Runtime) affinity(tree string, colocate bool) *corev1.Affinity {
 }
 
 // restrictedContainer is the Pod Security "restricted" container context
-// (k8s-manifests.ts:44-48).
+// (RESTRICTED_CONTAINER_SECURITY_CONTEXT, k8s-manifests.ts).
 func restrictedContainer() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		AllowPrivilegeEscalation: new(false),

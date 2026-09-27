@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 type askTransition struct {
@@ -37,6 +38,13 @@ func answerTransition(
 	revision *answerRevision,
 	writeBlock func(context.Context, pgx.Tx, model.Ask, model.AskAnswer) error,
 ) askTransition {
+	// A block ask's answer is written into its document, where text reaches the parser with line
+	// feeds alone (pmdoc.LineFeeds); the ask's row takes the same text, so settlement, which writes
+	// the row's answer onto the block, agrees with it.
+	if text != nil {
+		lined := pmdoc.LineFeeds(*text)
+		text = &lined
+	}
 	return askTransition{
 		EventType: "ask.answered",
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {

@@ -25,6 +25,8 @@ related_issues:
 
 # Crash a pod from the node, and judge the kill from the pod
 
+> `scripts/kind-smoke/` and the in-cluster manifests under `deploy/kubernetes/daemon/` were removed with the TypeScript daemon's Kubernetes mode (LEGION-286); the paths below are as they stood at `4fdd9646`.
+
 The kind smoke's `kill-pod-resume` checkpoint crashes the root architect's pod and waits for the
 daemon to resurrect the same agent (`--resume`, generation +1). Three things about that kill cost a
 round each.

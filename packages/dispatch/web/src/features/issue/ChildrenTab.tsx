@@ -2,14 +2,10 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import type { IssueDetails } from "../../api/types";
-import {
-  badgeLow,
-  card,
-  linkHoverText,
-  linkText,
-  textMutedOnCanvas,
-  textSecondaryOnSurface,
-} from "../../theme/classes";
+import { EmptyState } from "../../components/EmptyState";
+import { StatusPill } from "../../components/Pill";
+import { card, linkHoverText, linkText, textSecondaryOnSurface } from "../../theme/classes";
+import { statusText } from "../project/board-model";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -17,7 +13,7 @@ import { GitHubLink } from "./GitHubLink";
 
 export function ChildrenTab({ issue }: { issue: IssueDetails }): ReactNode {
   if ((issue.children ?? []).length === 0) {
-    return <p className={textMutedOnCanvas}>No child issues.</p>;
+    return <EmptyState label="Children empty state" message="No child issues" />;
   }
 
   return (
@@ -32,9 +28,9 @@ export function ChildrenTab({ issue }: { issue: IssueDetails }): ReactNode {
             >
               {child.key} · {child.title}
             </Link>
-            <span className={`rounded-full px-2 py-1 text-xs ${badgeLow.bg} ${badgeLow.text}`}>
-              {child.status}
-            </span>
+            {/* The same pill the issue header shows, with the same lifecycle label: a reader
+                two inches below `In progress` must not meet `in_progress`. */}
+            <StatusPill>{statusText(child.status)}</StatusPill>
           </div>
           <div
             className={`mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm ${textSecondaryOnSurface}`}

@@ -32,7 +32,7 @@ import {
   parseDispatchReference,
 } from "../refs/routes";
 import { AskBlockCard } from "./AskBlockCard";
-import { type AskBlockHost, installAskBlockView, renderTypedBlock } from "./ask-block";
+import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
 import { bindRemoteMarks, type EditorHandle } from "./editor";
@@ -126,7 +126,7 @@ function setSearchHighlights(root: HTMLElement, query: string): void {
   CSS.highlights.set("dispatch-search", new Highlight(...ranges));
 }
 
-/** A rendered link mark's `dispatch://` target, if any. `@sjawhar/proof-editor`'s Markdown
+/** A rendered link mark's `dispatch://` target, if any. `@legion/proof-editor`'s Markdown
  * serializer sanitizes a `dispatch://` href to `""` (Milkdown's link sanitizer only allows
  * http/https/mailto/tel/ftp — a document strangers can edit should never render an
  * attacker-chosen non-http scheme as a clickable href) and tags the anchor with
@@ -385,7 +385,6 @@ export function ProofDocument({
               onMarkClick: (markId) => marginRef.current.focusItemForMark(markId),
               onMarkHover: (markId) => marginRef.current.hoverItemForMark(markId),
               readOnly: isClosedRef.current || schemaReadOnlyRef.current,
-              renderBlock: renderTypedBlock,
               user: {
                 color: colorForLogin(userRef.current.login),
                 name: userRef.current.login,
@@ -400,7 +399,7 @@ export function ProofDocument({
                 }
                 editor = handle;
                 editorRef.current = handle;
-                installAskBlockView(handle.view, setAskBlockHosts);
+                installTypedBlocks(handle.view, blockSchema, setAskBlockHosts);
                 const blockLink = window.location.hash;
                 if (blockLink.startsWith("#b-")) {
                   handle.focusBlock(decodeURIComponent(blockLink.slice(3)));

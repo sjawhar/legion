@@ -4,9 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"maps"
 	"net"
-	"slices"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -15,13 +14,16 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/sjawhar/legion/daemon/internal/agentsecrets"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // agentSandbox is the Agent Sandbox a cluster must have installed for the runtime (LEGION-206
@@ -34,7 +36,10 @@ var agentSandbox = sandbox.InstallRef{
 // workerImageTools are the worker image's own gh, git, jj, and Go legion
 // (packages/daemon/docker/worker.Dockerfile: git from the distribution, gh and jj copied to
 // /usr/local/bin, the Go coordinator's legion under /opt/legion/go/bin).
-var workerImageTools = sandbox.Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"}
+var workerImageTools = sandbox.Tools{
+	GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion",
+	AgentSecrets: "/opt/legion/go/bin/agent-secrets",
+}
 
 // imageProbeRetry is how often the daemon tries its worker image again after an attempt that said
 // nothing definitive: the daemon's backoff, bounded like `legion probe-image`'s at six attempts.
@@ -43,32 +48,44 @@ var workerImageTools = sandbox.Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git
 // deterministic refusal as a boot that never ends.
 var imageProbeRetry = bootprobe.Image
 
-// prepareSandbox is what Agent Sandbox needs before anything is opened (C1's translation, C3):
-// the cluster's client from runtime.kubernetes' kubeconfig, the Options every value of the
-// configuration becomes, the worker stream on tcp://<bind>:<worker_stream_port> (the address
-// every pod's shim dials), and the image probe. None of the host's own agent machinery runs: no Oh
-// My Pi invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a
+// sandboxReads is what Agent Sandbox needs that readBoot reads: the cluster's client and the
+// runtime's Options.
+type sandboxReads struct {
+	client *rest.Config
+	opts   sandbox.Options
+}
+
+// readSandbox is Agent Sandbox's share of readBoot (C1's translation, C3): the cluster's client from
+// runtime.kubernetes' kubeconfig, and the Options every value of the configuration becomes, with
+// the worker stream on tcp://<bind>:<worker_stream_port> (the address every pod's shim dials) and
+// paneNatsUser, the public key of the pane NATS nkey seed's user ("" with none), which the image
+// probe holds the providers Secret's seed to. None of the host's own agent machinery is read: no
+// Oh My Pi invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a
 // pod reads its bearer from its claim's Secret), no secretsd provider keys (a pod mounts its keys
 // from the providers Secret), and no host gh, git, or jj (a pod runs the image's).
-func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, p *plan) error {
+func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string, lookup func(string) (string, bool), log *slog.Logger) (sandboxReads, error) {
 	k := *cfg.Runtime.Kubernetes
 	rc, err := kubeClient(k)
 	if err != nil {
-		return err
+		return sandboxReads{}, err
 	}
-	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
-	if err := CheckOperatorPod(cfg); err != nil {
-		return err
-	}
-	opts, err := sandboxOptions(cfg, k, p.project, p.stream, dispatchToken, log)
+	stream := "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
+	opts, err := sandboxOptions(cfg, k, project, stream, dispatchToken, lookup, log)
 	if err != nil {
-		return err
+		return sandboxReads{}, err
 	}
+	opts.NATSUser = paneNatsUser
+	return sandboxReads{client: rc, opts: opts}, nil
+}
+
+// prepareSandbox is the runtime over readSandbox's client and Options, and the image probe.
+func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan) error {
+	p.stream = reads.opts.StreamURL
 	if o.runtime != nil {
 		p.newRuntime, p.probe = o.runtime, o.probe
 		return nil
 	}
-	p.newRuntime = sandboxRuntime(rc, opts, cfg.SlowCommandTimeout)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, cfg.SlowCommandTimeout)
 	p.probe = func(ctx context.Context, rt runtime.Runtime) error {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {
@@ -115,8 +132,9 @@ func kubeClient(k config.Kubernetes) (*rest.Config, error) {
 
 // sandboxOptions translates the configuration into the runtime's Options, all but the connection
 // directory and the token source, which boot hands the factory. It refuses what the cluster would
-// refuse only at the first pod: a role's request above its limit.
-func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dispatchToken string, log *slog.Logger) (sandbox.Options, error) {
+// refuse only at the first pod: a role's request above its limit. lookup is the daemon's
+// environment, which can name the NATS nkey seed (launchSecrets).
+func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dispatchToken string, lookup func(string) (string, bool), log *slog.Logger) (sandbox.Options, error) {
 	treeVolume, err := resource.ParseQuantity(k.TreeVolume)
 	if err != nil {
 		return sandbox.Options{}, fmt.Errorf("runtime.kubernetes.tree_volume: %w", err)
@@ -138,6 +156,10 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		}
 		resources[role] = requirements
 	}
+	var agentSecrets *sandbox.AgentSecrets
+	if a := k.AgentSecrets; a != nil {
+		agentSecrets = &sandbox.AgentSecrets{URL: a.URL, Audience: a.Audience, TokenExpiry: time.Duration(a.TokenExpirySeconds) * time.Second}
+	}
 	return sandbox.Options{
 		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, TreeVolume: treeVolume,
 		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
@@ -148,32 +170,72 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		Tools:            workerImageTools,
 		Pod:              sandbox.Pod(k.Pod),
 		ProviderKeys:     providerSecretKeys(cfg.ProviderKeys),
-		LaunchSecrets:    launchSecretNames(cfg),
+		LaunchSecrets:    launchSecretNames(cfg, lookup),
+		ProvidersSecrets: providersSecrets(cfg, lookup),
 		BootTimeout:      cfg.WorkerBootTimeout,
 		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
 		TerminationGrace: cfg.WorkerStopTimeout,
 		ProbeInterval:    cfg.ProbeInterval,
 		AdoptTimeout:     cfg.SlowCommandTimeout,
+		AgentSecrets:     agentSecrets,
 		Log:              log,
 	}, nil
 }
 
-// CheckOperatorPod is the Sandbox runtime's refusal of an operator pod or provider key that
-// collides with Legion's own (sandbox.CheckPod) over the configuration, run before anything is
-// opened: boot runs it, and so does `legion start --check-config`, which starts no runtime.
-func CheckOperatorPod(cfg config.Config) error {
-	if cfg.Runtime.Kubernetes == nil {
-		return nil
+// providersSecrets are the launch secrets a pod reads from the providers Secret's key of the same
+// name, never from a copy in its own Secret: the NATS nkey seed, when the daemon has one. The one
+// copy the cluster holds is the deployment's, in the Secret every pod already mounts; the daemon's
+// own file (or variable) is where the daemon reads it, and the two must hold the same seed.
+func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []string {
+	if natsauth.Configured(cfg.NatsNkeySeedFile, lookup) {
+		return []string{natsauth.SeedVariable}
 	}
-	return sandbox.CheckPod(sandbox.Pod(cfg.Runtime.Kubernetes.Pod), providerSecretKeys(cfg.ProviderKeys),
-		workerImageTools, launchSecretNames(cfg))
+	return nil
 }
 
-// launchSecretNames are the names of the secrets every launch's spec carries (launchSecrets), which
-// the runtime refuses the operator's pod and a provider key for.
-func launchSecretNames(cfg config.Config) []string {
-	return slices.Sorted(maps.Keys(launchSecrets(cfg)))
+// newSecretsLogin is the daemon's agent-secrets machine login as the machines' Enroller
+// (AGENTC-393 Plan C): constructs the client from runtime.kubernetes.agent_secrets and starts its
+// machine login on a background context at boot, logging the confirmation code exactly once —
+// pod enrollment is held until a human approves it on the Dispatch credential page. The client
+// itself is returned too, read-only, so the state route can show the login's current status
+// (source.State, agentsecrets.Client.LoginStatus). Never part of launchSecrets, so no pod is ever
+// handed the daemon's key or its won credential. Nil, nil without the block.
+func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *agentsecrets.Client) {
+	k := cfg.Runtime.Kubernetes
+	if k == nil || k.AgentSecrets == nil {
+		return nil, nil
+	}
+	client := &agentsecrets.Client{URL: k.AgentSecrets.URL, Operator: k.AgentSecrets.Operator, HTTP: &http.Client{Timeout: 30 * time.Second}}
+	operator := k.AgentSecrets.Operator
+	go func() {
+		code, err := client.Login(context.Background())
+		if err != nil {
+			log.Error("agent-secrets machine login failed", "error", err)
+			return
+		}
+		log.Info(fmt.Sprintf(
+			"agent-secrets machine login: enter code %s on the Dispatch credential page (approver: %s); pod enrollment is held until approved",
+			code, operator,
+		))
+	}()
+	return brokerEnroller{client: client}, client
 }
+
+// brokerEnroller is agentsecrets.Client as supervise.Enroller; an *agentsecrets.APIError is a
+// PermanentError when its status says so, which is how the machine tells a refusal from an outage.
+type brokerEnroller struct{ client *agentsecrets.Client }
+
+func (b brokerEnroller) Enroll(ctx context.Context, e supervise.PodEnrollment) (string, error) {
+	enrolled, err := b.client.Enroll(ctx, agentsecrets.PodEnrollment{
+		PodUID: e.PodUID, Thumbprint: e.Thumbprint, PodToken: e.PodToken, Session: e.Session,
+	})
+	if err != nil {
+		return "", err
+	}
+	return enrolled.ID, nil
+}
+
+func (b brokerEnroller) Revoke(ctx context.Context, id string) error { return b.client.Revoke(ctx, id) }
 
 // providerSecretKeys are provider_keys as the runtime takes them: each variable Oh My Pi reads,
 // to the key of the providers Secret that holds it; nil when the file names none.

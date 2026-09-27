@@ -5,6 +5,9 @@ import { dropTarget, groupIssuesByStatus, moveIssue, rankInputForInsertion } fro
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
+    route: null,
+    route_status: null,
+    route_holder: null,
     key: "CORE-1",
     title: "Core work",
     status: "todo",

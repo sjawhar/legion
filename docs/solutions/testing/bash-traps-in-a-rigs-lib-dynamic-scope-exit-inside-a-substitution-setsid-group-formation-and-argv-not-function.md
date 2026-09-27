@@ -24,6 +24,8 @@ related_issues:
 
 # Four bash traps in a rig's lib.sh
 
+> `scripts/kind-smoke/` and the in-cluster manifests under `deploy/kubernetes/daemon/` were removed with the TypeScript daemon's Kubernetes mode (LEGION-286); the paths below are as they stood at `4fdd9646`.
+
 Each of these cost the kind smoke a round or a failed CI run. None is exotic; all four are easy to
 write without noticing.
 

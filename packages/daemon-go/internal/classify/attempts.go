@@ -1,7 +1,11 @@
 // Package classify contains the pure event-decision rules the workflow applies to durable records.
 package classify
 
-import "github.com/sjawhar/legion/daemon/internal/record"
+import (
+	"sort"
+
+	"github.com/sjawhar/legion/daemon/internal/record"
+)
 
 // AttemptSetOrder describes an incoming check-run set relative to the stored per-name fence.
 type AttemptSetOrder string
@@ -41,4 +45,24 @@ func CompareAttemptSets(stored, incoming []record.AttemptRun) AttemptSetOrder {
 	default:
 		return AttemptSetEqual
 	}
+}
+
+// mergeAttemptSets is the fence after accepting incoming: the per-name maximum over both sets,
+// sorted by name. Nothing is pruned, so a check a settlement leaves out keeps its run, and an older
+// view of that check stays older.
+func mergeAttemptSets(stored, incoming []record.AttemptRun) []record.AttemptRun {
+	merged := make(map[string]int64, len(stored)+len(incoming))
+	for _, set := range [][]record.AttemptRun{stored, incoming} {
+		for _, run := range set {
+			if known, found := merged[run.Name]; !found || run.ID > known {
+				merged[run.Name] = run.ID
+			}
+		}
+	}
+	fence := make([]record.AttemptRun, 0, len(merged))
+	for name, id := range merged {
+		fence = append(fence, record.AttemptRun{Name: name, ID: id})
+	}
+	sort.Slice(fence, func(i, j int) bool { return fence[i].Name < fence[j].Name })
+	return fence
 }

@@ -27,12 +27,12 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 	ctx := context.Background()
 	_, uri := testnats.Start(t)
 
-	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("bus connect: %v", err)
 	}
 	defer client.Close()
-	store, err := cistore.Open(client.Conn, cistore.WithReplicas(1), cistore.WithTTL(time.Hour))
+	store, err := cistore.Open(client.Conn, logging.New("test"), cistore.WithReplicas(1), cistore.WithTTL(time.Hour))
 	if err != nil {
 		t.Fatalf("open cistore: %v", err)
 	}
@@ -46,8 +46,7 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 		secret = "s"
 		sha    = "abcdef1234567890abcdef1234567890abcdef12"
 	)
-	ci := webhook.CIRecorderFuncs{RecordFunc: store.Record, RecordSuiteFunc: store.RecordSuite, RecordHeadFunc: store.RecordHead}
-	handler := webhook.GitHubHandler(secret, "@legion", "", client, ci)
+	handler := webhook.GitHubHandler(secret, "@legion", "", client, store)
 	loopCtx, loopCancel := context.WithCancel(ctx)
 	defer loopCancel()
 	cistore.StartSummaryLoop(loopCtx, store, client, 100*time.Millisecond, 20*time.Millisecond, logging.New("e2e"))

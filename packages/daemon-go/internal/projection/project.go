@@ -9,7 +9,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -24,8 +23,14 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		return api.State{}, err
 	}
 	knownIssues := make(map[string]struct{}, len(issues))
+	// lingering is every tree whose root lingers, or closed after it lingered: only a root carries a
+	// linger deadline, and re-admission clears it.
+	lingering := make(map[string]bool)
 	for _, issue := range issues {
 		knownIssues[issue.Key] = struct{}{}
+		if issue.Lingers() {
+			lingering[issue.Key] = true
+		}
 	}
 	slots, err := s.Slots(ctx, tx)
 	if err != nil {
@@ -69,6 +74,12 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			Status:     issue.Status,
 			Workers:    map[claim.Role]api.PhaseView{},
 		}
+		// An escalation waits on the controller only while its tree runs. A held issue of a tree
+		// that lingers or closed keeps the reason on its record, and shows it again once the tree is
+		// re-admitted, which leaves the issue held.
+		if issue.Hold != nil && !lingering[issue.Tree] {
+			view.HoldReason = string(issue.Hold.Reason)
+		}
 		if slot, ok := slotViews[issue.Key]; ok {
 			view.Slot = &slot
 		}
@@ -77,7 +88,11 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		if err != nil {
 			return api.State{}, err
 		}
+		reviewDecision := ""
 		for _, item := range phases {
+			if item.Role == claim.RoleReviewer && item.Decision != nil {
+				reviewDecision = item.Decision.State
+			}
 			claimView, live := claimViews[item.Claim]
 			if !live {
 				continue
@@ -102,7 +117,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 				Number:         pr.Number,
 				Head:           pr.HeadSHA,
 				ChecksVerdict:  pr.Verdict,
-				ReviewDecision: pr.ReviewDecision,
+				ReviewDecision: reviewDecision,
 				FixAttempts:    pr.FixAttempts,
 			}
 		}
@@ -131,8 +146,8 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			// strict client, over a row that is a legitimate state.
 			view = api.Issue{
 				Key:     current.Issue,
-				Phase:   phase.Unrecorded,
-				Status:  string(phase.Unrecorded),
+				Phase:   api.Unrecorded,
+				Status:  string(api.Unrecorded),
 				Workers: map[claim.Role]api.PhaseView{},
 			}
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -632,6 +633,76 @@ func TestGithubResourceSubject(t *testing.T) {
 		got := GithubResourceSubject(item.owner, item.repo, item.resourceType, item.resourceNum)
 		if got != item.want {
 			t.Fatalf("GithubResourceSubject(%s, %s, %s, %s) = %s, want %s", item.owner, item.repo, item.resourceType, item.resourceNum, got, item.want)
+		}
+	}
+}
+
+// A GitHub repository's name may hold a dot, and a NATS subject splits on dots, so every GitHub
+// subject writes the owner and the name each as one segment, a dot as `_` (SanitizeSubjectSegment):
+// `sjawhar/.github` is otherwise an empty token no stream stores, and `acme/a.b` lands inside
+// `acme/a`'s `notifications.github.acme.a.>`. A name without a dot is written as it is.
+func TestGithubSubjectsWriteADottedOwnerOrNameAsOneSegment(t *testing.T) {
+	for _, tc := range []struct{ got, want string }{
+		{GithubSubject("sjawhar", ".github", "mention"), "notifications.github.sjawhar._github.mention"},
+		{GithubResourceSubject("acme", "a.b", "pr", "7"), "notifications.github.acme.a_b.pr.7"},
+		{GithubPushSubject("my-org", "a_b.c", "branch", "legion/X-1"), "notifications.github.my-org.a_b_c.push.branch.legion/X-1"},
+		{GithubWorkflowSubject("acme", "site.io", "ci.yml", "completed"), "notifications.github.acme.site_io.workflow.ci_yml.completed"},
+		{GithubSubject("acme", "widgets", "pr.7.checks"), "notifications.github.acme.widgets.pr.7.checks"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("subject = %s, want %s", tc.got, tc.want)
+		}
+	}
+}
+
+// The listener reads GithubTopicKinds as where a repository name ends in a topic, so every token
+// Envoy publishes right after a repository's owner and name is one: the kind and parent kind of
+// every event the two tables name and of one they don't, the mention, push, workflow and checks
+// topics, and every golden envelope's topic.
+func TestGithubTopicKindsHoldEveryTokenAfterTheRepository(t *testing.T) {
+	const prefix = "notifications.github.example-org.example-repo."
+	topics := []string{
+		GithubSubject("example-org", "example-repo", "mention"),
+		GithubPushSubject("example-org", "example-repo", "branch", "main"),
+		GithubWorkflowSubject("example-org", "example-repo", "ci.yml", "completed"),
+		GithubSubject("example-org", "example-repo", "pr.7.checks"),
+	}
+	events := []string{"merge_group"}
+	for event := range githubEventKinds {
+		events = append(events, event)
+	}
+	for event := range githubEventParents {
+		events = append(events, event)
+	}
+	for _, event := range events {
+		topics = append(topics, prefix+githubKind(event))
+		for _, body := range []map[string]any{{}, {"issue": map[string]any{"pull_request": map[string]any{}}}} {
+			if parent := githubParentKind(event, body); parent != "" {
+				topics = append(topics, prefix+parent)
+			}
+		}
+	}
+	goldens, err := filepath.Glob(filepath.Join("..", "..", "..", "contracts", "fixtures", "github-envelopes", "*.json"))
+	if err != nil || len(goldens) == 0 {
+		t.Fatalf("golden envelopes: %v, %d found", err, len(goldens))
+	}
+	for _, path := range goldens {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var golden struct {
+			Topic string `json:"topic"`
+		}
+		if err := json.Unmarshal(raw, &golden); err != nil {
+			t.Fatal(err)
+		}
+		topics = append(topics, golden.Topic)
+	}
+	for _, topic := range topics {
+		parts := strings.Split(strings.TrimPrefix(topic, "notifications.github."), ".")
+		if len(parts) < 3 || !slices.Contains(GithubTopicKinds, parts[2]) {
+			t.Errorf("%s: token %q after the repository is not in GithubTopicKinds %v", topic, parts[min(2, len(parts)-1)], GithubTopicKinds)
 		}
 	}
 }
@@ -1664,6 +1735,10 @@ func TestGithubSummary(t *testing.T) {
 func TestGithubPayloadFields(t *testing.T) {
 	longBody := strings.Repeat("a", 3000)
 	longBodyWithFooter := strings.Repeat("a", 3000) + `<!-- legion:{"session":"worker-1"} -->`
+	// A real subject line from this repository, well past the 70-rune push summary, which
+	// head_subject must carry whole.
+	realLongSubject := "fix(daemon-go, envoy, contracts): a dotted repository name is one subject segment" +
+		" and one key segment, and intake applies only its configured repositories (LEGION-208 4b) (#1421)"
 	tests := []struct {
 		name        string
 		event       string
@@ -1689,6 +1764,28 @@ func TestGithubPayloadFields(t *testing.T) {
 				"after": "2222222222222222", "before": "1111111111111111", "pusher": "pusher",
 				"head_subject": "Add actionable payloads", "commit_count": "2", "compare_url": "https://example-host/compare",
 			},
+		},
+		{
+			// The envelope must fit NATS's payload limit, so a head commit's first line is capped
+			// like the envelope's other text fields, however long a single-line message is.
+			name:  "push caps a head commit's first line at the envelope's text cap",
+			event: "push",
+			body: map[string]any{
+				"repository":  map[string]any{"full_name": "example-org/example-repo"},
+				"ref":         "refs/heads/main",
+				"head_commit": map[string]any{"message": strings.Repeat("s", 3000) + "\n\nBody"},
+			},
+			want: map[string]string{"head_subject": strings.Repeat("s", 2048) + "…"},
+		},
+		{
+			name:  "push keeps a long real subject line whole",
+			event: "push",
+			body: map[string]any{
+				"repository":  map[string]any{"full_name": "example-org/example-repo"},
+				"ref":         "refs/heads/main",
+				"head_commit": map[string]any{"message": realLongSubject + "\n\nBody"},
+			},
+			want: map[string]string{"head_subject": realLongSubject},
 		},
 		{
 			name:  "push lists unique changed paths across commits in first-seen order",
@@ -1736,6 +1833,24 @@ func TestGithubPayloadFields(t *testing.T) {
 			},
 		},
 		{
+			// A hundred paths are not bounded by their count alone: git bounds no path's length, and
+			// the envelope carries the list whole. The list stops at a path that would take it past
+			// its text budget, keeps every path it lists whole, and says it stopped.
+			name:  "push stops listing changed paths at their text budget and flags truncation",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"commits": []any{
+					map[string]any{"id": "1", "added": longPaths(0, 100), "removed": []any{}, "modified": []any{}},
+				},
+			},
+			want: map[string]string{
+				"changed_paths":           strings.Join(pathsWithinBudget(longPathStrings(0, 100)), "\n"),
+				"changed_paths_truncated": "true",
+			},
+		},
+		{
 			name:  "push with no commits omits changed_paths",
 			event: "push",
 			body: map[string]any{
@@ -1746,6 +1861,40 @@ func TestGithubPayloadFields(t *testing.T) {
 			},
 			want:    map[string]string{"changed_paths_truncated": "false", "commit_count": "0"},
 			omitted: []string{"changed_paths"},
+		},
+		{
+			name:  "a forced push says so",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"forced":     true,
+				"commits": []any{
+					map[string]any{"id": "1", "added": []any{}, "removed": []any{}, "modified": []any{".legion/review.json"}},
+				},
+			},
+			want: map[string]string{"forced": "true", "changed_paths": ".legion/review.json"},
+		},
+		{
+			name:  "a push GitHub says was not forced says so",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"forced":     false,
+				"commits":    []any{},
+			},
+			want: map[string]string{"forced": "false"},
+		},
+		{
+			name:  "a push whose body leaves forced out says it was not forced",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"commits":    []any{},
+			},
+			want: map[string]string{"forced": "false"},
 		},
 		{
 			name:  "push removing the .legion handoffs lists the removed paths",
@@ -1846,12 +1995,25 @@ func TestGithubPayloadFields(t *testing.T) {
 				"pull_request": map[string]any{"number": 27, "head": map[string]any{"sha": "review-head-sha"}},
 				"review": map[string]any{
 					"body": "Ship it", "state": "approved", "commit_id": "review-commit-sha",
-					"user": map[string]any{"login": "reviewer"},
+					"submitted_at": nil, "user": map[string]any{"login": "reviewer"},
 				},
 			},
 			want: map[string]string{
 				"commit_id": "review-commit-sha", "head_sha": "review-head-sha", "state": "approved",
 			},
+			omitted: []string{"review_id", "submitted_at"},
+		},
+		{
+			name:  "a review carries GitHub's review id and its submission time",
+			event: "pull_request_review",
+			body: map[string]any{
+				"action":       "submitted",
+				"repository":   map[string]any{"full_name": "example-org/example-repo"},
+				"pull_request": map[string]any{"number": 19, "head": map[string]any{"sha": "head-sha"}},
+				"review": map[string]any{"id": float64(5325101010), "state": "approved", "commit_id": "head-sha",
+					"submitted_at": "2026-09-26T12:03:00Z", "user": map[string]any{"login": "reviewer"}},
+			},
+			want: map[string]string{"review_id": "5325101010", "submitted_at": "2026-09-26T12:03:00Z"},
 		},
 		{
 			name:  "long comment body is capped and marked",
@@ -1902,11 +2064,271 @@ func TestGithubPayloadFields(t *testing.T) {
 	}
 }
 
+// TestEnvelopeTitlesAreCappedAtTheEnvelopeTextCap: every envelope carrying an issue or pull
+// request title keeps it under the envelope's text cap, because a publish past NATS's max
+// payload fails; a title GitHub itself allows (at most 256 characters) is copied whole.
+func TestEnvelopeTitlesAreCappedAtTheEnvelopeTextCap(t *testing.T) {
+	repository := map[string]any{"full_name": "example-org/example-repo"}
+	comment := map[string]any{"body": "noted", "user": map[string]any{"login": "commenter"}}
+	review := map[string]any{
+		"id": float64(7), "state": "approved", "body": "ok", "user": map[string]any{"login": "reviewer"},
+		"submitted_at": "2026-09-26T00:00:00Z",
+	}
+	bodies := map[string]func(title string) map[string]any{
+		"issue_comment": func(title string) map[string]any {
+			return map[string]any{"action": "created", "repository": repository, "comment": comment,
+				"issue": map[string]any{"number": float64(3), "title": title}}
+		},
+		"issues": func(title string) map[string]any {
+			return map[string]any{"action": "opened", "repository": repository,
+				"issue": map[string]any{"number": float64(3), "title": title}}
+		},
+		"pull_request": func(title string) map[string]any {
+			return map[string]any{"action": "opened", "repository": repository,
+				"pull_request": map[string]any{"number": float64(7), "title": title}}
+		},
+		"pull_request_review": func(title string) map[string]any {
+			return map[string]any{"action": "submitted", "repository": repository, "review": review,
+				"pull_request": map[string]any{"number": float64(7), "title": title}}
+		},
+		"pull_request_review_comment": func(title string) map[string]any {
+			return map[string]any{"action": "created", "repository": repository, "comment": comment,
+				"pull_request": map[string]any{"number": float64(7), "title": title}}
+		},
+	}
+	longestAllowed := strings.Repeat("t", 256)
+	for event, body := range bodies {
+		for _, tc := range []struct{ name, title, want string }{
+			{"a title past the cap is cut", strings.Repeat("t", 3000), strings.Repeat("t", 2048) + "…"},
+			{"GitHub's longest title is kept whole", longestAllowed, longestAllowed},
+			{"a title's own whitespace is kept", "  Fix the  listener\t", "  Fix the  listener\t"},
+		} {
+			t.Run(event+"/"+tc.name, func(t *testing.T) {
+				payload := decodePayload(t, GithubEnvelope(GithubEnvelopeInput{
+					Event: event, Delivery: "delivery", EventID: "event", TraceID: "trace", Body: body(tc.title),
+				}).Payload)
+				if got := payload["title"]; got != tc.want {
+					t.Fatalf("title has %d runes, want %d (%q...)", len([]rune(got)), len([]rune(tc.want)), first(got, 20))
+				}
+			})
+		}
+	}
+}
+
+func TestGhostWisprTitleIsCappedAtTheEnvelopeTextCap(t *testing.T) {
+	for _, tc := range []struct{ name, title, want string }{
+		{"a title past the cap is cut", strings.Repeat("g", 3000), strings.Repeat("g", 2048) + "…"},
+		{"a real session title is kept whole", "How are we gonna do the", "How are we gonna do the"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := GhostWisprEnvelope(GhostWisprEnvelopeInput{
+				EventType: "summary_ready", Delivery: "gw-delivery", EventID: "e", TraceID: "t",
+				Body: map[string]any{
+					"event_type": "summary_ready",
+					"payload":    map[string]any{"session_id": "20260326041629", "title": tc.title, "type": "summary_ready"},
+					"created_at": "2026-03-26T04:17:03Z",
+				},
+			})
+			if got := decodePayload(t, item.Payload)["title"]; got != tc.want {
+				t.Fatalf("title has %d runes, want %d", len([]rune(got)), len([]rune(tc.want)))
+			}
+		})
+	}
+}
+
+// TestAGithubEnvelopeStaysUnderNATSMaxPayloadWhateverItsFieldsHold: the listener publishes an
+// envelope whole, and a publish past the server's max payload (1 MiB by default) fails, so the
+// envelope a GitHub body produces must stay under it however large each of the body's fields is,
+// now that a body may be 25 MiB. Every string in each captured fixture grows by 256 KiB of `<`, which
+// JSON writes as six bytes and the envelope, carrying the payload as a string, as seven. The topic is
+// left out of the measure: a push's ref and a workflow's file name name the subject it is published
+// on, which is bounded where it is published (bus.ErrTooLarge), not cut here, since a cut subject
+// would reach the wrong subscribers.
+func TestAGithubEnvelopeStaysUnderNATSMaxPayloadWhateverItsFieldsHold(t *testing.T) {
+	const natsDefaultMaxPayload = 1 << 20
+	grow := strings.Repeat("<", 256<<10)
+	var inflate func(value any) any
+	inflate = func(value any) any {
+		switch v := value.(type) {
+		case string:
+			return v + grow
+		case map[string]any:
+			for key, item := range v {
+				v[key] = inflate(item)
+			}
+		case []any:
+			for i, item := range v {
+				v[i] = inflate(item)
+			}
+		}
+		return value
+	}
+	for _, fixture := range []struct{ name, event string }{
+		{"pull-request-opened", "pull_request"},
+		{"pull-request-synchronize", "pull_request"},
+		{"pull-request-closed-merged", "pull_request"},
+		{"issue-comment-created", "issue_comment"},
+		{"issue-comment-edited", "issue_comment"},
+		{"issue-comment-pr-created", "issue_comment"},
+		{"pull-request-review-submitted", "pull_request_review"},
+		{"pull-request-review-comment-created", "pull_request_review_comment"},
+		{"push", "push"},
+		{"workflow-run-without-pr", "workflow_run"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("..", "..", "scripts", "fixtures", "github", fixture.name+".json"))
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("decode fixture: %v", err)
+			}
+			items := GithubEnvelopes(GithubEnvelopeInput{
+				Event: fixture.event, Delivery: "delivery", EventID: "event", TraceID: "trace",
+				Body: inflate(body).(map[string]any),
+			}, "@legion")
+			if len(items) == 0 {
+				t.Fatal("the grown fixture produced no envelope")
+			}
+			for _, item := range items {
+				item.Topic = ""
+				data, err := json.Marshal(item)
+				if err != nil {
+					t.Fatalf("encode envelope: %v", err)
+				}
+				// Half the server's default: the other half is more than the topic and the MsgId
+				// header that repeats it need.
+				if len(data) > natsDefaultMaxPayload/2 {
+					t.Fatalf("the envelope is %d bytes without its topic, past half NATS's default max payload (%d)",
+						len(data), natsDefaultMaxPayload/2)
+				}
+			}
+		})
+	}
+}
+
+// What a CI observation copies from its check run goes to the listener's CI store, which writes the
+// record with a publish, so each text is capped like an envelope's.
+func TestACheckRunIsCappedAtTheEnvelopeTextCap(t *testing.T) {
+	observe := func(t *testing.T, checkRun map[string]any) CIObservation {
+		t.Helper()
+		fields := map[string]any{
+			"id": float64(7), "name": "build", "head_sha": strings.Repeat("a", 40), "status": "completed",
+			"pull_requests": []any{map[string]any{"number": float64(3)}},
+		}
+		for key, value := range checkRun {
+			fields[key] = value
+		}
+		observations := GithubCIObservations("check_run", map[string]any{
+			"repository": map[string]any{"name": "widgets", "owner": map[string]any{"login": "acme"}},
+			"check_run":  fields,
+		})
+		if len(observations) != 1 {
+			t.Fatalf("observations = %d, want 1", len(observations))
+		}
+		return observations[0]
+	}
+	name := func(t *testing.T, check string) string {
+		t.Helper()
+		return observe(t, map[string]any{"name": check}).CheckName
+	}
+
+	t.Run("a real name is kept whole", func(t *testing.T) {
+		if got := name(t, "envoy-go / test (ubuntu-latest)"); got != "envoy-go / test (ubuntu-latest)" {
+			t.Fatalf("check name = %q, want it whole", got)
+		}
+	})
+	// The CI record is keyed by check name, so two names that share the text the cap keeps must
+	// stay two checks, and one name must key the same entry on every observation.
+	t.Run("a name past the cap is cut and stays its own", func(t *testing.T) {
+		shared := strings.Repeat("c", 3000)
+		first, second := name(t, shared+" / lint"), name(t, shared+" / test")
+		if first == second {
+			t.Fatalf("two names sharing their first %d runes capped to one: %.60q", maxEnvelopeTextRunes, first)
+		}
+		if again := name(t, shared+" / lint"); again != first {
+			t.Fatalf("one name capped two ways: %.60q and %.60q", first, again)
+		}
+		for _, got := range []string{first, second} {
+			if !strings.HasPrefix(got, strings.Repeat("c", 2048)+"…") {
+				t.Fatalf("capped name %.60q does not keep the name's first 2,048 runes and an ellipsis", got)
+			}
+			if runes := len([]rune(got)); runes > 2048+32 {
+				t.Fatalf("capped name has %d runes, want at most %d", runes, 2048+32)
+			}
+		}
+	})
+	t.Run("every other copied text is capped", func(t *testing.T) {
+		long := strings.Repeat("u", 600_000)
+		got := observe(t, map[string]any{"html_url": long, "status": long, "conclusion": long, "completed_at": long})
+		for field, value := range map[string]string{"URL": got.URL, "Status": got.Status, "Conclusion": got.Conclusion, "ObservedAt": got.ObservedAt} {
+			if value != strings.Repeat("u", 2048)+"…" {
+				t.Fatalf("%s has %d runes, want the first 2,048 and an ellipsis", field, len([]rune(value)))
+			}
+		}
+	})
+}
+
+// A workflow's file name is whatever the repository named the file, and a published NATS subject
+// may hold no whitespace (nats.go refuses it) or wildcard, so its segment writes each as `_`, as it
+// writes a dot.
+func TestAWorkflowFileNameIsOneValidSubjectSegment(t *testing.T) {
+	for _, tc := range []struct{ file, want string }{
+		{"my ci.yml", "notifications.github.acme.widgets.workflow.my_ci_yml.completed"},
+		{"a\tb\nc*d>e.yml", "notifications.github.acme.widgets.workflow.a_b_c_d_e_yml.completed"},
+	} {
+		item := GithubEnvelope(GithubEnvelopeInput{Event: "workflow_run", Delivery: "d", EventID: "e", TraceID: "t", Body: map[string]any{
+			"action":     "completed",
+			"repository": map[string]any{"name": "widgets", "full_name": "acme/widgets", "owner": map[string]any{"login": "acme"}},
+			"workflow_run": map[string]any{
+				"name": "CI", "path": ".github/workflows/" + tc.file, "head_branch": "main", "id": float64(1),
+			},
+		}})
+		if item.Topic != tc.want {
+			t.Errorf("workflow file %q: topic = %q, want %q", tc.file, item.Topic, tc.want)
+		}
+	}
+}
+
 // numberedPathStrings returns src/f<from>.ts .. src/f<to-1>.ts.
 func numberedPathStrings(from, to int) []string {
 	paths := make([]string, 0, to-from)
 	for n := from; n < to; n++ {
 		paths = append(paths, fmt.Sprintf("src/f%d.ts", n))
+	}
+	return paths
+}
+
+// longPathStrings returns paths of 400 runes each, numbered from..to-1.
+func longPathStrings(from, to int) []string {
+	paths := make([]string, 0, to-from)
+	for n := from; n < to; n++ {
+		paths = append(paths, fmt.Sprintf("src/%s/f%03d.ts", strings.Repeat("d", 388), n))
+	}
+	return paths
+}
+
+func longPaths(from, to int) []any {
+	paths := make([]any, 0, to-from)
+	for _, path := range longPathStrings(from, to) {
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+// pathsWithinBudget returns the longest prefix of paths whose newline-joined list fits the push
+// payload's changed-paths budget.
+func pathsWithinBudget(paths []string) []string {
+	runes := 0
+	for i, path := range paths {
+		if i > 0 {
+			runes++
+		}
+		runes += len([]rune(path))
+		if runes > maxPushChangedPathRunes {
+			return paths[:i]
+		}
 	}
 	return paths
 }
@@ -1944,6 +2366,8 @@ func TestGithubPayloadPushChangedPathsFixture(t *testing.T) {
 		"commit_count":            "1",
 		"after":                   "538bbf1ab6b933e2b0aaf1cbe83106c387a70035",
 		"ref":                     "refs/heads/legion/LEGION-23",
+		// GitHub's own push carries "forced": false.
+		"forced": "false",
 	}
 	for key, value := range want {
 		if got := payload[key]; got != value {

@@ -11,6 +11,7 @@ import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { logger } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
+import { resetEnvoySessionsForTests } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
 import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
@@ -134,7 +135,11 @@ const clipboardState = {
   error: undefined as Error | undefined,
 };
 
+// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
+const { nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
+  nkeyAuthenticator,
+  nkeys,
   connect: async ({ name }: { readonly name: string }) => {
     if (natsState.failConnects > 0) {
       natsState.failConnects -= 1;
@@ -252,8 +257,11 @@ const originalTmuxPane = process.env.TMUX_PANE;
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on
-  // globalThis would otherwise make every transcript here look like a subagent's.
+  // globalThis would otherwise make every transcript here look like a subagent's, and the
+  // top-level session one test publishes would be the reply address the next test's subagent
+  // instance reports.
   resetLegionBootstrappedSessionForTests();
+  resetEnvoySessionsForTests();
   testAgentRoster().splice(0);
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   // A test that never stubs fetch must not register its `ses_*` fixture on the real listener
@@ -268,7 +276,9 @@ beforeEach(() => {
   delete process.env.TMUX_PANE;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A managed-timer callback that rejects fails the test that scheduled it.
+  await Promise.all(contextTimers.splice(0));
   if (originalNatsUrl === undefined) delete process.env.ENVOY_NATS_URL;
   else process.env.ENVOY_NATS_URL = originalNatsUrl;
   if (originalEnvoyUrl === undefined) delete process.env.ENVOY_URL;
@@ -354,6 +364,9 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
   };
 }
 
+/** Every callback the default `sessionContext()` timer ran, awaited after each test. */
+const contextTimers: Promise<void>[] = [];
+
 // The session-manager surface `isSubagentSession` reads. No transcript path reads as a
 // top-level session, so every fixture here registers unless a test supplies a transcript that
 // sits inside a parent's directory.
@@ -368,6 +381,9 @@ function sessionContext(sessionID = "ses_omp", hasUI = true): SessionContext {
     hasUI,
     sessionManager: { ...topLevelSession, getSessionId: () => sessionID },
     setInterval: () => undefined,
+    setTimeout: (callback) => {
+      contextTimers.push(Promise.resolve().then(callback));
+    },
     ui: {
       notify: () => undefined,
       onTerminalInput: () => () => undefined,
@@ -496,7 +512,7 @@ function responseWithRegistration(
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
 const UNASKED_WAIT_NUDGE =
-  "You just said you are waiting on a human, but you have no open ask in Dispatch, so nobody knows you are waiting. Open it now with dispatch_ask — or dispatch_request_approval when what you need is approval of a document — naming exactly what you need and from whom. Do not reply just to acknowledge this reminder.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open an ask for it now with dispatch_ask (or dispatch_request_approval for a document), naming exactly what you need and from whom.";
 
 /** Custom-message type of the nudge itself, which a session hears amid other deliveries. */
 const ASK_REMINDER_TYPE = "dispatch-ask-reminder";
@@ -518,6 +534,7 @@ async function bootAskNudge(
     readonly as_of?: string;
     readonly count?: number;
     readonly opened_since?: boolean;
+    readonly asks?: readonly { readonly question: string }[];
   },
   options: {
     /** Transcript this session resumes from, as `getBranch()` returns it. */
@@ -527,17 +544,20 @@ async function bootAskNudge(
     /** Awaited before the stop-time query answers, to hold its round trip open. */
     readonly holdStopQuery?: () => Promise<void>;
     /**
-     * How the host answers the hidden self-check; `null` is a host with no `pi.askEphemeral`
-     * at all, which is every OMP build that cannot serve a Dispatch BTW either. A host
-     * initialised without the capability installs a stub that throws synchronously instead of
-     * rejecting, so this may throw rather than return a promise.
+     * How the host answers the hidden self-check. A host initialised without the capability
+     * installs a stub that throws synchronously instead of rejecting, so this may throw rather
+     * than return a promise.
      */
-    readonly selfCheck?:
-      | ((input: {
-          readonly prompt: string;
-          readonly signal?: AbortSignal;
-        }) => Promise<{ readonly replyText: string }>)
-      | null;
+    readonly selfCheck?: (input: {
+      readonly prompt: string;
+      readonly signal?: AbortSignal;
+    }) => Promise<{ readonly replyText: string }>;
+    /**
+     * Where the host serves its side turn: `pi.askEphemeral` (the fork's releases before
+     * Oh My Pi 18.3, the default), the extension context's `runEphemeralTurn` (18.3 on), or
+     * nowhere, which is a host that cannot serve a Dispatch BTW either.
+     */
+    readonly sideTurn?: "askEphemeral" | "runEphemeralTurn" | "none";
     /**
      * A fresh TUI, whose session id the host mints only after `session_start`: the extension's
      * own `sessionID` stays empty until the registration heartbeat heals the drift.
@@ -545,6 +565,8 @@ async function bootAskNudge(
     readonly lazySessionID?: boolean;
     /** `ENVOY_SELF_CHECK_TIMEOUT_MS` for this instance, so a hung host is bounded in ms. */
     readonly selfCheckTimeoutMs?: number;
+    /** Queue the managed timer's callbacks instead of running them, until `runHeldTimers()`. */
+    readonly holdTimers?: boolean;
   } = {}
 ) {
   const branch = options.branch ?? [];
@@ -552,6 +574,10 @@ async function bootAskNudge(
   // snapshot it was taken from: a regression that pinned it to the arming turn, or that failed
   // to move it, shows up in the `since=` of a later stop.
   let asOfCalls = 0;
+  // Set by `holdNextArming()`: the next arming read signals `out` and waits for `gate`.
+  let armingHold:
+    | { readonly out: PromiseWithResolvers<void>; readonly gate: PromiseWithResolvers<void> }
+    | undefined;
   let lastAsOf = "";
   process.env.DISPATCH_URL = "http://dispatch.test";
   process.env.DISPATCH_TOKEN = "token";
@@ -576,6 +602,12 @@ async function bootAskNudge(
     if (url.pathname !== "/api/v1/asks/open") return responseWithRegistration(input, init, {});
     queries.push(url.search);
     if (url.search.includes("since=")) await options.holdStopQuery?.();
+    else if (armingHold !== undefined) {
+      const hold = armingHold;
+      armingHold = undefined;
+      hold.out.resolve();
+      await hold.gate.promise;
+    }
     const open = snapshot(url.searchParams.get("since") ?? undefined);
     asOfCalls += 1;
     lastAsOf = open.as_of ?? `2026-09-13T00:00:0${asOfCalls}Z`;
@@ -585,10 +617,23 @@ async function bootAskNudge(
         session_id: sessionID,
         as_of: lastAsOf,
         opened_since: open.opened_since ?? false,
-        count: open.count ?? 0,
+        count: open.count ?? open.asks?.length ?? 0,
         waiting_on_human: 0,
         waiting_on_agent: 0,
-        asks: [],
+        asks: (open.asks ?? []).map((ask, index) => ({
+          id: `ask-${index}`,
+          ref: `/issues/LEGION-${index}#ask-${index}`,
+          question: ask.question,
+          kind: "question",
+          urgency: "normal",
+          created_at: "2026-09-13T00:00:00Z",
+          age_seconds: 0,
+          priority: null,
+          owner: { issue: { key: `LEGION-${index}`, title: "Test" } },
+          human_replied: false,
+          last_reply: null,
+          waiting_on: "human",
+        })),
       }),
       { headers: { "Content-Type": "application/json" } }
     );
@@ -598,25 +643,25 @@ async function bootAskNudge(
   const selfCheck = options.selfCheck;
   if (options.selfCheckTimeoutMs === undefined) delete process.env.ENVOY_SELF_CHECK_TIMEOUT_MS;
   else process.env.ENVOY_SELF_CHECK_TIMEOUT_MS = String(options.selfCheckTimeoutMs);
-  envoyExtension(
-    selfCheck === null
-      ? fixture.pi
-      : {
-          ...fixture.pi,
-          // Deliberately not an `async` wrapper: a host stub that throws synchronously must
-          // reach the extension as a synchronous throw, which is the whole of that case.
-          askEphemeral: (input) => {
-            asked.push(input);
-            return selfCheck === undefined
-              ? Promise.resolve({ replyText: "WAITING" })
-              : selfCheck(input);
-          },
-        }
-  );
+  // Deliberately not an `async` wrapper: a host stub that throws synchronously must reach the
+  // extension as a synchronous throw, which is the whole of that case.
+  const answer = (input: { readonly prompt: string; readonly signal?: AbortSignal }) => {
+    asked.push(input);
+    return selfCheck === undefined ? Promise.resolve({ replyText: "WAITING" }) : selfCheck(input);
+  };
+  const host = options.sideTurn ?? "askEphemeral";
+  envoyExtension(host === "askEphemeral" ? { ...fixture.pi, askEphemeral: answer } : fixture.pi);
   // A fresh TUI has no session yet at `session_start`; the host mints the id before the first
   // turn, and the extension's own `sessionID` heals only on the next heartbeat.
   let live = options.lazySessionID === true ? "" : sessionID;
   const intervals: (() => void)[] = [];
+  // The stop-time check runs on the host's managed timer once `agent_end` returns; a stop is
+  // over when every timer it scheduled has run.
+  const timers: Promise<void>[] = [];
+  const held: (() => void | Promise<void>)[] = [];
+  const drainTimers = async (): Promise<void> => {
+    while (timers.length > 0) await timers.shift();
+  };
   const context: SessionContext = {
     ...sessionContext(sessionID, options.hasUI ?? true),
     sessionManager: {
@@ -625,6 +670,15 @@ async function bootAskNudge(
       getBranch: () => branch,
     },
     setInterval: (callback) => intervals.push(callback),
+    setTimeout: (callback) => {
+      if (options.holdTimers === true) held.push(callback);
+      else timers.push(Promise.resolve().then(callback));
+    },
+    ...(host === "runEphemeralTurn"
+      ? {
+          runEphemeralTurn: ({ promptText, signal }) => answer({ prompt: promptText, signal }),
+        }
+      : {}),
   };
   await fixture.handlers.get("session_start")?.({}, context);
   live = sessionID;
@@ -674,19 +728,41 @@ async function bootAskNudge(
     },
     /** A run the user did not type: an Envoy delivery, or another extension's continuation. */
     runStart: () => agentStart({}, context),
-    /** A stop defaults to a normal settle: the run's last reply ended `stopReason: "stop"`. */
-    stop: (
+    /**
+     * Holds the next turn's arming read open: `out` resolves once that read is in flight, and
+     * the read answers when `release()` is called.
+     */
+    holdNextArming: () => {
+      const hold = {
+        out: Promise.withResolvers<void>(),
+        gate: Promise.withResolvers<void>(),
+      };
+      armingHold = hold;
+      return { out: hold.out.promise, release: () => hold.gate.resolve() };
+    },
+    /** Runs, in order, every timer callback `holdTimers` queued, each to completion. */
+    runHeldTimers: async () => {
+      for (const callback of held.splice(0)) await callback();
+    },
+    /**
+     * A stop defaults to a normal settle: the run's last reply ended `stopReason: "stop"`. It
+     * resolves once the check the stop scheduled has finished, or at once under `holdTimers`.
+     */
+    stop: async (
       event: {
         readonly willContinue?: boolean;
         readonly messages?: readonly { readonly role?: string; readonly stopReason?: string }[];
       } = {}
-    ) => agentEnd({ messages: [{ role: "assistant", stopReason: "stop" }], ...event }, context),
+    ) => {
+      await agentEnd({ messages: [{ role: "assistant", stopReason: "stop" }], ...event }, context);
+      await drainTimers();
+    },
     toolResult: (event: Record<string, unknown>) => toolResult(event, context),
   };
 }
 
 /**
- * The same host with the run-end self-check available. Without `askEphemeral` the nudge has no
+ * The same host with the run-end self-check available. Without a side turn the nudge has no
  * trigger at all, so neither lifecycle edge reads Dispatch.
  */
 function withSelfCheck(pi: TestPi): TestPi {
@@ -881,6 +957,87 @@ describe("envoy OMP extension", () => {
     expect(session.asked[0]?.signal?.aborted).toBe(false);
     // The arming period lives in memory only: nothing about it reaches the transcript.
     expect(session.fixture.entries).toEqual([]);
+  });
+
+  test("runs the self-check through the session context's runEphemeralTurn on an upstream host", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-context");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_context", () => ({}), {
+      sideTurn: "runEphemeralTurn",
+    });
+
+    await session.userTurn();
+    await session.stop();
+
+    expect(session.fixture.deliveries).toMatchObject([
+      { customType: "dispatch-ask-reminder", options: { deliverAs: "steer", triggerTurn: true } },
+    ]);
+    // The self-check goes out in the /btw wrapper `pi.askEphemeral` used to add, with the
+    // extension's own abort signal.
+    expect(session.asked.map((ask) => ask.prompt)).toEqual([
+      expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
+    ]);
+    expect(session.asked[0]?.signal?.aborted).toBe(false);
+  });
+
+  test("runs the stop-time check on the managed timer, after agent_end has returned", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-after-handler");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_after_handler", () => ({}), {
+      sideTurn: "runEphemeralTurn",
+      holdTimers: true,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    // On Oh My Pi 18.3 a side turn started inside the handler would carry the handler's 30 s
+    // abort, so nothing about the check may have happened by the time it returns.
+    expect(session.queries).toEqual(["?author_session=ses_nudge_after_handler"]);
+    expect(session.asked).toEqual([]);
+
+    await session.runHeldTimers();
+    expect(session.asked).toHaveLength(1);
+    expect(session.fixture.deliveries).toMatchObject([{ customType: "dispatch-ask-reminder" }]);
+  });
+
+  test("a user turn between a stop and its timer leaves that stop unchecked", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-turn-before-timer");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_turn_before_timer", () => ({}), {
+      holdTimers: true,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    // The user types, and the timer fires while the turn's arming read is still out: no run has
+    // started, so only the turn's generation says the stop has been overtaken.
+    const arming = session.holdNextArming();
+    const typed = session.userTurn("the next thing");
+    await arming.out;
+    await session.runHeldTimers();
+    arming.release();
+    await typed;
+
+    // Only the two arming reads: the stop's check never read Dispatch or asked the model.
+    expect(session.queries).toEqual([
+      "?author_session=ses_nudge_turn_before_timer",
+      "?author_session=ses_nudge_turn_before_timer",
+    ]);
+    expect(session.asked).toEqual([]);
+    expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("a woken run between a stop and its timer leaves that stop unchecked", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-run-before-timer");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_run_before_timer", () => ({}), {
+      holdTimers: true,
+    });
+
+    await session.userTurn();
+    await session.stop();
+    await session.runStart();
+    await session.runHeldTimers();
+
+    // The stop is about a run the session has moved past, so its check reads nothing.
+    expect(session.queries).toEqual(["?author_session=ses_nudge_run_before_timer"]);
+    expect(session.asked).toEqual([]);
   });
 
   test("stays silent when the self-check answers PROCEEDING", async () => {
@@ -1300,7 +1457,7 @@ describe("envoy OMP extension", () => {
     // The same OMP builds that cannot serve a Dispatch BTW: with no self-check there is no
     // trigger, so the session does not pay the arming round trip either.
     const session = await bootAskNudge(envoyExtension, "ses_nudge_no_ephemeral", () => ({}), {
-      selfCheck: null,
+      sideTurn: "none",
     });
 
     await session.userTurn();
@@ -1512,15 +1669,64 @@ describe("envoy OMP extension", () => {
     ).toHaveLength(1);
   });
 
+  test("a recorded settle is not re-checked while the turn that overtook it is still arming", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-settle-arming");
+    const { promise: held, resolve: release } = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_settle_arming", () => ({}), {
+      selfCheck: async () => {
+        started.resolve();
+        await held;
+        return { replyText: "WAITING" };
+      },
+    });
+
+    await session.userTurn();
+    const first = session.stop();
+    await started.promise;
+    // A woken run works and settles inside the check's window, so its stop is recorded…
+    await session.runStart();
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-1",
+      input: {},
+      details: {},
+      isError: false,
+    });
+    const woken = session.stop();
+    // …then the user types, and the check comes back while that turn's arming read is still
+    // out. No run has started, so only the turn's generation marks the recorded stop as
+    // overtaken; re-checking it would steer into the turn just typed.
+    const arming = session.holdNextArming();
+    const typed = session.userTurn("actually, do this instead");
+    await arming.out;
+    release();
+    await Promise.all([first, woken]);
+    arming.release();
+    await typed;
+
+    expect(session.asked).toHaveLength(1);
+    expect(
+      session.fixture.deliveries.filter((delivery) => delivery.customType === ASK_REMINDER_TYPE)
+    ).toEqual([]);
+    expect(session.queries).toHaveLength(3);
+  });
+
   test("a run that starts while Dispatch answers the stop pays for no check", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-run-during-query");
     const query = Promise.withResolvers<void>();
+    const queryOut = Promise.withResolvers<void>();
     const session = await bootAskNudge(envoyExtension, "ses_nudge_run_during_query", () => ({}), {
-      holdStopQuery: () => query.promise,
+      holdStopQuery: () => {
+        queryOut.resolve();
+        return query.promise;
+      },
     });
 
     await session.userTurn();
     const stopped = session.stop();
+    // The run starts only once the stop's query is out: a run before it is the pre-flight's case.
+    await queryOut.promise;
     await session.runStart();
     query.resolve();
     await stopped;
@@ -1578,29 +1784,75 @@ describe("envoy OMP extension", () => {
     }
   });
 
-  test("stays silent at a stop that leaves an ask open", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-open");
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_open", () => ({ count: 1 }));
-
-    await session.userTurn();
-    await session.stop();
-    // Dispatch already knows the agent is waiting: nothing is asked of the model.
-    expect(session.fixture.deliveries).toEqual([]);
-    expect(session.asked).toEqual([]);
-  });
-
-  test("stays silent when an ask was opened after the turn began", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-opened-since");
-    // Answered and closed within the turn: nothing is open at the stop, but the session did
-    // put a question to a human, so it is not silently waiting.
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_since", () => ({
-      opened_since: true,
+  test("nudges a WAITING session even when it already holds an open ask", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-held-waiting");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_held_waiting", () => ({
+      asks: [{ question: "Which deployment window should I use?" }],
     }));
 
     await session.userTurn();
     await session.stop();
+
+    expect(session.fixture.deliveries).toEqual([
+      expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
+    ]);
+    expect(session.asked[0]?.prompt).toContain("Which deployment window should I use?");
+  });
+
+  test("leaves a held ask silent when the self-check answers PROCEEDING", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-held-proceeding");
+    const session = await bootAskNudge(
+      envoyExtension,
+      "ses_nudge_held_proceeding",
+      () => ({ asks: [{ question: "Which deployment window should I use?" }] }),
+      { selfCheck: async () => ({ replyText: "PROCEEDING" }) }
+    );
+
+    await session.userTurn();
+    await session.stop();
+
+    expect(session.asked).toHaveLength(1);
     expect(session.fixture.deliveries).toEqual([]);
-    expect(session.asked).toEqual([]);
+  });
+
+  test("names no open asks or the first five held ask questions in the self-check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-prompt-asks");
+    const longQuestion = `A held question that exceeds the prompt limit: ${"x".repeat(130)}`;
+    const heldQuestions = [
+      "First held question",
+      "Second held question\u2028with details that do not belong in the prompt",
+      "Third held question\rwith details that do not belong in the prompt",
+      "Fourth held question with\ta bell\u0007character",
+      longQuestion,
+      "Sixth held question",
+    ];
+    const held = await bootAskNudge(envoyExtension, "ses_nudge_prompt_held", () => ({
+      asks: heldQuestions.map((question) => ({ question })),
+    }));
+    await held.userTurn();
+    await held.stop();
+
+    const heldPrompt = held.asked[0]?.prompt ?? "";
+    const askListStart = heldPrompt.indexOf("Your open asks in Dispatch:");
+    const askListEnd = heldPrompt.indexOf("\n\nAre you right now waiting");
+    expect(heldPrompt.slice(askListStart, askListEnd).split("\n")).toEqual([
+      "Your open asks in Dispatch:",
+      "- First held question",
+      "- Second held question",
+      "- Third held question",
+      "- Fourth held question with a bell character",
+      `- ${longQuestion.slice(0, 119)}…`,
+      "+1 more",
+    ]);
+    expect(heldPrompt).not.toContain("with details that do not belong in the prompt");
+    expect(heldPrompt).not.toContain(longQuestion);
+    expect(heldPrompt).not.toContain("Sixth held question");
+    expect(heldPrompt).toContain("+1 more");
+
+    const none = await bootAskNudge(envoyExtension, "ses_nudge_prompt_none", () => ({}));
+    await none.userTurn();
+    await none.stop();
+    expect(none.asked[0]?.prompt).toContain("There are no open asks");
   });
 
   test("the ask the agent opens itself spends the check the period owed", async () => {
@@ -1632,35 +1884,18 @@ describe("envoy OMP extension", () => {
     expect(session.asked).toEqual([]);
   });
 
-  test("an ask that stays open keeps every settle silent and spends none of the period", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-ask-open-budget");
-    // The rule the server implements (`packages/envoy/internal/dispatch/api/asks.go`):
-    // `opened_since` is true when this session authored any ask at or after `since`, whatever
-    // state it is in now, and `count` is what is open at the snapshot.
-    const asks: { readonly created_at: string; open: boolean }[] = [];
+  test("the five-check period budget applies while the session holds open asks", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-held-budget");
     const session = await bootAskNudge(
       envoyExtension,
-      "ses_nudge_ask_budget",
-      (since) => ({
-        count: asks.filter((ask) => ask.open).length,
-        opened_since: since !== undefined && asks.some((ask) => ask.created_at >= since),
-      }),
+      "ses_nudge_held_budget",
+      () => ({ asks: [{ question: "Which deployment window should I use?" }] }),
       { selfCheck: async () => ({ replyText: "PROCEEDING" }) }
     );
 
     await session.userTurn();
-    asks.push({ created_at: session.asOf(), open: true });
-    await session.toolResult({
-      toolName: "dispatch_ask",
-      toolCallId: "call-ask",
-      input: {},
-      details: { ask: "ask-1" },
-      isError: false,
-    });
-
-    // The agent carries on with what it can while the human is away. Dispatch answers that its
-    // question is open at every one of those settles, so none of them asks the model anything.
-    for (let step = 0; step < 6; step += 1) {
+    for (let step = 0; step < 9; step += 1) {
+      await session.stop();
       await session.toolResult({
         toolName: "bash",
         toolCallId: `call-${step}`,
@@ -1668,74 +1903,10 @@ describe("envoy OMP extension", () => {
         details: {},
         isError: false,
       });
-      await session.stop();
     }
-    expect(session.asked).toEqual([]);
 
-    // More settles than the period's five checks have gone by, and the budget is untouched:
-    // the human answers, and the next stop after real work is checked as usual.
-    const answered = asks[0];
-    if (answered === undefined) throw new Error("the fixture recorded no ask");
-    answered.open = false;
-    await session.toolResult({
-      toolName: "bash",
-      toolCallId: "call-after",
-      input: {},
-      details: {},
-      isError: false,
-    });
-    await session.stop();
-    expect(session.asked).toHaveLength(1);
-  });
-
-  test("work re-arms the check once the agent's own ask has been answered", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-ask-answered");
-    const asks: { readonly created_at: string; open: boolean }[] = [];
-    const session = await bootAskNudge(
-      envoyExtension,
-      "ses_nudge_answered",
-      (since) => ({
-        count: asks.filter((ask) => ask.open).length,
-        opened_since: since !== undefined && asks.some((ask) => ask.created_at >= since),
-      }),
-      { selfCheck: async () => ({ replyText: "WAITING" }) }
-    );
-
-    await session.userTurn();
-    asks.push({ created_at: session.asOf(), open: true });
-    await session.toolResult({
-      toolName: "dispatch_ask",
-      toolCallId: "call-ask",
-      input: {},
-      details: { ask: "ask-1" },
-      isError: false,
-    });
-    await session.toolResult({
-      toolName: "bash",
-      toolCallId: "call-1",
-      input: {},
-      details: {},
-      isError: false,
-    });
-    await session.stop();
-    expect(session.asked).toEqual([]);
-
-    // The human answers, and the ask closes. A standing session is woken by that answer through
-    // Envoy, which arms no period of its own, so nothing but the moving window can let the
-    // nudge speak again — and the second silent wait is exactly what it exists to catch.
-    const answered = asks[0];
-    if (answered === undefined) throw new Error("the fixture recorded no ask");
-    answered.open = false;
-    await session.toolResult({
-      toolName: "bash",
-      toolCallId: "call-2",
-      input: {},
-      details: {},
-      isError: false,
-    });
-    await session.stop();
-    expect(session.asked).toHaveLength(1);
-    expect(session.fixture.deliveries).toHaveLength(1);
+    expect(session.asked).toHaveLength(5);
+    expect(session.fixture.deliveries).toEqual([]);
   });
 
   test("waits for the real stop when OMP has already scheduled a continuation", async () => {
@@ -4330,6 +4501,146 @@ describe("envoy OMP extension", () => {
     expect(fixture.deliveries).toEqual([]);
   });
 
+  test("answers a targeted BTW through the session context's runEphemeralTurn in the /btw prompt", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const registrations: unknown[] = [];
+    const replies: unknown[] = [];
+    const posted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/v1/interests/subscribe") {
+        registrations.push(JSON.parse(init?.body?.toString() ?? "{}"));
+      }
+      if (path === "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply") {
+        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        posted.resolve();
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-context");
+    const fixture = createPi();
+    const prompts: string[] = [];
+    // An upstream host: the side turn is on the extension context, and `pi.askEphemeral` does
+    // not exist.
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_delivery"),
+        runEphemeralTurn: async ({ promptText }) => {
+          prompts.push(promptText);
+          return { replyText: "Yes, ship it." };
+        },
+      }
+    );
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    agent.push(targetedDispatchEnvelope("btw", "targeted-context"));
+    await posted.promise;
+
+    expect(registrations).toMatchObject([{ capabilities: ["aside", "btw", "steer"] }]);
+    // The host sends the prompt as given, so the question goes out in the /btw wrapper the
+    // older `pi.askEphemeral` added itself.
+    expect(prompts).toEqual([
+      expect.stringMatching(/^<btw>\n[\s\S]*\nDelivery btw targeted-context\n<\/btw>$/),
+    ]);
+    expect(replies).toEqual([
+      { actor: { id: "ses_delivery", kind: "session" }, attempt: 1, body: "Yes, ship it." },
+    ]);
+    expect(fixture.deliveries).toEqual([]);
+  });
+
+  test("prefers the session context's runEphemeralTurn over pi.askEphemeral", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const posted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      if (
+        new URL(input.toString()).pathname ===
+        "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply"
+      ) {
+        posted.resolve();
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-precedence");
+    const fixture = createPi();
+    const calls: string[] = [];
+    envoyExtension({
+      ...fixture.pi,
+      askEphemeral: async () => {
+        calls.push("askEphemeral");
+        return { replyText: "from askEphemeral" };
+      },
+    });
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_delivery"),
+        runEphemeralTurn: async () => {
+          calls.push("runEphemeralTurn");
+          return { replyText: "from runEphemeralTurn" };
+        },
+      }
+    );
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    agent.push(targetedDispatchEnvelope("btw", "targeted-precedence"));
+    await posted.promise;
+
+    expect(calls).toEqual(["runEphemeralTurn"]);
+  });
+
+  test("refuses a BTW that drains in during session_shutdown without starting a side turn", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const replies: unknown[] = [];
+    const posted = Promise.withResolvers<void>();
+    // Deregistration hangs, so the shutdown handler is still running when the frame arrives.
+    const deregistration = Promise.withResolvers<Response>();
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/v1/sessions/ses_delivery") return deregistration.promise;
+      if (path === "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply") {
+        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
+        posted.resolve();
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-shutdown");
+    const fixture = createPi();
+    const calls: string[] = [];
+    envoyExtension(fixture.pi);
+    const context: SessionContext = {
+      ...sessionContext("ses_delivery"),
+      runEphemeralTurn: async () => {
+        calls.push("runEphemeralTurn");
+        return { replyText: "too late" };
+      },
+    };
+    await fixture.handlers.get("session_start")?.({}, context);
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    const shutdown = fixture.handlers.get("session_shutdown")?.({}, context);
+    agent.push(targetedDispatchEnvelope("btw", "targeted-shutdown"));
+    await posted.promise;
+    deregistration.resolve(response({}));
+    await shutdown;
+
+    expect(replies).toEqual([
+      {
+        actor: { id: "ses_delivery", kind: "session" },
+        attempt: 1,
+        error: "This OMP session is shutting down",
+      },
+    ]);
+    expect(calls).toEqual([]);
+  });
+
   test("fails closed for a malformed targeted frame and reports the error to Dispatch", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "dispatch-token";
@@ -4492,11 +4803,458 @@ describe("envoy OMP extension", () => {
       expect(heartbeats).toHaveLength(1);
       expect(natsState.connectedNames.length - connectsBefore).toBe(1);
       expect(natsState.subscriptions.has("notifications.agent.ses_child")).toBe(false);
-      // With no identity of its own, a subagent's tools carry no source session.
+      // No identity of its own, so whoami names the reachable one — the parent that spawned
+      // it — and reports the subagent's own host session id beside it.
       const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
       if (whoami === undefined) throw new Error("envoy_whoami was not registered");
-      const result = await whoami.execute("call-1", {});
-      expect(result.details).toMatchObject({ sessionID: "" });
+      const childContext = sessionWithTranscript("ses_child", childFile, heartbeats);
+      const result = await whoami.execute("call-1", {}, undefined, undefined, childContext);
+      expect(result.details).toMatchObject({
+        sessionID: "ses_parent",
+        subagent: { session_id: "ses_child" },
+      });
+      expect(JSON.parse(result.content[0]?.text ?? "{}")).toMatchObject({
+        session_id: "ses_parent",
+        // Its instance stored no directory either, so the live one answers for it.
+        dir: childContext.cwd,
+        subagent: { session_id: "ses_child" },
+      });
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  type MessageBody = Record<string, unknown> & { readonly source_session?: string };
+
+  /** The message bodies a fixture's tools posted, by listener path. */
+  function recordingMessages(): { readonly path: string; readonly body: MessageBody }[] {
+    const posted: { readonly path: string; readonly body: MessageBody }[] = [];
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/v1/messages/send" || path === "/v1/messages/publish") {
+        posted.push({ path, body: JSON.parse(init?.body?.toString() ?? "{}") });
+        return response({
+          event_id: "evt_subagent",
+          source: "agent",
+          source_event_id: "evt_subagent",
+          topic: "notifications.agent.ses_target",
+          dedupe_key: "dedupe_subagent",
+          issued_at: 1,
+          payload_summary: "message",
+          trace_id: "trace_subagent",
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    return posted;
+  }
+
+  /**
+   * A process whose first top-level session is `parentID`, and the instances that join it: more
+   * top-level sessions (an ACP host runs several in one process) and subagents, each nesting
+   * under the transcript it is given. Every instance comes from one module import, as they do
+   * in a real process.
+   */
+  async function subagentProcess(
+    query: string,
+    parentID: string,
+    transcript: (name: string) => string
+  ) {
+    const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+    const heartbeats: (() => void)[] = [];
+    const boot = async (id: string, file: string) => {
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const context = sessionWithTranscript(id, file, heartbeats);
+      await fixture.handlers.get("session_start")?.({}, context);
+      return { ...fixture, context };
+    };
+    const parentFile = transcript(`2026-09-23T00-00-00-000Z_${parentID}.jsonl`);
+    const parent = await boot(parentID, parentFile);
+    return { boot, heartbeats, parent, parentFile };
+  }
+
+  test("a task subagent's sends name the parent as their source session", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      const host = await subagentProcess("subagent-source", "ses_parent", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
+      );
+
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "from the subagent" },
+          undefined,
+          undefined,
+          child.context
+        );
+      await child.tools
+        .find((tool) => tool.name === "envoy_publish")
+        ?.execute(
+          "call-publish",
+          { topic: "notifications.role.controller", message: "broadcast" },
+          undefined,
+          undefined,
+          child.context
+        );
+
+      expect(posted).toEqual([
+        {
+          path: "/v1/messages/send",
+          body: {
+            source: "agent",
+            source_session: "ses_parent",
+            target_session: "ses_target",
+            message: "from the subagent",
+            idempotency_key: expect.any(String),
+          },
+        },
+        {
+          path: "/v1/messages/publish",
+          body: {
+            source: "agent",
+            source_session: "ses_parent",
+            topic: "notifications.role.controller",
+            message: "broadcast",
+            idempotency_key: expect.any(String),
+          },
+        },
+      ]);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent of a subagent names the process's top-level session", async () => {
+    const fixture = transcriptFixture();
+    try {
+      recordingRegistrations();
+      const host = await subagentProcess("nested-subagent", "ses_parent", fixture.transcript);
+      await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
+      );
+      // OMP nests a subagent's own subagent one directory deeper.
+      const nested = await host.boot(
+        "ses_nested",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout/Oracle.jsonl")
+      );
+
+      const whoami = nested.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, nested.context);
+      expect(result?.details).toMatchObject({
+        sessionID: "ses_parent",
+        subagent: { session_id: "ses_nested" },
+      });
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent follows the parent to the session id a switch minted", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      const host = await subagentProcess("switched-parent", "ses_parent", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
+      );
+      // A /fork or /handoff mints a new id for the same conversation; the parent's instance
+      // republishes it, and the subagent's reply address must move with it.
+      await host.parent.handlers.get("session_switch")?.(
+        { reason: "fork" },
+        sessionWithTranscript(
+          "ses_parent_next",
+          fixture.transcript("2026-09-23T00-01-00-000Z_ses_parent_next.jsonl"),
+          host.heartbeats
+        )
+      );
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, child.context);
+      expect(result?.details).toMatchObject({ sessionID: "ses_parent_next" });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "after the switch" },
+          undefined,
+          undefined,
+          child.context
+        );
+      expect(posted.map((request) => request.body.source_session)).toEqual(["ses_parent_next"]);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent of a process with no Envoy identity reports no reply address", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      // Nothing ever ran a top-level session_start here: no Envoy config, so no identity to
+      // inherit. The tool must say so rather than name the subagent's unreachable host id.
+      const { default: envoyExtension } = await import("./envoy.ts?identityless-subagent");
+      fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent.jsonl");
+      const child = createPi();
+      envoyExtension(child.pi);
+      const context = sessionWithTranscript(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl"),
+        []
+      );
+      await child.handlers.get("session_start")?.({}, context);
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, context);
+      expect(result?.details).toMatchObject({
+        sessionID: "",
+        subagent: {
+          session_id: "ses_child",
+          note: expect.stringContaining("no reply address"),
+        },
+      });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "orphaned" },
+          undefined,
+          undefined,
+          context
+        );
+      // An empty source session is dropped by the listener's own JSON on the way out, which
+      // leaves the recipient no sender and no reply hint: the field must be absent instead.
+      expect(posted[0]?.body).not.toHaveProperty("source_session");
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent of one of several top-level sessions names the one that spawned it", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      // An ACP host runs several top-level sessions in one process, each firing its own
+      // session_start. The subagent belongs to the first; the second must not answer for it.
+      const host = await subagentProcess("two-top-level", "ses_a", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_a/Scout.jsonl")
+      );
+      await host.boot("ses_b", fixture.transcript("2026-09-23T00-02-00-000Z_ses_b.jsonl"));
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, child.context);
+      expect(result?.details).toMatchObject({
+        sessionID: "ses_a",
+        subagent: { session_id: "ses_child" },
+      });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "from ses_a's subagent" },
+          undefined,
+          undefined,
+          child.context
+        );
+      expect(posted.map((request) => request.body.source_session)).toEqual(["ses_a"]);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a nested subagent walks its own transcript up past a second top-level session", async () => {
+    const fixture = transcriptFixture();
+    try {
+      recordingRegistrations();
+      const host = await subagentProcess("nested-two-top-level", "ses_a", fixture.transcript);
+      await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_a/Scout.jsonl")
+      );
+      await host.boot("ses_b", fixture.transcript("2026-09-23T00-02-00-000Z_ses_b.jsonl"));
+      await host.boot(
+        "ses_b_child",
+        fixture.transcript("2026-09-23T00-02-00-000Z_ses_b/Scout.jsonl")
+      );
+      const nested = await host.boot(
+        "ses_nested",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_a/Scout/Oracle.jsonl")
+      );
+
+      const whoami = nested.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, nested.context);
+      expect(result?.details).toMatchObject({
+        sessionID: "ses_a",
+        subagent: { session_id: "ses_nested" },
+      });
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a session that switches transcripts leaves no record for a subagent of the old one", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      const host = await subagentProcess("switched-away", "ses_a", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_a/Scout.jsonl")
+      );
+      // ses_a forks into a new id under a new transcript, and a second top-level session runs
+      // beside it, so nothing is unambiguous any more: the entry under ses_a's old transcript
+      // must be gone, or this subagent would be handed an id its session has retired.
+      await host.parent.handlers.get("session_switch")?.(
+        { reason: "fork" },
+        sessionWithTranscript(
+          "ses_a_next",
+          fixture.transcript("2026-09-23T00-01-00-000Z_ses_a_next.jsonl"),
+          host.heartbeats
+        )
+      );
+      await host.boot("ses_b", fixture.transcript("2026-09-23T00-02-00-000Z_ses_b.jsonl"));
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, child.context);
+      expect(result?.details).toMatchObject({ sessionID: "" });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "orphaned by the fork" },
+          undefined,
+          undefined,
+          child.context
+        );
+      expect(posted[0]?.body).not.toHaveProperty("source_session");
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent of a session whose host mints its id later reports no address", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      // A fresh TUI fires session_start before its id exists and heals by drift up to a
+      // heartbeat later. Its subagent must resolve that session and find no id yet, never fall
+      // through to whichever other top-level session this process is running.
+      const host = await subagentProcess("lazy-id", "", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_/Scout.jsonl")
+      );
+      await host.boot("ses_b", fixture.transcript("2026-09-23T00-02-00-000Z_ses_b.jsonl"));
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, child.context);
+      expect(result?.details).toMatchObject({ sessionID: "" });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "before the id exists" },
+          undefined,
+          undefined,
+          child.context
+        );
+      expect(posted[0]?.body).not.toHaveProperty("source_session");
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent that outlives its session's shutdown reports no address", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const posted = recordingMessages();
+      const host = await subagentProcess("shutdown-parent", "ses_parent", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
+      );
+      // The session deregisters with the listener here, so it is no longer an address a reply
+      // reaches — the `no live session` failure this whole record exists to stop.
+      await host.parent.handlers.get("session_shutdown")?.({}, host.parent.context);
+
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      const result = await whoami?.execute("call-1", {}, undefined, undefined, child.context);
+      expect(result?.details).toMatchObject({ sessionID: "" });
+      await child.tools
+        .find((tool) => tool.name === "envoy_send")
+        ?.execute(
+          "call-send",
+          { session_id: "ses_target", message: "after the parent went away" },
+          undefined,
+          undefined,
+          child.context
+        );
+      expect(posted[0]?.body).not.toHaveProperty("source_session");
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a subagent's publish to a role its own parent holds says it was not delivered", async () => {
+    const fixture = transcriptFixture();
+    try {
+      // The listener never delivers a message to the session it names as its source, so a
+      // subagent publishing to a role its parent holds gets a 200 with that holder and nothing
+      // else. The tool result has to say so; only the role case is visible in the answer.
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input.toString());
+        if (url.pathname !== "/v1/messages/publish") {
+          return responseWithRegistration(input, init, {});
+        }
+        const topic = String(JSON.parse(init?.body?.toString() ?? "{}").topic);
+        return response({
+          event_id: "evt_echo",
+          source: "agent",
+          source_event_id: "evt_echo",
+          topic,
+          dedupe_key: "dedupe_echo",
+          issued_at: 1,
+          payload_summary: "broadcast",
+          trace_id: "trace_echo",
+          holder: topic.endsWith("controller") ? "ses_parent" : "ses_reviewer",
+        });
+      };
+      const host = await subagentProcess("publish-echo", "ses_parent", fixture.transcript);
+      const child = await host.boot(
+        "ses_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl")
+      );
+
+      const publish = child.tools.find((tool) => tool.name === "envoy_publish");
+      const echoed = await publish?.execute(
+        "call-echo",
+        { topic: "notifications.role.controller", message: "broadcast" },
+        undefined,
+        undefined,
+        child.context
+      );
+      expect(echoed?.details).toMatchObject({ holder: "ses_parent", undelivered_echo: true });
+      expect(echoed?.content[0]?.text).toContain("Not delivered");
+
+      // The same tool, the same source session, a role someone else holds: delivered as usual,
+      // and nothing of the sort said.
+      const other = await publish?.execute(
+        "call-other",
+        { topic: "notifications.role.reviewer", message: "broadcast" },
+        undefined,
+        undefined,
+        child.context
+      );
+      expect(other?.details).not.toHaveProperty("undelivered_echo");
     } finally {
       fixture.remove();
     }
@@ -4789,13 +5547,14 @@ describe("envoy OMP extension", () => {
   test("reports the active session directory through envoy_whoami", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?whoami-directory");
     const fixture = createPi();
+    const context = sessionContext("ses_whoami");
 
     envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_whoami"));
+    await fixture.handlers.get("session_start")?.({}, context);
     const whoami = fixture.tools.find((tool) => tool.name === "envoy_whoami");
     if (whoami === undefined) throw new Error("envoy_whoami was not registered");
 
-    const result = await whoami.execute("", {});
+    const result = await whoami.execute("", {}, undefined, undefined, context);
 
     expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
       session_id: "ses_whoami",

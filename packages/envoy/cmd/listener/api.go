@@ -8,9 +8,9 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -80,9 +80,10 @@ type messageBody struct {
 }
 
 // sendResponse is the answer to a targeted send. Duplicate reports that JetStream already held
-// this message, so nothing new reached the agent's subject; it is only ever true for a
-// dispatch-sourced send, the only one published under a MsgId. Absent means false, which is
-// what an older listener's answer reads as.
+// this message, so nothing new reached the agent's subject; it can only be true for a send whose
+// dedupe key names the upstream event (contracts.DedupeKeyNamesTheUpstreamEvent), and
+// Dispatch is the one sender that uses it. Absent means false, which is what an older listener's
+// answer reads as.
 type sendResponse struct {
 	contracts.Envelope
 	Recipient string `json:"recipient"`
@@ -146,10 +147,14 @@ func hasCapability(capabilities []string, value string) bool {
 //     the send outright. A malformed or unreadable targeted frame is never treated as if it
 //     were untagged: presence of the exact "delivery" key is itself a claim that this send is
 //     targeted, and an unreadable claim is refused, not waved through.
-//   - "delivery" is present and its mode reads unambiguously as a single non-empty string:
-//     mode=<that string>, err=nil. An unrecognised (non-enum) mode string is not a case this
-//     function decides: it returns that string like any other, and the ordinary capability
-//     check refuses it because no session advertises a bogus capability.
+//   - "delivery" is present and its mode reads unambiguously as one of the three delivery
+//     modes: mode=<that string>, err=nil.
+//   - "delivery" is present and its mode reads unambiguously as something else: mode="",
+//     err!=nil, refused like any other unreadable claim. This used to be waved through on the
+//     grounds that the capability check behind it would refuse a mode no session advertises -
+//     but `capabilities` is an open list from the registry, so a session that advertises a
+//     bogus string is exactly what makes that argument fail. The Dispatch server's
+//     `validDelivery` already refuses the same set at its own boundary; this is the listener's.
 func frameDeliveryMode(payload *string) (mode string, err error) {
 	if payload == nil {
 		return "", nil
@@ -182,7 +187,18 @@ func frameDeliveryMode(payload *string) (mode string, err error) {
 	if mode == "" {
 		return "", fmt.Errorf("delivery.mode is present but empty")
 	}
+	if !isDeliveryMode(mode) {
+		return "", fmt.Errorf("delivery.mode %q is not a delivery mode", mode)
+	}
 	return mode, nil
+}
+
+// isDeliveryMode reports whether value is one of the three targeted-delivery modes. The list is
+// DELIVERY_CAPABILITIES in packages/contracts/src/dispatch-api.ts, spelled here as the Dispatch
+// server spells it in its own `validDelivery`: the two sides talk over HTTP, not a shared Go
+// import.
+func isDeliveryMode(value string) bool {
+	return value == "aside" || value == "btw" || value == "steer"
 }
 
 // hasCaseVariantSibling reports whether keys contains some key that case-insensitively, but
@@ -206,6 +222,22 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 
 func writeJSONError(w http.ResponseWriter, status int, message string, expected ...string) {
 	writeJSON(w, status, apiError{Error: message, Expected: expected})
+}
+
+// writeNATSError answers a request NATS did not serve. What NATS refuses however often it is sent
+// is the caller's own input, so it is answered naming why: a message too large to take whole, or a
+// session id or role whose KV key would make a subject too long (bus.ErrTooLarge), is a 413, and a
+// topic or key NATS does not accept in a subject (bus.ErrInvalidSubject) a 400. Any other failure
+// is status with message.
+func writeNATSError(w http.ResponseWriter, err error, status int, message string) {
+	switch {
+	case errors.Is(err, bus.ErrTooLarge):
+		writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, bus.ErrInvalidSubject):
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeJSONError(w, status, message)
+	}
 }
 
 func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderResult) {
@@ -330,29 +362,18 @@ func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, so
 		return nil
 	}
 	sender := &contracts.EnvelopeSender{SessionID: sourceSession}
-	if registry != nil {
-		if interest, err := registry.Get(sourceSession); err == nil {
-			sender.Machine = interest.MachineID
-			sender.Cwd = interest.Dir
-			sender.Roles = roleNames(interest.Topics)
-		}
+	if interest, err := registry.Get(sourceSession); err == nil {
+		sender.Machine = interest.MachineID
+		sender.Cwd = interest.Dir
+		sender.Roles = roleNames(interest.Topics)
 	}
-	if sessions != nil {
-		if entry, err := sessions.Get(sourceSession); err == nil {
-			sender.Title = entry.Title
-		}
+	if entry, err := sessions.Get(sourceSession); err == nil {
+		sender.Title = entry.Title
 	}
 	return sender
 }
 
 const roleHolderResolutionAttempts = 2
-
-func liveRoleHolder(registry *store.Registry, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
-	if registry == nil || sessions == nil {
-		return roleHolderResult{}, fmt.Errorf("service starting")
-	}
-	return resolveLiveRoleHolder(registry, sessions, role)
-}
 
 // releaseExpiredRoleClaim is the single point in the listener that
 // interprets store.ExpiredRoleClaimRelease's ExpiredRoleClaimSuperseded
@@ -373,9 +394,6 @@ func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string,
 }
 
 func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
-	if registry == nil || sessions == nil {
-		return roleHolderResult{}, fmt.Errorf("service starting")
-	}
 	for range roleHolderResolutionAttempts {
 		claim, err := registry.RoleClaim(role)
 		if err != nil {
@@ -416,7 +434,7 @@ func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.Session
 
 // sendHandler publishes a direct message only while the target session has a
 // live registry entry.
-func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
+func sendHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -455,11 +473,6 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		d := state.Load()
-		if d.sessions == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		target, err := d.sessions.Get(targetSession)
 		if err != nil {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
@@ -483,13 +496,9 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
-		if d.client == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		duplicate, err := d.client.PublishReportingDuplicate(item)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, sendResponse{
@@ -510,12 +519,8 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
 			return
 		}
-		if sessions == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
-			return
-		}
 		if err := sessions.Delete(sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -527,7 +532,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // verbatim (a re-send a receiver's own dedupe recognises); it is mutually
 // exclusive with idempotency_key and may not begin with roleForwardDedupePrefix,
 // the mark the role arbiter drops on sight.
-func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
+func publishHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -577,17 +582,12 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		d := state.Load()
-		if d.client == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		result := roleHolderResult{state: roleHolderLive}
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			var err error
-			result, err = liveRoleHolder(d.registry, d.sessions, role)
+			result, err = resolveLiveRoleHolder(d.registry, d.sessions, role)
 			if err != nil {
-				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 				return
 			}
 			if result.state != roleHolderLive {
@@ -597,7 +597,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
 		if err := d.client.Publish(item); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, publishResponse{Envelope: item, Holder: result.holder})
@@ -629,10 +629,6 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		if sessions == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
-			return
-		}
 		entries, err := sessions.List()
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
@@ -656,11 +652,9 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 				UpdatedAt:      entry.UpdatedAt,
 				LastSeen:       entry.UpdatedAt,
 			}
-			if registry != nil {
-				if interest, err := registry.Get(entry.SessionID); err == nil {
-					info.Topics = interest.Topics
-					info.Roles = roleNames(interest.Topics)
-				}
+			if interest, err := registry.Get(entry.SessionID); err == nil {
+				info.Topics = interest.Topics
+				info.Roles = roleNames(interest.Topics)
 			}
 			result = append(result, info)
 		}
@@ -670,10 +664,6 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 
 func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if registry == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "interest registry unavailable")
-			return
-		}
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
 
 		if sessionID == "" {
@@ -689,13 +679,13 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 		case http.MethodGet:
 			item, err := registry.Get(sessionID)
 			if err != nil {
-				writeJSONError(w, http.StatusNotFound, err.Error())
+				writeNATSError(w, err, http.StatusNotFound, err.Error())
 				return
 			}
 			writeJSON(w, http.StatusOK, item)
 		case http.MethodDelete:
 			if err := registry.Remove(sessionID, nil); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -705,7 +695,7 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 	}
 }
 
-func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.HandlerFunc {
+func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -745,11 +735,6 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			writeJSONError(w, http.StatusBadRequest, "role must match "+rolePatternString, "role")
 			return
 		}
-		d := state.Load()
-		if d.registry == nil || d.sessions == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		entry, err := d.sessions.Get(body.SessionID)
 		if errors.Is(err, nats.ErrKeyNotFound) {
 			writeJSONError(w, http.StatusNotFound, "session is not registered")
@@ -762,7 +747,7 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 		entry.MachineID = machineID
 		entry.SelfSubscribed = true
 		if err := d.sessions.Put(body.SessionID, entry); err != nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
+			writeNATSError(w, err, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
 			return
 		}
 		previous := ""
@@ -774,7 +759,7 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			// live or not; any other live holder is protected.
 			holder, err := d.registry.RoleHolder(body.Role)
 			if err != nil {
-				writeJSONError(w, http.StatusServiceUnavailable, "read role holder: "+err.Error())
+				writeNATSError(w, err, http.StatusServiceUnavailable, "read role holder: "+err.Error())
 				return
 			}
 			previous = strings.TrimSpace(body.PreviousSessionID)
@@ -800,14 +785,14 @@ func roleSetHandler(state *atomic.Pointer[listenerDeps], machineID string) http.
 			return
 		}
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, item)
 	}
 }
 
-func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
+func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -818,10 +803,9 @@ func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusBadRequest, "role is required", "role")
 			return
 		}
-		d := state.Load()
-		result, err := liveRoleHolder(d.registry, d.sessions, role)
+		result, err := resolveLiveRoleHolder(d.registry, d.sessions, role)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if result.state != roleHolderLive {
@@ -844,10 +828,7 @@ func (d *listenerDeps) streamInspector() streamInfoLookup {
 	if d.streamInfo != nil {
 		return d.streamInfo
 	}
-	if d.client != nil {
-		return d.client.JS()
-	}
-	return nil
+	return d.client.JS()
 }
 
 func streamInfoWithin(ctx context.Context, inspector streamInfoLookup, streamName, subjectsFilter string) (*nats.StreamInfo, error) {
@@ -872,32 +853,77 @@ func streamInfoWithin(ctx context.Context, inspector streamInfoLookup, streamNam
 	}
 }
 
-func githubRepositoryTopic(topic string) (owner, repo string, ok bool) {
+// githubRepositoryTopic is a GitHub topic read as Envoy publishes it. Its repository name runs from
+// the token after the owner to the first token that is one of contracts.GithubTopicKinds or a
+// wildcard, and Envoy writes each dot in a name as `_`, so a name the topic spreads over several
+// tokens receives nothing.
+type githubRepositoryTopic struct {
+	owner string
+	// name holds the name's tokens as the topic wrote them; repo is them joined with `_`.
+	name []string
+	repo string
+	// spelled is the topic with repo in place of name.
+	spelled string
+	// kindFollows is whether a kind, rather than a wildcard or the topic's end, ended the name.
+	kindFollows bool
+}
+
+func parseGithubRepositoryTopic(topic string) (githubRepositoryTopic, bool) {
 	const githubTopicPrefix = "notifications.github."
 	remainder, ok := strings.CutPrefix(topic, githubTopicPrefix)
 	if !ok {
-		return "", "", false
+		return githubRepositoryTopic{}, false
 	}
 	parts := strings.Split(remainder, ".")
-	if len(parts) < 3 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
+	if len(parts) < 3 || parts[0] == "" {
+		return githubRepositoryTopic{}, false
 	}
-	return parts[0], parts[1], true
+	end := 2
+	for end < len(parts) && parts[end] != "*" && parts[end] != ">" && !slices.Contains(contracts.GithubTopicKinds, parts[end]) {
+		end++
+	}
+	repo := strings.Join(parts[1:end], "_")
+	if repo == "" {
+		return githubRepositoryTopic{}, false
+	}
+	return githubRepositoryTopic{
+		owner:       parts[0],
+		name:        parts[1:end],
+		repo:        repo,
+		spelled:     githubTopicPrefix + strings.Join(append([]string{parts[0], repo}, parts[end:]...), "."),
+		kindFollows: end < len(parts) && slices.Contains(contracts.GithubTopicKinds, parts[end]),
+	}, true
+}
+
+// warning is what a subscription to the topic is told when its name spans several tokens. A kind
+// after them, or an empty token among them (a leading, trailing or doubled dot), means the name
+// was spelled with its dot, and the warning names Envoy's spelling. Otherwise the token after the
+// name's first is a mistyped kind, and the warning names the kinds instead of a spelling that
+// would receive nothing either. A repository whose name is itself a kind (`acme.pr.pr.7.>`) is
+// read as that name, and `acme.site.pr.pr.7.>` reads as `acme/site`: the two can't be told apart.
+func (g githubRepositoryTopic) warning(topic string) string {
+	switch {
+	case len(g.name) == 1:
+		return ""
+	case g.kindFollows || slices.Contains(g.name, ""):
+		return fmt.Sprintf(`%s spells a repository name with a dot, and GitHub topics write each dot in a name as "_": subscribe to %s`, topic, g.spelled)
+	default:
+		return fmt.Sprintf(`%s: %q after %s/%s is not a GitHub topic kind (%s), and a dot in a repository name is written "_"`,
+			topic, g.name[1], g.owner, g.name[0], strings.Join(contracts.GithubTopicKinds, ", "))
+	}
 }
 
 func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string, logger *logging.Logger) string {
-	owner, repo, ok := githubRepositoryTopic(topic)
+	parsed, ok := parseGithubRepositoryTopic(topic)
 	if !ok {
 		return ""
 	}
+	owner, repo := parsed.owner, parsed.repo
 	if strings.ContainsAny(owner, "*>") || strings.ContainsAny(repo, "*>") {
 		logger.Warn("listener ignored GitHub repository topic with wildcard segment", slog.String("topic", topic))
 		return ""
 	}
 	inspector := d.streamInspector()
-	if inspector == nil {
-		return ""
-	}
 	streamName := d.streamName
 	if streamName == "" {
 		streamName = bus.Stream
@@ -917,7 +943,7 @@ func unwiredRepositoryWarning(ctx context.Context, d *listenerDeps, topic string
 	return ""
 }
 
-func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, logger *logging.Logger) http.HandlerFunc {
+func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -934,11 +960,6 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 			return
 		}
 		logger.Info("listener subscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics), slog.Int("port", body.Port), slog.Bool("self_subscribed", body.SelfSubscribed), slog.String("dir", body.Dir))
-		d := state.Load()
-		if d.registry == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		item, err := d.registry.Upsert(store.Interest{
 			SessionID: body.SessionID,
 			MachineID: machineID,
@@ -949,17 +970,13 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 				slog.String("session_id", body.SessionID),
 				slog.Any("topics", body.Topics),
 				slog.String("error", err.Error()))
-			writeJSONError(w, http.StatusServiceUnavailable, err.Error())
+			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
 			return
 		}
 		if body.Port > 0 || body.SelfSubscribed {
-			if d.sessions == nil {
-				writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
-				return
-			}
 			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
-				writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
+				writeNATSError(w, err, http.StatusServiceUnavailable, "session registry unavailable")
 				return
 			}
 		}
@@ -968,11 +985,15 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 		warnings := make([]string, 0)
 		warnedRepositories := make(map[string]struct{})
 		for _, topic := range body.Topics {
-			owner, repo, ok := githubRepositoryTopic(topic)
+			parsed, ok := parseGithubRepositoryTopic(topic)
 			if !ok {
 				continue
 			}
-			key := owner + "\x00" + repo
+			if warning := parsed.warning(topic); warning != "" {
+				warnings = append(warnings, warning)
+				continue
+			}
+			key := parsed.owner + "\x00" + parsed.repo
 			if _, seen := warnedRepositories[key]; seen {
 				continue
 			}
@@ -985,8 +1006,10 @@ func subscribeHandler(state *atomic.Pointer[listenerDeps], machineID string, log
 	}
 }
 
-func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], machineID string, logger *logging.Logger) {
-	v1.HandleFunc("/v1/interests/subscribe", subscribeHandler(deps, machineID, logger))
+// registerV1Routes builds the /v1 routes over the listener's dependencies, which main hands over
+// only once every store is open, so no handler can see a store that is not.
+func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logger *logging.Logger) {
+	v1.HandleFunc("/v1/interests/subscribe", subscribeHandler(d, machineID, logger))
 	v1.HandleFunc("/v1/interests/unsubscribe", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1006,13 +1029,8 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 			return
 		}
 		logger.Info("listener unsubscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics))
-		d := deps.Load()
-		if d.registry == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
-			return
-		}
 		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		removed := body.Topics
@@ -1021,17 +1039,12 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 		}
 		writeJSON(w, http.StatusOK, map[string][]string{"removed": removed})
 	})
-	v1.HandleFunc("/v1/roles/set", roleSetHandler(deps, machineID))
-	v1.HandleFunc("/v1/roles/", roleGetHandler(deps))
+	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID))
+	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
 		if sessionID == "" {
 			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
-			return
-		}
-		d := deps.Load()
-		if d.sessions == nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
 		entry, err := d.sessions.Get(sessionID)
@@ -1042,20 +1055,11 @@ func registerV1Routes(v1 *http.ServeMux, deps *atomic.Pointer[listenerDeps], mac
 		writeJSON(w, http.StatusOK, entry)
 	})
 
-	v1.HandleFunc("/v1/interests/", func(w http.ResponseWriter, r *http.Request) {
-		d := deps.Load()
-		adminInterestsHandler(d.registry).ServeHTTP(w, r)
-	})
-	v1.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
-		d := deps.Load()
-		sessionsHandler(d.registry, d.sessions).ServeHTTP(w, r)
-	})
-	v1.HandleFunc("/v1/sessions/", func(w http.ResponseWriter, r *http.Request) {
-		d := deps.Load()
-		deleteSessionHandler(d.sessions).ServeHTTP(w, r)
-	})
-	v1.HandleFunc("/v1/messages/send", sendHandler(deps))
-	v1.HandleFunc("/v1/messages/publish", publishHandler(deps))
+	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
+	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
+	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
+	v1.HandleFunc("/v1/messages/send", sendHandler(d))
+	v1.HandleFunc("/v1/messages/publish", publishHandler(d))
 	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})

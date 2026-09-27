@@ -14,8 +14,9 @@ alter table claims add column serving_generation bigint not null default 0;
 -- claim whose worker is registered and working the issue's run is serving that run — the workflow
 -- starts one role's worker per phase, and the issue's recorded generation is the run it is on —
 -- so each such claim takes it. A claim on an issue no workflow records keeps zero, as does one
--- whose process is gone: launching, failed and retired claims are relaunched or replaced, and the
--- task the new process is given carries its own run.
+-- that is failed or retired: it is replaced, and the task the new process is given carries its own
+-- run. (A claim being relaunched — launching, shim_connected — was skipped here for the same
+-- reason, wrongly: its worker keeps the task it already holds. 0014 gives it the issue's run.)
 update claims c
 set serving_generation = i.generation
 from issues i

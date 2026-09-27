@@ -15,7 +15,7 @@ the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Issue content has Spec,
 Conversation, Children, and Artifacts tabs; the Spec document renders and edits through
-`@sjawhar/proof-editor`, with Yjs presence and margin-linked marks. The margin holds Comments and
+`@legion/proof-editor`, with Yjs presence and margin-linked marks. The margin holds Comments and
 Pinned. Each issue-owned anchored comment thread is one card with flat replies, inline reply and
 author-edit controls, mark-aligned cross-hover, and resolved history behind `Resolved (N)`.
 Project-document thread replies are handled by the margin-by-owner surface. Below the `xl`
@@ -92,7 +92,11 @@ docker rmi ghcr.io/sjawhar/legion/envoy:pr4-local
 `e2e/seed.ts` truncates its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
 The suite has `chromium` and `iphone` projects; the iPhone project uses Chromium
-with iPhone 13 viewport, touch, and user-agent emulation.
+with iPhone 13 viewport, touch, and user-agent emulation. A `webkit` project runs
+`e2e/collab-cursor.e2e.ts` alone, since where a caret lands beside a
+collaborator's cursor differs by engine, and a `firefox` project runs
+`e2e/code-line-replace.e2e.ts` alone, since Firefox's own editing mishandles text
+typed over what follows a block's last line break; `bun run e2e:install` installs all three browsers.
 
 ## Phone check
 

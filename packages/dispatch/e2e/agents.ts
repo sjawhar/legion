@@ -39,6 +39,12 @@ export async function setSessionSendStatus(sessionID: string, status: 200 | 404)
   });
 }
 
+/** Takes a seeded session out of the live registry, or puts it back, without reseeding: a
+ *  reseed clears every fixture send status with it. */
+export async function setSessionLive(sessionID: string, live: boolean): Promise<void> {
+  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { live });
+}
+
 export async function getSentMessages(): Promise<Record<string, unknown>[]> {
   return (await fixtureRequest("/__fixture/sends", "GET")).json() as Promise<
     Record<string, unknown>[]

@@ -35,7 +35,7 @@ one line. The work was the proof.
 | --- | --- |
 | `packages/daemon/src/daemon/config.ts` | imports `DEFAULT_OMP_INVOCATION` (`mise x ${OMP_FORK_PIN} -- omp`) |
 | `packages/daemon/docker/worker.Dockerfile` | the `cli` stage runs the same `bun` command into `/out/omp-pin`; the `tools` stage `mise x "$pin" -- omp --version` / `mise where`; the runtime stage's probe step runs `legion probe-image` |
-| `.github/workflows/worker-image.yaml` | `pull_request.paths` names `omp-pin.ts`, so a PR that touches it builds the image |
+| `.github/workflows/worker-image.yaml` | `pull_request.paths` names `packages/daemon/**`, `omp-pin.ts` included, so a PR that touches it builds the image |
 | `.github/workflows/envoy-and-contracts.yaml` | the `daemon-go` job installs the pin and exports `LEGION_TEST_OMP`, so the Go daemon's real-binary tests run on it |
 
 So a bump is `grep -rn "<old version>" .` (excluding `.jj`, `.git`, `node_modules`) to confirm

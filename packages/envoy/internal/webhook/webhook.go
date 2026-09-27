@@ -1,6 +1,11 @@
 package webhook
 
 import (
+	"errors"
+	"log"
+	"net/http"
+
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
@@ -10,28 +15,17 @@ type Publisher interface {
 	Publish(contracts.Envelope) error
 }
 
-// PublisherFunc adapts a plain function to the Publisher interface.
-type PublisherFunc func(contracts.Envelope) error
-
-func (f PublisherFunc) Publish(item contracts.Envelope) error {
-	return f(item)
-}
-
-// CIRecorderFuncs adapts cistore functions required by CIRecorder.
-type CIRecorderFuncs struct {
-	RecordFunc      func(contracts.CIObservation) error
-	RecordSuiteFunc func(contracts.CIObservation) error
-	RecordHeadFunc  func(owner, repo, number, sha, updatedAt string) error
-}
-
-func (f CIRecorderFuncs) Record(observation contracts.CIObservation) error {
-	return f.RecordFunc(observation)
-}
-
-func (f CIRecorderFuncs) RecordSuite(observation contracts.CIObservation) error {
-	return f.RecordSuiteFunc(observation)
-}
-
-func (f CIRecorderFuncs) RecordHead(owner, repo, number, sha, updatedAt string) error {
-	return f.RecordHeadFunc(owner, repo, number, sha, updatedAt)
+// deliveryFailed answers a delivery whose envelope, or CI observation, the listener did not publish,
+// and logs `<action> refused` or `<action> failed`. A refusal (bus.ErrRefused: too large to publish
+// whole, or a subject NATS does not accept) is refused the same way on every redelivery, so it is a
+// 422, which a redelivery sweep takes as terminal, and its error says why. Any other failure may
+// pass on a redelivery, so it is a 503; `github publish failed` is the line an alert pages on.
+func deliveryFailed(w http.ResponseWriter, action string, err error) {
+	if errors.Is(err, bus.ErrRefused) {
+		log.Printf("%s refused: %v", action, err)
+		http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	log.Printf("%s failed: %v", action, err)
+	http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 }

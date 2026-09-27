@@ -202,6 +202,9 @@ describe("resolveDaemonEnvironment", () => {
           SSH_AUTH_SOCK: "/tmp/ssh-x/agent.1",
           MNEMOPI_VEC_WEIGHT: "0.5",
           ENVOY_TOKEN_FILE: "/leaked/legion-omp-legion-6-implementer-envoy_token",
+          // the daemon's own NATS seed (LEGION-279), which no pane may hold
+          NATS_DAEMON_NKEY_SEED: "leaked-daemon-seed",
+          NATS_DAEMON_NKEY_SEED_FILE: "/leaked/nats-daemon.seed",
         },
         run: async (command) => {
           if (command.join(" ") === "/tools/mise env --json") {
@@ -210,6 +213,7 @@ describe("resolveDaemonEnvironment", () => {
                 PATH: "/full/bin:/usr/bin",
                 CARGO_HOME: "/home/legion/.cargo",
                 ENVOY_TOKEN: "leaked-from-mise",
+                NATS_DAEMON_NKEY_SEED_FILE: "/leaked/from-mise/nats-daemon.seed",
               }),
               stderr: "",
               exitCode: 0,
@@ -620,6 +624,11 @@ describe("isSecretLikeName", () => {
       "GITHUB_PAT",
       "GOOGLE_APPLICATION_CREDENTIALS",
       "GOOGLE_APPLICATION_CREDENTIALS_FILE",
+      "NATS_NKEY_SEED",
+      "NATS_NKEY_SEED_FILE",
+      "NATS_DAEMON_NKEY_SEED",
+      "NATS_DAEMON_NKEY_SEED_FILE",
+      "nats_nkey_seed",
       "npm_config_token",
       "my_api_key",
       "some_private_key_pem",
@@ -630,7 +639,7 @@ describe("isSecretLikeName", () => {
 
   it("leaves ordinary names alone, including ones that merely contain a suffix mid-word", () => {
     // The segment must end the name (or be followed only by `_FILE`): `TOKENIZER`, `X_PATH`
-    // (`_PAT` + `H`), `X_KEYBOARD` (`_KEY` + `BOARD`) are not credentials. Every allow-listed name
+    // (`_PAT` + `H`), `X_KEYBOARD` (`_KEY` + `BOARD`), `X_SEEDS` (`_SEED` + `S`) are not credentials. Every allow-listed name
     // must land here, or the allow-list would hand a pane nothing.
     for (const name of [
       "PATH",
@@ -647,6 +656,8 @@ describe("isSecretLikeName", () => {
       "NODE_EXTRA_CA_CERTS",
       "LEGION_CREDENTIAL_HELPER",
       "GH_CONFIG_DIR",
+      "SEEDLING",
+      "X_SEEDS",
     ]) {
       expect(isSecretLikeName(name)).toBe(false);
     }

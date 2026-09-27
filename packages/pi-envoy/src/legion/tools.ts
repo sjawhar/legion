@@ -14,6 +14,7 @@ import {
   HANDOFF_OPERATIONS,
   handoffSchemaFields,
   isHandoffOperation,
+  rootArchitectHandoffRefusal,
   runHandoffAction,
 } from "./handoff-actions";
 
@@ -107,7 +108,7 @@ export function createLegionTool(deps: {
         const op = String(parameters.op);
         if (isHandoffOperation(op)) {
           if (active.kind !== "phase-worker") {
-            throw new Error(`${op} is not available to a root architect session`);
+            throw new Error(rootArchitectHandoffRefusal(op));
           }
           return await runHandoffAction({
             operation: op,

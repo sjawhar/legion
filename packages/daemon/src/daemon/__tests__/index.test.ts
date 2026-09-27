@@ -4023,7 +4023,7 @@ describe("startDaemon", () => {
           dedupe_key: "dedupe-mention-1",
           issued_at: 1_000,
           payload_summary: "mention",
-          payload: JSON.stringify({ text: "@legion please investigate" }),
+          payload: JSON.stringify({ text: "@legion please investigate", repo: "acme/widgets" }),
           trace_id: "trace-mention-1",
         })
       );
