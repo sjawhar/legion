@@ -1130,12 +1130,18 @@ describe("TmuxRuntime", () => {
     expect(server.commands.filter(isBootstrapKill)).toHaveLength(1);
   });
 
-  it("recreates a server that exits after opening the creator's first window but before its ownership marker", async () => {
+  it.each([
+    ["no server running on /tmp/tmux-1000/legion-omp"],
+    // Tmux's third way of saying the server is gone: it exited while this client's command ran
+    // (LEGION-174 — the retry gate did not recognize this shape, so `spawnController` threw
+    // "tmux window ownership marker failed" instead of retrying).
+    ["server exited unexpectedly"],
+  ])("recreates a server that exits after opening the creator's first window but before its ownership marker: %s", async (stderr) => {
     const harness = await tmuxHarness();
     const { server } = harness;
     server.windowOwnershipResult = {
       exitCode: 1,
-      stderr: "no server running on /tmp/tmux-1000/legion-omp",
+      stderr,
       endsSession: true,
     };
 
@@ -1151,6 +1157,30 @@ describe("TmuxRuntime", () => {
     expect(verbs.filter((value) => value === "new-session")).toHaveLength(2);
     expect(verbs.filter((value) => value === "new-window")).toHaveLength(2);
     expect(server.commands.filter(isBootstrapKill)).toHaveLength(2);
+  });
+
+  it("retries the window open on the same still-live session when the just-opened window vanishes before its ownership marker, needing no session recreation", async () => {
+    const harness = await tmuxHarness();
+    const { server } = harness;
+    server.windowOwnershipResult = {
+      exitCode: 1,
+      stderr: "no such window: @42",
+    };
+
+    const locator = await harness.runtime.spawn("root", harness.makeSpec("architect"));
+
+    expect(locator).toMatchObject({
+      runtime: "tmux",
+      tmuxWindowId: "@43",
+      tmuxPaneId: "%2",
+    });
+    const verbs = server.commands.map(verb);
+    expect(verbs.filter((value) => value === "has-session")).toHaveLength(2);
+    // The session never died: one creation only, and the retry -- against the same session --
+    // never re-kills the bootstrap window a first attempt already cleaned up.
+    expect(verbs.filter((value) => value === "new-session")).toHaveLength(1);
+    expect(verbs.filter((value) => value === "new-window")).toHaveLength(2);
+    expect(server.commands.filter(isBootstrapKill)).toHaveLength(1);
   });
 
   it("serializes recovery after a new-window failure with a concurrent first spawn, so both roots open windows after one recreation", async () => {
@@ -1843,6 +1873,7 @@ describe("TmuxRuntime", () => {
     ["can't find pane: %1"],
     ["no server running on /tmp/tmux-1000/legion-omp"],
     ["error connecting to /tmp/tmux-1000/legion-omp (No such file or directory)"],
+    ["server exited unexpectedly"],
   ])("stop treats a list-panes failure whose stderr proves the pane gone as an already-gone pane: %s", async (stderr) => {
     const harness = await tmuxHarness();
     const locator = await harness.runtime.spawn("worker", harness.makeSpec("tester"));

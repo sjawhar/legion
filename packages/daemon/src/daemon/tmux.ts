@@ -16,10 +16,20 @@ export interface TmuxServer {
 }
 
 /** stderr shapes meaning no server is behind the daemon's own socket: `no server running` (a
- * socket file left behind by an exited server) or `error connecting to … (No such file or
- * directory)` (the socket was never created — a first boot, or a reboot cleared `TMUX_TMPDIR`). */
+ * socket file left behind by an exited server), `error connecting to … (No such file or
+ * directory)` (the socket was never created — a first boot, or a reboot cleared `TMUX_TMPDIR`),
+ * or `server exited unexpectedly` (the server exited while this client's command ran, which is
+ * what releasing the server's last pane does to a probe just behind it; verify.go:20). */
 export const NO_SERVER_STDERR =
-  /no server running|error connecting to .*\(No such file or directory\)/;
+  /no server running|server exited unexpectedly|error connecting to .*\(No such file or directory\)/;
+
+/** What tmux says when the window `markOwner`'s `set-option -w` just targeted is no longer
+ * there: its sole pane's process exited so fast the window closed before the marker could reach
+ * it, while the session (and whatever other window shared it, most often the bootstrap window a
+ * creator has not yet killed) survived -- a session death at the same point instead matches
+ * `NO_SERVER_STDERR` above (LEGION-189, `real-deployment-instructions-e2e.test.ts`'s
+ * `spawnController` flake: `tmux window ownership marker failed (exit 1): no such window: @1`). */
+export const NO_SUCH_WINDOW_STDERR = /no such window: /;
 
 function argv(server: TmuxServer, ...rest: string[]): string[] {
   return ["tmux", "-L", server.socket, ...rest];
