@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -152,7 +154,7 @@ func TestResolveBootConfigRequiresBothOIDCVariables(t *testing.T) {
 }
 
 func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, nil)
+	handler := dispatchHandler(http.NewServeMux(), nil, nil, "")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -166,7 +168,7 @@ func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
 }
 
 func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
-	handler := dispatchHandler(http.NewServeMux(), nil, &bus.Client{})
+	handler := dispatchHandler(http.NewServeMux(), nil, &bus.Client{}, "")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
@@ -177,6 +179,81 @@ func TestDispatchHandlerReportsDisconnectedNATS(t *testing.T) {
 	if nats, ok := health["nats"].(bool); !ok || nats {
 		t.Fatalf("healthz nats = %#v, want false", nats)
 	}
+}
+
+// /healthz names what is deployed, for a deploy check to compare with what was meant to be:
+// the commit the image build stamped, and the highest migration the database has applied. The
+// schema version is the database's, read per probe, never the binary's own list: a row a later
+// image applied shows up at once, which is the only reading under which comparing it with a
+// commit's migrations tests anything.
+func TestHealthzReportsTheBuildCommitAndTheAppliedSchemaVersion(t *testing.T) {
+	database := storetest.Open(t)
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+	handler := dispatchHandler(http.NewServeMux(), database, nil, commit)
+	probe := func() map[string]any {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		var health map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+			t.Fatalf("decode health response: %v", err)
+		}
+		if response.Code != http.StatusOK || health["ok"] != true || health["db"] != true {
+			t.Fatalf("healthz = %d %#v, want 200 with ok and db true", response.Code, health)
+		}
+		return health
+	}
+
+	highest := highestMigrationFile(t)
+	health := probe()
+	if health["commit"] != commit {
+		t.Fatalf("healthz commit = %#v, want %q", health["commit"], commit)
+	}
+	if health["schema_version"] != float64(highest) {
+		t.Fatalf("healthz schema_version = %#v, want %d, the highest migration file", health["schema_version"], highest)
+	}
+
+	if _, err := database.Pool.Exec(context.Background(), "insert into schema_migrations (version) values ($1)", highest+1); err != nil {
+		t.Fatalf("record a later migration: %v", err)
+	}
+	if got := probe()["schema_version"]; got != float64(highest+1) {
+		t.Fatalf("healthz schema_version after the database recorded %d = %#v, want the database's", highest+1, got)
+	}
+}
+
+// A binary the image build did not stamp says so: null, never an empty string or a guess.
+func TestHealthzReportsAnUnstampedCommitAsNull(t *testing.T) {
+	response := httptest.NewRecorder()
+	dispatchHandler(http.NewServeMux(), nil, nil, "").ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	var health map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	for _, field := range []string{"commit", "schema_version"} {
+		if value, found := health[field]; !found || value != nil {
+			t.Fatalf("healthz %s = %#v (present %t), want null", field, value, found)
+		}
+	}
+}
+
+// highestMigrationFile is the number of the last up migration in the source tree, read the way
+// store.Migrate names versions: the digits before the first underscore.
+func highestMigrationFile(t *testing.T) int {
+	t.Helper()
+	names, err := filepath.Glob("../../internal/dispatch/store/migrations/*.up.sql")
+	if err != nil || len(names) == 0 {
+		t.Fatalf("list migrations: %v (%d files)", err, len(names))
+	}
+	highest := 0
+	for _, name := range names {
+		prefix, _, _ := strings.Cut(filepath.Base(name), "_")
+		version, err := strconv.Atoi(prefix)
+		if err != nil {
+			t.Fatalf("migration %s: %v", name, err)
+		}
+		highest = max(highest, version)
+	}
+	return highest
 }
 
 // /healthz answers while every connection of the shared pool is held. A busy period
@@ -196,7 +273,7 @@ func TestHealthzAnswersWhileEveryPooledConnectionIsHeld(t *testing.T) {
 		defer connection.Release()
 	}
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, ""))
 	defer server.Close()
 	client := &http.Client{Timeout: 3 * time.Second}
 	started := time.Now()
@@ -247,7 +324,7 @@ func TestHealthzAnswersWhilePostgresStopsAnswering(t *testing.T) {
 		database.Pool.Close()
 	})
 
-	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil))
+	server := httptest.NewServer(dispatchHandler(http.NewServeMux(), database, nil, ""))
 	defer server.Close()
 	// The shared pool's own round trip is the control: the link works right up to the outage.
 	if _, err := database.Pool.Exec(context.Background(), "select 1"); err != nil {
@@ -269,8 +346,8 @@ func TestHealthzAnswersWhilePostgresStopsAnswering(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 		t.Fatalf("decode health response: %v", err)
 	}
-	if response.StatusCode != http.StatusServiceUnavailable || health["db"] != false {
-		t.Fatalf("health probe with Postgres unreachable = %d %#v, want 503 with db false",
+	if response.StatusCode != http.StatusServiceUnavailable || health["db"] != false || health["schema_version"] != nil {
+		t.Fatalf("health probe with Postgres unreachable = %d %#v, want 503 with db false and no schema version",
 			response.StatusCode, health)
 	}
 }
