@@ -192,21 +192,25 @@ suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestio
 `docs/accept.go`) writes blocks, so it stores what reads back as the live document, and refuses
 what cannot, naming `replace_with`. A table the splice cut is padded to its width as the browser
 editor's table plugin pads it (`padCutTables`, `pmdoc.PadTables`), where the browser's accept
-writes the replacement where `Splice` does (`padsLikeTheBrowser`): inline text, nothing, code's
-literal text, or block content across two textblocks whose edges it aligns with as the browser
-requires (`pmdoc.MultiblockAligned`), starting exactly at the start of the first, a
-document-level block, and ending exactly at the end of the last, since the browser replaces both
-textblocks whole. Other block content over a table, such as a list over one cell's whole text, or
-one running from a paragraph in a callout, a quote or a list item, from a cell into the next row,
-or from one character into a paragraph or heading, is not padded. Nor is anything running from one table into the next, which the browser can join into
-one table: like the reject, the accept refuses it even where the browser's result would read the
-same. Such an accept is judged as the splice left it, and the checks below refuse it. Block
+writes the replacement where `Splice` does (`padsLikeTheBrowser`): inline text, code's literal
+text, an empty replacement (which deletes the matched text, by this accept's own rule, where the
+browser's accept of an empty suggestion only clears its mark), or block content across two
+textblocks whose edges it aligns with as the browser requires (`pmdoc.MultiblockAligned`),
+starting exactly at the start of the first, a document-level block, and ending exactly at the end
+of the last, since the browser replaces both textblocks whole. Other block content over a table,
+such as a list over one cell's whole text, or one running from a paragraph in a callout, a quote
+or a list item, or from one character into a paragraph or heading, is not padded. Nor is anything
+running from one table into the next, or from one body row into another (`joinsTwoBodyRows`),
+which the browser can join into one table or row, even where the browser's result would read as
+the padded one would; the reject refuses a join of two tables the same way. A range from the
+header row into the first body row is padded, since those rows cannot join. An accept that is not
+padded is judged as the splice left it, and the checks below refuse one that cut a table. Block
 content the browser takes whose range ends short of the last textblock's end, within the editor's
 tolerance (`- a` over `abc Next` with the cell holding `Next e`), keeps the rest of that textblock
 (` e`), which the browser's accept drops with the textblock; the cell keeps text, so nothing there
-is cut or padded. `pmdoc/multiblock_test.go`'s table is all that pins `pmdoc.MultiblockAligned` to the
-editor, so a proof-sdk pin bump that changes `resolveStructuralMultiblockRange` re-checks it. It
-then settles the blocks it changed (`settleAccepted`,
+is cut or padded. `pmdoc/multiblock_test.go`'s table is all that pins `pmdoc.MultiblockAligned` to
+the editor, so a proof-sdk pin bump that changes `resolveStructuralMultiblockRange` re-checks it.
+It then settles the blocks it changed (`settleAccepted`,
 `pmdoc.AgreeWithReadBack`): the empty halves a block replacement leaves of the textblock it lands
 in, which carry no block id, go where the renderer does not write them, and each list and list
 item takes the spread its markdown reads back with, paired as far down as the read-back check
