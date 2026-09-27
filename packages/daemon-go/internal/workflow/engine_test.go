@@ -102,7 +102,7 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: new(3)})
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
 
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-todo", intake.DispatchIssue{
 		Key: "LEGION-209", Seq: 1, Type: "issue.updated", Status: "todo", Title: "child", Parent: "LEGION-208", Rank: "V",
 	}, engine, admissionStub{}); err != nil {
@@ -125,7 +125,7 @@ func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 
 	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true, Summary: readyPacket}, engine, admissionStub{})
 	if err != nil {
@@ -164,7 +164,7 @@ func TestReadyRefusedWithNoDesignGateCommitsAndRecordsNoPendingVersion(t *testin
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 
 	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{})
 	if err != nil {
@@ -194,7 +194,7 @@ func TestAReopenedPullRequestKeepsItsAttemptCounters(t *testing.T) {
 		HeadUpdatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC), HeadUpdatedAtSource: "webhook",
 		Failing: []string{}, FailingStatuses: []string{}, FixAttempts: 2, BlockedAttempts: 1, State: record.PullRequestOpen,
 	})
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 
 	if _, err := intake.ApplyFact(ctx, pool, "github", "reopened", intake.PullRequestOpened{
 		Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-208", HeadSHA: "new",
@@ -222,7 +222,7 @@ func TestRefusedReadyAdvancesWhenTheGateReopensAtALaterVersion(t *testing.T) {
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 
 	if _, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true, Summary: readyPacket}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact READY: %v", err)
@@ -254,7 +254,7 @@ func TestImplementationReachesTestingWhenHandoffAndPullRequestArriveInEitherOrde
 			ctx := context.Background()
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			engine := testEngine()
+			engine := testEngine(config.DesignGateRootIssues, nil)
 			handoff := func() {
 				if _, err := intake.ApplyFact(ctx, pool, "api", "handoff", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "abc123", Verdict: "pass"}, engine, admissionStub{}); err != nil {
 					t.Fatalf("ApplyFact handoff: %v", err)
@@ -318,7 +318,7 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
 	js := testJetStream(t)
-	stop := startConsume(t, js, pool, testEngine())
+	stop := startConsume(t, js, pool, testEngine(config.DesignGateRootIssues, nil))
 	defer stop()
 	publishCaptured(t, js, "notifications.github.sjawhar.legion.pr.42.review", "../intake/testdata/github/review.json")
 	testwait.Eventually(t, "captured approval reaches retro", func() bool {
@@ -338,7 +338,7 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Rounds: 2})
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 
 	if _, err := intake.ApplyFact(ctx, pool, "github", "changes-requested", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head"}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact review: %v", err)
@@ -363,7 +363,7 @@ func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T
 
 	if _, err := intake.ApplyFact(ctx, pool, "api", "production-check", intake.HandoffComplete{Generation: 1,
 		Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "the merged change serves", Commit: "retro",
-	}, testEngine(), admissionStub{}); err != nil {
+	}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact production check: %v", err)
 	}
 	var gotPhase string
@@ -398,7 +398,7 @@ func TestAPhaseFinishedNoticeCarriesTheWorkersSummaryAndItsVerdict(t *testing.T)
 
 	if _, err := intake.ApplyFact(ctx, pool, "api", "tester-passed", intake.HandoffComplete{
 		Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Generation: 1, Summary: "twelve scenarios pass against the head", Verdict: "pass", Commit: "test-handoff",
-	}, testEngine(), admissionStub{}); err != nil {
+	}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact tester completion: %v", err)
 	}
 	var payload []byte
@@ -604,7 +604,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(t, pool)
 			}
-			if _, err := intake.ApplyFact(context.Background(), pool, "fact", tc.name, tc.fact(), testEngine(), admissionStub{}); err != nil {
+			if _, err := intake.ApplyFact(context.Background(), pool, "fact", tc.name, tc.fact(), testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 				t.Fatalf("ApplyFact: %v", err)
 			}
 			var gotPhase, gotStatus string
@@ -665,7 +665,7 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 				role := RoleFor(from)
 				seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "backward", Phase: from, Generation: 1, Status: "in_progress", Rank: "U"})
 				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: "claim"})
-				if _, err := intake.ApplyFact(context.Background(), pool, "api", string(from)+"-"+string(to), intake.BackwardMove{Issue: "LEGION-208", Requester: role, To: to, Reason: "correct"}, testEngine(), admissionStub{}); err != nil {
+				if _, err := intake.ApplyFact(context.Background(), pool, "api", string(from)+"-"+string(to), intake.BackwardMove{Issue: "LEGION-208", Requester: role, To: to, Reason: "correct"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 					t.Fatalf("ApplyFact backward: %v", err)
 				}
 				var got string
@@ -730,11 +730,13 @@ func seedRecord(t *testing.T, pool *pgxpool.Pool, put func(pgx.Tx) error) {
 	}
 }
 
-func testEngine() *Engine {
+// testEngine is the engine the workflow tests drive, under the design gate policy given and
+// logging to log (the default logger when nil).
+func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour,
+		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
-	}, nil)
+	}, log)
 }
 
 func assertOutboxKinds(t *testing.T, pool *pgxpool.Pool, want []string) {

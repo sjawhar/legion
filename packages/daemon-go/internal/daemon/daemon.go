@@ -537,7 +537,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Store:   pruning(tokens.Recording(st), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
-			identity: p.identity,
+			identity: p.identity, designGate: cfg.Gates.Design,
 		},
 		Identity:     p.identity,
 		PhaseHolds:   p.phaseHolds,

@@ -346,7 +346,7 @@ func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, 
 	var fact intake.Fact
 	switch state {
 	case supervise.StateReady:
-		fact = intake.ClaimReady{Issue: c.Issue, Role: c.Role}
+		fact = intake.ClaimReady{Issue: c.Issue, Role: c.Role, Launch: c.Generation}
 	case supervise.StateFailed:
 		fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role}
 	default:

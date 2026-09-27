@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -104,6 +105,29 @@ func architectClaim(t *testing.T, sup *supervisor, issue string, state supervise
 	return token
 }
 
+// leasedOutboxRow enqueues row and leases it as the runner does before it executes a row, and
+// returns the row as the runner then holds it: the notice executor publishes only a row it finds
+// under its lease.
+func leasedOutboxRow(t *testing.T, pool *pgxpool.Pool, records record.Store, row record.OutboxRow) record.OutboxRow {
+	t.Helper()
+	enqueueOutbox(t, pool, records, row)
+	if err := pool.QueryRow(context.Background(), "select id from outbox order by id desc limit 1").Scan(&row.ID); err != nil {
+		t.Fatalf("read the enqueued row: %v", err)
+	}
+	row.LeaseToken = leaseOutboxRow(t, pool, row.ID)
+	return row
+}
+
+// leaseOutboxRow leases outbox row id for a minute and returns its lease token.
+func leaseOutboxRow(t *testing.T, pool *pgxpool.Pool, id int64) string {
+	t.Helper()
+	token := fmt.Sprintf("lease-%d", id)
+	if _, err := pool.Exec(context.Background(), "update outbox set lease_token = $2, lease_until = now() + interval '1 minute' where id = $1", id, token); err != nil {
+		t.Fatalf("lease outbox row %d: %v", id, err)
+	}
+	return token
+}
+
 func mustClaimToken(t *testing.T, issue string, role claim.Role) claim.Token {
 	t.Helper()
 	token, err := claim.NewToken("legion", issue, role)
@@ -180,8 +204,7 @@ func TestANoticeGoesToTheOwningArchitectsRoleTopicAlone(t *testing.T) {
 	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
 	architectClaim(t, sup, "LEGION-2", supervise.StateWorking)
 	publisher := &holderPublisher{}
-	row := mustOutboxRow(t, "LEGION-3", record.Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing}, time.Now())
-	row.ID = 56
+	row := leasedOutboxRow(t, pool, records, mustOutboxRow(t, "LEGION-3", record.Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing}, time.Now()))
 
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion"}
 	if err := runner.execute(context.Background(), row); err != nil {
@@ -189,7 +212,7 @@ func TestANoticeGoesToTheOwningArchitectsRoleTopicAlone(t *testing.T) {
 	}
 	want := architectTopic(t, "LEGION-2")
 	_, delivered := publisher.snapshot()
-	if len(delivered) != 1 || delivered[0].topic != want || delivered[0].key != "legion-outbox:56" {
+	if len(delivered) != 1 || delivered[0].topic != want || delivered[0].key != record.OutboxKey(row.ID) {
 		t.Fatalf("notice publishes = %+v, want one to %s under the row's key", delivered, want)
 	}
 	for _, issue := range []string{"LEGION-1", "LEGION-2", "LEGION-3"} {
@@ -248,6 +271,7 @@ func TestANoticeHeldForAnAbsentArchitectArrivesInOrderOnceItReturns(t *testing.T
 	if err := pool.QueryRow(context.Background(), "select id, last_error from outbox order by id limit 1").Scan(&first.ID, &lastError); err != nil {
 		t.Fatalf("read the first held row: %v", err)
 	}
+	first.LeaseToken = leaseOutboxRow(t, pool, first.ID)
 	if held := runner.execute(context.Background(), first); !errors.Is(held, errNoticeWaits) || !errors.Is(held, notify.ErrNoHolder) ||
 		!strings.Contains(lastError, `"reason":"unclaimed"`) {
 		t.Fatalf("held error %v, last_error %q: want a wait that carries the listener's no-holder refusal", held, lastError)
@@ -583,5 +607,58 @@ func TestANoticeOfATreeWhoseRootIsNotRecordedFinishesUndelivered(t *testing.T) {
 	if _, delivered := publisher.snapshot(); len(delivered) != 0 || outboxRows(t, pool) != 0 ||
 		strings.Count(logged.String(), `level=ERROR msg="outbox notice finished undelivered: it has no architect"`) != 1 {
 		t.Fatalf("delivered %+v with %d rows left, log %q; want the row finished undelivered with one error line", delivered, outboxRows(t, pool), logged.String())
+	}
+}
+
+// A newer ready drops every catch-up the outbox holds (DropCatchUps), a row the runner has already
+// leased included. The runner executes a leased row from memory, so the notice executor reads the
+// row under its lease in the tree's snapshot and publishes nothing when the row is gone: the
+// architect is told the fresh catch-up alone, not the dropped one first.
+func TestACatchUpDroppedUnderItsLeaseIsNotPublished(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	catchUp := func(generation uint64) record.Notice {
+		return record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: fmt.Sprintf("generation %d", generation),
+			CatchUp: &record.CatchUp{Generation: generation, Gate: record.CatchUpGate{Policy: "root-issues"}, Issues: []record.CatchUpIssue{}}}
+	}
+	clock := time.Now()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", catchUp(1), clock))
+	var leased []record.OutboxRow
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		leased, err = records.ClaimDue(ctx, tx, "LEGION", clock, 10, time.Minute)
+		return err
+	}); err != nil || len(leased) != 1 {
+		t.Fatalf("lease the first catch-up: %v rows, %v", len(leased), err)
+	}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if err := records.DropCatchUps(ctx, tx, "LEGION-1"); err != nil {
+			return err
+		}
+		return records.Enqueue(ctx, tx, mustOutboxRow(t, "LEGION-1", catchUp(2), clock))
+	}); err != nil {
+		t.Fatalf("drop the first catch-up and write the second: %v", err)
+	}
+	publisher := &holderPublisher{}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
+		project: "legion", now: func() time.Time { return clock }}
+
+	if err := runner.execute(ctx, leased[0]); err != nil {
+		t.Fatalf("execute the leased first catch-up: %v", err)
+	}
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the outbox: %v", err)
+	}
+	_, delivered := publisher.snapshot()
+	var got []string
+	for _, published := range delivered {
+		got = append(got, published.payload.(record.Notice).Reason)
+	}
+	if fmt.Sprint(got) != "[generation 2]" || outboxRows(t, pool) != 0 {
+		t.Fatalf("delivered %v with %d rows left; want the second catch-up alone", got, outboxRows(t, pool))
 	}
 }

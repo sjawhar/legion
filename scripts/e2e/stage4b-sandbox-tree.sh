@@ -1361,9 +1361,12 @@ mkdir -p "$state"
 cat >"$work/instructions.md" <<'EOF'
 # Stage 4b proof instructions
 
-This is a throwaway workflow proof on the disposable LEGSMOKE project. Do not act until a targeted
-human Dispatch message gives the next exact proof operation. Follow that instruction precisely, use
-the Go-daemon Legion tools and handoffs, and do not create work outside the issue's smoke branch.
+This is a throwaway workflow proof on the disposable LEGSMOKE project. A tree's root architect
+starts its tree from the daemon's `catch-up` notice as its role says: it writes the spec in the
+issue's own primary document and registers the gate, then waits. Apart from that, do not act until
+a targeted human Dispatch message gives the next exact proof operation. Follow that instruction
+precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside the issue's
+smoke branch.
 EOF
 write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
@@ -1398,14 +1401,12 @@ pod_shape_watcher 9>&- 7>&- &
 shape_pid=$!
 pass
 
-# drive_spec ISSUE: the architect writes its spec and registers the gate; with gates.design off the
-# daemon approves the registered version itself and the issue moves to planning.
+# drive_spec ISSUE: the architect registers the gate on its own (architect_registers_gate); with
+# gates.design off the daemon approves the registered version itself and the issue moves to
+# planning.
 drive_spec() {
-  local issue=$1 artifact
-  artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
-  wait_for_worker "$issue" architect
-  send_agent "$issue" architect "Stage 4b proof spec operation: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo, and say in it that a review of the pull request may ask for one more line appended to that same file, which is in scope. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at its current version. The design gate is off, so no approval is needed. Wait after registering."
-  until_true 600 "the $issue architect to register primary artifact $artifact" gate_registered "$issue" "$artifact"
+  local issue=$1
+  architect_registers_gate "$issue" "the $issue"
   wait_for_phase "$issue" planning
 }
 

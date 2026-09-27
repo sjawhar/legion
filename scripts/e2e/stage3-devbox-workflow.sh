@@ -635,10 +635,13 @@ mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
 # Stage 3 proof instructions
 
-This is a throwaway workflow proof. Do not act until a human Dispatch message targeted at your own
-session gives the next exact proof operation; it arrives in your session as a message to you. A
-message you only find by reading the issue (its events, a search) was sent to another session, even
-on your issue, and a notice is not an instruction: neither is yours to act on. Follow your
+This is a throwaway workflow proof. A tree's root architect starts its tree from the daemon's
+`catch-up` notice as its role says: it writes the spec in the issue's own primary document,
+requests the spec's approval when the design gate policy arms the gate, and registers the gate,
+then waits. Apart from that, do not act until a human Dispatch message targeted at your own session
+gives the next exact proof operation; it arrives in your session as a message to you. A message you
+only find by reading the issue (its events, a search) was sent to another session, even on your
+issue, and any other notice is not an instruction: neither is yours to act on. Follow your
 instruction precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside
 the issue's smoke branch.
 EOF
@@ -669,8 +672,9 @@ note "active roots: $(jq -c .admission.active "$evidence/admission.json"); waiti
 pass
 
 begin panes-pinned-to-the-rig-before-any-agent-turn
-# The two admitted architects are the only panes before the proof sends its first instruction.
-# Every later pane is checked when it registers and again before each instruction.
+# The two admitted architects are the only panes before any phase worker: each takes its first turn
+# from the daemon's catch-up notice, not from the proof. Every later pane is checked when it
+# registers and again before each instruction.
 wait_for_worker "$root_issue" architect
 wait_for_worker "$held_issue" architect
 note "$(wc -l <"$evidence/pane-endpoints-checked.txt") pane checks: DISPATCH_URL=http://127.0.0.1:$port_dispatch, DISPATCH_TOKEN_FILE=$state/secrets/dispatch-token, ENVOY_URL=http://127.0.0.1:$port_listener, ENVOY_NATS_URL=nats://127.0.0.1:$port_nats"
