@@ -92,7 +92,7 @@ type overrides struct {
 	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
 	// production daemon always mints through appauth.New.
 	workflowTokens appauth.Tokens
-	// listen opens the API listener and, under kubernetes, the worker stream's; nil is net.Listen.
+	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
 }
 
@@ -346,8 +346,6 @@ type plan struct {
 	probe       func(ctx context.Context, rt runtime.Runtime) error
 	clock       supervise.Clock
 	orphanSweep time.Duration
-	// listen opens the worker stream's tcp listener (overrides.listen); nil is net.Listen.
-	listen func(network, address string) (net.Listener, error)
 	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
@@ -398,7 +396,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, rolesDir: reads.rolesDir, roleReferences: reads.roleReferences,
-		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, listen: o.listen,
+		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
@@ -535,7 +533,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	tokens := api.NewBootTokens(st)
 	sup := newSupervisor(supervising, st, p.project, cfg.StateDir, log)
 	listener, err := stream.Listen(streaming, p.stream,
-		sup.helloResolver(tokens, cfg.WorkerRPCTimeout), stream.Options{RPCTimeout: cfg.WorkerRPCTimeout, Log: log, Listen: p.listen})
+		sup.helloResolver(tokens, cfg.WorkerRPCTimeout), stream.Options{RPCTimeout: cfg.WorkerRPCTimeout, Log: log})
 	if err != nil {
 		cancel()
 		cancelStream()

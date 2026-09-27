@@ -235,7 +235,7 @@ attempts:
 				t.Fatalf("scratch Dispatch exited before it was ready (%v):\n%s", err, output.String())
 			default:
 			}
-			if response, err := http.Get(baseURL + "/api/v1"); err == nil {
+			if response, err := pollClient.Get(baseURL + "/api/v1"); err == nil {
 				response.Body.Close()
 				if response.StatusCode == http.StatusOK {
 					return baseURL, token

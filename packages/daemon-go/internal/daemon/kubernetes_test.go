@@ -128,10 +128,10 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 	}
 }
 
-// Under kubernetes the worker stream is TCP on the daemon's bind and worker_stream_port, the one
-// address the runtime hands every pod's shim, and the runtime is given the workflow's App tokens.
-// The host's own agent machinery never runs: no pane launcher is installed, no Dispatch token file
-// is written, and the workflow's boot has no worker-bin stage.
+// Under kubernetes the worker stream is TCP on the daemon's bind, at a port the listener resolves
+// itself, the one address the runtime hands every pod's shim, and the runtime is given the
+// workflow's App tokens. The host's own agent machinery never runs: no pane launcher is
+// installed, no Dispatch token file is written, and the workflow's boot has no worker-bin stage.
 func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	cfg.Runtime = kubernetesConfig(t, "https://127.0.0.1:1").Runtime
@@ -155,12 +155,12 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	record.mu.Lock()
 	address, apps := record.address, record.apps
 	record.mu.Unlock()
-	stream := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
-	if address != "tcp://"+stream {
-		t.Errorf("the runtime was told to have shims dial %q, want tcp://%s", address, stream)
+	prefix := "tcp://" + cfg.Bind + ":"
+	if !strings.HasPrefix(address, prefix) || strings.HasSuffix(address, ":0") {
+		t.Fatalf("the runtime was told to have shims dial %q, want %s<bound port>", address, prefix)
 	}
-	if conn, err := net.DialTimeout("tcp", stream, time.Second); err != nil {
-		t.Errorf("the worker stream does not accept on %s: %v", stream, err)
+	if conn, err := net.DialTimeout("tcp", strings.TrimPrefix(address, "tcp://"), time.Second); err != nil {
+		t.Errorf("the worker stream does not accept on %s: %v", address, err)
 	} else {
 		conn.Close()
 	}

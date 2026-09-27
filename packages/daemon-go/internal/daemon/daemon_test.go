@@ -76,12 +76,11 @@ func testConfig(t *testing.T) config.Config {
 	if err := os.WriteFile(tokenFile, []byte(testOperatorToken+"\n"), 0o600); err != nil {
 		t.Fatalf("write the operator token: %v", err)
 	}
-	// Both ports are held from here until the daemon binds them (heldListen): a port found free
-	// and closed again is any process's to take first. Under kubernetes the worker stream is a TCP
-	// listener too, so its port is held beside the API's rather than taken as its neighbour, which
-	// may be any process's.
+	// The API port is held from here until the daemon binds it (heldListen): a port found free
+	// and closed again is any process's to take first. The worker stream port is always 0: the
+	// listener resolves it at bind time and reports the kernel's choice, so nothing needs holding
+	// for it.
 	port := holdPort(t)
-	stream := holdPort(t)
 	return config.Config{
 		Project:                                 "TEST" + randomSuffix(t),
 		Port:                                    port,
@@ -91,7 +90,7 @@ func testConfig(t *testing.T) config.Config {
 		Runtime:                                 config.Runtime{Name: "tmux"},
 		AdmissionCap:                            4,
 		DaemonURL:                               "http://127.0.0.1:" + strconv.Itoa(port),
-		WorkerStreamPort:                        stream,
+		WorkerStreamPort:                        0,
 		WorkerBootTimeout:                       120 * time.Second,
 		WorkerBootRegistrationDeadlineIntervals: 3,
 		WorkerRPCTimeout:                        5 * time.Second,
@@ -116,27 +115,33 @@ func randomSuffix(t *testing.T) string {
 	return strings.ToUpper(hex.EncodeToString(b[:]))
 }
 
-// The ports testConfig hands a daemon are held until the daemon binds them: another process asking
-// for either in between is refused, and the daemon still boots on both.
+// The API port testConfig hands a daemon is held until the daemon binds it: another process
+// asking for it in between is refused, and the daemon still boots on it. The worker stream's
+// port is never held — nothing is handed out for it — since the listener resolves port 0 itself
+// at bind time; the daemon still ends up serving a real, dialable address.
 func TestThePortsHandedToADaemonCannotBeTakenBeforeItBinds(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	cfg.Runtime = kubernetesConfig(t, "https://127.0.0.1:1").Runtime
-	for _, port := range []int{cfg.Port, cfg.WorkerStreamPort} {
-		address := net.JoinHostPort(cfg.Bind, strconv.Itoa(port))
-		if thief, err := net.Listen("tcp", address); err == nil {
-			_ = thief.Close()
-			t.Fatalf("another listener took %s between the pick and the daemon's bind", address)
-		}
+	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
+	if thief, err := net.Listen("tcp", address); err == nil {
+		_ = thief.Close()
+		t.Fatalf("another listener took %s between the pick and the daemon's bind", address)
 	}
 	record := &built{}
 	o := fakeRuntime(fake.NewRuntime(), record)
 	o.workflowTokens = &workflowTokenRecorder{}
 	startDaemon(t, cfg, o)
 	record.mu.Lock()
-	address := record.address
+	streamAddress := record.address
 	record.mu.Unlock()
-	if want := "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort)); address != want {
-		t.Errorf("the worker stream listens on %q, want %q", address, want)
+	prefix := "tcp://" + cfg.Bind + ":"
+	if !strings.HasPrefix(streamAddress, prefix) || strings.HasSuffix(streamAddress, ":0") {
+		t.Fatalf("the worker stream listens on %q, want %s<bound port>", streamAddress, prefix)
+	}
+	if conn, err := net.DialTimeout("tcp", strings.TrimPrefix(streamAddress, "tcp://"), time.Second); err != nil {
+		t.Errorf("the worker stream does not accept on %s: %v", streamAddress, err)
+	} else {
+		conn.Close()
 	}
 }
 
@@ -167,14 +172,14 @@ func holdPort(t *testing.T) int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
-// rebindHeldPorts hands cfg a freshly held API and worker-stream port. A daemon that has stopped
-// closed the listeners it was handed, and from then on the ports it used are any process's, so a
-// test that starts a second daemon on the same config holds a pair again first.
+// rebindHeldPorts hands cfg a freshly held API port. A daemon that has stopped closed the
+// listener it was handed, and from then on the port it used is any process's, so a test that
+// starts a second daemon on the same config holds one again first. The worker stream needs no
+// rebinding: it is always port 0, resolved fresh on every bind.
 func rebindHeldPorts(t *testing.T, cfg *config.Config) {
 	t.Helper()
 	cfg.Port = holdPort(t)
 	cfg.DaemonURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
-	cfg.WorkerStreamPort = holdPort(t)
 }
 
 // heldListen is the daemon's listen under test: the listener holdPort holds for address, handed
@@ -186,7 +191,7 @@ func heldListen(network, address string) (net.Listener, error) {
 	listener, held := heldPorts.byAddress[address]
 	delete(heldPorts.byAddress, address)
 	heldPorts.Unlock()
-	if !held || network != "tcp" {
+	if !held {
 		return nil, &net.AddrError{Err: "no held listener: call rebindHeldPorts before starting a daemon again on the same config", Addr: address}
 	}
 	return listener, nil
@@ -464,7 +469,7 @@ func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 	t.Cleanup(d.stop)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		response, err := d.client.Get(d.base + "/healthz")
+		response, err := pollClient.Get(d.base + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
