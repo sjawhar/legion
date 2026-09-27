@@ -102,15 +102,6 @@ export async function handleGhToken(
  * App's identity cannot be read: the command then cannot tell a Legion App from another bot, and a
  * bot's thread closes only on its opener's `Accepted:`. That turns the rule off for the answer, so
  * it is logged. */
-/** The contract names each App role's login by key. GITHUB_APP_ROLES and those keys must be one
- * set: a role added to the list, or to the contract, alone fails to compile here, rather than a
- * third App's login being dropped by the schema without a word. */
-type ContractAppLogins = NonNullable<
-  ReturnType<typeof LegionDaemonApi.GitHubToken.response.parse>["legionAppLogins"]
->;
-type SameKeys<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
-export const APP_ROLES_ARE_THE_CONTRACTS: SameKeys<GitHubAppRole, keyof ContractAppLogins> = true;
-
 async function legionAppLoginsFor(
   ctx: RouteContext,
   issue: string

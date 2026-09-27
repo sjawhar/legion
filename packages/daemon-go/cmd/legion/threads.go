@@ -55,15 +55,13 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 	defer response.Body.Close()
 	var credential githubTokenResponse
-	var apps *legionApps
-	if err := json.NewDecoder(response.Body).Decode(&credential); err == nil && credential.Token != "" {
-		apps, err = legionAppsFrom(credential.LegionAppLogins)
-		if err != nil {
-			fmt.Fprintf(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response: %v\n", err)
-			return 1
-		}
-	} else {
+	if err := json.NewDecoder(response.Body).Decode(&credential); err != nil || credential.Token == "" {
 		fmt.Fprintln(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response")
+		return 1
+	}
+	apps, err := legionAppsFrom(credential.LegionAppLogins)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response: %v\n", err)
 		return 1
 	}
 	threads, err := unresolvedReviewThreads(ctx, credential.Token, repository, number)
@@ -123,6 +121,9 @@ func legionAppsFrom(logins map[string]string) (*legionApps, error) {
 	if logins == nil {
 		return nil, nil
 	}
+	if len(logins) != 2 {
+		return nil, fmt.Errorf("legionAppLogins names %d Apps, not implement and review", len(logins))
+	}
 	apps := &legionApps{logins: map[string]bool{}}
 	for _, role := range []string{"implement", "review"} {
 		slug := botSlug(logins[role])
@@ -130,11 +131,10 @@ func legionAppsFrom(logins map[string]string) (*legionApps, error) {
 			return nil, fmt.Errorf("legionAppLogins names no App login for %s", role)
 		}
 		apps.logins[slug] = true
+		if role == "review" {
+			apps.review = slug
+		}
 	}
-	if len(logins) != 2 {
-		return nil, fmt.Errorf("legionAppLogins names %d Apps, not implement and review", len(logins))
-	}
-	apps.review = botSlug(logins["review"])
 	return apps, nil
 }
 
@@ -161,17 +161,18 @@ func isAcceptance(body string) bool {
 // resolution says whether thread is resolved and on whose acceptance, or, when it is left open,
 // why. Every account it compares is identified by what GitHub asserts about it, its type and its
 // login together, never a login alone: a login is a string anyone may register (the review App's
-// bare slug is a free username on a public repository), and every weaker proxy for "who wrote
-// this" was forgeable by someone who read the rule. The subject of a finding never closes it: a thread closes only on its newest submitted
-// comment being an Accepted: from its opener, or, on a thread a Bot that is none of Legion's role
-// Apps opened, from Legion's review App. GitHub cannot tell a CI bot from a person whose gh is
-// routed to an App, and such a bot may never accept, so the Legion reviewer is the independent
-// party who adjudicates its finding; the reviewer may accept a finding an App-routed person
-// raised, which the resolved line then says. The pull request's author (the implementer, whose
-// App the merger shares) closes nothing: its reply is an answer, not an acceptance. The reviewer's
-// acceptance need not follow an answer from the author: accepting is the reviewer's judgement of
-// the finding, and a required prior reply would be a ceremony the implementer could satisfy with
-// an empty one. A draft in a pending review never counts, since GitHub shows it only to its author.
+// bare slug is a free username on a public repository), and every weaker proxy for "who wrote this"
+// was forgeable by someone who read the rule. The subject of a finding never closes it: a thread
+// closes only on its newest submitted comment being an Accepted: from its opener, or, on a thread a
+// Bot that is none of Legion's role Apps opened, from Legion's review App. GitHub cannot tell a CI
+// bot from a person whose gh is routed to an App, and such a bot may never accept, so the Legion
+// reviewer is the independent party who adjudicates its finding; the reviewer may accept a finding
+// an App-routed person raised, which the resolved line then says. The pull request's author (the
+// implementer, whose App the merger shares) closes nothing: its reply is an answer, not an
+// acceptance. The reviewer's acceptance need not follow an answer from the author: accepting is the
+// reviewer's judgement of the finding, and a required prior reply would be a ceremony the
+// implementer could satisfy with an empty one. A draft in a pending review never counts, since
+// GitHub shows it only to its author.
 func resolution(thread reviewThread, apps *legionApps) (how, reason string) {
 	if thread.newestPending {
 		return "", "an unsubmitted draft in a pending review"

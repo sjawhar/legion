@@ -338,14 +338,15 @@ this proof.
     pageInfo { hasNextPage endCursor }
     nodes {
       id isResolved
-      opener: comments(first: 1) { nodes { author { login } } }
-      newest: comments(last: 1) { nodes { author { login } body state } }
+      opener: comments(first: 1) { nodes { author { __typename login } } }
+      newest: comments(last: 1) { nodes { author { __typename login } body state } }
     }
   }
   ```
 
-  Resolve only when the newest comment is submitted, its `author { login }` equals the opener's,
-  and its `body`, after removing leading spaces, tabs, CR, and LF, begins `Accepted:`. Without a
+  Resolve only when the newest comment is submitted, its `author` is the opener's account (the same
+  `__typename` and `login`: a login alone is a string anyone may register), and its `body`, after
+  removing leading spaces, tabs, CR, and LF, begins `Accepted:`. Without a
   grant nothing names Legion's own App logins, so this route closes a bot's thread only on its
   opener's `Accepted:`: leave one the Legion reviewer accepted for the implementer's or merger's
   run in a pane, or report it. For each thread to resolve:
