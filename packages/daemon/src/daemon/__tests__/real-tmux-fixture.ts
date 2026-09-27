@@ -86,7 +86,7 @@ export interface TmuxTestServer {
  * immediately, before the test ever creates one -- and `kill-server` is idempotent (tmux reports
  * an already-exited or never-created server without creating one), so running it unconditionally
  * once this process dies is safe whether or not a server ever existed. `teardown` below kills the
- * watchdog outright once its own `kill-server` returns, so the watchdog never outlives both the
+ * watchdog outright once its own `kill-session` returns, so the watchdog never outlives both the
  * test and the server it guards. */
 function armOrphanWatchdog(session: string) {
   const parentPid = process.pid;
@@ -112,8 +112,10 @@ function armOrphanWatchdog(session: string) {
  * this run actually minted. A watchdog reaps that same private server if this process dies before
  * teardown runs (see `armOrphanWatchdog`): its own `kill-server` is the one exception the guard
  * does not need to cover, since it is a shell string the watchdog's script builds, addressed at
- * the exact socket this call already owns, and it only ever runs after this process has already
- * died -- there is no session left standing to name instead. */
+ * the exact socket this call already owns. The orphaned session is still standing when the
+ * watchdog fires -- `kill-session -t <session>` would reach it exactly as `teardown` does -- so
+ * `kill-server` here is simply equivalent, not the only option, and carries the same negligible
+ * collision exposure either way. */
 export function createTmuxTestServer(label: string): TmuxTestServer {
   const project = `${label}${randomUUID().replaceAll("-", "")}`;
   const session = `legion-${project}`;
