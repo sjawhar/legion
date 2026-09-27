@@ -210,13 +210,19 @@ func claimTookRole(state supervise.ClaimState) bool {
 	return state == supervise.StateReady || state == supervise.StateWorking || state == supervise.StateIdle
 }
 
-// claimState is the state of token's claim, or "" when this daemon does not supervise it.
-func (r *outbox) claimState(token claim.Token) supervise.ClaimState {
+// supervisedClaim is token's claim as this daemon supervises it, or the zero Claim, whose state is
+// "", when it does not supervise it.
+func (r *outbox) supervisedClaim(token claim.Token) supervise.Claim {
 	machine, ok := r.supervisor.Machine(token)
 	if !ok {
-		return ""
+		return supervise.Claim{}
 	}
-	return machine.Claim().State
+	return machine.Claim()
+}
+
+// claimState is the state of token's claim, or "" when this daemon does not supervise it.
+func (r *outbox) claimState(token claim.Token) supervise.ClaimState {
+	return r.supervisedClaim(token).State
 }
 
 // architectEnded says why nobody will hold the role of the owning architect, in state, for a

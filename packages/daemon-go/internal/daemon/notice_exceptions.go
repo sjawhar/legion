@@ -39,9 +39,8 @@ const (
 
 // noticeReholdDelays is how long each copy of a notice whose forward failed waits: the nth copy
 // waits the nth delay after the report of the one before it, except that a copy goes at once when
-// the architect's agent has taken its role, unless it is a later copy that failed on that same
-// session (rehold). The first catches a quick relaunch, the second one heartbeat later, and the
-// last is sent after any registration a stopped session left behind must have lapsed, past both
+// copyDueAtOnce says so. The first catches a quick relaunch, the second one heartbeat later, and
+// the last is sent after any registration a stopped session left behind must have lapsed, past both
 // windows with a minute to spare. That copy then either reaches the relaunched session or is
 // refused (notify.ErrNoHolder) and held by the executor until a session holds the role again, so
 // nothing is dropped while the architect's claim lives. There are three, as the TypeScript daemon
@@ -90,17 +89,8 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // The notice goes back through the executor as a new row of its issue, counted in its Resends,
 // so it is routed, fenced and held as any notice is, and it is published under the dedupe key of
 // the row it copies (Notice.Published), so a session that did get the forward recognises the copy.
-// A copy is due at once when the architect's agent has taken its role and said it is ready
-// (claimTookRole), and it is the first copy or its report names a session other than the one the
-// claim is ready on: that ready has passed, so no release (releaseWaiting) would make the copy due,
-// and every later notice to the architect would wait behind it. The first covers a relaunch that
-// took its role inside the receipt window; a later copy that failed on another session went where
-// the role no longer is. A later copy whose report names no session (the listener names none for
-// no_holder, or when it could not read the holder) says nothing about where the role went. It is
-// due after the next of noticeReholdDelays, as is a later copy that failed on the claim's own
-// ready session and every copy while the claim has not taken its role, so a claim that reads live
-// while its session hears nothing (a reconnecting connection, a death the supervisor has not seen)
-// keeps the notice for the whole schedule instead of spending its copies in seconds. It is queued again once per delay; the report of its last copy is logged
+// A copy is due at once when copyDueAtOnce says so, and otherwise after the next of
+// noticeReholdDelays. It is queued again once per delay; the report of its last copy is logged
 // and queues nothing. A report about another daemon's publish, another project, a role that is not
 // an architect, or anything but a notice changes nothing. The exception lane has no redelivery, so
 // a report that cannot be read is logged here and dropped. Each published copy of a row is queued
@@ -145,12 +135,8 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "resends", notice.Resends)
 		return nil
 	}
-	var held supervise.Claim
-	if machine, ok := r.supervisor.Machine(reported.architect); ok {
-		held = machine.Claim()
-	}
 	due := r.now().Add(noticeReholdDelays[notice.Resends])
-	if claimTookRole(held.State) && (notice.Resends == 0 || exception.RecipientSession != "" && exception.RecipientSession != held.Session) {
+	if copyDueAtOnce(r.supervisedClaim(reported.architect), notice.Resends, exception.RecipientSession) {
 		due = r.now()
 	}
 	mark := fmt.Sprintf("%s#%d", exception.DedupeKey, notice.Resends)
@@ -176,6 +162,27 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason)
 	}
 	return nil
+}
+
+// copyDueAtOnce says whether the next copy of a notice is due at once, given held, the architect's
+// claim as this daemon supervises it (the zero Claim when it does not), resends, the copies of the
+// notice already sent, and recipient, the session the report names. A copy is due at once when
+// the architect's agent has taken its role and said it is ready (claimTookRole), and it is the
+// first copy or its report names a session other than the one the claim is ready on: that ready
+// has passed, so no release (releaseWaiting) would make the copy due, and every later notice to
+// the architect would wait behind it. The first covers a relaunch that took its role inside the
+// receipt window; a later copy that failed on another session went where the role no longer is. A
+// later copy whose report names no session (the listener names none for no_holder, or when it
+// could not read the holder) says nothing about where the role went. It waits its delay, as does a
+// later copy that failed on the claim's own ready session and every copy while the claim has not
+// taken its role, so a claim that reads live while its session hears nothing (a reconnecting
+// connection, a death the supervisor has not seen) keeps the notice for the whole schedule instead
+// of spending its copies in seconds.
+func copyDueAtOnce(held supervise.Claim, resends int, recipient string) bool {
+	if !claimTookRole(held.State) {
+		return false
+	}
+	return resends == 0 || recipient != "" && recipient != held.Session
 }
 
 // reportedNotice is the notice a report is about, as exceptionNotice reads it: its issue, the

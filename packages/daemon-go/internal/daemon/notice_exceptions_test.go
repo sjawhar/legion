@@ -615,3 +615,38 @@ func TestALaterCopyToAnArchitectBackOnAnotherSessionIsDueAtOnce(t *testing.T) {
 		})
 	}
 }
+
+// A copy is due at once only while the architect's agent holds its role, and then only the first
+// copy, or a later one whose report names a session other than the one the claim is ready on. A
+// later copy that failed on the claim's own session, or whose report names no session, waits.
+func TestWhenACopyIsDueAtOnce(t *testing.T) {
+	claimOn := func(state supervise.ClaimState) supervise.Claim {
+		return supervise.Claim{State: state, Session: "ses_arch"}
+	}
+	for _, tc := range []struct {
+		name      string
+		held      supervise.Claim
+		resends   int
+		recipient string
+		want      bool
+	}{
+		{"an unsupervised claim", supervise.Claim{}, 0, "ses_arch", false},
+		{"a relaunching claim", claimOn(supervise.StateLaunching), 0, "ses_old", false},
+		{"a registered claim, before it takes its role", claimOn(supervise.StateRegistered), 0, "ses_arch", false},
+		{"a suspended claim", claimOn(supervise.StateSuspended), 0, "ses_old", false},
+		{"the first copy, its own session", claimOn(supervise.StateReady), 0, "ses_arch", true},
+		{"the first copy, another session", claimOn(supervise.StateWorking), 0, "ses_old", true},
+		{"the first copy, no session named", claimOn(supervise.StateIdle), 0, "", true},
+		{"a later copy, another session", claimOn(supervise.StateReady), 1, "ses_old", true},
+		{"the last copy, another session", claimOn(supervise.StateWorking), 2, "ses_old", true},
+		{"a later copy, its own session", claimOn(supervise.StateReady), 1, "ses_arch", false},
+		{"a later copy, no session named", claimOn(supervise.StateIdle), 2, "", false},
+		{"a later copy, another session, before the role is taken", claimOn(supervise.StateRegistered), 1, "ses_old", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := copyDueAtOnce(tc.held, tc.resends, tc.recipient); got != tc.want {
+				t.Fatalf("copyDueAtOnce(%s on %q, %d copies, report from %q) = %t, want %t", tc.held.State, tc.held.Session, tc.resends, tc.recipient, got, tc.want)
+			}
+		})
+	}
+}
