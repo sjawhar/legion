@@ -55,10 +55,8 @@ func TestAPullRequestFinishingOutsideAwaitingMergeTellsTheArchitectOnce(t *testi
 // its own clock, which is not late, tells it nothing more, since the pull request is already closed.
 func TestALateCloseTellsTheArchitectNothingAndARedeliveredCloseNothingMore(t *testing.T) {
 	earlier, later := lateApplied.Add(-time.Hour), lateApplied.Add(time.Minute)
-	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-c",
-		HeadUpdatedAt: lateApplied, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+	pool := appliedEvents(t, record.PullRequestOpen)
+	apply := applyFacts(t, pool, testEngine())
 	for _, step := range []struct {
 		id      string
 		fact    intake.Fact
@@ -70,17 +68,9 @@ func TestALateCloseTellsTheArchitectNothingAndARedeliveredCloseNothingMore(t *te
 		{"close", lateClosed("head-d", later), "head-d", record.PullRequestClosed, 1},
 		{"redelivered-close", lateClosed("head-d", later), "head-d", record.PullRequestClosed, 1},
 	} {
-		if _, err := intake.ApplyFact(context.Background(), pool, "github", step.id, step.fact, testEngine(), admissionStub{}); err != nil {
-			t.Fatalf("ApplyFact %s: %v", step.id, err)
-		}
-		var head string
-		var state record.PullRequestState
-		if err := pool.QueryRow(t.Context(), "select head_sha, state from pull_requests where issue = 'LEGION-208'").Scan(&head, &state); err != nil {
-			t.Fatalf("read the pull request after %s: %v", step.id, err)
-		}
-		got := architectNotices(t, pool)
-		if head != step.head || state != step.state || len(got) != step.notices {
-			t.Fatalf("after %s the pull request is at %s, %s, with architect notices %+v; want %s, %s, and %d", step.id, head, state, got, step.head, step.state, step.notices)
+		apply(step.id, step.fact)
+		if got, notices := pullRequestAt(t, pool), architectNotices(t, pool); got.head != step.head || got.state != step.state || len(notices) != step.notices {
+			t.Fatalf("after %s the pull request is %+v, with architect notices %+v; want %s, %s, and %d", step.id, got, notices, step.head, step.state, step.notices)
 		}
 	}
 	assertPhase(t, pool, phase.Reviewing)

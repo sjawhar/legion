@@ -179,3 +179,40 @@ func TestACloseOrReopenCarriesItsHead(t *testing.T) {
 		})
 	}
 }
+
+// A branch can carry a second pull request: after a merge, or once park and rerun open a new one
+// from the same branch. A late opened or reopened of the earlier pull request, older than the
+// newer one's clock, is a redelivery and changes nothing: the record stays the newer pull request,
+// whose later events still apply. The same holds for an older pull request's late opened while the
+// newer one is open.
+func TestALateEventOfAnEarlierPullRequestLeavesTheNewerOne(t *testing.T) {
+	opened43, synced43 := lateApplied.Add(time.Minute), lateApplied.Add(2*time.Minute)
+	pr43 := intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-208", HeadSHA: "head-e", UpdatedAt: opened43}
+	sync43 := intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-208", HeadSHA: "head-f", UpdatedAt: synced43}
+	pr41 := intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 41, Branch: "legion/LEGION-208", HeadSHA: "head-a", UpdatedAt: lateApplied.Add(-time.Hour)}
+	for _, tc := range []struct {
+		name   string
+		seed   record.PullRequestState
+		facts  []intake.Fact
+		number int
+		head   string
+		state  record.PullRequestState
+	}{
+		{"merged #42, #43 opened, then #42's late opened", record.PullRequestMerged, []intake.Fact{pr43, lateOpened("head-c", lateApplied), sync43}, 43, "head-f", record.PullRequestOpen},
+		{"merged #42, #43 opened, then #42's late reopen", record.PullRequestMerged, []intake.Fact{pr43, lateReopened("head-c", lateApplied.Add(30*time.Second)), sync43}, 43, "head-f", record.PullRequestOpen},
+		{"open #42, then an older #41's late opened", record.PullRequestOpen, []intake.Fact{pr41}, 42, "head-c", record.PullRequestOpen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := appliedEvents(t, tc.seed, tc.facts...)
+			var number int
+			var head string
+			var state record.PullRequestState
+			if err := pool.QueryRow(t.Context(), "select number, head_sha, state from pull_requests where issue = 'LEGION-208'").Scan(&number, &head, &state); err != nil {
+				t.Fatalf("read the pull request: %v", err)
+			}
+			if number != tc.number || head != tc.head || state != tc.state {
+				t.Fatalf("the record is #%d at %s, %s; want #%d at %s, %s", number, head, state, tc.number, tc.head, tc.state)
+			}
+		})
+	}
+}

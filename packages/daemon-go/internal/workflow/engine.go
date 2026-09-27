@@ -408,6 +408,12 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	if err != nil {
 		return intake.Result{}, err
 	}
+	// An opened or reopened older than the recorded pull request's clock is a late redelivery,
+	// whichever pull request it names: a branch can carry a newer pull request after a merge or a
+	// park and rerun, and an earlier one's late event must not replace it.
+	if recorded != nil && classify.LateLifecycle(fact.UpdatedAt, recorded.HeadUpdatedAt) {
+		return intake.Result{}, nil
+	}
 	if recorded != nil && recorded.Repo == fact.Repo && recorded.Number == fact.Number {
 		// GitHub sends opened once per pull request, so an opened for one already recorded is a
 		// redelivery whatever its clock; a reopen is fenced by its clock. GitHub never reopens a
@@ -671,13 +677,13 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if err != nil || pr == nil || pr.State == record.PullRequestMerged || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
-	already := classify.RepeatedClose(*pr, fact.UpdatedAt)
+	repeated := classify.RepeatedClose(*pr, fact.UpdatedAt)
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}
 	pr.State = record.PullRequestClosed
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
-	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil || already {
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil || repeated {
 		return intake.Result{}, err
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
