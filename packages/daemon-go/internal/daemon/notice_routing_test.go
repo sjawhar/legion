@@ -364,7 +364,7 @@ func TestANoticeForAnOperatorSuspendedRootIsHeldUntilItHoldsItsRoleAgain(t *test
 // An earlier notice's architect is found as its own kind routes it: a child's close starts at the
 // parent. A close held for the absent root architect therefore holds the root's later notices, even
 // though the closed child has a running sub-architect of its own, and when the root returns the
-// close arrives first, even when the later notice falls due before the held close does.
+// close arrives first, though the later notice falls due before the held close does.
 func TestAHeldChildCloseHoldsTheArchitectsLaterNotices(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -378,14 +378,24 @@ func TestAHeldChildCloseHoldsTheArchitectsLaterNotices(t *testing.T) {
 	publisher.setAbsent(architectTopic(t, "LEGION-1"))
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion",
 		now: func() time.Time { return clock }}
-	// The close is tried and held several times, so its backoff outgrows the later notice's.
-	for tick := range 5 {
+	// The close is tried and held six times, so its backoff (1 s doubling, 32 s after the sixth)
+	// outlasts the 20 s step, and the later notice, written now, falls due before the held close.
+	for tick := range 6 {
 		if err := runner.RunOnce(context.Background()); err != nil {
 			t.Fatalf("tick %d: %v", tick, err)
 		}
 		clock = clock.Add(20 * time.Second)
 	}
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", record.Notice{Kind: "design-approved", Version: 3}, clock))
+	var closeDue, laterDue time.Time
+	if err := pool.QueryRow(context.Background(), `select
+		(select next_at from outbox where payload ->> 'kind' = 'child-closed'),
+		(select next_at from outbox where payload ->> 'kind' = 'design-approved')`).Scan(&closeDue, &laterDue); err != nil {
+		t.Fatalf("read the two rows' due times: %v", err)
+	}
+	if !laterDue.Before(closeDue) {
+		t.Fatalf("the later notice is due at %s and the held close at %s; want the later notice due first", laterDue, closeDue)
+	}
 	publisher.setAbsent()
 	for tick := range 8 {
 		if err := runner.RunOnce(context.Background()); err != nil {
