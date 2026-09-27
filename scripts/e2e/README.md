@@ -294,16 +294,22 @@ no bash command first, once their last grant is over 60 s old — a grant's life
 the read's own `Created:` line back, judged from the transcript: Oh My Pi serves the read by
 running `gh` with the environment it copied at its start, so this passes only when the pane named
 `LEGION_GRANT_FILE` from that start and the plugin minted a grant for the read itself (LEGION-262).
+`notices-reach-architects-alone` reads every phase-worker session in the isolated profile (a
+session's role is its newest Envoy role claim) and fails on any workflow notice delivered to one:
+every notice kind is for the architect that owns its issue, on that architect's role topic, and the
+run's `pr-blocked`, production-check `phase-finished` and `worker-died` are each checked in their
+architect's session where they are written.
 After the sign-off the proof human removes
 every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
 fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
 loop before Stage 7, so the proof's reviewer approves a head that still carries `.legion/`, and
 without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
 Each check is named in the transcript;
-six negative controls demonstrate that the status-actor, held-worker, re-closed-gate, and idle-read
-assertions reject deliberately corrupted observations before the captured observations pass again
-(the idle read's three: its result refused as it was before LEGION-262, the read inside its previous
-grant's lifetime, and a bash command before it).
+seven negative controls demonstrate that the status-actor, held-worker, re-closed-gate, idle-read
+and worker-notice assertions reject deliberately corrupted observations before the captured
+observations pass again (the idle read's three: its result refused as it was before LEGION-262, the
+read inside its previous grant's lifetime, and a bash command before it; the worker notice's: a copy
+of one phase-worker session with a `pr-blocked` delivery appended).
 Once every agent is gone, `model-turns-through-the-gateway` runs
 [`lib/check-model-route.sh`](#libcheck-model-routesh) over every agent session in the isolated
 profile, each subagent's included: it fails on any assistant turn or model selection that is not

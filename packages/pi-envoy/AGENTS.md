@@ -146,8 +146,9 @@ daemon registers both on one route, a root being the claim whose issue is its tr
 transcript; `claims/register` with the pane's boot token and this build's `goDaemonApiVersion`
 (`pluginContract`), where any 4xx exits the process with one log line naming the route, status,
 and daemon sentence (`exitOnGoRegistrationRefusal`) and a 5xx or transport failure propagates
-without exiting; jj session attribution; the Envoy role, which is the claim token; a persisted
-notice-topic subscription (the architect's tree root or a worker's issue); and `claims/ready`,
+without exiting; jj session attribution; the Envoy role, which is the claim token and the topic
+the Go daemon sends an architect every notice on (no claim subscribes to an issue's notice topic,
+so no phase worker is woken by an architect's notice); and `claims/ready`,
 retried three times a second apart on a 5xx or transport failure only. The tool-call hook mints a
 fresh grant into the pane's `LEGION_GRANT_FILE` before every call that redeems one (see the grant
 file row below). It also registers the Go `legion` tool: architects register gates, release

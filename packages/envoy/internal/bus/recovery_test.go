@@ -450,8 +450,8 @@ func TestJetStreamPublishDeduplicatesAStableEnvelopeDestination(t *testing.T) {
 	}
 }
 
-// The Go Legion daemon publishes each workflow notice on notifications.legion.<project>.<issue>
-// through the listener's publish route. That route publishes to JetStream, so the stream must carry
+// The Go Legion daemon publishes its controller notices on notifications.legion.<project>.controller,
+// one name of the notifications.legion.<project>.<name> family, through the listener's publish route. That route publishes to JetStream, so the stream must carry
 // the subject; outside every stream subject JetStream has no responder and the route answers 500.
 // The retained copy is not a replay for a pane: a pane subscribes over core NATS and gets only what
 // is published while it is subscribed.
