@@ -23,7 +23,33 @@ import (
 // (classify.SettlementFor).
 const skipChecksTrailer = "skip-checks: true"
 
-var trailingSkipChecks = regexp.MustCompile(`(?:\s*\n)?skip-checks: ?true\s*$`)
+var skipChecksLine = regexp.MustCompile(`^skip-checks: ?true\s*$`)
+
+// withoutSkipChecks is message without a skip-checks line in its final paragraph, where a trailer
+// lives, with trailing space trimmed. The line can be followed there by trailers jj appended after
+// an earlier push wrote it (templates.commit_trailers); GitHub honours it only as the last line, so
+// such a message runs CI, but the rule is the push's to state, not GitHub's parser's.
+func withoutSkipChecks(message string) string {
+	message = strings.TrimRight(message, " \t\n")
+	split := strings.LastIndex(message, "\n\n")
+	if split < 0 {
+		return message
+	}
+	var kept []string
+	for _, line := range strings.Split(message[split+2:], "\n") {
+		if !skipChecksLine.MatchString(line) {
+			kept = append(kept, line)
+		}
+	}
+	if len(kept) == len(strings.Split(message[split+2:], "\n")) {
+		return message
+	}
+	body := strings.TrimRight(message[:split], " \t\n")
+	if len(kept) == 0 {
+		return body
+	}
+	return body + "\n\n" + strings.Join(kept, "\n")
+}
 
 // pushHelp is `legion push`'s rule, as its help states it.
 const pushHelp = `usage: legion push [--workspace <dir>]
@@ -39,6 +65,11 @@ the branch: the planner's .legion/plan.json, the tester's .legion/test.json, and
 head's verdict to it. Every other push runs CI in full: one carrying code, a reviewer round with
 any other verdict or none, the .legion/ deletion, and a rewrite. A trailer an earlier push left on
 @- is removed. Never add or remove the trailer yourself.
+
+GitHub honours the trailer only as the message's last line, so the push describes @- with jj's
+templates.commit_trailers empty (the trailers @- already carries stay above it) and reads the
+message back: when it does not end as this rule says, nothing is pushed and the command exits 1
+naming the line it ends with.
 `
 
 // runPush is `legion push`, whose rule pushHelp states: the pane decides whether a push skips CI,
@@ -174,21 +205,39 @@ func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
 }
 
 // markHead ends @-'s message with the skip-checks trailer when the push skips CI and removes one
-// otherwise, describing @- only when its message changes.
+// otherwise, describing @- only when its message changes. GitHub honours the trailer only as the
+// message's last line, and jj appends templates.commit_trailers to every message it describes (a
+// pane's overlay adds its Omp-Session trailer, which the message already carries from the commit),
+// so the describe runs with that template empty. The message is then read back: the property the
+// push owes GitHub is one of the pushed message, so a head whose message does not end as the rule
+// says is refused before anything is pushed, naming the line it ends with.
 func markHead(jj, dir string, skip bool) error {
 	message, err := pushJJ(jj, dir, "log", "--no-graph", "-T", "description", "-r", "@-")
 	if err != nil {
 		return err
 	}
-	want := strings.TrimRight(trailingSkipChecks.ReplaceAllString(message, ""), " \t\n")
+	want := withoutSkipChecks(message)
 	if skip {
 		want += "\n\n\n" + skipChecksTrailer
 	}
 	if want == strings.TrimRight(message, " \t\n") {
 		return nil
 	}
-	_, err = pushJJ(jj, dir, "describe", "-r", "@-", "-m", want)
-	return err
+	if _, err := pushJJ(jj, dir, "--config", `templates.commit_trailers=""`, "describe", "-r", "@-", "-m", want); err != nil {
+		return err
+	}
+	described, err := pushJJ(jj, dir, "log", "--no-graph", "-T", "description", "-r", "@-")
+	if err != nil {
+		return err
+	}
+	if described != want {
+		lines := strings.Split(described, "\n")
+		if skip {
+			return fmt.Errorf("@-'s message ends with %q after legion push described it, not with GitHub's %q trailer, so GitHub would run the CI this push skips; nothing was pushed", lines[len(lines)-1], skipChecksTrailer)
+		}
+		return fmt.Errorf("@-'s message ends with %q after legion push described it, not as its message without the %q trailer; nothing was pushed", lines[len(lines)-1], skipChecksTrailer)
+	}
+	return nil
 }
 
 // pushJJ runs the boot-resolved jj on the workspace and returns its trimmed output, stderr

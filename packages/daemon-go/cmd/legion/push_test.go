@@ -11,6 +11,9 @@ import (
 )
 
 // pushRig is a pane workspace for LEGION-7 with a bare GitHub stand-in as origin, main pushed there.
+// Its jj runs under the pane's own overlay (packages/pi-envoy/src/legion/jj-attribution.ts), which
+// appends an Omp-Session trailer to every message jj describes, as a pane's jj does: a rig without
+// it proves the push only from a shell.
 type pushRig struct {
 	t                 *testing.T
 	jj, workspace, gh string
@@ -27,6 +30,11 @@ func newPushRig(t *testing.T) pushRig {
 	if output, err := exec.Command(git, "init", "--bare", "--initial-branch=main", remote).CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %v\n%s", err, output)
 	}
+	overlay := filepath.Join(t.TempDir(), "jj-attribution.toml")
+	if err := os.WriteFile(overlay, []byte(`[templates]`+"\n"+`commit_trailers = '"Omp-Session: ses-pane"'`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JJ_CONFIG", overlay)
 	t.Setenv("JJ_USER", "Legion test")
 	t.Setenv("JJ_EMAIL", "legion-test@example.invalid")
 	t.Setenv("LEGION_ISSUE", "LEGION-7")
@@ -94,6 +102,8 @@ func (r pushRig) pushed() string {
 func TestPushSkipsCIOnlyForHandoffsALaterPushFollows(t *testing.T) {
 	r := newPushRig(t)
 	skipped := func(message string) bool { return strings.HasSuffix(message, "\n\n\nskip-checks: true") }
+	// Every pushed message keeps the pane's attribution trailer and carries the skip-checks line at
+	// most once, as its last line.
 	for _, step := range []struct {
 		name    string
 		files   map[string]string
@@ -116,7 +126,8 @@ func TestPushSkipsCIOnlyForHandoffsALaterPushFollows(t *testing.T) {
 		r.commit(step.message, step.files)
 		code, output := r.push()
 		pushed := r.pushed()
-		if code != 0 || skipped(pushed) != step.skip || strings.HasSuffix(strings.TrimSpace(strings.TrimSuffix(pushed, "skip-checks: true")), "skip-checks: true") {
+		if code != 0 || skipped(pushed) != step.skip || strings.Count(pushed, "skip-checks") != map[bool]int{true: 1}[step.skip] ||
+			!strings.Contains(pushed, "Omp-Session: ses-pane") {
 			t.Fatalf("%s: legion push = %d %q, pushed %q; want skip-checks %t", step.name, code, output, pushed, step.skip)
 		}
 	}
@@ -163,7 +174,7 @@ func TestPushRunsARewriteInFull(t *testing.T) {
 	r.run("new", "@--")
 	r.commit("test: record handoff again\n\n\nskip-checks: true", map[string]string{".legion/test.json": `{"rewritten":true}` + "\n"})
 	code, output := r.push()
-	if code != 0 || r.pushed() != "test: record handoff again" {
+	if code != 0 || r.pushed() != "test: record handoff again\n\nOmp-Session: ses-pane" {
 		t.Fatalf("the rewrite's push = %d %q, pushed %q; want it run in full", code, output, r.pushed())
 	}
 	if _, err := os.Stat(tipFile); !os.IsNotExist(err) {

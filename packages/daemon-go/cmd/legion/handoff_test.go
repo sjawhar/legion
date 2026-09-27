@@ -696,14 +696,23 @@ func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testin
 // repository public to enable this feature" (docs/solutions/legion/controller-gate-2-required-checks-live-reads.md).
 // It can define no ruleset, so none requires a check there, and READY rests on the branch's
 // protection alone: posted when that requires nothing, refused when it requires a check the head
-// lacks.
+// lacks. Only that answer means no rulesets: a rulesets read that fails otherwise (another 403,
+// such as a token that lost access, or a server error) leaves the required checks unknown, and
+// READY is refused naming the read.
 func TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets(t *testing.T) {
+	const planAnswer = `{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":"403"}`
+	unprotected := `{"name":"main","protected":false}`
 	for _, tc := range []struct {
 		name, branch string
+		rulesStatus  int
+		rulesBody    string
 		posted       bool
+		refusal      string
 	}{
-		{"and no branch protection", `{"name":"main","protected":false}`, true},
-		{"and branch protection requiring a check the head lacks", `{"name":"main","protected":true,"protection":{"required_status_checks":{"contexts":["legacy"]}}}`, false},
+		{"and no branch protection", unprotected, http.StatusForbidden, planAnswer, true, ""},
+		{"and branch protection requiring a check the head lacks", `{"name":"main","protected":true,"protection":{"required_status_checks":{"contexts":["legacy"]}}}`, http.StatusForbidden, planAnswer, false, `has no result for the required check "legacy"`},
+		{"but the read is refused for another reason", unprotected, http.StatusForbidden, `{"message":"Resource not accessible by integration","status":"403"}`, false, "GET /rules/branches/main with 403"},
+		{"but the read fails", unprotected, http.StatusInternalServerError, `{"message":"Server Error"}`, false, "GET /rules/branches/main with 500"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := "/repos/acme/widgets"
@@ -713,8 +722,8 @@ func TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets(t *testing.T) {
 				case repo + "/pulls/42":
 					_, _ = w.Write([]byte(`{"head":{"sha":"c0de0000000000000000000000000000000000ff"},"base":{"ref":"main"}}`))
 				case repo + "/rules/branches/main":
-					w.WriteHeader(http.StatusForbidden)
-					_, _ = w.Write([]byte(`{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":"403"}`))
+					w.WriteHeader(tc.rulesStatus)
+					_, _ = w.Write([]byte(tc.rulesBody))
 				case repo + "/branches/main":
 					_, _ = w.Write([]byte(tc.branch))
 				case repo + "/commits/c0de0000000000000000000000000000000000ff/check-runs":
@@ -739,8 +748,8 @@ func TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets(t *testing.T) {
 				}
 				return
 			}
-			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), `has no result for the required check "legacy"`) {
-				t.Fatalf("READY = %d, daemon read %v, stderr %q; want a refusal naming the protected branch's check", code, *bodies, errb.String())
+			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), tc.refusal) {
+				t.Fatalf("READY = %d, daemon read %v, stderr %q; want a refusal naming %q", code, *bodies, errb.String(), tc.refusal)
 			}
 		})
 	}
