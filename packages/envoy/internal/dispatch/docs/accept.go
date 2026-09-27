@@ -36,25 +36,33 @@ func settleAccepted(before, after *pmdoc.Node, match pmdoc.Range, with string) (
 // what reads back and changes nothing but the lines it writes: in a list item's code, the lines it
 // leaves blank (blankListItemLines); then, markdown dropping the line breaks that end code, where
 // only line breaks follow the match, the text's own ending breaks, a blank line it ends with
-// included. A match that runs past the code into the next block is written as sent, since what
-// follows the text there is the rest of that block, which the splice joins to it.
-func acceptedCode(with string, at pmdoc.TextblockAt, match pmdoc.Range) (string, pmdoc.Range) {
+// included. A match can run past the code into later blocks, to end, the textblock it ends in.
+// One that takes all of end's text leaves nothing after the text, as at the code's end, so the
+// same rules apply. One that ends inside end's text is written as sent: the rest of end, which the
+// splice joins to the code, follows the text, and neither rule can judge it, so a line of spaces
+// and tabs that text leaves in a list item's code reads back empty and the accept is refused.
+func acceptedCode(with string, at, end pmdoc.TextblockAt, match pmdoc.Range) (string, pmdoc.Range) {
+	past := match.To > at.Content.To
+	if past && match.To != end.Content.To {
+		return with, match
+	}
 	var text strings.Builder
 	for _, child := range at.Node.Children {
 		text.WriteString(child.Text)
 	}
 	code := utf16.Encode([]rune(text.String()))
-	from, to := match.From-at.Content.From, match.To-at.Content.From
-	if to > len(code) {
-		return with, match
-	}
+	from, to := match.From-at.Content.From, min(match.To, at.Content.To)-at.Content.From
 	if insideListItem(at) {
 		with, from, to = blankListItemLines(code, with, from, to)
 	}
 	if !slices.ContainsFunc(code[to:], func(unit uint16) bool { return unit != '\n' }) {
 		with = strings.TrimRight(with, "\n")
 	}
-	return with, pmdoc.Range{From: at.Content.From + from, To: at.Content.From + to}
+	written := pmdoc.Range{From: at.Content.From + from, To: at.Content.From + to}
+	if past {
+		written.To = match.To
+	}
+	return with, written
 }
 
 // blankListItemLines writes empty each line that with, written over code from to to, leaves
@@ -194,6 +202,39 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 		"replace_with %q leaves text the document reads back as another block where it lands (%v); reject the suggestion, or reply asking for the text inside a line",
 		with, broke,
 	)
+}
+
+// refuseAcceptedCodeThatReshapes refuses an accept whose code changes how a block around the code
+// reads back (pmdoc.BlockShapeError), in the words of the other accept refusals: the block, why,
+// and what the person accepting can do, since they cannot move the code as the edit route's
+// refusal (refuseCodeThatReshapesItsBlock) advises. The block named is the typed block holding
+// the code, or else the document-level block that reads back otherwise, such as the table a
+// suggestion running out of the code runs into.
+func refuseAcceptedCodeThatReshapes(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string) error {
+	var broken *pmdoc.Node
+	reshaped, err := replacementBroke(before, after, match, func(block *pmdoc.Node) error {
+		err := pmdoc.BlockShapeError(block)
+		if err != nil {
+			broken = block
+		}
+		return err
+	})
+	if err != nil || reshaped == nil {
+		return err
+	}
+	for _, ancestor := range at.Ancestors {
+		if pmdoc.IsTypedBlock(ancestor.Type) {
+			holder := holderName(ancestor)
+			return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
+				"replace_with %q changes how the %s holding this code block reads back (%v); reject the suggestion, or reply asking for code the %s can hold",
+				with, holder, reshaped, holder,
+			)}
+		}
+	}
+	return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
+		"replace_with %q changes how the %s reads back (%v); reject the suggestion, or reply asking for a change that stays inside the code block",
+		with, holderName(broken), reshaped,
+	)}
 }
 
 // holderName names the block holding a match as a reader names it.

@@ -164,9 +164,16 @@ back without them, and an accepted suggestion writes its code as it reads back (
 in a list item's code, a line it leaves holding only spaces and tabs, CommonMark's blank line, is
 written empty, the spaces and tabs that line keeps around it included, while any other character,
 a no-break space or a form feed among them, is kept, as both readers keep it; then, where only
-line breaks follow it, its text loses the line breaks that end it. A suggestion that runs past the
-code into the next block is written as sent, the rest of that block joining it. Code on other
-lines stays as it was. A line of colons in code inside a typed block is kept: the browser editor's
+line breaks follow it, its text loses the line breaks that end it. A suggestion can run past the
+code into the blocks after it. One that takes all of the text of the textblock it ends in leaves
+nothing after its own text, as at the code's end, so both rules apply. One that ends inside that
+text is written as sent, and the rest of that text joins the code after it, so a line of spaces
+and tabs it leaves in a list item's code reads back empty and the accept is refused. Code on other
+lines stays as it was. An accept whose code changes how a block around it reads back is refused
+naming the typed block holding the code, or else the block that reads back otherwise, such as a
+table the suggestion runs into, and advising rejecting the suggestion
+(`refuseAcceptedCodeThatReshapes`); the edit route's refusal of the same shape advises moving the
+code out of the typed block instead. A line of colons in code inside a typed block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
 them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -
