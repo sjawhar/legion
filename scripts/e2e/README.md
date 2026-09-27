@@ -287,7 +287,12 @@ handoff for that round when the issue reaches testing, and the commit carrying e
 implementer, tester, and reviewer handoff is authored and committed by that role's own App, read
 from the issue's workspace),
 and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
-worker after its launch budget and the architect's retry relaunching it, restart during
+worker after its launch budget and the architect's retry relaunching it, a root whose human
+decides at the design gate that no change is needed (`architect-closes-a-no-change-root`: the
+architect ends its admitted tree with `close_root`, the daemon posts its reason on the issue before
+it writes `done`, every status write on the issue is the daemon's, the freed slot goes to the next
+waiting root, and the journal has the gate's changes request, the close, the linger, the slot
+release and the architect's suspension), restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
 credentials: in one bash tool call of a real implementer pane, plain `gh` resolves
 `<state_dir>/worker-bin/gh`, two chained `legion gh` calls authenticate as `legion-implementer[bot]`

@@ -250,6 +250,13 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	if issue.Status == payload.Status {
 		return nil
 	}
+	// A done write's reason goes on the issue first: Dispatch refuses a message on a closed issue.
+	// It is posted as this row's message, so a retry after a failed write finds it and posts none.
+	if payload.Reason != "" {
+		if err := r.message(ctx, row, record.MessagePost{Body: payload.Reason}); err != nil {
+			return err
+		}
+	}
 	if err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
 		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
 	}
@@ -522,7 +529,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"row", row.ID, "issue", issue.Key, "role", payload.Role, "leaves", payload.Leaves, "phase", issue.Phase, "start-row", last)
 			return nil
 		}
-		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token}); err != nil {
+		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason}); err != nil {
 			return fmt.Errorf("suspend claim %s: %w", token, err)
 		}
 		return nil

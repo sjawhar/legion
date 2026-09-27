@@ -137,6 +137,12 @@ func (e *Engine) noticeWithController(ctx context.Context, tx pgx.Tx, issue stri
 	return e.enqueue(ctx, tx, issue, record.ControllerNotice(notice))
 }
 
+// logOnCommit writes one Info line once the fact's transaction commits (intake.OnCommit), so a
+// fact rolled back writes nothing and one retried after a failed commit writes it once.
+func (e *Engine) logOnCommit(ctx context.Context, msg string, args ...any) {
+	intake.OnCommit(ctx, func() { e.log.Info(msg, args...) })
+}
+
 // refused is a committed 409: the fact changed nothing, and the caller is told why.
 func refused(code, message string) intake.Result {
 	return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: code, Message: message}}
@@ -175,7 +181,8 @@ func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
-	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: role, Generation: issue.Generation, Leaves: leaves})
+	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: role, Generation: issue.Generation, Leaves: leaves,
+		Reason: fmt.Sprintf("%s left %s", issue.Key, leaves)})
 }
 
 // start starts the phase worker of the issue's current phase, a start stamped with that phase.

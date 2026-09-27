@@ -72,6 +72,17 @@ type SignOffRequest struct {
 // SignOffResponse confirms the sign-off fact committed.
 type SignOffResponse struct{}
 
+// RootCloseRequest is a root architect's close of its tree before the tree's first phase starts,
+// with the reason posted on the issue.
+type RootCloseRequest struct {
+	GrantID string `json:"grantId"`
+	Issue   string `json:"issue"`
+	Reason  string `json:"reason"`
+}
+
+// RootCloseResponse confirms the close committed.
+type RootCloseResponse struct{}
+
 // ChildRequest names the child of the architect's tree that park_child takes out of the workflow
 // or rerun_child runs again.
 type ChildRequest struct {
@@ -416,6 +427,35 @@ func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.applyFact(w, r, requestFactID("signoff"), intake.SignOff{Issue: req.Issue}, SignOffResponse{})
+}
+
+// closeRoot ends the architect's tree while its root is admitted and no phase has started
+// (workflow's closeRoot): the root's own architect only, with a reason short enough to post as a
+// message.
+func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
+	var req RootCloseRequest
+	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}, field{"reason", req.Reason}) {
+		return
+	}
+	if !claim.IsIssueKey(req.Issue) {
+		writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issue is not an issue key")
+		return
+	}
+	fact := intake.CloseRoot{Issue: req.Issue, Reason: req.Reason}
+	if length := dispatch.MessageBodyLength(fact.Message()); length > record.MessagePostLimit {
+		writeFailure(w, http.StatusBadRequest, "CLOSE_REASON_TOO_LONG",
+			fmt.Sprintf("the reason makes a %d-character message, over the %d one message holds; shorten it", length, record.MessagePostLimit))
+		return
+	}
+	grant, _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
+	if !ok {
+		return
+	}
+	if !claim.IsTreeRoot(req.Issue, grant.Tree) {
+		writeFailure(w, http.StatusForbidden, "ROOT_REQUIRED", fmt.Sprintf("close_root ends the tree root %s; a child leaves with park_child", grant.Tree))
+		return
+	}
+	s.applyFact(w, r, requestFactID("roots-close"), fact, RootCloseResponse{})
 }
 
 // parkChild takes a running child of the architect's tree out of the workflow by moving it to

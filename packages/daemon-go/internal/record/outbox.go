@@ -36,6 +36,10 @@ type OutboxPayload interface{ OutboxKind() OutboxKind }
 type StatusWrite struct {
 	Status         string `json:"status"`
 	ObservedStatus string `json:"observedStatus"`
+	// Reason is a done write's reason: the runner posts it as a message on the issue before it
+	// writes the status, since Dispatch refuses a message on a closed issue. Empty for a write
+	// with no reason to record.
+	Reason string `json:"reason,omitempty"`
 }
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }
@@ -195,6 +199,8 @@ type SuperviseRequest struct {
 	// generation across re-admission, so the close acts only while its tree lingers at that root
 	// generation: never in the tree's next run, nor in a later linger of it.
 	Linger uint64 `json:"linger,omitempty"`
+	// Reason is why a suspend stops the claim, for the line the suspended claim logs.
+	Reason string `json:"reason,omitempty"`
 }
 
 func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }
@@ -348,6 +354,12 @@ func validateOutboxPayload(payload OutboxPayload) error {
 	case StatusWrite:
 		if value.Status == "" {
 			return fmt.Errorf("outbox status write has empty status")
+		}
+		if value.Reason != "" && value.Status != "done" {
+			return fmt.Errorf("a status write to %s carries a reason; only a done write does", value.Status)
+		}
+		if length := dispatch.MessageBodyLength(value.Reason); length > MessagePostLimit {
+			return fmt.Errorf("a status write's reason is %d characters, over the %d a message holds", length, MessagePostLimit)
 		}
 	case MessagePost, GateSeed, LingerClose:
 	case WorkspaceRemove:

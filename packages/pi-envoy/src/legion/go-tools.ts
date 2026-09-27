@@ -28,6 +28,7 @@ const OPERATIONS: Readonly<Record<GoLegionToolRole, readonly string[]>> = {
     "request_backward_move",
     "retry_or_escalate",
     "sign_off",
+    "close_root",
     "park_child",
     "rerun_child",
     "read_record",
@@ -41,6 +42,7 @@ const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   request_backward_move: ["to", "reason"],
   retry_or_escalate: ["issue", "decision"],
   sign_off: ["issue"],
+  close_root: ["issue", "reason"],
   park_child: ["issue"],
   rerun_child: ["issue"],
   read_record: ["issue"],
@@ -58,6 +60,7 @@ function toolSchema(pi: PiApi): unknown {
       "request_backward_move",
       "retry_or_escalate",
       "sign_off",
+      "close_root",
       "park_child",
       "rerun_child",
       "read_record",
@@ -210,6 +213,15 @@ export function createGoLegionTool(deps: {
             await client.signOff({
               grantId,
               issue: requiredString(parameters, operation, "issue"),
+            });
+            return jsonSuccess({});
+          }
+          case "close_root": {
+            const grantId = await grantFor(client, active);
+            await client.rootClose({
+              grantId,
+              issue: requiredString(parameters, operation, "issue"),
+              reason: requiredString(parameters, operation, "reason"),
             });
             return jsonSuccess({});
           }

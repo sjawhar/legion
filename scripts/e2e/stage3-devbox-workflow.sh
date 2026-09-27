@@ -656,12 +656,14 @@ pass
 begin admission
 root_issue=$(new_issue "Primary durable workflow profile")
 held_issue=$(new_issue "Budget exhaustion sentinel")
+nochange_issue=$(new_issue "No-change close at the design gate")
 restart_issue=$(new_issue "Restart outbox compass")
 set_status "$root_issue" todo
 set_status "$held_issue" todo
+set_status "$nochange_issue" todo
 set_status "$restart_issue" todo
-until_true 180 "two roots admitted and one waiting in Dispatch rank order" sh -c \
-  "'$work/legion' state --json --port '$port_daemon' | jq -e --arg a '$root_issue' --arg b '$held_issue' --arg c '$restart_issue' '.admission.cap == 2 and .admission.active == [\$a,\$b] and .admission.waiting == [\$c]'"
+until_true 180 "two roots admitted and two waiting in Dispatch rank order" sh -c \
+  "'$work/legion' state --json --port '$port_daemon' | jq -e --arg a '$root_issue' --arg b '$held_issue' --arg c '$nochange_issue' --arg d '$restart_issue' '.admission.cap == 2 and .admission.active == [\$a,\$b] and .admission.waiting == [\$c,\$d]'"
 child_issue=$(new_issue "Dependent admission leaf" "$root_issue")
 set_status "$child_issue" todo
 timeout_hook=admission_diagnostics
@@ -911,12 +913,59 @@ else
   pass
 fi
 
+# no_change_close: a root whose human decides at the design gate that no change is needed. Closing
+# the first root freed its slot, so this root, first in the waiting line, is admitted; its architect
+# registers its spec, the human requests changes saying no change is needed, and the architect ends
+# the tree itself (close_root) while the root is still admitted. The daemon posts the architect's
+# reason on the issue before it writes done, and the freed slot goes to the next waiting root with
+# no human status write. Each step of the tree's close is one journal line.
+no_change_close() {
+  begin architect-closes-a-no-change-root
+  local artifact reason token
+  until_true 240 "the no-change root to take the first root's freed admission slot" sh -c \
+    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$nochange_issue' '.issues[\$issue].slot != null'"
+  architect_registers_gate "$nochange_issue" "Stage 3 no-change proof"
+  artifact=$(daemon_state | jq -er --arg issue "$nochange_issue" '.issues[$issue].designGate.artifactId')
+  reason="No change is needed: $repo already has what this issue asks for. Close this issue without a change."
+  dispatch_human POST "artifacts/$artifact/reviews" "$(jq -cn --arg reason "$reason" '{state: "changes_requested", reason: $reason}')" >/dev/null
+  send_agent "$nochange_issue" architect "Stage 3 no-change proof: the human reviewing your spec requested changes: \"$reason\" End your tree as your role says, and change nothing else."
+  until_true 600 "the no-change root to be done in Dispatch" dispatch_status_is "$nochange_issue" "done"
+  dispatch_events "$nochange_issue" >"$evidence/nochange-events.json"
+  jq -e '(map(select(.type == "message.created" and (.payload.body | contains("Closed by its architect before its first phase:")))) | first | .seq) as $message
+    | (map(select(.type == "issue.closed")) | first | .seq) as $closed
+    | $message != null and $closed != null and $message < $closed' "$evidence/nochange-events.json" >/dev/null ||
+    fail "the architect's reason was not posted on $nochange_issue before its close; see $evidence/nochange-events.json"
+  jq -e --arg daemon "legion-daemon:$project" '[.[] | select(.type | IN("issue.updated", "issue.closed")) | select(.payload.status | IN("in_progress", "done"))]
+    | (map(.payload.status) | unique) == ["done", "in_progress"] and all(.actor.id == $daemon)' "$evidence/nochange-events.json" >/dev/null ||
+    fail "a status write on $nochange_issue was not the daemon's; see $evidence/nochange-events.json"
+  session_contains "$nochange_issue" architect '"close_root"' || fail "the architect of $nochange_issue did not call close_root"
+  token=$(claim_token "$nochange_issue" architect)
+  until_true 60 "the no-change tree's architect to be suspended" tree_suspended "$nochange_issue"
+  jq -c --arg issue "$nochange_issue" --arg token "$token" 'select(
+      (.msg == "workflow: design gate changes requested" and .issue == $issue)
+      or (.msg == "workflow: issue left the workflow" and .issue == $issue)
+      or (.msg == "workflow: tree lingers" and .tree == $issue)
+      or (.msg == "admission: slot released" and .issue == $issue)
+      or (.msg == "supervise: suspended" and .claim == $token))
+    | {msg, issue, tree, status, reason, slots, cap}' "$evidence/logs/daemon.log" >"$evidence/nochange-journal.txt"
+  for line in "design gate changes requested" "issue left the workflow" "tree lingers" "admission: slot released" "supervise: suspended"; do
+    grep -qF "\"$line" "$evidence/nochange-journal.txt" || fail "the journal has no \"$line\" line for $nochange_issue; see $evidence/nochange-journal.txt"
+  done
+  grep -F '"workflow: issue left the workflow"' "$evidence/nochange-journal.txt" | grep -qF '"status":"done"' ||
+    fail "the close line of $nochange_issue does not name done"
+  grep -F '"supervise: suspended"' "$evidence/nochange-journal.txt" | grep -qF "\"reason\":\"the tree of $nochange_issue lingers\"" ||
+    fail "the architect's suspension line does not name the linger as its reason"
+  note "$nochange_issue: the architect called close_root; its reason was posted before the close, every status write was the daemon's, and the journal has: $(jq -r .msg "$evidence/nochange-journal.txt" | sort -u | tr '\n' ';')"
+  pass
+}
+
 # restart_scenarios: the restart mid-implementer, the in-agent credentials, and the pending status
-# write, all on the third root.
+# write, all on the fourth root.
 restart_scenarios() {
   begin restart-mid-implementer
-  # The third root was waiting. Completing the first root freed its slot, so it must now be admitted
-  # in rank order; this validates promotion before exercising the mid-phase restart.
+  # The fourth root was waiting behind the no-change root. That root's close freed the slot, so it
+  # must now be admitted in rank order, with no human status write; this validates promotion before
+  # exercising the mid-phase restart.
   until_true 240 "the waiting root to take the freed admission slot" sh -c \
     "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].slot != null'"
   drive_gate "$restart_issue" "Stage 3 restart proof"
@@ -1043,6 +1092,7 @@ notices_reach_architects_alone() {
 }
 if [ -z "$until" ]; then
   [ "$from" = restart ] || held_worker
+  no_change_close
   restart_scenarios
   [ -n "$from" ] || status_actors
   notices_reach_architects_alone

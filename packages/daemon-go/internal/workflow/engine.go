@@ -101,6 +101,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.backward(ctx, tx, fact)
 	case intake.SignOff:
 		return e.signOff(ctx, tx, fact)
+	case intake.CloseRoot:
+		return e.closeRoot(ctx, tx, fact)
 	case intake.LingerExpired:
 		return e.lingerExpired(ctx, tx, fact)
 	default:
@@ -793,6 +795,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return err
 	}
+	e.logOnCommit(ctx, "workflow: phase changed", "issue", issue.Key, "tree", issue.Tree, "from", from, "to", row.To, "trigger", trigger, "status", issue.Status)
 	if err := e.clearHandoff(ctx, tx, issue.Key, RoleFor(row.To)); err != nil {
 		return err
 	}
@@ -858,9 +861,9 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 // tree's architect started, and each phase worker, whether or not it ever reported a handoff. The
 // phase rows record only handoffs, so they cannot list the claims; the executor treats a request
 // for a claim that does not exist as done.
-func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp) error {
+func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp, reason string) error {
 	for _, role := range claim.Roles {
-		if err := e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: op, Tree: issue.Tree, Role: role, Generation: issue.Generation}); err != nil {
+		if err := e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: op, Tree: issue.Tree, Role: role, Generation: issue.Generation, Reason: reason}); err != nil {
 			return err
 		}
 	}

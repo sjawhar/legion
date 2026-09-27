@@ -22,6 +22,7 @@ import {
   LegionGoPhaseBackwardRequest,
   LegionGoPhaseRetryRequest,
   LegionGoRegisterResponse,
+  LegionGoRootCloseRequest,
   LegionGoSignOffRequest,
   LegionGoStateResponse,
   LegionGoWaveReleaseRequest,
@@ -53,6 +54,7 @@ const schemas: Record<string, z.ZodType> = {
   "phase-backward.json": LegionGoEmptyResponse,
   "phase-retry.json": LegionGoEmptyResponse,
   "signoff.json": LegionGoEmptyResponse,
+  "root-close.json": LegionGoEmptyResponse,
   "child-park.json": LegionGoEmptyResponse,
   "child-rerun.json": LegionGoEmptyResponse,
   // No route answers this one: it is the contract number the Go daemon's boot gate requires of the
@@ -122,6 +124,11 @@ test("every Stage 3 workflow request has a strict schema", () => {
       { grantId: "grant-208", issue: "LEGION-208", decision: "retry" },
     ],
     ["signoff", LegionGoSignOffRequest, { grantId: "grant-208", issue: "LEGION-208" }],
+    [
+      "root close",
+      LegionGoRootCloseRequest,
+      { grantId: "grant-208", issue: "LEGION-208", reason: "no change" },
+    ],
     ["child", LegionGoChildRequest, { grantId: "grant-208", issue: "LEGION-209" }],
   ];
 

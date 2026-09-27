@@ -642,3 +642,38 @@ func TestGateRegistrationIsItsOwnFactInEachGeneration(t *testing.T) {
 		t.Fatalf("gate facts = %#v, want one registration per generation", got)
 	}
 }
+
+// A root architect ends its own tree before its first phase starts: a human decided no change at
+// the design gate, or the issue is moot. The route takes the reason; nothing else ends an admitted
+// root from the architect's side, since sign_off needs the production check and a backward move
+// needs a phase worker.
+func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	closed := h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": "The human decided no change is needed.",
+	}, nil)
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close = %d: %s", closed.Code, closed.Body)
+	}
+	if got := facts.recorded(); len(got) != 1 || got[0] != (intake.CloseRoot{Issue: "LEGION-208", Reason: "The human decided no change is needed."}) {
+		t.Fatalf("close facts = %#v", got)
+	}
+
+	// A child is not the root, a phase worker is not the architect, and a reason too long for one
+	// message would never post.
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-209", "reason": "moot",
+	}, nil), http.StatusForbidden, "ROOT_REQUIRED")
+	worker := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": worker.grant(t), "issue": "LEGION-208", "reason": "moot",
+	}, nil), http.StatusForbidden, "ARCHITECT_REQUIRED")
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": strings.Repeat("x", record.MessagePostLimit),
+	}, nil), http.StatusBadRequest, "CLOSE_REASON_TOO_LONG")
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("refused closes applied facts %#v", got[1:])
+	}
+}
