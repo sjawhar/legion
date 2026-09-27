@@ -29,7 +29,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
-	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -240,7 +239,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		// The durable consumers exist before the listing is read: a consumer created now delivers
 		// only what is published after it, so everything earlier is the listing's, and what the
 		// listing misses (a move published while it is read) the consumer delivers.
-		if err := workflow.connect(boot, cfg, plan.natsSeed, plan.secrets[natsauth.SeedVariable]); err != nil {
+		if err := workflow.connect(boot, cfg, plan.nats); err != nil {
 			s.stop()
 			listener.Close()
 			workflow.stop()
@@ -317,9 +316,9 @@ type plan struct {
 	project       string
 	operatorToken string
 	secrets       map[string]string
-	// natsSeed is the daemon's own NATS nkey seed (natsauth.DaemonSeed), "" when it has none; no
-	// launch carries it.
-	natsSeed     string
+	// nats is the user the daemon's own NATS connection authenticates as (natsConnection); no launch
+	// carries its seed unless it is the pane seed.
+	nats         natsConnection
 	instructions string
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
@@ -380,7 +379,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		orphanSweep = orphanSweepInterval
 	}
 	p := plan{
-		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, natsSeed: reads.natsSeed, instructions: instructions,
+		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, rolesDir: reads.rolesDir, roleReferences: reads.roleReferences,
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
 	}

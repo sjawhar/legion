@@ -19,10 +19,9 @@ import (
 type bootReads struct {
 	project, operatorToken, dispatchToken, rolesDir string
 	secrets                                         map[string]string
-	natsUser                                        string // the NATS nkey seed's user's public key, "" with no seed
-	natsSeed                                        string // the daemon's own NATS nkey seed (natsauth.DaemonSeed), "" for none
-	daemonNatsUser                                  string // natsSeed's user's public key, "" with no daemon seed
-	instructions                                    []byte // nil when the configuration names none
+	paneNatsUser                                    string         // the pane seed's user's public key, "" with no pane seed
+	nats                                            natsConnection // the user the daemon's own NATS connection authenticates as
+	instructions                                    []byte         // nil when the configuration names none
 	roleReferences                                  promptrefs.Names
 	tmux                                            tmuxReads    // runtime: tmux
 	sandbox                                         sandboxReads // runtime: kubernetes
@@ -57,18 +56,18 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 	if r.secrets, err = readLaunchSecrets(cfg, lookup); err != nil {
 		return bootReads{}, err
 	}
-	if seed := r.secrets[natsauth.SeedVariable]; seed != "" {
-		if r.natsUser, err = natsauth.PublicKey(seed); err != nil {
+	paneSeed := r.secrets[natsauth.SeedVariable]
+	if paneSeed != "" {
+		if r.paneNatsUser, err = natsauth.PublicKey(paneSeed); err != nil {
 			return bootReads{}, err
 		}
 	}
-	if r.natsSeed, err = natsauth.DaemonSeed(cfg.NatsDaemonNkeySeedFile, lookup); err != nil {
+	daemonSeed, err := natsauth.DaemonSeed(cfg.NatsDaemonNkeySeedFile, lookup)
+	if err != nil {
 		return bootReads{}, err
 	}
-	if r.natsSeed != "" {
-		if r.daemonNatsUser, err = natsauth.PublicKey(r.natsSeed); err != nil {
-			return bootReads{}, err
-		}
+	if r.nats, err = chooseNATSConnection(daemonSeed, paneSeed, r.paneNatsUser); err != nil {
+		return bootReads{}, err
 	}
 	if cfg.InstructionsPath != "" {
 		if r.instructions, err = config.ReadDeploymentInstructions(cfg.InstructionsPath); err != nil {
@@ -90,7 +89,7 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 	case "tmux":
 		r.tmux, err = readTmux(cfg, lookup, getenv, hostOMP)
 	case "kubernetes":
-		r.sandbox, err = readSandbox(cfg, r.project, r.dispatchToken, r.natsUser, lookup, log)
+		r.sandbox, err = readSandbox(cfg, r.project, r.dispatchToken, r.paneNatsUser, lookup, log)
 	default:
 		err = fmt.Errorf("runtime %q is neither tmux nor kubernetes", cfg.Runtime.Name)
 	}
@@ -98,6 +97,39 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 		return bootReads{}, err
 	}
 	return r, nil
+}
+
+// natsConnection is the NATS user the daemon's own connection authenticates as: its own seed
+// (natsauth.DaemonSeed) when it has one, else the pane seed every pane receives (launchSecrets),
+// else no credential. No launch carries it.
+type natsConnection struct {
+	seed     string // "" for no credential
+	user     string // seed's user's public key, "" with no seed
+	source   string // "daemon", "pane" or "none": where seed came from
+	paneUser bool   // whether user is the pane seed's user, as when the daemon seed is the pane seed
+}
+
+// chooseNATSConnection is the connection over daemonSeed and paneSeed, each "" for none, where
+// paneUser is paneSeed's user's public key, already read.
+func chooseNATSConnection(daemonSeed, paneSeed, paneUser string) (natsConnection, error) {
+	switch {
+	case daemonSeed != "":
+		user, err := natsauth.PublicKey(daemonSeed)
+		if err != nil {
+			return natsConnection{}, err
+		}
+		return natsConnection{seed: daemonSeed, user: user, source: "daemon", paneUser: user == paneUser}, nil
+	case paneSeed != "":
+		return natsConnection{seed: paneSeed, user: paneUser, source: "pane", paneUser: true}, nil
+	default:
+		return natsConnection{source: "none"}, nil
+	}
+}
+
+// log logs, once, the user the connection authenticates as, by public key, whether that is the pane
+// user, and where its seed came from; never the seed.
+func (c natsConnection) log(log *slog.Logger) {
+	log.Info("legion daemon connects to NATS", "user", c.user, "paneUser", c.paneUser, "seed", c.source)
 }
 
 // tmuxReads is what panes on this host need that readBoot reads: the OMP invocation, and the host's
@@ -130,10 +162,13 @@ func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func
 // anything (readBoot), over the daemon's environment (lookup, and the process's for the OMP
 // invocation): nil when boot would get past every such refusal, and the public keys of the pane
 // seed's user and the daemon seed's user, each "" when the daemon has no such seed, never a seed.
-func CheckStart(cfg config.Config, lookup func(string) (string, bool)) (natsUser, daemonNatsUser string, err error) {
+func CheckStart(cfg config.Config, lookup func(string) (string, bool)) (paneNatsUser, daemonNatsUser string, err error) {
 	r, err := readBoot(cfg, lookup, os.Getenv, true, slog.New(slog.DiscardHandler))
 	if err != nil {
 		return "", "", err
 	}
-	return r.natsUser, r.daemonNatsUser, nil
+	if r.nats.source == "daemon" {
+		daemonNatsUser = r.nats.user
+	}
+	return r.paneNatsUser, daemonNatsUser, nil
 }

@@ -110,17 +110,17 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // the seed.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
-	natsUser, daemonNatsUser := "", ""
+	paneNatsUser, daemonNatsUser := "", ""
 	if err == nil {
-		natsUser, daemonNatsUser, err = daemon.CheckStart(cfg, os.LookupEnv)
+		paneNatsUser, daemonNatsUser, err = daemon.CheckStart(cfg, os.LookupEnv)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
 	ok := "Config OK: project=" + cfg.Project
-	if natsUser != "" {
-		ok += " nats-nkey-user=" + natsUser
+	if paneNatsUser != "" {
+		ok += " nats-nkey-user=" + paneNatsUser
 	}
 	if daemonNatsUser != "" {
 		ok += " nats-daemon-nkey-user=" + daemonNatsUser

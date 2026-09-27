@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -12,6 +13,10 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nkeys"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
@@ -127,31 +132,69 @@ func TestTheWorkflowConnectsAsTheDaemonSeedOverThePaneSeed(t *testing.T) {
 	})
 }
 
-// natsUser picks the daemon seed, else the pane seed, else none, and its one line says which user
-// that is and whether it is the pane user, the daemon seed naming the pane user included.
-func TestNatsUserNamesTheUserTheDaemonConnectsAs(t *testing.T) {
+// chooseNATSConnection picks the daemon seed, else the pane seed, else none, and its one line says
+// which user that is and whether it is the pane user, the daemon seed naming the pane user included.
+func TestChooseNATSConnectionNamesTheUserTheDaemonConnectsAs(t *testing.T) {
 	daemonSeed, daemonUser := testnats.User(t)
 	paneSeed, paneUser := testnats.User(t)
 	for _, tc := range []struct {
-		name, daemon, pane, seed, line string
+		name, daemon, pane, paneUser, seed, line string
 	}{
-		{"both", daemonSeed, paneSeed, daemonSeed, "user=" + daemonUser + " paneUser=false seed=daemon"},
-		{"the daemon seed alone", daemonSeed, "", daemonSeed, "user=" + daemonUser + " paneUser=false seed=daemon"},
-		{"a daemon seed that is the pane seed", paneSeed, paneSeed, paneSeed, "user=" + paneUser + " paneUser=true seed=daemon"},
-		{"the pane seed alone", "", paneSeed, paneSeed, "user=" + paneUser + " paneUser=true seed=pane"},
-		{"neither", "", "", "", `user="" paneUser=false seed=none`},
+		{"both", daemonSeed, paneSeed, paneUser, daemonSeed, "user=" + daemonUser + " paneUser=false seed=daemon"},
+		{"the daemon seed alone", daemonSeed, "", "", daemonSeed, "user=" + daemonUser + " paneUser=false seed=daemon"},
+		{"a daemon seed that is the pane seed", paneSeed, paneSeed, paneUser, paneSeed, "user=" + paneUser + " paneUser=true seed=daemon"},
+		{"the pane seed alone", "", paneSeed, paneUser, paneSeed, "user=" + paneUser + " paneUser=true seed=pane"},
+		{"neither", "", "", "", "", `user="" paneUser=false seed=none`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var out bytes.Buffer
-			seed, err := natsUser(slog.New(slog.NewTextHandler(&out, nil)), tc.daemon, tc.pane)
+			nc, err := chooseNATSConnection(tc.daemon, tc.pane, tc.paneUser)
 			// Named, never printed: a failure message is no place for a seed.
 			name := map[string]string{daemonSeed: "the daemon seed", paneSeed: "the pane seed", "": "none"}
-			if err != nil || seed != tc.seed {
-				t.Fatalf("natsUser = %s, %v; want %s", name[seed], err, name[tc.seed])
+			if err != nil || nc.seed != tc.seed {
+				t.Fatalf("chooseNATSConnection = %s, %v; want %s", name[nc.seed], err, name[tc.seed])
 			}
+			var out bytes.Buffer
+			nc.log(slog.New(slog.NewTextHandler(&out, nil)))
 			want := `level=INFO msg="legion daemon connects to NATS" ` + tc.line + "\n"
 			if !strings.HasSuffix(out.String(), want) || strings.Count(out.String(), "\n") != 1 {
 				t.Errorf("log = %q, want one line ending %q", out.String(), want)
+			}
+		})
+	}
+}
+
+// The daemon's own seed reaches no launch: with both seeds configured, a root's and a worker's
+// launch carry the pane seed as NATS_NKEY_SEED and nothing of the daemon seed, in no secret, no
+// variable, and no other field of the spec.
+func TestNoLaunchCarriesTheDaemonSeed(t *testing.T) {
+	daemonSeed, paneSeed := testnats.UserSeed(t), testnats.UserSeed(t)
+	for _, tc := range []struct {
+		name    string
+		key     string
+		environ []string
+	}{
+		{"nats_daemon_nkey_seed_file", testnats.SeedFile(t, daemonSeed), nil},
+		{"NATS_DAEMON_NKEY_SEED_FILE", "", []string{"NATS_DAEMON_NKEY_SEED_FILE=" + testnats.SeedFile(t, daemonSeed)}},
+		{"NATS_DAEMON_NKEY_SEED", "", []string{"NATS_DAEMON_NKEY_SEED=" + daemonSeed}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.NatsNkeySeedFile = testnats.SeedFile(t, paneSeed)
+			cfg.NatsDaemonNkeySeedFile = tc.key
+			rt := fake.NewRuntime()
+			o := fakeRuntime(rt, &built{})
+			o.environ = tc.environ
+			d := startDaemon(t, cfg, o)
+
+			root := lastLaunch(t, rt, d.spawn(architect()))
+			worker := lastLaunch(t, rt, d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Wait."}))
+			for kind, spec := range map[string]runtime.SpawnSpec{"root": root, "worker": worker} {
+				if got := spec.Secrets["NATS_NKEY_SEED"]; got != paneSeed {
+					t.Errorf("the %s launch's NATS_NKEY_SEED secret is %q, want the pane seed", kind, got)
+				}
+				if dump := fmt.Sprintf("%#v", spec); strings.Contains(dump, daemonSeed) || strings.Contains(dump, "NATS_DAEMON") {
+					t.Errorf("the %s launch carries the daemon seed or its name: %s", kind, dump)
+				}
 			}
 		})
 	}

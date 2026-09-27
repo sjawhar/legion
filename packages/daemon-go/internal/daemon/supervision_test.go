@@ -238,43 +238,6 @@ func TestEveryLaunchCarriesTheNatsSeedTheDaemonResolved(t *testing.T) {
 	}
 }
 
-// The daemon's own seed reaches no launch: with both seeds configured, a root's and a worker's
-// launch carry the pane seed as NATS_NKEY_SEED and nothing of the daemon seed, in no secret, no
-// variable, and no other field of the spec.
-func TestNoLaunchCarriesTheDaemonSeed(t *testing.T) {
-	daemonSeed, paneSeed := testnats.UserSeed(t), testnats.UserSeed(t)
-	for _, tc := range []struct {
-		name    string
-		key     string
-		environ []string
-	}{
-		{"nats_daemon_nkey_seed_file", testnats.SeedFile(t, daemonSeed), nil},
-		{"NATS_DAEMON_NKEY_SEED_FILE", "", []string{"NATS_DAEMON_NKEY_SEED_FILE=" + testnats.SeedFile(t, daemonSeed)}},
-		{"NATS_DAEMON_NKEY_SEED", "", []string{"NATS_DAEMON_NKEY_SEED=" + daemonSeed}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := testConfig(t)
-			cfg.NatsNkeySeedFile = testnats.SeedFile(t, paneSeed)
-			cfg.NatsDaemonNkeySeedFile = tc.key
-			rt := fake.NewRuntime()
-			o := fakeRuntime(rt, &built{})
-			o.environ = tc.environ
-			d := startDaemon(t, cfg, o)
-
-			root := lastLaunch(t, rt, d.spawn(architect()))
-			worker := lastLaunch(t, rt, d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Wait."}))
-			for kind, spec := range map[string]runtime.SpawnSpec{"root": root, "worker": worker} {
-				if got := spec.Secrets["NATS_NKEY_SEED"]; got != paneSeed {
-					t.Errorf("the %s launch's NATS_NKEY_SEED secret is %q, want the pane seed", kind, got)
-				}
-				if dump := fmt.Sprintf("%#v", spec); strings.Contains(dump, daemonSeed) || strings.Contains(dump, "NATS_DAEMON") {
-					t.Errorf("the %s launch carries the daemon seed or its name: %s", kind, dump)
-				}
-			}
-		})
-	}
-}
-
 // A default operator claim has no arbitrary prompt file. It must receive the shared role prompt
 // followed by the Go daemon parts, the role's own and the one every architect shares, so tmux can
 // concatenate them before addressing and deployment instructions into its single OMP flag.
