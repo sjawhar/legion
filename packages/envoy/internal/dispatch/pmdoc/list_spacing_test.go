@@ -35,6 +35,13 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			readable: "ref[^n] here.\n\n- [^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n      :::\n",
 		},
 		{
+			// The typed block's rule holds with a quote inside it: the browser editor reads a blank
+			// line after the list as spacing its last item by what follows.
+			name:     "a blank line after a list in a quote in a typed block in a footnote definition",
+			refused:  "x[^n]\n\n[^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    > - c\n    >\n    > p\n    :::\n",
+			readable: "x[^n]\n\n[^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    > - c\n    > p\n    :::\n",
+		},
+		{
 			name:    "an empty list item before a paragraph its outer item holds",
 			refused: "- t\n\n  -\n\n  para\n",
 		},

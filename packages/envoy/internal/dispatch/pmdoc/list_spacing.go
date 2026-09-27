@@ -176,6 +176,12 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		}
 	}
 	switch {
+	case typed && footnoted && quoted && isAncestor(definition, directive) && isAncestor(directive, quote):
+		// A quote inside a typed block in a footnote definition keeps the typed block's rule.
+		if lines.blankAtOrAfterTypedList(list, directive, quoteBlankLineAt(quoteDepth(list))) {
+			return typedFootnoteListBlank
+		}
+		setSpread(list, false, spreadsNothing)
 	case quoted && footnoted:
 		spread, lastSpread, reason := footnotedQuoteListSpread(list, quote, definition, lines)
 		if reason != "" {
@@ -201,15 +207,8 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		}
 		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, anyBlock) })
 	case footnoted && typed:
-		// Blank lines past the typed block's closing fence stand outside it.
-		last := len(lines.starts)
-		if next := nextBlock(list); directive.Closed && (next == nil || !isAncestor(directive, next)) {
-			last = lines.lineOf(directive.closer)
-		} else if next != nil {
-			last = lines.lineOf(startOf(next))
-		}
-		if len(lines.blanks(lines.lineOf(startOf(list)), last, whitespaceLine)) > 0 {
-			return "a blank line at or after a list in a typed block in a footnote definition, which the browser editor reads as spacing the list by what follows it"
+		if lines.blankAtOrAfterTypedList(list, directive, whitespaceLine) {
+			return typedFootnoteListBlank
 		}
 		setSpread(list, false, spreadsNothing)
 	case footnoted:
@@ -224,6 +223,23 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, spreadsNothing) })
 	}
 	return ""
+}
+
+// typedFootnoteListBlank is the refusal of a blank line at or after a list in a typed block in a
+// footnote definition (blankAtOrAfterTypedList).
+const typedFootnoteListBlank = "a blank line at or after a list in a typed block in a footnote definition, which the browser editor reads as spacing the list by what follows it"
+
+// blankAtOrAfterTypedList reports whether a line blank(line) holds stands from list's start up to
+// the next block, or to the closing fence of directive, the typed block around it, where nothing
+// in directive follows the list: blank lines past the fence stand outside it.
+func (l sourceLines) blankAtOrAfterTypedList(list ast.Node, directive *typedDirective, blank func([]byte) bool) bool {
+	last := len(l.starts)
+	if next := nextBlock(list); directive.Closed && (next == nil || !isAncestor(directive, next)) {
+		last = l.lineOf(directive.closer)
+	} else if next != nil {
+		last = l.lineOf(startOf(next))
+	}
+	return len(l.blanks(l.lineOf(startOf(list)), last, blank)) > 0
 }
 
 // quotedListSpread is a list's spread in a quote, as the browser editor's parser reads it: spread
