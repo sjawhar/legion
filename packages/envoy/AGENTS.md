@@ -156,28 +156,38 @@ definition and another callout. Text a `replace` writes that would read as block
 start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::` over a
 paragraph is stored `\---` and so on (the renderer's line-start escapes). Beside an emptied
 paragraph it is written the same way, since an empty paragraph is not written. Accepting a
-suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`) writes blocks,
-so it reads back what it writes and refuses what reads back otherwise, naming `replace_with`. Over
-every document-level block the accept writes it runs `refuseUnreadableReplacement`'s check
-(`refuseUnreadableAccept`, outside an ask) and, outside a typed block, the shape comparison
+suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`, its checks in
+`docs/accept.go`) writes blocks, so it stores what reads back as the live document, and refuses
+what cannot, naming `replace_with`. It first settles the blocks it changed (`settleAccepted`,
+`pmdoc.AgreeWithReadBack`): the empty halves a block replacement leaves of the textblock it lands
+in, which carry no block id, go where the renderer does not write them, and each list's and list
+item's spread becomes the one its markdown reads back with, so two paragraphs in a tight list item
+leave the item spread and a block over an item's text leaves no empty line before its nested
+list. An empty replacement keeps the paragraph it empties, which is not written beside other
+blocks. Outside an ask it then runs, over every document-level block it changed,
+`refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison
 (`refuseReshapedAccept`: `pmdoc.BlockShapeError`). A non-empty replacement inside a typed block is
 checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
 `paragraph+ bullet_list?` rule; each non-ask typed block around the match then round-trips through
 its rendered markdown (`refuseTypedAcceptRoundTrip`), so a list written beside a list of its kind
-in a callout, which reads back as one list, is refused. Last, the whole document round-trips
-(`refuseAcceptedDocumentShape`: `pmdoc.DocumentShapeError`), which reads each block beside the
-ones around it: two such lists meet at the document's level too, or beside a typed block the
-accept rewrites or consumes, and this refusal names that and advises rejecting, since where the
-join removes what stood between two lists no text keeps them apart. Each check passes over a
-block, or for the last a document, that already read back otherwise. An accept parses its text
-as blocks
+in a callout, which reads back as one list, is refused. Last, the whole document is read back
+(`refuseMisreadAccept`: `pmdoc.NewMisread`), each document-level block beside the ones around it
+and with its attributes and text, a column without alignment expected back left as the renderer
+writes it: an accept is refused where what it changed, or a block that read back as written
+beside it, now reads back otherwise - two lists of one kind meeting at the document's level or
+beside a typed block it rewrites or consumes, a task item emptied to `- [ ]` that reads back as a
+plain item. What read back otherwise before the accept, a block or an attribute, is not its to
+refuse, and nothing else in the document switches the check off. That refusal names what reads
+back and advises only rejecting, since where the join removes what stood between two lists no
+text keeps them apart. An accept parses its text as blocks
 written into the document (`pmdoc.ParseFragment`: a leading `---` is a rule, as `***` is, except
 that a closed front-matter block is front matter where the text lands at the document's start,
 at the start of a top-level first block's text), so a rule or a list over a whole paragraph is
 written as that block and kept, while one that leaves a block the document cannot read back,
 such as a list beside a list of its kind, is refused: the document
 stays as it was and the suggestion stays open. The person accepting cannot change the text, so
-the refusal (`acceptRefusal`) says what the text writes where it lands and names what they can
+the refusal (`acceptRefusal`) says what the text writes where it lands - for a same-id rewrite of
+a typed block, in the block that typed block stands in - and names what they can
 do (reject the suggestion, or reply asking for text the block can hold), never an edit-route
 operation; it says the text empties a paragraph only when the text renders no content, and then
 offers deleting the paragraph only where the rest of its block stands without it, and the whole

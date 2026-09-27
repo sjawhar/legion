@@ -434,12 +434,13 @@ func deleteText(t *testing.T, handler http.Handler, artifactID, find string) {
 	}
 }
 
-// Two lists of one kind side by side read back as one list, so an accept that leaves them so is
-// refused wherever they meet, the document's own level included: a list written beside one, text
-// that joins away what stood between two, or blocks an accept writes where a callout it rewrites
-// or consumes stood. The refusal names what reads back and advises rejecting, since no text over
-// the match keeps two lists apart where the join removes what stood between them.
-func TestAcceptingASuggestionRefusesListsThatReadBackAsOne(t *testing.T) {
+// An accept is refused where the document it would store reads back otherwise. Two lists of one
+// kind side by side read back as one list wherever they meet, the document's own level included:
+// a list written beside one, text that joins away what stood between two, or blocks an accept
+// writes where a callout it rewrites or consumes stood. A task item emptied of its text reads back
+// as a plain item. The refusal names what reads back and advises rejecting, since no text over the
+// match keeps two lists apart where the join removes what stood between them.
+func TestAcceptingASuggestionRefusesWhatTheDocumentReadsBackOtherwise(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
@@ -461,6 +462,7 @@ func TestAcceptingASuggestionRefusesListsThatReadBackAsOne(t *testing.T) {
 		{"a list consuming a callout beside a list", "Intro.\n\n" + callout + "\n\n- After here.\n", "Body. After", "- a", bullets, ""},
 		// Two lists the document already reads back as one (an edit that deletes what stood between
 		// them leaves them so) are not this accept's, and do not let it join two more.
+		{"nothing in a task item", "- [ ] Body.\n- [x] two\n", "Body.", "", "a task item reads back as a plain list item", ""},
 		{"nothing between two lists, beside two that already read back as one", "- a\n\nSep.\n\n- b\n\nIntro.\n\n- c\n\nBody.\n\n- d\n", "Body.", "", bullets, "Sep."},
 	} {
 		t.Run(test.name, func(t *testing.T) {

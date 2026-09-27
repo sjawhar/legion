@@ -328,12 +328,13 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			}
 		}
 		if accept {
+			if next, err = settleAccepted(tree, next, range_, with); err != nil {
+				return err
+			}
 			if !insideAsk(at) {
 				if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
 					return err
 				}
-			}
-			if checkAcceptedShape(at) {
 				if err := refuseReshapedAccept(tree, next, range_, at, with, replacement); err != nil {
 					return err
 				}
@@ -351,7 +352,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			if err := refuseTypedAcceptRoundTrip(tree, next, range_, at, with, replacement); err != nil {
 				return err
 			}
-			if err := refuseAcceptedDocumentShape(tree, next, with); err != nil {
+			if err := refuseMisreadAccept(tree, next, range_, with); err != nil {
 				return err
 			}
 		}
@@ -364,76 +365,6 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		}
 		return nil
 	})
-}
-
-// checkAcceptedShape reports whether the document-level shape guard decides an accepted
-// suggestion. A typed block has its own content rule, so its round trip is checked by
-// refuseTypedAcceptRoundTrip instead. An ask's semantic round trip is refuseBrokenAsks.
-func checkAcceptedShape(at pmdoc.TextblockAt) bool {
-	for _, ancestor := range at.Ancestors {
-		if pmdoc.IsTypedBlock(ancestor.Type) {
-			return false
-		}
-	}
-	return true
-}
-
-// insideAsk reports whether an accepted suggestion lands in an ask. refuseBrokenAsks is the ask
-// round-trip and semantic rule, so it names an empty question or another invalid ask before a
-// document-level parser failure can.
-func insideAsk(at pmdoc.TextblockAt) bool {
-	for _, ancestor := range at.Ancestors {
-		if ancestor.Type == "ask" {
-			return true
-		}
-	}
-	return false
-}
-
-// refuseTypedAcceptRoundTrip checks every non-ask typed block an accept changed, from the
-// innermost one out. A typed block's content rule decides whether a replacement fits, but it
-// cannot see how the block's markdown reads back: two lists of one kind side by side in it read
-// back as one. A shape that was already broken is not this accept's refusal; a changed readable
-// block that renders back differently is.
-func refuseTypedAcceptRoundTrip(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node) error {
-	for _, beforeBlock := range at.Ancestors {
-		if beforeBlock.Type == "ask" || !pmdoc.IsTypedBlock(beforeBlock.Type) || pmdoc.BlockShapeError(beforeBlock) != nil {
-			continue
-		}
-		id := blockID(beforeBlock)
-		var afterBlock *pmdoc.Node
-		pmdoc.Walk(after, func(node *pmdoc.Node) bool {
-			if node.Type == beforeBlock.Type && blockID(node) == id {
-				afterBlock = node
-				return false
-			}
-			return true
-		})
-		if afterBlock == nil {
-			continue
-		}
-		if broke := pmdoc.BlockShapeError(afterBlock); broke != nil {
-			return &ErrInvalidOp{Field: "replace_with", Reason: acceptRefusal(before, after, match, at, with, replacement, broke)}
-		}
-	}
-	return nil
-}
-
-// refuseAcceptedDocumentShape refuses an accept that leaves a document which read back as written
-// reading back as blocks of another shape. The checks before it read each block the accept changed
-// on its own, or its typed block whole; this one reads the document's blocks beside each other,
-// where a list written beside a list of its kind reads back as one list. A document that already
-// read back otherwise is left to those checks. The refusal names what reads back and advises only
-// rejecting: where the accept removes what stood between two lists, no text over the match keeps
-// them apart.
-func refuseAcceptedDocumentShape(before, after *pmdoc.Node, with string) error {
-	broke := pmdoc.DocumentShapeError(after)
-	if broke == nil || pmdoc.DocumentShapeError(before) != nil {
-		return nil
-	}
-	return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
-		"replace_with %q leaves blocks the document reads back otherwise (%v); reject the suggestion", with, broke,
-	)}
 }
 
 // refuseBrokenAsks refuses the first ask a write left unreadable whose id the document could read

@@ -273,12 +273,7 @@ func BlockReadError(block *Node) error {
 // is nil when it reads back so, or the parser's refusal of the markdown. What a textblock holds is
 // not compared.
 func BlockShapeError(block *Node) error {
-	return DocumentShapeError(readAlone(block))
-}
-
-// DocumentShapeError is BlockShapeError for a whole document, which also reads each document-level
-// block beside the ones around it: two lists of one kind side by side read back as one list.
-func DocumentShapeError(doc *Node) error {
+	doc := readAlone(block)
 	markdown, err := Render(doc)
 	if err != nil {
 		return err
