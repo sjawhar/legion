@@ -726,14 +726,116 @@ describe("executeDispatchTool", () => {
       },
     ]);
     expect(reply.details).toMatchObject({ message: "reply-1", in_reply_to: parent, posted: true });
-    expect(reply.text).toBe(`Replied to message ${parent} with message reply-1`);
+    expect(reply.text).toBe(
+      `Replied to message ${parent} with message reply-1. ` +
+        `dispatch_read({message: "${parent}"}) reads the conversation back.`
+    );
     expect(onIssue.details).toMatchObject({ issue: "LEGION-3", message: "message-9" });
     expect(byRef.details).toMatchObject({ issue: "LEGION-3", message: "message-9" });
   });
 
-  // Dispatch allows one reply per delivery attempt: a second call is answered with the reply
-  // already stored, at 200, and posts nothing. Reporting that as a send would tell a session it
-  // answered a human it never answered - most often over the host's own automatic BTW reply.
+  // Once the session has answered, other text is its follow-up: Dispatch threads it under the
+  // session's first reply and answers 201 with a message whose parent is that reply, not the
+  // human's message.
+  test("reports a follow-up threaded under the session's first reply", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (new URL(String(url)).pathname !== `/api/v1/messages/${parent}/reply`) {
+        throw new Error("unexpected request");
+      }
+      return response({
+        id: "reply-2",
+        issue_key: null,
+        body: JSON.parse(init?.body as string).body,
+        in_reply_to: "reply-1",
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: { body: "Done: the dashboard is at /dash.", in_reply_to: parent },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "ses_reader",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toMatchObject({
+      message: "reply-2",
+      in_reply_to: parent,
+      posted: true,
+      follows: "reply-1",
+    });
+    expect(result.text).toBe(
+      `Replied to message ${parent} with message reply-2, a follow-up threaded under your ` +
+        `reply reply-1. dispatch_read({message: "${parent}"}) reads the conversation back.`
+    );
+  });
+
+  // A human's direct message belongs to no issue, so a session reads that conversation back by
+  // the message id alone - even in a Legion pane, where LEGION_ISSUE names unrelated work.
+  test("dispatch_read reads a direct-message conversation by message id", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const paths: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      paths.push(target.pathname);
+      if (target.pathname !== `/api/v1/messages/${parent}`) throw new Error("unexpected request");
+      return response({
+        message: {
+          id: parent,
+          issue_key: null,
+          author: { kind: "user", id: "sami" },
+          body: "Where is the dashboard?",
+          deliveries: [],
+        },
+        replies: [
+          {
+            id: "reply-1",
+            issue_key: null,
+            author: { kind: "session", id: "ses_reader" },
+            body: "On it.",
+            in_reply_to: parent,
+            deliveries: [],
+          },
+          {
+            id: "reply-2",
+            issue_key: null,
+            author: { kind: "session", id: "ses_reader" },
+            body: "Done.",
+            in_reply_to: "reply-1",
+            deliveries: [],
+          },
+        ],
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { message: parent },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "ses_reader",
+      config,
+      env: { LEGION_ISSUE: "LEGION-3" },
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(paths).toEqual([`/api/v1/messages/${parent}`]);
+    expect(result.details).toMatchObject({ message: parent });
+    expect(result.text).toContain(`${parent} · user sami`);
+    expect(result.text).toContain("Body: Where is the dashboard?");
+    expect(result.text).toContain("reply-2 · session ses_reader");
+    expect(result.text).toContain("Body: Done.");
+  });
+
+  // A Dispatch that keeps one reply per delivery attempt answers a second call with the stored
+  // reply, at 200, and posts nothing. Reporting that as a send would tell a session it answered
+  // a human it never answered - most often over the host's own automatic BTW reply.
   test("says nothing was posted when the delivery was already answered", async () => {
     const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {

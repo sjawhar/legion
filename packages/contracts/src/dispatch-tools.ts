@@ -105,6 +105,33 @@ const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
     "issue is required unless in_reply_to names a message delivered to this session, which is the one message with no issue.",
 };
 
+/**
+ * dispatch_read: an issue, a project document, or a ref, exactly as every owned read - or a
+ * `message` alone, which addresses a conversation by any message in it. A human's direct message
+ * to this session and the replies to it belong to no issue or document, so the id is all there is.
+ */
+const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
+  check: (value) => {
+    const input = value as {
+      readonly message?: unknown;
+      readonly issue?: unknown;
+      readonly project?: unknown;
+      readonly artifact?: unknown;
+      readonly ref?: unknown;
+    };
+    if (typeof input.message !== "string") return documentOwnerValidation(true).check(value);
+    return (
+      input.issue === undefined &&
+      input.project === undefined &&
+      input.artifact === undefined &&
+      input.ref === undefined
+    );
+  },
+  message:
+    "Exactly one of issue and project is required; with project, artifact names the document. " +
+    "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.",
+};
+
 /** Component attachment modes an issue write accepts. */
 export const ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"] as const;
 
@@ -615,8 +642,9 @@ export const dispatchToolSpecs = [
       "clear is an ask (dispatch_ask), so it lands in their inbox. Never progress or status updates - Dispatch is a high-signal " +
       "record, not a log. Not a decision (dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " +
       "one sent from the Agents page, which names no issue - pass that message's bare id as in_reply_to and no issue; " +
-      "the reply lands in that conversation, and a second call with the same in_reply_to posts nothing because " +
-      "Dispatch keeps the one reply per message. Every other message names its issue. " +
+      "the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " +
+      "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " +
+      "that conversation back. Every other message names its issue. " +
       `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z
@@ -850,8 +878,10 @@ export const dispatchToolSpecs = [
     name: "dispatch_read",
     example: { issue: "DSP-1" },
     description:
-      "Read an issue or project-document summary, targeted ask, or targeted comment reply chain. Do not use it for document " +
-      "contents; use dispatch_doc_read instead. Supply ref, issue, or project plus artifact. " +
+      "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " +
+      "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " +
+      "or project plus artifact; or message alone, which reads a human's direct message to this session and every " +
+      "reply to it (they belong to no issue). " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       OWNER_REFERENCE,
@@ -860,8 +890,15 @@ export const dispatchToolSpecs = [
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z.string().describe("Project document artifact id, slug, or filename.").optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
+      message: z
+        .string()
+        .describe(
+          "A message id (uuid): reads the conversation it belongs to, the root message and every " +
+            "reply. Name nothing else with it."
+        )
+        .optional(),
     }),
-    validation: documentOwnerValidation(true),
+    validation: readValidation,
   },
   {
     name: "dispatch_search",

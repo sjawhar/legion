@@ -386,6 +386,13 @@ export class DispatchClient {
     ]);
   }
 
+  /** `GET /api/v1/messages/{id}`: the conversation a message belongs to, by any message id in
+   *  it - the root and every reply. It takes no issue, so it reads a human's direct message to
+   *  a session and the replies to it, which belong to none. */
+  async getMessageThread(id: string): Promise<MessageRead> {
+    return this.#json("GET", ["api", "v1", "messages", id]);
+  }
+
   async artifact(
     issue: string,
     input: CreateArtifactInput

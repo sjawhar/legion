@@ -1378,10 +1378,21 @@ export interface UserIssueState {
 
 export type UserState = Record<string, UserIssueState>;
 
-/** A viewer's Clear on one agent's conversation: exchanges whose newest message is at or
- * before `cleared_before` (RFC3339) are hidden for that viewer only. */
+/** One viewer's state for one agent's conversation. Exchanges whose newest message is at or
+ * before `cleared_before` (RFC3339, the viewer's Clear) are hidden for that viewer only;
+ * `read_through` is how far the viewer has read; `unread_replies` counts the session's replies
+ * to messages this viewer sent that are newer than both. */
 export interface UserAgentState {
-  readonly cleared_before: string;
+  readonly cleared_before?: string;
+  readonly read_through?: string;
+  readonly unread_replies: number;
+}
+
+/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, or both. `read_through`
+ * only moves forward; the response is the session's whole `UserAgentState`. */
+export interface UserAgentStateInput {
+  readonly cleared_before?: string;
+  readonly read_through?: string;
 }
 
 /** `GET /api/v1/me/agents/state`: keyed by session ID. */

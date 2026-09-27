@@ -858,15 +858,23 @@ dispatch_message({
 
 Leave `issue` out — there is no issue to post into, and naming one would file your answer on
 unrelated work. Dispatch threads the reply under their message in the same conversation, and the
-human sees it on your agent card. Every other message still names its issue, so keep the `issue`
+human sees it in your conversation on the Agents page, where it shows as an unread reply until
+they read it. Every other message still names its issue, so keep the `issue`
 the frame gave you whenever it gave you one; a `dispatch://KEY/message/<id>` reference names the
 issue its message lives on, so that form is a reply on that issue, not a direct message.
 
-One reply per message they send. A second call with the same `in_reply_to` posts nothing:
-Dispatch answers it with the reply already stored, and the tool result says the message was
-already answered rather than reporting a send. That happens most often when your host answered
-the **BTW** automatically before you got here — read the result before writing again, and wait
-for their next message instead.
+Have more to say after you answered? Call it again with the same `in_reply_to` and the new text:
+Dispatch threads that follow-up under your first reply, and the tool result names the reply it
+follows. The same text again posts nothing, so a retry is safe. Your host may already have
+answered a **BTW** automatically before you got here; a second call is then your follow-up to
+that answer, so read the result before writing again.
+
+Read the whole conversation back — their message and every reply, yours included — with the
+message id alone; it has no issue:
+
+```ts
+dispatch_read({ message: "<the direct message's id, or any reply's>" })
+```
 
 ## Following
 
