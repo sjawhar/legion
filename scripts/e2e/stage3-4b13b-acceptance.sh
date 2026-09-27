@@ -96,8 +96,12 @@ cleanup() {
     printf 'production audit after failure:\n' >&2
     production_audit >&2
   fi
-  daemon_state >"$evidence/final-state.json" 2>/dev/null
-  "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" >"$evidence/final-claims.json" 2>/dev/null
+  # A pass has already captured both in services-stopped and stopped the daemon; a redirection to
+  # the stopped daemon would truncate them.
+  if [ -n "${daemon_pid:-}" ]; then
+    daemon_state >"$evidence/final-state.json" 2>/dev/null
+    "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" >"$evidence/final-claims.json" 2>/dev/null
+  fi
   stop_pid "$watcher_pid"
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
@@ -1011,7 +1015,7 @@ printf '%s\n' "$tester_own" >"$evidence/tester-own-summary-head-$root1.txt"
 instructed "$root1" tester testing || note "$root1's tester was not instructed before it completed; its summary is its own"
 [ -n "$planner_line" ] || soft "no planning phase-finished notice reached $root1's architect"
 grep -qF 'verdict:' <<<"$planner_line" && soft "the planner's phase-finished notice carries a verdict"
-note "tester notice: $({ grep -o 'summary: TESTER-SUMMARY[^\\]*' <<<"$tester_line" || true; } | head -1) / $(grep -o 'verdict: [a-z]*' <<<"$tester_line" || true)"
+note "tester notice: $({ grep -o 'summary: \\"TESTER-SUMMARY[^\\]*' <<<"$tester_line" || true; } | head -1) / $(grep -o 'verdict: [a-z]*' <<<"$tester_line" || true)"
 note "planner notice (control): verdict line absent: $(grep -c 'verdict:' <<<"$planner_line" || true)"
 pass
 
@@ -1225,6 +1229,7 @@ pass
 
 begin services-stopped
 daemon_state >"$evidence/final-state.json"
+"$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" >"$evidence/final-claims.json"
 stop_pid "$watcher_pid"; watcher_pid=
 stop_pid "$daemon_pid"; daemon_pid=
 stop_dispatch() { stop_pid "$dispatch_pid"; dispatch_pid=; }
