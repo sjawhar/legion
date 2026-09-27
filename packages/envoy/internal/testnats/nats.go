@@ -248,10 +248,12 @@ func StartNkeyAuthorized(t testing.TB, user string) string {
 	return uri
 }
 
-// answering waits, within connectTimeout, for the server at uri to speak the client protocol: a
-// connection with no credential is admitted, or refused with the server's own authorization
-// violation. Testcontainers can report a mapped port before the NATS protocol handshake, and a
-// dial then ends in EOF or a refusal that says nothing about the server's users.
+// answering waits, within connectTimeout, for the server at uri to refuse a connection with no
+// credential with its own authorization violation: the proof it speaks the client protocol and
+// enforces its nkey users. Testcontainers can report a mapped port before the NATS protocol
+// handshake, and a dial then ends in EOF or a refusal that says nothing about the server's users.
+// A server that admits the connection enforces no users, and every refusal a test expects of it
+// would pass for the wrong reason, so that fails the test.
 func answering(t testing.TB, uri string) {
 	t.Helper()
 	deadline := time.Now().Add(connectTimeout)
@@ -260,6 +262,7 @@ func answering(t testing.TB, uri string) {
 		var conn *natsgo.Conn
 		if conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect()); err == nil {
 			conn.Close()
+			t.Fatalf("NATS at %s admitted a client with no credential: it enforces no nkey users", uri)
 			return
 		}
 		if errors.Is(err, natsgo.ErrAuthorization) {

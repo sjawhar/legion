@@ -246,10 +246,12 @@ func StartNkeyAuthorized(t testing.TB, user string) string {
 	return url
 }
 
-// answering returns once the server at url speaks the client protocol: a connection with no
-// credential is admitted, or refused with the server's own authorization violation. The log line
-// the container's start waits for can come before a connection there is served, and until then a
-// dial ends in EOF or a refusal that says nothing about the server's users.
+// answering returns once the server at url refuses a connection with no credential with its own
+// authorization violation: the proof it speaks the client protocol and enforces its nkey users. The
+// log line the container's start waits for can come before a connection there is served, and until
+// then a dial ends in EOF or a refusal that says nothing about the server's users. A server that
+// admits the connection enforces no users, and every refusal a test expects of it would pass for
+// the wrong reason, so that fails the test.
 func answering(t testing.TB, url string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), readinessTimeout)
@@ -258,7 +260,7 @@ func answering(t testing.TB, url string) {
 		conn, err := nats.Connect(url, nats.Timeout(time.Second), nats.NoReconnect())
 		if err == nil {
 			conn.Close()
-			return
+			t.Fatalf("NATS at %s admitted a client with no credential: it enforces no nkey users", url)
 		}
 		if errors.Is(err, nats.ErrAuthorization) {
 			return
