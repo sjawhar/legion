@@ -33,12 +33,12 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "packages/pi-envoy/scripts/grant-rig/setup.sh": "profiles/l12rig",
   "packages/pi-envoy/scripts/smoke-btw.sh": "tmux kill-session",
   "packages/pi-envoy/scripts/smoke-delivery.sh": "tmux kill-session",
-  "scripts/e2e/controller-start-tmux.sh": "$p",
+  "scripts/e2e/controller-start-tmux.sh": "needs a socket",
   "scripts/e2e/lib/check-model-route.sh": "$control",
   "scripts/e2e/lib/install-model-gateway.sh": "realpath -m",
   "scripts/e2e/stage2-tmux-supervision.sh": "realpath -m",
-  "scripts/e2e/stage3-4b13b-acceptance.sh": "$p",
-  "scripts/e2e/stage3-devbox-workflow.sh": "$p",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "needs a socket",
+  "scripts/e2e/stage3-devbox-workflow.sh": "needs a socket",
   "scripts/e2e/stage4b-sandbox-tree.sh": "$p",
 };
 
@@ -446,19 +446,14 @@ describe("signals", () => {
       expect(bash("killall sleep")).toContain("by name or pattern");
       expect(bash("sudo pkill -f 'node server'")).toContain("pkill");
       expect(bash('kill "$(cat server.pid)"')).toContain("cannot resolve the pid");
-      expect(bash("tmux kill-server")).toContain("pane's server");
-      expect(bash("tmux -L scratch kill-server")).toBeUndefined();
-      expect(
-        guard.bash("tmux -L legion-legion kill-server", workspace, {
-          ...env,
-          LEGION_PROJECT: "legion",
-        })
-      ).toContain("daemon's private server");
+      expect(bash("tmux kill-server")).toContain("needs a socket");
+      expect(bash("tmux -L scratch kill-server")).toContain("needs a socket");
+      expect(bash("tmux -L scratch new-session -d; tmux -L scratch kill-server")).toBeUndefined();
+      expect(bash(`echo ${process.ppid} | xargs kill`)).toContain("standard input");
       const pidFile = path.join(scratch, "mine", "child.pid");
       expect(
         bash(`sleep 60 & echo "$!" > ${pidFile}; pid="$(<${pidFile})"; kill "$pid"`)
       ).toBeUndefined();
-      expect(bash(`echo ${process.ppid} | xargs kill`)).toContain("standard input");
       expect(
         bash(
           `pid_file=${pidFile}; sleep 60 & echo "$!" > "$pid_file"; pid="$(<"$pid_file")"; kill "$pid"`

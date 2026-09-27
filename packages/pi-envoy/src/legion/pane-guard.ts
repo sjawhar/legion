@@ -105,6 +105,8 @@ interface State {
   output: Expansion | undefined;
   /** Files this shell wrote with a pid it started, indexed by resolved path. */
   readonly pidFiles: Map<string, Expansion>;
+  /** Explicit tmux sockets this shell started before it tries to stop them. */
+  readonly startedTmux: Set<string>;
   /** Functions available in this shell, with their definition source for diagnostic locations. */
   functions: Map<string, FunctionDefinition>;
   /** EXIT handlers run when this shell finishes, after its last assignment. */
@@ -775,6 +777,7 @@ function clone(st: State): State {
     traps: [...st.traps],
     runningFunctions: new Set(st.runningFunctions),
     pidFiles: new Map(st.pidFiles),
+    startedTmux: new Set(st.startedTmux),
   };
 }
 
@@ -1492,42 +1495,41 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       }
       return;
     case "tmux": {
+      let socket: Arg | undefined;
+      let socketIsPath = false;
+      for (let i = 0; i < rest.length; i += 1) {
+        const text = literalText(rest[i]?.exp);
+        if (text === "-L" || text === "-S" || text === "--socket") {
+          socket = rest[i + 1];
+          socketIsPath = text !== "-L";
+          i += 1;
+        } else if (text?.startsWith("--socket=")) {
+          socket = { text, exp: [literal(text.slice(9))] };
+          socketIsPath = true;
+        }
+      }
+      const socketKey = socket === undefined ? undefined : (literalText(socket.exp) ?? socket.text);
+      const startsServer = rest.some((arg) =>
+        /^(?:new|new-session)$/.test(literalText(arg.exp) ?? "")
+      );
+      if (startsServer && socketKey !== undefined) st.startedTmux.add(socketKey);
       const killing = rest.find((arg) =>
         /^kill-(?:server|session|window|pane)$/.test(literalText(arg.exp) ?? "")
       );
       if (killing === undefined) return;
-      let socket: string | undefined;
-      let explicitSocket = false;
-      for (let i = 0; i < rest.length; i += 1) {
-        const text = literalText(rest[i]?.exp);
-        if (text === "-L" || text === "-S" || text === "--socket") {
-          explicitSocket = true;
-          socket = literalText(rest[i + 1]?.exp);
-          i += 1;
-        } else if (text?.startsWith("--socket=")) {
-          explicitSocket = true;
-          socket = text.slice(9);
-        }
-      }
-      const ownSocket = ctx.env.TMUX?.split(",")[0];
-      const daemonSocket =
-        ctx.env.LEGION_PROJECT === undefined
-          ? undefined
-          : `legion-${ctx.env.LEGION_PROJECT.toLowerCase()}`;
       if (
-        explicitSocket &&
-        (socket === undefined || (socket !== ownSocket && socket !== daemonSocket))
+        socket !== undefined &&
+        socketIsPath &&
+        judgePath(socket.exp, st, ctx, { follow: true, overwrite: false }).ok
       ) {
         return;
       }
-      const target =
-        socket !== undefined && socket === daemonSocket
-          ? "the daemon's private server"
-          : "the pane's server";
+      if (socketKey !== undefined && st.startedTmux.has(socketKey)) return;
       throw new Refusal(
         site.snippet,
         site.line,
-        `\`tmux ${literalText(killing.exp)}\` ends ${target} and the processes in it, which a pane did not start`
+        `\`tmux ${literalText(killing.exp)}\` needs a socket this shell started; the default and an ` +
+          "unproven socket can end panes and processes this pane did not start"
       );
     }
     default:
@@ -1824,6 +1826,7 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
     argv0: undefined,
     output: undefined,
     pidFiles: new Map(),
+    startedTmux: new Set(),
     functions: new Map(),
     traps: [],
     runningFunctions: new Set(),
@@ -2293,6 +2296,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     argv0: undefined,
     output: undefined,
     pidFiles: new Map(),
+    startedTmux: new Set(),
     functions: new Map(),
     traps: [],
   });
