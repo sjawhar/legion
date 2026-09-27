@@ -473,7 +473,8 @@ func (l sourceLines) blankAtOrAfterTypedList(list ast.Node, directive *typedDire
 // by a blank line after an item that does not end in a list, or, when the last item does not, by
 // blank lines between it and what the quote goes on with: one before a quote, a list, an item or a
 // footnote definition, and two before anything else or at the quote's end; in a typed block inside
-// the quote, one before anything and two at its end.
+// the quote, one before anything and two at its fence, three where no fence closes it, and one
+// more of each after an item ending in a quote.
 func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective bool, lines sourceLines) (bool, string) {
 	// Blank lines after an item that ends in a list are that list's. In a typed block inside the
 	// quote, one after an item that ends in a quote is that quote's, and more spread the list.
@@ -515,15 +516,23 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 		within = directive
 	}
 	if next == nil || !isAncestor(within, next) {
-		// At the end of the quote, or of a typed block inside it before its closing fence.
+		// At the end of the quote, or of a typed block inside it before its closing fence. A typed
+		// block no fence closes runs to the quote's end, which takes a third blank line, and an
+		// item ending in a quote gives that quote one more (least).
 		blanks := lines.blanksEnding(next, outerBlankLineAt(depth), blank)
-		if typed, ok := within.(*typedDirective); ok && typed.Closed {
-			blanks = lines.blanksBefore(typed.closer, blank)
+		need := 2
+		if typed, ok := within.(*typedDirective); ok {
+			if typed.Closed {
+				blanks = lines.blanksBefore(typed.closer, blank)
+			} else {
+				need = 3
+			}
+			need += least(last) - 1
 		} else if typed, ok := ancestor[*typedDirective](within); ok && typed.Closed && (next == nil || !isAncestor(typed, next)) {
 			// A quote in a typed block that nothing after the list goes on with ends at its fence.
 			blanks = lines.blanksBefore(typed.closer, blank)
 		}
-		return blanks >= 2, ""
+		return blanks >= need, ""
 	}
 	blanks := lines.blanksBefore(startOf(next), blank)
 	switch {

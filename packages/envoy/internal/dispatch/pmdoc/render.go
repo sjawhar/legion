@@ -281,7 +281,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.enter(n)
 		r.quoteDepth++
 		r.blocksNoTrailing(n.Children, prefix+"> ")
-		r.blanksEndingQuotedList(n.Children, prefix+"> ")
+		r.blanksEndingQuotedList(n.Children, prefix+"> ", false)
 		r.quoteDepth--
 		r.leave()
 	case "bullet_list", "ordered_list":
@@ -370,7 +370,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.typed = &typedScope{prefix: prefix, colons: colons, quotes: r.quoteDepth}
 		r.enter(n)
 		r.blocksNoTrailing(n.Children, prefix)
-		r.blanksEndingQuotedList(n.Children, prefix)
+		r.blanksEndingQuotedList(n.Children, prefix, true)
 		r.leave()
 		r.typed = outer
 		r.writeSyntax("\n" + prefix + fence)

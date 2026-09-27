@@ -177,14 +177,19 @@ func spacedAfter(list *Node, quoted bool) *Node {
 }
 
 // blanksEndingQuotedList writes the two blank lines that, at the end of a quote or of a typed block
-// inside one, spread the list its blocks end in, where nothing else does.
-func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string) {
+// inside one (atFence), spread the list its blocks end in, where nothing else does - three before a
+// typed block's fence where the list's last item ends in a quote, which takes one of them.
+func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string, atFence bool) {
 	last := blocks[len(blocks)-1]
 	if !isList(last) || r.inFootnote || r.quoteDepth == 0 {
 		return
 	}
 	if spaced := spacedAfter(last, true); spaced.Attrs["spread"] == true && !spreadByItsOwnLines(spaced, true, r.itemDepth > 0) {
-		r.writeSyntax(strings.Repeat("\n"+strings.TrimRight(prefix, " "), 2))
+		blanks := 2
+		if item := spaced.Children[len(spaced.Children)-1]; atFence && r.inQuotedTypedBlock() && item.Children[len(item.Children)-1].Type == "blockquote" {
+			blanks = 3
+		}
+		r.writeSyntax(strings.Repeat("\n"+strings.TrimRight(prefix, " "), blanks))
 	}
 }
 
