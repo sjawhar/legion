@@ -188,8 +188,11 @@ thread open with exit 0. A newest comment that is a draft in a pending review ne
 (`left open <url> — newest reply by <login> is an unsubmitted draft in a pending review`). GitHub
 shows a draft only to its author, so a caller posting as the opener's account would otherwise
 resolve on an acceptance nobody submitted. For every caller, then, a thread is resolved only when
-its newest submitted comment is the opener's `Accepted:`; a caller's own draft newer than that can
-only make it leave the thread open. A newest comment with no `state` (the query stopped selecting
+its newest submitted comment is the opener's `Accepted:`, or, on a thread a bot account opened
+whose comment and review carry no Legion footer (`<!-- legion:`), the pull request author's
+disposition, `Fixed in <commit>: …` or `Declined: …` as its first line (`disposedByAuthor`; a bot
+never posts `Accepted:`, and a Legion reviewer's thread still needs its own). A caller's own draft
+newer than that can only make it leave the thread open. A newest comment with no `state` (the query stopped selecting
 it), or an unresolved thread with no comments, exits 1 before anything is resolved. The Go CLI's
 `threads resolve` (`packages/daemon-go/cmd/legion/threads.go`) applies the same rule, whitespace,
 pending drafts and both refusals included; `threads_test.go` and `review-threads.test.ts` share

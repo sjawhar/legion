@@ -263,6 +263,7 @@ later phase keeps it current rather than replacing it:
 resolved <thread URL>
 left open <thread URL> — newest reply by <login> is not an acceptance
 left open <thread URL> — newest reply by <login> is an unsubmitted draft in a pending review
+left open <thread URL> — newest reply by <login> is not the opener's acceptance or the pull request author's disposition (Fixed in <commit>: … or Declined: …)
 
 **Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
@@ -316,9 +317,13 @@ this proof.
   In a Legion pane, the **implementer** runs the command before every push that answers a review
   (the corrective push and the final `.legion/` deletion push) and pastes its output into the
   `Threads` section. The command resolves each unresolved thread whose newest submitted comment is
-  the opener's own `Accepted:` reply, one `resolveReviewThread` per thread, prints `resolved <url>`
-  or `left open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the
-  thread's URL and GitHub's message when GitHub refuses one.
+  the opener's own `Accepted:` reply. It also resolves each thread a bot account opened (a CI
+  bot's, whose comment and review carry no Legion footer, `<!-- legion:`) once the newest
+  submitted comment is the pull request author's disposition, `Fixed in <commit>: …` or
+  `Declined: …` as its first line: a bot never posts `Accepted:`. A Legion reviewer's thread still
+  needs the reviewer's `Accepted:`. It makes one `resolveReviewThread` per thread, prints
+  `resolved <url>` or `left open <url> — newest reply by <login> is …` naming why, and exits 1
+  naming the thread's URL and GitHub's message when GitHub refuses one.
 
   Without a grant, page through `reviewThreads`, skip `isResolved: true`, and compare the opener
   with the newest comment. Query shape, inside `repository { pullRequest { … } }`:
@@ -335,8 +340,11 @@ this proof.
   ```
 
   Resolve only when the newest comment is submitted, its `author { login }` equals the opener's,
-  and its `body`, after removing leading spaces, tabs, CR, and LF, begins `Accepted:`. For each
-  such thread:
+  and its `body`, after removing leading spaces, tabs, CR, and LF, begins `Accepted:`. A thread a
+  bot opened is resolved instead when the newest submitted comment is the pull request author's
+  and its first line is `Fixed in <commit>: …` or `Declined: …`; select the opener's
+  `author { __typename login }` and `body`, its review's `body`, and the pull request's
+  `author { login }` to tell. For each such thread:
 
   ```graphql
   mutation($threadId: ID!) {

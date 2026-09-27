@@ -40,8 +40,9 @@ minutes before the architect changed the order.
    on your tip, one push. Set the PR body's `Threads` line to *answered, awaiting `Accepted:`*.
    Report the new head to the architect over Envoy and with the `legion` tool's `handoff_complete`; the
    architect resumes the reviewer on that head.
-4. **`legion threads resolve` waits for the `Accepted:`.** The command resolves only a thread whose
-   newest comment is the opener's own `Accepted:`; run it early and it prints `left open`. The
+4. **`legion threads resolve` waits for the `Accepted:`.** The command resolves a reviewer's thread only when
+   its newest comment is the opener's own `Accepted:` (a bot's thread, since LEGION-208, on the
+   author's disposition instead); run it early and it prints `left open`. The
    architect's next resume of the implementer does two things in one round: `threads resolve`
    (Threads line to `0 unresolved`, output quoted) and, if the re-review was clean, the `.legion/`
    deletion push the reviewer then approves by SHA.
