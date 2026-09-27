@@ -331,6 +331,18 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     `does not declare attribute "priority"`,
 		},
 		{
+			// The browser editor's parser reads a name up to a space, so `title\tkind` is one name,
+			// which the schema does not declare.
+			name:     "a tab after a bare attribute",
+			markdown: ":::callout{#block-1 title\tkind=\"warning\"}\nBody.\n:::\n",
+			want:     "malformed directives are not supported",
+		},
+		{
+			name:     "a tab after a bare attribute at the end",
+			markdown: ":::callout{#block-1 kind=\"warning\" title\t}\nBody.\n:::\n",
+			want:     "malformed directives are not supported",
+		},
+		{
 			name:     "Pandoc fenced div",
 			markdown: "::: {.callout}\nBody.\n:::\n",
 			want:     "Pandoc fenced divs and malformed directives are not supported",

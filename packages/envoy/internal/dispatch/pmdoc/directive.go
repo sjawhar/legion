@@ -295,8 +295,9 @@ func parseDirectiveAttributes(value string) (Attrs, error) {
 				return nil, fmt.Errorf("repeated attribute %q", name)
 			}
 			// A name alone is an empty value: the browser editor writes an attribute holding
-			// the empty string so (`title`), and reads it back as `title=""`.
-			if offset == len(value) || unicode.IsSpace(rune(value[offset])) {
+			// the empty string so (`title`), and reads it back as `title=""`. It reads a name up
+			// to a space, so a tab after one is part of it.
+			if offset == len(value) || value[offset] == ' ' {
 				attrs[name] = ""
 				continue
 			}
