@@ -629,3 +629,82 @@ func waitFor(t *testing.T, what string, ch <-chan string) string {
 }
 
 var errBoom = errors.New("boom")
+
+// fakeEnroller is the broker as the machine sees it: it records every enrollment and revocation,
+// mints ids, and fails what the test told it to.
+type fakeEnroller struct {
+	mu          sync.Mutex
+	enrollments []PodEnrollment
+	revoked     []string
+	enrollErr   error
+	revokeErr   error
+	revokeFails int // Revoke fails this many times, then succeeds
+	next        int
+}
+
+func (f *fakeEnroller) Enroll(_ context.Context, e PodEnrollment) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.enrollErr != nil {
+		return "", f.enrollErr
+	}
+	f.enrollments = append(f.enrollments, e)
+	f.next++
+	return fmt.Sprintf("enr-%d", f.next), nil
+}
+
+func (f *fakeEnroller) Revoke(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.revokeFails > 0 {
+		f.revokeFails--
+		return errors.New("broker unreachable")
+	}
+	if f.revokeErr != nil {
+		return f.revokeErr
+	}
+	f.revoked = append(f.revoked, id)
+	return nil
+}
+
+func (f *fakeEnroller) enrolled() []PodEnrollment {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.enrollments)
+}
+
+func (f *fakeEnroller) revocations() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.revoked)
+}
+
+type permanentErr struct{ msg string }
+
+func (e permanentErr) Error() string   { return e.msg }
+func (e permanentErr) Permanent() bool { return true }
+
+var testIdentity = &AgentSecretsIdentity{Thumbprint: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs", PodToken: "eyJhbGciOiJSUzI1NiJ9.e30.sig"}
+
+// withSecrets gives the harness a broker; hello sends the identity with every hello from then on.
+func (h *harness) withSecrets() *fakeEnroller {
+	h.t.Helper()
+	f := &fakeEnroller{}
+	h.deps.Secrets = f
+	h.start(h.store.load(h.token))
+	return f
+}
+
+// helloWithIdentity is the shim's hello2 carrying the pod's identity at the claim's generation,
+// with its connection in the directory, as connect (`:501`) registers it.
+func (h *harness) helloWithIdentity() {
+	h.t.Helper()
+	h.conns.Register(h.token, h.conn)
+	h.must(StreamHello{Claim: h.token, Generation: h.generation(), AgentSecrets: testIdentity})
+}
+
+// exit is the agent reporting its own end, fenced on the claim's generation and session.
+func (h *harness) exit() {
+	h.t.Helper()
+	h.must(RequestExit{Claim: h.token, Generation: h.generation(), Session: session, Reason: "done"})
+}

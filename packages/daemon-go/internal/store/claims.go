@@ -23,6 +23,7 @@ var _ supervise.Store = (*Store)(nil)
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.session,
 	c.session_file, c.locator, c.state, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost, c.last_start_row, c.serving_generation,
+	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation,
 	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -46,11 +47,18 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		}
 		locator = encoded
 	}
+	var enrollmentID, enrollmentIncarnation *string
+	if c.Enrollment != nil {
+		enrollmentID = &c.Enrollment.ID
+		if c.Enrollment.Incarnation != "" {
+			enrollmentIncarnation = &c.Enrollment.Incarnation
+		}
+	}
 	_, err := db.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation,
 		session, session_file, locator, state, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, workspace_lost, last_start_row,
-		serving_generation)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		serving_generation, agent_secrets_enrollment, agent_secrets_enrollment_incarnation)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation,
 		session = excluded.session, session_file = excluded.session_file,
@@ -61,11 +69,14 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		capability_hash = excluded.capability_hash, uncertain_streak = excluded.uncertain_streak,
 		workspace_lost = excluded.workspace_lost, last_start_row = excluded.last_start_row,
 		serving_generation = excluded.serving_generation,
+		agent_secrets_enrollment = excluded.agent_secrets_enrollment,
+		agent_secrets_enrollment_incarnation = excluded.agent_secrets_enrollment_incarnation,
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation),
 		c.Session, c.SessionFile, locator, string(c.State),
 		c.Budgets.LaunchFailures, c.Budgets.Deaths, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.WorkspaceLost, c.LastStartRow, int64(c.ServingGeneration),
+		enrollmentID, enrollmentIncarnation,
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -177,23 +188,24 @@ func (s *Store) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryI
 
 func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	var (
-		c                   supervise.Claim
-		token, role, state  string
-		generation          int64
-		locator             []byte
-		deliveryID, task    *string
-		markedBy            *string
-		deliveryPhase       *string
-		deliveryGeneration  *int64
-		servingGeneration   int64
-		queuedAt, delivered *time.Time
-		confirmed           *time.Time
-		interrupted         *bool
+		c                          supervise.Claim
+		token, role, state         string
+		generation                 int64
+		locator                    []byte
+		deliveryID, task           *string
+		markedBy                   *string
+		deliveryPhase              *string
+		deliveryGeneration         *int64
+		servingGeneration          int64
+		enrollmentID, enrollmentIC *string
+		queuedAt, delivered        *time.Time
+		confirmed                  *time.Time
+		interrupted                *bool
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
-		&c.LastStartRow, &servingGeneration,
+		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC,
 		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
@@ -212,6 +224,9 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			return supervise.Claim{}, fmt.Errorf("read claim %s: %w", token, err)
 		}
 		c.Locator = &loc
+	}
+	if enrollmentID != nil && enrollmentIC != nil {
+		c.Enrollment = &supervise.Enrollment{ID: *enrollmentID, Incarnation: *enrollmentIC}
 	}
 	if deliveryID != nil {
 		c.Pending = &supervise.Delivery{

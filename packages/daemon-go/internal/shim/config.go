@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -95,4 +96,44 @@ func ReadProviderEnv(dir string, lookup func(string) (string, bool)) ([]string, 
 		env = append(env, name+"="+strings.TrimSpace(string(body)))
 	}
 	return env, nil
+}
+
+// ReadAgentSecretsFlags reads --agent-secrets-key-dir, --pod-token-file and --agent-secrets-bin,
+// the Sandbox runtime's three flags for a pod the daemon enrolls with the secrets broker: the
+// tmpfs directory the key is generated in and the enrollment id is written to, the projected
+// service-account token the hello carries, and the `agent-secrets` binary that generates the
+// key and renews the lease. All three or none; each path is checked before anything is dialled,
+// naming its flag. set is which flags were given.
+func ReadAgentSecretsFlags(set map[string]bool, keyDir, tokenFile, binary string) (*AgentSecrets, error) {
+	given := 0
+	for _, name := range []string{"agent-secrets-key-dir", "pod-token-file", "agent-secrets-bin"} {
+		if set[name] {
+			given++
+		}
+	}
+	switch given {
+	case 0:
+		return nil, nil
+	case 3:
+	default:
+		return nil, errors.New("--agent-secrets-key-dir, --pod-token-file and --agent-secrets-bin are given together or not at all")
+	}
+	info, err := os.Stat(keyDir)
+	if err != nil {
+		return nil, fmt.Errorf("--agent-secrets-key-dir %s: %w", keyDir, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("--agent-secrets-key-dir %s is not a directory (mode %s)", keyDir, info.Mode())
+	}
+	if _, err := os.Stat(tokenFile); err != nil {
+		return nil, fmt.Errorf("--pod-token-file %s is unreadable: %w", tokenFile, err)
+	}
+	if info, err := os.Stat(binary); err != nil {
+		return nil, fmt.Errorf("--agent-secrets-bin %s: %w", binary, err)
+	} else if info.IsDir() {
+		return nil, fmt.Errorf("--agent-secrets-bin %s is a directory, not an executable file", binary)
+	} else if info.Mode().Perm()&0o111 == 0 {
+		return nil, fmt.Errorf("--agent-secrets-bin %s is not executable (mode %s)", binary, info.Mode())
+	}
+	return &AgentSecrets{KeyDir: keyDir, TokenFile: tokenFile, Binary: binary}, nil
 }

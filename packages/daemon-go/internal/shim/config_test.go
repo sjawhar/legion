@@ -132,3 +132,41 @@ func TestReadProviderEnvExportsFilesSkipsFilePointersAndRefusesShadows(t *testin
 		t.Fatalf("ReadProviderEnv(missing) = %v; want a refusal naming the flag and the directory", err)
 	}
 }
+
+func TestReadAgentSecretsFlagsAreAllOrNone(t *testing.T) {
+	dir := t.TempDir()
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("a.b.c"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, "agent-secrets")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	all := map[string]bool{"agent-secrets-key-dir": true, "pod-token-file": true, "agent-secrets-bin": true}
+	got, err := shim.ReadAgentSecretsFlags(all, dir, token, bin)
+	if err != nil || got == nil || got.KeyDir != dir || got.TokenFile != token || got.Binary != bin {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if got, err := shim.ReadAgentSecretsFlags(map[string]bool{}, "", "", ""); err != nil || got != nil {
+		t.Fatalf("none set: %+v, %v; want nil, nil", got, err)
+	}
+	for name, set := range map[string]map[string]bool{
+		"key dir alone": {"agent-secrets-key-dir": true},
+		"token alone":   {"pod-token-file": true},
+		"two of three":  {"agent-secrets-key-dir": true, "pod-token-file": true},
+	} {
+		if _, err := shim.ReadAgentSecretsFlags(set, dir, token, bin); err == nil || !strings.Contains(err.Error(), "together") {
+			t.Fatalf("%s: err %v, want the all-or-none refusal", name, err)
+		}
+	}
+	if _, err := shim.ReadAgentSecretsFlags(all, filepath.Join(dir, "missing"), token, bin); err == nil || !strings.Contains(err.Error(), "--agent-secrets-key-dir") {
+		t.Fatalf("missing key dir: %v", err)
+	}
+	if _, err := shim.ReadAgentSecretsFlags(all, dir, filepath.Join(dir, "no-token"), bin); err == nil || !strings.Contains(err.Error(), "--pod-token-file") {
+		t.Fatalf("missing token: %v", err)
+	}
+	if _, err := shim.ReadAgentSecretsFlags(all, dir, token, filepath.Join(dir, "no-bin")); err == nil || !strings.Contains(err.Error(), "--agent-secrets-bin") {
+		t.Fatalf("missing binary: %v", err)
+	}
+}

@@ -68,6 +68,7 @@ type Runtime struct {
 	providerKeys                            map[string]string
 	providersSecrets                        []string
 	natsUser                                string
+	agentSecrets                            *AgentSecrets
 	agent                                   []string
 	bootTimeout                             time.Duration
 	bootIntervals                           int
@@ -167,9 +168,20 @@ func configure(opts Options) (*Runtime, error) {
 	}
 	for _, tool := range []struct{ name, path string }{
 		{"gh", opts.Tools.GH}, {"git", opts.Tools.Git}, {"jj", opts.Tools.JJ}, {"legion", opts.Tools.Legion},
+		{"agent-secrets", opts.Tools.AgentSecrets},
 	} {
 		if !filepath.IsAbs(tool.path) {
 			return refuse("the image's %s path %q is not absolute", tool.name, tool.path)
+		}
+	}
+	if a := opts.AgentSecrets; a != nil {
+		switch {
+		case a.URL == "":
+			return refuse("agent secrets: no broker URL")
+		case a.Audience == "":
+			return refuse("agent secrets: no token audience")
+		case a.TokenExpiry < 10*time.Minute || a.TokenExpiry > time.Hour:
+			return refuse("agent secrets: token expiry %s is not between %s and %s (the API server's floor and agent-c's admission cap)", a.TokenExpiry, 10*time.Minute, time.Hour)
 		}
 	}
 	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets); err != nil {
@@ -184,7 +196,7 @@ func configure(opts Options) (*Runtime, error) {
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
 		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
-		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools,
+		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
