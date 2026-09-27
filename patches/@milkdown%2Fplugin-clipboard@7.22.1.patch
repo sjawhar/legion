@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..5dd164b89cec8274958fe44d911041f5f3287242 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..50c9031f06ad86c799f55da3ff619b4089db27e5 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,9 @@
@@ -52,30 +52,30 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..5dd164b89cec8274958fe44d911041f5
 +}
 +// A fragment's lines: each textblock's content, and each run of inline nodes beside blocks, which
 +// parsed HTML leaves unwrapped (text before a list, a Gmail line before a div); any other block is
-+// read for the lines inside it. A run holding only blank text or line breaks is not a line.
++// read for the lines inside it. A textblock or run holding only blank text or line breaks, such as
++// the empty header row ProseMirror's parse gives a pasted table, is not a line.
 +function textLines(fragment) {
 +	const lines = [];
-+	let run = [];
-+	const endRun = () => {
-+		if (run.some((node) => node.isText ? /\S/.test(node.text) : !/\n/.test(node.type.spec.leafText?.(node) ?? ""))) lines.push(Fragment.from(run));
-+		run = [];
++	const addLine = (nodes) => {
++		if (nodes.some((node) => node.isText ? /\S/.test(node.text) : !/\n/.test(node.type.spec.leafText?.(node) ?? ""))) lines.push(Fragment.from(nodes));
 +	};
++	let run = [];
 +	fragment.forEach((node) => {
 +		if (node.isInline) {
 +			run.push(node);
 +			return;
 +		}
-+		endRun();
-+		if (node.isTextblock) lines.push(node.content);
++		addLine(run);
++		run = [];
++		if (node.isTextblock) addLine(node.content.content);
 +		else lines.push(...textLines(node.content));
 +	});
-+	endRun();
++	addLine(run);
 +	return lines;
 +}
 +function inlineSlice(fragment, schema) {
 +	const inline = [];
 +	for (const line of textLines(fragment)) {
-+		if (line.size === 0) continue;
 +		if (inline.length > 0) inline.push(schema.text(" "));
 +		line.forEach((child) => {
 +			if (child.isText) inline.push(schema.text(child.text.replace(/\s*\n\s*/g, " "), child.marks));
