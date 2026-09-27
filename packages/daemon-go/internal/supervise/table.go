@@ -867,13 +867,19 @@ func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPend
 // never handed the finished one's. A task of no phase — an operator's own, an architect's — is
 // not the workflow's to end, and goes on that resume.
 func suspend(m *Machine, ctx context.Context, ev Event) error {
+	// The table routes only RequestSuspend here (eventKindOf's onSuspend). Another event is a wiring
+	// error, refused before anything is stopped, rather than a panic or a journal line with no
+	// reason.
+	request, ok := ev.(RequestSuspend)
+	if !ok {
+		return fmt.Errorf("suspend %s: the suspend action was handed %T, not a RequestSuspend", m.claim.Token, ev)
+	}
 	if err := m.suspendProcess(ctx); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
 	}
 	if err := m.suspended(ctx); err != nil {
 		return err
 	}
-	request, _ := ev.(RequestSuspend)
 	m.log.Info("supervise: suspended", "reason", request.Reason)
 	return nil
 }

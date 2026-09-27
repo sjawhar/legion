@@ -644,7 +644,8 @@ A reviewer's phase ends with its completion, not with its review. A round that w
 takes this order: write, commit and push the handoff; submit the review of the head that push
 made, by its SHA; then complete. An approval waits for the CI verdict to settle green at that head
 before you submit it, since an approval stands only on green checks and GitHub can dismiss one
-once the head moves; a request for changes does not wait, since it stands whatever CI says and the
+once the head moves, and a verdict that settles red there makes the round's decision a request for
+changes naming the failing checks; a request for changes does not wait, since it stands whatever CI says and the
 issue leaves reviewing with it. A review of a head the handoff push then replaces names a head
 the pull request no longer has. A round that writes none (the final approval of the `.legion/`
 deletion head) reviews the head as it is. The daemon moves the issue once both are in —

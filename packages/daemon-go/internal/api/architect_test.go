@@ -416,6 +416,54 @@ func TestSignOffAndRetryAreTheOwningArchitects(t *testing.T) {
 	}
 }
 
+// A child whose parent chain leaves the tree before reaching an architect's issue - no parent, or a
+// parent not recorded, as one human re-parent in Dispatch leaves it - is the tree root's, as the
+// notice router decides (owningArchitect): the root architect the production_check notice reaches
+// may sign it off and retry it, and a sub-architect still may not.
+func TestABrokenParentChainIsTheTreeRootArchitects(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209")
+	unrecorded := "LEGION-999"
+	records := record.NewStore()
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		for _, child := range []record.Issue{
+			{Key: "LEGION-211", Tree: "LEGION-208", Project: testProject, Title: "no parent", Phase: phase.ProductionCheck, Status: "in_progress"},
+			{Key: "LEGION-212", Tree: "LEGION-208", Project: testProject, Title: "unrecorded parent", Parent: &unrecorded, Phase: phase.ProductionCheck, Status: "in_progress"},
+		} {
+			if err := records.PutIssue(context.Background(), tx, child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	root := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	subArchitect := newLiveClaimIn(t, h, "LEGION-208", "LEGION-209", claim.RoleArchitect)
+	for _, issue := range []string{"LEGION-211", "LEGION-212"} {
+		for _, route := range []struct {
+			path  string
+			extra map[string]any
+		}{{"/legion/v1/signoff", nil}, {"/legion/v1/phase/retry", map[string]any{"decision": "retry"}}} {
+			request := func(grant string) map[string]any {
+				body := map[string]any{"grantId": grant, "issue": issue}
+				for key, value := range route.extra {
+					body[key] = value
+				}
+				return body
+			}
+			before := len(facts.recorded())
+			assertFailure(t, h.request(http.MethodPost, route.path, request(subArchitect.grant(t)), nil), http.StatusForbidden, "ISSUE_NOT_OWNED")
+			if got := h.request(http.MethodPost, route.path, request(root.grant(t)), nil); got.Code != http.StatusOK {
+				t.Fatalf("%s on %s by the root architect = %d: %s", route.path, issue, got.Code, got.Body)
+			}
+			if got := len(facts.recorded()) - before; got != 1 {
+				t.Fatalf("%s on %s applied %d facts, want the root architect's one", route.path, issue, got)
+			}
+		}
+	}
+}
+
 func TestArchitectureRouteRefusalsExposeTheFactResultAndGrantState(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	h, _, _ := newArchitectHarness(t, credential.New(func() time.Time { return now }),

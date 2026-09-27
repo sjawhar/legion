@@ -449,14 +449,18 @@ func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 	s.applyFact(w, r, requestFactID("roots-close"), fact, EmptyResponse{})
 }
 
-// rootRoute is a route an architect takes only on its tree's root, and how its two refusals read:
-// code, what the route does to the root, where a child goes instead, and what the root's own
-// architect does.
-type rootRoute struct{ code, does, forChild, byRoot string }
+// rootRoute is a route an architect takes only on its tree's root: its refusal code, and its two
+// refusals, each a whole message whose one verb is the tree root: forChild when the grant names a
+// child of the tree, notOwner when its architect does not own the root.
+type rootRoute struct{ code, forChild, notOwner string }
 
 var (
-	gateRoute      = rootRoute{"GATE_ROOT_ONLY", "the design gate belongs to", "register it there", "registers it"}
-	closeRootRoute = rootRoute{"ROOT_REQUIRED", "close_root ends", "a child leaves with park_child", "closes it"}
+	gateRoute = rootRoute{"GATE_ROOT_ONLY",
+		"the design gate belongs to the tree root %s; register it there",
+		"the design gate belongs to the tree root %s; its root architect registers it"}
+	closeRootRoute = rootRoute{"ROOT_REQUIRED",
+		"close_root ends the tree root %s; a child leaves with park_child",
+		"close_root ends the tree root %s; its root architect closes it"}
 )
 
 // rootArchitectOf says whether grant acts on recorded, an issue of its tree, as a route that only
@@ -465,7 +469,7 @@ var (
 // otherwise.
 func (s *server) rootArchitectOf(w http.ResponseWriter, r *http.Request, grant credential.Grant, recorded record.Issue, route rootRoute) bool {
 	if !claim.IsTreeRoot(recorded.Key, grant.Tree) {
-		writeFailure(w, http.StatusForbidden, route.code, fmt.Sprintf("%s the tree root %s; %s", route.does, grant.Tree, route.forChild))
+		writeFailure(w, http.StatusForbidden, route.code, fmt.Sprintf(route.forChild, grant.Tree))
 		return false
 	}
 	owns, err := s.owns(r.Context(), grant, recorded)
@@ -474,7 +478,7 @@ func (s *server) rootArchitectOf(w http.ResponseWriter, r *http.Request, grant c
 		return false
 	}
 	if !owns {
-		writeFailure(w, http.StatusForbidden, route.code, fmt.Sprintf("%s the tree root %s; its root architect %s", route.does, grant.Tree, route.byRoot))
+		writeFailure(w, http.StatusForbidden, route.code, fmt.Sprintf(route.notOwner, grant.Tree))
 	}
 	return owns
 }
@@ -496,20 +500,46 @@ func (s *server) architectOwns(w http.ResponseWriter, r *http.Request, grant cre
 // owns says whether grant's architect owns recorded, an issue of its tree: recorded is the grant's
 // own issue or lies under it, through its recorded parents. So the tree root's architect owns every
 // issue of its tree, and a sub-architect its own issue and those under it, never the root or a
-// sibling: a sub-architect holds a grant for the whole tree and can name any issue of it.
+// sibling: a sub-architect holds a grant for the whole tree and can name any issue of it. A chain
+// that leaves the tree before reaching the grant's issue (no parent on a child, a parent not
+// recorded or recorded in another tree, a cycle) ends at the tree root, whose architect owns the
+// issue: a human's re-parent in Dispatch leaves an issue's tree as it was (admit's
+// recordObservation), and the notice router ends the same walk at the same place
+// (owningArchitect, internal/daemon/notice_routing.go), so the architect a production_check notice
+// reaches is the one that may sign the issue off. The walk reads every parent in one read-only
+// transaction, opened only when it has a parent to read.
 func (s *server) owns(ctx context.Context, grant credential.Grant, recorded record.Issue) (bool, error) {
+	var tx pgx.Tx
+	defer func() {
+		if tx != nil {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	byRoot := claim.IsTreeRoot(grant.Issue, grant.Tree)
 	seen := map[string]bool{}
 	for current := &recorded; ; {
 		if current.Key == grant.Issue {
 			return true, nil
 		}
 		if current.Parent == nil || claim.IsTreeRoot(current.Key, current.Tree) || seen[current.Key] {
-			return false, nil
+			return byRoot, nil
 		}
 		seen[current.Key] = true
-		parent, err := s.recordedIssue(ctx, *current.Parent)
-		if err != nil || parent == nil || parent.Tree != grant.Tree {
+		if tx == nil {
+			if s.pool == nil || s.records == nil {
+				return false, errors.New("record dependencies are unavailable")
+			}
+			var err error
+			if tx, err = s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly}); err != nil {
+				return false, err
+			}
+		}
+		parent, err := s.records.Issue(ctx, tx, *current.Parent)
+		if err != nil {
 			return false, err
+		}
+		if parent == nil || parent.Tree != grant.Tree {
+			return byRoot, nil
 		}
 		current = parent
 	}

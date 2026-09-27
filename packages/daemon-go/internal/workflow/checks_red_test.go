@@ -21,7 +21,9 @@ import (
 // implementing, where the implementer is already at work. Nor does a red on a head a handoff-only
 // push reached, whose code is the head it replaced: in reviewing that is the reviewer's own
 // handoff head, whose settled verdict the reviewer waits for before it decides, so the round is
-// left open, its reviewer running, and the red is the round's to decide.
+// left open, its reviewer running, and the red is the round's to decide. And a round that has
+// already decided is ended by its decision before the red rule is asked: a request for changes
+// sends the implementer the reviewer's body and counts the round, and no checks-red is told.
 func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -29,14 +31,17 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 		status      string
 		planned     bool
 		handoffHead bool
-		want        phase.Phase
+		// decided seeds the reviewer's row with a request for changes: both halves of the round in.
+		decided bool
+		want    phase.Phase
 	}{
-		{"in testing", phase.Testing, "testing", false, false, phase.Implementing},
-		{"in reviewing", phase.Reviewing, "needs_review", false, false, phase.Implementing},
-		{"a planned red in testing", phase.Testing, "testing", true, false, phase.Testing},
-		{"in implementing", phase.Implementing, "in_progress", false, false, phase.Implementing},
-		{"on the tester's handoff-only head", phase.Testing, "testing", false, true, phase.Testing},
-		{"on the reviewer's handoff-only head, its round half in", phase.Reviewing, "needs_review", false, true, phase.Reviewing},
+		{"in testing", phase.Testing, "testing", false, false, false, phase.Implementing},
+		{"in reviewing", phase.Reviewing, "needs_review", false, false, false, phase.Implementing},
+		{"a planned red in testing", phase.Testing, "testing", true, false, false, phase.Testing},
+		{"in implementing", phase.Implementing, "in_progress", false, false, false, phase.Implementing},
+		{"on the tester's handoff-only head", phase.Testing, "testing", false, true, false, phase.Testing},
+		{"on the reviewer's handoff-only head, its round half in", phase.Reviewing, "needs_review", false, true, false, phase.Reviewing},
+		{"on a code head whose round has decided", phase.Reviewing, "needs_review", false, false, true, phase.Implementing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -50,7 +55,11 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 			seedPR(t, pool, pr)
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			if tc.from == phase.Reviewing {
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"})
+				reviewer := record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"}
+				if tc.decided {
+					reviewer.Decision = &record.ReviewDecision{State: "changes_requested", Body: "rename the widget", Head: "head"}
+				}
+				seedPhase(t, pool, reviewer)
 			}
 			engine := testEngine(config.DesignGateRootIssues, nil)
 			if result, err := intake.ApplyFact(context.Background(), pool, "github", "red", intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
@@ -73,6 +82,16 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 				t.Fatalf("read the implementer's start: %v", err)
 			}
 			want := "CI is red at head: python-cli-tests / test (pytest)"
+			if tc.decided {
+				var rounds int
+				if err := pool.QueryRow(context.Background(), "select rounds from phases where issue = 'LEGION-208' and role = 'implementer'").Scan(&rounds); err != nil {
+					t.Fatalf("read the implementer's rounds: %v", err)
+				}
+				if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") || !strings.Contains(task, "rename the widget") || strings.Contains(task, want) || rounds != 1 {
+					t.Fatalf("task %q, notices %v, rounds %d; want the reviewer's body, no checks-red and the round counted", task, got, rounds)
+				}
+				return
+			}
 			var reason string
 			if err := pool.QueryRow(context.Background(), "select payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason); err != nil {
 				t.Fatalf("read the architect's checks-red notice: %v", err)
