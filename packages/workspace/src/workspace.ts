@@ -930,10 +930,13 @@ async function restoreGitWorktree(
   // with this temporary one. The random suffix also keeps two concurrent restores of the same
   // workspace from writing into, and renaming, the same temporary directory.
   await mkdir(worktrees, { recursive: true });
-  // TmuxRuntime.provisionQueue (runtime-tmux.ts), an async mutex keyed by repository wrapping
-  // every provisionIssueWorkspace call including this one, makes two concurrent restores of this
-  // workspace impossible: nothing else can be using a temporary entry naming this workspace while
-  // we hold it, so any left over from an earlier kill is swept before this restore creates its own.
+  // Two locks, not one, cover every caller of this function: TmuxRuntime.provisionQueue
+  // (runtime-tmux.ts), an async mutex keyed by repository, for the tmux runtime's own call; and
+  // withWorkspaceInitLock (cli/workspace-init.ts), a per-repository flock held for the whole
+  // provisionIssueWorkspace call, for the Kubernetes init container's CLI call. Between them, two
+  // concurrent restores of the same workspace are impossible: nothing else can be using a
+  // temporary entry naming this workspace while either lock is held, so any left over from an
+  // earlier kill is swept before this restore creates its own.
   const restorePrefix = `.${path.basename(target)}.restore-`;
   const siblings = await readdir(worktrees).catch((error) => {
     console.error(
