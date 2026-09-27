@@ -820,7 +820,9 @@ and spreads nothing, even where the code's text drops it, unless a quote between
 (`keepsBlankLinesAfter`). The code's text drops that line where it ends a list item or a footnote
 definition that flow content follows (a paragraph, a heading, a rule, a fence, a typed block or a
 table), or a quote no container opens right after, and keeps it before a quote, a list item or a
-definition, as that parser reads it (`blankTaker`). The renderer writes each spacing so that it reads back
+definition, as that parser reads it (`blankTaker`). A list item decides by what follows its list only
+inside its own quote or typed block; past one, that container's rule decides, so a typed block's
+fence keeps the line and a quote's end judges it by what opens right after. The renderer writes each spacing so that it reads back
 (`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
 a list where one would spread what it follows, none inside a list item after a list ending in
 an empty item, where goldmark ends the item at a blank line, and none in a quote after a footnote

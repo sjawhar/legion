@@ -33,7 +33,8 @@ func fencedCodeText(code *ast.FencedCodeBlock, source []byte) []*Node {
 // container instead (startsContainer: a quote, a list item of any list, or a definition) leaves
 // the blank line the block's, as do a typed block's fence and, but for a quote's, the document's
 // end. A last item and a definition nothing follows in its container end with the container around
-// them.
+// them, and so does a last item whose next block lies outside its quote or typed block
+// (enclosingFlow): that container's own rule decides.
 func blankTaker(code ast.Node, source []byte) ast.Node {
 	for container := code.Parent(); container != nil; container = container.Parent() {
 		switch container := container.(type) {
@@ -50,7 +51,7 @@ func blankTaker(code ast.Node, source []byte) ast.Node {
 			if container.NextSibling() != nil {
 				return nil
 			}
-			if next := nextBlock(container.Parent()); next != nil {
+			if next := nextBlock(container.Parent()); next != nil && enclosingFlow(next) == enclosingFlow(container) {
 				if startsContainer(next) {
 					return nil
 				}
@@ -65,6 +66,17 @@ func blankTaker(code ast.Node, source []byte) ast.Node {
 			}
 		case *typedDirective:
 			return nil
+		}
+	}
+	return nil
+}
+
+// enclosingFlow is the nearest quote or typed block around node, or nil at the document's level.
+func enclosingFlow(node ast.Node) ast.Node {
+	for parent := node.Parent(); parent != nil; parent = parent.Parent() {
+		switch parent.(type) {
+		case *ast.Blockquote, *typedDirective:
+			return parent
 		}
 	}
 	return nil
