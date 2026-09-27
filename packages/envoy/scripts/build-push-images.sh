@@ -5,7 +5,9 @@ set -euo pipefail
 # dispatch SPA and regenerates the Go contracts from the whole workspace.
 cd "$(dirname "$0")/../../.."
 
-TAG="${1:?Usage: build-push-images.sh <git-sha-tag>}"
+# The tag is also the LEGION_COMMIT build argument, which the Dockerfile refuses unless it is a
+# full 40-character commit sha.
+TAG="${1:?Usage: build-push-images.sh <full 40-character commit sha>}"
 REGISTRY="${ENVOY_REGISTRY:?ENVOY_REGISTRY is required (e.g. ghcr.io/your-org/your-repo)}"
 
 echo "Building and pushing multi-arch image with tag: $TAG"
