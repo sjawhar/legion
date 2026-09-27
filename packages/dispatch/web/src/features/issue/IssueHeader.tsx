@@ -99,35 +99,43 @@ export function IssueHeader({
       parentInputRef.current?.focus();
     }
   }, [parentEditing]);
-  const railRef = useRef<HTMLDivElement>(null);
   // Whether the details rail has anywhere left to scroll, which is what its trailing fade says.
-  // Three things change the answer and none of them is a render of this component alone: the
-  // reader scrolling the rail, the viewport resizing, and the rail's own content arriving (the
-  // labels, the subscriber count, a GitHub title). The ResizeObserver watches the rail and its
-  // content wrapper is the rail itself, so the layout effect re-measures on every render too -
-  // measuring is two reads and no write unless the answer changed.
+  // The rail element is state rather than a ref so this runs once per rail, not once per render:
+  // three things change the answer and none of them is a render of this component - the reader
+  // scrolling the rail, the rail's box changing with the viewport, and its content arriving (the
+  // labels, the subscriber count, a GitHub title). One listener and two observers cover them,
+  // and the mutation observer re-observes children a render added.
+  const [rail, setRail] = useState<HTMLDivElement | null>(null);
   const [railScrollable, setRailScrollable] = useState(false);
   useLayoutEffect(() => {
-    const node = railRef.current;
-    if (node === null) {
+    if (rail === null) {
       return;
     }
     // A fractional layout leaves scrollLeft a hair short of the end; one pixel of slack keeps a
     // rail scrolled to its end from wearing the fade.
     const measure = () =>
-      setRailScrollable(node.scrollWidth - node.clientWidth - node.scrollLeft > 1);
-    measure();
-    node.addEventListener("scroll", measure, { passive: true });
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
-    for (const child of node.children) {
-      observer.observe(child);
-    }
-    return () => {
-      node.removeEventListener("scroll", measure);
-      observer.disconnect();
+      setRailScrollable(rail.scrollWidth - rail.clientWidth - rail.scrollLeft > 1);
+    const sizes = new ResizeObserver(measure);
+    const observeAll = () => {
+      sizes.observe(rail);
+      for (const child of rail.children) {
+        sizes.observe(child);
+      }
     };
-  });
+    observeAll();
+    const contents = new MutationObserver(() => {
+      observeAll();
+      measure();
+    });
+    contents.observe(rail, { characterData: true, childList: true, subtree: true });
+    rail.addEventListener("scroll", measure, { passive: true });
+    measure();
+    return () => {
+      rail.removeEventListener("scroll", measure);
+      sizes.disconnect();
+      contents.disconnect();
+    };
+  }, [rail]);
   const [subscribersOpen, setSubscribersOpen] = useState(false);
   const [referencesOpen, setReferencesOpen] = useState(false);
   const { titles: agentTitles } = useAgents(issue.created_by?.kind === "session");
@@ -429,7 +437,7 @@ export function IssueHeader({
         <div
           className={`flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto [scrollbar-width:thin] md:[&_button]:min-h-7 md:[&_button]:py-0 ${railScrollable ? scrollFadeTrailing : ""}`}
           data-testid="issue-metadata-rail"
-          ref={railRef}
+          ref={setRail}
         >
           {whoseTurn === null ? null : (
             <span

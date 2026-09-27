@@ -1001,26 +1001,31 @@ test("a clamped title shows two lines and no fragment of the third", async ({
     // How many lines of the title a reader can see: the line boxes that start above the bottom of
     // whatever clips them. A clamped element with vertical padding clips below the line it cut, so
     // the top of the third line was drawn inside that padding.
-    expect(
-      await title.evaluate((element) => {
-        const text = element.firstChild?.firstChild ?? element.firstChild;
-        if (text === null || text === undefined) {
-          return -1;
-        }
-        const range = document.createRange();
-        range.selectNodeContents(text);
-        let clip: Element | null = text.parentElement;
-        while (clip !== null && getComputedStyle(clip).overflowY === "visible") {
-          clip = clip.parentElement;
-        }
-        if (clip === null) {
-          return -1;
-        }
-        const box = clip.getBoundingClientRect();
-        const bottom = box.bottom - Number.parseFloat(getComputedStyle(clip).borderBottomWidth);
-        return Array.from(range.getClientRects()).filter((rect) => rect.top < bottom - 0.5).length;
-      })
-    ).toBe(2);
+    // Polled, not sampled once: the clamp is a layout the browser settles into, and a single
+    // immediate measurement caught the frame before it (1 run in 9 locally).
+    await expect
+      .poll(() =>
+        title.evaluate((element) => {
+          const text = element.firstChild?.firstChild ?? element.firstChild;
+          if (text === null || text === undefined) {
+            return -1;
+          }
+          const range = document.createRange();
+          range.selectNodeContents(text);
+          let clip: Element | null = text.parentElement;
+          while (clip !== null && getComputedStyle(clip).overflowY === "visible") {
+            clip = clip.parentElement;
+          }
+          if (clip === null) {
+            return -1;
+          }
+          const box = clip.getBoundingClientRect();
+          const bottom = box.bottom - Number.parseFloat(getComputedStyle(clip).borderBottomWidth);
+          return Array.from(range.getClientRects()).filter((rect) => rect.top < bottom - 0.5)
+            .length;
+        })
+      )
+      .toBe(2);
   } finally {
     await context.close();
   }
