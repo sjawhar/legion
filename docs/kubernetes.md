@@ -359,10 +359,10 @@ daemon or running a key command.
 The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
 directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
 `legion-pane` user the daemon's own NATS connection authenticates as. A set source that is empty,
-missing, unreadable, blank, readable by others, or not an nkey user seed refuses boot, naming the
-key and the path. Its group may read the file: a daemon running as a non-root uid in a pod reads a
-mounted Secret only through the pod's `fsGroup` (the kubelet's file is root's), so mount it with
-`defaultMode: 0440`, never the kubelet's default `0644`, which others can read. `legion start
+missing, unreadable, blank, writable by its group, open to others, or not an nkey user seed refuses
+boot, naming the key and the path. Its group may read the file: a daemon running as a non-root uid
+in a pod reads a mounted Secret only through the pod's `fsGroup` (the kubelet's file is root's), so
+mount it with `defaultMode: 0440`, never the kubelet's default `0644`, which others can read. `legion start
 --check-config` reads the seed exactly as boot does and refuses with boot's words; its OK line then
 names the seed's user by public key (`Config OK: project=<project> nats-nkey-user=U…`), never the
 seed. With one, every pod's
@@ -371,10 +371,10 @@ seed. With one, every pod's
 whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same
 seed in the providers Secret under that key. The image probe refuses boot when the kubelet cannot
 mount the key, when it holds no user seed, and when its user is not the daemon's own seed's (the
-probe reports the user's public key, never the seed). A probe that reports no user at all is either
-an image whose `legion probe-image` predates the report (rebuild the worker image at or after
-1a7aca7b) or a key holding no seed (fill the providers Secret's `NATS_NKEY_SEED`); the refusal
-names both. The shim skips the file, since the pointer
+probe reports the user's public key, never the seed). A probe that reports no user at all is an
+image whose `legion probe-image` predates the report, and the refusal says to rebuild the worker
+image at or after 1a7aca7b: a current one exits 1 on a blank or invalid key. The shim skips the
+file, since the pointer
 names it, so the seed is never a variable of Oh My Pi or the tools it runs. With none, a pod
 carries no pointer and mounts no such key. While the daemon has a seed, `provider_keys` may neither
 name `NATS_NKEY_SEED` (on either runtime) nor read the Secret's `NATS_NKEY_SEED` key under another

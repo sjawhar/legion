@@ -102,9 +102,9 @@ func TestReadPrivateSecretPointer(t *testing.T) {
 	}
 }
 
-// ReadGroupSecretPointer holds its file to ReadPrivateSecretPointer's rules except the group's
-// bits: a file its group can read is read, one others can read is refused naming the path and the
-// mode, and a FIFO is still refused rather than waited on.
+// ReadGroupSecretPointer holds its file to ReadPrivateSecretPointer's rules except that its group
+// may read it: a file its group can read is read, one its group can write or others can touch at
+// all is refused naming the path and the mode, and a FIFO is still refused rather than waited on.
 func TestReadGroupSecretPointer(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, mode os.FileMode) string {
@@ -129,8 +129,11 @@ func TestReadGroupSecretPointer(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct{ name, path, want string }{
-		{"other-readable", write("other", 0o604), "nats_nkey_seed_file %s is readable by others (mode 0604); chmod o-rwx it"},
-		{"the kubelet's default mode", write("default", 0o644), "nats_nkey_seed_file %s is readable by others (mode 0644); chmod o-rwx it"},
+		{"other-readable", write("other", 0o604), "nats_nkey_seed_file %s is writable by its group or open to others (mode 0604); chmod g-w,o-rwx it"},
+		{"other-writable", write("other-w", 0o602), "nats_nkey_seed_file %s is writable by its group or open to others (mode 0602); chmod g-w,o-rwx it"},
+		{"group-writable", write("group-rw", 0o660), "nats_nkey_seed_file %s is writable by its group or open to others (mode 0660); chmod g-w,o-rwx it"},
+		{"group-writable only", write("group-w", 0o620), "nats_nkey_seed_file %s is writable by its group or open to others (mode 0620); chmod g-w,o-rwx it"},
+		{"the kubelet's default mode", write("default", 0o644), "nats_nkey_seed_file %s is writable by its group or open to others (mode 0644); chmod g-w,o-rwx it"},
 		{"a FIFO", fifo, "nats_nkey_seed_file names %s, which is not a regular file"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

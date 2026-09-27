@@ -33,12 +33,12 @@ func Configured(file string, lookup func(string) (string, bool)) bool {
 // Seed is the nkey seed of the NATS user a process connects as: the trimmed contents of file, the
 // file the configuration's SeedFileKey names ("" when it names none); else those of the file
 // NATS_NKEY_SEED_FILE names; else NATS_NKEY_SEED. The first source set is authoritative: an empty
-// NATS_NKEY_SEED_FILE, or a missing, unreadable, blank, or other-readable file, is an error naming
-// the key or variable and the path (config.ReadGroupSecretPointer: a daemon running as a non-root
-// uid in a pod reads a kubelet-mounted Secret file through the pod's fsGroup, so its group may read
-// it), never a fallback to the next source or to no credential; so is a blank NATS_NKEY_SEED, and a
-// seed that is not a user nkey seed. None set is "": the connection carries no credential, as every
-// connection did before servers required one. No error carries the seed.
+// NATS_NKEY_SEED_FILE, or a missing, unreadable, blank, group-writable, or other-accessible file, is
+// an error naming the key or variable and the path (config.ReadGroupSecretPointer: a daemon running
+// as a non-root uid in a pod reads a kubelet-mounted Secret file through the pod's fsGroup, so its
+// group may read it), never a fallback to the next source or to no credential; so is a blank
+// NATS_NKEY_SEED, and a seed that is not a user nkey seed. None set is "": the connection carries no
+// credential, as every connection did before servers required one. No error carries the seed.
 // Deploy order: a process gets a seed only after its server has nkey users (the SRE's stage 1, with
 // the no_auth_user fallback); a server with no users sends no nonce, and nats.go then refuses the
 // nkey ("nats: nkeys not supported by the server") rather than connecting without it.

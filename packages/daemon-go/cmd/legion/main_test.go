@@ -429,7 +429,10 @@ func TestStartCheckConfigReadsTheNATSSeedAsBootDoes(t *testing.T) {
 	}{
 		{"a missing file", "", 0, func(path string) string { return "nats_nkey_seed_file names " + path + ", which could not be read: " }},
 		{"a file others can read", seed + "\n", 0o644, func(path string) string {
-			return "nats_nkey_seed_file " + path + " is readable by others (mode 0644); chmod o-rwx it\n"
+			return "nats_nkey_seed_file " + path + " is writable by its group or open to others (mode 0644); chmod g-w,o-rwx it\n"
+		}},
+		{"a file its group can write", seed + "\n", 0o660, func(path string) string {
+			return "nats_nkey_seed_file " + path + " is writable by its group or open to others (mode 0660); chmod g-w,o-rwx it\n"
 		}},
 		{"a file holding no seed", "SUNOTASEED\n", 0o600, func(path string) string {
 			return "nats_nkey_seed_file (" + path + ") does not hold a valid nkey seed"
