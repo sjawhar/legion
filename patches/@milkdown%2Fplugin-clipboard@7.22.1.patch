@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae468e326bd 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..5dd164b89cec8274958fe44d911041f5f3287242 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,9 @@
@@ -13,7 +13,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae4
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
  function isPureText(content) {
-@@ -24,6 +26,160 @@ function withMeta(plugin, meta) {
+@@ -24,6 +26,169 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
@@ -22,8 +22,9 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae4
 +// into the caret's text, and so is one with the caret in a table cell's text. Flattened text takes
 +// the caret's marks only when the paste is one unmarked line, as an unflattened paste does.
 +// Clipboard HTML that is only a copy of cells is a grid paste from the caret's cell, as a paste onto
-+// selected cells is (tab-separated text included, and other HTML one textblock per cell), each cell
-+// retyped for the row it lands in and flattened to one line, since a GFM cell holds one.
++// selected cells is (tab-separated text included, and other HTML one line per cell), each cell
++// retyped for the row it lands in and flattened to one line, since a GFM cell holds one. A line is a
++// textblock, or a run of inline content that parsed HTML leaves beside blocks (textLines).
 +function isolatingAncestorType($pos) {
 +	for (let depth = $pos.depth; depth > 0; depth--) {
 +		const type = $pos.node(depth).type;
@@ -49,24 +50,39 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae4
 +	}
 +	return countType(pasted.content, type) > countType(state.doc.content, type) + countType(slice.content, type);
 +}
++// A fragment's lines: each textblock's content, and each run of inline nodes beside blocks, which
++// parsed HTML leaves unwrapped (text before a list, a Gmail line before a div); any other block is
++// read for the lines inside it. A run holding only blank text or line breaks is not a line.
++function textLines(fragment) {
++	const lines = [];
++	let run = [];
++	const endRun = () => {
++		if (run.some((node) => node.isText ? /\S/.test(node.text) : !/\n/.test(node.type.spec.leafText?.(node) ?? ""))) lines.push(Fragment.from(run));
++		run = [];
++	};
++	fragment.forEach((node) => {
++		if (node.isInline) {
++			run.push(node);
++			return;
++		}
++		endRun();
++		if (node.isTextblock) lines.push(node.content);
++		else lines.push(...textLines(node.content));
++	});
++	endRun();
++	return lines;
++}
 +function inlineSlice(fragment, schema) {
 +	const inline = [];
-+	const addLine = (content) => {
-+		if (content.size === 0) return;
++	for (const line of textLines(fragment)) {
++		if (line.size === 0) continue;
 +		if (inline.length > 0) inline.push(schema.text(" "));
-+		content.forEach((child) => {
++		line.forEach((child) => {
 +			if (child.isText) inline.push(schema.text(child.text.replace(/\s*\n\s*/g, " "), child.marks));
 +			else if (child.isLeaf && /\n/.test(child.type.spec.leafText?.(child) ?? "")) inline.push(schema.text(" ", child.marks));
 +			else inline.push(child);
 +		});
-+	};
-+	// A slice parsed from inline content (a table cell's text, say) is one line already.
-+	if (fragment.firstChild?.isInline) addLine(fragment);
-+	else fragment.descendants((node) => {
-+		if (!node.isTextblock) return true;
-+		addLine(node.content);
-+		return false;
-+	});
++	}
 +	return new Slice(Fragment.from(inline), 0, 0);
 +}
 +function pasteFlattened(view, slice, schema) {
@@ -80,7 +96,9 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae4
 +function tsvCells(text, schema) {
 +	const { cell, row } = tableNodeTypes(schema);
 +	const lines = text.replace(/\r\n?/g, "\n").replace(/\n$/, "").split("\n");
-+	const rows = lines.map((line) => row.create(null, line.split("\t").map((value) => cell.create(null, schema.nodes.paragraph.create(null, value ? schema.text(value) : null)))));
++	return gridCells(lines.map((line) => row.create(null, line.split("\t").map((value) => cell.create(null, schema.nodes.paragraph.create(null, value ? schema.text(value) : null))))));
++}
++function gridCells(rows) {
 +	return __pastedCells(new Slice(Fragment.from(rows), 0, 0));
 +}
 +function fitCell(cellType, slice) {
@@ -105,29 +123,20 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae4
 +	if (html.length === 0) return null;
 +	const template = document.createElement("template");
 +	template.innerHTML = html;
-+	const rows = [...template.content.querySelectorAll("tr")].filter((tr) => tr.querySelector(":scope > td, :scope > th") !== null);
++	// A table nested in a copied cell is that cell's content, not rows of the grid.
++	const inCell = (element) => element.parentElement?.closest("td, th") != null;
++	const rows = [...template.content.querySelectorAll("tr")].filter((tr) => !inCell(tr) && tr.querySelector(":scope > td, :scope > th") !== null);
 +	if (rows.length === 0) return null;
-+	for (const element of template.content.querySelectorAll("table, style, script, meta, link, title")) element.remove();
++	for (const element of template.content.querySelectorAll("table, style, script, meta, link, title")) if (!inCell(element)) element.remove();
 +	if (template.content.textContent.trim() !== "" || template.content.querySelector("img") !== null) return null;
 +	const { cell, row } = tableNodeTypes(schema);
 +	const parser = DOMParser.fromSchema(schema);
-+	return __pastedCells(new Slice(Fragment.from(rows.map((tr) => row.create(null, [...tr.children].filter((child) => child.matches("td, th")).map((td) => fitCell(cell, inlineSlice(parser.parseSlice(td).content, schema)))))), 0, 0));
++	return gridCells(rows.map((tr) => row.create(null, [...tr.children].filter((child) => child.matches("td, th")).map((td) => fitCell(cell, inlineSlice(parser.parseSlice(td).content, schema))))));
 +}
-+function htmlLineCells(view, html, schema) {
-+	if (html.length === 0) return null;
-+	view.someProp("transformPastedHTML", (transform) => {
-+		html = transform(html, view);
-+	});
-+	const container = document.createElement("div");
-+	container.innerHTML = html;
++function htmlLineCells(slice, schema) {
 +	const { cell, row } = tableNodeTypes(schema);
-+	const cells = [];
-+	DOMParser.fromSchema(schema).parseSlice(container).content.descendants((node) => {
-+		if (!node.isTextblock) return true;
-+		cells.push(fitCell(cell, new Slice(node.content, 0, 0)));
-+		return false;
-+	});
-+	return cells.length === 0 ? null : __pastedCells(new Slice(Fragment.from(row.create(null, cells)), 0, 0));
++	const cells = textLines(slice.content).map((line) => fitCell(cell, new Slice(line, 0, 0)));
++	return cells.length === 0 ? null : gridCells([row.create(null, cells)]);
 +}
 +function pasteIntoTable(view, event, slice, parsePlainText) {
 +	const { state } = view;
@@ -137,7 +146,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae4
 +	const html = event.clipboardData.getData("text/html");
 +	if (selection instanceof CellSelection) {
 +		const rect = selectedRect(state);
-+		const pasted = (html.length === 0 && text.includes("\t") ? tsvCells(text, schema) : htmlTableCells(html, schema) ?? htmlLineCells(view, html, schema)) ?? __pastedCells(slice) ?? {
++		const pasted = (html.length > 0 ? htmlTableCells(html, schema) ?? htmlLineCells(slice, schema) : text.includes("\t") ? tsvCells(text, schema) : null) ?? __pastedCells(slice) ?? {
 +			width: 1,
 +			height: 1,
 +			rows: [Fragment.from(fitCell(tableNodeTypes(schema).cell, slice))]
@@ -174,7 +183,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae4
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -40,9 +196,15 @@ function dispatchPasteSlice(view, slice) {
+@@ -40,9 +205,15 @@ function dispatchPasteSlice(view, slice) {
  }
  var clipboard = $prose((ctx) => {
  	const schema = ctx.get(schemaCtx);
@@ -190,7 +199,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae4
  		transformPastedHTML: (html, view) => {
  			const prevTransform = prev.transformPastedHTML;
  			if (prevTransform) html = prevTransform(html, view);
-@@ -58,7 +220,6 @@ var clipboard = $prose((ctx) => {
+@@ -58,7 +229,6 @@ var clipboard = $prose((ctx) => {
  		key,
  		props: {
  			handlePaste: (view, event, preProcessedSlice) => {
@@ -198,7 +207,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae4
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -77,13 +238,13 @@ var clipboard = $prose((ctx) => {
+@@ -77,13 +247,13 @@ var clipboard = $prose((ctx) => {
  				}
  				const html = clipboardData.getData("text/html");
  				if (html.length === 0 && text.length === 0) return false;
