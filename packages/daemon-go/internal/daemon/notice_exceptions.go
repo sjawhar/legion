@@ -14,7 +14,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/record"
-	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // noticeExceptionSubjects is where the Envoy listener reports a role-lane forward it could not
@@ -37,16 +36,16 @@ const (
 	pluginHeartbeat    = 2 * time.Minute
 )
 
-// noticeReholdDelays is how long each copy of a notice whose forward failed waits: the nth copy
-// waits the nth delay after the report of the one before it. The first catches a quick relaunch,
-// the second one heartbeat later, and the last is sent after any registration a stopped session
-// left behind must have lapsed, past both windows with a minute to spare. That copy then either
-// reaches the relaunched session or is refused (notify.ErrNoHolder) and held by the executor until
-// a session holds the role again, so nothing is dropped while the architect's claim lives. There
-// are three, as the TypeScript daemon re-sends one at most three times (processes.ts,
-// resendToRootArchitect): a holder that keeps its registration alive but never confirms a delivery
-// would otherwise be sent copies without end, and the report of its last copy is logged and queues
-// nothing.
+// noticeReholdDelays is how long each copy of a notice whose forward failed waits while its
+// architect's agent has not taken its role (rehold): the nth copy waits the nth delay after the
+// report of the one before it. The first catches a quick relaunch, the second one heartbeat later,
+// and the last is sent after any registration a stopped session left behind must have lapsed, past
+// both windows with a minute to spare. That copy then either reaches the relaunched session or is
+// refused (notify.ErrNoHolder) and held by the executor until a session holds the role again, so
+// nothing is dropped while the architect's claim lives. There are three, as the TypeScript daemon
+// re-sends one at most three times (processes.ts, resendToRootArchitect): a holder that keeps its
+// registration alive but never confirms a delivery would otherwise be sent copies without end, and
+// the report of its last copy is logged and queues nothing.
 var noticeReholdDelays = [...]time.Duration{30 * time.Second, pluginHeartbeat, max(listenerSessionTTL, listenerClaimStale) + time.Minute}
 
 // errNoticeException is a report the listener sent that cannot be read as the failed forward of
@@ -76,34 +75,33 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 }
 
 // rehold queues a notice again when the listener reports that its forward to the owning
-// architect's session failed after the publish was accepted: the forward failed
+// architect's session did not complete after the publish was accepted: the forward failed
 // (`delivery_failed`), the holder lapsed between the two (`no_holder`), or the session the
-// listener forwarded to did not confirm it in time (`receipt_timeout`) and is not the claim's own
-// session with its role taken. A session that stopped running but is still registered produces
-// that last one: the listener forwards to it and waits for a receipt that never comes. So does the
-// relaunch window, until the claim's agent has taken the Envoy role back. A late receipt from the
-// claim's own session once its agent took the role and said it is ready (claimTookRole) is a slow
-// holder that has the notice, as the TypeScript daemon reads it (processes.ts, handleException),
-// so it is logged and nothing is queued. A registered claim has not taken the role yet, so a
-// report from its session is queued: a copy the session may already have beats a notice lost.
+// listener forwarded to did not confirm it in time (`receipt_timeout`). A session that stopped
+// running but is still registered produces that last one: the listener forwards to it and waits
+// for a receipt that never comes. So does the relaunch window, until the claim's agent has taken
+// the Envoy role back. Every such report is queued, a late receipt from the claim's own session
+// too: a Go relaunch resumes the claim's session id, so a report naming it cannot tell the stopped
+// process from the relaunched one, and a copy the session already has costs one frame its plugin
+// drops, where a skipped copy the relaunched process never saw is a notice lost.
 //
 // The notice goes back through the executor as a new row of its issue, counted in its Resends,
 // so it is routed, fenced and held as any notice is, and it is published under the dedupe key of
-// the row it copies (Notice.ResendOf), so a session that did get the forward recognises the copy.
-// It is due after the next of noticeReholdDelays, or at once when the architect's agent has
-// already taken its role on a session other than the one the forward went to: that ready has
-// passed, so no release (releaseWaiting) would make the copy due, and every later notice to the
-// architect would wait behind it. It is queued again once per delay; the report of its last copy
-// is logged and queues nothing. A report about another daemon's publish, another project, a role
-// that is not an architect, or anything but a notice changes nothing. The exception lane has no
-// redelivery, so a report that cannot be read is logged here and dropped. Each published copy of a
-// row is queued again once, keyed by the row's dedupe key and the copy's count: a publish whose
-// 200 was lost is retried under the same key, and the listener reports each failed forward under a
-// fresh event id.
+// the row it copies (Notice.Published), so a session that did get the forward recognises the copy.
+// It is due at once when the architect's agent has taken its role and said it is ready
+// (claimTookRole): its ready has passed, so no release (releaseWaiting) would make the copy due,
+// and every later notice to the architect would wait behind it. Otherwise it is due after the next
+// of noticeReholdDelays. It is queued again once per delay; the report of its last copy is logged
+// and queues nothing. A report about another daemon's publish, another project, a role that is not
+// an architect, or anything but a notice changes nothing. The exception lane has no redelivery, so
+// a report that cannot be read is logged here and dropped. Each published copy of a row is queued
+// again once, keyed by the row's dedupe key and the copy's count: a publish whose 200 was lost is
+// retried under the same key, and the listener reports each failed forward under a fresh event id.
 //
 // The row finishes when the listener accepts the publish, and the listener reports a failed
-// forward only after its receipt window (two seconds). A notice to the same architect published in
-// that window is not held behind the failed one, so it can arrive before the copy.
+// forward only after its receipt window (two seconds, longer while forwards queue behind others on
+// its role lane). A notice to the same architect written before the report arrives is not held
+// behind the failed one, so it can arrive before the copy.
 func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if r.supervisor == nil {
 		return errors.New("notice re-hold has no claim supervisor")
@@ -127,18 +125,8 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if !ok {
 		return nil
 	}
-	var held supervise.Claim
-	if machine, ok := r.supervisor.Machine(claim.Token(strings.TrimPrefix(exception.OriginalTopic, roleTopicPrefix))); ok {
-		held = machine.Claim()
-	}
 	switch exception.Reason {
-	case "receipt_timeout":
-		if exception.RecipientSession != "" && exception.RecipientSession == held.Session && claimTookRole(held.State) {
-			r.log.Info("outbox notice receipt was late; its architect's session is live, so nothing is re-sent",
-				"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "session", held.Session)
-			return nil
-		}
-	case "delivery_failed", "no_holder":
+	case "delivery_failed", "no_holder", "receipt_timeout":
 	default:
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}
@@ -148,7 +136,7 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 		return nil
 	}
 	due := r.now().Add(noticeReholdDelays[notice.Resends])
-	if claimTookRole(held.State) && held.Session != exception.RecipientSession {
+	if claimTookRole(r.claimState(claim.Token(strings.TrimPrefix(exception.OriginalTopic, roleTopicPrefix)))) {
 		due = r.now()
 	}
 	mark := fmt.Sprintf("%s#%d", exception.DedupeKey, notice.Resends)

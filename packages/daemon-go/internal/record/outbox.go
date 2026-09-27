@@ -112,6 +112,17 @@ type Notice struct {
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
 
+// Published is the notice the runner publishes for outbox row id, and the dedupe key it goes under:
+// a re-held copy goes under the key of the row it copies, and without ResendOf.
+func (n Notice) Published(id int64) (Notice, string) {
+	if n.ResendOf == 0 {
+		return n, OutboxKey(id)
+	}
+	copied := n.ResendOf
+	n.ResendOf = 0
+	return n, OutboxKey(copied)
+}
+
 // ControllerNotice is a Notice for the project's controller topic (notify.ControllerTopic) alone,
 // in an outbox row of its own, so its publish retries apart from the architect's notice row. It is
 // published as the Notice it is.

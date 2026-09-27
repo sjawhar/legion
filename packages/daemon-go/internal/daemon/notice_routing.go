@@ -64,7 +64,7 @@ func (r *outbox) readNoticeTree(ctx context.Context, row record.OutboxRow) (reco
 	var tree treeSnapshot
 	if err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		var err error
-		if issue, tree.noticeRoute, err = r.readNoticeRoute(ctx, tx, row.Issue, nil); err != nil {
+		if issue, tree.noticeRoute, err = r.readNoticeRoute(ctx, tx, row.Issue, map[string]noticeRoute{}); err != nil {
 			return err
 		}
 		tree.earlier, err = r.records.EarlierNotices(ctx, tx, tree.root.Key, row.ID)
@@ -76,9 +76,9 @@ func (r *outbox) readNoticeTree(ctx context.Context, row record.OutboxRow) (reco
 }
 
 // readNoticeRoute reads in tx the tree of the issue key names, and returns the issue as the tree's
-// own issue set holds it with the tree's route. routes, when not nil, holds the routes already
-// read by tree root and keeps the ones read here, so a caller routing several notices in one
-// transaction reads each tree once. A notice is unroutable when its issue is not recorded, has no
+// own issue set holds it with the tree's route. routes holds the routes already read by tree root
+// and keeps the ones read here, so a caller routing several notices in one transaction reads each
+// tree once. A notice is unroutable when its issue is not recorded, has no
 // tree or no recorded root, or its keys make no claim token.
 func (r *outbox) readNoticeRoute(ctx context.Context, tx pgx.Tx, key string, routes map[string]noticeRoute) (record.Issue, noticeRoute, error) {
 	if !claim.IsIssueKey(key) {
@@ -114,9 +114,7 @@ func (r *outbox) readNoticeRoute(ctx context.Context, tx pgx.Tx, key string, rou
 	if route.root, ok = route.issues[recorded.Tree]; !ok {
 		return record.Issue{}, noticeRoute{}, fmt.Errorf("%w: the root %s of %s is not recorded", errNoticeUnroutable, recorded.Tree, key)
 	}
-	if routes != nil {
-		routes[recorded.Tree] = route
-	}
+	routes[recorded.Tree] = route
 	return route.issues[key], route, nil
 }
 

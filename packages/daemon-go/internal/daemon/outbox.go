@@ -314,12 +314,7 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if earlier := earlierNoticeFor(tree, architect, runs); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
-	key := record.OutboxKey(row.ID)
-	if payload.ResendOf != 0 {
-		key = record.OutboxKey(payload.ResendOf)
-	}
-	notice := payload
-	notice.ResendOf = 0
+	notice, key := payload.Published(row.ID)
 	published := r.notices.Publish(ctx, roleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	switch {
 	case published == nil:

@@ -78,10 +78,11 @@ func queuedNotices(t *testing.T, pool *pgxpool.Pool) []string {
 
 // A notice the listener accepted but could not forward to the owning architect's session is queued
 // again, counted as one re-send and published under the key of the row it copies, so a session that
-// did get the forward recognises the copy. The copy waits the first re-send delay, or is due at once
-// when the architect's agent has already taken its role on another session, since that ready will
-// not come again to release it. A registered claim has not taken its role, so a late receipt from
-// its own session is queued too.
+// did get the forward recognises the copy. Every report is queued, a late receipt from the claim's
+// own session too: a Go relaunch resumes the session id, so that report may come from the stopped
+// process. The copy is due at once when the architect's agent has taken its role, whichever session
+// the forward went to, since that ready will not come again to release it; otherwise it waits the
+// first re-send delay.
 func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 	for _, tc := range []struct {
 		name, reason       string
@@ -89,13 +90,15 @@ func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 		session, recipient string
 		due                time.Duration
 	}{
-		{"a failed forward", "delivery_failed", supervise.StateWorking, "ses_live", "ses_live", noticeReholdDelays[0]},
+		{"a failed forward to the live session", "delivery_failed", supervise.StateWorking, "ses_live", "ses_live", 0},
+		{"a late receipt from the live session", "receipt_timeout", supervise.StateIdle, "ses_live", "ses_live", 0},
 		{"a holder that lapsed, the role taken since", "no_holder", supervise.StateWorking, "ses_live", "", 0},
 		{"a holder that lapsed, the claim relaunching", "no_holder", supervise.StateLaunching, "", "", noticeReholdDelays[0]},
 		{"a late receipt while the claim relaunches", "receipt_timeout", supervise.StateLaunching, "", "ses_stopped", noticeReholdDelays[0]},
 		{"a late receipt from the stopped session after the new one registered", "receipt_timeout", supervise.StateRegistered, "ses_new", "ses_stopped", noticeReholdDelays[0]},
 		{"a late receipt from the stopped session after the new one is ready", "receipt_timeout", supervise.StateReady, "ses_new", "ses_stopped", 0},
 		{"a late receipt from a resumed session before it takes its role", "receipt_timeout", supervise.StateRegistered, "ses_arch", "ses_arch", noticeReholdDelays[0]},
+		{"a late receipt from a resumed session that took its role inside the receipt window", "receipt_timeout", supervise.StateReady, "ses_arch", "ses_arch", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -176,10 +179,9 @@ func TestAReportOfTheExecutorsOwnPublishIsQueuedAgain(t *testing.T) {
 }
 
 // Only a failed forward of this daemon's notice about an issue of its project, to an architect of
-// its project, is queued again. A late receipt from the claim's own live session is a slow holder
-// that has the notice. Any other report — another project's role or issue, a phase worker's role,
-// the merge queue's READY, another publisher's key, a summary that is not the executor's own, a
-// payload that is not a notice — is someone else's, and changes nothing.
+// its project, is queued again. Any other report — another project's role or issue, a phase
+// worker's role, the merge queue's READY, another publisher's key, a summary that is not the
+// executor's own, a payload that is not a notice — is someone else's, and changes nothing.
 func TestAReportThatIsNotAFailedNoticeForwardChangesNothing(t *testing.T) {
 	notice := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}
 	root := "notifications.role.legion-legion-legion-1-architect"
@@ -187,7 +189,6 @@ func TestAReportThatIsNotAFailedNoticeForwardChangesNothing(t *testing.T) {
 		name   string
 		report laneReport
 	}{
-		{"a late receipt from the claim's live session", laneReport{"evt-exception", "receipt_timeout", root, "pr-blocked on LEGION-2", notice, "legion-outbox:7", "ses_live"}},
 		{"another project's architect", laneReport{"evt-exception", "delivery_failed", "notifications.role.legion-other-legion-1-architect", "pr-blocked on LEGION-2", notice, "legion-outbox:7", "ses_live"}},
 		{"another project's issue", laneReport{"evt-exception", "delivery_failed", root, "pr-blocked on OTHER-2", notice, "legion-outbox:7", "ses_live"}},
 		{"a phase worker's role", laneReport{"evt-exception", "delivery_failed", "notifications.role.legion-legion-legion-2-planner", "pr-blocked on LEGION-2", notice, "legion-outbox:7", "ses_live"}},
