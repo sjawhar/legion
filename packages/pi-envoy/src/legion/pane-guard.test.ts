@@ -278,6 +278,14 @@ describe("scripts a command runs", () => {
     expect(reason).not.toContain(`line 3 of ${parent}`);
   });
 
+  test("attributes a nested script call-site to the enclosing script", () => {
+    const inner = script("nested-attribution-inner.sh", ':\n:\nrm -rf "$HOME"\n');
+    const outer = script("nested-attribution-outer.sh", `:\n:\n:\nbash ${inner}\n`);
+    const reason = bash(`bash ${outer}`);
+    expect(reason).toContain(`line 4 of ${outer}`);
+    expect(reason).toContain(`line 3 of ${inner}`);
+  });
+
   test("uses a shell function's echoed path in a command substitution", () => {
     const generated = script(
       "function-output.sh",
@@ -498,6 +506,7 @@ describe("the eval tool", () => {
     ).toContain(".ssh");
     expect(code("js", 'await tool.bash({ command: "rm -rf ~" })')).toContain("`~`");
     expect(code("js", 'execSync("pkill -x sleep")')).toContain("pkill");
+
     // Allowed: inside the workspace, an unevaluable argument (the documented residual), reads.
     expect(
       code("py", 'shutil.rmtree(os.path.join(os.environ["LEGION_WORKSPACE"], "build"))')

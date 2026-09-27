@@ -2340,8 +2340,7 @@ function runFile(
     throw new Refusal(
       site.snippet,
       site.line,
-      `line ${error.line} of ${source}, \`${error.snippet}\`: ${error.detail}`,
-      source
+      `line ${error.line} of ${source}, \`${error.snippet}\`: ${error.detail}`
     );
   }
 }
