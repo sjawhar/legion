@@ -212,15 +212,18 @@ prosemirror-tables' grid paste (`__pastedCells`, `__clipCells`, `__insertCells`)
 cell on, growing the table as needed, or clipped to the selection. That grid paste differs from
 prosemirror-tables' own paste handler in three ways. Copied cells are read from the clipboard HTML's
 own rows and cells (`htmlTableCells`), because ProseMirror's parse at the caret gives body rows an
-empty leading header row, which Milkdown's table requires. Tab-separated text pasted onto selected
-cells fills them one value each, and other HTML one textblock each (`htmlLineCells`), so a list
-fills them item by item, as paragraphs do, and repeats from its first item across a wider
-selection. Every cell is retyped for the row it lands in and kept to one line (`fitCells`). The
-retyping is because Milkdown's header row holds only `table_header` cells and a
-body row only `table_cell` ones, and prosemirror-tables' own insert threw on a paste that put header
-cells in a body row or reached the header row. A cell holding more than one block or a line break (a
-`<br>`, a code block's newline) is flattened as the caret path flattens, because a hard break stored
-in a table ends its row. Two other patches keep a pasted table's rows.
+empty leading header row, which Milkdown's table requires; a table nested in a copied cell is that
+cell's content. Tab-separated text pasted onto selected cells fills them one value each, and other
+HTML one line each (`htmlLineCells`), so a list fills them item by item, as paragraphs do, and
+repeats from its first item across a wider selection. Every cell is retyped for the row it lands in
+and kept to one line (`fitCells`). The retyping is because Milkdown's header row holds only
+`table_header` cells and a body row only `table_cell` ones, and prosemirror-tables' own insert threw
+on a paste that put header cells in a body row or reached the header row. A cell holding more than
+one block or a line break (a `<br>`, a code block's newline) is flattened as the caret path
+flattens, because a hard break stored in a table ends its row. A line, in both, is a textblock or a
+run of inline content that parsed HTML leaves beside blocks (`textLines`), such as a Gmail copy's
+first line before its `<div>`s or text before a list in a cell, so that text is kept. Two other
+patches keep a pasted table's rows.
 `patches/prosemirror-tables@1.8.5.patch` makes `fixTables` fill a row with no cells with the cell
 type that row holds, since the default body cell doesn't fit Milkdown's header row and the fix
 repeated forever. A hunk in `patches/@milkdown%2Fpreset-gfm@7.22.1.patch` makes preset-gfm's table

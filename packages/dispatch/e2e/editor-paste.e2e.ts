@@ -230,11 +230,30 @@ test("HTML holding a paragraph and a table, pasted into a body cell, stays in th
   }
 });
 
-/** Selects the cells from the one holding `from` to the one holding `to`, the way a person does:
- * dragging across them, or clicking one and shift-clicking the other. */
-async function selectCells(page: Page, from: string, to: string, how: "drag" | "shift-click") {
+/** How a person selects cells: dragging across them, clicking one and shift-clicking the other, or
+ * dragging out of one cell and back into it, which selects that cell alone (prosemirror-tables). */
+type CellGesture = "drag" | "shift-click" | "drag-back";
+
+/** Selects the cells from the one holding `from` to the one holding `to` with `how`; for
+ * "drag-back", `from` names the one cell. */
+async function selectCells(page: Page, from: string, to: string, how: CellGesture) {
   const editor = documentEditor(page);
-  if (how === "drag") {
+  if (how === "drag-back") {
+    const cell = editor.locator("td, th").filter({ hasText: from });
+    const start = await cell.boundingBox();
+    const neighbour = await cell
+      .locator("xpath=following-sibling::*[1] | preceding-sibling::*[1]")
+      .first()
+      .boundingBox();
+    if (!start || !neighbour) throw new Error("the cells have no layout");
+    await page.mouse.move(start.x + 5, start.y + start.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(neighbour.x + neighbour.width / 2, neighbour.y + neighbour.height / 2, {
+      steps: 5,
+    });
+    await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2, { steps: 5 });
+    await page.mouse.up();
+  } else if (how === "drag") {
     const start = await editor.getByText(from).boundingBox();
     const end = await editor.getByText(to).boundingBox();
     if (!start || !end) throw new Error("the cells have no layout");
@@ -253,7 +272,7 @@ async function openWithCellsSelected(
   browser: Browser,
   from: string,
   to: string,
-  how: "drag" | "shift-click",
+  how: CellGesture,
   spec: string = table
 ) {
   const { alice, issue, page } = await openIssue(browser, "Cell selection paste", spec);
@@ -276,28 +295,15 @@ function targetName(target: Target): string {
 /** Opens the two-row table as alice with the caret after `target`, or with its cells selected. */
 async function openAt(browser: Browser, title: string, target: Target) {
   if (typeof target === "string") return openWithCaret(browser, title, table, target, "end");
-  if (target[0] === target[1]) {
-    // A drag that leaves a cell and comes back to it selects that one cell (prosemirror-tables).
-    const opened = await openIssue(browser, title, table);
-    const editor = documentEditor(opened.page);
-    await expect(editor).toContainText(target[0]);
-    const cell = await editor.getByText(target[0]).boundingBox();
-    const other = await editor
-      .getByText(target[0] === "alpha one" ? "beta two" : "alpha one")
-      .boundingBox();
-    if (!cell || !other) throw new Error("the cells have no layout");
-    await opened.page.mouse.move(cell.x + 5, cell.y + cell.height / 2);
-    await opened.page.mouse.down();
-    await opened.page.mouse.move(other.x + other.width / 2, other.y + other.height / 2, {
-      steps: 5,
-    });
-    await opened.page.mouse.move(cell.x + cell.width / 2, cell.y + cell.height / 2, { steps: 5 });
-    await opened.page.mouse.up();
-    await expect(opened.page.locator(".selectedCell")).toHaveCount(1);
-    return opened;
-  }
-  const opened = await openWithCellsSelected(browser, target[0], target[1], "shift-click");
-  await expect(opened.page.locator(".selectedCell")).not.toHaveCount(0);
+  const single = target[0] === target[1];
+  const opened = await openWithCellsSelected(
+    browser,
+    target[0],
+    target[1],
+    single ? "drag-back" : "shift-click"
+  );
+  if (single) await expect(opened.page.locator(".selectedCell")).toHaveCount(1);
+  else await expect(opened.page.locator(".selectedCell")).not.toHaveCount(0);
   return opened;
 }
 
@@ -402,16 +408,25 @@ for (const [name, clipboard, target, stored] of [
 }
 
 // A copied cell holding more than one block, as a Docs cell of two paragraphs or a list does, keeps
-// all of it, joined into its one line the way the caret path joins pasted text. Fitting the parsed
-// cell into a Milkdown cell, which holds one paragraph, once kept only the first block.
+// all of it, joined into its one line the way the caret path joins pasted text: text beside a block,
+// and a table nested in the cell, as email HTML nests them, included. Fitting the parsed cell into a
+// Milkdown cell, which holds one paragraph, once kept only the first block, text before a block
+// once ran into that block's first line and lost the rest, and a nested table's rows once became
+// rows of the grid, with their text removed from the cell.
 const cellBlocks = [
   ["two paragraphs", "<p>x</p><p>y</p>", "x y"],
   ["a list", "<ul><li>a</li><li>b</li></ul>", "a b"],
+  ["text then a list", "a<ul><li>i</li><li>j</li></ul>", "a i j"],
+  ["text then a paragraph", "a<p>b</p>", "a b"],
+  ["a paragraph then text", "<p>x</p>tail", "x tail"],
+  ["bold text then a paragraph", "<b>x</b><p>y</p>", "**x** y"],
+  ["text around a rule", "a<hr>b", "a b"],
+  ["a table", "o1<table><tr><td>i1</td><td>i2</td></tr></table>", "o1 i1 i2"],
 ] as const;
 for (const [blocks, cellHtml, joined] of cellBlocks) {
   const clipboard = {
     html: `<table><tr><td>${cellHtml}</td><td>z</td></tr></table>`,
-    text: `${joined}\tz`,
+    text: `${joined.replaceAll("*", "")}\tz`,
   };
   for (const [target, stored] of [
     [
@@ -446,67 +461,59 @@ for (const [blocks, cellHtml, joined] of cellBlocks) {
   }
 }
 
-// A list pasted onto selected cells fills them one item per cell, as paragraphs already do, and
-// like them repeats from its first item across a selection wider than it. It once filled every
-// selected cell with its first item.
+// HTML pasted onto selected cells that isn't a copy of cells fills them one line each, a line being
+// a paragraph, a list item, or text beside a block, and like a copy of cells it repeats from its
+// first line across a selection wider than it. A list once filled every cell with its first item,
+// and text or an image beside a block was once dropped.
 const threeColumns = "| c1 | c2 | c3 |\n| --- | --- | --- |\n| d1 | d2 | d3 |\n";
-for (const [list, tag] of [
-  ["a list", "ul"],
-  ["an ordered list", "ol"],
+const image = "![](https://example.com/i.png)";
+for (const [shape, html, cells] of [
+  ["a list of 2 items", "<ul><li>a</li><li>b</li></ul>", ["a", "b"]],
+  ["a list of 3 items", "<ul><li>a</li><li>b</li><li>c</li></ul>", ["a", "b", "c"]],
+  ["an ordered list of 2 items", "<ol><li>a</li><li>b</li></ol>", ["a", "b"]],
+  ["an ordered list of 3 items", "<ol><li>a</li><li>b</li><li>c</li></ol>", ["a", "b", "c"]],
+  ["two paragraphs", "<p>x</p><p>y</p>", ["x", "y"]],
+  ["a line then a block, as a Gmail copy", "Line one<div>line two</div>", ["Line one", "line two"]],
+  ["text then a paragraph", "lead<p>b</p>", ["lead", "b"]],
+  ["a paragraph then text", "<p>a</p>tail", ["a", "tail"]],
+  [
+    "a paragraph then a table",
+    "<p>lead</p><table><tr><td>one</td><td>two</td></tr></table>",
+    ["lead", "one", "two"],
+  ],
+  [
+    "a partial copy of three paragraphs",
+    "<span>end of one</span><p>two</p><span>start of three</span>",
+    ["end of one", "two", "start of three"],
+  ],
+  ["a paragraph then an image", '<p>a</p><img src="https://example.com/i.png">', ["a", image]],
 ] as const) {
-  for (const items of [
-    ["a", "b"],
-    ["a", "b", "c"],
+  for (const [to, row] of [
+    ["d2", `| ${cells[0]} | ${cells[1]} | d3 |`],
+    ["d3", `| ${cells[0]} | ${cells[1]} | ${cells[2] ?? cells[0]} |`],
   ] as const) {
-    const clipboard = {
-      html: `<${tag}>${items.map((item) => `<li>${item}</li>`).join("")}</${tag}>`,
-      text: items.join("\n"),
-    };
-    for (const [to, row] of [
-      ["d2", `| ${items[0]} | ${items[1]} | d3 |`],
-      ["d3", `| ${items[0]} | ${items[1]} | ${items[2] ?? items[0]} |`],
-    ] as const) {
-      test(`${list} of ${items.length} items pasted onto d1 to ${to} fills them item by item`, async ({
+    test(`${shape} pasted onto d1 to ${to} fills them one line each`, async ({ browser }) => {
+      const { alice, issue, page } = await openWithCellsSelected(
         browser,
-      }) => {
-        const { alice, issue, page } = await openIssue(browser, "List cells paste", threeColumns);
-        try {
-          await expect(documentEditor(page)).toContainText(to);
-          await selectCells(page, "d1", to, "shift-click");
-          await expect(page.locator(".selectedCell")).toHaveCount(to === "d2" ? 2 : 3);
+        "d1",
+        to,
+        "shift-click",
+        threeColumns
+      );
+      try {
+        await expect(page.locator(".selectedCell")).toHaveCount(to === "d2" ? 2 : 3);
 
-          await paste(page, clipboard);
+        await paste(page, { html, text: cells.join("\n") });
 
-          await expect
-            .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-            .toBe(`| c1 | c2 | c3 |\n| :--- | :--- | :--- |\n${row}\n`);
-        } finally {
-          await alice.close();
-        }
-      });
-    }
+        await expect
+          .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+          .toBe(`| c1 | c2 | c3 |\n| :--- | :--- | :--- |\n${row}\n`);
+      } finally {
+        await alice.close();
+      }
+    });
   }
 }
-
-// The control: two paragraphs pasted onto three cells fill them one paragraph each and repeat.
-test("two paragraphs pasted onto d1 to d3 fill them paragraph by paragraph", async ({
-  browser,
-}) => {
-  const { alice, issue, page } = await openIssue(browser, "Paragraph cells paste", threeColumns);
-  try {
-    await expect(documentEditor(page)).toContainText("d3");
-    await selectCells(page, "d1", "d3", "shift-click");
-    await expect(page.locator(".selectedCell")).toHaveCount(3);
-
-    await paste(page, { html: "<p>x</p><p>y</p>", text: "x\n\ny" });
-
-    await expect
-      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-      .toBe("| c1 | c2 | c3 |\n| :--- | :--- | :--- |\n| x | y | x |\n");
-  } finally {
-    await alice.close();
-  }
-});
 
 // A copied table's row with no cells (an empty <tr>) carries nothing to paste, so the grid paste
 // leaves it out. It once reached prosemirror-tables' insert as a row of no cells, which threw, and the
