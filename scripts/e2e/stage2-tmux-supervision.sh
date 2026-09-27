@@ -513,7 +513,10 @@ pass
 begin stale-generation-hello-refused
 refused_msg="worker-stream: rejected hello (stale worker generation)"
 before_count=$(log_count "$refused_msg")
-reply=$(printf '{"type":"hello","bootToken":"%s"}\n' "$(cat "$work/stale-boot-token")" |
+# The hello2 a pane's shim sends (shimwire.Hello2; a tmux pane's carries no agentSecrets). The
+# listener refuses a v1 hello before it reads the boot token, so one would never reach the
+# generation check.
+reply=$(printf '{"type":"hello2","bootToken":"%s"}\n' "$(cat "$work/stale-boot-token")" |
   socat -t 5 - "UNIX-CONNECT:$state/worker-stream.sock" 2>&1) || true
 [ -z "$reply" ] || fail "the daemon answered a stale hello: $reply"
 until_true 10 "the daemon to log the stale hello" sh -c "[ \"\$(jq -R --arg m '$refused_msg' 'fromjson? | select(.msg == \$m)' '$daemon_log' | jq -s length)\" -gt $before_count ]"
