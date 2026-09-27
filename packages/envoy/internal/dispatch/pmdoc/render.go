@@ -292,8 +292,15 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
 		outer, outerQuotes := r.inFootnote, r.footnoteQuotes
 		r.inFootnote, r.footnoteQuotes = true, r.quoteDepth
+		// The browser editor's parser reads the lines of a definition a list item holds as the
+		// item's, so in a tight item a blank line between two of its blocks would spread the item.
+		tightItem := len(r.containers) > 0 && r.containers[len(r.containers)-1].Type == "list_item" && r.containers[len(r.containers)-1].Attrs["spread"] != true
 		r.enter(n)
-		r.blocksNoTrailing(n.Children, prefix+definitionIndent)
+		if tightItem {
+			r.itemBlocks(n.Children, false, prefix, prefix+definitionIndent, false)
+		} else {
+			r.blocksNoTrailing(n.Children, prefix+definitionIndent)
+		}
 		r.leave()
 		r.inFootnote, r.footnoteQuotes = outer, outerQuotes
 	default:
@@ -466,45 +473,52 @@ func (r *renderer) list(n *Node, prefix string) {
 			}
 			children = children[1:]
 		}
-		otherMarkers := otherListMarkers(children)
 		r.itemDepth++
 		r.enter(item)
-		for childIndex, child := range children {
-			// A tight item writes its blocks on consecutive lines, where a paragraph would run on
-			// into a paragraph after it and underline itself with a rule's `---`. The browser
-			// editor's writer puts a blank line between two paragraphs (the item then reads back
-			// spread) and writes a rule `***`, and so does this renderer.
-			afterParagraph := childIndex > 0 && children[childIndex-1].Type == "paragraph"
-			if childIndex > 0 {
-				blanks := 0
-				if item.Attrs["spread"] == true || afterParagraph && child.Type == "paragraph" {
-					blanks = 1
-				}
-				if previous := children[childIndex-1]; isList(previous) {
-					after, exact := r.blanksAfterList(previous, child)
-					switch {
-					case exact:
-						blanks = after
-					// One blank line keeps a block that cannot open on the line after a paragraph
-					// off the paragraph the list ends in.
-					case !isList(child) && !opensAfterParagraph(child) && endsInParagraph(previous):
-						blanks = 1
-					}
-				}
-				r.writeSyntax("\n" + strings.Repeat(strings.TrimRight(prefix, " ")+"\n", blanks) + indent)
-				// A quote on the line after a paragraph opens there, and a list opening it whose
-				// first item cannot interrupt a paragraph would not: a quote line first leaves the
-				// list its own line.
-				if blanks == 0 && afterParagraph && opensWithListThatCannotInterrupt(child) {
-					r.writeSyntax(">\n" + indent)
-				}
-			}
-			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0 && marker != "* ")
-			r.otherListMarker = otherMarkers[childIndex]
-			r.block(child, indent)
-		}
+		r.itemBlocks(children, item.Attrs["spread"] == true, prefix, indent, skipped && marker != "* ")
 		r.leave()
 		r.itemDepth--
+	}
+}
+
+// itemBlocks writes blocks the browser editor's parser reads as a list item's lines - the item's
+// own, or those of a footnote definition the item holds - at indent, their lines' prefix, where
+// prefix is the list's. A tight item writes its blocks on consecutive lines, where a paragraph
+// would run on into a paragraph after it and underline itself with a rule's `---`. The browser
+// editor's writer puts a blank line between two paragraphs (the item then reads back spread) and
+// writes a rule `***`, and so does this renderer; firstRule reports whether a rule opening the
+// blocks is written `***` too.
+func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string, firstRule bool) {
+	otherMarkers := otherListMarkers(blocks)
+	for index, child := range blocks {
+		afterParagraph := index > 0 && blocks[index-1].Type == "paragraph"
+		if index > 0 {
+			blanks := 0
+			if spread || afterParagraph && child.Type == "paragraph" {
+				blanks = 1
+			}
+			if previous := blocks[index-1]; isList(previous) {
+				after, exact := r.blanksAfterList(previous, child)
+				switch {
+				case exact:
+					blanks = after
+				// One blank line keeps a block that cannot open on the line after a paragraph off
+				// the paragraph the list ends in.
+				case !isList(child) && !opensAfterParagraph(child) && endsInParagraph(previous):
+					blanks = 1
+				}
+			}
+			r.writeSyntax("\n" + strings.Repeat(strings.TrimRight(prefix, " ")+"\n", blanks) + indent)
+			// A quote on the line after a paragraph opens there, and a list opening it whose first
+			// item cannot interrupt a paragraph would not: a quote line first leaves the list its
+			// own line.
+			if blanks == 0 && afterParagraph && opensWithListThatCannotInterrupt(child) {
+				r.writeSyntax(">\n" + indent)
+			}
+		}
+		r.asteriskRule = child.Type == "hr" && (afterParagraph && !spread || firstRule && index == 0)
+		r.otherListMarker = otherMarkers[index]
+		r.block(child, indent)
 	}
 }
 

@@ -84,3 +84,11 @@ One whose fence is in a quote in the definition[^uj], which ends at the blank li
       > x
 
   tail
+
+A tight item holding a definition[^uk] with a list and a code block:
+
+- [^uk]: - a
+      ```
+      x
+      ```
+  tail
