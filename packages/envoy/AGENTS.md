@@ -355,8 +355,9 @@ back. Where it stores otherwise than the browser's reject, or refuses what the b
 - `# HelloQQ` then `## ZZ world.` keeps two headings (`# Hello`, `## &#32;world.`); the browser's
   delete joins them, and `Splice`, which makes ProseMirror's replace, keeps headings of two levels
   apart.
-- A cell at a row's end into the next row's first cell keeps the rows apart and pads the next row;
-  the browser joins the rows and widens the table.
+- A cell at a row's end into the next row's first cell keeps the rows apart and pads the next row,
+  whose remaining cells move one column left keeping their own alignment, so each reads back with
+  its new column's; the browser joins the rows and widens the table.
 - One into a one-column table's only header cell stores one empty header cell; the browser leaves
   the header row empty and adds a row, which the schema cannot hold.
 - A padded cell takes its column's alignment, where `fixTables` makes it left, so the column reads
