@@ -299,6 +299,22 @@ func (s *server) writeBroadcast(
 			return broadcastRead{}, nil, err
 		}
 		events = append(events, event)
+		// The recipient's first delivery attempt is opened here, unclaimed, rather than by the
+		// worker that will send it. A recipient then always has an attempt to show - "Sending"
+		// while a worker holds it, and, if the process dies before the send, a lapsed pending
+		// row the ordinary same-mode retry resumes under its own idempotency key. Opening it
+		// later left a stranded recipient with no attempt at all, which only a delivery in a
+		// DIFFERENT mode could move, and that is a genuine second frame where the first landed.
+		// claimed_at stays null, so recordPendingMessageDelivery reads the row as free and
+		// resumes it instead of opening a second attempt beside it.
+		attempt, err := scanMessageDelivery(tx.QueryRow(ctx, `
+			insert into message_deliveries (message_id, attempt, delivery, session_id, state)
+			values ($1, 1, $2, $3, 'pending')
+			returning `+messageDeliveryColumns, message.ID, delivery, recipient.sessionID))
+		if err != nil {
+			return broadcastRead{}, nil, err
+		}
+		message.Deliveries = []model.MessageDelivery{attempt}
 		sent.Recipients = append(sent.Recipients, broadcastRecipient{
 			SessionID: recipient.sessionID, Message: message, Replies: []model.Message{},
 		})
@@ -313,9 +329,9 @@ func (s *server) writeBroadcast(
 // broadcastDeliveryWorkers at a time. It runs on the server's lifetime rather than the
 // request's, so a browser that goes away cannot strand a recipient, and a shutdown cancels it
 // rather than leaving the goroutine behind. One recipient's failure never stops another's: a
-// send the listener refused lands as a failed attempt on that message, and a delivery this
-// cannot record at all leaves the message with no attempt, which the broadcast view shows as
-// not sent and offers a retry for.
+// send the listener refused settles that recipient's attempt as failed, and a delivery this
+// cannot record at all leaves the attempt pending and unclaimed, which the broadcast view
+// shows as sending and, once the claim lease has passed, offers a same-mode retry for.
 func (s *server) deliverBroadcast(messages []model.Message, delivery string, actor model.Actor) {
 	workers := min(broadcastDeliveryWorkers, len(messages))
 	pending := make(chan model.Message)

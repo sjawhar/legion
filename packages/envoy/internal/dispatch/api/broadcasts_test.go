@@ -411,10 +411,19 @@ func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testin
 	if sends != 0 {
 		t.Fatalf("%d sends completed before the create answered; delivery must run behind it", sends)
 	}
+	// Every recipient carries its attempt from the moment the broadcast is written, opened
+	// pending and unclaimed: a recipient with no attempt could only be moved by a delivery in
+	// another mode, which is a second frame wherever the first one landed.
 	for _, recipient := range created.Recipients {
-		if len(recipient.Message.Deliveries) != 0 {
-			t.Fatalf("%s carries %#v; an attempt cannot exist before the send",
+		if len(recipient.Message.Deliveries) != 1 {
+			t.Fatalf("%s carries %#v, want one attempt opened with the broadcast",
 				recipient.SessionID, recipient.Message.Deliveries)
+		}
+		attempt := recipient.Message.Deliveries[0]
+		if attempt.Attempt != 1 || attempt.State != "pending" || attempt.Delivery != "btw" ||
+			attempt.SessionID != recipient.SessionID {
+			t.Fatalf("%s attempt = %#v, want attempt 1 pending in the broadcast's mode",
+				recipient.SessionID, attempt)
 		}
 	}
 
@@ -424,9 +433,11 @@ func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testin
 		t.Fatalf("recipients = %#v", delivered.Recipients)
 	}
 	for _, recipient := range delivered.Recipients {
-		if recipient.Message.Deliveries[0].State != "sent" {
-			t.Fatalf("%s attempt = %#v, want it sent once the listener answered",
-				recipient.SessionID, recipient.Message.Deliveries[0])
+		// The worker settles the attempt the write opened; it never opens a second one beside it.
+		if len(recipient.Message.Deliveries) != 1 || recipient.Message.Deliveries[0].Attempt != 1 ||
+			recipient.Message.Deliveries[0].State != "sent" {
+			t.Fatalf("%s attempts = %#v, want the one attempt settled sent",
+				recipient.SessionID, recipient.Message.Deliveries)
 		}
 	}
 }

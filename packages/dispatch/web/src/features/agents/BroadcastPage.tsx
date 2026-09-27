@@ -18,6 +18,8 @@ import {
   dangerText,
   linkHoverText,
   linkText,
+  secondaryButtonBorder,
+  secondaryButtonText,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
@@ -35,6 +37,10 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 
 import { deliveryAttempts } from "./attempts";
+
+/** How long the server leaves a delivery claim before another sender may take it
+ *  (`claimLapsed`, one minute). Past it, a pending attempt is nobody's. */
+const CLAIM_LEASE_MS = 60_000;
 
 /** How many recipients have answered: a recipient whose thread carries a message the session
  *  itself wrote. The human's own follow-ups in that thread are not answers. */
@@ -75,10 +81,12 @@ function BroadcastRecipientRow({
   const answeredBy = answer === undefined ? undefined : resolveAuthor(answer.author, titles).label;
   const attempts = deliveryAttempts(recipient.message.deliveries, label);
   const latest = attempts.at(-1);
-  // Only a delivered attempt is settled news. A recipient with no attempt was never sent to -
-  // delivery runs behind the send, and a shutdown can cut it - and an attempt still pending is
-  // a send whose outcome nobody learned. Both are retryable, in the attempt's own mode safely.
-  const retryable = answeredBy === undefined && latest?.state !== "sent";
+  // A pending attempt nobody has come back to. The server frees a claim after a minute
+  // (`claimLapsed`), and it judges the claim; this reads the attempt's own timestamp, which is
+  // never later than the claim, so at worst the retry is offered a moment early - and a
+  // same-mode retry of a send that landed is dropped by the stream, so early is safe.
+  const stranded =
+    latest?.state === "pending" && Date.now() - Date.parse(latest.createdAt) > CLAIM_LEASE_MS;
   const capabilities = capabilitiesForTarget(recipient.message.target, liveAgents);
   return (
     <article aria-label={label} className={`rounded-xl border p-3 ${card} ${borderDefault}`}>
@@ -91,21 +99,41 @@ function BroadcastRecipientRow({
         <DeliveryStatus
           answeredBy={answeredBy}
           deliveries={attempts}
-          retryOffered={offersSafeRetry(attempts, retryable)}
+          retryOffered={offersSafeRetry(attempts, answeredBy === undefined)}
           targetName={label}
         />
       )}
-      {retryable ? (
+      {answeredBy !== undefined || latest?.state === "sent" ? null : latest?.state === "failed" ? (
+        // A failure is settled news: the same-mode retry the stream deduplicates, and, since
+        // nothing is outstanding, the mode-change sends too.
         <DeliveryRetry
           canAside={capabilities?.includes("aside") !== false}
           canBtw={capabilities?.includes("btw") !== false}
           canSteer={capabilities?.includes("steer") !== false}
-          mode={latest?.delivery ?? delivery}
+          mode={latest.delivery}
           onRetry={retry.mutate}
           retrying={retry.isPending}
           sameModeRetry={offersSafeRetry(attempts, true)}
           targetName={label}
         />
+      ) : latest === undefined || stranded ? (
+        // Outstanding, and nobody is carrying it. Only the attempt's own mode is offered: the
+        // frame may already have reached the agent, and the stream drops a repeat of the same
+        // mode while it cannot recognise a different one - that would be a second delivery.
+        <div className="mt-3">
+          <button
+            className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
+            disabled={retry.isPending}
+            onClick={() => retry.mutate(latest?.delivery ?? delivery)}
+            type="button"
+          >
+            Retry
+          </button>
+          <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
+            Nobody is carrying this send. Retry uses {latest?.delivery ?? delivery} again, which
+            cannot deliver it twice.
+          </p>
+        </div>
       ) : null}
       {recipient.replies.map((reply) => (
         <div className={`mt-2 border-t pt-2 ${borderDefault}`} key={reply.id}>
