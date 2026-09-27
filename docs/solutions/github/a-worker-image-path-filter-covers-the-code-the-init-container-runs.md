@@ -46,8 +46,23 @@ plugin bundles, and named three files of the daemon the CLI is compiled from. So
 every context source `worker.Dockerfile` copies, whole (`packages/daemon/**`, not chosen files
 under it), and `.github/scripts/check-image-trigger-paths.sh` parses the Dockerfile and fails the
 lint job when the filter misses a file the build reads. Building on every daemon pull request
-costs little: on 2026-09-26/27 the Worker Image check already ran on 76 pull request branches
-against the Tests workflow's 69, at a median of about 280 s.
+costs little. Replaying the last 50 merged pull requests (as of 2026-09-27) through the filter
+before and after it named the daemon whole, with git's `:(glob)` pathspecs:
+
+```bash
+paths() { git show "$1:.github/workflows/worker-image.yaml" | python3 -c 'import sys,yaml; print(" ".join(":(glob)"+p for p in yaml.safe_load(sys.stdin)[True]["pull_request"]["paths"]))'; }
+old=$(paths dab7f13d); new=$(paths 2b6dec37)
+gh pr list -R sjawhar/legion --state merged -L 50 --json number,mergeCommit -q '.[] | "\(.number) \(.mergeCommit.oid)"' |
+  while read -r n sha; do
+    git diff --quiet "$sha~1" "$sha" -- $old; o=$?; git diff --quiet "$sha~1" "$sha" -- $new; w=$?
+    echo "$n old=$o new=$w"
+  done | awk '{o+=($2=="old=1"); w+=($3=="new=1")} END {print "merged PRs:", NR, "built before:", o, "built after:", w}'
+# merged PRs: 50 built before: 27 built after: 28   (the one added is #1466, packages/contracts)
+
+gh api "repos/sjawhar/legion/actions/workflows/worker-image.yaml/runs?event=pull_request&status=success&per_page=100" \
+  --jq '[.workflow_runs[] | ((.updated_at|fromdate)-(.run_started_at|fromdate))] | sort | "runs: \(length) median_s: \(.[length/2|floor])"'
+# runs: 100 median_s: 274
+```
 
 Every widening of `pull_request.paths` applies to the PR that makes it: GitHub runs the workflow
 file from the PR merge ref for `pull_request` events, so LEGION-178's own first push built its

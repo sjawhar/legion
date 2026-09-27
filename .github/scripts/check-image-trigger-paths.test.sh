@@ -89,7 +89,17 @@ root=$(fixture green)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it checked" "$(contains "$out" 'docker/Dockerfile: checked 5 inputs (7 files) against .github/workflows/image.yaml on.push.paths')"
-check "a file the .dockerignore drops needs no filter" "$(is "$(contains "$out" 'dist/out.js')" false)"
+
+echo "case: a file the .dockerignore drops needs no filter, and one it keeps does"
+root=$(fixture dockerignore-applied)
+sed -i 's|      - "packages/app/\*\*"|      - "packages/app/package.json"\n      - "packages/app/src/**"|' \
+  "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "passes only because **/dist drops dist/out.js" "$(is "$status" 0)"
+: > "$root/.dockerignore"
+run_check "$root"
+check "fails once the .dockerignore keeps dist" "$(is "$status" 1)"
+check "names the file" "$(contains "$out" 'does not cover packages/app (docker/Dockerfile:3): packages/app/dist/out.js is built')"
 
 echo "case: a path filter removed"
 root=$(fixture dropped-source)
@@ -162,6 +172,15 @@ sed -i 's|^    branches: \[main\]$|&\n    paths-ignore:\n      - "packages/app/s
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the trigger" "$(contains "$out" 'on.push.paths-ignore does not cover packages/app')"
+
+echo "case: a GitHub path pattern using ?, + or \\ is refused, not guessed"
+# GitHub reads `package.json?` as package.jso or package.json; picomatch as package.json plus one
+# character. The check refuses GitHub's form rather than read it either way.
+root=$(fixture github-question)
+sed -i 's|      - "package.json"|      - "package.json?"|' "$root/.github/workflows/image.yaml"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the pattern" "$(contains "$out" "on.push.paths has package.json?: this check does not read GitHub's ?, + or")"
 
 echo "case: a RUN bind mount reads the context"
 root=$(fixture bind-mount)
@@ -252,5 +271,54 @@ sed -i "s|needs.changes.outputs.other == 'true'|needs.changes.outputs.manual == 
 run_check "$root"
 check "a gate on an output that is no paths filter fails, rather than reading as ungated" "$(is "$status" 1)"
 check "names the output" "$(contains "$out" 'gated on needs.changes.outputs.manual, which is not a dorny/paths-filter filter')"
+
+echo "case: the gate shape release.yaml writes is read"
+root=$(fixture called-release-shape)
+callers "$root" "$all_inputs"
+python3 - "$root/.github/workflows/release.yaml" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read().replace(
+    "    if: needs.changes.outputs.image == 'true' || needs.changes.outputs.other == 'true'\n",
+    "    if: >-\n"
+    "      always() && (needs.changes.result == 'success' || needs.changes.result == 'skipped') &&\n"
+    "      (needs.changes.outputs.image == 'true' || needs.changes.outputs.other == 'true' ||\n"
+    "      github.event_name == 'workflow_dispatch')\n",
+)
+open(path, "w").write(text)
+PY
+run_check "$root"
+check "passes" "$(is "$status" 0)"
+check "names both filters" "$(contains "$out" 'jobs.image.if (jobs.changes filter image or jobs.changes filter other)')"
+
+echo "case: a gate in any other shape fails, rather than being read as ||"
+root=$(fixture called-and)
+callers "$root" "$all_inputs"
+sed -i "s#    if: .*#    if: (needs.changes.outputs.image == 'true') \&\& (needs.changes.outputs.other == 'true')#" \
+  "$root/.github/workflows/release.yaml"
+run_check "$root"
+check "outputs in two &&-joined clauses fail" "$(is "$status" 1)"
+check "says why" "$(contains "$out" 'jobs.image calls an image workflow, and its if: tests needs.\*.outputs in more than one &&-joined clause')"
+
+root=$(fixture called-not-true)
+callers "$root" "$all_inputs"
+sed -i "s#needs.changes.outputs.other == 'true'#needs.changes.outputs.other != 'false'#" \
+  "$root/.github/workflows/release.yaml"
+run_check "$root"
+check "an output compared with anything but == 'true' fails" "$(is "$status" 1)"
+check "quotes the term" "$(contains "$out" "tests an output as \`needs.changes.outputs.other != 'false'\`")"
+
+root=$(fixture called-every)
+callers "$root" "$all_inputs"
+sed -i "s#^        with:\$#&\n          predicate-quantifier: 'every'#" "$root/.github/workflows/release.yaml"
+run_check "$root"
+check "predicate-quantifier: every fails" "$(is "$status" 1)"
+check "names it" "$(contains "$out" 'predicate-quantifier: every, which this check cannot evaluate')"
+
+echo "case: a paths-filter pattern keeps picomatch's ?"
+root=$(fixture called-dorny-question)
+callers "$root" "$(printf '%s\n' "$all_inputs" | sed "s|'package.json'|'package.jso?'|")"
+run_check "$root"
+check "package.jso? covers package.json in a dorny filter" "$(is "$status" 0)"
 
 summary "check-image-trigger-paths.sh"
