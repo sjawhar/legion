@@ -407,12 +407,13 @@ at error as `NATS refused the daemon a permission: its NATS user lacks that gran
 `operation` and `subject`: the server reports a refusal asynchronously, so a missing grant would
 otherwise be silent.
 
-Rollout order when the server gains the `legion-daemon` user (AGENTC-759): the server admits
-`legion-daemon`, with the daemon's grants, first; then the daemon gets its seed and restarts, and
-its boot line must read `paneUser=false`; only then does the server stop granting the daemon's
-subjects to `legion-pane`. Reversed, the daemon still connects as `legion-pane`, and each subject
-the server stops granting logs the error line above (a refused consumer or subscription never
-delivers).
+Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
+`legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
+every daemon gets it and restarts, and each boot line must read `paneUser=false`; only then is the
+`legion-pane` seed written. `legion-pane` is never granted the daemon's subjects (its JetStream
+consumers, the exceptions lane, role publishes). Reversed, a daemon holding only the `legion-pane`
+seed connects as `legion-pane`, and each refused subject logs the error line above (a refused
+consumer or subscription never delivers).
 
 ### Anatomy of a Sandbox pod
 
