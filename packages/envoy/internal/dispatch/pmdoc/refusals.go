@@ -12,13 +12,21 @@ import (
 // refuseBlocks refuses a document holding a block that cannot be stored as it reads (blockRefusal),
 // walking the tree goldmark read before it is converted, in document order, so that a document
 // refused for two reasons names the one it meets first. Conversion refuses nothing a reading can
-// reach. Spacing is refused apart from it, before it (browserListSpacing).
+// reach. Spacing is refused apart from it, before it (browserListSpacing). The inline content of a
+// paragraph, a heading or a table cell holds no block, and the walk does not enter it.
 func refuseBlocks(root ast.Node, source []byte) error {
 	return ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
-		return ast.WalkContinue, blockRefusal(node, source)
+		if err := blockRefusal(node, source); err != nil {
+			return ast.WalkStop, err
+		}
+		switch node.(type) {
+		case *ast.Paragraph, *ast.TextBlock, *ast.Heading, *extensionast.TableCell:
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
 	})
 }
 
