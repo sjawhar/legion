@@ -1709,75 +1709,7 @@ describe("ProcessManager", () => {
       "legion-omp-controller-envoy_token",
     ]);
   });
-  it("delivers a configured NATS nkey seed to every process as a 0600 file with its own NATS_NKEY_SEED_FILE pointer, pruned with the pane's boot-token file", async () => {
-    const stateDir = await temporaryDir();
-    const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
-    await mkdir(workspace, { recursive: true });
-    let sessionExists = false;
-    const { manager: processes, commands } = manager(newLegionState("omp", 1), {
-      config: config(stateDir, { natsNkeySeed: "SUlegionpaneseed" }),
-      run: async (command) => {
-        commands.push(command);
-        if (command[3] === "has-session") return { stdout: "", exitCode: sessionExists ? 0 : 1 };
-        if (command[3] === "new-session") sessionExists = true;
-        if (command[3] === "new-window") {
-          return { stdout: `@${commands.length} %${commands.length} 12345\n`, exitCode: 0 };
-        }
-        if (command[3] === "split-window") {
-          return { stdout: `%${commands.length} 12345\n`, exitCode: 0 };
-        }
-        return { stdout: "", exitCode: 0 };
-      },
-    });
-    await processes.ensureController();
-    await processes.spawnRoot(root);
-    await processes.spawnWorker(root, root, "tester", "verify #41");
-
-    const dir = path.join(stateDir, "secrets");
-    const architectToken = roleToken("omp", root, "architect");
-    const testerToken = roleToken("omp", root, "tester");
-    const launches = commands.filter(
-      (c) => c[0] === "tmux" && (c[3] === "new-window" || c[3] === "split-window")
-    );
-    for (const command of launches) {
-      for (const part of command) expect(part).not.toContain("SUlegionpaneseed");
-    }
-    const [controller, architect, tester] = launches.map(tmuxWindowEnvironment);
-    if (!controller || !architect || !tester) throw new Error("missing launches");
-    expect(controller).toMatchObject({
-      LEGION_CONTROLLER_SECRET_FILE: path.join(dir, "legion-omp-controller"),
-      NATS_NKEY_SEED_FILE: path.join(dir, "legion-omp-controller-nats_nkey_seed"),
-    });
-    expect(architect).toMatchObject({
-      LEGION_BOOT_TOKEN_FILE: path.join(dir, architectToken),
-      NATS_NKEY_SEED_FILE: path.join(dir, `${architectToken}-nats_nkey_seed`),
-    });
-    expect(tester).toMatchObject({
-      LEGION_BOOT_TOKEN_FILE: path.join(dir, testerToken),
-      NATS_NKEY_SEED_FILE: path.join(dir, `${testerToken}-nats_nkey_seed`),
-    });
-    for (const environment of [controller, architect, tester]) {
-      expect(environment.NATS_NKEY_SEED).toBeUndefined();
-      expect(environment.ENVOY_TOKEN_FILE).toBeUndefined();
-      if (!environment.NATS_NKEY_SEED_FILE) throw new Error("pointer missing");
-      expect((await stat(environment.NATS_NKEY_SEED_FILE)).mode & 0o777).toBe(0o600);
-      expect(await readFile(environment.NATS_NKEY_SEED_FILE, "utf8")).toBe("SUlegionpaneseed");
-    }
-
-    await processes.markProcessDead(root);
-    expect(
-      await stat(path.join(dir, `${architectToken}-nats_nkey_seed`)).catch(() => undefined)
-    ).toBe(undefined);
-    expect(await readFile(path.join(dir, `${testerToken}-nats_nkey_seed`), "utf8")).toBe(
-      "SUlegionpaneseed"
-    );
-    await processes.closeTree(root);
-    expect((await readdir(dir)).sort()).toEqual([
-      "legion-omp-controller",
-      "legion-omp-controller-nats_nkey_seed",
-    ]);
-  });
-  it("never hands a pane the daemon's own NATS seed: no launch argument, pane variable, secret file, or SpawnSpec carries it", async () => {
+  it("delivers a configured NATS nkey seed to every process as a 0600 file with its own NATS_NKEY_SEED_FILE pointer, pruned with the pane's boot-token file, and never the daemon's own seed", async () => {
     const daemonSeed = "SUlegiondaemonseed";
     const stateDir = await temporaryDir();
     const workspace = path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42");
@@ -1805,45 +1737,58 @@ describe("ProcessManager", () => {
     await processes.spawnRoot(root);
     await processes.spawnWorker(root, root, "tester", "verify #41");
 
+    const dir = path.join(stateDir, "secrets");
+    const architectToken = roleToken("omp", root, "architect");
+    const testerToken = roleToken("omp", root, "tester");
     const launches = commands.filter(
       (c) => c[0] === "tmux" && (c[3] === "new-window" || c[3] === "split-window")
     );
-    expect(launches).toHaveLength(3);
+    for (const command of launches) {
+      for (const part of command) expect(part).not.toContain("SUlegionpaneseed");
+    }
     for (const command of commands) {
       for (const part of command) expect(part).not.toContain(daemonSeed);
     }
-    for (const environment of launches.map(tmuxWindowEnvironment)) {
-      for (const name of Object.keys(environment)) expect(name).not.toContain("NATS_DAEMON");
-    }
-    const dir = path.join(stateDir, "secrets");
-    const files = await readdir(dir);
-    expect(files.length).toBeGreaterThan(0);
-    for (const file of files) {
+    for (const file of await readdir(dir)) {
       expect(await readFile(path.join(dir, file), "utf8")).not.toContain(daemonSeed);
     }
-
-    const state = newLegionState("omp", 1);
-    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
-    state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
-    state.admission.active.push(root);
-    const runtime = new FakeRuntime();
-    const { manager: onRuntime } = manager(state, {
-      config: config(await temporaryDir(), {
-        natsNkeySeed: "SUlegionpaneseed",
-        natsDaemonNkeySeed: daemonSeed,
-      }),
-      runtime,
+    const [controller, architect, tester] = launches.map(tmuxWindowEnvironment);
+    if (!controller || !architect || !tester) throw new Error("missing launches");
+    expect(controller).toMatchObject({
+      LEGION_CONTROLLER_SECRET_FILE: path.join(dir, "legion-omp-controller"),
+      NATS_NKEY_SEED_FILE: path.join(dir, "legion-omp-controller-nats_nkey_seed"),
     });
-    await onRuntime.ensureController();
-    await onRuntime.spawnRoot(root);
-    await onRuntime.spawnWorker(root, root, "tester", "verify #41");
-    expect(runtime.spawned).toHaveLength(3);
-    for (const spawn of runtime.spawned) {
-      expect(spawn.spec.secrets.NATS_NKEY_SEED).toBe("SUlegionpaneseed");
-      expect(JSON.stringify(spawn.spec)).not.toContain(daemonSeed);
+    expect(architect).toMatchObject({
+      LEGION_BOOT_TOKEN_FILE: path.join(dir, architectToken),
+      NATS_NKEY_SEED_FILE: path.join(dir, `${architectToken}-nats_nkey_seed`),
+    });
+    expect(tester).toMatchObject({
+      LEGION_BOOT_TOKEN_FILE: path.join(dir, testerToken),
+      NATS_NKEY_SEED_FILE: path.join(dir, `${testerToken}-nats_nkey_seed`),
+    });
+    for (const environment of [controller, architect, tester]) {
+      expect(environment.NATS_NKEY_SEED).toBeUndefined();
+      expect(environment.ENVOY_TOKEN_FILE).toBeUndefined();
+      for (const name of Object.keys(environment)) expect(name).not.toContain("NATS_DAEMON");
+      if (!environment.NATS_NKEY_SEED_FILE) throw new Error("pointer missing");
+      expect((await stat(environment.NATS_NKEY_SEED_FILE)).mode & 0o777).toBe(0o600);
+      expect(await readFile(environment.NATS_NKEY_SEED_FILE, "utf8")).toBe("SUlegionpaneseed");
     }
+
+    await processes.markProcessDead(root);
+    expect(
+      await stat(path.join(dir, `${architectToken}-nats_nkey_seed`)).catch(() => undefined)
+    ).toBe(undefined);
+    expect(await readFile(path.join(dir, `${testerToken}-nats_nkey_seed`), "utf8")).toBe(
+      "SUlegionpaneseed"
+    );
+    await processes.closeTree(root);
+    expect((await readdir(dir)).sort()).toEqual([
+      "legion-omp-controller",
+      "legion-omp-controller-nats_nkey_seed",
+    ]);
   });
-  it("puts a configured Envoy token in every SpawnSpec's secrets and never in its env, on any runtime", async () => {
+  it("puts a configured Envoy token and the pane seed in every SpawnSpec's secrets and never in its env, and never the daemon's own seed, on any runtime", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
@@ -1851,7 +1796,11 @@ describe("ProcessManager", () => {
     state.admission.active.push(root);
     const runtime = new FakeRuntime();
     const { manager: processes } = manager(state, {
-      config: config(stateDir, { envoyToken: "envoy-listener-token" }),
+      config: config(stateDir, {
+        envoyToken: "envoy-listener-token",
+        natsNkeySeed: "SUlegionpaneseed",
+        natsDaemonNkeySeed: "SUlegiondaemonseed",
+      }),
       runtime,
     });
     await processes.ensureController();
@@ -1860,15 +1809,34 @@ describe("ProcessManager", () => {
     expect(runtime.spawned.map((spawn) => [spawn.kind, spawn.spec.secrets])).toEqual([
       [
         "controller",
-        { LEGION_CONTROLLER_SECRET: "controller-secret", ENVOY_TOKEN: "envoy-listener-token" },
+        {
+          LEGION_CONTROLLER_SECRET: "controller-secret",
+          ENVOY_TOKEN: "envoy-listener-token",
+          NATS_NKEY_SEED: "SUlegionpaneseed",
+        },
       ],
-      ["root", { LEGION_BOOT_TOKEN: "boot-token", ENVOY_TOKEN: "envoy-listener-token" }],
-      ["worker", { LEGION_BOOT_TOKEN: "worker-boot-token", ENVOY_TOKEN: "envoy-listener-token" }],
+      [
+        "root",
+        {
+          LEGION_BOOT_TOKEN: "boot-token",
+          ENVOY_TOKEN: "envoy-listener-token",
+          NATS_NKEY_SEED: "SUlegionpaneseed",
+        },
+      ],
+      [
+        "worker",
+        {
+          LEGION_BOOT_TOKEN: "worker-boot-token",
+          ENVOY_TOKEN: "envoy-listener-token",
+          NATS_NKEY_SEED: "SUlegionpaneseed",
+        },
+      ],
     ]);
     for (const spawn of runtime.spawned) {
       expect(spawn.spec.env).not.toHaveProperty("ENVOY_TOKEN");
       expect(spawn.spec.env).not.toHaveProperty("ENVOY_TOKEN_FILE");
       expect(JSON.stringify(spawn.spec.env)).not.toContain("envoy-listener-token");
+      expect(JSON.stringify(spawn.spec)).not.toContain("SUlegiondaemonseed");
     }
   });
   it("reaps a secret file inherited from a previous daemon process once its locator clears, not only at the next boot", async () => {
