@@ -521,6 +521,24 @@ export function disconnectAllStreams(options: ApiOptions = {}): Promise<{ ok: bo
   );
 }
 
+/**
+ * Closes every live document on the server and waits for the settlements in flight, leaving it
+ * able to load documents again. Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see
+ * run-server.sh) that resetDatabase uses so its TRUNCATE cannot cross lock order with a
+ * settlement still running from the scenario before it.
+ */
+export function quiesceDocuments(options: ApiOptions = {}): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    "/api/v1/artifacts/_test/quiesce",
+    "POST",
+    {},
+    {
+      as: "agent",
+      ...options,
+    }
+  );
+}
+
 /** Points `project` at `repo`'s `.dispatch/architecture` on `branch` (the fake GitHub serves it). */
 export function putArchitectureSource(
   project: string,

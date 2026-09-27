@@ -2470,3 +2470,35 @@ func assertTableCellPipeVersionAndEventCounts(t *testing.T, database *store.Stor
 		t.Fatalf("document counts = versions:%d events:%d, want versions:%d events:%d", versions, events, wantVersions, wantEvents)
 	}
 }
+
+// Quiesce is what lets the browser-test harness truncate its database between scenarios: it
+// leaves the server with no live document and no settlement of its own to run. It has to flush
+// each room before it closes it, or an edit that had only reached the room would be lost, and
+// it has to leave the service able to load the document again afterwards.
+func TestQuiesceFlushesEveryLiveDocumentAndLeavesTheServiceUsable(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+
+	if err := service.Quiesce(context.Background()); err != nil {
+		t.Fatalf("quiesce document service: %v", err)
+	}
+	if _, live := service.rooms.Load(artifactID); live {
+		t.Fatal("a document room outlived the quiesce")
+	}
+
+	// The room is gone, so this text is what the store holds: the edit reached it.
+	text, err := service.Text(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("read document after quiesce: %v", err)
+	}
+	if !strings.Contains(text, "after") {
+		t.Fatalf("document text after quiesce = %q, want the edit", text)
+	}
+
+	// And the service still settles what it is asked to settle afterwards.
+	editLiveTree(t, service, artifactID, replaceRun("after", "later"))
+	settleCurrentGeneration(t, service, artifactID)
+	waitForDocumentVersion(t, service.store, artifactID, 2)
+}

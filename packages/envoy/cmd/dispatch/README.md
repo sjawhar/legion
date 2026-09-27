@@ -13,7 +13,7 @@ application state in Postgres.
 | `NATS_URLS` | Comma-separated NATS URLs. When set, overrides `natsUrls` from merged `envoy.json`. |
 | `DISPATCH_AGENT_TOKEN` | Shared bearer fallback for devbox agents. Personal tokens minted in Settings are the normal agent credential. |
 | `DISPATCH_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist. Required for cookie identity mode and enforced during OAuth sign-in. |
-| `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection. Test/e2e only — leave unset in every real deployment. |
+| `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection, and `POST /api/v1/artifacts/_test/quiesce`, which closes every live document and waits for the settlements in flight. Test/e2e only — leave unset in every real deployment. |
 | `ENVOY_URL` | Base URL of the Envoy listener (`GET /v1/sessions`) behind `GET /api/v1/agents`; defaults to `http://127.0.0.1:9020`. |
 | `DISPATCH_OIDC_ISSUER` | OIDC issuer whose projected service-account tokens authenticate as agents. Set with `DISPATCH_OIDC_AUDIENCE` or not at all. |
 | `DISPATCH_OIDC_AUDIENCE` | Audience those tokens must carry (`dispatch`). Set with `DISPATCH_OIDC_ISSUER` or not at all. |
@@ -251,6 +251,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/github/graphql` | POST | cookie or trusted header | Proxy GitHub GraphQL using the caller's stored token. |
 | `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — and NATS is connected where configured. A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. |
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
+| `/api/v1/artifacts/_test/quiesce` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every live document and wait for the settlements in flight; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/events/_test/disconnect` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every open SSE connection; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/inbox?project=&assignee=` | GET | cookie or trusted header (human only) | List open asks newest-first, including their issue key, title, and assignee. `assignee=me\|unassigned\|<login>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that login; an unlisted login is `400 ASSIGNEE_NOT_ALLOWED`. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached. |
