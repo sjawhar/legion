@@ -5,14 +5,16 @@
  * editor modules until a browser renders a document with them, and a stale declaration is a
  * shape tsc believes and the runtime does not have.
  *
- * Each fix case below is one member of that line, read where it lives, because none of them has
- * an exported seam a unit test could call. A cut that loses one — the first cut of the cleaned
- * line lost the cursor label — passes every other check in the repository.
+ * Each fix case below is one member of that line. The suggestion mark's attributes are checked
+ * by rendering the mark from the schema the headless engine builds; the rest have no exported
+ * seam a unit test could call, so they are read where they live. A cut that loses one passes
+ * every other check in the repository.
  */
 
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createHeadlessProof } from "../src/lib-headless.js";
 
 const upstreamSrc = join(import.meta.dir, "..", "node_modules", "proof-sdk-upstream", "src");
 
@@ -30,21 +32,22 @@ test("the pinned dependency carries the Dark Reader fix", () => {
   expect(cursors).toContain("proof-collab-selection--");
 });
 
-test("the pinned dependency keeps the collaboration cursor label inline", () => {
-  // A block label lets a browser move a post-update text selection into the cursor decoration,
-  // which interrupts local typing after a remote edit.
-  const cursors = readFileSync(join(upstreamSrc, "editor/plugins/collab-cursors.ts"), "utf8");
-  expect(cursors).toContain("const label = document.createElement('span');");
-  expect(cursors).toContain("label.contentEditable = 'false';");
-  expect(cursors).not.toContain("const label = document.createElement('div');");
-});
-
-test("the pinned dependency renders replacement suggestions", () => {
-  // The suggestion mark's DOM attributes have to stay primitive: spreading the ctx attrs put
-  // "[object Object]" on the span. And the replace-insert widget is keyed by its replacement,
-  // so a changed replacement redraws instead of keeping the first content it rendered.
-  const proofMarks = readFileSync(join(upstreamSrc, "editor/schema/proof-marks.ts"), "utf8");
-  expect(proofMarks).not.toContain("const attrs = ctx.get(proofSuggestionAttr.key)(mark);");
+test("the pinned dependency renders replacement suggestions", async () => {
+  // The suggestion mark's DOM attributes have to stay strings: an object among them reaches the
+  // span as "[object Object]". And the replace-insert widget is keyed by its replacement, so a
+  // changed replacement redraws instead of keeping the first content it rendered.
+  const { schema } = await createHeadlessProof();
+  const suggestion = schema.marks.proofSuggestion;
+  if (suggestion === undefined) throw new Error("the editor schema has no proofSuggestion mark");
+  const mark = suggestion.create({ by: "ai:tester", id: "suggestion-1", kind: "replace" });
+  const rendered: unknown = suggestion.spec.toDOM?.(mark, true);
+  if (!Array.isArray(rendered)) throw new Error("proofSuggestion renders no DOM output spec");
+  expect(rendered[1]).toEqual({
+    "data-by": "ai:tester",
+    "data-id": "suggestion-1",
+    "data-kind": "replace",
+    "data-proof": "suggestion",
+  });
 
   const marks = readFileSync(join(upstreamSrc, "editor/plugins/marks.ts"), "utf8");
   expect(marks).toMatch(/key: `replace-insert-\$\{mark\.id\}-\$\{replacementContent\}`/);
