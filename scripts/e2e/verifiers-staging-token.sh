@@ -15,6 +15,10 @@
 # and everything this script prints goes through `redact`, which replaces any JWT-shaped run
 # with <redacted-jwt>. The two minted tokens are reported by their decoded iss/aud/sub/exp.
 set -euo pipefail
+# This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
+# no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
+# NATS_NKEY_SEED or NATS_NKEY_SEED_FILE.
+unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 
 pg_name=verifiers-e2e-pg
 nats_name=verifiers-e2e-nats

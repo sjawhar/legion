@@ -6,6 +6,7 @@
 package routes
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
@@ -23,6 +24,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -78,6 +80,8 @@ type AppContextOptions struct {
 	AppSource        string
 	GitHubAPIBase    string
 	OIDC             *oidc.Verifier
+	AgentStream      agentstream.Source
+	Lifetime         context.Context
 	TestHooksEnabled bool
 }
 
@@ -106,6 +110,8 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		App:              opts.App,
 		GitHubAPIBase:    opts.GitHubAPIBase,
 		OIDC:             opts.OIDC,
+		AgentStream:      opts.AgentStream,
+		Lifetime:         opts.Lifetime,
 		TestHooksEnabled: opts.TestHooksEnabled,
 	})
 	if err != nil {

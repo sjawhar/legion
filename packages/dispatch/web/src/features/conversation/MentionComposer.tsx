@@ -841,14 +841,15 @@ export function MentionComposer({
       onSubmit={submit}
       ref={formRef}
     >
-      {compact ? null : (
+      {/* The title repeats the submit button two rows below it, so the row exists only where it
+          also carries Close - an anchored composer floating over a quote, where naming what is
+          being written is worth a line. */}
+      {compact || anchor === undefined ? null : (
         <div className="flex items-center justify-between gap-3">
           <p className={`text-sm font-semibold ${textPrimaryOnSurface}`}>{title}</p>
-          {anchor === undefined ? null : (
-            <button className={`text-sm ${dismissButtonText}`} onClick={onClose} type="button">
-              Close
-            </button>
-          )}
+          <button className={`text-sm ${dismissButtonText}`} onClick={onClose} type="button">
+            Close
+          </button>
         </div>
       )}
       {replyTo === null ? null : (

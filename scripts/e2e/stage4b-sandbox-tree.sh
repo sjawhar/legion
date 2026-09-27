@@ -81,6 +81,9 @@ nats_url=${LEGION_E2E_NATS_URL:-}
 # deletes with the rest.
 fixture=$root/scripts/e2e/fixtures/operator-route
 route_configmap=legion-operator-route-$run_label
+# The providers Secret the runtime names for the project (ProvidersSecretName), which the run creates
+# only when the operator's environment names a NATS nkey seed and lib/namespace-rig.sh deletes.
+providers_secret=legion-$run_label-providers
 # operator-close's tree, which no workflow issue backs: the run's own, named for the run, and its
 # worker's issue, a child in the same project. Both are issue keys (PROJECT-NUMBER), which the
 # daemon's spawn requires; the trailing digit keeps the child apart from the root.
@@ -426,6 +429,27 @@ create_route_configmap() {
     --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create ConfigMap $route_configmap"
   note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$run_label"
+}
+# create_providers_secret is the operator's step for the NATS nkey seed: a daemon with a seed (the
+# operator's NATS_NKEY_SEED_FILE, else NATS_NKEY_SEED, which the daemon inherits) points every pod
+# and the image probe at the providers Secret's NATS_NKEY_SEED key, so the run puts the same seed
+# there, from a 0600 file, never an argument. With neither set there is no seed and no Secret.
+create_providers_secret() {
+  local seed_file=$work/providers-nats-seed
+  if [ -n "${NATS_NKEY_SEED_FILE+set}" ]; then
+    (umask 077 && tr -d '[:space:]' <"$NATS_NKEY_SEED_FILE" >"$seed_file") || fail "NATS_NKEY_SEED_FILE names $NATS_NKEY_SEED_FILE, which could not be read"
+  elif [ -n "${NATS_NKEY_SEED+set}" ]; then
+    (umask 077 && printf '%s' "$NATS_NKEY_SEED" | tr -d '[:space:]' >"$seed_file")
+  else
+    note "[operator] no NATS nkey seed in the environment: no providers Secret"
+    return 0
+  fi
+  [ -s "$seed_file" ] || fail "the operator's NATS nkey seed is empty"
+  op create secret generic "$providers_secret" --from-file=NATS_NKEY_SEED="$seed_file" \
+    --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
+    fail "the operator could not create Secret $providers_secret"
+  rm -f "$seed_file"
+  note "[operator] Secret $providers_secret: NATS_NKEY_SEED from the operator's seed, label legion.dev/project=$run_label"
 }
 start_daemon() {
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
@@ -1345,6 +1369,7 @@ write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
 note "$out"
 create_route_configmap
+create_providers_secret
 production_baseline
 start_daemon
 start_interests_sampler

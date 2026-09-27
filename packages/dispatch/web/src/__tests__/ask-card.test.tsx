@@ -315,6 +315,8 @@ test("AskCard copies its tmux target and confirms success", async () => {
   const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
 
   try {
+    // The session's own handles fold behind the author chip; open it first.
+    fireEvent.click(view.getByRole("button", { expanded: false, name: /session/ }));
     fireEvent.click(view.getByRole("button", { name: "Copy tmux target dev:4.7" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("dev:4.7"));
     expect(await view.findByText("Copied", { exact: true })).toBeTruthy();
@@ -337,6 +339,8 @@ test("AskCard confirms tmux target copy through the legacy clipboard fallback", 
   const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
 
   try {
+    // The session's own handles fold behind the author chip; open it first.
+    fireEvent.click(view.getByRole("button", { expanded: false, name: /session/ }));
     fireEvent.click(view.getByRole("button", { name: "Copy tmux target dev:4.7" }));
     expect(await view.findByText("Copied", { exact: true })).toBeTruthy();
   } finally {
@@ -362,6 +366,8 @@ test("AskCard shows an inline failure when neither clipboard path can copy", asy
   const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
 
   try {
+    // The session's own handles fold behind the author chip; open it first.
+    fireEvent.click(view.getByRole("button", { expanded: false, name: /session/ }));
     fireEvent.click(view.getByRole("button", { name: "Copy tmux target dev:4.7" }));
     expect(await view.findByText("Copy failed - select the text", { exact: true })).toBeTruthy();
     expect(view.getByText("dev:4.7", { exact: true })).toBeTruthy();

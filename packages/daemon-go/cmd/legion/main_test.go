@@ -387,6 +387,7 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 		{extra: "gates: { design: sometimes }\n", says: "gates.design"},
 		{extra: "envoy_url: not a url\n", says: "envoy_url"},
 		{drop: "dispatch_token_file: ./dispatch-token\n", says: "dispatch_token_file is required when dispatch_url is configured"},
+		{extra: "nats_nkey_seed_file: ./nats-seed\nprovider_keys: {NATS_NKEY_SEED: NATS_NKEY_SEED_TESTS}\n", says: "provider_keys names NATS_NKEY_SEED, the launch secret every launch carries"},
 	} {
 		config, marker := workflowConfig(t, 13370, variant.extra)
 		if variant.drop != "" {
@@ -413,7 +414,7 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 }
 
 // Under runtime: kubernetes, --check-config also makes the boot's refusal of an operator pod that
-// collides with Legion's own (daemon.CheckOperatorPod): a mount at Legion's boot projection is
+// collides with Legion's own (daemon.CheckOperatorConfig): a mount at Legion's boot projection is
 // refused naming both paths, with no App key command run.
 func TestStartCheckConfigRefusesAnOperatorPodCollidingWithLegions(t *testing.T) {
 	legionState(t)

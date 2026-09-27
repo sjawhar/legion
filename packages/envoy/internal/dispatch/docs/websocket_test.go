@@ -293,7 +293,9 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write delayed document: %v", err)
 	}
-	waitFor(t, time.Second, "durable append blocked", func() bool { return service.hasDurableAppend(artifactID) })
+	if !service.hasDurableAppend(artifactID) {
+		t.Fatal("durable append finished while its advisory lock was held")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	if err := service.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -302,7 +304,7 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	if err := locker.Commit(context.Background()); err != nil {
 		t.Fatalf("release append lock: %v", err)
 	}
-	waitFor(t, time.Second, "delayed durable append commit", func() bool { return !service.hasDurableAppend(artifactID) })
+	waitForPersistedUpdates(t, service, artifactID, 2)
 	reloaded := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
 	defer reloaded.Shutdown(context.Background())
 	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {

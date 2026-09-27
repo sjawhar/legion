@@ -470,6 +470,34 @@ func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now 
 	return claimed, nil
 }
 
+func (s *Postgres) WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error) {
+	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
+		where kind = $1 and next_at > $2 and split_part(issue, '-', 1) = $3 order by id`, string(OutboxKindNotice), now, project)
+	if err != nil {
+		return nil, fmt.Errorf("list waiting notices: %w", err)
+	}
+	defer rows.Close()
+	waiting := []OutboxRow{}
+	for rows.Next() {
+		row, err := scanOutbox(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list waiting notices: %w", err)
+		}
+		waiting = append(waiting, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list waiting notices: %w", err)
+	}
+	return waiting, nil
+}
+
+func (s *Postgres) ExpediteOutbox(ctx context.Context, tx pgx.Tx, id int64, now time.Time) error {
+	if _, err := tx.Exec(ctx, "update outbox set next_at = $2 where id = $1 and next_at > $2", id, now); err != nil {
+		return fmt.Errorf("expedite outbox row %d: %w", id, err)
+	}
+	return nil
+}
+
 func (s *Postgres) TreeIssues(ctx context.Context, tx pgx.Tx, tree string) ([]Issue, error) {
 	rows, err := tx.Query(ctx, "select "+issueColumns+" from issues where tree = $1 order by key", tree)
 	if err != nil {

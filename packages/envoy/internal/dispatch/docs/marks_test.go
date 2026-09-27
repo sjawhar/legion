@@ -716,6 +716,147 @@ func repeatLiveBlockID(t *testing.T, service *Service, artifactID string) {
 	}
 }
 
+// A document a browser edit left unreadable, here with an emptied callout in a list item, is not
+// an accept's to refuse elsewhere: the accept stores and the callout stays as it was.
+func TestAcceptSuggestionBesideABlockTheParserAlreadyRefuses(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Gone.\n  :::\n\nIntro.\n\nBody.\n\nAfter.\n")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+			if node.Type == "callout" {
+				node.Children = []*pmdoc.Node{{Type: "paragraph", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: "emptied"}}}
+				return false
+			}
+			return true
+		})
+		return tree
+	})
+	before := liveTree(t, service, artifactID)
+	if _, err := pmdoc.ReadBack(before); err == nil {
+		t.Fatal("the emptied callout in a list item reads back; the test needs a document the parser refuses")
+	}
+	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
+	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "Body.", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("accept beside a block the parser already refuses: %v", err)
+	}
+	after := liveTree(t, service, artifactID)
+	if len(after.Children) != 4 || pmdoc.StripAnchorMarks(after.Children[2]).Children[0].Text != "Changed." {
+		t.Fatalf("after the accept the document holds %#v, want Changed. in place of Body.", after.Children)
+	}
+	if !after.Children[0].Equal(before.Children[0]) {
+		t.Fatal("the accept changed the list holding the emptied callout")
+	}
+}
+
+// A footnote definition whose reference a browser edit removed already reads back as nothing,
+// which is not an accept's: an accept inside the definition stores.
+func TestAcceptSuggestionInAFootnoteDefinitionWhoseReferenceIsGone(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Intro[^1].\n\n[^1]: Body.\n")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		intro := tree.Children[0]
+		kept := intro.Children[:0]
+		for _, child := range intro.Children {
+			if child.Type != "footnote_reference" {
+				kept = append(kept, child)
+			}
+		}
+		intro.Children = kept
+		return tree
+	})
+	if back, err := pmdoc.ReadBack(liveTree(t, service, artifactID)); err != nil || len(back.Children) != 1 {
+		t.Fatalf("the unreferenced definition reads back as %#v (%v); the test needs one that reads back as nothing", back, err)
+	}
+	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
+	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "Body.", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("accept in a footnote definition whose reference is gone: %v", err)
+	}
+	definition := liveTree(t, service, artifactID).Children[1]
+	if definition.Type != "footnote_definition" || pmdoc.StripAnchorMarks(definition.Children[0]).Children[0].Text != "Changed." {
+		t.Fatalf("after the accept the definition is %#v, want it holding Changed.", definition)
+	}
+}
+
+// An accept changes only the text it writes. Code beside it keeps the line break that ends it and
+// the comment anchored on that break, and code whose ending breaks a mark splits takes an accept
+// over its text, with or without a break of its own.
+func TestAcceptSuggestionLeavesCodeItDoesNotWrite(t *testing.T) {
+	codeWithMarkedBreak := func(text string) func(*pmdoc.Node) *pmdoc.Node {
+		return func(tree *pmdoc.Node) *pmdoc.Node {
+			pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+				if node.Type == "code_block" {
+					node.Children = []*pmdoc.Node{{Type: "text", Text: text}, {Type: "text", Text: "\n", Marks: []pmdoc.Mark{{Type: "proofComment", Attrs: pmdoc.Attrs{"id": "c1"}}}}}
+					return false
+				}
+				return true
+			})
+			return tree
+		}
+	}
+	for _, test := range []struct{ name, spec, code, quote, with string }{
+		{"text beside code in the same list", "- Body.\n- ```\n  c\n  ```\n", "c", "Body.", "Changed."},
+		{"text over code whose ending breaks a mark splits", "Intro.\n\n```\nabc\n```\n", "abc\n", "abc", "xyz"},
+		{"text ending in a break over code a marked break ends", "Intro.\n\n```\nabc\n```\n", "abc", "abc", "xyz\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, test.spec)
+			editLiveTree(t, service, artifactID, codeWithMarkedBreak(test.code))
+			spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
+			if _, err := service.MarkQuote(context.Background(), artifactID, spec, test.quote, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", test.with, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+				t.Fatalf("accept: %v", err)
+			}
+			if _, _, ok := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "c1"); !ok {
+				t.Fatal("the comment anchored on the code's ending line break is gone after the accept")
+			}
+		})
+	}
+}
+
+// An accept leaves a list item beside the text it writes as it was, spread its markdown does not
+// carry included: the accept settles only what it wrote.
+func TestAcceptSuggestionLeavesASiblingItemsSpread(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "- Body.\n- two\n")
+	sibling := func(tree *pmdoc.Node) *pmdoc.Node {
+		var found *pmdoc.Node
+		pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
+			if node.Type == "list_item" {
+				found = node
+			}
+			return true
+		})
+		return found
+	}
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		sibling(tree).Attrs["spread"] = true
+		return tree
+	})
+	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
+	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "Body.", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if spread := sibling(liveTree(t, service, artifactID)).Attrs["spread"]; spread != true {
+		t.Fatalf("the item beside the accepted text holds spread %v after the accept, want the true it held", spread)
+	}
+}
+
 // A repeat the live document already holds is settlement's to repair, not a write's to refuse or
 // to repair: beside one, an accept whose replacement names no held id (inline, or a typed block
 // with an id of its own), the reject of a browser insert, and an upload of the document's own text

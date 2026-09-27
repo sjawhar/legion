@@ -6,8 +6,13 @@ Tracked Oh My Pi (`pi-*`) extension package for Envoy messaging.
 
 This package owns Pi-specific tool registration, direct NATS subscriptions, targeted Dispatch
 delivery, and self-subscription registration for every session. HTTP transport, tool metadata, and
-subject construction come from the Envoy core packages. `@legion/envoy-client/delivery` is the sole
-inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
+subject construction come from the Envoy core packages. Both NATS connections (the agent subjects
+in `extensions/envoy.ts`, Legion's control subject in `extensions/legion.ts`) connect as the nkey
+user `@legion/envoy-client/nats-auth` reads from `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, and
+without a credential when neither is set; an unusable seed fails the connect naming the variable,
+and a Legion daemon strips both from every pane it launches, handing it instead the `legion-pane`
+seed file it holds as `NATS_NKEY_SEED_FILE` when it has one. `@legion/envoy-client/delivery` is
+the sole inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
 Dispatch **BTW** frame runs `pi.askEphemeral` and posts its body or error to the correlated delivery
 attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective delivery mode. Role claims
 are routed by the listener: this extension receives a receipt-backed request on its direct agent
@@ -37,13 +42,14 @@ per daemon.
 
 ### The TypeScript daemon: `legion.daemonApiVersion`
 
-`legion.daemonApiVersion` (currently 8) covers the `LegionDaemonApi` HTTP request and response
+`legion.daemonApiVersion` (currently 9) covers the `LegionDaemonApi` HTTP request and response
 shapes the extension validates strictly (`@legion/contracts`), and the pane contract — every
 environment variable the TypeScript daemon sets on a pane that this extension reads or writes:
 `LEGION_GRANT_FILE`, `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`,
 `LEGION_CONTROL_SUBJECT`, `LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`,
 `ENVOY_NATS_URL`, `ENVOY_URL`, `ENVOY_TOKEN_FILE` (the listener bearer, read by
-`@legion/envoy-client` ahead of `ENVOY_TOKEN`; contract 3, LEGION-25), and the `LEGION_*` identity
+`@legion/envoy-client` ahead of `ENVOY_TOKEN`; contract 3, LEGION-25), `NATS_NKEY_SEED_FILE` (the
+`legion-pane` NATS nkey seed; contract 9, LEGION-279), and the `LEGION_*` identity
 variables `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_GENERATION`/`LEGION_WORKSPACE`/
 `LEGION_STATE_DIR`/`LEGION_CONTROLLER` (read by `src/legion/classify.ts` and
 `extensions/legion.ts`; the Dispatch and Envoy variables by `@legion/envoy-client`; the grant
@@ -71,17 +77,20 @@ recorded when a `legion controller start` session calls `/controller/ready` agai
 and `POST /legion/v1/controller/secret` (the CLI's call, never this extension's). Contract 7 removes
 `merge` from `/gh-token`: Legion never merges (LEGION-19). Contract 8 adds `pluginVersion` to
 `/process/started`, `/worker/started`, and `/controller/ready`, and a tree's or role's
-`workspaceLost` record to the state response (#1167). The number is re-read against `main` at every
+`workspaceLost` record to the state response (#1167). Contract 9 adds `NATS_NKEY_SEED_FILE` to the
+pane contract: the `legion-pane` NATS nkey seed file every pane and pod gets when the daemon has one
+(`nats_nkey_seed_file`), which `@legion/envoy-client/nats-auth` reads (LEGION-279). The number is re-read against `main` at every
 rebase: two branches that each change a surface both take the next number, and the second to land
 renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 7) is the contract with `packages/daemon-go`: the claim,
+`legion.goDaemonApiVersion` (currently 8) is the contract with `packages/daemon-go`: the claim,
 credential, workflow, controller, and state shapes `src/legion/go-daemon-client.ts` parses strictly
 through `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
-`LEGION_GRANT_FILE`, `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, the Envoy variables, and
+`LEGION_GRANT_FILE`, `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, the Envoy variables,
+`NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and
 `DISPATCH_URL`/`DISPATCH_TOKEN_FILE` when the daemon has `dispatch_url` configured.
 Contract 4 adds the operator-launched controller: `POST /legion/v1/controller/secret` (the CLI's
 call, never this extension's), a controller registration on `claims/register` answered with the
@@ -113,6 +122,15 @@ Contract 7 adds `holdReason` to an issue on `/legion/v1/state`: `escalated` whil
 architect escalated stays held in a tree that runs, absent otherwise (a tree that lingers or is
 closed shows none until it is re-admitted). The controller skill reads it at every start,
 since the escalation's wake reaches only a controller running when it is published (#1420).
+Contract 8 adds `NATS_NKEY_SEED_FILE` to the Go pane's environment (LEGION-279): when the daemon
+has the `legion-pane` NATS nkey seed (`nats_nkey_seed_file`, else `NATS_NKEY_SEED_FILE`, else
+`NATS_NKEY_SEED` in its own environment), every root and worker pane's pointer names a 0600
+`<role token>-nats_nkey_seed` file under the daemon's `<state_dir>/secrets`, pruned with the pane's
+other secret files, and every Sandbox pod's names the providers Secret's own `NATS_NKEY_SEED` file;
+the Go `legion controller start` sets it to the operator file's `nats_nkey_seed_file`. The
+extension's Envoy connections read the seed from it (`@legion/envoy-client`'s `nats-auth.ts`), so
+they authenticate as that nkey user once production NATS stops admitting credential-less clients.
+With no seed there is no pointer, and the connections carry no credential, as before.
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My
@@ -266,7 +284,7 @@ dead-connection recovery path does not resurrect it) — every other subscriber 
 it. `ask.follower_added` / `ask.follower_removed` likewise render only for the session
 they name.
 `dispatch_issue` accepts optional initial labels and an optional `components` attachment (below); project-document arguments resolve the document's artifact id, slug, or filename.
-`dispatch_issue_update` moves an issue's lifecycle `status`, retitles it, replaces `labels`, sets its coarse `priority` (`0` is P0, the highest, through `3`, P3, the lowest; `null` clears it — agents set priority by Sami's ruling of 2026-09-24 on `dispatch://LEGION/artifact/issue-status-conventions-md`), sets `route`, sets or clears its `parent` (a key in the same project; `""` clears, and the executor sends JSON `null`), attaches it to architecture `components` (`{mode: "inherit" | "explicit" | "none", ids?, reason?}`: `explicit` names bare component ids of the project's imported model, `none` needs a reason, `inherit` returns to the nearest ancestor's attachment; allowed on a closed issue; the result line reads `components -> explicit [a, b]` / `components -> none (reason)` / `components -> inherit`, and `400 COMPONENTS_INPUT` names an unknown, retired, or external id), or links URLs through `external_links` (merged into the existing links by URL, so linking the pull request just opened keeps earlier links); at least one field besides `issue` is required and `rank`, the board's own order, is not exposed. Its one-line result reads `KEY: status a -> b; priority -> P1; linked <url> (N links); parent -> KEY` (`priority cleared` / `parent cleared` on a clear), and a server refusal (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`, `PARENT_INPUT`, `COMPONENTS_INPUT`) keeps its code at the head of the thrown message. `dispatch_read` of an issue renders a `Components:` line — `a, b (inherited from KEY)`, `none — <reason>`, or `unassigned`, plus `(retired: c)` for ids a re-import retired — and component nodes render like every other reference node at `dispatch://<PROJECT>/component/<id>`.
+`dispatch_issue_update` moves an issue's lifecycle `status` (closing it, `status: "done"`, requires a `reason`, which the executor posts as an issue message before the PATCH because a closed issue takes no messages, comments, or artifacts; `reason` goes only with `done`, a failed message post sends no PATCH, and a PATCH that fails after the message landed names that message in its error), retitles it, replaces `labels`, sets its coarse `priority` (`0` is P0, the highest, through `3`, P3, the lowest; `null` clears it — agents set priority by Sami's ruling of 2026-09-24 on `dispatch://LEGION/artifact/issue-status-conventions-md`), sets `route`, sets or clears its `parent` (a key in the same project; `""` clears, and the executor sends JSON `null`), attaches it to architecture `components` (`{mode: "inherit" | "explicit" | "none", ids?, reason?}`: `explicit` names bare component ids of the project's imported model, `none` needs a reason, `inherit` returns to the nearest ancestor's attachment; allowed on a closed issue; the result line reads `components -> explicit [a, b]` / `components -> none (reason)` / `components -> inherit`, and `400 COMPONENTS_INPUT` names an unknown, retired, or external id), or links URLs through `external_links` (merged into the existing links by URL, so linking the pull request just opened keeps earlier links); at least one field besides `issue` is required and `rank`, the board's own order, is not exposed. Its one-line result reads `KEY: status a -> b; priority -> P1; linked <url> (N links); parent -> KEY` (`priority cleared` / `parent cleared` on a clear), and a server refusal (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`, `PARENT_INPUT`, `COMPONENTS_INPUT`) keeps its code at the head of the thrown message. `dispatch_read` of an issue renders a `Components:` line — `a, b (inherited from KEY)`, `none — <reason>`, or `unassigned`, plus `(retired: c)` for ids a re-import retired — and component nodes render like every other reference node at `dispatch://<PROJECT>/component/<id>`.
 `dispatch_claim` claims the issue for this session before it starts implementing, and `{issue, release: true}` releases it. A live holder's claim answers `409 ISSUE_CLAIMED` naming that session, so the second agent talks to it instead of working the same issue; a human holder is named by login instead, with nothing said about a session running, since there is none to message. `409 CLAIM_CONTENDED` is the other refusal: the holder changed twice while the call ran, so nothing was applied and nobody's liveness was checked — read the issue and decide again. A claim whose session the Envoy listener no longer lists is taken automatically, and the session that lost it hears about the takeover on its own agent topic. The claim never moves the issue's status, so an agent that starts work claims the issue *and* moves it to `in_progress` with `dispatch_issue_update` — two explicit actions, because the status is also how humans track work. Closing an issue releases its claim.
 `dispatch_ask` takes no `kind`: every ask it opens is a question whose options the asker chooses; no label is special to the server (a human to-do is the to-do phrased as the question, with whatever options fit it). `approval` asks are opened only through `dispatch_request_approval`.
 `dispatch_comment` accepts `turn: "agent" | "human"` only with `reply_to_ask` (the shared cross-field validation rejects it otherwise): `agent` is a progress note that keeps the ask waiting on the agent in the human's Inbox, `human` (the default) hands the turn to the human. The result text names the resulting state (`ask now waiting on agent` / `human`) and `details.ask_waiting_on` carries it.

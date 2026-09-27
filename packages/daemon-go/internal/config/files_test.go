@@ -46,7 +46,7 @@ func TestReadSecretPointer(t *testing.T) {
 // holding it is held to what the open file is: a regular file only its owner can read, with a
 // token in it. A group- or other-readable copy is refused naming the path and the mode, and a FIFO
 // is refused rather than waited on (packages/daemon/src/cli/controller-start.ts:177-199).
-func TestReadOperatorTokenFile(t *testing.T) {
+func TestReadPrivateSecretPointer(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, contents string, mode os.FileMode) string {
 		t.Helper()
@@ -65,9 +65,9 @@ func TestReadOperatorTokenFile(t *testing.T) {
 	}
 
 	good := write("owner-only", "  op-tok\n", 0o600)
-	token, err := ReadOperatorTokenFile("--operator-token-file", good)
+	token, err := ReadPrivateSecretPointer("--operator-token-file", good)
 	if err != nil || token != "op-tok" {
-		t.Fatalf("ReadOperatorTokenFile(0600) = %q, %v; want the trimmed token", token, err)
+		t.Fatalf("ReadPrivateSecretPointer(0600) = %q, %v; want the trimmed token", token, err)
 	}
 
 	for _, tc := range []struct {
@@ -83,7 +83,7 @@ func TestReadOperatorTokenFile(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
-				_, err := ReadOperatorTokenFile("operator_token_file", tc.path)
+				_, err := ReadPrivateSecretPointer("operator_token_file", tc.path)
 				done <- err
 			}()
 			select {
@@ -96,7 +96,7 @@ func TestReadOperatorTokenFile(t *testing.T) {
 					t.Fatalf("the refusal carries the token: %v", err)
 				}
 			case <-time.After(5 * time.Second):
-				t.Fatal("ReadOperatorTokenFile is still waiting on the file")
+				t.Fatal("ReadPrivateSecretPointer is still waiting on the file")
 			}
 		})
 	}

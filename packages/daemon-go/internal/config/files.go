@@ -30,16 +30,17 @@ func ReadSecretPointer(variable, file string) (string, error) {
 	return secret, nil
 }
 
-// ReadOperatorTokenFile is the operator bearer the file names — `variable` is the key or flag as
-// the operator wrote it (`operator_token_file`, `--operator-token-file`). The bearer buys a
-// controller capability and opens every operator route, so a group- or other-readable copy is a
-// second way in: the file is opened once, and the open descriptor must be a regular file whose
-// mode grants its group and others nothing before its trimmed, non-empty contents are read from
-// that same descriptor, so nothing swapped in between a check and a read is ever read
+// ReadPrivateSecretPointer is ReadSecretPointer for a secret a group- or other-readable copy of
+// would be a second way in — the operator bearer, which buys a controller capability and opens every
+// operator route, and the NATS nkey seed every agent authenticates with — `variable` is the key or
+// flag as the operator wrote it (`operator_token_file`, `--operator-token-file`,
+// `nats_nkey_seed_file`). The file is opened once, and the open descriptor must be a regular file
+// whose mode grants its group and others nothing before its trimmed, non-empty contents are read
+// from that same descriptor, so nothing swapped in between a check and a read is ever read
 // (packages/daemon/src/cli/controller-start.ts:177-199, which stats and reads separately). The
 // open does not block, so a FIFO is refused rather than waited on. The contents never appear in an
 // error.
-func ReadOperatorTokenFile(variable, file string) (string, error) {
+func ReadPrivateSecretPointer(variable, file string) (string, error) {
 	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("%s names %s, which could not be read: %w", variable, file, err)

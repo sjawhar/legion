@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -56,10 +55,8 @@ func TestAPullRequestFinishingOutsideAwaitingMergeTellsTheArchitectOnce(t *testi
 // its own clock, which is not late, tells it nothing more, since the pull request is already closed.
 func TestALateCloseTellsTheArchitectNothingAndARedeliveredCloseNothingMore(t *testing.T) {
 	earlier, later := lateApplied.Add(-time.Hour), lateApplied.Add(time.Minute)
-	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-c",
-		HeadUpdatedAt: lateApplied, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+	pool := appliedEvents(t, record.PullRequestOpen)
+	apply := applyFacts(t, pool, testEngine())
 	for _, step := range []struct {
 		id      string
 		fact    intake.Fact
@@ -71,17 +68,9 @@ func TestALateCloseTellsTheArchitectNothingAndARedeliveredCloseNothingMore(t *te
 		{"close", lateClosed("head-d", later), "head-d", record.PullRequestClosed, 1},
 		{"redelivered-close", lateClosed("head-d", later), "head-d", record.PullRequestClosed, 1},
 	} {
-		if _, err := intake.ApplyFact(context.Background(), pool, "github", step.id, step.fact, testEngine(), admissionStub{}); err != nil {
-			t.Fatalf("ApplyFact %s: %v", step.id, err)
-		}
-		var head string
-		var state record.PullRequestState
-		if err := pool.QueryRow(t.Context(), "select head_sha, state from pull_requests where issue = 'LEGION-208'").Scan(&head, &state); err != nil {
-			t.Fatalf("read the pull request after %s: %v", step.id, err)
-		}
-		got := architectNotices(t, pool)
-		if head != step.head || state != step.state || len(got) != step.notices {
-			t.Fatalf("after %s the pull request is at %s, %s, with architect notices %+v; want %s, %s, and %d", step.id, head, state, got, step.head, step.state, step.notices)
+		apply(step.id, step.fact)
+		if got, notices := pullRequestAt(t, pool), architectNotices(t, pool); got.head != step.head || got.state != step.state || len(notices) != step.notices {
+			t.Fatalf("after %s the pull request is %+v, with architect notices %+v; want %s, %s, and %d", step.id, got, notices, step.head, step.state, step.notices)
 		}
 	}
 	assertPhase(t, pool, phase.Reviewing)
@@ -100,22 +89,9 @@ func TestASecondCloseTellsTheArchitectOnceWhicheverOrderItsReopenArrives(t *test
 		{"the close delivered first", []intake.Fact{lateClosed("head-d", closed), lateReopened("head-c", reopened)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-c",
-				HeadUpdatedAt: lateApplied, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
-			for i, fact := range tc.facts {
-				if _, err := intake.ApplyFact(context.Background(), pool, "github", fmt.Sprintf("step-%d", i), fact, testEngine(), admissionStub{}); err != nil {
-					t.Fatalf("step %d: %v", i, err)
-				}
-			}
-			var head string
-			var state record.PullRequestState
-			if err := pool.QueryRow(t.Context(), "select head_sha, state from pull_requests where issue = 'LEGION-208'").Scan(&head, &state); err != nil {
-				t.Fatalf("read the pull request: %v", err)
-			}
-			if got := architectNotices(t, pool); head != "head-d" || state != record.PullRequestClosed || len(got) != 1 {
-				t.Fatalf("the pull request is at %s, %s, with architect notices %+v; want head-d, closed, and one notice", head, state, got)
+			pool := appliedEvents(t, record.PullRequestClosed, tc.facts...)
+			if got, notices := pullRequestAt(t, pool), architectNotices(t, pool); got.head != "head-d" || got.state != record.PullRequestClosed || len(notices) != 1 {
+				t.Fatalf("the pull request is %+v, with architect notices %+v; want head-d, closed, and one notice", got, notices)
 			}
 		})
 	}
@@ -125,19 +101,9 @@ func TestASecondCloseTellsTheArchitectOnceWhicheverOrderItsReopenArrives(t *test
 // closed record, so it is a redelivery: the pull request stays closed and the architect is told
 // nothing more.
 func TestAClocklessCloseOfAClosedPullRequestTellsTheArchitectNothing(t *testing.T) {
-	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-c",
-		HeadUpdatedAt: lateApplied, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
-	if _, err := intake.ApplyFact(context.Background(), pool, "github", "close", lateClosed("head-c", time.Time{}), testEngine(), admissionStub{}); err != nil {
-		t.Fatalf("ApplyFact close: %v", err)
-	}
-	var state record.PullRequestState
-	if err := pool.QueryRow(t.Context(), "select state from pull_requests where issue = 'LEGION-208'").Scan(&state); err != nil {
-		t.Fatalf("read the pull request: %v", err)
-	}
-	if got := architectNotices(t, pool); state != record.PullRequestClosed || len(got) != 0 {
-		t.Fatalf("the pull request is %s, with architect notices %+v; want closed, and none", state, got)
+	pool := appliedEvents(t, record.PullRequestClosed, lateClosed("head-c", time.Time{}))
+	if got, notices := pullRequestAt(t, pool), architectNotices(t, pool); got.state != record.PullRequestClosed || len(notices) != 0 {
+		t.Fatalf("the pull request is %+v, with architect notices %+v; want closed, and none", got, notices)
 	}
 }
 
@@ -145,20 +111,19 @@ func TestAClocklessCloseOfAClosedPullRequestTellsTheArchitectNothing(t *testing.
 // it, and the merge carries no clock that could fence it: a close of a pull request recorded
 // merged changes nothing and tells the architect nothing.
 func TestACloseOfAMergedPullRequestChangesNothing(t *testing.T) {
-	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-c",
-		HeadUpdatedAt: lateApplied, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
-	if _, err := intake.ApplyFact(context.Background(), pool, "github", "close", lateClosed("head-d", lateApplied.Add(time.Minute)), testEngine(), admissionStub{}); err != nil {
-		t.Fatalf("ApplyFact close: %v", err)
+	pool := appliedEvents(t, record.PullRequestMerged, lateClosed("head-d", lateApplied.Add(time.Minute)))
+	if got, notices := pullRequestAt(t, pool), architectNotices(t, pool); got.head != "head-c" || got.state != record.PullRequestMerged || len(notices) != 0 {
+		t.Fatalf("the pull request is %+v, with architect notices %+v; want head-c, merged, and none", got, notices)
 	}
-	var head string
-	var state record.PullRequestState
-	if err := pool.QueryRow(t.Context(), "select head_sha, state from pull_requests where issue = 'LEGION-208'").Scan(&head, &state); err != nil {
-		t.Fatalf("read the pull request: %v", err)
-	}
-	if got := architectNotices(t, pool); head != "head-c" || state != record.PullRequestMerged || len(got) != 0 {
-		t.Fatalf("the pull request is at %s, %s, with architect notices %+v; want head-c, merged, and none", head, state, got)
+}
+
+// GitHub never reopens a merged pull request either, so a reopen observed after the merge is older
+// than it: a reopen of a pull request recorded merged changes nothing, and it stays merged at the
+// head it merged at.
+func TestAReopenOfAMergedPullRequestChangesNothing(t *testing.T) {
+	pool := appliedEvents(t, record.PullRequestMerged, lateReopened("head-d", lateApplied.Add(time.Minute)))
+	if got, notices := pullRequestAt(t, pool), architectNotices(t, pool); got.head != "head-c" || got.state != record.PullRequestMerged || len(notices) != 0 {
+		t.Fatalf("the pull request is %+v, with architect notices %+v; want head-c, merged, and none", got, notices)
 	}
 }
 

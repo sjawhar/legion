@@ -43,10 +43,10 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 	return filepath.Join(stateDir, "prompts", string(token)+".md")
 }
 
-// SpawnSpec is the launch's secrets (the Envoy bearer, when the daemon has one), its prompt — the
-// role prompt parts, the addressing sentence, and the deployment instructions — and its
-// repository; for a claim whose workspace was lost with its session, the issue's branch the
-// recreated workspace is recovered from.
+// SpawnSpec is the launch's secrets (launchSecrets: the Envoy bearer and the NATS nkey seed, each
+// when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
+// deployment instructions — and its repository; for a claim whose workspace was lost with its
+// session, the issue's branch the recreated workspace is recovered from.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {

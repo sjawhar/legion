@@ -202,6 +202,29 @@ func TestReadyMakesTheRegisteredClaimReady(t *testing.T) {
 	}
 }
 
+// A ready the claim takes tells the workflow the claim's agent took its role and can be prompted
+// (Options.ClaimReady), once per ready, so a relaunched architect's waiting notices are released;
+// a ready it refuses, naming another session, tells it nothing.
+func TestReadyOfTheClaimsSessionTellsTheWorkflow(t *testing.T) {
+	h := newHarness(t)
+	token, boot := h.launch("LEGION-208", claim.RoleArchitect)
+	registered := h.registered(boot, "ses_architect")
+	ready := func(session string) {
+		t.Helper()
+		h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+			ClaimToken: token, SessionID: session, Secret: registered.Secret, Generation: registered.Generation,
+		}, nil)
+	}
+
+	ready("ses_other")
+	ready("ses_architect")
+	ready("ses_architect")
+
+	if got := *h.readied; len(got) != 2 || got[0].Token != token || got[0].Session != "ses_architect" || got[1].Session != "ses_architect" {
+		t.Fatalf("told of %+v, want the claim's session twice and never ses_other", got)
+	}
+}
+
 // ready and exit are the agent's own requests: each carries the secret its registration issued,
 // the generation it runs at, and the session it is — and each refusal is the one that failed.
 func TestReadyAndExitRefuseWhatTheyCannotAuthenticateOrFence(t *testing.T) {

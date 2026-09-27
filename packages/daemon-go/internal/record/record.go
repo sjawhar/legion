@@ -235,6 +235,10 @@ type Store interface {
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
+	// WaitingNotices is every notice row of project's issues not yet due at now, oldest first.
+	WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error)
+	// ExpediteOutbox makes row id due at now if it was due later.
+	ExpediteOutbox(ctx context.Context, tx pgx.Tx, id int64, now time.Time) error
 	// TreeIssues is every issue of tree, the root included, by key.
 	TreeIssues(ctx context.Context, tx pgx.Tx, tree string) ([]Issue, error)
 	// EarlierNotices is every unfinished notice row of tree's issues written before row id, oldest

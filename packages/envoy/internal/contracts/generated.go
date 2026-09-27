@@ -165,11 +165,16 @@ func SlackSubject(team string, channel string, kind string) string {
 	return "notifications.slack." + team + "." + channel + "." + kind
 }
 
-// SanitizeSubjectSegment replaces dots in a NATS subject segment with underscores so the segment
-// stays a single token. Mirrored on the TS side as `sanitizeSubjectSegment`.
+// SanitizeSubjectSegment makes a value one NATS subject segment: a dot, which a subject splits on,
+// and whitespace and the wildcards * and >, which a published subject may not hold, each become an
+// underscore. A slash is kept. Generated from SUBJECT_SEGMENT_REPLACED in packages/contracts, which
+// `sanitizeSubjectSegment` reads too, so what the listener publishes and what a consumer expects
+// cannot drift apart.
 func SanitizeSubjectSegment(value string) string {
-	return strings.ReplaceAll(value, ".", "_")
+	return subjectSegmentSanitizer.Replace(value)
 }
+
+var subjectSegmentSanitizer = strings.NewReplacer(".", "_", " ", "_", "\t", "_", "\r", "_", "\n", "_", "*", "_", ">", "_")
 
 func SlackThreadSubject(team, channel, threadTs, kind string) string {
 	return "notifications.slack." + team + "." + channel + ".thread." + SanitizeSubjectSegment(threadTs) + "." + kind
@@ -191,6 +196,21 @@ const GhostWisprTopicPrefix = "notifications.ghostwispr."
 
 func GhostWisprSubject(sessionId string, kind string) string {
 	return GhostWisprTopicPrefix + sessionId + "." + kind
+}
+
+// AgentStreamSubjectPrefix roots the live agent conversation stream. Generated from
+// AGENT_STREAM_SUBJECT_PREFIX in packages/contracts so the session that publishes its own turns
+// and the Dispatch relay that forwards them to a browser cannot drift apart. It sits outside
+// "notifications." deliberately: that family is what the notification stream captures, so every
+// frame travels over core NATS and the bus retains none of it.
+const AgentStreamSubjectPrefix = "agentstream."
+
+func AgentStreamFramesSubject(sessionID string) string {
+	return AgentStreamSubjectPrefix + sessionID + ".frames"
+}
+
+func AgentStreamControlSubject(sessionID string) string {
+	return AgentStreamSubjectPrefix + sessionID + ".control"
 }
 
 func WhatsappSubject(phone, jid, kind string) string {

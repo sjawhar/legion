@@ -10,6 +10,7 @@ import {
   type NatsConnection,
   NatsError,
   nanos,
+  nkeyAuthenticator,
   StringCodec,
 } from "nats";
 import { createCancellableSleep } from "./cancellable-sleep";
@@ -243,6 +244,8 @@ export interface JetStreamConnection {
   drain(): Promise<void>;
 }
 
+/** Connects as the NATS nkey user `config.natsNkeySeed` names (resolved and validated at load),
+ * and without a credential when the daemon has none. */
 export async function createNatsTransport(
   config: DaemonConfig,
   connectFn: (opts: ConnectionOptions) => Promise<JetStreamConnection> = connect
@@ -250,6 +253,9 @@ export async function createNatsTransport(
   const connection = await connectFn({
     servers: config.natsUrls,
     name: `legion-daemon-${config.project}`,
+    ...(config.natsNkeySeed === undefined
+      ? {}
+      : { authenticator: nkeyAuthenticator(new TextEncoder().encode(config.natsNkeySeed)) }),
     reconnect: true,
     maxReconnectAttempts: -1,
     reconnectTimeWait: 2_000,
