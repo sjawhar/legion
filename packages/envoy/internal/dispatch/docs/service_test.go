@@ -2497,8 +2497,17 @@ func TestQuiesceFlushesEveryLiveDocumentAndLeavesTheServiceUsable(t *testing.T) 
 		t.Fatalf("document text after quiesce = %q, want the edit", text)
 	}
 
-	// And the service still settles what it is asked to settle afterwards.
+	// And the service schedules its own settlements again: an edit after the quiesce arms the
+	// room's timer. A quiesce that never lifted its hold would leave that timer unarmed and
+	// every later edit unsettled, which settling this room by hand below cannot show.
 	editLiveTree(t, service, artifactID, replaceRun("after", "later"))
+	state := service.room(artifactID)
+	state.mu.Lock()
+	armed := service.isSettleTimerArmed(state.settle)
+	state.mu.Unlock()
+	if !armed {
+		t.Fatal("no settlement was scheduled for the edit after the quiesce")
+	}
 	settleCurrentGeneration(t, service, artifactID)
 	waitForDocumentVersion(t, service.store, artifactID, 2)
 }
