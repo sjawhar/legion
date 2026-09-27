@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -173,6 +174,21 @@ func otherListMarkers(blocks []*Node) []bool {
 	return other
 }
 
+// listItemMarker is the marker a list item is written with: `- `, or `N. ` in an ordered list, or,
+// in a list written with its kind's other marker (otherListMarkers), `* ` or `N) `.
+func listItemMarker(ordered bool, number int, other bool) string {
+	switch {
+	case ordered && other:
+		return strconv.Itoa(number) + ") "
+	case ordered:
+		return strconv.Itoa(number) + ". "
+	case other:
+		return "* "
+	default:
+		return "- "
+	}
+}
+
 func (r *renderer) block(n *Node, prefix string) {
 	start := r.b.Len()
 	blockOffset := -1
@@ -284,17 +300,7 @@ func (r *renderer) list(n *Node, prefix string) {
 				r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + prefix)
 			}
 		}
-		marker := "- "
-		if other {
-			marker = "* "
-		}
-		if n.Type == "ordered_list" {
-			delimiter := "."
-			if other {
-				delimiter = ")"
-			}
-			marker = fmt.Sprintf("%d%s ", start+index, delimiter)
-		}
+		marker := listItemMarker(n.Type == "ordered_list", start+index, other)
 		r.writeSyntax(marker)
 		if checked, ok := item.Attrs["checked"].(bool); ok {
 			if checked {

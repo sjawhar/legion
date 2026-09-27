@@ -3,7 +3,6 @@ package pmdoc
 import (
 	"fmt"
 	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -31,17 +30,13 @@ type BlockMarker struct {
 
 // Markdown renders the marker the way the document renderer writes it, for error text.
 func (m BlockMarker) Markdown() string {
-	switch {
-	case m.Kind == MarkerHeading:
+	switch m.Kind {
+	case MarkerHeading:
 		return strings.Repeat("#", max(m.Level, 1)) + " "
-	case m.Kind == MarkerOrdered && m.Other:
-		return strconv.Itoa(max(m.Number, 1)) + ") "
-	case m.Kind == MarkerOrdered:
-		return strconv.Itoa(max(m.Number, 1)) + ". "
-	case m.Kind == MarkerBullet && m.Other:
-		return "* "
-	case m.Kind == MarkerBullet:
-		return "- "
+	case MarkerOrdered:
+		return listItemMarker(true, max(m.Number, 1), m.Other)
+	case MarkerBullet:
+		return listItemMarker(false, 0, m.Other)
 	default:
 		return ""
 	}
