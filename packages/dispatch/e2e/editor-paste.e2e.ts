@@ -217,7 +217,7 @@ async function openWithCellsSelected(
   to: string,
   how: "drag" | "shift-click",
   spec: string = table
-): Promise<{ alice: Awaited<ReturnType<typeof asUser>>; artifactId: string; page: Page }> {
+) {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec, title: "Cell selection paste" });
   const alice = await asUser(browser, "alice");
