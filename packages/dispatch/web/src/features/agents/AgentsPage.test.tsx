@@ -135,7 +135,8 @@ function renderAgents({
   });
   const getMyAgentState = spyOn(api, "getMyAgentState").mockResolvedValue(agentState);
   const putAgentState = spyOn(api, "putAgentState").mockImplementation(async (_session, input) => ({
-    cleared_before: input.cleared_before,
+    ...input,
+    unread_replies: 0,
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
@@ -969,6 +970,45 @@ test("Agents shows only the newest exchange and folds the rest behind Show N old
   }
 });
 
+// An agent answering a human's direct message is news the human did not go looking for: the
+// count shows in the navigation and on the agent's row until the conversation is opened, and
+// opening it records how far it was read, so the count stays gone on every device.
+test("an agent's unread reply shows on its row and in the navigation until its conversation is opened", async () => {
+  const page = renderAgents({
+    agentState: { "planner-session": { unread_replies: 1 } },
+    messages: [
+      exchange("m1", "Where is the dashboard?", "2026-09-14T01:00:00Z", {
+        body: "At /dash.",
+        createdAt: "2026-09-14T01:05:00Z",
+      }),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    // The test viewport is compact, so the shell's header carries the badge the rail would.
+    await expect(screen.findByRole("link", { name: "New reply 1" })).resolves.toBeTruthy();
+    expect(within(planner).queryByText("At /dash.")).toBeNull();
+
+    fireEvent.click(
+      await within(planner).findByRole("button", { name: "Planner replied: 1 unread" })
+    );
+    await expect(within(planner).findByText("At /dash.")).resolves.toBeTruthy();
+    await waitFor(() =>
+      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
+        read_through: "2026-09-14T01:05:00Z",
+      })
+    );
+    await waitFor(() =>
+      expect(within(planner).queryByRole("button", { name: /unread/ })).toBeNull()
+    );
+    expect(screen.queryByRole("link", { name: /^New repl/ })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 test("Agents renders no fold for a single exchange", async () => {
   const page = renderAgents({
     messages: [exchange("m1", "Only question", "2026-09-14T01:00:00Z")],
@@ -1034,7 +1074,9 @@ test("Agents Clear hides every exchange up to now for this viewer and persists t
 
 test("Agents keeps exchanges with activity after the persisted cutoff and hides the rest", async () => {
   const page = renderAgents({
-    agentState: { "planner-session": { cleared_before: "2026-09-14T12:00:00Z" } },
+    agentState: {
+      "planner-session": { cleared_before: "2026-09-14T12:00:00Z", unread_replies: 0 },
+    },
     messages: [
       exchange("m3", "New question", "2026-09-15T00:00:00Z"),
       // Asked before the Clear, answered after it: the answer is fresh, so the exchange shows.

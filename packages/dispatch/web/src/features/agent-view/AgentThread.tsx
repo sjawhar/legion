@@ -4,6 +4,7 @@ import {
   type ReasoningMessagePartComponent,
   ThreadPrimitive,
   type ToolCallMessagePartComponent,
+  useAuiState,
 } from "@assistant-ui/react";
 import { type ReactNode, useState } from "react";
 
@@ -95,6 +96,19 @@ function UserMessage(): ReactNode {
 }
 
 function AssistantMessage(): ReactNode {
+  // A reply the session sent through Dispatch (AgentRuntimeThread marks it), not a streamed turn.
+  const fromDispatch = useAuiState((state) => state.message.metadata.custom.dispatch === true);
+  if (fromDispatch) {
+    return (
+      <div
+        className={`mt-4 rounded-xl border px-3 py-2 text-sm whitespace-pre-wrap ${card} ${borderDefault} ${textPrimaryOnCanvas}`}
+        data-testid="agent-dispatch-reply"
+      >
+        <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>Reply via Dispatch</p>
+        <MessagePrimitive.Parts />
+      </div>
+    );
+  }
   return (
     <div
       className={`mt-4 text-sm whitespace-pre-wrap ${textPrimaryOnCanvas}`}

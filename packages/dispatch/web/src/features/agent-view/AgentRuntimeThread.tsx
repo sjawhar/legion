@@ -5,15 +5,9 @@ import {
 } from "@assistant-ui/react";
 import { type ReactNode, useMemo } from "react";
 
+import type { MessageRead } from "../../api/types";
 import { AgentThread } from "./AgentThread";
 import { type AgentConversation, isRunning, toThreadMessages } from "./conversation";
-
-/** A message this viewer sent, echoed back into its own thread. */
-export interface SentMessage {
-  readonly id: string;
-  readonly at: number;
-  readonly body: string;
-}
 
 /**
  * Everything that reads the conversation, in one component so a boundary can be put around it.
@@ -30,27 +24,47 @@ export function AgentRuntimeThread({
   onNew,
   placeholder,
   resetKey,
-  sent,
+  sessionId,
+  stored,
 }: {
   conversation: AgentConversation;
   empty: string;
   onNew: (message: { content: readonly { type: string; text?: string }[] }) => Promise<void>;
   placeholder: string;
   resetKey: string;
-  sent: readonly SentMessage[];
+  sessionId: string;
+  stored: readonly MessageRead[];
 }): ReactNode {
   const messages = useMemo(() => {
     const streamed = toThreadMessages(conversation);
-    const echoes: ThreadMessageLike[] = sent.map((entry) => ({
-      content: [{ text: entry.body, type: "text" as const }],
-      createdAt: new Date(entry.at),
-      id: entry.id,
-      role: "user" as const,
-    }));
-    return [...streamed, ...echoes].sort(
+    // Dispatch's side of the conversation, interleaved with the stream by time: what the session
+    // wrote is its reply, everything else was said to it.
+    const dispatch: ThreadMessageLike[] = stored
+      .flatMap((read) => [read.message, ...read.replies])
+      .map((message) => {
+        // AgentThread renders a message carrying this marker as Dispatch's, not the stream's.
+        const custom = { dispatch: true };
+        return message.author.kind === "session" && message.author.id === sessionId
+          ? {
+              content: [{ text: message.body, type: "text" as const }],
+              createdAt: new Date(message.created_at),
+              id: `dispatch:${message.id}`,
+              metadata: { custom },
+              role: "assistant" as const,
+              status: { reason: "stop", type: "complete" } as const,
+            }
+          : {
+              content: [{ text: message.body, type: "text" as const }],
+              createdAt: new Date(message.created_at),
+              id: `dispatch:${message.id}`,
+              metadata: { custom },
+              role: "user" as const,
+            };
+      });
+    return [...streamed, ...dispatch].sort(
       (left, right) => (left.createdAt?.getTime() ?? 0) - (right.createdAt?.getTime() ?? 0)
     );
-  }, [conversation, sent]);
+  }, [conversation, sessionId, stored]);
 
   const runtime = useExternalStoreRuntime({
     // The frames already arrive in assistant-ui's own message shape, so the store's converter

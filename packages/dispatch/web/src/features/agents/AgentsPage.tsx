@@ -4,7 +4,7 @@ import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { inboxQuery } from "../../api/queries";
+import { inboxQuery, userAgentStateQuery } from "../../api/queries";
 import type {
   Agent,
   Message,
@@ -57,6 +57,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 
 import { deliveryAttempts } from "./attempts";
+import { unreadRepliesLabel, useMarkRepliesRead } from "./unread";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
@@ -380,10 +381,8 @@ function AgentMessageList({
     queryFn: () => api.listAgentMessages(agent.session_id),
     queryKey: ["agents", agent.session_id, "messages"],
   });
-  const agentState = useQuery({
-    queryFn: () => api.getMyAgentState(),
-    queryKey: ["user-agent-state"],
-  });
+  const agentState = useQuery(userAgentStateQuery());
+  useMarkRepliesRead(agent.session_id, messages.data);
   const [showOlder, setShowOlder] = useState(false);
   const [showCleared, setShowCleared] = useState(false);
   // The cutoff is the newest visible message's own timestamp, not the browser clock: both are
@@ -394,7 +393,7 @@ function AgentMessageList({
       api.putAgentState(agent.session_id, { cleared_before: clearedBefore }),
     onSuccess: (next) => {
       setShowCleared(false);
-      queryClient.setQueryData<UserAgentStates>(["user-agent-state"], (current) => ({
+      queryClient.setQueryData<UserAgentStates>(userAgentStateQuery().queryKey, (current) => ({
         ...current,
         [agent.session_id]: next,
       }));
@@ -624,6 +623,8 @@ function AgentRow({
   // The inbox query and the agent list are polled separately, so the two counts can briefly
   // disagree in either direction; a negative remainder renders nothing.
   const waitingOnAgent = agent.open_asks - needsYou;
+  const unreadReplies =
+    useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);
   const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
   const detailsId = useId();
@@ -688,6 +689,18 @@ function AgentRow({
               <Timestamp at={agent.last_activity} />
             )}
           </span>
+          {unreadReplies === 0 ? null : (
+            // Opening the conversation is what reads it, so the badge opens it.
+            <button
+              aria-label={`${label} replied: ${unreadReplies} unread`}
+              className="inline-flex min-h-11 items-center rounded-full md:min-h-8"
+              onClick={() => setExpanded(true)}
+              title={`Replies from ${label} you have not read`}
+              type="button"
+            >
+              <LabelPill selected>{unreadRepliesLabel(unreadReplies)}</LabelPill>
+            </button>
+          )}
           {needsYou === 0 ? null : (
             <AskCountPill
               agent={agent}

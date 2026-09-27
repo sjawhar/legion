@@ -1,7 +1,12 @@
 import { expect, test } from "@playwright/test";
 
 import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
-import { publishAgentStreamFrame, setAgentStreamResponder } from "./api";
+import {
+  createAgentMessage,
+  publishAgentStreamFrame,
+  replyToMessageDelivery,
+  setAgentStreamResponder,
+} from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -149,6 +154,40 @@ test("the conversation view replays what the session held, streams its next turn
   }
 });
 
+// A session answers a human's direct message through Dispatch, which the relayed stream shows
+// only as a tool call. The replies are news the human did not go looking for, so they are
+// counted unread in the navigation, and the live view shows them - which is reading them.
+test("a session's replies to a direct message are unread until the live view shows them", async ({
+  browser,
+}) => {
+  const asked = await createAgentMessage(planner.session_id, {
+    body: "Where is the dashboard?",
+    delivery: "aside",
+  });
+  const session = { id: planner.session_id, kind: "session" as const };
+  await replyToMessageDelivery(asked.id, { attempt: 1, body: "Switching to it now." }, session);
+  await replyToMessageDelivery(asked.id, { attempt: 1, body: "Done: it is at /dash." }, session);
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto("/agents");
+    await expect(page.getByText("New replies 2").first()).toBeVisible();
+
+    await page.goto(`/agents/${planner.session_id}/live`);
+    await expect(page.getByTestId("agent-thread")).toContainText("Where is the dashboard?");
+    const replies = page.getByTestId("agent-dispatch-reply");
+    await expect(replies).toHaveCount(2);
+    await expect(replies.first()).toContainText("Switching to it now.");
+    await expect(replies.last()).toContainText("Done: it is at /dash.");
+    await expect(page.getByText(/^New repl/)).toHaveCount(0);
+    await page.reload();
+    await expect(page.getByTestId("agent-dispatch-reply")).toHaveCount(2);
+    await expect(page.getByText(/^New repl/)).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
 test("a session that has published nothing renders as empty, not as a conversation", async ({
   browser,
 }) => {
@@ -165,7 +204,7 @@ test("a session that has published nothing renders as empty, not as a conversati
     await expect(page.getByTestId("agent-thread-empty")).toHaveText(
       "Nothing yet. This session's next turn appears here as it happens."
     );
-    await expect(page.getByText("Nothing here is stored")).toBeVisible();
+    await expect(page.getByText(/relayed while this page is open/)).toBeVisible();
   } finally {
     await context.close();
   }

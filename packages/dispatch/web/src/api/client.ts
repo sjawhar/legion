@@ -61,6 +61,7 @@ import type {
   Subscriber,
   UpdateIssueInput,
   UserAgentState,
+  UserAgentStateInput,
   UserAgentStates,
   UserIssueState,
   UserState,
@@ -643,7 +644,7 @@ export class DispatchApiClient {
     return this.json<UserAgentStates>("/api/v1/me/agents/state");
   }
 
-  putAgentState(sessionID: string, input: UserAgentState): Promise<UserAgentState> {
+  putAgentState(sessionID: string, input: UserAgentStateInput): Promise<UserAgentState> {
     return this.json<UserAgentState>(
       `/api/v1/me/agents/${pathSegment(sessionID)}/state`,
       idempotentWriteInit("PUT", input)

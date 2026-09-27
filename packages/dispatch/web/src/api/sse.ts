@@ -10,7 +10,13 @@ import {
   type StreamEvent,
   setConnectionState,
 } from "./live";
-import { architectureSourcesQuery, inboxQuery, projectsQuery, userStateQuery } from "./queries";
+import {
+  architectureSourcesQuery,
+  inboxQuery,
+  projectsQuery,
+  userAgentStateQuery,
+  userStateQuery,
+} from "./queries";
 import { coalescePrefixKeys, refreshQueries } from "./query-refresh";
 import type { ChangedReference, Event, EventType } from "./types";
 
@@ -389,8 +395,9 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // that moves a broadcast's recipient table arrives here. The open broadcast views are
     // refreshed by key prefix rather than by threading a broadcast id through the message,
     // delivery and reply payloads; nothing else is keyed under ["broadcast"], and the
-    // queries only exist while a broadcast page is mounted.
-    return [key, ["broadcast"]];
+    // queries only exist while a broadcast page is mounted. A reply in a direct conversation can
+    // be unread for its asker, and the count lives in the viewer's per-agent state.
+    return [key, ["broadcast"], userAgentStateQuery().queryKey];
   }
   if (event.issue_key === null) {
     if (event.artifact_id === null || event.artifact_id === undefined) {

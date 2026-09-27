@@ -117,6 +117,7 @@ export type {
   TargetCandidate,
   UpdateIssueInput,
   UserAgentState,
+  UserAgentStateInput,
   UserAgentStates,
   UserIssueState,
   UserState,

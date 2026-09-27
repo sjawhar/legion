@@ -4,9 +4,10 @@ import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom"
 
 import { api, isForbidden, isUnauthorized } from "./api/client";
 import { useConnectionState } from "./api/live";
-import { inboxQuery, whoAmIQuery } from "./api/queries";
+import { inboxQuery, userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
+import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { waitingOnYou } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
@@ -362,6 +363,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const connection = useConnectionState();
   const inbox = useQuery(inboxQuery());
   const needsYouCount = inbox.data === undefined ? 0 : waitingOnYou(inbox.data).length;
+  const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
 
   const mainRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -478,6 +480,14 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 >
                   Needs you {needsYouCount}
                 </span>
+              )}
+              {unreadReplies === 0 ? null : (
+                <Link
+                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+                  to="/agents"
+                >
+                  {unreadRepliesLabel(unreadReplies)}
+                </Link>
               )}
             </div>
             <button

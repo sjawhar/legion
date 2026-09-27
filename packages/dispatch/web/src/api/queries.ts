@@ -36,6 +36,15 @@ export const userStateQuery = () =>
     queryFn: () => api.getMyState(),
   });
 
+/** The viewer's per-agent conversation state: each session's Clear, read mark, and count of
+ *  unread replies to the viewer's direct messages. The navigation, the Agents page, and the
+ *  live view all read this one key. */
+export const userAgentStateQuery = () =>
+  queryOptions({
+    queryKey: ["user-agent-state"],
+    queryFn: () => api.getMyAgentState(),
+  });
+
 /** Every native project, shared by the shell, project routes, and settings. */
 export const projectsQuery = () =>
   queryOptions({
