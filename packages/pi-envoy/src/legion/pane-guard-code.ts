@@ -840,7 +840,7 @@ export function scanCode(
       else sinks.signal(callee, "", callee === "os.killpg");
       continue;
     }
-    if (language === "py") scanPythonProcessCall(callee, args, value, scope, sinks);
+    if (language === "py") scanPythonProcessCall(callee, args, value, sinks);
     else scanJsProcessCall(callee, args, value, scope, sinks);
   }
 }
@@ -908,7 +908,6 @@ function scanPythonProcessCall(
   callee: string,
   args: { positional: Token[][]; keyword: Map<string, Token[]> },
   value: (index: number) => Value,
-  _scope: Scope,
   sinks: CodeSinks
 ): void {
   if (callee === "os.system" || callee === "os.popen" || callee.endsWith("getoutput")) {

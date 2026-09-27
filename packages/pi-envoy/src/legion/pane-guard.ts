@@ -29,6 +29,7 @@ import {
   statSync,
 } from "node:fs";
 import * as path from "node:path";
+import { messageFor } from "@legion/envoy-client/errors";
 import type {
   ArithmeticExpression,
   Command,
@@ -710,8 +711,16 @@ function lineOf(source: string, pos: number): number {
   return line;
 }
 
+/** The snippet now; the line only when a refusal reads it, since counting lines for every
+ * command of a long script would make walking it quadratic. */
 function siteOf(node: { readonly pos: number; readonly end: number }, st: State): Site {
-  return { snippet: st.source.slice(node.pos, node.end).trim(), line: lineOf(st.source, node.pos) };
+  const source = st.source;
+  return {
+    snippet: source.slice(node.pos, node.end).trim(),
+    get line() {
+      return lineOf(source, node.pos);
+    },
+  };
 }
 
 function walkScript(script: ParsedScript, st: State, ctx: Ctx): void {
@@ -1021,8 +1030,7 @@ function unwrap(
     };
     if (base === "sudo" || base === "doas") list = skip("ughpCDrtUT", ["--user", "--group"]);
     else if (base === "nice") list = skip("n", ["--adjustment"]);
-    else if (base === "nohup" || base === "setsid" || base === "builtin") list = skip("");
-    else if (base === "time") list = skip("");
+    else if (["nohup", "setsid", "builtin", "time"].includes(base)) list = skip("");
     else if (base === "exec") list = skip("a");
     else if (base === "command") {
       const flags = rest.map((arg) => literalText(arg.exp));
@@ -1265,7 +1273,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     case "kill":
-      checkKill(rest, st, ctx, site);
+      checkKill(rest, ctx, site);
       return;
     case "pkill":
     case "killall":
@@ -1476,7 +1484,7 @@ function checkXargs(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void
   }
 }
 
-function checkKill(list: readonly Arg[], _st: State, ctx: Ctx, site: Site): void {
+function checkKill(list: readonly Arg[], ctx: Ctx, site: Site): void {
   const words = list.map((arg) => literalText(arg.exp));
   if (
     words.some((word) => word === "-l" || word === "-L" || word === "--list" || word === "--table")
@@ -1536,7 +1544,7 @@ function descendant(pid: number, ctx: Ctx): true | string {
     try {
       parent = ctx.parentOf(current);
     } catch (error) {
-      return `could not be traced to this pane's Oh My Pi process (${error instanceof Error ? error.message : String(error)})`;
+      return `could not be traced to this pane's Oh My Pi process (${messageFor(error)})`;
     }
     if (parent === undefined)
       return hops === 0
@@ -1810,7 +1818,7 @@ function runFile(
       throw new Refusal(
         site.snippet,
         site.line,
-        `the guard cannot read the script ${abs} (${error instanceof Error ? error.message : String(error)})`
+        `the guard cannot read the script ${abs} (${messageFor(error)})`
       );
     }
   }
