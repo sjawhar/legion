@@ -580,15 +580,19 @@ func TestANoticeToALiveClaimThatHearsNothingKeepsItsSchedule(t *testing.T) {
 
 // A later copy whose report names a session other than the one the claim is ready on went to a
 // session the role has since left, so it is due at once, as the first copy is: waiting its delay
-// would hold the live architect's later notices behind it. Only a later copy that failed on the
-// claim's own ready session keeps its delay, since that session may be the one hearing nothing.
+// would hold the live architect's later notices behind it. A later copy that failed on the claim's
+// own ready session keeps its delay, since that session may be the one hearing nothing, and so
+// does one whose report names no session: the listener names none when the role had no holder or
+// it could not read the holder, which says nothing about where the role went.
 func TestALaterCopyToAnArchitectBackOnAnotherSessionIsDueAtOnce(t *testing.T) {
 	for _, tc := range []struct {
-		name, recipient string
-		due             time.Duration
+		name, reason, recipient string
+		due                     time.Duration
 	}{
-		{"the report names the session the role left", "ses_stopped", 0},
-		{"the report names the claim's own ready session", "ses_new", noticeReholdDelays[1]},
+		{"the report names the session the role left", "receipt_timeout", "ses_stopped", 0},
+		{"the report names the claim's own ready session", "receipt_timeout", "ses_new", noticeReholdDelays[1]},
+		{"a lapsed holder, naming no session", "no_holder", "", noticeReholdDelays[1]},
+		{"a failed holder read, naming no session", "delivery_failed", "", noticeReholdDelays[1]},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -597,7 +601,7 @@ func TestALaterCopyToAnArchitectBackOnAnotherSessionIsDueAtOnce(t *testing.T) {
 			clock := time.Now()
 			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: record.NewStore(), supervisor: sup, project: "legion", now: func() time.Time { return clock }}
 			copied := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts", Resends: 1}
-			report := laneReport{"evt-exception", "receipt_timeout", architectTopic(t, "LEGION-1"), "pr-blocked on LEGION-2", copied, "legion-outbox:7", tc.recipient}
+			report := laneReport{"evt-exception", tc.reason, architectTopic(t, "LEGION-1"), "pr-blocked on LEGION-2", copied, "legion-outbox:7", tc.recipient}
 			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
 				t.Fatalf("rehold: %v", err)
 			}
