@@ -100,7 +100,8 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // The row finishes when the listener accepts the publish, and the listener reports a failed
 // forward only after its receipt window (two seconds, longer while forwards queue behind others on
 // its role lane). A notice to the same architect written before the report arrives is not held
-// behind the failed one, so it can arrive before the copy.
+// behind the failed one, so it can arrive before the copy. A catch-up a newer one superseded
+// (catchUpSuperseded) is not queued again: its copy would arrive after the fresh catch-up.
 func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if r.supervisor == nil {
 		return errors.New("notice re-hold has no claim supervisor")
@@ -146,8 +147,17 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if err != nil {
 		return fmt.Errorf("%w: exception %s carries a notice the outbox refuses: %w", errNoticeException, envelope.EventID, err)
 	}
-	queued := false
+	queued, superseded := false, false
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		if notice.CatchUp != nil {
+			root, err := r.records.Issue(ctx, tx, issue)
+			if err != nil {
+				return err
+			}
+			if superseded = catchUpSuperseded(*notice.CatchUp, r.supervisedClaim(reported.architect), root); superseded {
+				return nil
+			}
+		}
 		fresh, err := r.records.MarkProcessed(ctx, tx, "envoy-exception", mark)
 		if err != nil || !fresh {
 			return err
@@ -157,11 +167,29 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	}); err != nil {
 		return fmt.Errorf("re-hold the notice of exception %s: %w", envelope.EventID, err)
 	}
+	if superseded {
+		r.log.Info("outbox catch-up not re-held: a newer catch-up supersedes it", "issue", issue, "key", exception.DedupeKey,
+			"generation", notice.CatchUp.Generation, "launch", notice.CatchUp.Launch, "reason", exception.Reason)
+	}
 	if queued {
 		r.log.Info("outbox notice re-held: the listener could not forward it to its architect's session",
 			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason)
 	}
 	return nil
+}
+
+// catchUpSuperseded says whether a newer catch-up than catchUp exists for its architect: held, the
+// claim as this daemon supervises it, has taken its role at a later launch than the one catchUp was
+// written for, and that launch's ready wrote one (workflow's claimReady), queued or delivered; or
+// root, as recorded now, is at a later generation, and its re-admission's start writes one,
+// whether it finds the claim running or relaunches it. Neither holds for a catch-up that may be
+// the architect's only one: a claim relaunching or not yet ready has had no later ready, and one
+// its later ready will write drops the queued copy.
+func catchUpSuperseded(catchUp record.CatchUp, held supervise.Claim, root *record.Issue) bool {
+	if claimTookRole(held.State) && held.Generation > catchUp.Launch {
+		return true
+	}
+	return root != nil && root.Generation > catchUp.Generation
 }
 
 // copyDueAtOnce says whether the next copy of a notice is due at once, given held, the architect's

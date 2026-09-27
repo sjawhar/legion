@@ -39,20 +39,20 @@ func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 			engine := testEngine(tc.policy, nil)
 			// The reason is worded for a relaunch mid-tree as much as for the first launch: an
 			// architect told to start over would edit its spec, and a new version closes its gate.
-			told := func(generation int) string {
-				return fmt.Sprintf("gen=%d policy=%s issues=LEGION-1,LEGION-2 reason=the tree of LEGION-1 at generation %d as the daemon records it at this launch; start or resume it as your role says",
-					generation, tc.policy, generation)
+			told := func(generation, launch int) string {
+				return fmt.Sprintf("gen=%d launch=%d policy=%s issues=LEGION-1,LEGION-2 reason=the tree of LEGION-1 at generation %d as the daemon records it now; start or resume it as your role says",
+					generation, launch, tc.policy, generation)
 			}
 
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 1)
-			if got, want := catchUps(t, pool), []string{told(1)}; fmt.Sprint(got) != fmt.Sprint(want) {
+			if got, want := catchUps(t, pool), []string{told(1, 1)}; fmt.Sprint(got) != fmt.Sprint(want) {
 				t.Fatalf("after the root architect's first ready, catch-ups %v; want %v", got, want)
 			}
 
 			// The first launch dies before its catch-up is delivered; the relaunch's replaces it.
 			first := catchUpRows(t, pool)
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 2)
-			if got, want := catchUps(t, pool), []string{told(1)}; fmt.Sprint(got) != fmt.Sprint(want) || fmt.Sprint(catchUpRows(t, pool)) == fmt.Sprint(first) {
+			if got, want := catchUps(t, pool), []string{told(1, 2)}; fmt.Sprint(got) != fmt.Sprint(want) || fmt.Sprint(catchUpRows(t, pool)) == fmt.Sprint(first) {
 				t.Fatalf("after a relaunch in the same generation, catch-ups %v in rows %v (before, %v); want the relaunch's own, alone", got, catchUpRows(t, pool), first)
 			}
 
@@ -67,7 +67,7 @@ func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 			}
 			seedAdmittedTree(t, pool, 2)
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 3)
-			if got, want := catchUps(t, pool), []string{told(2)}; fmt.Sprint(got) != fmt.Sprint(want) {
+			if got, want := catchUps(t, pool), []string{told(2, 3)}; fmt.Sprint(got) != fmt.Sprint(want) {
 				t.Fatalf("after the re-admitted tree's ready, catch-ups %v; want %v", got, want)
 			}
 		})
@@ -129,13 +129,13 @@ func claimReady(t *testing.T, pool *pgxpool.Pool, engine *Engine, issue string, 
 		t.Fatalf("claim token: %v", err)
 	}
 	if _, err := intake.ApplyFact(context.Background(), pool, "supervise", fmt.Sprintf("supervise:%s:%d:ready", token, launch),
-		intake.ClaimReady{Issue: issue, Role: role}, engine, admissionStub{}); err != nil {
+		intake.ClaimReady{Issue: issue, Role: role, Launch: uint64(launch)}, engine, admissionStub{}); err != nil {
 		t.Fatalf("apply the ready of %s: %v", token, err)
 	}
 }
 
-// catchUps is every catch-up notice the outbox holds, in order: the generation it names, the gate
-// policy it states, the tree's issue keys it lists, and its reason.
+// catchUps is every catch-up notice the outbox holds, in order: the generation it names, the launch
+// it was written for, the gate policy it states, the tree's issue keys it lists, and its reason.
 func catchUps(t *testing.T, pool *pgxpool.Pool) []string {
 	t.Helper()
 	got := []string{}
@@ -148,7 +148,7 @@ func catchUps(t *testing.T, pool *pgxpool.Pool) []string {
 		for _, issue := range notice.CatchUp.Issues {
 			keys = append(keys, issue.Key)
 		}
-		got = append(got, fmt.Sprintf("gen=%d policy=%s issues=%s reason=%s", notice.CatchUp.Generation, notice.CatchUp.Gate.Policy, strings.Join(keys, ","), notice.Reason))
+		got = append(got, fmt.Sprintf("gen=%d launch=%d policy=%s issues=%s reason=%s", notice.CatchUp.Generation, notice.CatchUp.Launch, notice.CatchUp.Gate.Policy, strings.Join(keys, ","), notice.Reason))
 	}
 	return got
 }

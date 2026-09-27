@@ -260,11 +260,15 @@ type ClaimFailed struct {
 
 func (ClaimFailed) isFact() {}
 
-// ClaimReady is the supervision observation that a claim is ready: its agent took its Envoy role
-// and said it can be prompted.
+// ClaimReady is a claim ready to be prompted, from either of two sources: the supervision
+// observation of a launch's ready, its agent having taken its Envoy role and said it can be
+// prompted (workflowRuntime.applyTerminal), and a start the outbox runs that finds a tree's root
+// architect already running, whose launch has no second ready (the outbox's start). Launch is the
+// claim's launch generation the ready belongs to, the running one for the second source.
 type ClaimReady struct {
-	Issue string
-	Role  claim.Role
+	Issue  string
+	Role   claim.Role
+	Launch uint64
 }
 
 func (ClaimReady) isFact() {}

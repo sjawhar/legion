@@ -498,6 +498,14 @@ func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) er
 	return nil
 }
 
+func (s *Postgres) OutboxLeased(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) (bool, error) {
+	var leased bool
+	if err := tx.QueryRow(ctx, "select exists(select 1 from outbox where id = $1 and lease_token = $2)", id, leaseToken).Scan(&leased); err != nil {
+		return false, fmt.Errorf("read the lease of outbox row %d: %w", id, err)
+	}
+	return leased, nil
+}
+
 func (s *Postgres) ExpediteOutbox(ctx context.Context, tx pgx.Tx, id int64, now time.Time) error {
 	if _, err := tx.Exec(ctx, "update outbox set next_at = $2 where id = $1 and next_at > $2", id, now); err != nil {
 		return fmt.Errorf("expedite outbox row %d: %w", id, err)

@@ -650,3 +650,54 @@ func TestWhenACopyIsDueAtOnce(t *testing.T) {
 		})
 	}
 }
+
+// A catch-up whose forward failed is superseded once a newer one exists for the claim: the
+// architect's claim is ready at a later launch, whose ready wrote a catch-up of its own, queued or
+// already delivered (claimReady), or the root is re-admitted at a later generation, whose start
+// writes one. A copy would reach the architect after that fresh catch-up, so none is queued. A
+// catch-up nothing superseded may be the architect's only one, and is re-held as any notice is.
+func TestAReheldCatchUpNeverFollowsANewerOne(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		state      supervise.ClaimState
+		launch     uint64
+		generation uint64
+		reheld     bool
+	}{
+		{"the claim ready at a later launch", supervise.StateReady, 3, 1, false},
+		{"the claim working at a later launch", supervise.StateWorking, 3, 1, false},
+		{"the claim relaunching", supervise.StateLaunching, 3, 1, true},
+		{"the claim ready at the catch-up's own launch", supervise.StateReady, 2, 1, true},
+		{"the root re-admitted at a later generation", supervise.StateReady, 2, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			noticeTree(t, pool, records, false)
+			root := record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: tc.generation, Status: "in_progress"}
+			putOutboxIssue(t, pool, records, root)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			if _, _, err := sup.Create(context.Background(), supervise.Claim{
+				Token: mustClaimToken(t, "LEGION-1", claim.RoleArchitect), Project: "legion", Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleArchitect,
+				State: tc.state, Session: "ses_new", Generation: tc.launch,
+			}, ""); err != nil {
+				t.Fatalf("create the architect claim: %v", err)
+			}
+			var logged bytes.Buffer
+			runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: &holderPublisher{},
+				supervisor: sup, project: "legion", now: time.Now}
+			notice := record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: "generation 1",
+				CatchUp: &record.CatchUp{Generation: 1, Launch: 2, Gate: record.CatchUpGate{Policy: "root-issues"}, Issues: []record.CatchUpIssue{}}}
+			report := laneReport{"evt-exception", "receipt_timeout", architectTopic(t, "LEGION-1"), "catch-up on LEGION-1", notice, "legion-outbox:7", "ses_stopped"}
+
+			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+				t.Fatalf("rehold: %v", err)
+			}
+			queued := queuedNotices(t, pool)
+			superseded := strings.Contains(logged.String(), `msg="outbox catch-up not re-held: a newer catch-up supersedes it"`)
+			if tc.reheld && (len(queued) != 1 || superseded) || !tc.reheld && (len(queued) != 0 || !superseded) {
+				t.Fatalf("queued %v, logged:\n%s\nwant re-held %t", queued, logged.String(), tc.reheld)
+			}
+		})
+	}
+}

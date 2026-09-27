@@ -22,9 +22,11 @@ import (
 // either. The ready is one fact per launch (workflowRuntime.applyTerminal keys it by the claim's
 // launch generation), so the boot's replay of a ready already applied tells nothing more, and one
 // never applied tells it once. A catch-up an earlier launch never had delivered is dropped first,
-// so the agent is given one catch-up, computed now. The notice goes through the outbox like any
-// other, so it is routed, held and re-held as they are. A tree that lingers or has left the
-// workflow is told nothing, nor is a sub-architect (no workflow path starts one) or a phase worker.
+// so the agent is given one catch-up, computed now; it names the launch it was written for, so a
+// failed forward of an older one is not queued again behind it (the outbox's rehold). The notice
+// goes through the outbox like any other, so it is routed, held and re-held as they are. A tree
+// that lingers or has left the workflow is told nothing, nor is a sub-architect (no workflow path
+// starts one) or a phase worker.
 func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimReady) (intake.Result, error) {
 	if fact.Role != claim.RoleArchitect {
 		return intake.Result{}, nil
@@ -40,11 +42,12 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 	if err != nil {
 		return intake.Result{}, err
 	}
+	catchUp.Launch = fact.Launch
 	if err := e.store.DropCatchUps(ctx, tx, root.Key); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.notice(ctx, tx, root.Key, record.Notice{Kind: "catch-up", Role: claim.RoleArchitect,
-		Reason:  fmt.Sprintf("the tree of %s at generation %d as the daemon records it at this launch; start or resume it as your role says", root.Key, root.Generation),
+		Reason:  fmt.Sprintf("the tree of %s at generation %d as the daemon records it now; start or resume it as your role says", root.Key, root.Generation),
 		CatchUp: &catchUp})
 }
 

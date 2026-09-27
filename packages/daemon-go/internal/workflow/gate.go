@@ -25,7 +25,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err := e.store.PutGate(ctx, tx, gate); err != nil {
 		return intake.Result{}, err
 	}
-	logged := e.logOnCommit("workflow: design gate registered", "tree", issue.Tree, "issue", issue.Key, "artifact", fact.ArtifactID,
+	logged := e.logOnCommit("workflow: design gate registered", "issue", issue.Key, "artifact", fact.ArtifactID,
 		"version", fact.Version, "open", classify.DesignGateOpen(gate), "policy", e.cfg.DesignGate)
 	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: fact.Version, Generation: issue.Generation}); err != nil {
 		return intake.Result{}, err

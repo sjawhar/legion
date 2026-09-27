@@ -39,6 +39,10 @@ var errNoticeWaits = errors.New("the notice waits for its architect")
 // no dead-letter path, so the row finishes undelivered with one log line.
 var errNoticeUnroutable = errors.New("the notice has no architect to go to")
 
+// errNoticeRowGone is a notice row deleted while the runner held its lease: a catch-up a newer
+// ready dropped (record.Store.DropCatchUps).
+var errNoticeRowGone = errors.New("the notice row was deleted under its lease")
+
 // noticeRoute is what routes a notice of a tree: the tree's project token, its root, and every
 // issue of the tree whose key makes a claim token, by key. An issue whose key makes no claim token
 // owns nothing, so it is left out: a walk that meets it ends at the root, and an earlier notice of
@@ -57,13 +61,20 @@ type treeSnapshot struct {
 	earlier []record.OutboxRow
 }
 
-// readNoticeTree reads row's tree in one repeatable-read transaction: row's issue and the tree's
-// route (readNoticeRoute), then the fence. A notice it cannot route is errNoticeUnroutable.
+// readNoticeTree reads row's tree in one repeatable-read transaction: that the row is still in the
+// outbox under its lease, row's issue and the tree's route (readNoticeRoute), then the fence. A row
+// deleted under its lease is errNoticeRowGone, and a notice it cannot route is errNoticeUnroutable.
 func (r *outbox) readNoticeTree(ctx context.Context, row record.OutboxRow) (record.Issue, treeSnapshot, error) {
 	var issue record.Issue
 	var tree treeSnapshot
 	if err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
-		var err error
+		leased, err := r.records.OutboxLeased(ctx, tx, row.ID, row.LeaseToken)
+		if err != nil {
+			return err
+		}
+		if !leased {
+			return errNoticeRowGone
+		}
 		if issue, tree.noticeRoute, err = r.readNoticeRoute(ctx, tx, row.Issue, map[string]noticeRoute{}); err != nil {
 			return err
 		}

@@ -159,7 +159,7 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-2", Title: "Root", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
-	row := mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now())
+	row := leasedOutboxRow(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now()))
 	publisher := &outboxPublisher{err: errors.New("listener unavailable")}
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 
@@ -1186,7 +1186,7 @@ func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}); err != nil {
 		t.Fatalf("repeat replay persisted ready claim: %v", err)
 	}
-	if got := handler.facts(); len(got) != 1 || got[0] != (intake.ClaimReady{Issue: persisted.Issue, Role: persisted.Role}) {
+	if got := handler.facts(); len(got) != 1 || got[0] != (intake.ClaimReady{Issue: persisted.Issue, Role: persisted.Role, Launch: persisted.Generation}) {
 		t.Fatalf("ready facts = %#v, want exactly one replayed ClaimReady", got)
 	}
 }
@@ -1594,10 +1594,14 @@ func workspaceRemovals(t *testing.T, pool *pgxpool.Pool) int {
 	return count
 }
 
-// A re-admission starts the root's architect again, but a linger leaves that claim running, so the
-// start finds it working and only records itself: no ready follows, and without a catch-up the
-// architect would sit through the new generation untold. The start tells it, as a ready would. A
-// start that launches the claim tells nothing: its ready will.
+// A re-admission starts the root's architect again. The linger suspended it, so the start normally
+// resumes it and the resume's ready tells it its tree. It is still running in two cases: its claim
+// was mid-launch when the linger's suspend ran, which the machine ignores while launching, so it
+// came up during the linger and was told nothing; or the re-admission's start ran before the
+// linger's suspend. Then the start finds it working and only records itself: no ready follows, and
+// without a catch-up the architect would sit through the new generation untold. The start tells
+// it, as a ready would, for the launch that runs. A start that launches the claim tells nothing:
+// its ready will.
 func TestAStartThatFindsTheRootArchitectRunningTellsItItsTree(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -1620,7 +1624,7 @@ func TestAStartThatFindsTheRootArchitectRunningTellsItItsTree(t *testing.T) {
 	}
 	catchUpReasons := func() []string {
 		t.Helper()
-		rows, err := pool.Query(ctx, "select payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = 'catch-up' order by id")
+		rows, err := pool.Query(ctx, "select (payload->>'reason') || ' launch=' || (payload->'catch_up'->>'launch') from outbox where kind = 'notice' and payload->>'kind' = 'catch-up' order by id")
 		if err != nil {
 			t.Fatalf("read the catch-ups: %v", err)
 		}
@@ -1657,7 +1661,7 @@ func TestAStartThatFindsTheRootArchitectRunningTellsItItsTree(t *testing.T) {
 		t.Fatalf("start the running architect for generation 2: %v", err)
 	}
 	told := catchUpReasons()
-	want := "the tree of LEGION-208 at generation 2 as the daemon records it at this launch; start or resume it as your role says"
+	want := fmt.Sprintf("the tree of LEGION-208 at generation 2 as the daemon records it now; start or resume it as your role says launch=%d", launch)
 	if len(told) != 1 || told[0] != want || machine.Claim().State != supervise.StateReady {
 		t.Fatalf("after the generation 2 start, catch-ups %q with the architect %s; want one, %q, and the architect left running", told, machine.Claim().State, want)
 	}

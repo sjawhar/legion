@@ -44,7 +44,7 @@ func TestTheDesignGateLogsItsRegistrationAndEachOpenOrClose(t *testing.T) {
 		want []string
 	}{
 		{"registration", intake.GateRegistered{Issue: "LEGION-1", ArtifactID: "art-1", Version: 2},
-			[]string{`msg="workflow: design gate registered" tree=LEGION-1 issue=LEGION-1 artifact=art-1 version=2 open=false policy=root-issues`}},
+			[]string{`msg="workflow: design gate registered" issue=LEGION-1 artifact=art-1 version=2 open=false policy=root-issues`}},
 		{"changes requested on the closed gate", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "art-1", Kind: intake.DispatchArtifactChangesRequested, Version: 2, Reason: "tighten it"},
 			[]string{`msg="workflow: design gate changes requested" issue=LEGION-1 artifact=art-1 version=2`}},
 		{"a new version", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "art-1", Kind: intake.DispatchArtifactVersion, Version: 3},
