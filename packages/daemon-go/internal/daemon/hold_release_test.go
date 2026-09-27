@@ -509,8 +509,13 @@ func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsAfterCommitIsRe
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { w.pollHoldReleaseWith(ctx, &failingPositionReader{failures: 1 << 20}); close(done) }()
-	time.Sleep(10 * w.holdPollInterval)
+	reader := &failingPositionReader{failures: 1 << 20}
+	go func() { w.pollHoldReleaseWith(ctx, reader); close(done) }()
+	testwait.Eventually(t, "the poll to have observed the held admission at least once", func() bool {
+		reader.mu.Lock()
+		defer reader.mu.Unlock()
+		return reader.calls > 0
+	})
 
 	// release's own transaction commits here — its advisory lock is transaction-scoped and frees
 	// right at commit — but its AfterCommit, which clears pending, has not run yet: the exact
@@ -603,8 +608,13 @@ func TestPollHoldReleaseRetriesAFailedClosingPass(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { w.pollHoldReleaseWith(ctx, &failingPositionReader{failures: 1 << 20}); close(done) }()
-	time.Sleep(10 * w.holdPollInterval)
+	reader := &failingPositionReader{failures: 1 << 20}
+	go func() { w.pollHoldReleaseWith(ctx, reader); close(done) }()
+	testwait.Eventually(t, "the poll to have observed the held admission at least once", func() bool {
+		reader.mu.Lock()
+		defer reader.mu.Unlock()
+		return reader.calls > 0
+	})
 
 	// The exact commit/AfterCommit window leaves LEGION-RACE recorded but unpromoted once
 	// pending clears.

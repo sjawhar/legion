@@ -218,7 +218,7 @@ export function ReferencedBy({
                 ) : (
                   <Link
                     {...referenceTriggerProps(group.path.route)}
-                    className={`underline ${linkText} ${linkHoverText}`}
+                    className={`dispatch-inline-link underline ${linkText} ${linkHoverText}`}
                     to={group.path.href}
                   >
                     {group.label}

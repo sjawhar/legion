@@ -48,7 +48,7 @@ a {
     scroll-padding-bottom: 5rem;
   }
   button,
-  a,
+  a:not(.prose a):not(.dispatch-inline-link),
   input:not([type="checkbox"]):not([type="radio"]),
   select,
   textarea {
@@ -57,9 +57,24 @@ a {
   }
 
   button,
-  a:not(.prose a) {
+  a:not(.prose a):not(.dispatch-inline-link) {
     display: inline-flex;
     align-items: center;
+  }
+
+  /* An anchor inside a sentence keeps its line box: a 44px control box there is blank space in
+     the middle of a line. Vertical padding grows its hit box instead, at no layout cost,
+     because padding on an inline element does not move the line. The two values are the two
+     line pitches: a body's links sit on 24px lines, where 3px is the most that does not reach
+     the text of a link on the line above, and Dispatch's own inline links (`view`, a
+     components line, a backlink) sit on their own row at 12px, where 6px is what reaches the
+     24px of WCAG 2.5.8. Both 2.5.8 and 2.5.5 exempt a link inside a sentence in any case. */
+  .prose a {
+    padding-block: 3px;
+  }
+
+  .dispatch-inline-link {
+    padding-block: 6px;
   }
 
   label:has(input[type="checkbox"]),

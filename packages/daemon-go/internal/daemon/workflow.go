@@ -423,7 +423,7 @@ type positionReader interface {
 	DispatchPosition(ctx context.Context) (intake.DispatchConsumerPosition, error)
 }
 
-// pollHoldRelease is the boot-owned release that replaces intake's per-delivery hook with: while
+// pollHoldRelease is the boot-owned release: while
 // admission holds anything back, it re-reads the Dispatch consumer's own position on a ticker and
 // applies each changed reading as a synthetic fact, independent of any message delivery. A quiet
 // stream after its last backlog message delivers nothing further to trigger a release the old

@@ -1,14 +1,19 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import {
   AckPolicy,
+  type Authenticator,
+  type ConnectionOptions,
   type ConsumerConfig,
   type ConsumerInfo,
   DeliverPolicy,
   ErrorCode,
   NatsError,
+  type NKeyAuth,
   nanos,
+  nkeys,
   ReplayPolicy,
 } from "nats";
+import type { DaemonConfig } from "../config";
 import {
   createNatsTransport,
   durableConsumerPolicyDrifted,
@@ -132,6 +137,7 @@ interface FakeConnection {
   request(): Promise<{ data: Uint8Array }>;
   flush(): Promise<void>;
   drain(): Promise<void>;
+  status(): AsyncIterable<never>;
 }
 
 function fakeConnection(jsm: FakeJsm, pullSubscription: FakePullSubscription): FakeConnection {
@@ -146,6 +152,7 @@ function fakeConnection(jsm: FakeJsm, pullSubscription: FakePullSubscription): F
     request: async () => ({ data: new Uint8Array() }),
     flush: async () => {},
     drain: async () => {},
+    status: async function* () {},
   };
 }
 
@@ -486,5 +493,105 @@ describe("createNatsTransport consumeDurable", () => {
     expect(pullSub.unsubscribeCalls).toBe(1);
 
     await transport.close();
+  });
+});
+
+describe("createNatsTransport subscribe", () => {
+  /** Runs a daemon-shaped process whose one core subscription ends with `ending`, and returns its
+   * exit code and stderr. A child process, since the test runner fails any test in which a
+   * rejection goes unhandled, and a daemon dying of one is the behaviour under test. */
+  async function subscriptionEndingWith(ending: "a permission refusal" | "another error") {
+    const script = `
+      import { ErrorCode, NatsError } from "nats";
+      import { createNatsTransport } from ${JSON.stringify(`${import.meta.dir}/../nats-transport.ts`)};
+      import { config } from ${JSON.stringify(`${import.meta.dir}/ci-fixtures.ts`)};
+      const ending = ${JSON.stringify(ending)} === "a permission refusal"
+        ? new NatsError("Permissions Violation", ErrorCode.PermissionsViolation)
+        : new Error("iterator broke");
+      const transport = await createNatsTransport(config(), async () => ({
+        subscribe: () => ({ unsubscribe() {}, async *[Symbol.asyncIterator]() { throw ending; } }),
+        status: async function* () {},
+        drain: async () => {},
+      }));
+      transport.subscribe("notifications.slack.*.*.mention", () => {});
+    `;
+    const child = Bun.spawn([process.execPath, "-e", script], {
+      cwd: `${import.meta.dir}/../../..`,
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const stderr = await new Response(child.stderr).text();
+    return { exitCode: await child.exited, stderr };
+  }
+
+  it("dies of any error that ends a subscription but a permission refusal, without logging it", async () => {
+    const failed = await subscriptionEndingWith("another error");
+    expect(failed.exitCode).not.toBe(0);
+    expect(failed.stderr).toContain("iterator broke");
+    expect(failed.stderr).not.toContain("[legion] NATS subscription");
+    const refused = await subscriptionEndingWith("a permission refusal");
+    expect(refused).toEqual({ exitCode: 0, stderr: "" });
+  });
+});
+
+describe("the user createNatsTransport connects as", () => {
+  const newUser = () => {
+    const pair: { getSeed(): Uint8Array; getPublicKey(): string } = nkeys.createUser();
+    return { seed: new TextDecoder().decode(pair.getSeed()), publicKey: pair.getPublicKey() };
+  };
+  const pane = newUser();
+  const daemon = newUser();
+
+  /** The nkey the connection would present, and the transport's info lines. */
+  async function connectsAs(seeds: Pick<DaemonConfig, "natsNkeySeed" | "natsDaemonNkeySeed">) {
+    let options: ConnectionOptions | undefined;
+    const info: string[] = [];
+    const infoSpy = spyOn(console, "info").mockImplementation((line: unknown) => {
+      info.push(String(line));
+    });
+    try {
+      await createNatsTransport({ ...config(), ...seeds }, async (opts) => {
+        options = opts;
+        return fakeConnection(new FakeJsm(), new FakePullSubscription());
+      });
+    } finally {
+      infoSpy.mockRestore();
+    }
+    const authenticator = options?.authenticator as Authenticator | undefined;
+    const auth = authenticator?.("nonce") as NKeyAuth | undefined;
+    return { nkey: auth?.nkey, info };
+  }
+
+  it("is the daemon seed's user, else the pane seed's, else none, and the one boot line says which", async () => {
+    expect(await connectsAs({ natsNkeySeed: pane.seed, natsDaemonNkeySeed: daemon.seed })).toEqual({
+      nkey: daemon.publicKey,
+      info: [
+        `[legion] daemon NATS connects as nkey user ${daemon.publicKey}, its own daemon user, not the pane user (${pane.publicKey})`,
+      ],
+    });
+    expect(await connectsAs({ natsDaemonNkeySeed: daemon.seed })).toEqual({
+      nkey: daemon.publicKey,
+      info: [
+        `[legion] daemon NATS connects as nkey user ${daemon.publicKey}, its own daemon user, not the pane user (panes carry no NATS credential)`,
+      ],
+    });
+    expect(await connectsAs({ natsNkeySeed: pane.seed, natsDaemonNkeySeed: pane.seed })).toEqual({
+      nkey: pane.publicKey,
+      info: [
+        `[legion] daemon NATS connects as nkey user ${pane.publicKey}, the pane user: the daemon seed is the pane seed`,
+      ],
+    });
+    expect(await connectsAs({ natsNkeySeed: pane.seed })).toEqual({
+      nkey: pane.publicKey,
+      info: [
+        `[legion] daemon NATS connects as nkey user ${pane.publicKey}, the pane user: no daemon seed is configured`,
+      ],
+    });
+    expect(await connectsAs({})).toEqual({
+      nkey: undefined,
+      info: [
+        "[legion] daemon NATS connects with no credential: neither a daemon nor a pane seed is configured",
+      ],
+    });
   });
 });

@@ -457,7 +457,7 @@ export function IssueHeader({
               <span className="font-medium">Parent:</span>
               {issue.parent === null ? null : (
                 <Link
-                  className={`shrink-0 underline ${linkText} ${linkHoverText}`}
+                  className={`dispatch-inline-link shrink-0 underline ${linkText} ${linkHoverText}`}
                   to={buildIssuePath({ key: issue.parent, kind: "issue" })}
                 >
                   {issue.parent}

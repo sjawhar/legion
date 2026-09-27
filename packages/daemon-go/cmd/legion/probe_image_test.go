@@ -169,6 +169,26 @@ func TestProbeImageNamesTheUserOfTheSeedItsPointerNames(t *testing.T) {
 	}
 }
 
+// The pointer is read as the daemon reads its seed (natsauth.Seed): the pod's mount, root's and
+// 0440 under fsGroup, is read through the group (config.ReadGroupSecretPointer's test; a test
+// cannot make a file root's), and a file the probe's own uid owns is held to 0600.
+func TestProbeImageReadsTheSeedPointerByTheDaemonsModeRule(t *testing.T) {
+	omp := imageOmp(t)
+	root := inImage(t, thisBinarysContract, omp)
+	seed, _ := testnats.User(t)
+	file := testnats.SeedFile(t, seed+"\n")
+	if err := os.Chmod(file, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NATS_NKEY_SEED_FILE", file)
+
+	code, stdout, stderr := probeImage("--plugin-root", root)
+
+	if want := "NATS_NKEY_SEED_FILE " + file + " is readable by its group or others (mode 0640); chmod 0600 it"; code != 1 || stdout != "" || !strings.Contains(stderr, want) || strings.Contains(stderr, seed) {
+		t.Fatalf("probe-image with a 0640 seed it owns = %d %q %q, want exit 1 saying %q and no seed", code, stdout, stderr, want)
+	}
+}
+
 // With --provider-env-dir, as the probe Sandbox runs it when provider keys are configured, every
 // probe's Oh My Pi gets each key as a worker's shim exports it, so an agent keyed only through the
 // providers Secret resolves as it would in a worker; a key the environment already names is refused
