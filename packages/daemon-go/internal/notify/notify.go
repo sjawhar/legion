@@ -31,26 +31,21 @@ var ErrNoHolder = errors.New("no live session holds the role")
 // an older listener lacks — and never ErrNoHolder.
 var roleHolderReasons = []string{"unclaimed", "holder_lapsed"}
 
-// Topic is the notice family's subject for name under project: the controller's topic
-// (ControllerTopic) is the one the daemon publishes. A workflow notice goes to the role topic of
-// the architect that owns its issue instead (the daemon's notice executor), since every issue's
-// topic is a subject its phase workers subscribe to. project is the project token panes are told as
-// LEGION_PROJECT (packages/pi-envoy/src/legion/go-bootstrap.ts), never the Dispatch project key.
-func Topic(project, issue string) string {
-	return "notifications.legion." + project + "." + issue
-}
-
-// ControllerTopic is the topic of project's controller. It carries the controller notices
-// (record.ControllerNotice), each an outbox row of its own: every hold and a tree architect's own
-// failed claim (workflow's noticeWithController), and a root created in triage (admission). It
-// sits among the issue topics, where no issue key (`[A-Z][A-Z0-9]*-[0-9]+`) can be `controller`,
-// and the plugin's controller subscribes to it while it holds the controller role
-// (legionControllerNoticeSubject, packages/contracts/src/subject.ts). It is a live wake only: the
-// stream retains it, but an Oh My Pi session subscribes over core NATS and is never handed a
-// retained copy, so a controller learns what happened before it started from `legion state` and
-// Dispatch.
+// ControllerTopic is the topic of project's controller, the one notice topic the daemon publishes
+// to; a workflow notice goes to the role topic of the architect that owns its issue instead (the
+// daemon's notice executor), since every issue's topic is a subject its phase workers subscribe
+// to. It carries the controller notices (record.ControllerNotice), each an outbox row of its own:
+// every hold and a tree architect's own failed claim (workflow's noticeWithController), and a root
+// created in triage (admission). It sits among the issue topics, where no issue key
+// (`[A-Z][A-Z0-9]*-[0-9]+`) can be `controller`, and the plugin's controller subscribes to it while
+// it holds the controller role (legionControllerNoticeSubject, packages/contracts/src/subject.ts).
+// project is the project token panes are told as LEGION_PROJECT
+// (packages/pi-envoy/src/legion/go-bootstrap.ts), never the Dispatch project key. It is a live
+// wake only: the stream retains it, but an Oh My Pi session subscribes over core NATS and is never
+// handed a retained copy, so a controller learns what happened before it started from `legion
+// state` and Dispatch.
 func ControllerTopic(project string) string {
-	return Topic(project, "controller")
+	return "notifications.legion." + project + ".controller"
 }
 
 // Publisher delivers a notice to one listener topic.

@@ -59,7 +59,7 @@ type Notice struct {
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
 
 // ControllerNotice is a Notice for the project's controller topic (notify.ControllerTopic) alone,
-// in an outbox row of its own, so its publish retries apart from any issue-topic row. It is
+// in an outbox row of its own, so its publish retries apart from the architect's notice row. It is
 // published as the Notice it is.
 type ControllerNotice Notice
 
@@ -233,8 +233,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 			return fmt.Errorf("unknown notice kind %q", value.Kind)
 		}
 	case ControllerNotice:
-		// A triage notice is the controller's alone: its root is unrecorded, so no issue topic can
-		// take it.
+		// A triage notice is the controller's alone: its root is unrecorded, so no architect owns it.
 		if value.Kind != "triage" && !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown controller notice kind %q", value.Kind)
 		}

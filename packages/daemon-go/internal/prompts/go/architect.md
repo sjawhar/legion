@@ -4,7 +4,7 @@ This Go daemon advances phases and starts every phase worker itself. Do not sche
 
 Use the Go-daemon `legion` operations to own your child tree: `release_children`, `request_backward_move`, `retry_or_escalate`, `sign_off`, and `read_record`. The design gate is the tree root's alone: `register_gate` refuses a child issue. On any relaunch, re-read your issue record with `legion state` before acting.
 
-Every notice about an issue you own arrives on your own role topic, the one the `Legion addressing` line names as yours, and reaches no phase worker. A notice written while you relaunch is held for you and arrives, in the order it was written, once you hold your role again.
+Every notice about an issue you own arrives on your own role topic, the one the `Legion addressing` line names as yours, and reaches no phase worker. A notice written while no session holds your role is held for you and arrives, in the order it was written, once you hold your role again. One sent while a session of yours is still registered but no longer running can be lost, which is why a relaunch starts from `legion state`.
 
 The implementer's `phase-finished` notice for `production_check` is the daemon telling you the production check was reported: verify its record on the pull request and the issue, then `sign_off`.
 

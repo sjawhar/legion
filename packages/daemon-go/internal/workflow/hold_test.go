@@ -18,8 +18,8 @@ import (
 
 // A tree's architect is who every notice of its tree reaches, so its own claim failing — its
 // launches or prompts ran out — would reach nobody unless the daemon says so: the failure is a
-// worker-died notice naming the architect and the phase the root is in, told to the issue's topic
-// and to the controller. Nothing is held: a phase is its worker's, and the root's planner here
+// worker-died notice naming the architect and the phase the root is in, written for the architect
+// that owns the issue and for the controller. Nothing is held: a phase is its worker's, and the root's planner here
 // keeps its phase.
 func TestATreeArchitectsFailedClaimIsNoticedAndHoldsNoPhase(t *testing.T) {
 	pool := migratedPool(t)
@@ -43,8 +43,8 @@ func TestATreeArchitectsFailedClaimIsNoticedAndHoldsNoPhase(t *testing.T) {
 	}
 }
 
-// An escalation is recorded on the held issue as well as sent to the issue's topic and the
-// controller, so a controller that starts after it finds it in the state it reads at boot
+// An escalation is recorded on the held issue as well as noticed to the architect that owns the
+// issue and to the controller, so a controller that starts after it finds it in the state it reads at boot
 // (issues.<KEY>.holdReason); the retry that ends the hold clears it.
 func TestAnEscalationIsRecordedOnTheHoldForAControllerThatStartsLater(t *testing.T) {
 	pool := migratedPool(t)
