@@ -31,14 +31,14 @@ type holderPublisher struct {
 	delivered []outboxPublish
 }
 
-func (p *holderPublisher) Publish(_ context.Context, topic, _ string, payload any, key string) error {
+func (p *holderPublisher) Publish(_ context.Context, topic, message string, payload any, key string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.attempts++
 	if p.absent[topic] {
 		return fmt.Errorf("publish notice to %s: listener returned 404 Not Found: {\"reason\":\"unclaimed\"}: %w", topic, notify.ErrNoHolder)
 	}
-	p.delivered = append(p.delivered, outboxPublish{topic: topic, key: key, payload: payload})
+	p.delivered = append(p.delivered, outboxPublish{topic: topic, message: message, key: key, payload: payload})
 	return nil
 }
 
