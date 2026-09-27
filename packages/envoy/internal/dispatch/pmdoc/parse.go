@@ -579,17 +579,16 @@ func parseTypedDirective(directive *typedDirective, source []byte, footnotes map
 	if !ok {
 		return nil, fmt.Errorf("%w: unknown typed block %q (known types: %s)", ErrSchema, directive.Name, strings.Join(typedBlockNames(), ", "))
 	}
+	if err := undeclaredAttributes(directive.Name, directive.Attrs, typ.Attributes); err != nil {
+		return nil, err
+	}
 	attrs := defaultAttributes(typ)
 	for name, raw := range directive.Attrs {
 		if name == BlockIDAttr {
 			attrs[name] = raw
 			continue
 		}
-		definition, ok := typ.Attributes[name]
-		if !ok {
-			return nil, fmt.Errorf("%w: typed block %q does not declare attribute %q", ErrSchema, directive.Name, name)
-		}
-		value, err := parseTypedAttributeValue(definition, raw)
+		value, err := parseTypedAttributeValue(typ.Attributes[name], raw)
 		if err != nil {
 			return nil, fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, directive.Name, name, err)
 		}

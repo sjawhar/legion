@@ -309,6 +309,29 @@ func TestTypedStringArrayAttributesUpdateAfterYjsReload(t *testing.T) {
 		t.Fatalf("update reloaded ask: %v", err)
 	}
 }
+
+// A typed block's attributes are a map, so a refusal that named the first undeclared one it met
+// named a different one from run to run; it names every undeclared attribute, sorted, reading the
+// markdown or checking a tree.
+func TestTypedBlockNamesItsUndeclaredAttributesSorted(t *testing.T) {
+	const want = `outside Proof schema: typed block "callout" does not declare attributes "bar", "foo"`
+	markdown := ":::callout{#block-1 kind=\"note\" title=\"T\" foo=\"x\" bar=\"y\"}\nBody.\n:::\n"
+	tree := &Node{Type: "doc", Children: []*Node{{
+		Type:     "callout",
+		Attrs:    Attrs{BlockIDAttr: "block-1", "kind": "note", "title": "T", "foo": "x", "bar": "y"},
+		Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "Body."}}}},
+	}}}
+	// Go starts each map range at a random entry, so a hundred runs meet both orders.
+	for run := 0; run < 100; run++ {
+		if _, err := Parse(markdown); err == nil || err.Error() != want {
+			t.Fatalf("Parse(%q) = %v, want %q", markdown, err, want)
+		}
+		if err := tree.Validate(); err == nil || err.Error() != want {
+			t.Fatalf("Validate() = %v, want %q", err, want)
+		}
+	}
+}
+
 func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 	cases := []struct {
 		name     string
