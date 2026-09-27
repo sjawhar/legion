@@ -789,9 +789,9 @@ func TestCreateDoesNotReuseAnExpiredOrRevokedGrant(t *testing.T) {
 	}
 }
 
-// podEnrollment enrolls a pod through svc whose requests are approved by LEGION-9's assignee
-// (the fixture's IssueAssignee answers "alice").
-func podEnrollment(t *testing.T, svc *enroll.Service, runtimeID string) enroll.Enrollment {
+// podEnrollment enrolls a pod running as the service account subject through svc, whose requests
+// are approved by LEGION-9's assignee (the fixture's IssueAssignee answers "alice").
+func podEnrollment(t *testing.T, svc *enroll.Service, runtimeID, subject string) enroll.Enrollment {
 	t.Helper()
 	ctx := context.Background()
 	issuer := oidctest.New(t)
@@ -811,7 +811,7 @@ func podEnrollment(t *testing.T, svc *enroll.Service, runtimeID string) enroll.E
 	}
 	pod, err := svc.Create(ctx, cred, enroll.Enrollment{
 		Kind: "pod", RuntimeID: runtimeID, ApproverKind: "issue_assignee", ApproverIssue: str("LEGION-9"),
-		Thumbprint: "tp-" + runtimeID, PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", runtimeID),
+		Thumbprint: "tp-" + runtimeID, PodToken: mintPodToken(t, issuer, key, subject, runtimeID),
 	})
 	if err != nil {
 		t.Fatalf("Create(pod enrollment): %v", err)
@@ -1003,7 +1003,7 @@ func TestHumanRevokeIsLimitedToTheApproverOrOperator(t *testing.T) {
 		t.Fatalf("RevokeGrant(the operator, other casing) = %v", err)
 	}
 
-	pod := podEnrollment(t, svc, "pod-revoke-approver")
+	pod := podEnrollment(t, svc, "pod-revoke-approver", "system:serviceaccount:legion:worker")
 	pending, err := m.Create(ctx, pod.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
 	if err != nil {
 		t.Fatalf("Create(pod) = %v", err)
@@ -1088,5 +1088,240 @@ func TestAuditSurvivesControlCharactersInSecretNames(t *testing.T) {
 	}
 	if len(recorded) != 1 || recorded[0] != name {
 		t.Fatalf("audited secrets = %q, want [%q]", recorded, name)
+	}
+}
+
+func approveAs(user, askID string) dispatch.Ask {
+	return dispatch.Ask{ID: askID, State: "answered", Answer: &dispatch.Answer{User: user, Selected: []string{"Approve"}, At: time.Now()}}
+}
+
+// TestApprovalMatchesTheApproverCaseInsensitively pins that Dispatch recording the answering
+// human's login with GitHub's display casing never turns their genuine approval into a denial.
+func TestApprovalMatchesTheApproverCaseInsensitively(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	req, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := m.ApplyAnswer(ctx, req.ID, approveAs("SJawhar", "ask-1")); err != nil {
+		t.Fatalf("ApplyAnswer: %v", err)
+	}
+	got, err := m.Get(ctx, req.ID)
+	if err != nil || got.State != "granted" {
+		t.Fatalf("Get = %+v (detail %v), %v, want granted", got, got.Detail, err)
+	}
+}
+
+// TestApprovalAfterTheEnrollmentLapsedDenies pins that an approval landing after the requesting
+// session's lease lapsed denies the request as withdrawn instead of granting to a dead session.
+func TestApprovalAfterTheEnrollmentLapsedDenies(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	req, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := m.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at = now() - interval '1 minute' where id=$1`, enrA.ID); err != nil {
+		t.Fatalf("lapse lease: %v", err)
+	}
+	changed, err := m.ApplyAnswer(ctx, req.ID, approveAs("sjawhar", "ask-1"))
+	if err != nil || !changed {
+		t.Fatalf("ApplyAnswer = %v, %v, want a decision", changed, err)
+	}
+	got, err := m.Get(ctx, req.ID)
+	if err != nil || got.State != "denied" || got.GrantID != nil || got.Detail == nil || *got.Detail != "enrollment no longer live" {
+		t.Fatalf("Get = %+v, %v, want denied with no grant because the enrollment is no longer live", got, err)
+	}
+}
+
+const tightenedRules = `version: 1
+secrets:
+  AUTO_TOKEN:
+    source: dev1/agent-secrets/AUTO_TOKEN
+    owner: sjawhar
+    delivery: inject
+    max_lifetime_seconds: 43200
+    requesters: %s
+`
+
+// TestTightenedRulesStopLiveGrants pins that a live grant is re-checked against rules that changed
+// after it was decided: once the rules deny the requester, or want an approval the automatic
+// grant never had, values are refused and the grant is no longer handed back by reuse.
+func TestTightenedRulesStopLiveGrants(t *testing.T) {
+	for name, requesters := range map[string]string{
+		"denied":            "[]",
+		"approval-now":      "[{kind: box, operator: sjawhar, decision: approval, approver: operator}]",
+		"other-operator":    "[{kind: box, operator: mallory, decision: automatic}]",
+		"other-kind":        "[{kind: host, operator: sjawhar, decision: automatic}]",
+		"explicitly-denied": "[{kind: box, operator: sjawhar, decision: deny}]",
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, _, _, enrA, _ := newFixture(t)
+			ctx := context.Background()
+			granted, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
+			if err != nil || granted.GrantID == nil {
+				t.Fatalf("Create = %+v, %v, want an automatic grant", granted, err)
+			}
+			withRules(t, m, fmt.Sprintf(tightenedRules, requesters))
+			if _, _, _, err := m.Values(ctx, *granted.GrantID, enrA.ID.String()); !errors.Is(err, ErrGrantNotLive) {
+				t.Fatalf("Values under tightened rules = %v, want ErrGrantNotLive", err)
+			}
+			again, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it again", "", "")
+			if err != nil {
+				t.Fatalf("Create(again): %v", err)
+			}
+			if again.ID == granted.ID {
+				t.Fatalf("Create(again) reused the grant the tightened rules no longer allow")
+			}
+		})
+	}
+}
+
+// TestUnchangedPermissionSurvivesARulesChange pins the other side: a rules change that still
+// allows the grant (here, only the lifetime changes) keeps it usable and reusable.
+func TestUnchangedPermissionSurvivesARulesChange(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	granted, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
+	if err != nil || granted.GrantID == nil {
+		t.Fatalf("Create = %+v, %v", granted, err)
+	}
+	withRules(t, m, strings.Replace(fmt.Sprintf(tightenedRules, "[{kind: box, operator: sjawhar, decision: automatic}]"), "43200", "600", 1))
+	if _, _, _, err := m.Values(ctx, *granted.GrantID, enrA.ID.String()); err != nil {
+		t.Fatalf("Values = %v, want the grant still usable", err)
+	}
+	if again, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "again", "", ""); err != nil || again.ID != granted.ID {
+		t.Fatalf("Create(again) = %+v, %v, want the live grant reused", again, err)
+	}
+}
+
+// TestProxyGrantNeverWidensToInject pins that the delivery frozen at grant time is a ceiling: a
+// name granted for proxy delivery stays proxy-only even after the rules switch it to inject.
+func TestProxyGrantNeverWidensToInject(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	proxied := `version: 1
+secrets:
+  AUTO_TOKEN:
+    source: dev1/agent-secrets/AUTO_TOKEN
+    owner: sjawhar
+    delivery: %s
+    max_lifetime_seconds: 43200
+    requesters: [{kind: box, operator: sjawhar, decision: automatic}]
+%s`
+	withRules(t, m, fmt.Sprintf(proxied, "proxy", "    proxy: {scheme: https, host: example.com, port: 443, path_prefix: /, methods: [GET], header: Authorization, header_format: 'Bearer {value}'}\n"))
+	granted, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
+	if err != nil || granted.GrantID == nil {
+		t.Fatalf("Create = %+v, %v", granted, err)
+	}
+	withRules(t, m, fmt.Sprintf(proxied, "inject", ""))
+	values, proxyOnly, _, err := m.Values(ctx, *granted.GrantID, enrA.ID.String())
+	if err != nil {
+		t.Fatalf("Values: %v", err)
+	}
+	if len(values) != 0 || len(proxyOnly) != 1 || proxyOnly[0] != "AUTO_TOKEN" {
+		t.Fatalf("Values released %d values, proxy_only %v; want none released and AUTO_TOKEN proxy-only", len(values), proxyOnly)
+	}
+}
+
+// TestAutomaticAccessNeedsNoDispatch pins the spec's Dispatch-outage row: with every Dispatch
+// lookup failing, an automatic request is still granted and a denied one still denied; only a
+// request that needs an approval fails, and it fails with the Dispatch error.
+func TestAutomaticAccessNeedsNoDispatch(t *testing.T) {
+	m, opener, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	down := &dispatch.Error{Method: "GET", Path: "/api/v1/issues", Err: errors.New("connection refused")}
+	m.StandingIssue = func(context.Context, string) (string, error) { return "", down }
+	m.IssueAssignee = func(context.Context, string) (string, error) { return "", down }
+
+	auto, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
+	if err != nil || auto.State != "granted" {
+		t.Fatalf("Create(automatic) with Dispatch down = %+v, %v, want granted", auto, err)
+	}
+	denied, err := m.Create(ctx, enrA.ID.String(), []string{"DENIED_KEY", "DEEL_API_KEY"}, "need it", "", "")
+	if err != nil || denied.State != "denied" {
+		t.Fatalf("Create(denied) with Dispatch down = %+v, %v, want denied", denied, err)
+	}
+	_, err = m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if dispatchErr, ok := dispatch.AsError(err); !ok || !dispatchErr.Unavailable() {
+		t.Fatalf("Create(approval) with Dispatch down = %v, want the Dispatch outage", err)
+	}
+	if len(opener.calls) != 0 {
+		t.Fatalf("asks opened = %d, want 0", len(opener.calls))
+	}
+}
+
+// TestValuesNamesASecretMissingFromTheStore pins that a rule whose source the secrets store does
+// not hold is refused as ErrSecretNotInStore naming the secret, not an opaque failure.
+func TestValuesNamesASecretMissingFromTheStore(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	withRules(t, m, `version: 1
+secrets:
+  GHOST_KEY:
+    source: dev1/agent-secrets/GHOST_KEY
+    owner: sjawhar
+    delivery: inject
+    max_lifetime_seconds: 3600
+    requesters: [{kind: box, operator: sjawhar, decision: automatic}]
+`)
+	granted, err := m.Create(ctx, enrA.ID.String(), []string{"GHOST_KEY"}, "need it", "", "")
+	if err != nil || granted.GrantID == nil {
+		t.Fatalf("Create = %+v, %v", granted, err)
+	}
+	_, _, _, err = m.Values(ctx, *granted.GrantID, enrA.ID.String())
+	if !errors.Is(err, ErrSecretNotInStore) || !strings.Contains(err.Error(), "GHOST_KEY") {
+		t.Fatalf("Values = %v, want ErrSecretNotInStore naming GHOST_KEY", err)
+	}
+}
+
+// TestRevokingARevokedGrantWritesNoSecondAuditRow pins that a repeated revoke succeeds without
+// recording a revocation that never happened: one grant.revoked row, naming the first revoker.
+func TestRevokingARevokedGrantWritesNoSecondAuditRow(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	req, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
+	if err != nil || req.GrantID == nil {
+		t.Fatalf("Create = %+v, %v", req, err)
+	}
+	if err := m.RevokeGrant(ctx, *req.GrantID, Revoker{EnrollmentID: enrA.ID.String()}); err != nil {
+		t.Fatalf("RevokeGrant (first): %v", err)
+	}
+	if err := m.RevokeGrant(ctx, *req.GrantID, Revoker{Login: "sjawhar"}); err != nil {
+		t.Fatalf("RevokeGrant (again) = %v, want success", err)
+	}
+	var rows int
+	var actor, revokedBy string
+	if err := m.Store.Pool.QueryRow(ctx, `select count(*), min(a.actor), min(g.revoked_by) from audit a join grants g on g.id=a.grant_id where a.kind='grant.revoked' and a.grant_id=$1`, *req.GrantID).Scan(&rows, &actor, &revokedBy); err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	want := "session:" + enrA.ID.String()
+	if rows != 1 || actor != want || revokedBy != want {
+		t.Fatalf("grant.revoked rows=%d actor=%s revoked_by=%s, want one row naming %s", rows, actor, revokedBy, want)
+	}
+}
+
+// TestPodRulesMatchTheVerifiedServiceAccount pins that a pod entry naming a service account
+// matches only pods whose projected token proved that account at enrollment.
+func TestPodRulesMatchTheVerifiedServiceAccount(t *testing.T) {
+	m, _, svc, _, _ := newFixture(t)
+	ctx := context.Background()
+	withRules(t, m, `version: 1
+secrets:
+  WORKER_KEY:
+    source: dev1/agent-secrets/AUTO_TOKEN
+    owner: sjawhar
+    delivery: inject
+    max_lifetime_seconds: 3600
+    requesters: [{kind: pod, service_account: 'system:serviceaccount:legion:worker', decision: automatic}]
+`)
+	worker := podEnrollment(t, svc, "pod-worker", "system:serviceaccount:legion:worker")
+	if req, err := m.Create(ctx, worker.ID.String(), []string{"WORKER_KEY"}, "need it", "", ""); err != nil || req.State != "granted" {
+		t.Fatalf("Create(pod running as legion:worker) = %+v, %v, want granted", req, err)
+	}
+	stranger := podEnrollment(t, svc, "pod-stranger", "system:serviceaccount:default:stranger")
+	if req, err := m.Create(ctx, stranger.ID.String(), []string{"WORKER_KEY"}, "need it", "", ""); err != nil || req.State != "denied" {
+		t.Fatalf("Create(pod running as default:stranger) = %+v, %v, want denied", req, err)
 	}
 }

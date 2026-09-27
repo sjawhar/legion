@@ -13,6 +13,9 @@ import (
 
 var ErrInvalid = errors.New("proof invalid")
 
+// jtiRetentionMargin is how long past the end of a proof's acceptance window its jti is kept.
+const jtiRetentionMargin = time.Minute
+
 type Verifier struct {
 	Skew   time.Duration
 	Lookup func(ctx context.Context, enrollmentID string) (thumbprint string, live bool, err error)
@@ -68,7 +71,10 @@ func (v *Verifier) Verify(ctx context.Context, compact, method, url string, now 
 	if presented != thumbprint {
 		return "", fmt.Errorf("%w: key is not the enrolled key", ErrInvalid)
 	}
-	fresh, err := v.Replay(ctx, c.JTI, issued.Add(5*time.Minute))
+	// The jti is remembered for as long as a proof carrying it can still pass the iat check above
+	// (until issued+Skew), plus a margin for the clock skew between this process and the database
+	// that prunes expired jtis.
+	fresh, err := v.Replay(ctx, c.JTI, issued.Add(v.Skew+jtiRetentionMargin))
 	if err != nil {
 		return "", err
 	}

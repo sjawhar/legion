@@ -684,3 +684,147 @@ func TestSessionID(t *testing.T) {
 		t.Fatalf("SessionID(nonexistent) = %q, %v, want empty, nil", got, err)
 	}
 }
+
+// insertPendingRequest writes a pending request row under enrollmentID the way requests.Machine
+// would, so these tests can watch what ending an enrollment does to it.
+func insertPendingRequest(t *testing.T, svc *Service, enrollmentID uuid.UUID) string {
+	t.Helper()
+	id := uuid.NewString()
+	if _, err := svc.Store.Pool.Exec(context.Background(), `insert into requests (id, enrollment_id, issue_key, reason, state, allowed_approver, rules_version, lifetime_seconds, pending_expires_at, ask_id)
+		values ($1,$2,'AGENTC-1','need it','pending','sjawhar','v',3600, now() + interval '1 hour', $3)`, id, enrollmentID, "ask-"+id); err != nil {
+		t.Fatalf("insert pending request: %v", err)
+	}
+	return id
+}
+
+func requestState(t *testing.T, svc *Service, id string) (state, decidedBy string, audits int) {
+	t.Helper()
+	ctx := context.Background()
+	if err := svc.Store.Pool.QueryRow(ctx, `select state, coalesce(decided_by, '') from requests where id=$1`, id).Scan(&state, &decidedBy); err != nil {
+		t.Fatalf("read request %s: %v", id, err)
+	}
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from audit where kind='request.cancelled' and request_id=$1`, id).Scan(&audits); err != nil {
+		t.Fatalf("count request.cancelled audit rows: %v", err)
+	}
+	return state, decidedBy, audits
+}
+
+// TestRevokeCancelsPendingRequests pins that ending an enrollment withdraws what it was still
+// waiting on: every pending request under it is cancelled, with its own audit row, in the same
+// transaction as the revoke.
+func TestRevokeCancelsPendingRequests(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	_, token, err := svc.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-cancel")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "box", RuntimeID: "box-cancel", Operator: str("sjawhar"), ApproverKind: "operator", Thumbprint: "tp-cancel"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	requestID := insertPendingRequest(t, svc, enr.ID)
+	if err := svc.Revoke(ctx, cred, enr.ID.String(), "launcher:test"); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	if state, by, audits := requestState(t, svc, requestID); state != "cancelled" || by != "launcher:test" || audits != 1 {
+		t.Fatalf("pending request after revoke: state=%s decided_by=%s audit rows=%d, want cancelled by launcher:test with one audit row", state, by, audits)
+	}
+}
+
+// TestLapsedLeaseReleasesTheRuntimeID pins that an enrollment whose lease lapsed without a revoke
+// is dead to Create: re-enrolling the same key mints a fresh enrollment (never the dead one back
+// as Existing), re-enrolling a different key is not refused as already enrolled, and the lapsed
+// enrollment is ended — revoked with an enrollment.expired audit row and its pending requests
+// cancelled.
+func TestLapsedLeaseReleasesTheRuntimeID(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	_, token, err := svc.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-lapse")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	in := Enrollment{Kind: "box", RuntimeID: "box-lapse", Operator: str("sjawhar"), ApproverKind: "operator", Thumbprint: "tp-lapse"}
+	lapse := func(id uuid.UUID) {
+		t.Helper()
+		if _, err := svc.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at = now() - interval '1 minute' where id=$1`, id); err != nil {
+			t.Fatalf("lapse lease: %v", err)
+		}
+	}
+
+	first, err := svc.Create(ctx, cred, in)
+	if err != nil {
+		t.Fatalf("Create(first): %v", err)
+	}
+	pending := insertPendingRequest(t, svc, first.ID)
+	lapse(first.ID)
+	sameKey, err := svc.Create(ctx, cred, in)
+	if err != nil {
+		t.Fatalf("Create(same key after the lease lapsed): %v", err)
+	}
+	if sameKey.Existing || sameKey.ID == first.ID {
+		t.Fatalf("Create(same key after lapse) = %+v, want a fresh enrollment, not the dead %s", sameKey, first.ID)
+	}
+	if _, err := svc.Renew(ctx, sameKey.ID.String()); err != nil {
+		t.Fatalf("Renew(the fresh enrollment): %v", err)
+	}
+	var revoked bool
+	var expiredAudits int
+	if err := svc.Store.Pool.QueryRow(ctx, `select revoked_at is not null, (select count(*) from audit where kind='enrollment.expired' and enrollment_id=$1) from enrollments where id=$1`, first.ID).Scan(&revoked, &expiredAudits); err != nil {
+		t.Fatalf("read the lapsed enrollment: %v", err)
+	}
+	if !revoked || expiredAudits != 1 {
+		t.Fatalf("lapsed enrollment revoked=%v enrollment.expired audit rows=%d, want revoked with one", revoked, expiredAudits)
+	}
+	if state, by, audits := requestState(t, svc, pending); state != "cancelled" || by != "broker" || audits != 1 {
+		t.Fatalf("pending request of the lapsed enrollment: state=%s decided_by=%s audit rows=%d, want cancelled by broker", state, by, audits)
+	}
+
+	lapse(sameKey.ID)
+	otherKey := in
+	otherKey.Thumbprint = "tp-lapse-rotated"
+	rotated, err := svc.Create(ctx, cred, otherKey)
+	if err != nil {
+		t.Fatalf("Create(different key after the lease lapsed) = %v, want a fresh enrollment", err)
+	}
+	if rotated.Existing || rotated.ID == sameKey.ID {
+		t.Fatalf("Create(different key after lapse) = %+v, want a fresh enrollment", rotated)
+	}
+}
+
+// TestPodEnrollmentRecordsTheVerifiedSubject pins that a pod enrollment stores the service-account
+// subject its projected token proved, and a box enrollment stores none.
+func TestPodEnrollmentRecordsTheVerifiedSubject(t *testing.T) {
+	svc := newService(t)
+	issuer, key := withPodVerifier(t, svc)
+	ctx := context.Background()
+	_, token, err := svc.MintLauncherCredential(ctx, nil, str("legion-daemon"), "cluster", "ask-subject")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	pod, err := svc.Create(ctx, cred, Enrollment{Kind: "pod", RuntimeID: "pod-subject", ApproverKind: "issue_assignee", ApproverIssue: str("LEGION-1"),
+		Thumbprint: "tp-subject", Subject: str("system:serviceaccount:spoofed:caller"),
+		PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", "pod-subject")})
+	if err != nil {
+		t.Fatalf("Create(pod): %v", err)
+	}
+	var subject *string
+	if err := svc.Store.Pool.QueryRow(ctx, `select subject from enrollments where id=$1`, pod.ID).Scan(&subject); err != nil {
+		t.Fatalf("read subject: %v", err)
+	}
+	if subject == nil || *subject != "system:serviceaccount:legion:worker" {
+		t.Fatalf("stored subject = %v, want the token's system:serviceaccount:legion:worker, never the caller's", subject)
+	}
+}

@@ -1,6 +1,7 @@
 // Package dispatch is the broker's thin client for the Dispatch routes the broker needs: open an
-// ask on an issue, read an ask, resolve a human's bearer, and find or create an operator's
-// standing secrets issue. It never answers, edits or resolves.
+// ask on an issue, read an ask, retract an ask whose answer can no longer matter, resolve a
+// human's bearer, and find or create an operator's standing secrets issue. It never answers or
+// edits an ask.
 package dispatch
 
 import (
@@ -140,11 +141,28 @@ func (c *Client) GetAsk(ctx context.Context, id string) (Ask, error) {
 	return body.Ask, nil
 }
 
-// ListIssues finds issues in project carrying label, repeating the label query parameter (a
-// single value is fine) the way Dispatch's GET /api/v1/issues?label= expects.
+type resolveAskBody struct {
+	Kind   string `json:"kind"`
+	Reason string `json:"reason"`
+	Actor  actor  `json:"actor"`
+}
+
+// RetractAsk closes an open ask without answering it (POST /api/v1/asks/{id}/resolve, kind
+// retracted), so nobody is left answering a question whose answer can change nothing.
+func (c *Client) RetractAsk(ctx context.Context, id, reason string) error {
+	body, err := json.Marshal(resolveAskBody{Kind: "retracted", Reason: reason, Actor: brokerActor})
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodPost, "/api/v1/asks/"+url.PathEscape(id)+"/resolve", c.token, bytes.NewReader(body), nil)
+}
+
+// ListIssues finds the open issues in project carrying label (GET /api/v1/issues?label=&open=true).
+// A closed issue takes no new ask, so it is never a candidate: an operator who closes their
+// standing issue gets a fresh one on the next lookup instead of a stream of refused asks.
 func (c *Client) ListIssues(ctx context.Context, project, label string) ([]IssueSummary, error) {
 	var issues []IssueSummary
-	path := "/api/v1/issues?project=" + url.QueryEscape(project) + "&label=" + url.QueryEscape(label)
+	path := "/api/v1/issues?project=" + url.QueryEscape(project) + "&label=" + url.QueryEscape(label) + "&open=true"
 	err := c.do(ctx, http.MethodGet, path, c.token, nil, &issues)
 	return issues, err
 }

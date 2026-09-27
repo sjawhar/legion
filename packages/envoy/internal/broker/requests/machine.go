@@ -27,13 +27,15 @@ import (
 )
 
 var (
-	ErrNotYours       = errors.New("this request or grant belongs to another session")
-	ErrNotApprover    = errors.New("only the grant's approver or its enrollment's operator may revoke it")
-	ErrTerminal       = errors.New("request is already decided")
-	ErrGrantNotLive   = errors.New("grant is expired, revoked, or its session ended")
-	ErrMixedApprovers = errors.New("the requested secrets need different approvers; request them separately")
-	ErrReasonTooLong  = errors.New("reason must be at most 400 characters")
-	ErrIssueMismatch  = errors.New("this session's approvals belong to its own issue; the requested issue differs")
+	ErrNotYours     = errors.New("this request or grant belongs to another session")
+	ErrNotApprover  = errors.New("only the grant's approver or its enrollment's operator may revoke it")
+	ErrTerminal     = errors.New("request is already decided")
+	ErrGrantNotLive = errors.New("grant is expired, revoked, or its session ended")
+	// ErrSecretNotInStore: the rules name a secret whose source the secrets store does not hold.
+	ErrSecretNotInStore = errors.New("secret is not in the secrets store")
+	ErrMixedApprovers   = errors.New("the requested secrets need different approvers; request them separately")
+	ErrReasonTooLong    = errors.New("reason must be at most 400 characters")
+	ErrIssueMismatch    = errors.New("this session's approvals belong to its own issue; the requested issue differs")
 )
 
 type askOpener interface {
@@ -77,8 +79,20 @@ type enrollmentRow struct {
 	ApproverKind  string
 	ApproverIssue *string
 	RuntimeID     string
+	Subject       *string
 }
 
+// requester is the enrollment as the rules see it, before any Dispatch lookup.
+func (e enrollmentRow) requester() rules.Requester {
+	return rules.Requester{Kind: e.Kind, Operator: deref(e.Operator), Subject: deref(e.Subject)}
+}
+
+// Create decides a request for names. It evaluates the rules before it asks Dispatch anything:
+// a request every name of which is automatic, or any name of which is denied, is decided without
+// Dispatch, so automatic access keeps working while Dispatch is unreachable. Only a request that
+// needs an approval looks up the approving issue's assignee (when the enrollment approves through
+// one) and the operator's standing issue (when no issue was named), and opens an ask; a Dispatch
+// failure on that path is returned as the *dispatch.Error it is.
 func (m *Machine) Create(ctx context.Context, enrollmentID string, names []string, reason, issue, sessionID string) (Request, error) {
 	if len(reason) > 400 {
 		return Request{}, ErrReasonTooLong
@@ -87,16 +101,6 @@ func (m *Machine) Create(ctx context.Context, enrollmentID string, names []strin
 	if err != nil {
 		return Request{}, err
 	}
-	if existing, ok, err := m.reuseLiveGrant(ctx, enrollmentID, names); err != nil {
-		return Request{}, err
-	} else if ok {
-		return existing, nil
-	}
-	set := m.Rules.Get()
-	requester := rules.Requester{Kind: enr.Kind}
-	if enr.Operator != nil {
-		requester.Operator = *enr.Operator
-	}
 	issueKey := issue
 	if enr.ApproverKind == "issue_assignee" && enr.ApproverIssue != nil {
 		if issue != "" && issue != *enr.ApproverIssue {
@@ -104,57 +108,41 @@ func (m *Machine) Create(ctx context.Context, enrollmentID string, names []strin
 		}
 		issueKey = *enr.ApproverIssue
 	}
-	if issueKey == "" {
-		issueKey, err = m.StandingIssue(ctx, requester.Operator)
-		if err != nil {
-			return Request{}, err
-		}
+	set := m.Rules.Get()
+	requester := enr.requester()
+	if existing, ok, err := m.reuseLiveGrant(ctx, enrollmentID, names, set, requester); err != nil {
+		return Request{}, err
+	} else if ok {
+		return existing, nil
 	}
-	if enr.ApproverKind == "issue_assignee" {
+	e, err := m.evaluate(set, names, requester)
+	if err != nil {
+		return Request{}, err
+	}
+	if e.awaitsAssignee && enr.ApproverKind == "issue_assignee" {
 		if requester.IssueAssignee, err = m.IssueAssignee(ctx, issueKey); err != nil {
+			return Request{}, fmt.Errorf("read the approving issue's assignee: %w", err)
+		}
+		if e, err = m.evaluate(set, names, requester); err != nil {
 			return Request{}, err
 		}
 	}
-	decisions := make([]SecretDecision, 0, len(names))
-	approver := ""
-	lifetime := m.MaxGrant
-	needsApproval := false
-	for _, name := range names {
-		d, err := set.Evaluate(name, requester)
-		if errors.Is(err, rules.ErrUnknownSecret) {
-			d = rules.Decision{Outcome: "deny", Delivery: "inject", Source: ""}
-		} else if err != nil {
-			return Request{}, err
+	if e.state == "pending" && issueKey == "" {
+		if requester.Operator == "" {
+			return Request{}, errors.New("this enrollment has no approving issue and no operator whose standing issue could hold the ask")
 		}
-		if d.Outcome == "approval" {
-			if approver != "" && approver != d.Approver {
-				return Request{}, ErrMixedApprovers
-			}
-			approver = d.Approver
-			needsApproval = true
+		if issueKey, err = m.StandingIssue(ctx, requester.Operator); err != nil {
+			return Request{}, fmt.Errorf("find the standing secrets issue: %w", err)
 		}
-		if d.MaxLifetime > 0 && d.MaxLifetime < lifetime {
-			lifetime = d.MaxLifetime
-		}
-		decisions = append(decisions, SecretDecision{Name: name, Decision: d.Outcome, Delivery: d.Delivery, Source: d.Source})
-	}
-	state := "granted"
-	for _, d := range decisions {
-		if d.Decision == "deny" {
-			state = "denied"
-		}
-	}
-	if state != "denied" && needsApproval {
-		state = "pending"
 	}
 	r := newRequest{
-		id: uuid.NewString(), enrollmentID: enrollmentID, issueKey: issueKey, reason: reason, state: state,
-		approver: approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: lifetime, decisions: decisions,
+		id: uuid.NewString(), enrollmentID: enrollmentID, issueKey: issueKey, reason: reason, state: e.state,
+		approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: e.lifetime, decisions: e.decisions,
 	}
-	if state == "pending" {
+	if e.state == "pending" {
 		return m.createPending(ctx, enr, r)
 	}
-	req := Request{ID: r.id, State: state, IssueKey: issueKey, Secrets: decisions}
+	req := Request{ID: r.id, State: e.state, IssueKey: issueKey, Secrets: e.decisions}
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return Request{}, err
@@ -163,14 +151,62 @@ func (m *Machine) Create(ctx context.Context, enrollmentID string, names []strin
 	if err := m.insertRequest(ctx, tx, r); err != nil {
 		return Request{}, err
 	}
-	if state == "granted" {
-		grantID, err := insertGrant(ctx, tx, r.id, enrollmentID, "", lifetime)
+	if e.state == "granted" {
+		grantID, err := insertGrant(ctx, tx, r.id, enrollmentID, "", e.lifetime)
 		if err != nil {
 			return Request{}, err
 		}
 		req.GrantID = &grantID
 	}
 	return req, tx.Commit(ctx)
+}
+
+// evaluation is one pass of the rules over a request's names.
+type evaluation struct {
+	decisions []SecretDecision
+	state     string // granted, denied or pending
+	approver  string
+	lifetime  time.Duration
+	// awaitsAssignee: nothing else denies the request, and some name wants the approving issue's
+	// assignee, who was not known to this pass.
+	awaitsAssignee bool
+}
+
+func (m *Machine) evaluate(set *rules.Set, names []string, requester rules.Requester) (evaluation, error) {
+	e := evaluation{decisions: make([]SecretDecision, 0, len(names)), state: "granted", lifetime: m.MaxGrant}
+	needsApproval, denied, awaiting := false, false, false
+	for _, name := range names {
+		d, err := set.Evaluate(name, requester)
+		if errors.Is(err, rules.ErrUnknownSecret) {
+			d = rules.Decision{Outcome: "deny", Delivery: "inject", Source: ""}
+		} else if err != nil {
+			return evaluation{}, err
+		}
+		switch {
+		case d.NeedsAssignee && requester.IssueAssignee == "":
+			awaiting = true
+		case d.Outcome == "deny":
+			denied = true
+		case d.Outcome == "approval":
+			if e.approver != "" && e.approver != d.Approver {
+				return evaluation{}, ErrMixedApprovers
+			}
+			e.approver = d.Approver
+			needsApproval = true
+		}
+		if d.MaxLifetime > 0 && d.MaxLifetime < e.lifetime {
+			e.lifetime = d.MaxLifetime
+		}
+		e.decisions = append(e.decisions, SecretDecision{Name: name, Decision: d.Outcome, Delivery: d.Delivery, Source: d.Source})
+	}
+	switch {
+	case denied || awaiting:
+		e.state = "denied"
+		e.awaitsAssignee = awaiting && !denied
+	case needsApproval:
+		e.state = "pending"
+	}
+	return e, nil
 }
 
 // newRequest is one request row as Create writes it.
@@ -333,7 +369,10 @@ func (m *Machine) CancelUnopened(ctx context.Context, now time.Time) (int, error
 }
 
 // ApplyAnswer moves a pending request on a Dispatch ask read. It is idempotent: a request that is
-// no longer pending is left alone and changed=false is returned.
+// no longer pending is left alone and changed=false is returned. An approval grants only while
+// the requesting enrollment is still live (not revoked, lease not lapsed); otherwise the request
+// is denied as withdrawn. The enrollment row is locked before the request row, the same order
+// enroll.Revoke takes them in, so the two never deadlock.
 func (m *Machine) ApplyAnswer(ctx context.Context, id string, ask dispatch.Ask) (bool, error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -343,41 +382,37 @@ func (m *Machine) ApplyAnswer(ctx context.Context, id string, ask dispatch.Ask) 
 	var enrollmentID, state string
 	var approver, storedAskID, recordedEdited *string
 	var lifetime int
-	err = tx.QueryRow(ctx, `select enrollment_id, state, allowed_approver, ask_id, ask_edited_at, lifetime_seconds from requests where id=$1 for update`, id).
-		Scan(&enrollmentID, &state, &approver, &storedAskID, &recordedEdited, &lifetime)
+	var live bool
+	if err := tx.QueryRow(ctx, `select enrollment_id from requests where id=$1`, id).Scan(&enrollmentID); err != nil {
+		return false, err
+	}
+	if err := tx.QueryRow(ctx, `select revoked_at is null and lease_expires_at > now() from enrollments where id=$1 for share`, enrollmentID).Scan(&live); err != nil {
+		return false, err
+	}
+	err = tx.QueryRow(ctx, `select state, allowed_approver, ask_id, ask_edited_at, lifetime_seconds from requests where id=$1 for update`, id).
+		Scan(&state, &approver, &storedAskID, &recordedEdited, &lifetime)
 	if err != nil {
 		return false, err
 	}
 	if state != "pending" {
 		return false, nil
 	}
-	switch ask.State {
-	case "open":
-		return false, nil
-	case "answered", "resolved":
-	default:
-		// Not a decision: an ask read this code cannot interpret leaves the request pending for
-		// the next poll rather than denying a request no human has refused.
-		return false, fmt.Errorf("ask %q has unrecognized state %q", ask.ID, ask.State)
+	decision, detail, err := dispatch.Verdict(ask, deref(storedAskID), recordedEdited, deref(approver))
+	if err != nil || decision == dispatch.Undecided {
+		return false, err
 	}
-	next, detail := "denied", ""
-	switch {
-	case storedAskID == nil || *storedAskID != ask.ID:
-		detail = "ask id does not match the request's own ask"
-	case ask.State != "answered" || ask.Answer == nil:
-		detail = "ask was " + ask.State + " without an approval"
-	case !sameEdit(recordedEdited, ask.EditedAt):
-		detail = "ask was edited after it was opened"
-	case approver == nil || ask.Answer.User != *approver:
-		detail = "answered by " + ask.Answer.User + ", not the allowed approver"
-	case len(ask.Answer.Selected) != 1 || ask.Answer.Selected[0] != "Approve":
-		detail = "approver chose " + strings.Join(ask.Answer.Selected, ",")
-	default:
-		next = "granted"
+	next := "denied"
+	if decision == dispatch.Approved {
+		if live {
+			next = "granted"
+		} else {
+			detail = "enrollment no longer live"
+		}
 	}
-	by := ""
+	by, actor := "", "broker"
 	if ask.Answer != nil {
-		by = ask.Answer.User
+		by = dispatch.CanonicalLogin(ask.Answer.User)
+		actor = "human:" + by
 	}
 	tag, err := tx.Exec(ctx, `update requests set state=$2, decided_at=now(), decided_by=$3, decision_detail=$4 where id=$1 and state='pending'`, id, next, nullable(by), nullable(detail))
 	if err != nil || tag.RowsAffected() != 1 {
@@ -391,7 +426,7 @@ func (m *Machine) ApplyAnswer(ctx context.Context, id string, ask dispatch.Ask) 
 		}
 		grantID = &g
 	}
-	if err := audit(ctx, tx, "request."+next, enrollmentID, id, grantID, "human:"+by, auditDetail{"detail": detail, "ask_id": ask.ID}); err != nil {
+	if err := audit(ctx, tx, "request."+next, enrollmentID, id, grantID, actor, auditDetail{"detail": detail, "ask_id": ask.ID}); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)
@@ -454,17 +489,22 @@ func (m *Machine) ExpirePending(ctx context.Context, now time.Time) (int, error)
 	return len(expired), tx.Commit(ctx)
 }
 
-// Values releases the inject-mode values of a live grant to its own enrollment. It re-checks the
-// enrollment, the grant, and that every name is still an inject-mode secret in the current rules.
+// Values releases the inject-mode values of a live grant to its own enrollment. Every call
+// re-checks the enrollment and the grant, and — when the rules have changed since the grant's
+// request was decided — that the current rules still allow this requester every granted name
+// (stillAllowed). A name is released only when both the delivery frozen at grant time and the
+// current delivery are inject: a grant approved for proxy delivery never widens into a raw value.
 // It holds no pooled connection across a Secrets Manager read: the grant's names are read into
 // memory before the first value is fetched.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, []string, time.Time, error) {
-	var owner string
+	var owner, requestID, rulesVersion string
 	var expires time.Time
 	var live bool
-	var requestID string
-	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and g.expires_at > now() and e.revoked_at is null and e.lease_expires_at > now(), g.request_id
-		from grants g join enrollments e on e.id=g.enrollment_id where g.id=$1`, grantID).Scan(&owner, &expires, &live, &requestID)
+	var enr enrollmentRow
+	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and g.expires_at > now() and e.revoked_at is null and e.lease_expires_at > now(),
+		g.request_id, r.rules_version, e.kind, e.operator, e.subject
+		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id where g.id=$1`, grantID).
+		Scan(&owner, &expires, &live, &requestID, &rulesVersion, &enr.Kind, &enr.Operator, &enr.Subject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil, time.Time{}, ErrGrantNotLive
 	}
@@ -477,37 +517,34 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	if !live {
 		return nil, nil, time.Time{}, ErrGrantNotLive
 	}
-	type grantedSecret struct{ name, source string }
-	var granted []grantedSecret
-	rows, err := m.Store.Pool.Query(ctx, `select name, source from request_secrets where request_id=$1 and decision <> 'deny' order by name`, requestID)
+	granted, err := m.grantedSecrets(ctx, requestID)
 	if err != nil {
 		return nil, nil, time.Time{}, err
 	}
-	for rows.Next() {
-		var g grantedSecret
-		if err := rows.Scan(&g.name, &g.source); err != nil {
-			rows.Close()
-			return nil, nil, time.Time{}, err
-		}
-		granted = append(granted, g)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, nil, time.Time{}, err
-	}
 	set := m.Rules.Get()
+	if rulesVersion != set.Version {
+		for _, g := range granted {
+			if err := stillAllowed(set, g.name, g.decision, enr.requester()); err != nil {
+				return nil, nil, time.Time{}, err
+			}
+		}
+	}
 	values := map[string]string{}
-	var proxyOnly, released []string
+	var proxyOnly []string
+	released := []string{}
 	for _, g := range granted {
 		current, ok := set.Secrets[g.name]
 		if !ok {
 			return nil, nil, time.Time{}, fmt.Errorf("%w: %s is no longer in the rules", ErrGrantNotLive, g.name)
 		}
-		if current.Delivery == "proxy" {
+		if g.delivery == "proxy" || current.Delivery == "proxy" {
 			proxyOnly = append(proxyOnly, g.name)
 			continue
 		}
 		value, err := m.Secrets.Read(ctx, g.source)
+		if errors.Is(err, secrets.ErrNotFound) {
+			return nil, nil, time.Time{}, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
+		}
 		if err != nil {
 			return nil, nil, time.Time{}, fmt.Errorf("read %s: %w", g.name, err)
 		}
@@ -519,6 +556,54 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 		return nil, nil, time.Time{}, err
 	}
 	return values, proxyOnly, expires, nil
+}
+
+// grantedSecret is one name a request did not deny, as frozen when the request was decided.
+type grantedSecret struct{ name, source, decision, delivery string }
+
+func (m *Machine) grantedSecrets(ctx context.Context, requestID string) ([]grantedSecret, error) {
+	rows, err := m.Store.Pool.Query(ctx, `select name, source, decision, delivery from request_secrets where request_id=$1 and decision <> 'deny' order by name`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var granted []grantedSecret
+	for rows.Next() {
+		var g grantedSecret
+		if err := rows.Scan(&g.name, &g.source, &g.decision, &g.delivery); err != nil {
+			return nil, err
+		}
+		granted = append(granted, g)
+	}
+	return granted, rows.Err()
+}
+
+// stillAllowed re-checks one granted name against rules newer than the ones its request was
+// decided under. The name must still exist and the current rules must still let this requester
+// have it: a deny, or no entry naming the requester at all, refuses; so does a name granted
+// automatically that the current rules want approved, since no human ever approved it. A name a
+// human approved stays allowed while the rules still want an approval, whoever the approver now
+// is. An entry that wants the issue's assignee counts as wanting an approval without the
+// assignee being looked up.
+func stillAllowed(set *rules.Set, name, frozenDecision string, requester rules.Requester) error {
+	d, err := set.Evaluate(name, requester)
+	if errors.Is(err, rules.ErrUnknownSecret) {
+		return fmt.Errorf("%w: %s is no longer in the rules", ErrGrantNotLive, name)
+	}
+	if err != nil {
+		return err
+	}
+	outcome := d.Outcome
+	if d.NeedsAssignee {
+		outcome = "approval"
+	}
+	switch {
+	case outcome == "deny":
+		return fmt.Errorf("%w: the current rules no longer allow %s", ErrGrantNotLive, name)
+	case frozenDecision == "automatic" && outcome == "approval":
+		return fmt.Errorf("%w: the current rules require approval for %s", ErrGrantNotLive, name)
+	}
+	return nil
 }
 
 // Revoker is who is ending a grant: exactly one of a session (EnrollmentID, authenticated by its
@@ -538,7 +623,8 @@ func (r Revoker) actor() string {
 
 // RevokeGrant ends a grant. A session may end only its own grants; a human only a grant they
 // approved or one whose enrollment they operate, so a signed-in human of one operator can never
-// end another operator's grant.
+// end another operator's grant. Revoking an already-revoked grant succeeds and changes nothing: it
+// writes no second grant.revoked audit row, so the trail never names a revoker who ended nothing.
 func (m *Machine) RevokeGrant(ctx context.Context, grantID string, by Revoker) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
@@ -558,8 +644,12 @@ func (m *Machine) RevokeGrant(ctx context.Context, grantID string, by Revoker) e
 	} else if !mayRevoke(by.Login, approver, operator) {
 		return ErrNotApprover
 	}
-	if _, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where id=$1 and revoked_at is null`, grantID, by.actor()); err != nil {
+	tag, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where id=$1 and revoked_at is null`, grantID, by.actor())
+	if err != nil {
 		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return nil
 	}
 	if err := audit(ctx, tx, "grant.revoked", owner, requestID, &grantID, by.actor(), auditDetail{}); err != nil {
 		return err
@@ -661,10 +751,12 @@ func (m *Machine) LiveGrants(ctx context.Context, enrollmentID string) ([]Grant,
 	return grants, rows.Err()
 }
 
+// enrollment reads a live enrollment (not revoked, lease not lapsed); pgx.ErrNoRows otherwise.
 func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, error) {
 	var e enrollmentRow
-	err := m.Store.Pool.QueryRow(ctx, `select id, kind, operator, approver_kind, approver_issue, runtime_id from enrollments where id=$1 and revoked_at is null`, id).
-		Scan(&e.ID, &e.Kind, &e.Operator, &e.ApproverKind, &e.ApproverIssue, &e.RuntimeID)
+	err := m.Store.Pool.QueryRow(ctx, `select id, kind, operator, approver_kind, approver_issue, runtime_id, subject from enrollments
+		where id=$1 and revoked_at is null and lease_expires_at > now()`, id).
+		Scan(&e.ID, &e.Kind, &e.Operator, &e.ApproverKind, &e.ApproverIssue, &e.RuntimeID, &e.Subject)
 	return e, err
 }
 
@@ -697,10 +789,11 @@ func matchingRequest(ctx context.Context, q interface {
 // reuseLiveGrant answers Create's own "request (or reuse the live grant)" contract: an exact
 // name-set match (never a subset or superset — the same matching rule coalescing uses for pending
 // requests) against a still-live grant (not revoked, not expired) under this enrollment is
-// returned as-is, with no new request row and no Dispatch ask. Called before any policy
-// evaluation in Create, so a caller that already holds a live grant for these exact names never
-// re-asks a human who already approved it once.
-func (m *Machine) reuseLiveGrant(ctx context.Context, enrollmentID string, names []string) (Request, bool, error) {
+// returned as-is, with no new request row and no Dispatch ask, as long as the rules it was decided
+// under are still current or the current rules still allow it (stillAllowed, the check Values
+// makes). A caller that already holds a live grant for these exact names never re-asks a human
+// who already approved it, and a rule tightened since then is never bypassed by reuse.
+func (m *Machine) reuseLiveGrant(ctx context.Context, enrollmentID string, names []string, set *rules.Set, requester rules.Requester) (Request, bool, error) {
 	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
 		join request_secrets s on s.request_id=r.id
 		join grants g on g.request_id=r.id
@@ -708,6 +801,23 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enrollmentID string, names
 		group by r.id`, enrollmentID, sortedCopy(names))
 	if err != nil || id == "" {
 		return Request{}, false, err
+	}
+	var rulesVersion string
+	if err := m.Store.Pool.QueryRow(ctx, `select rules_version from requests where id=$1`, id).Scan(&rulesVersion); err != nil {
+		return Request{}, false, err
+	}
+	if rulesVersion != set.Version {
+		granted, err := m.grantedSecrets(ctx, id)
+		if err != nil {
+			return Request{}, false, err
+		}
+		for _, g := range granted {
+			if err := stillAllowed(set, g.name, g.decision, requester); errors.Is(err, ErrGrantNotLive) {
+				return Request{}, false, nil
+			} else if err != nil {
+				return Request{}, false, err
+			}
+		}
 	}
 	r, err := m.Get(ctx, id)
 	return r, err == nil, err
@@ -746,11 +856,11 @@ func question(enr enrollmentRow, decisions []SecretDecision, reason string, life
 	return q
 }
 
-func sameEdit(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
+func deref(s *string) string {
+	if s == nil {
+		return ""
 	}
-	return *a == *b
+	return *s
 }
 
 func nullable(s string) *string {
@@ -764,4 +874,30 @@ func sortedCopy(s []string) []string {
 	sorted := append([]string(nil), s...)
 	sort.Strings(sorted)
 	return sorted
+}
+
+// endedAsk is a request that ended without an answer whose Dispatch ask may still be open.
+type endedAsk struct{ id, askID, state string }
+
+func (m *Machine) endedAsks(ctx context.Context) ([]endedAsk, error) {
+	rows, err := m.Store.Pool.Query(ctx, `select id, ask_id, state from requests
+		where state in ('cancelled','expired') and ask_id is not null and ask_retracted_at is null`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ended []endedAsk
+	for rows.Next() {
+		var e endedAsk
+		if err := rows.Scan(&e.id, &e.askID, &e.state); err != nil {
+			return nil, err
+		}
+		ended = append(ended, e)
+	}
+	return ended, rows.Err()
+}
+
+func (m *Machine) markAskRetracted(ctx context.Context, id string) error {
+	_, err := m.Store.Pool.Exec(ctx, `update requests set ask_retracted_at=now() where id=$1`, id)
+	return err
 }

@@ -229,3 +229,23 @@ func TestForgedSignatureFails(t *testing.T) {
 		t.Fatalf("forged signature (embedded key not the actual signer) must be rejected with ErrInvalid mentioning signature, got %v", err)
 	}
 }
+
+// TestJtiRetainedForTheWholeAcceptanceWindow pins that a proof's jti is remembered at least as
+// long as the proof itself can pass the iat check: with a skew wider than any fixed retention, a
+// replay inside the window must still find the jti recorded.
+func TestJtiRetainedForTheWholeAcceptanceWindow(t *testing.T) {
+	v, compact, _ := fixture(t)
+	v.Skew = 20 * time.Minute
+	var retainedUntil time.Time
+	v.Replay = func(_ context.Context, _ string, expires time.Time) (bool, error) {
+		retainedUntil = expires
+		return true, nil
+	}
+	now := time.Now()
+	if _, err := v.Verify(context.Background(), compact, "POST", "https://secrets.test/v1/requests", now); err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if lastAccepted := now.Add(v.Skew); retainedUntil.Before(lastAccepted) {
+		t.Fatalf("jti retained until %s, but a replay is accepted until %s", retainedUntil, lastAccepted)
+	}
+}

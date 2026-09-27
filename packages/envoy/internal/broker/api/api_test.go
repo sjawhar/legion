@@ -675,6 +675,8 @@ func (f *fakeLauncherDispatch) CreateIssue(_ context.Context, _, title string, a
 	return key, nil
 }
 
+func (f *fakeLauncherDispatch) RetractAsk(context.Context, string, string) error { return nil }
+
 // approve answers the one ask this test opens; it assumes exactly one ask has been created.
 func (f *fakeLauncherDispatch) approve(user string) {
 	f.mu.Lock()

@@ -161,11 +161,54 @@ func TestClientAgainstRealDispatchIssuesAndAsks(t *testing.T) {
 		answered.Answer.At.IsZero() {
 		t.Fatalf("GetAsk (answered) = %+v (answer %+v), want answered by Alice selecting Approve", answered, answered.Answer)
 	}
+	// The approval checks accept that answer from the approver Dispatch stores in lowercase.
+	if decision, reason, err := Verdict(answered, opened.ID, nil, "alice"); err != nil || decision != Approved {
+		t.Fatalf("Verdict(answered by Alice, approver alice) = %v %q %v, want Approved", decision, reason, err)
+	}
+	if decision, _, err := Verdict(answered, opened.ID, nil, "bob"); err != nil || decision != Denied {
+		t.Fatalf("Verdict(answered by Alice, approver bob) = %v %v, want Denied", decision, err)
+	}
+	// An answered ask cannot be retracted; Dispatch says so with a 409.
+	if err := c.RetractAsk(ctx, opened.ID, "no longer needed"); err == nil {
+		t.Fatal("RetractAsk(answered ask) succeeded, want Dispatch's refusal")
+	} else if dispatchErr, ok := AsError(err); !ok || dispatchErr.Status != http.StatusConflict {
+		t.Fatalf("RetractAsk(answered ask) = %v, want a 409 *Error", err)
+	}
+
+	// An open ask whose request ended is retracted, and reads back resolved.
+	stale, err := c.CreateAsk(ctx, key, "Release AUTO_TOKEN?", []Option{{Label: "Approve"}, {Label: "Deny"}}, "med")
+	if err != nil {
+		t.Fatalf("CreateAsk(stale): %v", err)
+	}
+	if err := c.RetractAsk(ctx, stale.ID, "the request was cancelled"); err != nil {
+		t.Fatalf("RetractAsk(open ask): %v", err)
+	}
+	if retracted, err := c.GetAsk(ctx, stale.ID); err != nil || retracted.State != "resolved" || retracted.Answer != nil {
+		t.Fatalf("GetAsk(retracted) = %+v, %v, want resolved with no answer", retracted, err)
+	}
+	if decision, _, err := Verdict(mustGetAsk(t, c, stale.ID), stale.ID, nil, "alice"); err != nil || decision != Denied {
+		t.Fatalf("Verdict(retracted ask) = %v %v, want Denied", decision, err)
+	}
+
+	// A closed standing issue is no candidate: ListIssues answers open issues only.
+	human(t, srv, http.MethodPatch, "/api/v1/issues/"+key, map[string]any{"status": "done"}, "alice", http.StatusOK, nil)
+	if open, err := c.ListIssues(ctx, contractProject, "agent-secrets"); err != nil || len(open) != 0 {
+		t.Fatalf("ListIssues after closing %s = %+v, %v, want no open issue", key, open, err)
+	}
 
 	_, err = c.GetAsk(ctx, uuid.NewString())
 	if dispatchErr, ok := AsError(err); !ok || dispatchErr.Status != http.StatusNotFound || dispatchErr.Unavailable() {
 		t.Fatalf("GetAsk(unknown) error = %v, want a 404 *Error", err)
 	}
+}
+
+func mustGetAsk(t *testing.T, c *Client, id string) Ask {
+	t.Helper()
+	ask, err := c.GetAsk(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetAsk(%s): %v", id, err)
+	}
+	return ask
 }
 
 func TestClientAgainstRealDispatchWhoami(t *testing.T) {

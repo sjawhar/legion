@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -40,15 +39,16 @@ const standingLabel = "agent-secrets"
 // rules configuration, this flow has exactly one lifetime and no wiring supplies a different one.
 const pendingTTL = 10 * time.Minute
 
-// dispatchClient is the subset of *dispatch.Client this package needs: opening and reading the
-// standing-issue ask (the same askOpener/askReader seam requests.Machine and requests.Poller use),
-// plus the two issue routes that find or create an operator's standing issue. A small interface
+// dispatchClient is the subset of *dispatch.Client this package needs: opening, reading and
+// retracting the standing-issue ask (the same seam requests.Machine and requests.Poller use), plus
+// the two issue routes that find or create an operator's standing issue. A small interface
 // keeps launcher_test.go's fake self-contained instead of standing up an httptest server.
 type dispatchClient interface {
 	CreateAsk(ctx context.Context, issue, question string, options []dispatch.Option, urgency string) (dispatch.Ask, error)
 	GetAsk(ctx context.Context, id string) (dispatch.Ask, error)
 	ListIssues(ctx context.Context, project, label string) ([]dispatch.IssueSummary, error)
 	CreateIssue(ctx context.Context, project, title string, assignee *string, labels []string) (string, error)
+	RetractAsk(ctx context.Context, id, reason string) error
 }
 
 type Service struct {
@@ -207,6 +207,44 @@ func (s *Service) Reconcile(ctx context.Context) error {
 			slog.Warn("launcher reconcile: apply ask", "ask", p.ask, "error", err)
 		}
 	}
+	return s.retractExpiredAsks(ctx)
+}
+
+// retractExpiredAsks closes the Dispatch ask of every request that expired unanswered, so the
+// operator is never left approving a login that can no longer be issued. No connection is held
+// across a Dispatch call; an ask Dispatch cannot retract right now is tried again next pass.
+func (s *Service) retractExpiredAsks(ctx context.Context) error {
+	rows, err := s.Store.Pool.Query(ctx, `select pending_id_hash, ask_id from launcher_credential_requests where state='expired' and ask_retracted_at is null`)
+	if err != nil {
+		return err
+	}
+	type expiredAsk struct {
+		hash []byte
+		ask  string
+	}
+	var expired []expiredAsk
+	for rows.Next() {
+		var e expiredAsk
+		if err := rows.Scan(&e.hash, &e.ask); err != nil {
+			rows.Close()
+			return err
+		}
+		expired = append(expired, e)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, e := range expired {
+		err := s.Dispatch.RetractAsk(ctx, e.ask, "the launcher credential request expired unanswered; approving it now would change nothing")
+		if !dispatch.Retracted(err) {
+			slog.Warn("launcher reconcile: retract ask", "ask", e.ask, "error", err)
+			continue
+		}
+		if _, err := s.Store.Pool.Exec(ctx, `update launcher_credential_requests set ask_retracted_at=now() where pending_id_hash=$1`, e.hash); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -240,31 +278,14 @@ func (s *Service) applyAsk(ctx context.Context, pendingHash []byte, ask dispatch
 		// and keeps this decision from silently depending on that alone.
 		service = nil
 	}
-	switch ask.State {
-	case "open":
-		return nil
-	case "answered", "resolved":
-	default:
-		// Not a decision: an ask read this code cannot interpret leaves the request pending for
-		// the next Reconcile rather than denying a request no human has refused.
-		return fmt.Errorf("ask %q has unrecognized state %q", ask.ID, ask.State)
+	decision, denyReason, err := dispatch.Verdict(ask, storedAskID, recordedEdited, operator)
+	if err != nil || decision == dispatch.Undecided {
+		return err
 	}
-	approved, denyReason := true, ""
-	switch {
-	case storedAskID != ask.ID:
-		approved, denyReason = false, "ask id does not match the request's own ask"
-	case ask.State != "answered" || ask.Answer == nil:
-		approved, denyReason = false, "ask was "+ask.State+" without an approval"
-	case !sameEdit(recordedEdited, ask.EditedAt):
-		approved, denyReason = false, "ask was edited after it was opened"
-	case ask.Answer.User != operator:
-		approved, denyReason = false, "answered by "+ask.Answer.User+", not the requesting operator"
-	case len(ask.Answer.Selected) != 1 || ask.Answer.Selected[0] != "Approve":
-		approved, denyReason = false, "approver chose "+strings.Join(ask.Answer.Selected, ",")
-	}
+	approved := decision == dispatch.Approved
 	by := ""
 	if ask.Answer != nil {
-		by = ask.Answer.User
+		by = dispatch.CanonicalLogin(ask.Answer.User)
 	}
 	if !approved {
 		if _, err := tx.Exec(ctx, `update launcher_credential_requests set state='denied' where pending_id_hash=$1 and state='pending'`, pendingHash); err != nil {
@@ -406,13 +427,6 @@ func confirmationCode() (string, error) {
 		code = append(code, confirmationAlphabet[int(b)%len(confirmationAlphabet)])
 	}
 	return string(code), nil
-}
-
-func sameEdit(a, b *string) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return *a == *b
 }
 
 func hashPendingID(raw string) []byte {

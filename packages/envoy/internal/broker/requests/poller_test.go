@@ -9,11 +9,14 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/dispatch"
 )
 
-// fakeAskReader is the poller's askReader: it answers GetAsk from a map the test mutates between
+// fakeAskReader is the poller's Dispatch: it answers GetAsk from a map the test mutates between
 // RunOnce calls, and fails loudly on an id it wasn't given so an unexpected read shows up in the
-// test rather than silently returning a zero Ask.
+// test rather than silently returning a zero Ask. RetractAsk records the ask id and answers
+// retractErr.
 type fakeAskReader struct {
-	asks map[string]dispatch.Ask
+	asks       map[string]dispatch.Ask
+	retracted  []string
+	retractErr error
 }
 
 func (f *fakeAskReader) GetAsk(_ context.Context, id string) (dispatch.Ask, error) {
@@ -22,6 +25,55 @@ func (f *fakeAskReader) GetAsk(_ context.Context, id string) (dispatch.Ask, erro
 		return dispatch.Ask{}, fmt.Errorf("fakeAskReader: no ask registered for %q", id)
 	}
 	return ask, nil
+}
+
+func (f *fakeAskReader) RetractAsk(_ context.Context, id, _ string) error {
+	f.retracted = append(f.retracted, id)
+	return f.retractErr
+}
+
+// TestPollerRetractsTheAskOfAnEndedRequest pins that a request cancelled or expired before anyone
+// answered has its Dispatch ask retracted, once: an outage leaves it for the next tick, and an
+// ask Dispatch reports already answered counts as closed.
+func TestPollerRetractsTheAskOfAnEndedRequest(t *testing.T) {
+	m, _, _, enrA, enrB := newFixture(t)
+	ctx := context.Background()
+	cancelled, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create(cancelled): %v", err)
+	}
+	if err := m.Cancel(ctx, cancelled.ID, enrA.ID.String()); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	expired, err := m.Create(ctx, enrB.ID.String(), []string{"DEEL_API_KEY"}, "need it too", "", "")
+	if err != nil {
+		t.Fatalf("Create(expired): %v", err)
+	}
+	if _, err := m.Store.Pool.Exec(ctx, `update requests set pending_expires_at = now() - interval '1 hour' where id=$1`, expired.ID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	reader := &fakeAskReader{retractErr: &dispatch.Error{Method: "POST", Path: "/resolve", Status: 503}}
+	poller := &Poller{Machine: m, Dispatch: reader, Interval: time.Minute}
+	if err := poller.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce (Dispatch down): %v", err)
+	}
+	if len(reader.retracted) != 2 {
+		t.Fatalf("retract attempts during the outage = %v, want both asks", reader.retracted)
+	}
+	reader.retracted, reader.retractErr = nil, &dispatch.Error{Method: "POST", Path: "/resolve", Status: 409, Code: "ASK_ANSWERED"}
+	if err := poller.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce (asks already closed): %v", err)
+	}
+	if want := map[string]bool{"ask-1": true, "ask-2": true}; len(reader.retracted) != 2 || !want[reader.retracted[0]] || !want[reader.retracted[1]] {
+		t.Fatalf("retract attempts after the outage = %v, want ask-1 and ask-2", reader.retracted)
+	}
+	reader.retracted = nil
+	if err := poller.RunOnce(ctx); err != nil {
+		t.Fatalf("RunOnce (nothing left): %v", err)
+	}
+	if len(reader.retracted) != 0 {
+		t.Fatalf("retract attempts once both asks are closed = %v, want none", reader.retracted)
+	}
 }
 
 // wakeCall records one Poller.Wake invocation for a test to assert against.

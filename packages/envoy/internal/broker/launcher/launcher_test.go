@@ -38,6 +38,7 @@ type fakeDispatch struct {
 	listIssuesDelay time.Duration
 	listGate        chan struct{}
 	listEntered     chan struct{}
+	retracted       []string
 }
 
 func (f *fakeDispatch) CreateAsk(_ context.Context, issue, question string, options []dispatch.Option, urgency string) (dispatch.Ask, error) {
@@ -88,6 +89,13 @@ func (f *fakeDispatch) CreateIssue(_ context.Context, _, title string, assignee 
 	key := fmt.Sprintf("PROJ-%d", f.createIssueN)
 	f.issues = append(f.issues, dispatch.IssueSummary{Key: key, Title: title, Assignee: assignee, Labels: labels})
 	return key, nil
+}
+
+func (f *fakeDispatch) RetractAsk(_ context.Context, id, _ string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retracted = append(f.retracted, id)
+	return nil
 }
 
 // createIssueCount safely reads createIssueN after concurrent Standing calls have settled.
@@ -322,7 +330,7 @@ func TestStandingReusesExistingIssue(t *testing.T) {
 // TestLauncherRequestExpiresAfterTTL pins Reconcile's expiry pass: a request whose expires_at is
 // backdated is expired before Reconcile ever reads its pending rows, so it never reaches
 // Dispatch.GetAsk (the fake would otherwise fail the test on being asked about the already-decided
-// ask) and Read reports it expired.
+// ask), Read reports it expired, and its now-pointless ask is retracted exactly once.
 func TestLauncherRequestExpiresAfterTTL(t *testing.T) {
 	ctx := context.Background()
 	svc, fake := newTestService(t)
@@ -344,6 +352,15 @@ func TestLauncherRequestExpiresAfterTTL(t *testing.T) {
 	state, token, err := svc.Read(ctx, pending.ID)
 	if err != nil || state != "expired" || token != "" {
 		t.Fatalf("Read (expired) = state=%q token_present=%v err=%v, want expired/empty", state, token != "", err)
+	}
+	if len(fake.retracted) != 1 || fake.retracted[0] != fake.createCalls[0].askID {
+		t.Fatalf("retracted asks = %v, want the expired request's ask %s", fake.retracted, fake.createCalls[0].askID)
+	}
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile (again): %v", err)
+	}
+	if len(fake.retracted) != 1 {
+		t.Fatalf("retracted asks after a second pass = %v, want the one retraction only", fake.retracted)
 	}
 }
 
@@ -455,5 +472,28 @@ func TestLauncherRequestEmptyServiceStringNormalizedToOperatorCredential(t *test
 	}
 	if cred.Service != nil {
 		t.Fatalf("credential service = %v, want nil for an empty service string", *cred.Service)
+	}
+}
+
+// TestApprovalMatchesTheOperatorCaseInsensitively pins that the operator approving from an
+// account whose GitHub display login carries capitals still issues the credential.
+func TestApprovalMatchesTheOperatorCaseInsensitively(t *testing.T) {
+	ctx := context.Background()
+	svc, fake := newTestService(t)
+	pending, err := svc.Request(ctx, "Xodarap", "mixed-case-host", nil)
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	fake.answer(fake.createCalls[0].askID, "XodaRap", "Approve")
+	if err := svc.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	state, token, err := svc.Read(ctx, pending.ID)
+	if err != nil || state != "issued" || token == "" {
+		t.Fatalf("Read = state=%q token_present=%v err=%v, want issued", state, token != "", err)
+	}
+	cred, err := svc.Enroll.AuthenticateLauncher(ctx, token)
+	if err != nil || cred.Operator == nil || *cred.Operator != "xodarap" {
+		t.Fatalf("credential operator = %v (err %v), want xodarap", cred.Operator, err)
 	}
 }

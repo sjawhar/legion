@@ -138,3 +138,81 @@ func TestRealDocumentAfterEmptyExtraRefused(t *testing.T) {
 		t.Fatal("expected a real third document, following an empty second one, to be refused")
 	}
 }
+
+// oneSecret is a rules file with one secret X whose requesters list is entries, one YAML flow
+// mapping per line.
+func oneSecret(entries ...string) []byte {
+	doc := "version: 1\nsecrets:\n  X:\n    source: s\n    owner: o\n    delivery: inject\n    max_lifetime_seconds: 60\n    requesters:\n"
+	for _, e := range entries {
+		doc += "      - " + e + "\n"
+	}
+	return []byte(doc)
+}
+
+// TestLoginsCompareCaseInsensitively pins that a rules author's casing of a GitHub login never
+// makes a rule unsatisfiable: operators and login: approvers are compared the way Dispatch
+// compares logins, trimmed and lowercased.
+func TestLoginsCompareCaseInsensitively(t *testing.T) {
+	set, err := Parse(oneSecret("{kind: box, operator: SJawhar, decision: approval, approver: 'login:Xodarap'}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := set.Evaluate("X", Requester{Kind: "box", Operator: "sjawhar"})
+	if err != nil || d.Outcome != "approval" || d.Approver != "xodarap" {
+		t.Fatalf("box/sjawhar against operator SJawhar, approver login:Xodarap = %+v %v, want approval by xodarap", d, err)
+	}
+}
+
+// TestUnsatisfiableEntriesRefused pins the load-time refusals for entries no requester could ever
+// satisfy or whose field would be silently ignored.
+func TestUnsatisfiableEntriesRefused(t *testing.T) {
+	for name, entry := range map[string]string{
+		"login: with no name":         "{kind: box, operator: sjawhar, decision: approval, approver: 'login:'}",
+		"login: with only blanks":     "{kind: box, operator: sjawhar, decision: approval, approver: 'login:  '}",
+		"operator approver for a pod": "{kind: pod, decision: approval, approver: operator}",
+		"approver with automatic":     "{kind: box, operator: sjawhar, decision: automatic, approver: operator}",
+		"service_account on a box":    "{kind: box, operator: sjawhar, service_account: 'system:serviceaccount:legion:worker', decision: automatic}",
+		"malformed service_account":   "{kind: pod, service_account: 'legion/worker', decision: automatic}",
+	} {
+		if _, err := Parse(oneSecret(entry)); err == nil || !strings.Contains(err.Error(), "requesters[0]") {
+			t.Errorf("%s: Parse = %v, want a refusal naming requesters[0]", name, err)
+		}
+	}
+}
+
+// TestPodEntriesScopeToServiceAccounts pins service_account: a pod entry naming one matches only
+// pods whose verified subject is that account, two entries may name two accounts, and an entry
+// with no service_account (which matches every pod) cannot sit beside another pod entry.
+func TestPodEntriesScopeToServiceAccounts(t *testing.T) {
+	set, err := Parse(oneSecret(
+		"{kind: pod, service_account: 'system:serviceaccount:legion:worker', decision: automatic}",
+		"{kind: pod, service_account: 'system:serviceaccount:legion:reviewer', decision: approval, approver: issue_assignee}",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for subject, want := range map[string]string{
+		"system:serviceaccount:legion:worker":   "automatic",
+		"system:serviceaccount:legion:reviewer": "approval",
+		"system:serviceaccount:default:other":   "deny",
+		"":                                      "deny",
+	} {
+		d, err := set.Evaluate("X", Requester{Kind: "pod", Subject: subject, IssueAssignee: "alice"})
+		if err != nil || d.Outcome != want {
+			t.Errorf("pod as %q: %+v %v, want %s", subject, d, err, want)
+		}
+	}
+	if _, err := Parse(oneSecret(
+		"{kind: pod, decision: automatic}",
+		"{kind: pod, service_account: 'system:serviceaccount:legion:worker', decision: deny}",
+	)); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("a pod entry for every account beside one for a named account: Parse = %v, want ambiguous", err)
+	}
+	unscoped, err := Parse(oneSecret("{kind: pod, decision: automatic}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d, err := unscoped.Evaluate("X", Requester{Kind: "pod", Subject: "system:serviceaccount:any:thing"}); err != nil || d.Outcome != "automatic" {
+		t.Fatalf("an entry with no service_account must still match every pod: %+v %v", d, err)
+	}
+}

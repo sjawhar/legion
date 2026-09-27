@@ -1,7 +1,8 @@
 // Package rules parses agent-secret-rules.yaml (see the AGENTC-393 overview contract) and answers
-// "what happens when this requester asks for this secret". Unknown keys, incomplete rules, and two
-// requester entries that match the same caller are refused at parse time, so a second entry can
-// never silently remove an approval requirement.
+// "what happens when this requester asks for this secret". Unknown keys, incomplete rules,
+// entries no requester could ever satisfy, and two requester entries that match the same caller
+// are refused at parse time, so a second entry can never silently remove an approval requirement
+// and a typo can never leave a rule silently dead.
 package rules
 
 import (
@@ -10,10 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sjawhar/envoy/internal/broker/dispatch"
 )
 
 var ErrUnknownSecret = errors.New("no rule names this secret")
@@ -35,9 +39,15 @@ type secretRule struct {
 type requester struct {
 	Kind     string `yaml:"kind"`
 	Operator string `yaml:"operator"`
-	Decision string `yaml:"decision"`
-	Approver string `yaml:"approver"`
+	// ServiceAccount scopes a pod entry to pods running as this Kubernetes service account
+	// (system:serviceaccount:<namespace>:<name>); empty matches every pod.
+	ServiceAccount string `yaml:"service_account"`
+	Decision       string `yaml:"decision"`
+	Approver       string `yaml:"approver"`
 }
+
+// serviceAccountSubject is the subject a projected service-account token carries.
+var serviceAccountSubject = regexp.MustCompile(`^system:serviceaccount:[a-z0-9]([-a-z0-9]*[a-z0-9])?:[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`)
 
 type proxyRule struct {
 	Scheme       string   `yaml:"scheme"`
@@ -67,14 +77,21 @@ type Requester struct {
 	Kind          string
 	Operator      string
 	IssueAssignee string
+	// Subject is a pod's verified service-account subject, matched against an entry's
+	// service_account.
+	Subject string
 }
 
 type Decision struct {
-	Outcome     string
-	Approver    string
-	Delivery    string
-	Source      string
-	MaxLifetime time.Duration
+	Outcome  string
+	Approver string
+	// NeedsAssignee reports that the matching entry wants approval from the issue's assignee;
+	// with no Requester.IssueAssignee the outcome is then deny, so a caller that has not looked
+	// the assignee up yet knows it has to.
+	NeedsAssignee bool
+	Delivery      string
+	Source        string
+	MaxLifetime   time.Duration
 }
 
 func Parse(data []byte) (*Set, error) {
@@ -119,16 +136,28 @@ func Parse(data []byte) (*Set, error) {
 			return nil, fmt.Errorf("rules: %s max_lifetime_seconds must be 1..43200", name)
 		}
 		seen := map[string]bool{}
+		requesters := make([]requester, 0, len(*r.Requesters))
+		pods, podsForAnyAccount := 0, false
 		for i, q := range *r.Requesters {
+			q.Operator = dispatch.CanonicalLogin(q.Operator)
+			q.ServiceAccount = strings.TrimSpace(q.ServiceAccount)
 			switch q.Kind {
 			case "box", "host":
 				if q.Operator == "" {
 					return nil, fmt.Errorf("rules: %s requesters[%d]: %s needs operator", name, i, q.Kind)
 				}
+				if q.ServiceAccount != "" {
+					return nil, fmt.Errorf("rules: %s requesters[%d]: service_account applies only to pod", name, i)
+				}
 			case "pod":
 				if q.Operator != "" {
 					return nil, fmt.Errorf("rules: %s requesters[%d]: pod takes no operator", name, i)
 				}
+				if q.ServiceAccount != "" && !serviceAccountSubject.MatchString(q.ServiceAccount) {
+					return nil, fmt.Errorf("rules: %s requesters[%d]: service_account must be system:serviceaccount:<namespace>:<name>, got %q", name, i, q.ServiceAccount)
+				}
+				pods++
+				podsForAnyAccount = podsForAnyAccount || q.ServiceAccount == ""
 			default:
 				return nil, fmt.Errorf("rules: %s requesters[%d]: kind must be box, host or pod", name, i)
 			}
@@ -138,20 +167,34 @@ func Parse(data []byte) (*Set, error) {
 					return nil, fmt.Errorf("rules: %s requesters[%d]: approver only with decision approval", name, i)
 				}
 			case "approval":
-				if q.Approver != "operator" && q.Approver != "issue_assignee" && !strings.HasPrefix(q.Approver, "login:") {
+				switch {
+				case q.Approver == "operator" && q.Kind == "pod":
+					return nil, fmt.Errorf("rules: %s requesters[%d]: a pod has no operator to approve; use issue_assignee or login:<name>", name, i)
+				case q.Approver == "operator", q.Approver == "issue_assignee":
+				case strings.HasPrefix(q.Approver, "login:"):
+					login := dispatch.CanonicalLogin(strings.TrimPrefix(q.Approver, "login:"))
+					if login == "" {
+						return nil, fmt.Errorf("rules: %s requesters[%d]: approver login: names nobody", name, i)
+					}
+					q.Approver = "login:" + login
+				default:
 					return nil, fmt.Errorf("rules: %s requesters[%d]: approver must be operator, issue_assignee or login:<name>", name, i)
 				}
 			default:
 				return nil, fmt.Errorf("rules: %s requesters[%d]: decision must be automatic, approval or deny", name, i)
 			}
-			key := q.Kind + "/" + q.Operator
+			key := q.Kind + "/" + q.Operator + "/" + q.ServiceAccount
 			if seen[key] {
 				return nil, fmt.Errorf("rules: %s: ambiguous requester %s matches two entries", name, key)
 			}
 			seen[key] = true
+			requesters = append(requesters, q)
+		}
+		if podsForAnyAccount && pods > 1 {
+			return nil, fmt.Errorf("rules: %s: ambiguous requester: a pod entry without service_account matches every pod another pod entry names", name)
 		}
 		set.Secrets[name] = Secret{Source: r.Source, Owner: r.Owner, Delivery: r.Delivery,
-			MaxLifetime: time.Duration(r.MaxLifetimeSeconds) * time.Second, Requesters: *r.Requesters, Proxy: r.Proxy}
+			MaxLifetime: time.Duration(r.MaxLifetimeSeconds) * time.Second, Requesters: requesters, Proxy: r.Proxy}
 	}
 	return set, nil
 }
@@ -172,17 +215,24 @@ func (s *Set) Evaluate(name string, r Requester) (Decision, error) {
 		return Decision{}, ErrUnknownSecret
 	}
 	d := Decision{Outcome: "deny", Delivery: secret.Delivery, Source: secret.Source, MaxLifetime: secret.MaxLifetime}
+	operator := dispatch.CanonicalLogin(r.Operator)
 	for _, q := range secret.Requesters {
-		if q.Kind != r.Kind || (q.Kind != "pod" && q.Operator != r.Operator) {
+		switch {
+		case q.Kind != r.Kind:
+			continue
+		case q.Kind != "pod" && q.Operator != operator:
+			continue
+		case q.Kind == "pod" && q.ServiceAccount != "" && q.ServiceAccount != r.Subject:
 			continue
 		}
 		d.Outcome = q.Decision
 		switch {
 		case q.Decision != "approval":
 		case q.Approver == "operator":
-			d.Approver = r.Operator
+			d.Approver = operator
 		case q.Approver == "issue_assignee":
-			d.Approver = r.IssueAssignee
+			d.Approver = dispatch.CanonicalLogin(r.IssueAssignee)
+			d.NeedsAssignee = true
 		default:
 			d.Approver = strings.TrimPrefix(q.Approver, "login:")
 		}

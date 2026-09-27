@@ -1,4 +1,3 @@
-// packages/envoy/internal/broker/requests/poller.go
 package requests
 
 import (
@@ -9,14 +8,17 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/dispatch"
 )
 
-type askReader interface {
+// pollerDispatch is the part of *dispatch.Client the poller uses: reading each pending request's
+// ask, and retracting the ask of a request that ended without an answer.
+type pollerDispatch interface {
 	GetAsk(ctx context.Context, id string) (dispatch.Ask, error)
+	RetractAsk(ctx context.Context, id, reason string) error
 }
 
 // launcherReconciler is launcher.Service's own Reconcile method, following the same
-// small-seam-not-concrete-type precedent as askReader above: the requests package must not import
-// launcher (it would cycle back through dispatch/enroll), so it names just the one method it
-// calls.
+// small-seam-not-concrete-type precedent as pollerDispatch above: the requests package must not
+// import launcher (it would cycle back through dispatch/enroll), so it names just the one method
+// it calls.
 type launcherReconciler interface {
 	Reconcile(ctx context.Context) error
 }
@@ -24,11 +26,10 @@ type launcherReconciler interface {
 // Poller is the one thing that moves pending requests: every interval it reads each pending row
 // from Postgres (never from memory, so a restart resumes exactly where the rows are), asks
 // Dispatch for the ask's authoritative state, and applies it. Envoy is only told afterwards.
-// Launcher, when set, is also reconciled each tick (see RunOnce) — a nil Launcher is a no-op so
-// that existing Poller literals with no Launcher field keep working unmodified.
+// Launcher, when set, is also reconciled each tick (see RunOnce).
 type Poller struct {
 	Machine  *Machine
-	Dispatch askReader
+	Dispatch pollerDispatch
 	Interval time.Duration
 	Wake     func(ctx context.Context, enrollmentID, requestID, state string)
 	Launcher launcherReconciler
@@ -98,5 +99,28 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 			}
 		}
 	}
+	p.retractEndedAsks(ctx)
 	return nil
+}
+
+// retractEndedAsks closes the Dispatch ask of every request that ended without an answer
+// (cancelled or expired), so a human is never left approving something that can no longer be
+// granted. No connection is held across a Dispatch call; an ask Dispatch cannot retract right
+// now is tried again next tick, and one already past answering is recorded as closed.
+func (p *Poller) retractEndedAsks(ctx context.Context) {
+	ended, err := p.Machine.endedAsks(ctx)
+	if err != nil {
+		slog.Warn("broker poller: list ended asks", "error", err)
+		return
+	}
+	for _, e := range ended {
+		err := p.Dispatch.RetractAsk(ctx, e.askID, "the secret request was "+e.state+"; its answer would change nothing")
+		if !dispatch.Retracted(err) {
+			slog.Warn("broker poller: retract ask", "request", e.id, "ask", e.askID, "error", err)
+			continue
+		}
+		if err := p.Machine.markAskRetracted(ctx, e.id); err != nil {
+			slog.Warn("broker poller: record ask retraction", "request", e.id, "error", err)
+		}
+	}
 }

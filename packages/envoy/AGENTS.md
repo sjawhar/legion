@@ -1132,22 +1132,32 @@ current, authoritative route list.
 `internal/broker/requests` is the state machine. A request's terminal states — `granted`,
 `denied`, `cancelled`, `expired` — are final: every transition is an `UPDATE` guarded by
 `state='pending'` inside one transaction that also writes its `audit` row, so a duplicate or late
-answer (a second poller tick, a re-delivered ask read) changes nothing. A grant's revocation is
-guarded differently: `RevokeGrant` sets `revoked_at`/`revoked_by` guarded by `revoked_at is null`,
-so `revoked_at`, once set, is never overwritten — but the guard doesn't check whether the update
-actually matched a row, so a second revoke of an already-revoked grant still returns success and
-writes a second `grant.revoked` audit row (potentially naming a different actor). A grant belongs
-to exactly one enrollment; `reuseLiveGrant()` returns a still-live grant (not revoked, not
-expired) for the exact same set of requested names as-is — no new request, no policy
-re-evaluation, no new ask. `Values()` likewise skips re-running the approval decision for a live
-grant, but it does check each requested name against the *current* rules: a name the rules no
-longer carry fails the whole release with `ErrGrantNotLive`, and a name the rules now deliver only
-by proxy is withheld from the response and returned in `proxy_only` instead. Audit rows never
-carry secret values — `audit()` takes only `kind`, `enrollment_id`, `request_id`, an optional
-`grant_id`, `actor`, and a non-secret JSON `detail`; `detail` carries things like the ask id, the
-refusal reason, or the requested secret names depending on the event, while the `actor` column
-(e.g. `human:<login>`) records who acted, including an approver. The granted value itself is read
-fresh from `secrets.Reader` when a grant is released and is never persisted.
+answer (a second poller tick, a re-delivered ask read) changes nothing. `Create` evaluates the rules
+before it calls Dispatch, so automatic and denied requests are decided while Dispatch is down;
+only a request needing an approval looks up the approving issue's assignee and the operator's
+standing issue and opens an ask, and a Dispatch failure there answers `503 DISPATCH_UNAVAILABLE`
+(or `502 DISPATCH_ERROR` when Dispatch refused the call). No pooled connection is ever held across
+a Dispatch or Secrets Manager call: a pending row is written first, the ask is opened with nothing
+held and recorded afterwards, a failed open cancels the row, and the poller cancels a pending row
+whose ask was never recorded and retracts the ask of every request that ended unanswered. An
+approval is decided by `dispatch.Verdict` (the one check `launcher` shares), which compares logins
+in Dispatch's lowercase form, and grants only while the requesting enrollment is still live.
+`RevokeGrant` lets a session end its own grants and a human end only a grant they approved or whose
+enrollment they operate (`403 NOT_APPROVER`); revoking an already-revoked grant succeeds and writes
+no second `grant.revoked` row. A grant belongs to exactly one enrollment; `reuseLiveGrant()`
+returns a still-live grant for the exact same set of requested names — no new request, no new ask
+— and `Values()` releases a live grant's values, both re-checking the grant against the current
+rules whenever they changed since it was decided: a name the rules no longer carry, deny, or an
+automatic grant the rules now want approved is refused (`GRANT_NOT_LIVE`). A name is released only
+when both its delivery frozen at grant time and its current delivery are `inject`; otherwise it is
+withheld and returned in `proxy_only`. A source missing from the secrets store is refused as
+`404 SECRET_NOT_IN_STORE` naming the secret. Audit rows never carry secret values — `audit()` takes
+only `kind`, `enrollment_id`, `request_id`, an optional `grant_id`, `actor`, and a non-secret JSON
+`detail` (always JSON-encoded, never formatted by hand); `detail` carries things like the ask id,
+the refusal reason, or the requested secret names depending on the event, while the `actor`
+column (`human:<login>`, `session:<enrollment id>`, `launcher:<credential id>` or `broker`) records
+who acted, including an approver. The granted value itself is read fresh from `secrets.Reader` when
+a grant is released and is never persisted.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
 ./cmd/agent-secrets/...`. The Postgres-backed tests skip, rather than fail, when
