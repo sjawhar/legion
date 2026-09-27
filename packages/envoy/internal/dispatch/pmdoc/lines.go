@@ -380,14 +380,14 @@ func columnOf(text []byte) int {
 // interrupts a block the browser editor's parser holds open there, other than a paragraph parent
 // holds, which goldmark names: a paragraph ending on the line before, reached across the containers
 // the line opens first, that forms no table, or an indented code block with only blank lines after
-// it. That parser
-// decides once per line whether it interrupts, from the construct it holds open, before opening the
-// containers the line starts with, and keeps indented code open to the line - except code right
-// after a list. That list stays open across the blank lines before the code and does not continue
-// its line, and that parser ends indented code at a line no open container continues, so the code
-// has ended and the line interrupts nothing (which is also why it reads a second code line there as
-// a second code block). A container opened on a line after the code, such as a typed block's
-// fence, starts a flow of its own that holds nothing open.
+// it. That parser decides once per line whether it interrupts, from the construct it holds open,
+// before opening the containers the line starts with, and keeps indented code open to the line -
+// except code right after a list, or right after a quote with no blank line between them. The list
+// stays open across the blank lines before the code, and the quote across the code's first line;
+// neither continues the line after it, and that parser ends indented code at a line no open
+// container continues, so the code has ended and the line interrupts nothing (which is also why it
+// reads a second code line there as a second code block). A container opened on a line after the
+// code, such as a typed block's fence, starts a flow of its own that holds nothing open.
 func interruptsOpenBlock(parent ast.Node, source []byte, start int) bool {
 	previous := parent.LastChild()
 	opensContainers := previous == nil
@@ -404,7 +404,15 @@ func interruptsOpenBlock(parent ast.Node, source []byte, start int) bool {
 		last := previous.Lines().At(previous.Lines().Len() - 1)
 		return bytes.Count(source[last.Start:start], []byte("\n")) <= 1
 	case *ast.CodeBlock:
-		if _, afterList := previous.PreviousSibling().(*ast.List); afterList || previous.Lines().Len() == 0 {
+		switch previous.PreviousSibling().(type) {
+		case *ast.List:
+			return false
+		case *ast.Blockquote:
+			if !previous.HasBlankPreviousLines() {
+				return false
+			}
+		}
+		if previous.Lines().Len() == 0 {
 			return false
 		}
 		last := previous.Lines().At(previous.Lines().Len() - 1)
