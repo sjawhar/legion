@@ -706,10 +706,11 @@ export interface Suggestion {
  * lacks the text the accept wrote: a concurrent browser change removed it after the accept's
  * version was rendered and before the write reached the room, which is past undoing (LEGION-269).
  * A loss inside the earlier window is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` instead, and leaves the
- * suggestion open. Absent from a Dispatch server predating the check.
+ * suggestion open. `null` is a check that reached no verdict, which is not the same statement as
+ * `false`; `undefined` is a Dispatch server predating the check.
  */
 export interface AcceptSuggestionResponse extends Comment {
-  readonly lost?: boolean;
+  readonly lost?: boolean | null;
 }
 
 /**

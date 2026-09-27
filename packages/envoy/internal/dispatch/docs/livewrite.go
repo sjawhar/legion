@@ -341,6 +341,12 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 // durable and the version written - so the verdict rides the caller's response instead
 // (Ledger.LostOps).
 //
+// A write that inserted no text reaches the verdict too, an empty one: a delete, a replace that
+// only shortens, a retype, an operation that changed nothing - none of them wrote anything a
+// concurrent change could remove, so "nothing was lost" is a statement this can make without
+// reading the room, and it is the one those edits deserve. Only a publish that failed leaves no
+// verdict, which the caller reports as undetermined.
+//
 // The read is a point-in-time statement, as the spec says it must be: srv.Apply holds no room
 // lock across its callback, so a deletion landing after it is not reported, and a deletion
 // landing before it is. It is deliberately taken without a Yjs transaction of its own: an empty
@@ -348,6 +354,7 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 // ygo's persistence worker - a durable doc_updates row - on every edit.
 func (s *Service) recordPublishedLoss(write *liveWrite) {
 	if write.loss == nil {
+		write.lost, write.lostVerdict = nil, true
 		return
 	}
 	doc := s.srv.GetDoc(write.artifactID)

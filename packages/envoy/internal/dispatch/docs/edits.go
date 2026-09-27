@@ -368,33 +368,38 @@ type editBatch struct {
 	// batch - every insertion is that operation's, with nothing to diff - from the rest.
 	operations int
 	written    []operationWrite
-	// priorIDs are the block ids the document held before the batch, which is how a block the
-	// batch created is told from one it changed.
-	priorIDs map[string]struct{}
 }
 
-// operationWrite is one operation's W: the blocks whose own inline content it wrote, plus a count
-// of the blocks it wrote that had no id yet, which only the caller's EnsureBlockIDs can name.
+// operationWrite is one operation's W: the blocks whose own inline content it wrote. A block the
+// batch created without an id of its own is not one: EnsureBlockIDs stamps the tree before the
+// write, so every block the update reaches carries an id, and a block that still has none holds
+// no text a caller could address (editBatch.writes attributes it to the batch).
 type operationWrite struct {
-	ids     []string
-	unnamed int
+	ids []string
 }
 
 // writes resolves each operation's W: which of the blocks the write actually inserted text into
 // (candidates, read from the Yjs update the batch made) each operation wrote. It runs after the
-// caller's EnsureBlockIDs, which is where a block an operation created without an id gets one;
-// those are the ids the stamped tree holds that the document did not and no operation claims.
+// caller's EnsureBlockIDs, which is where a block an operation created without an id gets one.
 //
 // A one-operation batch needs no diff at all: every run that operation's own update inserted is
 // that operation's, whichever block it landed in. That is the case the uncontended path pays for,
 // so the batch does not walk the tree for it (applyOperationsWithValidation).
+//
+// Every candidate is attributed, including the ones no operation's own text change claims. A
+// batch writes one Yjs update, and pmdoc.Update rewrites a block it passes over in place when an
+// operation inserts or removes a block above it - that untouched paragraph's text is re-inserted
+// under the same block id, and a concurrent deletion can take it exactly as it takes an
+// operation's own. Nothing in the batch can say which operation caused a collateral rewrite, and
+// the batch is atomic, so each such block belongs to every operation: dropping it instead would
+// let the paragraph vanish while the edit answered success, which is the report this whole check
+// exists to prevent.
 func (b editBatch) writes(candidates map[string]struct{}) []map[string]struct{} {
 	if b.operations == 1 {
 		return []map[string]struct{}{candidates}
 	}
 	written := make([]map[string]struct{}, len(b.written))
 	claimed := map[string]struct{}{}
-	unnamed := false
 	for index, write := range b.written {
 		written[index] = make(map[string]struct{}, len(write.ids))
 		for _, id := range write.ids {
@@ -404,34 +409,12 @@ func (b editBatch) writes(candidates map[string]struct{}) []map[string]struct{} 
 			written[index][id] = struct{}{}
 			claimed[id] = struct{}{}
 		}
-		unnamed = unnamed || write.unnamed > 0
 	}
-	if !unnamed {
-		return written
-	}
-	var stamped []string
-	pmdoc.Walk(b.tree, func(node *pmdoc.Node) bool {
-		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
-		if id == "" {
-			return true
-		}
-		if _, wanted := candidates[id]; !wanted {
-			return true
-		}
-		if _, held := b.priorIDs[id]; held {
-			return true
-		}
+	for id := range candidates {
 		if _, named := claimed[id]; named {
-			return true
-		}
-		stamped = append(stamped, id)
-		return true
-	})
-	for index, write := range b.written {
-		if write.unnamed == 0 {
 			continue
 		}
-		for _, id := range stamped {
+		for index := range written {
 			written[index][id] = struct{}{}
 		}
 	}
@@ -476,14 +459,9 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 	// batch's input. A walk of a thousand-block tree per operation is real work on the
 	// uncontended path, and a one-operation batch needs none of it (editBatch.writes).
 	tellOperationsApart := len(ops) > 1
-	var priorIDs map[string]struct{}
 	var blockText map[string]string
 	if tellOperationsApart {
 		blockText = pmdoc.BlockText(tree)
-		priorIDs = make(map[string]struct{}, len(blockText))
-		for id := range blockText {
-			priorIDs[id] = struct{}{}
-		}
 	}
 	for index, op := range ops {
 		if removal, alreadyRemoved := removed[op.Block]; op.Block != "" && alreadyRemoved {
@@ -512,7 +490,7 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 			unchanged = append(unchanged, index)
 		}
 		if tellOperationsApart {
-			written[index].ids, written[index].unnamed, blockText = pmdoc.BlocksGainingText(blockText, next)
+			written[index].ids, _, blockText = pmdoc.BlocksGainingText(blockText, next)
 		}
 		for _, blockID := range removedIDs {
 			removed[blockID] = batchRemoval{
@@ -529,7 +507,6 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 		unchanged:  unchanged,
 		operations: len(ops),
 		written:    written,
-		priorIDs:   priorIDs,
 	}, nil
 }
 

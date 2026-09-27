@@ -415,3 +415,99 @@ func TestABatchNamesOnlyTheOperationsWhoseTextWentMissing(t *testing.T) {
 		t.Fatalf("lost operations = %v, want %v: only the second operation's paragraph went", lost.Ops, want)
 	}
 }
+
+// pmdoc.Update rewrites a block it passes over in place when an operation inserts or removes a
+// block above it, so a batch's own update re-inserts the text of paragraphs no operation names -
+// and a concurrent deletion takes that text exactly as it takes an operation's own. The batch
+// wrote it, so the batch answers for it: the paragraph must not vanish while the edit reports
+// success (Rev1468, P1-b).
+func TestABatchAnswersForTheBlocksItsUpdateRewroteInPassing(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		ops     []model.EditOp
+		deletes string
+		gone    string
+	}{
+		{
+			name: "an insert above the edited paragraph",
+			ops: []model.EditOp{
+				{Op: "insert", Before: "start", Markdown: "Zero paragraph.\n"},
+				{Op: "replace", Find: "Charlie paragraph.", With: "Charlie paragraph edited."},
+			},
+			deletes: "Bravo paragraph.",
+			gone:    "Alpha paragraph.",
+		},
+		{
+			name: "a delete above the edited paragraph",
+			ops: []model.EditOp{
+				{Op: "delete", Find: "Alpha paragraph."},
+				{Op: "replace", Find: "Charlie paragraph.", With: "Charlie paragraph edited."},
+			},
+			deletes: "Alpha paragraph.",
+			gone:    "Bravo paragraph.",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "Alpha paragraph.\n\nBravo paragraph.\n\nCharlie paragraph.\n")
+			edit := startEditInFlight(t, service, artifactID, test.ops...)
+			edit.browserWrites(t, withoutTopLevelBlock(test.deletes))
+
+			_, err := service.SnapshotVersion(edit.ctx, artifactID, lostEditAgent)
+			var lost *ErrEditLost
+			if !errors.As(err, &lost) {
+				t.Fatalf("snapshot = %v, want the batch refused: its own update rewrote %q, and the browser's deletion took it", err, test.gone)
+			}
+			if len(lost.Ops) == 0 {
+				t.Fatalf("refusal names no operation: %v", lost)
+			}
+
+			// Nothing of the refused batch survives, and the paragraph the rewrite would have
+			// taken is still in the document.
+			edit.ledger.Discard()
+			if err := edit.tx.Rollback(context.Background()); err != nil {
+				t.Fatalf("roll back: %v", err)
+			}
+			live, err := service.Text(context.Background(), artifactID)
+			if err != nil {
+				t.Fatalf("read live document: %v", err)
+			}
+			if !strings.Contains(live, test.gone) {
+				t.Fatalf("live document = %q, want %q still in it", live, test.gone)
+			}
+		})
+	}
+}
+
+// An edit that inserts nothing - a delete, a replace that only shortens, a retype - has nothing a
+// concurrent change could remove, so it reaches the empty verdict rather than leaving the caller
+// unable to tell survival from an unanswered check (Rev1468, P1-a).
+func TestAnEditThatInsertsNothingStillReachesAVerdict(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		op   model.EditOp
+	}{
+		{name: "a delete", op: model.EditOp{Op: "delete", Find: "Alpha paragraph."}},
+		{name: "a shortening replace", op: model.EditOp{Op: "replace", Find: "Alpha paragraph.", With: "Alpha"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := lostEditService(t)
+			edit := startEditInFlight(t, service, artifactID, test.op)
+			if _, err := service.SnapshotVersion(edit.ctx, artifactID, lostEditAgent); err != nil {
+				t.Fatalf("snapshot: %v", err)
+			}
+			if err := edit.ledger.commit(context.Background()); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			edit.ledger.publish()
+			lost, known := edit.ledger.LostOps(artifactID)
+			if !known {
+				t.Fatalf("no verdict for %s, want the empty one: it inserted nothing to lose", test.name)
+			}
+			if len(lost) != 0 {
+				t.Fatalf("verdict = %v, want nothing lost", lost)
+			}
+		})
+	}
+}
