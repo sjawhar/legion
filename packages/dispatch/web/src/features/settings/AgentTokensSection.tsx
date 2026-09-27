@@ -80,7 +80,7 @@ export function AgentTokensSection(): ReactNode {
   };
 
   return (
-    <section aria-labelledby="agent-tokens-heading" className="mt-10">
+    <section aria-labelledby="agent-tokens-heading">
       <h2 className={`text-xl font-semibold ${textPrimaryOnCanvas}`} id="agent-tokens-heading">
         Agent tokens
       </h2>

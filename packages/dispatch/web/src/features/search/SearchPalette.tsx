@@ -317,6 +317,7 @@ export function SearchPalette({
                         muted ? textMutedOnSurfaceMuted : ""
                       }`}
                       data-status={header.status}
+                      id={`search-group-${header.id}`}
                       role="presentation"
                     >
                       <span className="font-semibold">{header.key}</span>
@@ -335,24 +336,35 @@ export function SearchPalette({
                         </span>
                       )}
                     </div>
-                    {ownerResults.map((result) => (
-                      <ResultOption
-                        active={result === activeResult}
-                        muted={muted}
-                        key={optionId(result)}
-                        onSelect={() => navigateToResult(result)}
-                        result={result}
-                      />
-                    ))}
+                    {/* The hits of one owner are a group named by the row above them, so a
+                        reader who cannot see that row still hears which issue or document a
+                        hit belongs to. The options stay direct children of the group and the
+                        listbox's own arrow navigation is untouched. A `fieldset` carries the
+                        group role implicitly; `min-w-0` overrides its UA `min-inline-size:
+                        min-content`, which a long hit would otherwise widen the palette to. */}
+                    <fieldset aria-labelledby={`search-group-${header.id}`} className="min-w-0">
+                      {ownerResults.map((result) => (
+                        <ResultOption
+                          active={result === activeResult}
+                          muted={muted}
+                          key={optionId(result)}
+                          onSelect={() => navigateToResult(result)}
+                          result={result}
+                        />
+                      ))}
+                    </fieldset>
                   </Fragment>
                 );
               })}
             </div>
           )}
-          {/* The palette is a keyboard surface and never said so: the keys that drive it now
-              sit at its foot, quieter than any hit above them. */}
+          {/* The palette is a keyboard surface and never said so: the keys that drive it sit
+              at its foot, quieter than any hit above them - and only where there is a pointer
+              that can hover, since a touch reader has none of these keys and the row would
+              cost them 33px of hits. */}
           <div
-            className={`flex flex-wrap items-center gap-x-3 gap-y-1 border-t px-3 py-2 text-xs ${borderDefault} ${textMutedOnSurface}`}
+            className={`hidden flex-wrap items-center gap-x-3 gap-y-1 border-t px-3 py-2 text-xs pointer-fine:flex ${borderDefault} ${textMutedOnSurface}`}
+            data-testid="search-keyboard-hints"
           >
             <span className="inline-flex items-center gap-1">
               <kbd className={`rounded px-1 py-0.5 font-medium ${kbdHint}`}>↑</kbd>
