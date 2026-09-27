@@ -398,7 +398,11 @@ seed, and with neither, with no credential. Keep it out of the providers Secret,
 mounts: in-cluster, put it in a Secret of its own, mounted into the daemon's pod alone with
 `defaultMode: 0440` (on a host, a 0600 file the daemon's uid owns), and name that file in
 `nats_daemon_nkey_seed_file`. No launch carries it, and a tmux pane's environment drops its
-variables with every other credential-shaped name. At boot the daemon logs, once, `legion daemon
+variables with every other credential-shaped name. Every command the daemon itself starts (git and
+jj in a managed repository's checkout, `mise where`, a key command) runs without
+`NATS_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED`, so a seed passed by value never reaches a repository's
+tooling; still, prefer the file forms (`nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, or the
+`_FILE` variables), since a value stays in the daemon's own process environment. At boot the daemon logs, once, `legion daemon
 connects to NATS` with `user=U…` (the public key, never the seed), `paneUser=true|false`, and
 `seed=daemon|pane|none`. `legion start --check-config` reads it as boot does and adds
 `nats-daemon-nkey-user=U…` to its OK line. Every permission the server refuses the daemon's

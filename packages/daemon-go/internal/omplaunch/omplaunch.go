@@ -67,7 +67,9 @@ func ResolveInvocation(invocation string, env func(string) string) (string, erro
 // activated bin. The pane still runs through `mise x` for the tool's declared environment, but it
 // names this executable directly, so its binary and the boot probe's binary cannot diverge.
 func resolveMiseOmp(mise, tool string) (string, error) {
-	output, err := exec.Command(mise, "where", tool).Output()
+	where := exec.Command(mise, "where", tool)
+	where.Env = runtime.WithoutNATSSeeds(os.Environ())
+	output, err := where.Output()
 	if err != nil {
 		return "", fmt.Errorf("mise could not resolve OMP tool %s: %w", tool, err)
 	}

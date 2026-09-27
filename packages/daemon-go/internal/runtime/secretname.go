@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -20,4 +21,21 @@ func IsSecretLikeName(name string) bool { return secretLikeName.MatchString(name
 // operator's pod env refuse such a name, since a secret reaches the process as a file.
 func HoldsSecretValue(name string) bool {
 	return IsSecretLikeName(name) && !strings.HasSuffix(name, "_FILE")
+}
+
+// natsSeedVariables are the variables a process holds a NATS nkey seed's value in: the pane seed's
+// and the daemon's own (natsauth.SeedVariable, natsauth.DaemonSeedVariable).
+var natsSeedVariables = []string{"NATS_NKEY_SEED", "NATS_DAEMON_NKEY_SEED"}
+
+// WithoutNATSSeeds is environ, in os.Environ() form, less the variables holding a NATS nkey seed's
+// value. Every command the daemon starts — git and jj in a managed repository's checkout, `mise
+// where`, a key command — runs under it, so a seed the operator hands the daemon as a value never
+// reaches that command or the repository tooling it runs. The `_FILE` pointers stay: they name a
+// file, which the daemon's uid alone may read, and a command given the path gains nothing it could
+// not already open.
+func WithoutNATSSeeds(environ []string) []string {
+	return slices.DeleteFunc(slices.Clone(environ), func(entry string) bool {
+		name, _, _ := strings.Cut(entry, "=")
+		return slices.Contains(natsSeedVariables, name)
+	})
 }
