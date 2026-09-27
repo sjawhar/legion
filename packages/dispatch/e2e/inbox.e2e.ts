@@ -226,14 +226,32 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
   });
 
   try {
+    const streamResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/events"
+    );
     const reloaded = page.reload();
-    await listRequested.promise;
+    // A reload is a cold client: the server starts its stream at the current head and replays
+    // nothing. Posting the hidden reply before that stream is open means the frame never
+    // reaches the page, no pending marker is ever set, and everything below passes without
+    // testing anything. Wait for the stream as the sibling above does.
+    await Promise.all([listRequested.promise, streamResponse]);
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
-    await page.waitForTimeout(150);
+    // The held Inbox response must not land until the browser has handled the hidden ask's
+    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on;
+    // a reply posted after it on the visible ask does. Event ids are delivered in order, so
+    // the marker appearing proves the frame before it was processed.
+    await createComment(
+      visibleIssue.key,
+      { ask_id: visibleAsk.id, body: "Ordering marker." },
+      session
+    );
+    await expect(
+      page.getByTestId(`ask-${visibleAsk.id}`).getByText("Ordering marker.")
+    ).toBeVisible();
     releaseList.resolve();
     await reloaded;
 
@@ -1032,7 +1050,9 @@ for (const refusal of [
       // Inbox the whole width) and on the line below when it is not (a phone). Asserting
       // "below" pinned one of those two layouts and went red on the other.
       const key = await page.locator("[data-inbox-owner]").first().boundingBox();
-      const alert = await retry.boundingBox();
+      // The refusal itself, not its Retry: the alert is the wide thing, and measuring the
+      // narrow control inside it checked something the assertion does not claim.
+      const alert = await row.getByRole("alert").boundingBox();
       expect(key).not.toBeNull();
       expect(alert).not.toBeNull();
       const overlaps =
