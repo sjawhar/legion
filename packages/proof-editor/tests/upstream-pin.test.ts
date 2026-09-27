@@ -5,14 +5,23 @@
  * editor modules until a browser renders a document with them, and a stale declaration is a
  * shape tsc believes and the runtime does not have.
  *
- * Each fix case below is one member of that line, read where it lives, because none of them has
- * an exported seam a unit test could call. A cut that loses one — the first cut of the cleaned
- * line lost the cursor label — passes every other check in the repository.
+ * Each fix case below is one member of that line. The proof-mark rendering fix is checked by
+ * running the pinned modules: each mark rendered from the schema the headless engine builds, and
+ * the marks plugin drawing a replacement in a real (happy-dom) view. The Dark Reader fix has no
+ * exported seam a unit test could call, so it is read where it lives. A cut that loses one passes
+ * every other check in the repository.
  */
 
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Ctx } from "@milkdown/kit/ctx";
+import { EditorState } from "@milkdown/kit/prose/state";
+import { EditorView } from "@milkdown/kit/prose/view";
+import { Window } from "happy-dom";
+import { applyRemoteMarks, marksPlugin } from "proof-sdk-upstream/src/editor/plugins/marks";
+import type { StoredMark } from "proof-sdk-upstream/src/formats/marks";
+import { createHeadlessProof } from "../src/lib-headless.js";
 
 const upstreamSrc = join(import.meta.dir, "..", "node_modules", "proof-sdk-upstream", "src");
 
@@ -30,24 +39,105 @@ test("the pinned dependency carries the Dark Reader fix", () => {
   expect(cursors).toContain("proof-collab-selection--");
 });
 
-test("the pinned dependency keeps the collaboration cursor label inline", () => {
-  // A block label lets a browser move a post-update text selection into the cursor decoration,
-  // which interrupts local typing after a remote edit.
-  const cursors = readFileSync(join(upstreamSrc, "editor/plugins/collab-cursors.ts"), "utf8");
-  expect(cursors).toContain("const label = document.createElement('span');");
-  expect(cursors).toContain("label.contentEditable = 'false';");
-  expect(cursors).not.toContain("const label = document.createElement('div');");
+test("the pinned dependency renders every proof mark with its data attributes only", async () => {
+  // Upstream's attribute slices default to `{ id: {}, by: {} }` and each mark's toDOM spreads
+  // them onto the span, which renders id="[object Object]" beside the real data-id.
+  const { schema } = await createHeadlessProof();
+  const samples: Array<[string, Record<string, string>, Record<string, string>]> = [
+    [
+      "proofSuggestion",
+      { by: "ai:tester", id: "m-1", kind: "replace" },
+      { "data-kind": "replace" },
+    ],
+    ["proofComment", { by: "human:tester", id: "m-2" }, {}],
+    ["proofFlagged", { by: "human:tester", id: "m-3" }, {}],
+    ["proofApproved", { by: "human:tester", id: "m-4" }, {}],
+  ];
+  for (const [name, attrs, extra] of samples) {
+    const type = schema.marks[name];
+    if (type === undefined) throw new Error(`the editor schema has no ${name} mark`);
+    const rendered: unknown = type.spec.toDOM?.(type.create(attrs), true);
+    if (!Array.isArray(rendered)) throw new Error(`${name} renders no DOM output spec`);
+    const proof = name.slice("proof".length).toLowerCase();
+    expect({ mark: name, attrs: rendered[1] }).toEqual({
+      mark: name,
+      attrs: { "data-by": attrs.by, "data-id": attrs.id, "data-proof": proof, ...extra },
+    });
+  }
+  const authored = schema.marks.proofAuthored;
+  if (authored === undefined) throw new Error("the editor schema has no proofAuthored mark");
+  const rendered: unknown = authored.spec.toDOM?.(
+    authored.create({ by: "human:tester", id: "m-5" }),
+    true
+  );
+  if (!Array.isArray(rendered)) throw new Error("proofAuthored renders no DOM output spec");
+  expect(rendered[1]).toEqual({
+    "data-by": "human:tester",
+    "data-proof": "authored",
+    "data-proof-id": "m-5",
+  });
 });
 
-test("the pinned dependency renders replacement suggestions", () => {
-  // The suggestion mark's DOM attributes have to stay primitive: spreading the ctx attrs put
-  // "[object Object]" on the span. And the replace-insert widget is keyed by its replacement,
-  // so a changed replacement redraws instead of keeping the first content it rendered.
-  const proofMarks = readFileSync(join(upstreamSrc, "editor/schema/proof-marks.ts"), "utf8");
-  expect(proofMarks).not.toContain("const attrs = ctx.get(proofSuggestionAttr.key)(mark);");
+test("the pinned dependency redraws a replacement revised on a viewer's page", async () => {
+  // A viewer who cannot edit receives marks with `hydrateAnchors: false`, which never touches
+  // the document. The replace-insert widget must still show the revised replacement, which it
+  // does only when its key changes with the replacement.
+  const { schema } = await createHeadlessProof();
+  const suggestion = schema.marks.proofSuggestion;
+  if (suggestion === undefined) throw new Error("the editor schema has no proofSuggestion mark");
+  const window = new Window();
+  // Put back exactly what was there: a key Bun never defined is deleted, not left as undefined,
+  // because src/tests/headless-no-dom.test.ts asserts `!("document" in globalThis)`.
+  const previous = (["document", "window"] as const).map(
+    (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const
+  );
+  Object.assign(globalThis, { document: window.document, window });
+  try {
+    // `$prose` hands the ProseMirror plugin back once its Milkdown wrapper has run; the marks
+    // factory ignores its context, so one that answers `$prose`'s wait and update is enough.
+    const proseContext = {
+      update: (_slice: unknown, updater: (plugins: unknown[]) => unknown[]) => void updater([]),
+      wait: async () => undefined,
+    } as unknown as Ctx;
+    await marksPlugin(proseContext)();
+    const doc = schema.node("doc", null, [
+      schema.node("paragraph", null, [
+        schema.text("The "),
+        schema.text("quick brown", [
+          suggestion.create({ by: "ai:tester", id: "replace-1", kind: "replace" }),
+        ]),
+        schema.text(" fox"),
+      ]),
+    ]);
+    const mount = window.document.body.appendChild(window.document.createElement("div"));
+    const view = new EditorView(mount as unknown as HTMLElement, {
+      state: EditorState.create({ doc, plugins: [marksPlugin.plugin()], schema }),
+    });
+    // Older than the marks plugin's 2 s glow window, so its class does not force a redraw.
+    const createdAt = new Date(Date.now() - 60_000).toISOString();
+    const replacement = (content: string): Record<string, StoredMark> => ({
+      "replace-1": {
+        by: "ai:tester",
+        content,
+        createdAt,
+        kind: "replace",
+        quote: "quick brown",
+        status: "pending",
+      },
+    });
 
-  const marks = readFileSync(join(upstreamSrc, "editor/plugins/marks.ts"), "utf8");
-  expect(marks).toMatch(/key: `replace-insert-\$\{mark\.id\}-\$\{replacementContent\}`/);
+    applyRemoteMarks(view, replacement("slow red"), { hydrateAnchors: false });
+    expect(view.dom.querySelector(".mark-replace-insert")?.textContent).toBe("slow red");
+    applyRemoteMarks(view, replacement("slow blue"), { hydrateAnchors: false });
+    expect(view.dom.querySelector(".mark-replace-insert")?.textContent).toBe("slow blue");
+    view.destroy();
+  } finally {
+    for (const [key, descriptor] of previous) {
+      if (descriptor === undefined) Reflect.deleteProperty(globalThis, key);
+      else Object.defineProperty(globalThis, key, descriptor);
+    }
+    await window.happyDOM.close();
+  }
 });
 
 // The timeout is explicit because the case spawns tsc over the whole upstream closure — two
