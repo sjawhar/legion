@@ -9,26 +9,50 @@ import "strings"
 // (opensAfterParagraph), or the list ends in no paragraph it would continue (endsInParagraph), and
 // either a single blank line would spread what it spaces, or the list stands in a typed block in
 // a footnote definition outside quotes, where the browser editor reads any blank line after it as
-// spreading its last item (spacedAfter), and that item is not spread already, or the list stands in
-// a quote and ends in a footnote definition (endsInDefinition), or, inside a list item, the list ends in an empty item, at a blank line after which
-// goldmark ends the list item around it or a quote the list stands in (emptyItemEndsOuterItem).
+// spreading its last item (spacedAfter), and that item is not spread already, or, inside a list
+// item, the list ends in an empty item, at a blank line after which goldmark ends the list item
+// around it or a quote the list stands in (emptyItemEndsOuterItem). In a quote a list ending in a
+// footnote definition takes the definition's count (blanksAfterDefinitionItem).
 // exact reports whether the count is one of those two; the one blank line everywhere else spaces
 // nothing, so a list item may write none instead.
 func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
+	if r.quoteDepth > 0 && !r.inFootnote && endsInDefinition(list) {
+		return r.blanksAfterDefinitionItem(list.Children[len(list.Children)-1], next), true
+	}
 	spaced, spacing := r.spacingAfterList(list, next)
 	typedInFootnote := r.inFootnote && r.typed != nil && r.quoteDepth == 0
 	switch {
 	case spaced != nil && spaced.Attrs["spread"] == true:
 		return spacing, true
-	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && spacing == 1 || typedInFootnote && spacedAfter(list, false).Attrs["spread"] != true || r.itemDepth > 0 && endsInEmptyItem(list) || r.quoteDepth > 0 && endsInDefinition(list)):
+	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && spacing == 1 || typedInFootnote && spacedAfter(list, false).Attrs["spread"] != true || r.itemDepth > 0 && endsInEmptyItem(list)):
 		return 0, true
 	default:
 		return 1, false
 	}
 }
 
+// blanksAfterDefinitionItem is how many blank lines follow item, in a list in a quote, where it
+// ends in a footnote definition, before next, the next item or the block after the list: those
+// lines are the definition's (definitionEndSpreadsItem), so an item spread by none of its own
+// lines takes one before a quote, a list or a definition after the list and two before anything
+// else, and none spreads the list. Otherwise it takes none before such a container and before
+// the next item, and one before anything else, which would continue the definition's paragraph.
+func (r *renderer) blanksAfterDefinitionItem(item, next *Node) int {
+	container := next != nil && (next.Type == "blockquote" || next.Type == "footnote_definition" || isList(next)) && next.Type != "list_item"
+	if item.Attrs["spread"] == true && !spreadByItsOwnLines(item, true, r.itemDepth > 0) {
+		if container {
+			return 1
+		}
+		return 2
+	}
+	if container || next == nil || next.Type == "list_item" {
+		return 0
+	}
+	return 1
+}
+
 // endsInDefinition reports whether list's last item ends in a footnote definition, whose blank lines
-// after it, in a quote, this parser cannot read (blankAfterDefinitionItem).
+// after it, in a quote, are the definition's (blanksAfterDefinitionItem).
 func endsInDefinition(list *Node) bool {
 	last := list.Children[len(list.Children)-1]
 	return last.Children[len(last.Children)-1].Type == "footnote_definition"
@@ -108,6 +132,10 @@ func spacedAfter(list *Node, quoted bool) *Node {
 	switch inner := last.Children[len(last.Children)-1]; {
 	case isList(inner):
 		return spacedAfter(inner, quoted)
+	case quoted && inner.Type == "footnote_definition":
+		// The blank lines after an item ending in a footnote definition are the definition's,
+		// and spread the item (definitionEndSpreadsItem).
+		return last
 	case quoted:
 		return list
 	default:

@@ -105,7 +105,7 @@ func TestFixturesAreWithinSchema(t *testing.T) {
 		"explicit-url-title",
 		"footnote-block-indents", "footnote-ending-in-a-block-in-an-item", "footnote-ending-in-a-block", "footnote-placement", "footnote-unreferenced", "footnote", "frontmatter-empty", "frontmatter-fence-whitespace", "frontmatter-long-fence", "frontmatter", "heading-line-breaks", "headings", "hr", "html", "image-alt-line-ends", "image-delimiters", "image",
 		"inline-code-backticks", "inline-code-spaces", "link-delimiters", "links", "list-spacing-in-containers", "lists", "long",
-		"marks", "nested-code", "nested-empty-items", "ordered-list-prefixes", "paragraphs", "softbreak", "tab-indented-list-markers", "table", "task-markers", "tasks",
+		"marks", "nested-code", "nested-empty-items", "ordered-list-prefixes", "paragraphs", "quoted-definition-items", "softbreak", "tab-indented-list-markers", "table", "task-markers", "tasks",
 		"unicode",
 	}
 	if len(fixtures) != len(wantNames) {

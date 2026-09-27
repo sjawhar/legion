@@ -444,7 +444,13 @@ func (r *renderer) list(n *Node, prefix string) {
 		}
 		if index > 0 {
 			r.writeSyntax("\n" + prefix)
-			if r.writesBlankAfterItem(n, n.Children[index-1]) {
+			blanks := 0
+			if previous := n.Children[index-1]; r.quoteDepth > 0 && !r.inFootnote && previous.Children[len(previous.Children)-1].Type == "footnote_definition" {
+				blanks = r.blanksAfterDefinitionItem(previous, item)
+			} else if r.writesBlankAfterItem(n, previous) {
+				blanks = 1
+			}
+			for range blanks {
 				r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + prefix)
 			}
 		}

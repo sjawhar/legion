@@ -713,7 +713,9 @@ lines after its last item, one before a quote or a list (or anything, in a typed
 quote) and two before anything else; blank lines after an item that ends in a quote or a list are
 that block's, and in a quote those after a footnote definition an item holds are the definition's -
 one spreads the item only before a quote, a list or a definition, and two before anything
-(`definitionBlanksInQuote`); and a quote and a footnote definition together mix the two
+(`definitionBlanksInQuote`), the same after an item ending in one, where the next item and the
+quote's end count as anything, and none spreads the list (`definitionEndSpreadsItem`,
+`blanksAfterDefinitionItem`); and a quote and a footnote definition together mix the two
 (`footnotedQuoteListSpread`). A blank line after a fenced code block no fence closed is the code's
 and spreads nothing, even where the code's text drops it, unless a quote between ends at it
 (`keepsBlankLinesAfter`). The renderer writes each spacing so that it reads back

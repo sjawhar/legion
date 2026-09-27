@@ -270,9 +270,6 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 			return typedFootnoteListBlank
 		}
 	}
-	if quoted && blankAfterDefinitionItem(list, lines) {
-		return "a blank line after a list item that ends in a footnote definition, in a quote, which the browser editor reads as spacing the item by what follows it"
-	}
 	switch {
 	case typed && footnoted:
 		// A list with a typed block and a footnote definition around it, whatever quotes stand
@@ -304,7 +301,7 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 			return reason
 		}
 		setSpread(list, spread, func(item ast.Node) bool {
-			return blankBetweenBlocksBut(item, anyBlock, definitionBlanksInQuote(list, lines))
+			return blankBetweenBlocksBut(item, anyBlock, definitionBlanksInQuote(list, lines)) || definitionEndSpreadsItem(item, list, quote, lines)
 		})
 	case footnoted:
 		setSpread(list, false, func(item ast.Node) bool {
@@ -332,28 +329,38 @@ func definitionBlanksInQuote(list ast.Node, lines sourceLines) func(ast.Node) bo
 	}
 }
 
-// blankAfterDefinitionItem reports whether a blank line at the list's quote depth follows an item
-// of list that ends in a footnote definition: the blank lines are the definition's, which the
-// browser editor reads as spacing the item by what follows.
-func blankAfterDefinitionItem(list *ast.List, lines sourceLines) bool {
+// definitionEndSpreadsItem reports whether the blank lines after item, in a list in quote, spread
+// it as the browser editor's parser reads them where item ends in a footnote definition: they are
+// the definition's, so one spreads the item before a quote, a list or a definition after the list,
+// two spread it before anything - the next item and the end of the quote as well - and neither
+// spreads the list (quotedListSpread).
+func definitionEndSpreadsItem(item ast.Node, list *ast.List, quote ast.Node, lines sourceLines) bool {
+	if !itemEndsInDefinition(item) {
+		return false
+	}
 	depth := quoteDepth(list)
 	blank := quoteBlankLineAt(depth)
-	outer := func(line []byte) bool {
-		return whitespaceLine(line) || quoteBlankLine(line) && bytes.Count(line, []byte(">")) < depth
+	if next := item.NextSibling(); next != nil {
+		return lines.blanksBefore(startOf(next), blank) >= 2
 	}
-	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
-		if _, definition := item.LastChild().(*extensionast.Footnote); !definition {
-			continue
-		}
-		next := item.NextSibling()
-		if next == nil {
-			next = nextBlock(list)
-		}
-		if lines.blanksEnding(next, outer, blank) > 0 {
-			return true
-		}
+	next := nextBlock(list)
+	if next == nil || !isAncestor(quote, next) {
+		return lines.blanksEnding(next, func(line []byte) bool {
+			return whitespaceLine(line) || quoteBlankLine(line) && bytes.Count(line, []byte(">")) < depth
+		}, blank) >= 2
 	}
-	return false
+	blanks := lines.blanksBefore(startOf(next), blank)
+	switch next.(type) {
+	case *ast.Blockquote, *ast.List, *extensionast.Footnote:
+		return blanks >= 1
+	}
+	return blanks >= 2
+}
+
+// itemEndsInDefinition reports whether item's last block is a footnote definition.
+func itemEndsInDefinition(item ast.Node) bool {
+	_, definition := item.LastChild().(*extensionast.Footnote)
+	return definition
 }
 
 // typedFootnoteListBlank is the refusal of a blank line at or after a list in a typed block in a
@@ -393,14 +400,15 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 	}
 	for item := list.FirstChild(); item.NextSibling() != nil; item = item.NextSibling() {
 		next := item.NextSibling()
-		if blankBefore(next) && !endsWithList(item) && lines.blanksBefore(startOf(next), blank) >= least(item) {
+		if blankBefore(next) && !endsWithList(item) && !itemEndsInDefinition(item) && lines.blanksBefore(startOf(next), blank) >= least(item) {
 			return true, ""
 		}
 	}
 	last := list.LastChild()
 	// The blank lines after a list ending in a fenced code block no fence closed are that block's,
-	// or its quote's, and space no list.
-	if endsWithList(last) || endsInOpenFence(list) {
+	// or its quote's, and space no list, and those after one ending in a footnote definition are the
+	// definition's (definitionEndSpreadsItem).
+	if endsWithList(last) || endsInOpenFence(list) || itemEndsInDefinition(last) {
 		return false, ""
 	}
 	threshold := 2
