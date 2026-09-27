@@ -102,7 +102,8 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
-	err := m.Handle(context.WithoutCancel(r.Context()), supervise.RequestReady{
+	ctx := context.WithoutCancel(r.Context())
+	err := m.Handle(ctx, supervise.RequestReady{
 		Claim: req.ClaimToken, Generation: req.Generation, Session: req.SessionID,
 	})
 	if err != nil {
@@ -110,7 +111,7 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.claimReady != nil {
-		s.claimReady(context.WithoutCancel(r.Context()), m.Claim())
+		s.claimReady(ctx, m.Claim())
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

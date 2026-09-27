@@ -87,8 +87,9 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // the listener forwards to it and waits for a receipt that never comes. So does the relaunch
 // window, where the claim's new session has registered with the daemon but its plugin has not yet
 // taken the Envoy role back from the stopped one. A late receipt from the claim's own live session
-// (registered, ready, working or idle) is a slow holder that has the notice, as the TypeScript
-// daemon reads it (processes.ts, handleException), so it is logged and nothing is queued.
+// (its agent registered and running, supervise.HoldsCapability) is a slow holder that has the
+// notice, as the TypeScript daemon reads it (processes.ts, handleException), so it is logged and
+// nothing is queued.
 //
 // The notice goes back through the executor as a new row of its issue, due after the next of
 // noticeReholdDelays and counted in its Resends, so it is routed, fenced and held as any notice
@@ -125,7 +126,7 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	case "receipt_timeout":
 		architect := claim.Token(strings.TrimPrefix(exception.OriginalTopic, roleTopicPrefix))
 		if machine, ok := r.supervisor.Machine(architect); ok {
-			if c := machine.Claim(); exception.RecipientSession != "" && exception.RecipientSession == c.Session && sessionLive(c.State) {
+			if c := machine.Claim(); exception.RecipientSession != "" && exception.RecipientSession == c.Session && supervise.HoldsCapability(c.State) {
 				r.log.Info("outbox notice receipt was late; its architect's session is live, so nothing is re-sent",
 					"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "session", c.Session)
 				return nil
@@ -187,17 +188,6 @@ func (r *outbox) exceptionNotice(exception roleLaneException) (string, record.No
 		return "", record.Notice{}, false
 	}
 	return issue, notice, true
-}
-
-// sessionLive is whether a claim in state has a session that is up and registered: it can take a
-// delivery, even if it is slow to confirm one.
-func sessionLive(state supervise.ClaimState) bool {
-	switch state {
-	case supervise.StateRegistered, supervise.StateReady, supervise.StateWorking, supervise.StateIdle:
-		return true
-	default:
-		return false
-	}
 }
 
 // releaseWaiting makes due at once every notice waiting for a later attempt that architect now
