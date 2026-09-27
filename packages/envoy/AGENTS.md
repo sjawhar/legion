@@ -857,7 +857,10 @@ paragraph. A label is stored as that parser reads it, its escapes and character 
 (`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the
 label as written; the writer escapes a bracket, a pipe, a backslash before punctuation or at the
 end, an ampersand opening a character reference, and white space as a numeric one, so each label
-reads back and one that needs none is written as it is (`escapeFootnoteLabel`). A definition's later
+reads back and one that needs none is written as it is (`escapeFootnoteLabel`). A reference whose
+label matches its definition's only as written, not once both are decoded (`[^&AUML;]` beside
+`[^&auml;]: `, whose written forms fold to one key while `&AUML;` names no character), is refused,
+since written from the decoded labels it would no longer find the definition. A definition's later
 lines start four columns past where its container's content starts, whatever indentation stands
 before its `[^` (`browserTextColumn`, `quoteContentColumn`). Goldmark gathers each definition, as
 it closes, into a list the parser keeps ahead of every block written while the document parses, so

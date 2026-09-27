@@ -93,6 +93,26 @@ func TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock(t *testing.T)
 	}
 }
 
+// The browser editor's parser matches a reference to its definition by the labels as written,
+// before their character references are decoded, and a label is stored and written decoded, so a
+// reference whose label matches its definition's only as written would lose it: `[^&AUML;]` finds
+// `[^&auml;]: `, but written `[^\&AUML;]` beside `[^ä]: ` it is text. One whose decoded label still
+// matches the definition's reads.
+func TestParseRefusesAReferenceMatchingItsDefinitionOnlyAsWritten(t *testing.T) {
+	for _, markdown := range []string{
+		"x[^&auml;] and [^&AUML;]\n\n[^&auml;]: d\n",
+		"x[^&auml;]\n\n[^&AUML;]: d\n",
+	} {
+		if _, err := Parse(markdown); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "only as written") {
+			t.Errorf("Parse(%q) error = %v, want a schema refusal of a reference matching only as written", markdown, err)
+		}
+	}
+	readable := "x[^&auml;] and [^&Auml;]\n\n[^&auml;]: d\n"
+	if _, err := Parse(readable); err != nil {
+		t.Errorf("Parse(%q): %v", readable, err)
+	}
+}
+
 func TestParsePreservesInlineHTMLAtom(t *testing.T) {
 	got, err := Parse("Before <span class=\"note\">inside</span> after.\n")
 	if err != nil {

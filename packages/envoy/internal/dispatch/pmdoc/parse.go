@@ -807,16 +807,23 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			}
 			children = append(children, image)
 		case *extensionast.FootnoteLink:
-			label, ok := footnotes[current.Index]
+			definitionLabel, ok := footnotes[current.Index]
 			if !ok {
 				return nil, fmt.Errorf("%w: footnote reference %d has no definition", ErrSchema, current.Index)
 			}
+			label := definitionLabel
 			if written, set := current.AttributeString(string(referenceLabelAttr)); set {
 				label = written.(string)
 			}
 			// The browser editor's parser decodes a label's escapes and character references, and
-			// matches a reference to its definition by the label as written.
-			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": unescapeMarkdownText([]byte(label))}})
+			// matches a reference to its definition by the label as written. Both labels are
+			// stored decoded and written from that, so one matching only as written, before
+			// decoding (`[^&AUML;]` beside `[^&auml;]: `), would not match once written.
+			decoded := unescapeMarkdownText([]byte(label))
+			if definition := unescapeMarkdownText([]byte(definitionLabel)); footnoteLabelKey(decoded) != footnoteLabelKey(definition) {
+				return nil, fmt.Errorf("%w: footnote reference %q matches its definition %q only as written, before their character references are decoded, which the document's markdown cannot keep", ErrSchema, decoded, definition)
+			}
+			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": decoded}})
 		case *ast.RawHTML:
 			value := segmentsText(current.Segments, source)
 			if strings.EqualFold(strings.TrimSpace(value), "</span>") {
