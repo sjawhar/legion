@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..1da0ce4c101e54d58d848f1792d5a414533548ce 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..86637c5b9e1d339fd06b1944cd36142e1d24b36f 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,9 @@
@@ -50,13 +50,13 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..1da0ce4c101e54d58d848f1792d5a414
 +	}
 +	return countType(pasted.content, type) > countType(state.doc.content, type) + countType(slice.content, type);
 +}
++function isLineBreak(node) {
++	return node.isLeaf && /\n/.test(node.type.spec.leafText?.(node) ?? "");
++}
 +// A fragment's lines: each textblock's content, and each run of inline nodes beside blocks, which
 +// parsed HTML leaves unwrapped (text before a list, a Gmail line before a div); any other block is
 +// read for the lines inside it. A textblock or run holding only blank text or line breaks, such as
 +// the empty header row ProseMirror's parse gives a pasted table, is not a line.
-+function isLineBreak(node) {
-+	return node.isLeaf && /\n/.test(node.type.spec.leafText?.(node) ?? "");
-+}
 +function textLines(fragment) {
 +	const lines = [];
 +	const addLine = (nodes) => {
