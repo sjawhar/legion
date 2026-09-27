@@ -45,8 +45,14 @@ type renderer struct {
 	otherListMarker bool
 	// footnoteLabels is every footnote label the document defines (footnoteLabelSet).
 	footnoteLabels footnoteLabelSet
-	err            error
-	blockOffsets   []BlockOffset
+	// listsReadLoose is, for each list the blocks being written stand in, outermost first, whether
+	// goldmark's looseness reads its spread as it is (loosenessReadsSpread); bareEmptyCode writes an
+	// empty code block in a typed block in a list item as its fences alone, and wroteBlankEmptyCode
+	// records one written with a line between them (emptyCodeWrittenBare).
+	listsReadLoose                     []bool
+	bareEmptyCode, wroteBlankEmptyCode bool
+	err                                error
+	blockOffsets                       []BlockOffset
 }
 
 // BlockOffset identifies one rendered block in byte offsets of the markdown.
@@ -97,10 +103,28 @@ func render(doc *Node) (r *renderer, err error) {
 	if holdsOnlyAnEmptyParagraph(doc) {
 		return &renderer{}, nil
 	}
-	r = &renderer{footnoteLabels: definedFootnoteLabels(doc)}
-	r.blocks(doc.Children, "")
+	labels := definedFootnoteLabels(doc)
+	r = renderBlocks(doc, labels, false)
+	// An empty code block in a typed block in a spread list item is written with a line between its
+	// fences, as main wrote it, except in a document holding a shape this parser reads only as the
+	// browser editor does, where that line is refused (emptyCodeWrittenBare): there the document is
+	// written again with the fences alone.
+	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
+		r = renderBlocks(doc, labels, true)
+	}
 	if r.err != nil {
 		return nil, r.err
+	}
+	return r, nil
+}
+
+// renderBlocks writes doc's blocks, an empty code block in a typed block in a spread list item as
+// its fences alone when bareEmptyCode says so.
+func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool) *renderer {
+	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode}
+	r.blocks(doc.Children, "")
+	if r.err != nil {
+		return r
 	}
 	// A rule opening the document is written `---`, as it always was, except where that is
 	// misread; there it is `***`, the same length. A `---` there opens front matter: a later line
@@ -112,7 +136,14 @@ func render(doc *Node) (r *renderer, err error) {
 			copy(r.b.Bytes(), "***")
 		}
 	}
-	return r, nil
+	return r
+}
+
+// holdsBrowserOnlyShape reports whether markdown, read as Parse reads it, holds a shape this
+// parser reads only as the browser editor's parser does (browserOnlyShape).
+func holdsBrowserOnlyShape(markdown []byte) bool {
+	_, rest := parseFrontmatterBlock(markdown)
+	return browserOnlyShape(blockReader.parse(markdown[rest:])) != ""
 }
 
 // holdsAContainerTheBrowserDrops reports whether doc holds, at its top level, a block the browser
@@ -391,11 +422,15 @@ func (r *renderer) inItemBelowQuotes() bool {
 // emptyCodeWrittenBare reports whether an empty code block is written as its fences alone, with no
 // line between them, where no quote between takes a line holding only the prefix as its own: in a
 // footnote definition, where both parsers keep that line as the code's text, and in a typed block in
-// a list item, where it is a blank line the browser editor reads as spacing the nearest item. Even
-// with every item that far spread, this parser reads that line only in a document holding no shape
-// it cannot decide the spacing of (browserOnlyShape), so it is never written there.
+// a list item, where it is a blank line the browser editor reads as spacing the nearest item. That
+// line is written there, as main wrote it, where the nearest item is spread and goldmark's
+// looseness, which this parser leaves that item's list to, reads the list's spread as it is
+// (loosenessReadsSpread), unless the document holds a shape this parser cannot decide the spacing
+// of (browserOnlyShape), where it is refused: render writes such a document again with the fences
+// alone (bareEmptyCode).
 func (r *renderer) emptyCodeWrittenBare() bool {
 	typed := false
+	items := 0
 	for index := len(r.containers) - 1; index >= 0; index-- {
 		switch r.containers[index].Type {
 		case "blockquote":
@@ -403,14 +438,41 @@ func (r *renderer) emptyCodeWrittenBare() bool {
 		case "footnote_definition":
 			return true
 		case "list_item":
-			if typed {
+			if !typed {
+				items++
+				continue
+			}
+			if r.bareEmptyCode || r.containers[index].Attrs["spread"] != true || !r.listsReadLoose[len(r.listsReadLoose)-1-items] {
 				return true
 			}
+			r.wroteBlankEmptyCode = true
+			return false
 		default:
 			typed = true
 		}
 	}
 	return false
+}
+
+// loosenessReadsSpread reports whether goldmark's looseness reads list's and its items' spread as
+// list holds them (parseList): an item is spread exactly where it writes more than one block, an
+// empty paragraph beside other blocks writing nothing, and the list only where no item is.
+func loosenessReadsSpread(list *Node) bool {
+	anySpread := false
+	for _, item := range list.Children {
+		written := 0
+		for _, child := range item.Children {
+			if child.Type != "paragraph" || len(child.Children) > 0 {
+				written++
+			}
+		}
+		spread := item.Attrs["spread"] == true
+		if spread != (written > 1) {
+			return false
+		}
+		anySpread = anySpread || spread
+	}
+	return !anySpread || list.Attrs["spread"] != true
 }
 
 // holdsOnlyAnEmptyParagraph reports whether container n holds nothing but one empty paragraph,
@@ -457,6 +519,8 @@ func (r *renderer) list(n *Node, prefix string) {
 	if n.Type == "ordered_list" {
 		start = int(num(n.Attrs["order"], 1))
 	}
+	r.listsReadLoose = append(r.listsReadLoose, loosenessReadsSpread(n))
+	defer func() { r.listsReadLoose = r.listsReadLoose[:len(r.listsReadLoose)-1] }()
 	for index, item := range n.Children {
 		if item.Type != "list_item" {
 			r.err = fmt.Errorf("%w: list contains %q", ErrSchema, item.Type)

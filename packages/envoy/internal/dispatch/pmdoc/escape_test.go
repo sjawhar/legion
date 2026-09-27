@@ -901,6 +901,12 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		// indentation there as on any line, and the item's stays as main wrote it.
 		"x[^f2]\n\n[^f2]: > - a\n    >\n    >   ```\n    >   \n    >   ```\n",
 		"- :::callout{#t1 kind=\"note\" title=\"T\"}\n  > ```\n  > \n  > ```\n  :::\n",
+		// An empty code block in a typed block in a spread list item, in a document holding no shape
+		// this parser reads only as the browser editor does: that line spreads the item for the
+		// browser editor, which is spread already, and goldmark's looseness reads it here, so it
+		// stays as main wrote it.
+		"- a\n\n  :::callout{#t1 kind=\"note\" title=\"T\"}\n  ```\n  \n  ```\n  :::\n",
+		"1. a\n\n   :::callout{#t1 kind=\"note\" title=\"T\"}\n   ```\n   \n   ```\n   :::\n2. b\n",
 		// No blank lines after an item that ends in a list in a quote, where that list is spread by
 		// the blank line after its own first item.
 		"> - a\n>   - b\n>   \n>\n>   - c\n> - z\n",
