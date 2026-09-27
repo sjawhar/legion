@@ -2,6 +2,9 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  type AgentStreamControlMessage,
+  agentStreamControlSubject,
+  agentStreamFramesSubject,
   agentSubject,
   DELIVERY_CAPABILITIES,
   type DeliveryCapability,
@@ -52,6 +55,7 @@ import {
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import { AgentStreamPublisher } from "../src/agent-stream";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import {
@@ -119,9 +123,9 @@ function askPromptQuestionHead(question: string): string {
     normalized.push(firstLine.slice(segmentStart, index), " ");
     segmentStart = index + 1;
   }
-  return (normalized === undefined
-    ? firstLine
-    : `${normalized.join("")}${firstLine.slice(segmentStart)}`).trim();
+  return (
+    normalized === undefined ? firstLine : `${normalized.join("")}${firstLine.slice(segmentStart)}`
+  ).trim();
 }
 /**
  * What the hidden self-check asks the agent, over a snapshot of its own conversation. It names
@@ -703,6 +707,80 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
+  // The live agent conversation stream (LEGION-232). This session's own turns, tool calls and
+  // streamed output become frames on a core-NATS subject the notification stream does not
+  // capture, so nothing is retained by the bus; the Dispatch relay forwards them to a human
+  // watching the session and writes none of it down. The publisher stays silent unless a viewer
+  // is attached, so a session nobody has open puts no conversation on the wire at all.
+  const agentStream = new AgentStreamPublisher({
+    now: () => Date.now(),
+    publish: (subject, payload) => connection?.publish(subject, codec.encode(payload)),
+  });
+  // The control subscription this session currently holds, and the id it was opened for.
+  let agentStreamControl: Subscription | undefined;
+  let agentStreamControlSession = "";
+
+  const pumpAgentStreamControl = async (
+    subscription: Subscription,
+    session: string
+  ): Promise<void> => {
+    try {
+      for await (const message of subscription) {
+        let request: AgentStreamControlMessage;
+        try {
+          request = JSON.parse(codec.decode(message.data)) as AgentStreamControlMessage;
+        } catch {
+          // A control frame this build cannot read arms nothing; the viewer asks again.
+          continue;
+        }
+        if (request.type !== "replay" && request.type !== "watch") continue;
+        agentStream.noteViewer();
+        if (request.type !== "replay" || message.reply === undefined) continue;
+        connection?.publish(
+          message.reply,
+          codec.encode(JSON.stringify(agentStream.replay(session)))
+        );
+      }
+    } catch {
+      // A dead iterator is a dropped connection, handled by the resubscribe below.
+    }
+    if (agentStreamControl === subscription) agentStreamControl = undefined;
+    if (shuttingDown || agentStreamControlSession !== session) return;
+    setTimeout(() => {
+      if (shuttingDown || agentStreamControlSession !== session) return;
+      void watchAgentStream(session).catch(() => undefined);
+    }, RESUBSCRIBE_DELAY_MS);
+  };
+
+  const watchAgentStream = async (session: string): Promise<void> => {
+    if (agentStreamControlSession === session && agentStreamControl !== undefined) return;
+    agentStreamControl?.unsubscribe();
+    agentStreamControl = undefined;
+    agentStreamControlSession = session;
+    const active = await ensureConnection();
+    const subscription = active.subscribe(agentStreamControlSubject(session));
+    agentStreamControl = subscription;
+    void pumpAgentStreamControl(subscription, session);
+  };
+
+  /** One of this session's messages, on its way to whoever has the session open. Only the
+   *  top-level instance publishes: a `task` subagent's instance never learns a session id, and
+   *  its work reaches the viewer as the parent's tool call anyway. */
+  const recordAgentStreamMessage = (message: unknown, streaming: boolean): void => {
+    if (sessionID === "") return;
+    agentStream.record(agentStreamFramesSubject(sessionID), message, streaming);
+  };
+
+  pi.on("message_start", async (event) => {
+    recordAgentStreamMessage(event.message, true);
+  });
+  pi.on("message_update", async (event) => {
+    recordAgentStreamMessage(event.message, true);
+  });
+  pi.on("message_end", async (event) => {
+    recordAgentStreamMessage(event.message, false);
+  });
+
   // The session stops holding its role: close the notice subjects it took for it, so a holder
   // another session replaced stops taking the role's wakes.
   const endRole = (): void => {
@@ -1056,6 +1134,9 @@ export default function envoyExtension(pi: PiApi): void {
     }
     await ensureConnection();
     await subscribe(currentTopic);
+    // A viewer's replay request and its watch pings reach the session here. Opening it costs
+    // one core subscription and publishes nothing: a session nobody opens stays silent.
+    await watchAgentStream(sessionID);
     if (resumed) {
       await recoverRegisteredInterests();
     }
@@ -1293,6 +1374,8 @@ export default function envoyExtension(pi: PiApi): void {
       subscriptions.clear();
       intentionallyClosed.clear();
       awaitingRetry.clear();
+      agentStreamControl = undefined;
+      agentStreamControlSession = "";
     }
   });
 
@@ -1543,7 +1626,10 @@ export default function envoyExtension(pi: PiApi): void {
     askCheckAbort = abort;
     let answered: Promise<string | undefined>;
     try {
-      answered = askEphemeral({ prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks), signal: abort.signal }).then(
+      answered = askEphemeral({
+        prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks),
+        signal: abort.signal,
+      }).then(
         (reply): string | undefined => reply.replyText,
         (error: unknown): string | undefined => {
           // An abort this extension made — a superseded check, or its own timeout, which logs
