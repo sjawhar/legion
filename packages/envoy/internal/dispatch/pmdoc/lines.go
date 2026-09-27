@@ -145,26 +145,37 @@ func recordEndedContainer(node ast.Node, state parser.State, reader gmtext.Reade
 // in a typed block so; the line ends the typed block there (parseTypedDirective refuses it).
 var lazyTypedParagraphAttr = []byte("pmdoc-lazy-typed-paragraph")
 
-// lazyTypedParagraph marks the typed block between paragraph and the container whose lines ended at
-// the line goldmark is continuing paragraph with, if one stands there (lazyTypedParagraphAttr).
-func lazyTypedParagraph(paragraph ast.Node, reader gmtext.Reader, pc parser.Context) {
+// lazilyEnded is the container around paragraph whose lines ended at the line goldmark is
+// continuing paragraph with (endedContainerKey): goldmark's lazy continuation line, which continues
+// the paragraph and no container that ended there. It is nil where the line continues them all.
+func lazilyEnded(paragraph ast.Node, reader gmtext.Reader, pc parser.Context) ast.Node {
 	ended, ok := pc.Get(endedContainerKey).(endedContainer)
-	if row, _ := reader.Position(); !ok || ended.line != row {
+	if row, _ := reader.Position(); !ok || ended.line != row || !isAncestor(ended.node, paragraph) {
+		return nil
+	}
+	return ended.node
+}
+
+// lazyTypedParagraph marks the typed block between paragraph and ended, the container a lazy
+// continuation line ended (lazilyEnded), if one stands there (lazyTypedParagraphAttr).
+func lazyTypedParagraph(paragraph, ended ast.Node) {
+	if ended == nil {
 		return
 	}
 	var typed *typedDirective
-	for parent := paragraph.Parent(); parent != nil; parent = parent.Parent() {
-		if parent == ended.node {
-			if typed != nil {
-				typed.SetAttribute(lazyTypedParagraphAttr, true)
-			}
-			return
-		}
+	for parent := paragraph.Parent(); parent != ended; parent = parent.Parent() {
 		if directive, ok := parent.(*typedDirective); ok && typed == nil {
 			typed = directive
 		}
 	}
+	if typed != nil {
+		typed.SetAttribute(lazyTypedParagraphAttr, true)
+	}
 }
+
+// lazyLinesAttr holds, on a paragraph, where each of its lazy continuation lines starts (lazilyEnded),
+// so a table made of the paragraph can tell which of its rows are such lines (lazyTableRows).
+var lazyLinesAttr = []byte("pmdoc-lazy-lines")
 
 // footnoteReferenceParser is goldmark's footnote reference parser, with a reference whose label
 // matches a definition's only up to case (footnoteLabelKey) resolved to that definition, as the
@@ -580,10 +591,16 @@ func (p lineRecordingParagraph) Open(parent ast.Node, reader gmtext.Reader, pc p
 
 func (p lineRecordingParagraph) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
 	_, segment := reader.PeekLine()
-	lazyTypedParagraph(node, reader, pc)
+	ended := lazilyEnded(node, reader, pc)
+	lazyTypedParagraph(node, ended)
 	state := p.BlockParser.Continue(node, reader, pc)
 	if state != parser.Close {
 		recordLine(segment, reader.Source(), pc)
+		if ended != nil {
+			lazy, _ := node.Attribute(lazyLinesAttr)
+			starts, _ := lazy.([]int)
+			node.SetAttribute(lazyLinesAttr, append(starts, lineStart(reader.Source(), segment.Start)))
+		}
 	}
 	return state
 }

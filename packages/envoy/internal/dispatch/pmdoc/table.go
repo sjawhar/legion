@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"bytes"
+	"slices"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -83,11 +84,21 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	start := first.TrimLeftSpace(reader.Source()).Start
 	blank := node.HasBlankPreviousLines()
 	parent, previous := node.Parent(), node.PreviousSibling()
+	// Goldmark's transformer consumes the lines it takes as rows, so where they start is read before
+	// it runs. A table takes the paragraph's lines from its header row to the paragraph's end.
+	starts := make([]int, lines.Len())
+	for index := range starts {
+		starts[index] = lineStart(reader.Source(), lines.At(index).Start)
+	}
+	lazy, _ := node.Attribute(lazyLinesAttr)
+	lazyStarts, _ := lazy.([]int)
 	node.SetLines(tabExpandedLines(lines, reader.Source()))
 	t.table.Transform(node, reader, pc)
 	if node.Parent() != nil {
-		if node.Lines().Len() == lines.Len() {
+		if kept := node.Lines().Len(); kept == len(starts) {
 			node.SetLines(lines)
+		} else if table, ok := node.NextSibling().(*extensionast.Table); ok {
+			markLazyRows(table, starts[kept:], lazyStarts)
 		}
 		return
 	}
@@ -98,6 +109,26 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	if table, ok := place.(*extensionast.Table); ok {
 		table.SetPos(start)
 		table.SetAttribute(blankAfterAttr, blank)
+		markLazyRows(table, starts, lazyStarts)
+	}
+}
+
+// lazyRowAttr marks a table a lazy continuation line is a body row of (markLazyRows): goldmark
+// continued the paragraph the table was made of with the line, where the browser editor's parser
+// ends the table, and every container the line does not continue, before it.
+var lazyRowAttr = []byte("pmdoc-lazy-row")
+
+// markLazyRows marks table (lazyRowAttr) where one of its body rows - the lines rows starts after
+// its header and delimiter rows - starts at one of lazy, where the paragraph's lazy lines start.
+func markLazyRows(table *extensionast.Table, rows, lazy []int) {
+	if len(rows) < 3 {
+		return
+	}
+	for _, row := range rows[2:] {
+		if slices.Contains(lazy, row) {
+			table.SetAttribute(lazyRowAttr, true)
+			return
+		}
 	}
 }
 

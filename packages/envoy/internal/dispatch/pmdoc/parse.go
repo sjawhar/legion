@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"bytes"
 	"fmt"
 	"html"
 	"log/slog"
@@ -555,6 +556,9 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		if _, typed := ancestor[*typedDirective](current); typed {
 			return nil, fmt.Errorf("%w: a footnote definition inside a typed block, which the browser editor refers to only from inside a typed block or after it", ErrSchema)
 		}
+		if bytes.ContainsAny(current.Ref, " \t") {
+			return nil, fmt.Errorf("%w: a footnote definition whose label holds whitespace, which the browser editor's parser reads as a paragraph", ErrSchema)
+		}
 		children, err := parseBlocks(current, source, footnotes)
 		if err != nil {
 			return nil, err
@@ -737,6 +741,9 @@ func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
 }
 
 func parseTable(table *extensionast.Table, source []byte, footnotes map[int]string) (*Node, error) {
+	if _, lazy := table.Attribute(lazyRowAttr); lazy {
+		return nil, fmt.Errorf("%w: a table a line continuing its container lazily would be a row of, which the browser editor's parser reads as ending the table and the container", ErrSchema)
+	}
 	children := make([]*Node, 0, table.ChildCount())
 	for child := table.FirstChild(); child != nil; child = child.NextSibling() {
 		switch row := child.(type) {

@@ -378,6 +378,25 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     "a line continuing a paragraph in a typed block from outside the block's container",
 		},
 		{
+			// The browser editor's parser reads a label holding whitespace as no label.
+			name:     "a footnote definition whose label holds whitespace",
+			markdown: "[^x y]: note\n",
+			want:     "a footnote definition whose label holds whitespace",
+		},
+		{
+			// Goldmark reads a line continuing a quote, a list item or a footnote definition lazily
+			// after a table as the table's row; the browser editor's parser ends the table, and
+			// every container the line does not continue, there.
+			name:     "a lazy line after a table in a quote",
+			markdown: "> | a |\n> | - |\n> | b |\ntail\n",
+			want:     "a table a line continuing its container lazily would be a row of",
+		},
+		{
+			name:     "a lazy line after a table in a footnote definition in a list item",
+			markdown: "x[^n]\n\n* [^n]: | a |\n      | - |\n      | b |\n  tail\n",
+			want:     "a table a line continuing its container lazily would be a row of",
+		},
+		{
 			name:     "Pandoc fenced div",
 			markdown: "::: {.callout}\nBody.\n:::\n",
 			want:     "Pandoc fenced divs and malformed directives are not supported",

@@ -55,6 +55,19 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			readable: "x[^n]\n\n> - [^n]: a\n\np\n",
 		},
 		{
+			// A quote standing between the definition and the typed block keeps the typed block's
+			// refusal: the browser editor reads the blank line as spacing the list.
+			name:    "a blank line after a list in a typed block in a quote in a footnote definition",
+			refused: "x[^n]\n\n[^n]: > :::callout{#c1 kind=\"note\" title=\"T\"}\n    > - b\n    >\n    > a\n    > :::\n",
+		},
+		{
+			// With no shape the browser editor alone reads, goldmark's looseness spreads the item
+			// holding two blocks and leaves "b", which a blank line follows, unspread; the browser
+			// editor spreads "b" by what follows it.
+			name:    "a blank line after a list in a typed block in a footnote definition, in a document holding no browser-only shape",
+			refused: "x[^n]\n\n[^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    - a\n\n      > q\n    - b\n\n    a\n    :::\n    tail\n",
+		},
+		{
 			name:    "an empty list item before a paragraph its outer item holds",
 			refused: "- t\n\n  -\n\n  para\n",
 		},
