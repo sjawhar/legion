@@ -353,6 +353,27 @@ describe("scripts a command runs", () => {
     expect(reason).not.toContain(`line 11 of ${outer}`);
   });
 
+  test("keeps inline traps and function locations across script boundaries", () => {
+    const trapLibrary = script("inline-trap-library.sh", ":\n:\ntrap 'rm -rf \"$HOME\"' EXIT\n");
+    const trapMain = script("inline-trap-main.sh", `. ${trapLibrary}\n`);
+    const trapTop = script("inline-trap-top.sh", `:\n:\n:\nbash ${trapMain}\n`);
+    const trapReason = bash(`bash ${trapTop}`);
+    expect(trapReason).toContain(`line 4 of ${trapTop}`);
+    expect(trapReason).toContain(`line 3 of ${trapLibrary}`);
+    expect((trapReason ?? "").match(/line \d+ of /g)).toHaveLength(3);
+
+    const functionMid = script("function-mid.sh", ':\n:\nf() {\n  rm -rf "$HOME"\n}\nf\n');
+    const functionTop = script("function-top.sh", `:\n:\nbash ${functionMid}\n`);
+    const functionReason = bash(`bash ${functionTop}`);
+    expect(functionReason).toContain(`line 3 of ${functionTop}`);
+    expect(functionReason).toContain(`line 4 of ${functionMid}`);
+    expect((functionReason ?? "").match(/line \d+ of /g)).toHaveLength(2);
+
+    const inlineReason = bash("f() { rm -rf ~; }; f");
+    expect(inlineReason).toContain("`rm -rf ~`");
+    expect(inlineReason).not.toContain("<function>");
+  });
+
   test("uses a shell function's echoed path in a command substitution", () => {
     const generated = script(
       "function-output.sh",
