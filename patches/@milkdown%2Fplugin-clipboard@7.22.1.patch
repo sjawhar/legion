@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..50c9031f06ad86c799f55da3ff619b4089db27e5 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..1da0ce4c101e54d58d848f1792d5a414533548ce 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,9 @@
@@ -13,7 +13,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..50c9031f06ad86c799f55da3ff619b40
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
  function isPureText(content) {
-@@ -24,6 +26,169 @@ function withMeta(plugin, meta) {
+@@ -24,6 +26,178 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
@@ -54,10 +54,13 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..50c9031f06ad86c799f55da3ff619b40
 +// parsed HTML leaves unwrapped (text before a list, a Gmail line before a div); any other block is
 +// read for the lines inside it. A textblock or run holding only blank text or line breaks, such as
 +// the empty header row ProseMirror's parse gives a pasted table, is not a line.
++function isLineBreak(node) {
++	return node.isLeaf && /\n/.test(node.type.spec.leafText?.(node) ?? "");
++}
 +function textLines(fragment) {
 +	const lines = [];
 +	const addLine = (nodes) => {
-+		if (nodes.some((node) => node.isText ? /\S/.test(node.text) : !/\n/.test(node.type.spec.leafText?.(node) ?? ""))) lines.push(Fragment.from(nodes));
++		if (nodes.some((node) => node.isText ? /\S/.test(node.text) : !isLineBreak(node))) lines.push(Fragment.from(nodes));
 +	};
 +	let run = [];
 +	fragment.forEach((node) => {
@@ -79,7 +82,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..50c9031f06ad86c799f55da3ff619b40
 +		if (inline.length > 0) inline.push(schema.text(" "));
 +		line.forEach((child) => {
 +			if (child.isText) inline.push(schema.text(child.text.replace(/\s*\n\s*/g, " "), child.marks));
-+			else if (child.isLeaf && /\n/.test(child.type.spec.leafText?.(child) ?? "")) inline.push(schema.text(" ", child.marks));
++			else if (isLineBreak(child)) inline.push(schema.text(" ", child.marks));
 +			else inline.push(child);
 +		});
 +	}
@@ -138,6 +141,12 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..50c9031f06ad86c799f55da3ff619b40
 +	const cells = textLines(slice.content).map((line) => fitCell(cell, new Slice(line, 0, 0)));
 +	return cells.length === 0 ? null : gridCells([row.create(null, cells)]);
 +}
++// Cells to paste onto a cell selection, read from the clipboard itself: HTML's copied cells or its
++// lines, or plain text's tab-separated values; null leaves the slice to prosemirror-tables.
++function selectionCells(html, text, slice, schema) {
++	if (html.length > 0) return htmlTableCells(html, schema) ?? htmlLineCells(slice, schema);
++	return text.includes("\t") ? tsvCells(text, schema) : null;
++}
 +function pasteIntoTable(view, event, slice, parsePlainText) {
 +	const { state } = view;
 +	const { selection, schema } = state;
@@ -146,7 +155,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..50c9031f06ad86c799f55da3ff619b40
 +	const html = event.clipboardData.getData("text/html");
 +	if (selection instanceof CellSelection) {
 +		const rect = selectedRect(state);
-+		const pasted = (html.length > 0 ? htmlTableCells(html, schema) ?? htmlLineCells(slice, schema) : text.includes("\t") ? tsvCells(text, schema) : null) ?? __pastedCells(slice) ?? {
++		const pasted = selectionCells(html, text, slice, schema) ?? __pastedCells(slice) ?? {
 +			width: 1,
 +			height: 1,
 +			rows: [Fragment.from(fitCell(tableNodeTypes(schema).cell, slice))]
@@ -183,7 +192,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..50c9031f06ad86c799f55da3ff619b40
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -40,9 +205,15 @@ function dispatchPasteSlice(view, slice) {
+@@ -40,9 +214,15 @@ function dispatchPasteSlice(view, slice) {
  }
  var clipboard = $prose((ctx) => {
  	const schema = ctx.get(schemaCtx);
@@ -199,7 +208,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..50c9031f06ad86c799f55da3ff619b40
  		transformPastedHTML: (html, view) => {
  			const prevTransform = prev.transformPastedHTML;
  			if (prevTransform) html = prevTransform(html, view);
-@@ -58,7 +229,6 @@ var clipboard = $prose((ctx) => {
+@@ -58,7 +238,6 @@ var clipboard = $prose((ctx) => {
  		key,
  		props: {
  			handlePaste: (view, event, preProcessedSlice) => {
@@ -207,7 +216,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..50c9031f06ad86c799f55da3ff619b40
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -77,13 +247,13 @@ var clipboard = $prose((ctx) => {
+@@ -77,13 +256,13 @@ var clipboard = $prose((ctx) => {
  				}
  				const html = clipboardData.getData("text/html");
  				if (html.length === 0 && text.length === 0) return false;
