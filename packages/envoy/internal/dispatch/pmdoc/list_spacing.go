@@ -111,32 +111,40 @@ func readExactListSpacing(root ast.Node, lines sourceLines) (refusal string) {
 	return refusal
 }
 
-// emptyItemEndsOuterItem reports whether goldmark ends the list item around item, an empty one,
-// at a blank line before a block the browser editor's parser keeps in it: one indented at least
-// as far as the outer item's content.
+// emptyItemEndsOuterItem reports whether goldmark ends a list item around item, an empty one, at a
+// blank line before a block the browser editor's parser keeps in it: one indented at least as far
+// as that item's content. Goldmark ends every item around the empty one there, so each is checked,
+// out to the first that goldmark's tree holds the block in.
 func emptyItemEndsOuterItem(item *ast.ListItem, lines sourceLines) bool {
-	outer, nested := ancestor[*ast.ListItem](item)
-	if !nested || item.FirstChild() != nil {
+	if item.FirstChild() != nil {
 		return false
 	}
 	next := nextBlock(item)
-	if next == nil || isAncestor(outer, next) {
+	if next == nil {
 		return false
 	}
-	// That parser goes on with the outer item only on lines carrying a marker for each quote
-	// around it, and measures the next block's text past those markers, where a quote the line
-	// opens further in is the item's when its marker stands at the item's content or past it. A
-	// line with fewer markers ends the quotes it lacks, and the item with them. Goldmark ends the
-	// quotes around the empty item at the blank line and re-opens one for the next line, so the
-	// next block's own quotes do not say which quotes those are.
-	depth := quoteDepth(outer)
-	carries := func(line []byte) bool { return leadingQuoteMarkers(line) >= depth }
 	blanks := lines.blanksBefore(startOf(next), markersOrWhitespace)
-	line := lines.lineOf(startOf(next))
-	if blanks == 0 || lines.blanksBefore(startOf(next), func(line []byte) bool { return markersOrWhitespace(line) && carries(line) }) < blanks || !carries(lines.text(line)) {
+	if blanks == 0 {
 		return false
 	}
-	return lines.textColumn(lines.pastQuoteMarkers(lines.starts[line], depth)) >= browserTextColumn(outer.FirstChild(), lines)
+	line := lines.lineOf(startOf(next))
+	for outer, nested := ancestor[*ast.ListItem](item); nested && !isAncestor(outer, next); outer, nested = ancestor[*ast.ListItem](outer) {
+		// That parser goes on with an item only on lines carrying a marker for each quote around
+		// it, and measures the next block's text past those markers, where a quote the line opens
+		// further in is the item's when its marker stands at the item's content or past it. A line
+		// with fewer markers ends the quotes it lacks, and the item with them. Goldmark ends the
+		// quotes around the empty item at the blank line and re-opens one for the next line, so the
+		// next block's own quotes do not say which quotes those are.
+		depth := quoteDepth(outer)
+		carries := func(line []byte) bool { return leadingQuoteMarkers(line) >= depth }
+		if lines.blanksBefore(startOf(next), func(line []byte) bool { return markersOrWhitespace(line) && carries(line) }) < blanks || !carries(lines.text(line)) {
+			continue
+		}
+		if lines.textColumn(lines.pastQuoteMarkers(lines.starts[line], depth)) >= browserTextColumn(outer.FirstChild(), lines) {
+			return true
+		}
+	}
+	return false
 }
 
 // leadingQuoteMarkers is how many quote markers open line, each with the spaces and tabs before it.

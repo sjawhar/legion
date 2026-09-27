@@ -810,7 +810,8 @@ after a list, or at or after a list in a typed block in a footnote definition, w
 typed blocks stand between - a document holding
 one of those shapes, or a footnote definition that ends in a block other than a paragraph, is
 refused, and so it is where goldmark reads its blocks otherwise: an empty list item and a blank
-line before a block its outer item holds. Every other document keeps goldmark's looseness there -
+line before a block an item around it holds, however far out, since goldmark ends every item around
+the empty one there (`emptyItemEndsOuterItem`). Every other document keeps goldmark's looseness there -
 a loose list's items holding more than one block are spread, the list when none is - which is how
 the documents Dispatch stores were read; but a blank line at or after a list in a typed block in a
 footnote definition is refused there too, unless goldmark spreads every item a blank line follows

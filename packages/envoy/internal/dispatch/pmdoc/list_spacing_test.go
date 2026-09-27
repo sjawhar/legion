@@ -55,6 +55,28 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			refused: "> > - a\n> >\n> >   -\n> >\n> >   x\n",
 		},
 		{
+			// Goldmark ends every item around the empty one at the blank line, so a block the
+			// browser editor keeps in an item further out is refused too.
+			name:    "an empty list item followed by a blank quote line and the next item of a list further out",
+			refused: "> 1. ---\n>    2. *\n>\n>    3. Setext\n",
+		},
+		{
+			name:    "an empty list item in a quote in a list item, then blank quote lines the outer item holds",
+			refused: "2. >\t10. # heading\n   >\t11. 1.\n   >\n   >\n",
+		},
+		{
+			name:    "an empty list item in a quoted item, then that quote's next item in the list item around it",
+			refused: "3. > - \t-\n   >\n   > - \t\n   >\n   >\n",
+		},
+		{
+			name:    "an empty list item in a quote in a list item, then a quote that item holds after a blank line",
+			refused: "1. > 2. Setext\n   > * *\n   >\n\n   >\n",
+		},
+		{
+			name:    "an empty list item in a list item in a list item, then a footnote definition the outermost holds",
+			refused: "* - 1.\n\n  [^m]:     indented code\n",
+		},
+		{
 			// The empty item's content starts on the next line, so the ordered list is the outer
 			// item's, and so is the paragraph after the blank line.
 			name:    "an empty list item holding a list on its next line, then a blank line and a paragraph",
