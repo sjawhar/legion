@@ -47,27 +47,58 @@ type emptyItemGuard struct{ parser.BlockParser }
 
 func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	line, segment := reader.PeekLine()
-	if bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && parent.ChildCount() == 0 &&
-		interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
+	bare := bareMarkerLine.Match(bytes.TrimRight(line, "\n"))
+	if bare && parent.ChildCount() == 0 && interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
+		return nil, parser.NoChildren
+	}
+	// After an indented code block, blank lines between or not, the browser editor's parser opens
+	// no list whose first item could not interrupt a paragraph: an empty one, or an ordered one
+	// numbered from other than one.
+	if _, code := parent.LastChild().(*ast.CodeBlock); code && (bare || orderedFromOtherThanOne(line)) {
 		return nil, parser.NoChildren
 	}
 	return p.BlockParser.Open(parent, reader, pc)
+}
+
+// orderedMarkerStart is an ordered list marker opening a line, its number captured.
+var orderedMarkerStart = regexp.MustCompile(`^ {0,3}([0-9]{1,9})[.)](?:[ \t]|\n|$)`)
+
+// orderedFromOtherThanOne reports whether line opens an ordered list item numbered from other than
+// one.
+func orderedFromOtherThanOne(line []byte) bool {
+	match := orderedMarkerStart.FindSubmatch(line)
+	return match != nil && strings.TrimLeft(string(match[1]), "0") != "1"
 }
 
 // tabIndented is a block parser reading a line whose indentation holds a tab as CommonMark and the
 // browser editor's parser do, when what follows the indentation matches opens: the tab spans the
 // columns to the next multiple of four, so after a quote's `> ` it spans two. Goldmark measures such
 // a line's indentation as if it began the line, or takes a list marker or a setext underline only
-// after spaces, and read `> \t- a` and `> a\n> \t===` as paragraph text. Before the parser looks at
-// such a line, its indentation is taken as the columns it spans, as padding.
+// after spaces, and read `> \t- a` and `> a\n> \t===` as paragraph text; and it counts a fence's
+// indentation in bytes, a tab as one, so it kept a column of each code line's indentation that the
+// fence's own removes (`> \t```` over `> \tc` read ` c`). Before the parser looks at such a line,
+// its indentation is taken as the columns it spans, as padding.
 type tabIndented struct {
 	parser.BlockParser
 	opens *regexp.Regexp
 }
 
+// Open also leaves goldmark the block's position where its text starts: goldmark places an opened
+// block at the line's start plus the block offset, which counts the columns a tab spans as bytes,
+// so a list item after a tab stood at a character past its marker.
 func (p tabIndented) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	_, start := reader.PeekLine()
 	expandTabIndentation(reader, p.opens)
-	return p.BlockParser.Open(parent, reader, pc)
+	line, segment := reader.PeekLine()
+	text := util.FirstNonSpacePosition(line)
+	if text >= 0 {
+		pc.SetBlockOffset(text)
+	}
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	if node != nil && text >= segment.Padding {
+		pc.SetBlockOffset(segment.Start + text - segment.Padding - start.Start)
+	}
+	return node, state
 }
 
 func (p tabIndented) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
@@ -75,7 +106,16 @@ func (p tabIndented) Continue(node ast.Node, reader gmtext.Reader, pc parser.Con
 	return p.BlockParser.Continue(node, reader, pc)
 }
 
+// setPadding sets reader's padding and drops the line it has peeked, which goldmark's
+// SetPadding keeps: a zero advance drops it.
+func setPadding(reader gmtext.Reader, padding int) {
+	reader.SetPadding(padding)
+	reader.Advance(0)
+}
+
 var (
+	// fenceStart is a code fence's opening run of backticks or tildes.
+	fenceStart = regexp.MustCompile("^(?:```|~~~)")
 	// listMarkerStart is a list marker opening a line's text: a bullet, or an ordered item's number
 	// and delimiter, followed by a space, a tab or the line's end.
 	listMarkerStart = regexp.MustCompile(`^(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|\n|$)`)
@@ -275,9 +315,23 @@ func definitionsInPlace(root ast.Node, context parser.Context) {
 	}
 }
 
+// Open reads the definition's opener without the padding a tab split by the containers' prefix
+// leaves ahead of it: goldmark's parser measures where the definition's text starts from the line
+// without that padding, so it took the label's first characters as the text (`]: def`).
 func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	_, segment := reader.PeekLine()
+	offset := pc.BlockOffset()
+	padded := segment.Padding > 0 && offset >= segment.Padding
+	if padded {
+		setPadding(reader, 0)
+		pc.SetBlockOffset(offset - segment.Padding)
+	}
 	node, state := p.BlockParser.Open(parent, reader, pc)
 	if node == nil {
+		if padded {
+			setPadding(reader, segment.Padding)
+			pc.SetBlockOffset(offset)
+		}
 		return node, state
 	}
 	if state&parser.HasChildren != 0 {
