@@ -150,23 +150,24 @@ func listenerView(runs []observedRun, at string, onlyConcluded bool) (Settlement
 	return candidate, complete
 }
 
-// timedSettlement is one settlement and the instant it describes.
-type timedSettlement struct {
-	at        string
+// namedSettlement is one settlement and the label failure messages name it by: "at <instant>" for
+// the replay, the step it stands for in a constructed sequence.
+type namedSettlement struct {
+	label     string
 	candidate SettlementCandidate
 }
 
 // pr1084Settlements is one settlement at every instant a check run on the head completed, each
 // with the next listener generation: only the complete views the listener publishes, or, with
 // incomplete, every instant's view of the runs concluded by then.
-func pr1084Settlements(incomplete bool) []timedSettlement {
+func pr1084Settlements(incomplete bool) []namedSettlement {
 	instants := make([]string, 0, len(pr1084Head2257aaef))
 	for _, run := range pr1084Head2257aaef {
 		instants = append(instants, run.completed)
 	}
 	slices.Sort(instants)
 	instants = slices.Compact(instants)
-	var settlements []timedSettlement
+	var settlements []namedSettlement
 	for _, at := range instants {
 		candidate, complete := listenerView(pr1084Head2257aaef, at, incomplete)
 		if !incomplete && !complete {
@@ -174,20 +175,20 @@ func pr1084Settlements(incomplete bool) []timedSettlement {
 		}
 		candidate.Generation = int64(len(settlements) + 1)
 		candidate.Snapshot = fmt.Sprintf("g%d", candidate.Generation)
-		settlements = append(settlements, timedSettlement{at: at, candidate: candidate})
+		settlements = append(settlements, namedSettlement{label: "at " + at, candidate: candidate})
 	}
 	return settlements
 }
 
-// verdictChange is the head's verdict becoming verdict at the settlement describing instant at.
+// verdictChange is the head's verdict becoming verdict at the settlement labelled label.
 type verdictChange struct {
-	at      string
+	label   string
 	verdict string
 }
 
 // settleAll applies the settlements in order, as the workflow engine does, and returns the pull
 // request and every change of its verdict.
-func settleAll(pr record.PullRequest, settlements []timedSettlement) (record.PullRequest, []verdictChange) {
+func settleAll(pr record.PullRequest, settlements []namedSettlement) (record.PullRequest, []verdictChange) {
 	var changes []verdictChange
 	for _, settlement := range settlements {
 		settled, applied := ApplySettlement(pr, settlement.candidate)
@@ -195,7 +196,7 @@ func settleAll(pr record.PullRequest, settlements []timedSettlement) (record.Pul
 			continue
 		}
 		if settled.Verdict != pr.Verdict {
-			changes = append(changes, verdictChange{at: settlement.at, verdict: settled.Verdict})
+			changes = append(changes, verdictChange{label: settlement.label, verdict: settled.Verdict})
 		}
 		pr = settled
 	}
@@ -206,20 +207,41 @@ func freshHead(sha string) record.PullRequest {
 	return record.PullRequest{HeadSHA: sha, Failing: []string{}, FailingStatuses: []string{}}
 }
 
+// recreatedRecord is candidate as the listener record recreated after its TTL holds it: the new
+// record starts from a new observation, a rerun of check rerun, and has not seen check dropped. It
+// is at the new record's generation zero.
+func recreatedRecord(candidate SettlementCandidate, dropped, rerun string) SettlementCandidate {
+	runs := make([]record.AttemptRun, 0, len(candidate.CheckRuns))
+	for _, run := range candidate.CheckRuns {
+		if run.Name == rerun {
+			run.ID++
+		}
+		if run.Name != dropped {
+			runs = append(runs, run)
+		}
+	}
+	candidate.CheckRuns = runs
+	candidate.Failing = slices.DeleteFunc(slices.Clone(candidate.Failing), func(failing string) bool { return failing == dropped })
+	candidate.Generation = 0
+	candidate.Snapshot = "recreated"
+	return candidate
+}
+
 // LEGION-152 acceptance 1: the settlements GitHub's check runs on #1084's head produce take the
 // head red at most once, at the first title failure, green once the passing title run is seen, and
-// never red again - including when every earlier settlement is delivered a second time afterwards.
+// never red again - including when a recreated listener record that no longer holds pr-title
+// settles, and every earlier settlement is then delivered a second time.
 func TestPR1084HeadReplayGoesRedAtMostOnceAndNeverReturnsToRed(t *testing.T) {
 	// The listener publishes only complete views. The first is at 07:40:48, when the CI suite's
 	// first attempt finished, after the title fix; the tree's architect got that green at 07:40:55.
 	// (The model also counts the instants between two attempts as complete, which the listener's
 	// quiet period and suite tracking skip: more green views, never fewer.)
 	published := pr1084Settlements(false)
-	if published[0].at != "07:40:48" {
-		t.Fatalf("first published settlement at %s, want 07:40:48", published[0].at)
+	if published[0].label != "at 07:40:48" {
+		t.Fatalf("first published settlement %s, want at 07:40:48", published[0].label)
 	}
 	_, changes := settleAll(freshHead("2257aaef"), published)
-	if want := []verdictChange{{"07:40:48", "green"}}; !slices.Equal(changes, want) {
+	if want := []verdictChange{{"at 07:40:48", "green"}}; !slices.Equal(changes, want) {
 		t.Fatalf("published verdicts changed %v, want %v", changes, want)
 	}
 
@@ -227,23 +249,29 @@ func TestPR1084HeadReplayGoesRedAtMostOnceAndNeverReturnsToRed(t *testing.T) {
 	// sequence the contract admits, and it holds the title failures.
 	every := pr1084Settlements(true)
 	pr, changes := settleAll(freshHead("2257aaef"), every)
-	if want := []verdictChange{{"07:32:42", "red"}, {"07:34:12", "green"}}; !slices.Equal(changes, want) {
+	if want := []verdictChange{{"at 07:32:42", "red"}, {"at 07:34:12", "green"}}; !slices.Equal(changes, want) {
 		t.Fatalf("verdicts changed %v, want %v", changes, want)
 	}
-	// At-least-once delivery: every settlement again, newest first, after the last.
-	redelivered := slices.Clone(every)
-	slices.Reverse(redelivered)
-	if _, changes := settleAll(pr, redelivered); len(changes) != 0 {
-		t.Fatalf("redelivered settlements changed the verdict %v, want no change from %s", changes, pr.Verdict)
+	// Then a record recreated after the listener's TTL by a dispatch rerun settles without
+	// pr-title, and every settlement is delivered again in order: the title failures stay older
+	// than the fence, which kept pr-title's passing run.
+	tail := []namedSettlement{{"recreated record", recreatedRecord(every[len(every)-1].candidate, "pr-title", "dispatch")}}
+	tail = append(tail, every...)
+	if _, changes := settleAll(pr, tail); len(changes) != 0 {
+		t.Fatalf("recreated record and redelivered settlements changed the verdict %v, want no change from %s", changes, pr.Verdict)
 	}
 }
 
 // LEGION-152 acceptance 2: once a head's only red check has passed on a newer run, no later
 // settlement of another check on the head reports it red again - whether the settlement holds the
-// whole record or, as a record recreated after the listener's TTL does, only the other check.
+// whole record or, as a record recreated after the listener's TTL does, only the other check - and
+// a late delivery of the check's own first, failing view is older than the daemon's fence, which is
+// the per-name maximum over every settlement it accepted (packages/envoy AGENTS.md, "Topic
+// shapes"). A fence replaced by each settlement would forget the passing run there and take the
+// old failure as a new name.
 func TestAPassedCheckStaysRetiredWhileAnotherCheckSettlesRepeatedly(t *testing.T) {
-	settlements := []timedSettlement{
-		{"title fails", SettlementCandidate{CheckRuns: []record.AttemptRun{{Name: "ci", ID: 20}, {Name: "title", ID: 10}}, Verdict: "red", Failing: []string{"title"}}},
+	settlements := []namedSettlement{
+		{"title fails", SettlementCandidate{CheckRuns: []record.AttemptRun{{Name: "title", ID: 10}}, Verdict: "red", Failing: []string{"title"}}},
 		{"title passes", SettlementCandidate{CheckRuns: []record.AttemptRun{{Name: "ci", ID: 20}, {Name: "title", ID: 11}}, Verdict: "green", Failing: []string{}}},
 	}
 	for id := int64(21); id <= 30; id++ {
@@ -251,36 +279,18 @@ func TestAPassedCheckStaysRetiredWhileAnotherCheckSettlesRepeatedly(t *testing.T
 		if id%2 == 0 { // every other settlement comes from a recreated record holding only ci
 			runs = runs[:1]
 		}
-		settlements = append(settlements, timedSettlement{fmt.Sprintf("ci %d", id), SettlementCandidate{CheckRuns: runs, Verdict: "green", Failing: []string{}}})
+		settlements = append(settlements, namedSettlement{fmt.Sprintf("ci %d", id), SettlementCandidate{CheckRuns: runs, Verdict: "green", Failing: []string{}}})
 	}
 	for i := range settlements {
 		settlements[i].candidate.Generation = int64(i + 1)
 		settlements[i].candidate.Snapshot = fmt.Sprintf("g%d", i+1)
 	}
-	_, changes := settleAll(freshHead("head"), settlements)
-	if want := []verdictChange{{"title fails", "red"}, {"title passes", "green"}}; !slices.Equal(changes, want) {
-		t.Fatalf("verdicts changed %v, want %v", changes, want)
-	}
-}
-
-// The daemon's fence is the per-name maximum over every settlement it accepted (packages/envoy
-// AGENTS.md, "Topic shapes"): a settlement that leaves a check out does not drop the check's run
-// from the fence, so a late delivery of that check's older, failing view is still older. A fence
-// replaced by each settlement forgets the passing run, takes the old failure as a new name, and
-// turns a green head red until the check runs again.
-func TestASettlementThatOmitsACheckKeepsItsRunInTheFence(t *testing.T) {
-	firstView := SettlementCandidate{CheckRuns: []record.AttemptRun{{Name: "title", ID: 10}}, Generation: 1, Snapshot: "g1", Verdict: "red", Failing: []string{"title"}}
-	settlements := []timedSettlement{
-		{"title fails", firstView},
-		{"title passes", SettlementCandidate{CheckRuns: []record.AttemptRun{{Name: "ci", ID: 20}, {Name: "title", ID: 11}}, Generation: 2, Snapshot: "g2", Verdict: "green", Failing: []string{}}},
-		{"recreated record", SettlementCandidate{CheckRuns: []record.AttemptRun{{Name: "ci", ID: 21}}, Generation: 0, Snapshot: "r0", Verdict: "green", Failing: []string{}}},
-		{"first view redelivered", firstView},
-	}
+	settlements = append(settlements, namedSettlement{"title fails redelivered", settlements[0].candidate})
 	pr, changes := settleAll(freshHead("head"), settlements)
 	if want := []verdictChange{{"title fails", "red"}, {"title passes", "green"}}; !slices.Equal(changes, want) {
 		t.Fatalf("verdicts changed %v, want %v", changes, want)
 	}
-	if want := []record.AttemptRun{{Name: "ci", ID: 21}, {Name: "title", ID: 11}}; !slices.Equal(pr.CheckRuns, want) {
+	if want := []record.AttemptRun{{Name: "ci", ID: 30}, {Name: "title", ID: 11}}; !slices.Equal(pr.CheckRuns, want) {
 		t.Fatalf("fence = %v, want %v", pr.CheckRuns, want)
 	}
 }

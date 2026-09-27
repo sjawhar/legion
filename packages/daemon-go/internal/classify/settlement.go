@@ -28,9 +28,14 @@ const (
 )
 
 // SettlementCandidate is the listener's proposed CI outcome and its ordering identity. Envoy
-// listener settlements are the Go daemon's only CI input: it never reads GitHub's checks, so a
-// check_run delivery the listener lost is recovered by the listener's webhook redelivery sweep or
-// by that check's next run, and by nothing here.
+// listener settlements are the Go daemon's only CI input: it never reads GitHub's checks, and a new
+// head resets the fence and failures (AdvancePullRequestHead). A check_run delivery the listener
+// lost is recovered only by Dispatch's webhook redelivery sweep (packages/envoy/internal/dispatch/
+// redeliver: it runs only where Dispatch has the App key and NATS, every two minutes, and resends
+// only deliveries GitHub recorded as failed within the last hour) or by the check's next run.
+// Nothing on the Go path corrects the rest: a check_run with no pull_requests yields no
+// observation, a deleted check's failure stands for the life of the head, and a rerun whose
+// completion is never observed holds the last verdict until the check runs again.
 type SettlementCandidate struct {
 	CheckRuns  []record.AttemptRun `json:"checkRuns"`
 	Generation int64               `json:"generation"`
