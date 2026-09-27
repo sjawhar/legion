@@ -144,7 +144,8 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 		return fmt.Errorf("%w: Yjs element %q does not match %q", ErrSchema, element.NodeName, want.Type)
 	}
 	current := Attrs(element.GetAttributeValues())
-	for key, value := range want.Attrs {
+	wantAttrs := liveAttrs(want)
+	for key, value := range wantAttrs {
 		if value == nil {
 			if _, ok := current[key]; ok {
 				element.DeleteAttribute(txn, key)
@@ -156,11 +157,32 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 		}
 	}
 	for key := range current {
-		if value, ok := want.Attrs[key]; !ok || value == nil {
+		if value, ok := wantAttrs[key]; !ok || value == nil {
 			element.DeleteAttribute(txn, key)
 		}
 	}
 	return updateChildren(txn, &element.YXmlFragment, want.Children)
+}
+
+// unalignedCell is the alignment the live document holds for a table cell with none, the tree's
+// null. The browser editor gives a cell whose alignment attribute is absent its schema's default,
+// left, and writes that back into the live document for any cell it edits, so an absent attribute
+// would turn an unaligned column into a left-aligned one at its first edit; it keeps "none", and
+// writes that column unaligned, as the tree's null is written. readElement reads it back as null.
+const unalignedCell = "none"
+
+// liveAttrs is node's attributes as the live document holds them: a table cell with no alignment
+// holds unalignedCell.
+func liveAttrs(node *Node) Attrs {
+	if node.Type != "table_cell" && node.Type != "table_header" || node.Attrs["alignment"] != nil {
+		return node.Attrs
+	}
+	attrs := make(Attrs, len(node.Attrs)+1)
+	for key, value := range node.Attrs {
+		attrs[key] = value
+	}
+	attrs["alignment"] = unalignedCell
+	return attrs
 }
 
 func insertPChild(txn *crdt.Transaction, frag *crdt.YXmlFragment, index int, child normalizedChild) error {
@@ -202,7 +224,7 @@ func createTypeFromElementNode(txn *crdt.Transaction, node *Node) (*crdt.YXmlEle
 		return nil, fmt.Errorf("%w: text is not an element", ErrSchema)
 	}
 	element := crdt.NewYXmlElement(node.Type)
-	for key, value := range node.Attrs {
+	for key, value := range liveAttrs(node) {
 		if value != nil && key != "ychange" {
 			element.SetAttributeValue(txn, key, yjsAttributeValue(value))
 		}
@@ -227,7 +249,7 @@ func equalYChildPChild(ychild any, pchild normalizedChild) bool {
 }
 
 func equalYElementPNode(element *crdt.YXmlElement, node *Node) bool {
-	if element.NodeName != node.Type || !attrsEqual(Attrs(element.GetAttributeValues()), node.Attrs) {
+	if element.NodeName != node.Type || !attrsEqual(treeAttrs(element.NodeName, element.GetAttributeValues()), node.Attrs) {
 		return false
 	}
 	children := element.Children()

@@ -62,7 +62,7 @@ func readChildren(frag *crdt.YXmlFragment, readDelta textDeltaReader) ([]*Node, 
 func readElement(e *crdt.YXmlElement, readDelta textDeltaReader) (*Node, error) {
 	n := &Node{Type: e.NodeName}
 	if attrs := e.GetAttributeValues(); len(attrs) > 0 {
-		n.Attrs = Attrs(attrs)
+		n.Attrs = treeAttrs(e.NodeName, attrs)
 	}
 	children, err := readChildren(&e.YXmlFragment, readDelta)
 	if err != nil {
@@ -100,6 +100,15 @@ func readText(t *crdt.YXmlText, readDelta textDeltaReader) ([]*Node, error) {
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// treeAttrs is attrs, a live element's attributes, as the tree holds them: a table cell's
+// unalignedCell is its null alignment (liveAttrs). It maps attrs in place.
+func treeAttrs(nodeName string, attrs map[string]any) Attrs {
+	if (nodeName == "table_cell" || nodeName == "table_header") && attrs["alignment"] == unalignedCell {
+		attrs["alignment"] = nil
+	}
+	return Attrs(attrs)
 }
 
 func attrsFromY(raw any) (Attrs, error) {

@@ -13,6 +13,10 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
+// Go-authored bytes read back as the tree, and y-prosemirror decodes them as the browser editor
+// would author the tree, but for a table cell with no alignment: it holds "none", since the
+// browser editor gives a cell whose alignment attribute is absent its schema's default, left, and
+// writes that back when the cell is edited.
 func TestUpdateFromEmptyEqualsAuthoredByBrowser(t *testing.T) {
 	for _, fx := range loadFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
@@ -39,13 +43,30 @@ func TestUpdateFromEmptyEqualsAuthoredByBrowser(t *testing.T) {
 			}
 
 			pm := decodeWithYProsemirror(t, crdt.EncodeStateAsUpdateV1(doc, nil))
-			if !pm.Equal(want) {
+			if live := unalignedCellsAsNone(want); !pm.Equal(live) {
 				actual, _ := pm.JSON()
-				expected, _ := want.JSON()
+				expected, _ := live.JSON()
 				t.Fatalf("y-prosemirror decodes Go-authored bytes differently\n got: %s\nwant: %s", actual, expected)
 			}
 		})
 	}
+}
+
+// unalignedCellsAsNone is doc with each table cell's null alignment written "none".
+func unalignedCellsAsNone(doc *Node) *Node {
+	out := *doc
+	if (doc.Type == "table_cell" || doc.Type == "table_header") && doc.Attrs["alignment"] == nil {
+		out.Attrs = Attrs{}
+		for key, value := range doc.Attrs {
+			out.Attrs[key] = value
+		}
+		out.Attrs["alignment"] = "none"
+	}
+	out.Children = make([]*Node, len(doc.Children))
+	for index, child := range doc.Children {
+		out.Children[index] = unalignedCellsAsNone(child)
+	}
+	return &out
 }
 
 func TestUpdateIsNoOpForEqualTree(t *testing.T) {
@@ -185,6 +206,56 @@ func runDecoder(script, encoded string) ([]byte, []byte, error) {
 		stderr = exitErr.Stderr
 	}
 	return output, stderr, err
+}
+
+// A table Go writes into the live document keeps each column's alignment through the browser
+// editor: loaded as its sync plugin loads it, a header cell and a body cell typed into and written
+// back as that plugin writes them, it reads back with every column as written. The editor gives a
+// cell whose alignment attribute is absent its schema's default, left, so an unaligned column
+// written that way came back left-aligned from its first edit.
+func TestTableAlignmentSurvivesABrowserCellEdit(t *testing.T) {
+	if _, err := exec.LookPath("bun"); err != nil {
+		if os.Getenv("CI") == "" {
+			t.Skip("bun is not on PATH; the browser editor's sync is required in CI")
+		}
+		t.Fatalf("bun is required in CI: %v", err)
+	}
+	written, err := Parse("| a | b | c |\n| --- | :---: | ---: |\n| d | e | f |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := crdt.New(crdt.WithClientID(1))
+	frag := doc.GetXmlFragment("prosemirror")
+	doc.Transact(func(txn *crdt.Transaction) {
+		err = Update(txn, frag, written)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	output, stderr, err := runDecoder("edit-cells.ts", base64.StdEncoding.EncodeToString(crdt.EncodeStateAsUpdateV1(doc, nil)))
+	if err != nil {
+		t.Fatalf("run edit-cells.ts: %v\nstderr:\n%s", err, stderr)
+	}
+	update, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(output)))
+	if err != nil {
+		t.Fatalf("edit-cells.ts output: %v\n%s", err, output)
+	}
+	edited := crdt.New()
+	if err := crdt.ApplyUpdateV1(edited, update, nil); err != nil {
+		t.Fatal(err)
+	}
+	tree, err := Read(edited.GetXmlFragment("prosemirror"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := Render(tree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "| ax | b | c |\n| --- | :---: | ---: |\n| dy | e | f |\n"; markdown != want {
+		t.Fatalf("after the browser editor's cell edits, the table renders %q, want %q", markdown, want)
+	}
 }
 
 func TestUpdateAppliesMarksToInsertedTextAtRunBoundary(t *testing.T) {
