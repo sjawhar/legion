@@ -10,7 +10,8 @@ subject construction come from the Envoy core packages. Both NATS connections (t
 in `extensions/envoy.ts`, Legion's control subject in `extensions/legion.ts`) connect as the nkey
 user `@legion/envoy-client/nats-auth` reads from `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, and
 without a credential when neither is set; an unusable seed fails the connect naming the variable,
-and a Legion daemon strips both from every pane it launches. `@legion/envoy-client/delivery` is
+and a Legion daemon strips both from every pane it launches, handing it instead the `legion-pane`
+seed file it holds as `NATS_NKEY_SEED_FILE` when it has one. `@legion/envoy-client/delivery` is
 the sole inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
 Dispatch **BTW** frame runs `pi.askEphemeral` and posts its body or error to the correlated delivery
 attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective delivery mode. Role claims
@@ -41,13 +42,14 @@ per daemon.
 
 ### The TypeScript daemon: `legion.daemonApiVersion`
 
-`legion.daemonApiVersion` (currently 8) covers the `LegionDaemonApi` HTTP request and response
+`legion.daemonApiVersion` (currently 9) covers the `LegionDaemonApi` HTTP request and response
 shapes the extension validates strictly (`@legion/contracts`), and the pane contract — every
 environment variable the TypeScript daemon sets on a pane that this extension reads or writes:
 `LEGION_GRANT_FILE`, `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`,
 `LEGION_CONTROL_SUBJECT`, `LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`,
 `ENVOY_NATS_URL`, `ENVOY_URL`, `ENVOY_TOKEN_FILE` (the listener bearer, read by
-`@legion/envoy-client` ahead of `ENVOY_TOKEN`; contract 3, LEGION-25), and the `LEGION_*` identity
+`@legion/envoy-client` ahead of `ENVOY_TOKEN`; contract 3, LEGION-25), `NATS_NKEY_SEED_FILE` (the
+`legion-pane` NATS nkey seed; contract 9, LEGION-279), and the `LEGION_*` identity
 variables `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_GENERATION`/`LEGION_WORKSPACE`/
 `LEGION_STATE_DIR`/`LEGION_CONTROLLER` (read by `src/legion/classify.ts` and
 `extensions/legion.ts`; the Dispatch and Envoy variables by `@legion/envoy-client`; the grant
@@ -75,7 +77,9 @@ recorded when a `legion controller start` session calls `/controller/ready` agai
 and `POST /legion/v1/controller/secret` (the CLI's call, never this extension's). Contract 7 removes
 `merge` from `/gh-token`: Legion never merges (LEGION-19). Contract 8 adds `pluginVersion` to
 `/process/started`, `/worker/started`, and `/controller/ready`, and a tree's or role's
-`workspaceLost` record to the state response (#1167). The number is re-read against `main` at every
+`workspaceLost` record to the state response (#1167). Contract 9 adds `NATS_NKEY_SEED_FILE` to the
+pane contract: the `legion-pane` NATS nkey seed file every pane and pod gets when the daemon has one
+(`nats_nkey_seed_file`), which `@legion/envoy-client/nats-auth` reads (LEGION-279). The number is re-read against `main` at every
 rebase: two branches that each change a surface both take the next number, and the second to land
 renumbers above the first.
 
