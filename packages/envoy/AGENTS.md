@@ -580,7 +580,10 @@ multiple of four from the column it stands at. A callout nested directly in a ca
 `::::`, as the browser editor writes it. There is
 no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and text directives are
 invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
-inside another block runs to that parent’s end.
+inside another block runs to that parent’s end. A typed block's lines start where its opening line's
+text does: both parsers take up to that many columns of indentation off each of its lines, as off a
+fenced code block's (`typedDirective.indent`), so a typed block nested in an indented one closes,
+and every block inside is read, from there.
 
 Text a caller writes reaches the parser with line feeds alone: `pmdoc.LineFeeds` writes each CR LF
 and each lone carriage return as a line feed, as CommonMark and the browser editor's parser read
@@ -598,12 +601,19 @@ trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line 
 such a span sheds at each end (`codeSpanPadded`), and the writer pads a span whose text starts and
 ends with one. A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
-prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
+prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM, and a table one
+would be a body row of is refused (`markLazyRows`): goldmark continues the paragraph the table is
+made of with the line, where the browser editor's parser ends the table, and every container the
+line does not continue, before it.
 A tab in a line's indentation spans the columns to the next multiple of four from where it stands,
 as CommonMark and the browser editor's parser read it, so after a quote's `> ` it spans two: `> \t- a`
 opens a list, `> \t| a |` over `> \t| - |` is a table, and `> a` over `> \t===` a setext heading
 (`tabIndented`, `tabExpandedLines`). Goldmark measured such indentation as if it began the line, or
 took a list marker or an underline only after spaces, and read each as paragraph text.
+An indented code block right after a list, outside it - which only a last item holding its content
+five or more columns in allows, by a wide ordered marker, spaces or tabs - is refused when it holds
+more than one line: the browser editor's parser keeps the list open across the code's first line,
+which the item does not continue, and reads the code's later lines as a second code block.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
@@ -648,25 +658,37 @@ spread by a blank line between its blocks or after it, before the next item or a
 definition goes on with; in a quote a blank line after an item spreads the list, and so do blank
 lines after its last item, one before a quote or a list (or anything, in a typed block inside the
 quote) and two before anything else; blank lines after an item that ends in a quote or a list are
-that block's; and a quote and a footnote definition together mix the two
-(`footnotedQuoteListSpread`). The renderer writes each spacing so that it reads back
+that block's, and in a quote those after a footnote definition an item holds are the definition's -
+one spreads the item only before a quote, a list or a definition, and two before anything
+(`definitionBlanksInQuote`); and a quote and a footnote definition together mix the two
+(`footnotedQuoteListSpread`). A blank line after a fenced code block no fence closed is the code's
+and spreads nothing, even where the code's text drops it, unless a quote between ends at it
+(`keepsBlankLinesAfter`). The renderer writes each spacing so that it reads back
 (`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
 a list where one would spread what it follows, and none inside a list item after a list ending in
-an empty item, where goldmark ends the item at a blank line. Where the lines alone do not decide
+an empty item, where goldmark ends the item at a blank line; a footnote definition a tight list item
+holds writes its blocks with the item's tight lines, since that parser reads them as the item's
+(`itemBlocks`). Where the lines alone do not decide
 the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote
-after a list, or at or after a list in a typed block in a footnote definition - a document holding
+after a list, or at or after a list in a typed block in a footnote definition, whatever quotes or
+typed blocks stand between - a document holding
 one of those shapes, or a footnote definition that ends in a block other than a paragraph, is
 refused, and so it is where goldmark reads its blocks otherwise: an empty list item and a blank
 line before a block its outer item holds. Every other document keeps goldmark's looseness there -
 a loose list's items holding more than one block are spread, the list when none is - which is how
-the documents Dispatch stores were read.
+the documents Dispatch stores were read; but a blank line at or after a list in a typed block in a
+footnote definition is refused there too, unless goldmark spreads every item a blank line follows
+(`goldmarkSpreadsItemsBeforeBlanks`), since that parser spreads such an item and never the list.
 
 A footnote definition is read where it is written, as that parser keeps it: inside another block,
 ahead of other blocks, in any order, and whether or not anything refers to it. One inside another
 footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner
 one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text, and so
 is one inside a typed block, which that parser's references reach only from inside a typed block or
-after it. Goldmark gathers
+after it. A definition whose label holds whitespace is refused, which that parser reads as a
+paragraph. A definition's later
+lines start four columns past where its container's content starts, whatever indentation stands
+before its `[^` (`browserTextColumn`, `quoteContentColumn`). Goldmark gathers
 the definitions it keeps at the document's end in the order of their first references and drops
 the rest, so the parser puts each back where it was written (`definitionsInPlace`).
 
