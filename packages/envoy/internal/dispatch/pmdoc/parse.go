@@ -867,20 +867,31 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 }
 
 func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) ([]*Node, error) {
+	trimLineSuffixes(parent, source)
 	active := append([]Mark(nil), initial...)
 	var children []*Node
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
 		switch current := child.(type) {
 		case *ast.Text:
 			value := parseTextValue(current.Value(source), active)
-			if current.HardLineBreak() {
-				value = strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "  ")
+			hard, soft := current.HardLineBreak(), current.SoftLineBreak()
+			if hard || soft {
+				if _, run, backslash := lineSuffix(current, source); backslash {
+					value = strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "  ")
+				} else {
+					// The browser editor's parser reads the spaces and tabs a line ends with, which
+					// trimLineSuffixes took off, as a hard break only where they are two spaces
+					// or more and no tab; goldmark broke hard at any two spaces ending the line.
+					value = strings.TrimSuffix(value, "\n")
+					hard = len(run) >= 2 && !strings.Contains(run, "\t")
+					soft = !hard
+				}
 			}
 			appendText(&children, value, active)
-			if current.HardLineBreak() {
+			if hard {
 				children = append(children, &Node{Type: "hardbreak", Attrs: Attrs{"isInline": false}})
 			}
-			if current.SoftLineBreak() {
+			if soft {
 				// A soft break is a space, as CommonMark renders it; the browser editor's
 				// white-space: break-spaces would show a literal newline as a line break. An
 				// image's alt text keeps its line feed, which that parser reads as written.
@@ -974,6 +985,47 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 		}
 	}
 	return children, nil
+}
+
+// lineSuffix is the spaces and tabs ending the line text's segment stands on, and where they start,
+// or whether a backslash ends the line instead, a hard break that keeps what stands before it.
+func lineSuffix(text *ast.Text, source []byte) (start int, run string, backslash bool) {
+	end := text.Segment.Stop
+	for end < len(source) && source[end] != '\n' {
+		end++
+	}
+	if end > 0 && source[end-1] == '\\' {
+		return end, "", true
+	}
+	start = end
+	for start > 0 && (source[start-1] == ' ' || source[start-1] == '\t') {
+		start--
+	}
+	return start, string(source[start:end]), false
+}
+
+// trimLineSuffixes takes the spaces and tabs a line of parent's text ends with, before a break no
+// backslash makes, off the text before it, as the browser editor's parser drops them. Goldmark
+// keeps all but the last in the text it ends a line's run of it with, and gives the break to an
+// empty text after them.
+func trimLineSuffixes(parent ast.Node, source []byte) {
+	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
+		text, ok := child.(*ast.Text)
+		if !ok || !text.SoftLineBreak() && !text.HardLineBreak() {
+			continue
+		}
+		start, _, backslash := lineSuffix(text, source)
+		if backslash {
+			continue
+		}
+		for node := ast.Node(text); node != nil; node = node.PreviousSibling() {
+			before, ok := node.(*ast.Text)
+			if !ok || before.Segment.Stop <= start {
+				break
+			}
+			before.Segment = before.Segment.WithStop(max(before.Segment.Start, start))
+		}
+	}
 }
 
 func unescapeMarkdownText(value []byte) string {

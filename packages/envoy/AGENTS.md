@@ -720,7 +720,10 @@ writer pads a span whose text starts and ends with one. The columns left of a ta
 marker took part of are text to that parser, not spaces, so they stand between, and a span ending
 in them sheds nothing. The writer writes a span's later line as it is, without the containers'
 prefix, except where a list item or footnote definition would take columns off the whitespace it
-opens with, and there behind the prefix (`takesCodeLineIndent`). A lazy continuation line - one that
+opens with, and there behind the prefix (`takesCodeLineIndent`). The spaces and tabs a line of text
+ends with are dropped, as that parser drops them, and are a hard break only where they are two
+spaces or more and no tab (`trimLineSuffixes`); goldmark kept all but the last and broke at any two
+spaces. A backslash ending the line keeps what stands before it. A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
 prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM, and a table one
 would be a body row of is refused (`markLazyRows`): goldmark continues the paragraph the table is

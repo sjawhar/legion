@@ -12406,7 +12406,7 @@
   },
   {
     "name": "image-alt-line-ends",
-    "markdown": "![a\nb](u)\n\n- ![a\nb](u)\n\n| h |\n| :- |\n| ![c&#10;d](u) |\n",
+    "markdown": "![a\nb](u)\n\n- ![a\nb](u)\n\n| h |\n| :- |\n| ![c&#10;d](u) |\n\n![alt ending in a tab \t\nand more](https://example.test/a.png) and ![a tab before two spaces\t  \nas well](https://example.test/b.png)\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -12538,11 +12538,39 @@
               ]
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.test/a.png",
+                "alt": "alt ending in a tab\nand more",
+                "title": null
+              }
+            },
+            {
+              "type": "text",
+              "text": " and "
+            },
+            {
+              "type": "image",
+              "attrs": {
+                "src": "https://example.test/b.png",
+                "alt": "a tab before two spaces\nas well",
+                "title": null
+              }
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "ASsBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEAAwVpbWFnZSgAAQEDc3JjAXcBdSgAAQEDYWx0AXcDYQpiKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADC2J1bGxldF9saXN0BwABBQMJbGlzdF9pdGVtBwABBgMJcGFyYWdyYXBoBwABBwMFaW1hZ2UoAAEIA3NyYwF3AXUoAAEIA2FsdAF3A2EKYigAAQcHYmxvY2tJZAF3CGItMDAwMDA0KAABBgVsYWJlbAF3A+KAoigAAQYIbGlzdFR5cGUBdwZidWxsZXQoAAEGBnNwcmVhZAF5KAABBgdibG9ja0lkAXcIYi0wMDAwMDMoAAEFBnNwcmVhZAF5KAABBQdibG9ja0lkAXcIYi0wMDAwMDKHAQUDBXRhYmxlBwABEgMQdGFibGVfaGVhZGVyX3JvdwcAARMDDHRhYmxlX2hlYWRlcgcAARQDCXBhcmFncmFwaAcAARUGBAABFgFoKAABFQdibG9ja0lkAXcIYi0wMDAwMDgoAAEUB2NvbHNwYW4BfQEoAAEUB3Jvd3NwYW4BfQEoAAEUCWFsaWdubWVudAF3BGxlZnQoAAEUB2Jsb2NrSWQBdwhiLTAwMDAwNygAARMHYmxvY2tJZAF3CGItMDAwMDA2hwETAwl0YWJsZV9yb3cHAAEeAwp0YWJsZV9jZWxsBwABHwMJcGFyYWdyYXBoBwABIAMFaW1hZ2UoAAEhA3NyYwF3AXUoAAEhA2FsdAF3A2MKZCgAASAHYmxvY2tJZAF3CGItMDAwMDExKAABHwdjb2xzcGFuAX0BKAABHwdyb3dzcGFuAX0BKAABHwlhbGlnbm1lbnQBdwRsZWZ0KAABHwdibG9ja0lkAXcIYi0wMDAwMTAoAAEeB2Jsb2NrSWQBdwhiLTAwMDAwOSgAARIHYmxvY2tJZAF3CGItMDAwMDA1AA==",
-    "rendered_by_milkdown": "![a\nb](u)\n\n* ![a\n  b](u)\n\n| h             |\n| :------------ |\n| ![c&#xA;d](u) |\n"
+    "yjs_update_v1_b64": "ATUBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEAAwVpbWFnZSgAAQEDc3JjAXcBdSgAAQEDYWx0AXcDYQpiKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADC2J1bGxldF9saXN0BwABBQMJbGlzdF9pdGVtBwABBgMJcGFyYWdyYXBoBwABBwMFaW1hZ2UoAAEIA3NyYwF3AXUoAAEIA2FsdAF3A2EKYigAAQcHYmxvY2tJZAF3CGItMDAwMDA0KAABBgVsYWJlbAF3A+KAoigAAQYIbGlzdFR5cGUBdwZidWxsZXQoAAEGBnNwcmVhZAF5KAABBgdibG9ja0lkAXcIYi0wMDAwMDMoAAEFBnNwcmVhZAF5KAABBQdibG9ja0lkAXcIYi0wMDAwMDKHAQUDBXRhYmxlBwABEgMQdGFibGVfaGVhZGVyX3JvdwcAARMDDHRhYmxlX2hlYWRlcgcAARQDCXBhcmFncmFwaAcAARUGBAABFgFoKAABFQdibG9ja0lkAXcIYi0wMDAwMDgoAAEUB2NvbHNwYW4BfQEoAAEUB3Jvd3NwYW4BfQEoAAEUCWFsaWdubWVudAF3BGxlZnQoAAEUB2Jsb2NrSWQBdwhiLTAwMDAwNygAARMHYmxvY2tJZAF3CGItMDAwMDA2hwETAwl0YWJsZV9yb3cHAAEeAwp0YWJsZV9jZWxsBwABHwMJcGFyYWdyYXBoBwABIAMFaW1hZ2UoAAEhA3NyYwF3AXUoAAEhA2FsdAF3A2MKZCgAASAHYmxvY2tJZAF3CGItMDAwMDExKAABHwdjb2xzcGFuAX0BKAABHwdyb3dzcGFuAX0BKAABHwlhbGlnbm1lbnQBdwRsZWZ0KAABHwdibG9ja0lkAXcIYi0wMDAwMTAoAAEeB2Jsb2NrSWQBdwhiLTAwMDAwOSgAARIHYmxvY2tJZAF3CGItMDAwMDA1hwESAwlwYXJhZ3JhcGgHAAErAwVpbWFnZSgAASwDc3JjAXcaaHR0cHM6Ly9leGFtcGxlLnRlc3QvYS5wbmcoAAEsA2FsdAF3HGFsdCBlbmRpbmcgaW4gYSB0YWIKYW5kIG1vcmWHASwGBAABLwUgYW5kIIcBLwMFaW1hZ2UoAAE1A3NyYwF3Gmh0dHBzOi8vZXhhbXBsZS50ZXN0L2IucG5nKAABNQNhbHQBdx9hIHRhYiBiZWZvcmUgdHdvIHNwYWNlcwphcyB3ZWxsKAABKwdibG9ja0lkAXcIYi0wMDAwMTIA",
+    "rendered_by_milkdown": "![a\nb](u)\n\n* ![a\n  b](u)\n\n| h             |\n| :------------ |\n| ![c&#xA;d](u) |\n\n![alt ending in a tab\nand more](https://example.test/a.png) and ![a tab before two spaces\nas well](https://example.test/b.png)\n"
   },
   {
     "name": "image-delimiters",
@@ -23971,7 +23999,7 @@
   },
   {
     "name": "softbreak",
-    "markdown": "First soft line\ncontinues in the same paragraph.\n",
+    "markdown": "First soft line\ncontinues in the same paragraph.\n\nA line ending in spaces and tabs \t\nloses them all, and one ending in a tab\t\t\nor a space after one\t \nas well, *inside \t\nemphasis* or a [link \t\ntext](https://example.test), and a heading \t\nunderlined\n===\n\nTwo spaces after a tab\t  \nare no hard break, two spaces alone  \nare, and a backslash \t\\\nkeeps what stands before it.\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -23986,11 +24014,90 @@
               "text": "First soft line continues in the same paragraph."
             }
           ]
+        },
+        {
+          "type": "heading",
+          "attrs": {
+            "id": "",
+            "level": 1,
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A line ending in spaces and tabs loses them all, and one ending in a tab or a space after one as well, "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "inside emphasis"
+            },
+            {
+              "type": "text",
+              "text": " or a "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "https://example.test",
+                    "title": null
+                  }
+                }
+              ],
+              "text": "link text"
+            },
+            {
+              "type": "text",
+              "text": ", and a heading underlined"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Two spaces after a tab are no hard break, two spaces alone"
+            },
+            {
+              "type": "hardbreak",
+              "attrs": {
+                "isInline": false
+              }
+            },
+            {
+              "type": "text",
+              "text": "are, and a backslash \t"
+            },
+            {
+              "type": "hardbreak",
+              "attrs": {
+                "isInline": false
+              }
+            },
+            {
+              "type": "text",
+              "text": "keeps what stands before it."
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AQQBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEwRmlyc3Qgc29mdCBsaW5lIGNvbnRpbnVlcyBpbiB0aGUgc2FtZSBwYXJhZ3JhcGguKAABAAdibG9ja0lkAXcIYi0wMDAwMDEA",
-    "rendered_by_milkdown": "First soft line continues in the same paragraph.\n"
+    "yjs_update_v1_b64": "AR4BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEwRmlyc3Qgc29mdCBsaW5lIGNvbnRpbnVlcyBpbiB0aGUgc2FtZSBwYXJhZ3JhcGguKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADB2hlYWRpbmcHAAEzBgQAATRnQSBsaW5lIGVuZGluZyBpbiBzcGFjZXMgYW5kIHRhYnMgbG9zZXMgdGhlbSBhbGwsIGFuZCBvbmUgZW5kaW5nIGluIGEgdGFiIG9yIGEgc3BhY2UgYWZ0ZXIgb25lIGFzIHdlbGwsIIYBmwEIZW1waGFzaXMOeyJtYXJrZXIiOiIqIn2EAZwBD2luc2lkZSBlbXBoYXNpc4YBqwEIZW1waGFzaXMEbnVsbIQBrAEGIG9yIGEghgGyAQRsaW5rLHsiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS50ZXN0IiwidGl0bGUiOm51bGx9hAGzAQlsaW5rIHRleHSGAbwBBGxpbmsEbnVsbIQBvQEaLCBhbmQgYSBoZWFkaW5nIHVuZGVybGluZWQoAAEzAmlkAXcAKAABMwVsZXZlbAF9ASgAATMHYmxvY2tJZAF3CGItMDAwMDAyhwEzAwlwYXJhZ3JhcGgHAAHbAQYEAAHcATpUd28gc3BhY2VzIGFmdGVyIGEgdGFiIGFyZSBubyBoYXJkIGJyZWFrLCB0d28gc3BhY2VzIGFsb25lhwHcAQMJaGFyZGJyZWFrKAABlwIIaXNJbmxpbmUBeYcBlwIGBAABmQIWYXJlLCBhbmQgYSBiYWNrc2xhc2ggCYcBmQIDCWhhcmRicmVhaygAAbACCGlzSW5saW5lAXmHAbACBgQAAbICHGtlZXBzIHdoYXQgc3RhbmRzIGJlZm9yZSBpdC4oAAHbAQdibG9ja0lkAXcIYi0wMDAwMDMA",
+    "rendered_by_milkdown": "First soft line continues in the same paragraph.\n\n# A line ending in spaces and tabs loses them all, and one ending in a tab or a space after one as well, *inside emphasis* or a [link text](https://example.test), and a heading underlined\n\nTwo spaces after a tab are no hard break, two spaces alone\\\nare, and a backslash \t\\\nkeeps what stands before it.\n"
   },
   {
     "name": "tab-indented-list-markers",
