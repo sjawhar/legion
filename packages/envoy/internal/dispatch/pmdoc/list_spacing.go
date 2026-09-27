@@ -202,6 +202,9 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 			return "a typed block holding a blank line inside a list item, which the browser editor reads as spacing the item"
 		}
 	}
+	if quoted && blankAfterDefinitionItem(list, lines) {
+		return "a blank line after a list item that ends in a footnote definition, in a quote, which the browser editor reads as spacing the item by what follows it"
+	}
 	switch {
 	case typed && footnoted && quoted && isAncestor(definition, directive) && isAncestor(directive, quote):
 		// A quote inside a typed block in a footnote definition keeps the typed block's rule.
@@ -250,6 +253,30 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, spreadsNothing) })
 	}
 	return ""
+}
+
+// blankAfterDefinitionItem reports whether a blank line at the list's quote depth follows an item
+// of list that ends in a footnote definition: the blank lines are the definition's, which the
+// browser editor reads as spacing the item by what follows.
+func blankAfterDefinitionItem(list *ast.List, lines sourceLines) bool {
+	depth := quoteDepth(list)
+	blank := quoteBlankLineAt(depth)
+	outer := func(line []byte) bool {
+		return whitespaceLine(line) || quoteBlankLine(line) && bytes.Count(line, []byte(">")) < depth
+	}
+	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
+		if _, definition := item.LastChild().(*extensionast.Footnote); !definition {
+			continue
+		}
+		next := item.NextSibling()
+		if next == nil {
+			next = nextBlock(list)
+		}
+		if lines.blanksEnding(next, outer, blank) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // typedFootnoteListBlank is the refusal of a blank line at or after a list in a typed block in a

@@ -48,6 +48,13 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			refused: "- > 1. - a\n  >\n  >    -\n  >\n  >    - c\n",
 		},
 		{
+			// The blank lines are the definition's, and the browser editor reads them as spacing the
+			// item that holds it, by what follows.
+			name:     "a blank line after a quoted list item that ends in a footnote definition",
+			refused:  "x[^n]\n\n> - [^n]: a\n>\n>\n> p\n",
+			readable: "x[^n]\n\n> - [^n]: a\n\np\n",
+		},
+		{
 			name:    "an empty list item before a paragraph its outer item holds",
 			refused: "- t\n\n  -\n\n  para\n",
 		},
