@@ -107,6 +107,44 @@ for (const [cell, quote, stored] of [
   });
 }
 
+// Text flattened into a cell takes the marks at the caret, or of the text it replaces, when it is one
+// line, as a one-line paste does anywhere else, and more than one line pasted into bold text isn't
+// bold, as anywhere else. The one line once kept only its own marks: after bold "delta" the pasted
+// "x" was stored outside the bold, and pasted over bold "delta" it lost the bold.
+const boldTable = "| alpha one | beta two |\n| --- | --- |\n| gamma three | **delta** four |\n";
+for (const [name, clipboard, target, stored] of [
+  ["plain text", { html: "", text: "x" }, "after bold text", "**deltax** four"],
+  ["plain text", { html: "", text: "x" }, "over selected bold text", "**x** four"],
+  ["HTML", { html: "<p>x</p>", text: "x" }, "after bold text", "**deltax** four"],
+  ["HTML", { html: "<p>x</p>", text: "x" }, "over selected bold text", "**x** four"],
+  [
+    "two paragraphs",
+    { html: "", text: "First\n\nSecond\n" },
+    "after bold text",
+    "**delta**First Second four",
+  ],
+] as const) {
+  test(`${name} pasted ${target} in a cell stores ${JSON.stringify(stored)}`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } =
+      target === "over selected bold text"
+        ? await openIssue(browser, "Marks paste", boldTable)
+        : await openWithCaret(browser, "Marks paste", boldTable, "delta", "end");
+    try {
+      if (target === "over selected bold text") await selectEditorText(page, "delta");
+
+      await paste(page, clipboard);
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toBe(`| alpha one | beta two |\n| :--- | :--- |\n| gamma three | ${stored} |\n`);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
 // Cells copied from a table and pasted with the caret in a cell are a grid paste, as on a selection
 // of cells: prosemirror-tables writes them over the cells from the caret's on, growing the table as
 // needed. Each pasted cell is retyped for the row it lands in: pasted onto the body, the copied

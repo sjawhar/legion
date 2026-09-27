@@ -888,6 +888,37 @@ for (const [shape, clipboard, question] of [
   });
 }
 
+// Text flattened into a bold question takes the bold only when it is one line, as a one-line paste
+// does anywhere else: a lone callout or a list pasted there once came out bold too.
+for (const [shape, text, question] of [
+  ["one line", "x", "**Which here?x**"],
+  ["a lone callout", loneCallout, "**Which here?**Careful."],
+  ["a list", "- x\n- y\n", "**Which here?**x y"],
+] as const) {
+  test(`${shape} pasted as plain text after a bold question stores ${JSON.stringify(question)}`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } = await openWithCaret(
+      browser,
+      "Paste into a bold question",
+      ':::ask{#q1 urgency="med" multiple="false"}\n**Which here?**\n\n- X\n- Y\n:::\n',
+      "Which here?",
+      "end"
+    );
+    try {
+      await paste(page, { html: "", text });
+
+      await expect
+        .poll(async () =>
+          withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
+        )
+        .toBe(`:::ask{#q1}\n${question}\n\n- X\n- Y\n:::\n`);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
 // Plain text that holds no typed block pastes as it always has: its first paragraph or list item
 // joins the text before the caret and its last one the text after it.
 for (const [caret, text, stored] of [
