@@ -323,6 +323,30 @@ func TestExecFormRefusesWhenNoNameIsGiven(t *testing.T) {
 	}
 }
 
+// TestTopLevelHelpExitsZero pins that a bare top-level "--help" or "-h" — no subcommand — exits
+// 0 and prints usage(), the conventional exit code for an explicit help request; only the
+// zero-argument form (no NAME, no --help) remains a usage error exiting 2.
+func TestTopLevelHelpExitsZero(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	keyDir := newKeyDir(t)
+
+	for _, flag := range []string{"--help", "-h", "help"} {
+		stdout, _, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, flag)
+		if exit != 0 {
+			t.Fatalf("agent-secrets %s: exit = %d, want 0", flag, exit)
+		}
+		if !strings.Contains(stdout, "usage:") {
+			t.Fatalf("agent-secrets %s: stdout = %q, want it to contain %q", flag, stdout, "usage:")
+		}
+	}
+
+	if _, _, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil); exit != exitUsageError {
+		t.Fatalf("agent-secrets with no arguments: exit = %d, want %d", exit, exitUsageError)
+	}
+}
+
 // TestExecFormRefusesToRunWhenAGrantedNameIsProxyOnly is the regression for the review's
 // Important finding 3: a granted request whose delivery is "proxy" (or otherwise missing from
 // the grant's values) must never exec — a proxy-only secret has no value for the CLI to release
@@ -461,8 +485,9 @@ func TestSelfJSONPrintsExactlyOneContractObjectNamingTheIssuedEnrollment(t *test
 }
 
 // launcherBroker serves POST /v1/launcher-credentials with a fixed pending id and confirmation
-// code, and answers GET /v1/launcher-credentials/{pending} as state "issued" carrying token, or
-// with no token field at all when token is empty (another reader already collected it).
+// code, and answers GET /v1/launcher-credentials/{pending} as state "issued" carrying token, or,
+// when token is empty (another reader already collected it), with no token field at all but a
+// fixed credential_id so the CLI can name it.
 func launcherBroker(t *testing.T, token string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
@@ -474,6 +499,8 @@ func launcherBroker(t *testing.T, token string) *httptest.Server {
 		body := map[string]any{"state": "issued"}
 		if token != "" {
 			body["token"] = token
+		} else {
+			body["credential_id"] = "cred-already-collected-1"
 		}
 		writeJSON(w, body)
 	})
@@ -504,7 +531,8 @@ func TestLauncherLoginPrintsConfirmationCodeAndWritesToken(t *testing.T) {
 
 // TestLauncherLoginRefusesAnAlreadyCollectedToken pins that "issued" with no token — the one-time
 // token already went to another reader of this pending id — is a loud failure, never an empty
-// token file and exit 0.
+// token file and exit 0. The message names the actual credential id and points at an operator,
+// not at a self-service revoke this repo does not implement.
 func TestLauncherLoginRefusesAnAlreadyCollectedToken(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker := launcherBroker(t, "")
@@ -516,6 +544,12 @@ func TestLauncherLoginRefusesAnAlreadyCollectedToken(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "did NOT succeed") {
 		t.Fatalf("stderr = %q, want it to say the login did not succeed", stderr)
+	}
+	if !strings.Contains(stderr, "cred-already-collected-1") {
+		t.Fatalf("stderr = %q, want it to name the credential id an operator can revoke", stderr)
+	}
+	if !strings.Contains(stderr, "Contact an operator") {
+		t.Fatalf("stderr = %q, want it to point at an operator rather than implying a self-service remedy", stderr)
 	}
 	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("token file stat = %v, want no file written", err)

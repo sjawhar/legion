@@ -841,6 +841,76 @@ func TestLauncherCredentialFloodIsRateLimited(t *testing.T) {
 	}
 }
 
+// TestLauncherCredentialRateLimitTrustsConfiguredProxyHeader pins I2: with TrustedProxyHeader
+// unset (the default), every caller behind one shared reverse proxy connection shares
+// r.RemoteAddr and so shares one bucket, exactly as before. With it set to trust a header the
+// broker's own proxy is configured to append, two callers whose header names distinct addresses
+// get independent per-address buckets, even though every request in this test arrives over the
+// same httptest connection (the same r.RemoteAddr).
+func TestLauncherCredentialRateLimitTrustsConfiguredProxyHeader(t *testing.T) {
+	limits := &LauncherLimits{PerAddress: Limit{Every: time.Hour, Burst: 1}, PerOperator: Limit{Every: time.Hour, Burst: 100}}
+	st := storetest.Open(t)
+	enr := &enroll.Service{Store: st, Lease: time.Hour}
+	ls := &launcher.Service{Store: st, Dispatch: &fakeLauncherDispatch{}, Enroll: enr, Project: "PROJ"}
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	Register(mux, Deps{
+		PublicURL:          srv.URL,
+		Enroll:             enr,
+		Proof:              &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, Replay: enr.Replay},
+		Dispatch:           dispatch.New("http://127.0.0.1:0", "unused-in-this-test", http.DefaultClient),
+		Launcher:           ls,
+		LauncherLimits:     limits,
+		TrustedProxyHeader: "X-Forwarded-For",
+	})
+
+	post := func(forwardedFor string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/launcher-credentials",
+			strings.NewReader(`{"operator":"sjawhar","host":"h"}`))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if forwardedFor != "" {
+			req.Header.Set("X-Forwarded-For", forwardedFor)
+		}
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		resp.Body.Close()
+		return resp
+	}
+
+	// Two hops in the chain: an earlier, client-supplied entry an attacker could forge, and the
+	// last one — the one this broker's own trusted proxy actually appended. Only the last entry
+	// must be trusted.
+	if status := post("10.0.0.9, 203.0.113.5").StatusCode; status != http.StatusAccepted {
+		t.Fatalf("first request from 203.0.113.5 = %d, want 202", status)
+	}
+	if status := post("10.0.0.9, 203.0.113.5").StatusCode; status != http.StatusTooManyRequests {
+		t.Fatalf("second request from the same trusted last hop = %d, want 429 (burst 1 exhausted)", status)
+	}
+	if status := post("10.0.0.9, 198.51.100.7").StatusCode; status != http.StatusAccepted {
+		t.Fatalf("first request from a different trusted last hop 198.51.100.7 = %d, want 202 (independent bucket)", status)
+	}
+	if status := post("10.0.0.9, 198.51.100.7").StatusCode; status != http.StatusTooManyRequests {
+		t.Fatalf("second request from 198.51.100.7 = %d, want 429 (its own bucket now exhausted)", status)
+	}
+
+	// A caller sending no header at all falls back to r.RemoteAddr, which is the shared httptest
+	// connection's address, the same one every request above arrived on — but that bucket was
+	// never touched by the header-bearing requests, so it still has its own untouched burst.
+	if status := post("").StatusCode; status != http.StatusAccepted {
+		t.Fatalf("request with no forwarded-for header = %d, want 202 (falls back to RemoteAddr, an untouched bucket)", status)
+	}
+	if status := post("").StatusCode; status != http.StatusTooManyRequests {
+		t.Fatalf("second no-header request = %d, want 429 (RemoteAddr bucket now exhausted)", status)
+	}
+}
+
 // TestLauncherCredentialFloodKeepsBrokerResponsive is the connection-exhaustion regression: a
 // flood of unauthenticated launcher-credential requests, each parked on a slow Dispatch, must not
 // drain the Postgres pool, so /healthz (which needs a connection) keeps answering at once.
@@ -1011,8 +1081,8 @@ func TestMalformedPathIDsAreRefusedAs400(t *testing.T) {
 func TestCreateRequestValidatesItsBody(t *testing.T) {
 	srv, enrA, _, _, _, _ := fixture(t)
 	for body, code := range map[string]string{
-		`{"secrets":[],"reason":"r"}`:                                        "SECRETS_REQUIRED",
-		`{"reason":"r"}`:                                                     "SECRETS_REQUIRED",
+		`{"secrets":[],"reason":"r"}`: "SECRETS_REQUIRED",
+		`{"reason":"r"}`:              "SECRETS_REQUIRED",
 		`{"secrets":["AUTO_TOKEN","AUTO_TOKEN"],"reason":"r"}`:               "DUPLICATE_SECRET",
 		`{"secrets":[""],"reason":"r"}`:                                      "SECRET_NAME_INPUT",
 		`{"secrets":["BAD\u0000NAME"],"reason":"r"}`:                         "SECRET_NAME_INPUT",

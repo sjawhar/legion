@@ -45,6 +45,37 @@ func TestLoadReadsTokenFileAheadOfValue(t *testing.T) {
 	}
 }
 
+// TestLoadReadsTrustedProxyHeaderOptionally pins that BROKER_TRUSTED_PROXY_HEADER is optional
+// (unset means "" — the rate limiter keys on r.RemoteAddr) and, when set, passes through
+// verbatim as the header name to trust.
+func TestLoadReadsTrustedProxyHeaderOptionally(t *testing.T) {
+	base := map[string]string{
+		"BROKER_DATABASE_URL": "postgres://x", "BROKER_PUBLIC_URL": "https://secrets.dev1.internal.trajectorylabs.com",
+		"BROKER_DISPATCH_URL": "https://dispatch.dev1.internal.trajectorylabs.com", "BROKER_DISPATCH_TOKEN": "t",
+		"BROKER_DISPATCH_PROJECT": "AGENTC", "BROKER_RULES_FILE": "/r.yaml",
+	}
+	cfg, err := Load(env(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrustedProxyHeader != "" {
+		t.Fatalf("TrustedProxyHeader = %q, want empty when BROKER_TRUSTED_PROXY_HEADER is unset", cfg.TrustedProxyHeader)
+	}
+
+	withHeader := map[string]string{}
+	for k, v := range base {
+		withHeader[k] = v
+	}
+	withHeader["BROKER_TRUSTED_PROXY_HEADER"] = "X-Forwarded-For"
+	cfg, err = Load(env(withHeader))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TrustedProxyHeader != "X-Forwarded-For" {
+		t.Fatalf("TrustedProxyHeader = %q, want X-Forwarded-For", cfg.TrustedProxyHeader)
+	}
+}
+
 func TestLoadRefusesBothRulesSources(t *testing.T) {
 	_, err := Load(env(map[string]string{
 		"BROKER_DATABASE_URL": "postgres://x", "BROKER_PUBLIC_URL": "https://s", "BROKER_DISPATCH_URL": "https://d",

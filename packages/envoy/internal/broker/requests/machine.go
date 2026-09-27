@@ -138,6 +138,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID string, names []strin
 	r := newRequest{
 		id: uuid.NewString(), enrollmentID: enrollmentID, issueKey: issueKey, reason: reason, state: e.state,
 		approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: e.lifetime, decisions: e.decisions,
+		denialDetail: e.denialDetail,
 	}
 	if e.state == "pending" {
 		return m.createPending(ctx, enr, r)
@@ -170,6 +171,10 @@ type evaluation struct {
 	// awaitsAssignee: nothing else denies the request, and some name wants the approving issue's
 	// assignee, who was not known to this pass.
 	awaitsAssignee bool
+	// denialDetail overrides the generic policy-deny decision_detail when the denial has a more
+	// specific cause (currently: the matching rule needs the issue's assignee to approve, but no
+	// assignee is available).
+	denialDetail string
 }
 
 func (m *Machine) evaluate(set *rules.Set, names []string, requester rules.Requester) (evaluation, error) {
@@ -203,6 +208,9 @@ func (m *Machine) evaluate(set *rules.Set, names []string, requester rules.Reque
 	case denied || awaiting:
 		e.state = "denied"
 		e.awaitsAssignee = awaiting && !denied
+		if e.awaitsAssignee {
+			e.denialDetail = "the matching rule requires approval by the issue's assignee, but none is available to decide this request"
+		}
 	case needsApproval:
 		e.state = "pending"
 	}
@@ -211,9 +219,9 @@ func (m *Machine) evaluate(set *rules.Set, names []string, requester rules.Reque
 
 // newRequest is one request row as Create writes it.
 type newRequest struct {
-	id, enrollmentID, issueKey, reason, state, approver, rulesVersion, sessionID string
-	lifetime                                                                     time.Duration
-	decisions                                                                    []SecretDecision
+	id, enrollmentID, issueKey, reason, state, approver, rulesVersion, sessionID, denialDetail string
+	lifetime                                                                                   time.Duration
+	decisions                                                                                  []SecretDecision
 }
 
 func (r newRequest) names() []string {
@@ -232,9 +240,16 @@ func (m *Machine) insertRequest(ctx context.Context, tx pgx.Tx, r newRequest) er
 		t := time.Now().Add(m.PendingTTL)
 		pendingExpires = &t
 	}
+	detail := ""
+	if r.state == "denied" {
+		detail = r.denialDetail
+		if detail == "" {
+			detail = "policy denies at least one requested secret"
+		}
+	}
 	if _, err := tx.Exec(ctx, `insert into requests (id, enrollment_id, issue_key, reason, state, allowed_approver, rules_version, lifetime_seconds, pending_expires_at, session_id, decided_at, decision_detail)
-		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, case when $5 in ('granted','denied') then now() end, case when $5='denied' then 'policy denies at least one requested secret' end)`,
-		r.id, r.enrollmentID, r.issueKey, r.reason, r.state, nullable(r.approver), r.rulesVersion, int(r.lifetime.Seconds()), pendingExpires, nullable(r.sessionID)); err != nil {
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, case when $5 in ('granted','denied') then now() end, $11)`,
+		r.id, r.enrollmentID, r.issueKey, r.reason, r.state, nullable(r.approver), r.rulesVersion, int(r.lifetime.Seconds()), pendingExpires, nullable(r.sessionID), nullable(detail)); err != nil {
 		return err
 	}
 	for _, d := range r.decisions {

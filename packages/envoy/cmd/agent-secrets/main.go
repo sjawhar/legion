@@ -59,6 +59,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	switch args[0] {
+	case "-h", "--help", "help":
+		fmt.Fprint(stdout, usage())
+		return 0
 	case "keygen":
 		return cmdKeygen(args[1:], stdout, stderr)
 	case "enroll":
@@ -432,7 +435,7 @@ func cmdLauncher(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "confirmation code: %s\napprove the Dispatch ask on %s's standing secrets issue only if it shows this code\n", code, *operator)
 	backoff := 2 * time.Second
 	for {
-		state, token, err := c.ReadLauncherCredential(ctx, pendingID)
+		state, token, credentialID, err := c.ReadLauncherCredential(ctx, pendingID)
 		if err != nil {
 			fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
 			return 1
@@ -441,8 +444,14 @@ func cmdLauncher(args []string, stdout, stderr io.Writer) int {
 		case "issued":
 			if token == "" {
 				// The one-time token was already handed to another reader of this pending id:
-				// whoever holds it, it is not this process, so this login did not succeed.
-				fmt.Fprintln(stderr, "agent-secrets launcher login: the credential was issued but its one-time token was already collected by another reader; this login did NOT succeed and nothing was written. Revoke that launcher credential and log in again.")
+				// whoever holds it, it is not this process, so this login did not succeed. There
+				// is no self-service way to revoke a launcher credential today; naming it is the
+				// most this CLI can do, and an operator has to act on it by hand.
+				if credentialID != "" {
+					fmt.Fprintf(stderr, "agent-secrets launcher login: a launcher credential was already issued for this request by someone else (credential id %s); this login did NOT succeed and nothing was written. Contact an operator to investigate and revoke launcher credential %s before retrying.\n", credentialID, credentialID)
+				} else {
+					fmt.Fprintln(stderr, "agent-secrets launcher login: a launcher credential was already issued for this request by someone else; this login did NOT succeed and nothing was written. Contact an operator to investigate before retrying.")
+				}
 				return 1
 			}
 			if err := os.MkdirAll(filepath.Dir(*out), 0o700); err != nil {

@@ -173,6 +173,15 @@ type createIssueBody struct {
 	Assignee *string  `json:"assignee"`
 	Labels   []string `json:"labels"`
 	Actor    actor    `json:"actor"`
+	// Force skips Dispatch's own near-duplicate title heuristic (duplicateCandidates), which
+	// runs against every issue in the project, open or closed, and would otherwise refuse this
+	// call with 409 POSSIBLE_DUPLICATE: once against the exact title of an issue Standing just
+	// found closed (and is opening a replacement for), and again against any issue whose title
+	// merely shares lexemes with "<label>: <operator>" or extends another operator's login. The
+	// caller already did the de-duplication that matters (Standing's exact-title match against
+	// ListIssues before ever reaching here), so Dispatch's fuzzy check is redundant here and
+	// actively wrong for a service opening a well-known, programmatically-managed title.
+	Force bool `json:"force"`
 }
 
 type createIssueResult struct {
@@ -181,7 +190,7 @@ type createIssueResult struct {
 
 // CreateIssue opens an issue and returns its key.
 func (c *Client) CreateIssue(ctx context.Context, project, title string, assignee *string, labels []string) (string, error) {
-	body, err := json.Marshal(createIssueBody{Project: project, Title: title, Assignee: assignee, Labels: labels, Actor: brokerActor})
+	body, err := json.Marshal(createIssueBody{Project: project, Title: title, Assignee: assignee, Labels: labels, Actor: brokerActor, Force: true})
 	if err != nil {
 		return "", err
 	}

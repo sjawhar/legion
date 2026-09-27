@@ -162,7 +162,7 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 		t.Fatalf("ask opened on issue %q, want the standing issue %q", call.issue, fake.issues[0].Key)
 	}
 
-	state, token, err := svc.Read(ctx, pending.ID)
+	state, token, _, err := svc.Read(ctx, pending.ID)
 	if err != nil || state != "pending" || token != "" {
 		t.Fatalf("Read (pending) = state=%q token_present=%v err=%v, want pending/empty/nil", state, token != "", err)
 	}
@@ -172,15 +172,18 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	state, token, err = svc.Read(ctx, pending.ID)
+	state, token, _, err = svc.Read(ctx, pending.ID)
 	if err != nil || state != "issued" || token == "" {
 		t.Fatalf("Read (issued, first) = state=%q token_present=%v err=%v, want issued with a token", state, token != "", err)
 	}
 	firstToken := token
 
-	state, token, err = svc.Read(ctx, pending.ID)
+	state, token, credentialID, err := svc.Read(ctx, pending.ID)
 	if err != nil || state != "issued" || token != "" {
 		t.Fatalf("Read (issued, second) = state=%q token_present=%v err=%v, want issued with no token", state, token != "", err)
+	}
+	if credentialID == "" {
+		t.Fatal("Read (issued, second) credentialID = \"\", want the credential id an operator could revoke")
 	}
 
 	cred, err := svc.Enroll.AuthenticateLauncher(ctx, firstToken)
@@ -202,7 +205,7 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 	if err := svc.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile (2nd): %v", err)
 	}
-	state, token, err = svc.Read(ctx, pending2.ID)
+	state, token, _, err = svc.Read(ctx, pending2.ID)
 	if err != nil || state != "denied" || token != "" {
 		t.Fatalf("Read (2nd, denied) = state=%q token_present=%v err=%v, want denied/empty", state, token != "", err)
 	}
@@ -281,7 +284,7 @@ func TestLauncherRequestServiceCredentialHasNilOperator(t *testing.T) {
 	if err := svc.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	_, token, err := svc.Read(ctx, pending.ID)
+	_, token, _, err := svc.Read(ctx, pending.ID)
 	if err != nil || token == "" {
 		t.Fatalf("Read (issued): token_present=%v err=%v", token != "", err)
 	}
@@ -349,7 +352,7 @@ func TestLauncherRequestExpiresAfterTTL(t *testing.T) {
 	if len(fake.getAskCalls) != 0 {
 		t.Fatalf("GetAsk calls = %v, want none for an already-expired row", fake.getAskCalls)
 	}
-	state, token, err := svc.Read(ctx, pending.ID)
+	state, token, _, err := svc.Read(ctx, pending.ID)
 	if err != nil || state != "expired" || token != "" {
 		t.Fatalf("Read (expired) = state=%q token_present=%v err=%v, want expired/empty", state, token != "", err)
 	}
@@ -368,7 +371,7 @@ func TestLauncherRequestExpiresAfterTTL(t *testing.T) {
 func TestReadUnknownPendingID(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newTestService(t)
-	if _, _, err := svc.Read(ctx, "not-a-real-pending-id"); err != ErrNotFound {
+	if _, _, _, err := svc.Read(ctx, "not-a-real-pending-id"); err != ErrNotFound {
 		t.Fatalf("Read(unknown) error = %v, want ErrNotFound", err)
 	}
 }
@@ -388,7 +391,7 @@ func TestReconcileLeavesRequestPendingOnUnrecognizedAskState(t *testing.T) {
 	if err := svc.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	state, token, err := svc.Read(ctx, pending.ID)
+	state, token, _, err := svc.Read(ctx, pending.ID)
 	if err != nil || state != "pending" || token != "" {
 		t.Fatalf("Read = state=%q token_present=%v err=%v, want still pending", state, token != "", err)
 	}
@@ -459,7 +462,7 @@ func TestLauncherRequestEmptyServiceStringNormalizedToOperatorCredential(t *test
 	if err := svc.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	_, token, err := svc.Read(ctx, pending.ID)
+	_, token, _, err := svc.Read(ctx, pending.ID)
 	if err != nil || token == "" {
 		t.Fatalf("Read (issued): token_present=%v err=%v", token != "", err)
 	}
@@ -488,7 +491,7 @@ func TestApprovalMatchesTheOperatorCaseInsensitively(t *testing.T) {
 	if err := svc.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	state, token, err := svc.Read(ctx, pending.ID)
+	state, token, _, err := svc.Read(ctx, pending.ID)
 	if err != nil || state != "issued" || token == "" {
 		t.Fatalf("Read = state=%q token_present=%v err=%v, want issued", state, token != "", err)
 	}

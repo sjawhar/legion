@@ -1106,8 +1106,15 @@ through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — which is
 URL is set, and is not itself required at startup), `BROKER_DISPATCH_TOKEN` (required),
 `BROKER_LEASE_SECONDS` (default 900, max 3600), `BROKER_ASK_POLL_SECONDS` (default 5, max 60),
 `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_MAX_GRANT_SECONDS` (default 43200, max
-43200), and `BROKER_RULES_RELOAD_SECONDS` (default 300, max 3600). `BROKER_DISPATCH_TOKEN` and
-`BROKER_ENVOY_TOKEN` follow the broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when
+43200), `BROKER_RULES_RELOAD_SECONDS` (default 300, max 3600), and `BROKER_TRUSTED_PROXY_HEADER`
+(optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential rate limiter's
+per-address bucket trusts for the caller's real address — its last comma-separated entry, the hop
+your own reverse proxy appended, never an earlier client-supplied one. Unset, the default, keys on
+`r.RemoteAddr` directly, which is correct only when the broker is reached without a proxy in front
+of it; behind one — this broker's documented production shape, the shared internal ALB —
+`r.RemoteAddr` is the proxy's own address for every caller, collapsing the per-address bucket into
+one shared by everyone unless this variable is set).
+`BROKER_DISPATCH_TOKEN` and `BROKER_ENVOY_TOKEN` follow the broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when
 set, names a file whose trimmed contents win over a bare `<NAME>` — with both set, the file wins
 silently, nothing is refused — and a named-but-unreadable or empty file is a startup error naming
 the file, never a silent fallback to an unset value. `config.Load` refuses to start on: a missing
@@ -1131,7 +1138,11 @@ kind of caller. A bad credential is a 401; a store or Dispatch that cannot answe
 authenticating is a 503 naming it. Every 500 is logged with its cause (`writeInternal`), every JSON
 body is capped at 1 MiB with unknown fields refused (`readJSON`), non-UUID path ids are 400
 `<KIND>_ID_INPUT`, and the unauthenticated `POST /v1/launcher-credentials` is rate limited per source
-address and per operator. Read `routes()` for the current, authoritative route list.
+address (see `BROKER_TRUSTED_PROXY_HEADER` above) and per operator — the per-operator bucket keys
+on the request body's own `operator` field, so an attacker naming a specific victim operator
+repeatedly can still lock out that operator's launcher logins at a low rate; this is inherent to a
+per-operator limit on an unauthenticated route and is an accepted risk, not a bug. Read `routes()`
+for the current, authoritative route list.
 
 `internal/broker/requests` is the state machine. A request's terminal states — `granted`,
 `denied`, `cancelled`, `expired` — are final: every transition is an `UPDATE` guarded by
@@ -1155,7 +1166,18 @@ rules whenever they changed since it was decided: a name the rules no longer car
 automatic grant the rules now want approved is refused (`GRANT_NOT_LIVE`). A name is released only
 when both its delivery frozen at grant time and its current delivery are `inject`; otherwise it is
 withheld and returned in `proxy_only`. A source missing from the secrets store is refused as
-`404 SECRET_NOT_IN_STORE` naming the secret. Audit rows never carry secret values — `audit()` takes
+`404 SECRET_NOT_IN_STORE` naming the secret. Pod enrollments have no `approver` (no ask is ever
+opened for an automatic decision) and no `operator`, so a pod's automatic-decision grant has no
+human revoker today: only the session itself (`RevokeGrant` with a matching `EnrollmentID`), or
+deleting the issuing enrollment (`DeleteEnrollment`, which cascades), can end it. This is a known,
+accepted consequence of the T1.3 cross-tenant-revoke fix (`mayRevoke` correctly requires a named
+approver or operator to exist before trusting a login against it), not a bug. Separately,
+`stillAllowed`'s policy re-check (used by `Values` and `reuseLiveGrant`) keeps a live grant valid
+when a later rules reload changes only who may approve a name still requiring approval — not
+whether it does — and it never shortens an already-issued grant's expiry when a secret's
+`max_lifetime_seconds` is tightened in a later reload: the grant's `expires_at` is fixed at
+creation from the rules version in force then. Both are intentional, documented choices.
+Audit rows never carry secret values — `audit()` takes
 only `kind`, `enrollment_id`, `request_id`, an optional `grant_id`, `actor`, and a non-secret JSON
 `detail` (always JSON-encoded, never formatted by hand); `detail` carries things like the ask id,
 the refusal reason, or the requested secret names depending on the event, while the `actor`

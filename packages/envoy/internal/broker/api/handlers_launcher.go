@@ -48,14 +48,17 @@ func (s *server) requestLauncherCredential(w http.ResponseWriter, r *http.Reques
 // readLauncherCredentialResponse omits token entirely, rather than sending it as JSON null, once
 // launcher.Service.Read has cleared it: a caller polling this route after the one "issued"
 // response that carried a token sees state "issued" with no token field at all, which is what
-// makes the token single-use on the wire as well as in Postgres.
+// makes the token single-use on the wire as well as in Postgres. CredentialID is present only in
+// that same no-token case, so a caller who observes it (this is currently only the launcher CLI)
+// can name the credential to an operator who needs to investigate and revoke it.
 type readLauncherCredentialResponse struct {
-	State string  `json:"state"`
-	Token *string `json:"token,omitempty"`
+	State        string  `json:"state"`
+	Token        *string `json:"token,omitempty"`
+	CredentialID *string `json:"credential_id,omitempty"`
 }
 
 func (s *server) readLauncherCredential(w http.ResponseWriter, r *http.Request) {
-	state, token, err := s.deps.Launcher.Read(r.Context(), r.PathValue("pending"))
+	state, token, credentialID, err := s.deps.Launcher.Read(r.Context(), r.PathValue("pending"))
 	switch {
 	case errors.Is(err, launcher.ErrNotFound):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such launcher credential request")
@@ -67,6 +70,8 @@ func (s *server) readLauncherCredential(w http.ResponseWriter, r *http.Request) 
 	resp := readLauncherCredentialResponse{State: state}
 	if token != "" {
 		resp.Token = &token
+	} else if state == "issued" && credentialID != "" {
+		resp.CredentialID = &credentialID
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

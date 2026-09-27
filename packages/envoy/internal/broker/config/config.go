@@ -31,20 +31,27 @@ type Config struct {
 	AskPollSeconds     int
 	ProofSkewSeconds   int
 	MaxGrantSeconds    int
+	// TrustedProxyHeader is the request header the launcher-credential rate limiter trusts for
+	// the caller's real address (BROKER_TRUSTED_PROXY_HEADER), e.g. "X-Forwarded-For". Empty (the
+	// default) means the broker is reached directly, so it keys on r.RemoteAddr as before. Set it
+	// only when every request truly passes through your own trusted reverse proxy first —
+	// otherwise a caller can forge the header and pick its own rate-limit bucket.
+	TrustedProxyHeader string
 }
 
 func Load(getenv func(string) string) (Config, error) {
 	cfg := Config{
-		ListenAddr:      orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
-		DatabaseURL:     getenv("BROKER_DATABASE_URL"),
-		PublicURL:       getenv("BROKER_PUBLIC_URL"),
-		DispatchURL:     getenv("BROKER_DISPATCH_URL"),
-		DispatchProject: getenv("BROKER_DISPATCH_PROJECT"),
-		RulesFile:       getenv("BROKER_RULES_FILE"),
-		RulesS3URI:      getenv("BROKER_RULES_S3_URI"),
-		K8sOIDCIssuer:   getenv("BROKER_K8S_OIDC_ISSUER"),
-		K8sOIDCAudience: getenv("BROKER_K8S_OIDC_AUDIENCE"),
-		EnvoyURL:        getenv("BROKER_ENVOY_URL"),
+		ListenAddr:         orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
+		DatabaseURL:        getenv("BROKER_DATABASE_URL"),
+		PublicURL:          getenv("BROKER_PUBLIC_URL"),
+		DispatchURL:        getenv("BROKER_DISPATCH_URL"),
+		DispatchProject:    getenv("BROKER_DISPATCH_PROJECT"),
+		RulesFile:          getenv("BROKER_RULES_FILE"),
+		RulesS3URI:         getenv("BROKER_RULES_S3_URI"),
+		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
+		K8sOIDCAudience:    getenv("BROKER_K8S_OIDC_AUDIENCE"),
+		EnvoyURL:           getenv("BROKER_ENVOY_URL"),
+		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
 	}
 	for _, req := range []struct{ name, value string }{
 		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},

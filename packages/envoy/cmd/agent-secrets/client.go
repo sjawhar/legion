@@ -329,21 +329,27 @@ func (c *client) RequestLauncherCredential(ctx context.Context, operator, host s
 }
 
 // ReadLauncherCredential polls a pending launcher-credential request. token is non-empty exactly
-// once, on the first read that observes state "issued".
-func (c *client) ReadLauncherCredential(ctx context.Context, pendingID string) (state, token string, err error) {
+// once, on the first read that observes state "issued". credentialID names the launcher
+// credential whenever state is "issued", whether or not token is present: when it isn't (another
+// reader already collected it), credentialID is the only thing the caller can act on.
+func (c *client) ReadLauncherCredential(ctx context.Context, pendingID string) (state, token, credentialID string, err error) {
 	raw, err := c.doBearer(ctx, "", http.MethodGet, "/v1/launcher-credentials/"+pendingID, nil)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	var result struct {
-		State string  `json:"state"`
-		Token *string `json:"token"`
+		State        string  `json:"state"`
+		Token        *string `json:"token"`
+		CredentialID *string `json:"credential_id"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", "", fmt.Errorf("decode launcher credential response: %w", err)
+		return "", "", "", fmt.Errorf("decode launcher credential response: %w", err)
 	}
 	if result.Token != nil {
 		token = *result.Token
 	}
-	return result.State, token, nil
+	if result.CredentialID != nil {
+		credentialID = *result.CredentialID
+	}
+	return result.State, token, credentialID, nil
 }

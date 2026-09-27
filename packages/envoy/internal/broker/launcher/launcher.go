@@ -139,32 +139,40 @@ func (s *Service) Request(ctx context.Context, operator, host string, service *s
 // Read answers the launcher's poll: "pending", "denied", "expired", or "issued" with the raw
 // one-time token exactly once. It locks the row for update and clears token_once only after
 // reading it back, and only when state is "issued"; a Read that observes "issued" a second time,
-// after the first clear committed, finds token_once already null.
-func (s *Service) Read(ctx context.Context, pendingID string) (state, token string, err error) {
+// after the first clear committed, finds token_once already null. credentialID is the launcher
+// credential's id whenever state is "issued" (set in the same statement as the state
+// transition), whether or not this call also returns its token: a caller that observes "issued"
+// with no token (another reader already collected it) still learns which credential that was, so
+// it can be named to an operator who needs to investigate and revoke it.
+func (s *Service) Read(ctx context.Context, pendingID string) (state, token, credentialID string, err error) {
 	h := hashPendingID(pendingID)
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer tx.Rollback(ctx)
 	var tok *string
-	err = tx.QueryRow(ctx, `select state, token_once from launcher_credential_requests where pending_id_hash=$1 for update`, h).Scan(&state, &tok)
+	var cred *string
+	err = tx.QueryRow(ctx, `select state, token_once, credential_id from launcher_credential_requests where pending_id_hash=$1 for update`, h).Scan(&state, &tok, &cred)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", ErrNotFound
+		return "", "", "", ErrNotFound
 	}
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
+	}
+	if cred != nil {
+		credentialID = *cred
 	}
 	if state != "issued" {
-		return state, "", nil
+		return state, "", "", nil
 	}
 	if tok != nil {
 		token = *tok
 		if _, err := tx.Exec(ctx, `update launcher_credential_requests set token_once=null where pending_id_hash=$1`, h); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 	}
-	return state, token, tx.Commit(ctx)
+	return state, token, credentialID, tx.Commit(ctx)
 }
 
 // Reconcile is the poller's own per-tick pass over every still-pending request: it expires
@@ -283,15 +291,16 @@ func (s *Service) applyAsk(ctx context.Context, pendingHash []byte, ask dispatch
 		return err
 	}
 	approved := decision == dispatch.Approved
-	by := ""
+	by, actor := "", "broker"
 	if ask.Answer != nil {
 		by = dispatch.CanonicalLogin(ask.Answer.User)
+		actor = "human:" + by
 	}
 	if !approved {
 		if _, err := tx.Exec(ctx, `update launcher_credential_requests set state='denied' where pending_id_hash=$1 and state='pending'`, pendingHash); err != nil {
 			return err
 		}
-		if err := auditLauncher(ctx, tx, "launcher_request.denied", "human:"+by, auditDetail(map[string]any{
+		if err := auditLauncher(ctx, tx, "launcher_request.denied", actor, auditDetail(map[string]any{
 			"operator": operator, "host": host, "ask_id": storedAskID, "reason": denyReason,
 		})); err != nil {
 			return err
@@ -312,7 +321,7 @@ func (s *Service) applyAsk(ctx context.Context, pendingHash []byte, ask dispatch
 		where pending_id_hash=$1 and state='pending'`, pendingHash, id, token); err != nil {
 		return err
 	}
-	if err := auditLauncher(ctx, tx, "launcher_request.issued", "human:"+by, auditDetail(map[string]any{
+	if err := auditLauncher(ctx, tx, "launcher_request.issued", actor, auditDetail(map[string]any{
 		"operator": operator, "service": service, "host": host, "ask_id": storedAskID, "credential_id": id.String(),
 	})); err != nil {
 		return err

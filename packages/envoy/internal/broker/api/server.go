@@ -30,6 +30,11 @@ type Deps struct {
 	Launcher  *launcher.Service
 	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
+	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the launcher-credential
+	// rate limiter's per-address bucket trusts for the real client address; empty means keying on
+	// r.RemoteAddr, correct only when the broker is reached directly rather than through a
+	// reverse proxy or load balancer. See limits.go's clientAddress.
+	TrustedProxyHeader string
 }
 
 type server struct {
@@ -42,7 +47,7 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.LauncherLimits != nil {
 		limits = *deps.LauncherLimits
 	}
-	s := &server{deps: deps, launcherLimiter: newLauncherLimiter(limits)}
+	s := &server{deps: deps, launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader)}
 	for _, route := range routes() {
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
 			who, ok := s.authenticate(w, r, route.Handler.auth)
@@ -219,7 +224,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 	if err := s.deps.Enroll.Store.Pool.Ping(r.Context()); err != nil {
-		writeUnavailable(w, "DATABASE", "ping Postgres", err)
+		writeUnavailable(w, "DATABASE_UNAVAILABLE", "ping Postgres", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

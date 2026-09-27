@@ -196,6 +196,29 @@ func TestClientAgainstRealDispatchIssuesAndAsks(t *testing.T) {
 		t.Fatalf("ListIssues after closing %s = %+v, %v, want no open issue", key, open, err)
 	}
 
+	// Standing's own re-lookup already de-duplicated on an exact open-issue title match; Dispatch's
+	// own near-duplicate heuristic (duplicateCandidates, checked against every issue regardless of
+	// status) must not additionally refuse re-creating the exact same title once the old one is
+	// closed. CreateIssue sets force so this succeeds with a fresh key rather than 409
+	// POSSIBLE_DUPLICATE.
+	reopened, err := c.CreateIssue(ctx, contractProject, "Secret requests: alice", new("alice"), []string{"agent-secrets"})
+	if err != nil {
+		t.Fatalf("CreateIssue(same title as a closed issue): %v", err)
+	}
+	if reopened == key || !issueKeyShape.MatchString(reopened) {
+		t.Fatalf("CreateIssue(same title as closed %s) = %q, want a new %s-<n> key", key, reopened, contractProject)
+	}
+
+	// The near-duplicate heuristic also matches on shared lexemes, not just exact titles: an
+	// operator whose login extends another operator's login ("bob-smith" vs. "bob") must still be
+	// able to get their own standing issue.
+	if _, err := c.CreateIssue(ctx, contractProject, "Secret requests: bob", new("bob"), []string{"agent-secrets"}); err != nil {
+		t.Fatalf("CreateIssue(Secret requests: bob): %v", err)
+	}
+	if _, err := c.CreateIssue(ctx, contractProject, "Secret requests: bob-smith", new("bob"), []string{"agent-secrets"}); err != nil {
+		t.Fatalf("CreateIssue(Secret requests: bob-smith) after Secret requests: bob exists: %v, want force to bypass the near-duplicate heuristic", err)
+	}
+
 	_, err = c.GetAsk(ctx, uuid.NewString())
 	if dispatchErr, ok := AsError(err); !ok || dispatchErr.Status != http.StatusNotFound || dispatchErr.Unavailable() {
 		t.Fatalf("GetAsk(unknown) error = %v, want a 404 *Error", err)

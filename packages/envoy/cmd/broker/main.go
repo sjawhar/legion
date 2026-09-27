@@ -90,7 +90,8 @@ func main() {
 	go poller.Run(ctx)
 	mux := http.NewServeMux()
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, Enroll: enr, Machine: machine, Dispatch: dc, Launcher: ls,
-		Proof: &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, Replay: enr.Replay}})
+		Proof:              &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, Replay: enr.Replay},
+		TrustedProxyHeader: cfg.TrustedProxyHeader})
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           withRequestDeadline(mux, requestDeadline),

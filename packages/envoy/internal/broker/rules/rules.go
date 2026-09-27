@@ -170,6 +170,8 @@ func Parse(data []byte) (*Set, error) {
 				switch {
 				case q.Approver == "operator" && q.Kind == "pod":
 					return nil, fmt.Errorf("rules: %s requesters[%d]: a pod has no operator to approve; use issue_assignee or login:<name>", name, i)
+				case q.Approver == "issue_assignee" && q.Kind != "pod":
+					return nil, fmt.Errorf("rules: %s requesters[%d]: %s has no approving issue; issue_assignee approval is only for pod", name, i, q.Kind)
 				case q.Approver == "operator", q.Approver == "issue_assignee":
 				case strings.HasPrefix(q.Approver, "login:"):
 					login := dispatch.CanonicalLogin(strings.TrimPrefix(q.Approver, "login:"))

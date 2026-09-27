@@ -1325,3 +1325,40 @@ secrets:
 		t.Fatalf("Create(pod running as default:stranger) = %+v, %v, want denied", req, err)
 	}
 }
+
+// TestAwaitsAssigneeDenialGetsDistinctDetail pins F1-NEW's fix: a request denied only because the
+// matching rule needs the issue's assignee to approve, and none is available, records a distinct
+// decision_detail rather than the generic "policy denies at least one requested secret" — the
+// same generic detail an ordinary policy deny produces, which left the two indistinguishable.
+func TestAwaitsAssigneeDenialGetsDistinctDetail(t *testing.T) {
+	m, _, svc, _, _ := newFixture(t)
+	ctx := context.Background()
+	withRules(t, m, `version: 1
+secrets:
+  NEEDS_ASSIGNEE:
+    source: dev1/agent-secrets/AUTO_TOKEN
+    owner: sjawhar
+    delivery: inject
+    max_lifetime_seconds: 3600
+    requesters: [{kind: pod, decision: approval, approver: issue_assignee}]
+`)
+	m.IssueAssignee = func(context.Context, string) (string, error) { return "", nil }
+	pod := podEnrollment(t, svc, "pod-no-assignee", "system:serviceaccount:legion:worker")
+
+	req, err := m.Create(ctx, pod.ID.String(), []string{"NEEDS_ASSIGNEE"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if req.State != "denied" {
+		t.Fatalf("req.State = %q, want denied", req.State)
+	}
+
+	got, err := m.Get(ctx, req.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	const want = "the matching rule requires approval by the issue's assignee, but none is available to decide this request"
+	if got.Detail == nil || *got.Detail != want {
+		t.Fatalf("Detail = %v, want %q", got.Detail, want)
+	}
+}

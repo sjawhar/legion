@@ -216,3 +216,21 @@ func TestPodEntriesScopeToServiceAccounts(t *testing.T) {
 		t.Fatalf("an entry with no service_account must still match every pod: %+v %v", d, err)
 	}
 }
+
+// TestIssueAssigneeApprovalRefusedForBoxOrHost pins that approver: issue_assignee is valid only
+// for a pod requester: a box or host has no approving issue, so a rule mixing the two is an
+// authoring error refused at parse time (F1-NEW).
+func TestIssueAssigneeApprovalRefusedForBoxOrHost(t *testing.T) {
+	for name, entry := range map[string]string{
+		"box":  "{kind: box, operator: sjawhar, decision: approval, approver: issue_assignee}",
+		"host": "{kind: host, operator: sjawhar, decision: approval, approver: issue_assignee}",
+	} {
+		if _, err := Parse(oneSecret(entry)); err == nil ||
+			!strings.Contains(err.Error(), "issue_assignee") || !strings.Contains(err.Error(), "requesters[0]") {
+			t.Errorf("%s + issue_assignee: Parse = %v, want a refusal naming issue_assignee and requesters[0]", name, err)
+		}
+	}
+	if _, err := Parse(oneSecret("{kind: pod, decision: approval, approver: issue_assignee}")); err != nil {
+		t.Fatalf("pod + issue_assignee must still parse: %v", err)
+	}
+}

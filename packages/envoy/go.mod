@@ -19,7 +19,6 @@ require (
 	github.com/testcontainers/testcontainers-go v0.41.0
 	github.com/testcontainers/testcontainers-go/modules/nats v0.41.0
 	github.com/yuin/goldmark v1.8.6
-	go.abhg.dev/goldmark/frontmatter v0.3.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/time v0.12.0
 	gopkg.in/yaml.v3 v3.0.1
