@@ -17,9 +17,13 @@ import (
 // continuation lines and off a header line holding one pipe alone (lazyTableRows).
 type lazyAwareTable struct{}
 
+// tableTransformer is goldmark's table paragraph transformer, which lazyTableRows runs and
+// formsTable tries.
+var tableTransformer = extension.NewTableParagraphTransformer()
+
 func (lazyAwareTable) Extend(m goldmark.Markdown) {
 	m.Parser().AddOptions(
-		parser.WithParagraphTransformers(util.Prioritized(lazyTableRows{table: extension.NewTableParagraphTransformer()}, 200)),
+		parser.WithParagraphTransformers(util.Prioritized(lazyTableRows{table: tableTransformer}, 200)),
 		parser.WithASTTransformers(util.Prioritized(extension.NewTableASTTransformer(), 0)),
 	)
 }
@@ -133,6 +137,40 @@ func markLazyRows(table *extensionast.Table, rows, lazy []int) {
 			return
 		}
 	}
+}
+
+// underlineAfterTable is goldmark's setext heading parser opening no heading under a paragraph its
+// table transformer reads a table in (formsTable). Goldmark's table is a paragraph, which the
+// underline would make a heading, and where the table takes the paragraph's every line goldmark
+// writes the underline as a paragraph of its own, or moves the lines before the table after it as
+// the heading. The browser editor's parser, whose table is no paragraph, reads the line as the
+// table's row, as it reads any line that opens no other block, so the line stays the paragraph's -
+// all but a lone `-`, which opens an empty list item there, as goldmark's own handling leaves it.
+type underlineAfterTable struct{ parser.BlockParser }
+
+func (p underlineAfterTable) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	line, _ := reader.PeekLine()
+	if paragraph, ok := pc.LastOpenedBlock().Node.(*ast.Paragraph); ok && paragraph.Parent() == parent &&
+		!bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && formsTable(paragraph, reader) {
+		return nil, parser.NoChildren
+	}
+	return p.BlockParser.Open(parent, reader, pc)
+}
+
+// formsTable reports whether goldmark's table transformer reads a table in paragraph's lines,
+// trying it on a copy apart from the document.
+func formsTable(paragraph *ast.Paragraph, reader gmtext.Reader) bool {
+	trial := ast.NewParagraph()
+	trial.SetLines(tabExpandedLines(paragraph.Lines(), reader.Source()))
+	holder := ast.NewDocument()
+	holder.AppendChild(holder, trial)
+	tableTransformer.Transform(trial, reader, parser.NewContext())
+	for child := holder.FirstChild(); child != nil; child = child.NextSibling() {
+		if _, ok := child.(*extensionast.Table); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // blockRowAttr marks a table goldmark took a body row of from a line the browser editor's parser

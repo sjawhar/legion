@@ -720,7 +720,10 @@ made of with the line, where the browser editor's parser ends the table, and eve
 line does not continue, before it. So is a table a line opening another block would be a row of - a
 list item that cannot interrupt a paragraph, whatever its marker, or indented code
 (`markBlockRows`): goldmark's table is a paragraph, which such a line continues, where that parser's
-table is no paragraph and ends there, reading the line as that block.
+table is no paragraph and ends there, reading the line as that block. A setext underline under a
+table is the table's row, as that parser reads it (`underlineAfterTable`), all but a lone `-`, an
+empty list item there: goldmark's setext heading took the table's paragraph, then wrote the
+underline as a paragraph after the table, or made the lines before the table a heading after it.
 A tab in a line's indentation spans the columns to the next multiple of four from where it stands,
 as CommonMark and the browser editor's parser read it, so after a quote's `> ` it spans two: `> \t- a`
 opens a list, `> \t| a |` over `> \t| - |` is a table, and `> a` over `> \t===` a setext heading
