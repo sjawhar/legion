@@ -74,10 +74,11 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 		}
 		// An unrecorded todo issue without the label is someone else's work in a project Legion may
 		// share with humans and other agents: Legion records nothing of it until it is handed over.
-		if observation.Status == "todo" && !handed {
-			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", record.LegionLabel)
+		if observation.Status != "todo" {
+			return intake.Result{}, nil
 		}
-		if observation.Status != "todo" || !handed {
+		if !handed {
+			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", record.LegionLabel)
 			return intake.Result{}, nil
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
@@ -120,11 +121,13 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		if err != nil {
 			return fmt.Errorf("read reconciled issue %s: %w", summary.Key, err)
 		}
+		handed := record.CarriesLegionLabel(summary.Labels)
 		if stored == nil {
-			if summary.Status == "todo" && !record.CarriesLegionLabel(summary.Labels) {
-				a.log.Debug("admission: not handed to Legion", "issue", summary.Key, "label", record.LegionLabel)
+			if summary.Status != "todo" {
+				continue
 			}
-			if summary.Status != "todo" || !record.CarriesLegionLabel(summary.Labels) {
+			if !handed {
+				a.log.Debug("admission: not handed to Legion", "issue", summary.Key, "label", record.LegionLabel)
 				continue
 			}
 			if err := a.putNewRoot(ctx, tx, intake.DispatchIssue{
@@ -141,7 +144,6 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 			continue
 		}
 
-		handed := record.CarriesLegionLabel(summary.Labels)
 		if summary.Status == "todo" && handed && readmittable(*stored) {
 			if err := a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, stored.LastDispatchSeq); err != nil {
 				return err
@@ -355,11 +357,11 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
-// waiting line empties. skip excludes candidates this call must not promote: Reconcile's boot read
-// passes the keys whose record is behind Dispatch's own log, so a record that still reads waiting
-// here is left for the stream's own Apply to promote or dequeue once it delivers the event already
-// on its way.
-func (a *Admission) promote(ctx context.Context, tx pgx.Tx, skip map[string]struct{}) error {
+// waiting line empties. deferred excludes candidates this call must not promote: Reconcile passes
+// the keys whose record is behind Dispatch's own log, so a record that still reads waiting here is
+// left for the stream's own Apply to promote or dequeue once it delivers the event already on its
+// way.
+func (a *Admission) promote(ctx context.Context, tx pgx.Tx, deferred map[string]struct{}) error {
 	if a.cap <= 0 {
 		return nil
 	}
@@ -376,7 +378,7 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx, skip map[string]stru
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
-		if _, held := skip[candidate.Key]; held {
+		if _, ok := deferred[candidate.Key]; ok {
 			continue
 		}
 		now := a.now()
@@ -453,9 +455,7 @@ func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root r
 // want of the label while the tree was not live, which recordObservation otherwise records with the
 // phase untouched. Candidate's own promotion is what makes the tree live for these, since nothing
 // else reaches them afterward — reenterChild only re-enters a live tree's reopened child, and a
-// later todo observation of one already todo changes nothing. It repeats what reenterChild does for
-// one: the next generation, its own generation-scoped facts cleared, admitted, in its tree kept.
-// advanceAdmittedTree moves it on once the tree's architect reopens the design gate.
+// later todo observation of one already todo changes nothing.
 func (a *Admission) reenterStrandedChildren(ctx context.Context, tx pgx.Tx, candidate record.Issue, issues []record.Issue, now time.Time) error {
 	for _, child := range issues {
 		if child.Key == candidate.Key || child.Tree != candidate.Tree {
@@ -472,8 +472,7 @@ func (a *Admission) reenterStrandedChildren(ctx context.Context, tx pgx.Tx, cand
 		if err := a.store.PutIssue(ctx, tx, child); err != nil {
 			return fmt.Errorf("re-enter stranded child %s: %w", child.Key, err)
 		}
-		reason := fmt.Sprintf("%s is todo; it runs again under %s", child.Key, candidate.Key)
-		if err := a.enqueue(ctx, tx, child.Key, record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: reason}, now); err != nil {
+		if err := a.enqueue(ctx, tx, child.Key, workflow.ChildReenteredNotice(child.Key, candidate.Key), now); err != nil {
 			return err
 		}
 	}

@@ -213,7 +213,7 @@ func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err := e.enterChild(ctx, tx, *root, fact, next); err != nil {
 		return err
 	}
-	return e.notice(ctx, tx, child.Key, record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child.Key, root.Key)})
+	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
 }
 
 // enterChild records a todo child under root's live tree, admitted at generation, and starts its
