@@ -195,7 +195,7 @@
         "mdast-util-directive": "^3.1.0",
         "micromark-extension-directive": "^4.0.0",
         "micromark-util-types": "^2.0.2",
-        "proof-sdk-upstream": "github:sjawhar/proof-sdk#c2697996af3ca82817e8ce8748a56b491717bd21",
+        "proof-sdk-upstream": "github:sjawhar/proof-sdk#06fc1977f1fee637d92c6393965555e88ab9adcb",
         "remark-frontmatter": "^5.0.0",
         "remark-gfm": "^4.0.1",
         "remark-parse": "^11.0.0",
@@ -208,6 +208,7 @@
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@types/bun": "latest",
+        "happy-dom": "^20.14.0",
         "typescript": "^5.3.0",
       },
     },
@@ -1457,7 +1458,7 @@
 
     "prismjs": ["prismjs@1.30.0", "", {}, "sha512-DEvV2ZF2r2/63V+tK8hQvrR2ZGn10srHbXviTlcv7Kpzw8jWiNTqbVgjO3IY8RxrrOUF8VPMQQFysYYYv0YZxw=="],
 
-    "proof-sdk-upstream": ["proof-sdk@github:sjawhar/proof-sdk#c269799", { "dependencies": { "@aws-sdk/client-s3": "^3.879.0", "@fontsource/ibm-plex-sans": "^5.2.8", "@handlewithcare/prosemirror-suggest-changes": "^0.1.8", "@hocuspocus/provider": "^2.15.2", "@hocuspocus/server": "^2.15.2", "@milkdown/core": "^7.5.0", "@milkdown/kit": "^7.5.0", "@milkdown/plugin-clipboard": "^7.5.0", "@milkdown/plugin-collab": "^7.18.0", "@milkdown/plugin-cursor": "^7.5.0", "@milkdown/plugin-history": "^7.5.0", "@milkdown/plugin-listener": "^7.5.0", "@milkdown/plugin-prism": "^7.18.0", "@milkdown/preset-commonmark": "^7.5.0", "@milkdown/preset-gfm": "^7.5.0", "@milkdown/theme-nord": "^7.5.0", "@resvg/resvg-js": "^2.6.2", "beautiful-mermaid": "^1.1.3", "better-sqlite3": "^12.6.2", "express": "^5.2.1", "prismjs": "^1.30.0", "remark-frontmatter": "^5.0.0", "remark-gfm": "^4.0.1", "satori": "^0.24.1", "web-haptics": "^0.0.6", "wink-eng-lite-web-model": "^1.2.1", "wink-nlp": "^2.1.0", "ws": "^8.19.0", "y-indexeddb": "^9.0.12", "y-prosemirror": "^1.2.19", "y-websocket": "^3.0.0", "yjs": "^13.6.20", "zod": "^3.22.0" } }, "sjawhar-proof-sdk-c269799", "sha512-Vx2wPA6V/lbpb7P3APMpfI9nBJeA+bXRyhtRqh3C6vD6fguGvTkj0CAx8XVLAoNalcEd4SG0HDKx0Cdi1/0n9g=="],
+    "proof-sdk-upstream": ["proof-sdk@github:sjawhar/proof-sdk#06fc197", { "dependencies": { "@aws-sdk/client-s3": "^3.879.0", "@fontsource/ibm-plex-sans": "^5.2.8", "@handlewithcare/prosemirror-suggest-changes": "^0.1.8", "@hocuspocus/provider": "^2.15.2", "@hocuspocus/server": "^2.15.2", "@milkdown/core": "^7.5.0", "@milkdown/kit": "^7.5.0", "@milkdown/plugin-clipboard": "^7.5.0", "@milkdown/plugin-collab": "^7.18.0", "@milkdown/plugin-cursor": "^7.5.0", "@milkdown/plugin-history": "^7.5.0", "@milkdown/plugin-listener": "^7.5.0", "@milkdown/plugin-prism": "^7.18.0", "@milkdown/preset-commonmark": "^7.5.0", "@milkdown/preset-gfm": "^7.5.0", "@milkdown/theme-nord": "^7.5.0", "@resvg/resvg-js": "^2.6.2", "beautiful-mermaid": "^1.1.3", "better-sqlite3": "^12.6.2", "express": "^5.2.1", "prismjs": "^1.30.0", "remark-frontmatter": "^5.0.0", "remark-gfm": "^4.0.1", "satori": "^0.24.1", "web-haptics": "^0.0.6", "wink-eng-lite-web-model": "^1.2.1", "wink-nlp": "^2.1.0", "ws": "^8.19.0", "y-indexeddb": "^9.0.12", "y-prosemirror": "^1.2.19", "y-websocket": "^3.0.0", "yjs": "^13.6.20", "zod": "^3.22.0" } }, "sjawhar-proof-sdk-06fc197", "sha512-s8mD1yl+chiZO48NC+niqatkiGRw046fqEttPFrPqYBbcj7HghMf72z+Y6poTaj8unfcg6XkEb7vjMOs4+c+3w=="],
 
     "property-information": ["property-information@7.2.0", "", {}, "sha512-IAtzIB6sUiWaJYrX9smp3V46pBGbBeLFRGdh25kg1334VcBlD8HzhPeNIWQH9zhGmo2itIe25EHt9dQP7G5hmg=="],
 

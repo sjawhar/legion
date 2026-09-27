@@ -17,12 +17,16 @@ import type {
   AskSnooze,
   AuthenticatedUser,
   BlockSchema,
+  BroadcastCreated,
+  BroadcastRead,
+  BroadcastSummary,
   Comment,
   CommentDelivery,
   CommentRead,
   CreateAgentMessageInput,
   CreateArtifactInput,
   CreateAskInput,
+  CreateBroadcastInput,
   CreateCommentInput,
   CreatedAgentToken,
   CreateIssueInput,
@@ -451,6 +455,18 @@ export class DispatchApiClient {
 
   listAgentMessages(sessionID: string): Promise<MessageRead[]> {
     return this.json<MessageRead[]>(`/api/v1/agents/${pathSegment(sessionID)}/messages`);
+  }
+
+  createBroadcast(input: CreateBroadcastInput): Promise<BroadcastCreated> {
+    return this.post<BroadcastCreated>("/api/v1/broadcasts", input);
+  }
+
+  listBroadcasts(): Promise<BroadcastSummary[]> {
+    return this.json<BroadcastSummary[]>("/api/v1/broadcasts");
+  }
+
+  getBroadcast(id: string): Promise<BroadcastRead> {
+    return this.json<BroadcastRead>(`/api/v1/broadcasts/${pathSegment(id)}`);
   }
 
   createMessageDelivery(id: string, delivery: "btw" | "aside" | "steer"): Promise<MessageDelivery> {

@@ -51,13 +51,13 @@ type sandboxReads struct {
 
 // readSandbox is Agent Sandbox's share of readBoot (C1's translation, C3): the cluster's client from
 // runtime.kubernetes' kubeconfig, and the Options every value of the configuration becomes, with
-// the worker stream on tcp://<bind>:<worker_stream_port> (the address every pod's shim dials) and,
-// when the daemon has a NATS nkey seed, its user's public key, which the image probe holds the
-// providers Secret's seed to. None of the host's own agent machinery is read: no Oh My Pi
-// invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a pod
-// reads its bearer from its claim's Secret), no secretsd provider keys (a pod mounts its keys from
-// the providers Secret), and no host gh, git, or jj (a pod runs the image's).
-func readSandbox(cfg config.Config, project, dispatchToken, seed string, lookup func(string) (string, bool), log *slog.Logger) (sandboxReads, error) {
+// the worker stream on tcp://<bind>:<worker_stream_port> (the address every pod's shim dials) and
+// natsUser, the public key of the daemon's NATS nkey seed's user ("" with none), which the image
+// probe holds the providers Secret's seed to. None of the host's own agent machinery is read: no
+// Oh My Pi invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a
+// pod reads its bearer from its claim's Secret), no secretsd provider keys (a pod mounts its keys
+// from the providers Secret), and no host gh, git, or jj (a pod runs the image's).
+func readSandbox(cfg config.Config, project, dispatchToken, natsUser string, lookup func(string) (string, bool), log *slog.Logger) (sandboxReads, error) {
 	k := *cfg.Runtime.Kubernetes
 	rc, err := kubeClient(k)
 	if err != nil {
@@ -68,12 +68,7 @@ func readSandbox(cfg config.Config, project, dispatchToken, seed string, lookup 
 	if err != nil {
 		return sandboxReads{}, err
 	}
-	if seed != "" {
-		// The probe refuses a providers Secret whose NATS_NKEY_SEED is any other user's seed.
-		if opts.NATSUser, err = natsauth.PublicKey(seed); err != nil {
-			return sandboxReads{}, err
-		}
-	}
+	opts.NATSUser = natsUser
 	return sandboxReads{client: rc, opts: opts}, nil
 }
 

@@ -8,6 +8,22 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/sjawhar/envoy/internal/bus"
+)
+
+// maxRecordBytes and maxSettlementBytes bound a head's record and the settlement published from
+// it, each of which goes to NATS whole. GitHub allows 50,000 check runs in one check suite, so the
+// number of check names a head collects has no bound of GitHub's own. The record is kept well under
+// the server's 1 MiB default, since it is written whole on every observation; about 1,300 checks of
+// ordinary names fit. The settlement needs its own bound, because a name costs more there: a
+// failing check is named three times to the record's two, inside a JSON string in the envelope's
+// JSON, so a `"` costs 12 bytes a character in the settlement against 4 in the record. Its bound
+// is 64 KiB under the 1 MiB default, room for what a later settlement of the same record adds (a
+// longer generation, `superseded_settlement`).
+const (
+	maxRecordBytes     = 384 << 10
+	maxSettlementBytes = 1<<20 - 64<<10
 )
 
 // write applies mutate to the current state of identity's record, a new one carrying only the
@@ -17,6 +33,11 @@ import (
 // server restart must not fail them all, and GitHub does not redeliver a delivery the listener
 // refused. A lasting error fails it at once. Each attempt takes the handle the latest Rewatch
 // installed, and each KV call is given up on if the store is rewatched before it is answered.
+//
+// A write that would take the record past maxRecordBytes, or its settlement past
+// maxSettlementBytes, is refused with bus.ErrTooLarge, which a redelivery would meet again: the
+// record is written as it was, marked Overflowed, so it never settles on the checks it could not
+// hold.
 func (s *Store) write(identity State, mutate func(*State) bool) error {
 	key := Key(identity.Owner, identity.Repo, identity.Number, identity.SHA)
 	deadline := time.Now().Add(recordBudget)
@@ -58,6 +79,29 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 		if err != nil {
 			return err
 		}
+		settlement, err := settlementSize(st)
+		if err != nil {
+			return err
+		}
+		refused := boundsRefusal(key, len(buf), settlement)
+		if refused != nil {
+			// Decoded afresh rather than copied: mutate changed st in place, and the maps a shallow
+			// copy of the read would share are the ones it changed.
+			stored := identity
+			if rev != 0 {
+				if err := json.Unmarshal(entry.Value(), &stored); err != nil {
+					return err
+				}
+			}
+			if stored.Overflowed {
+				return refused
+			}
+			st = stored
+			st.Overflowed = true
+			if buf, err = json.Marshal(st); err != nil {
+				return err
+			}
+		}
 		_, err = kvCall(s.nextRewatch(), func() (uint64, error) {
 			if rev == 0 {
 				return kv.Create(key, buf)
@@ -66,7 +110,7 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 		})
 		switch {
 		case err == nil:
-			return nil
+			return refused
 		case kvErrorLasts(err):
 			return err
 		case isCASConflict(err):
@@ -75,6 +119,35 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 			retryErr = err
 		}
 	}
+}
+
+// boundsRefusal is the refusal of a write to key's record of record bytes whose settlement is
+// settlement bytes, when either is past its bound (maxRecordBytes, maxSettlementBytes), and nil
+// otherwise.
+func boundsRefusal(key string, record, settlement int) error {
+	switch {
+	case record > maxRecordBytes:
+		return fmt.Errorf("%w: head %s's record would be %d bytes, past its %d-byte bound",
+			bus.ErrTooLarge, key, record, maxRecordBytes)
+	case settlement > maxSettlementBytes:
+		return fmt.Errorf("%w: head %s's settlement would be %d bytes, past its %d-byte bound",
+			bus.ErrTooLarge, key, settlement, maxSettlementBytes)
+	}
+	return nil
+}
+
+// settlementSize is the size of the settlement st would publish, encoded as the summary loop sends
+// it; its topic travels in the protocol line, which a server's max payload does not count.
+func settlementSize(st State) (int, error) {
+	env, err := settlementEnvelope(st, time.Now().UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	data, err := json.Marshal(env)
+	if err != nil {
+		return 0, err
+	}
+	return len(data), nil
 }
 
 // errKVRewatched is what a KV call answers when the store was rewatched before its answer came.
@@ -145,8 +218,9 @@ func (s *Store) nextRewatch() <-chan struct{} {
 // (authorization, an expired credential, a permissions violation); the bucket is not there when
 // the handle is taken; JetStream is not enabled for the server or the account, which JetStream
 // reports as a 503 but which is configuration no retry within the budget changes, unlike the 503
-// of a server restarting; or JetStream refuses the request itself (any other 4xx, an invalid key,
-// a record over the payload limit). Anything else is transient, and what the retry actually
+// of a server restarting; JetStream refuses the request itself (any other 4xx, an invalid key,
+// a record over the payload limit); or the handle refuses the key before sending anything
+// (bus.ErrRefused, bus.EnsureKeyValue). Anything else is transient, and what the retry actually
 // rescues is a NATS reconnect (ErrReconnectBufExceeded, a request refused while the connection
 // reconnects, and errKVRewatched, a request given up on at the rewatch that follows it), a
 // JetStream 503 while a server restarts, and no responders, which a request gets whenever no
@@ -185,5 +259,5 @@ var lastingKVErrors = []error{
 	nats.ErrAuthorization, nats.ErrAuthExpired, nats.ErrPermissionViolation,
 	nats.ErrBucketNotFound,
 	nats.ErrJetStreamNotEnabled, nats.ErrJetStreamNotEnabledForAccount,
-	nats.ErrInvalidKey, nats.ErrMaxPayload,
+	nats.ErrInvalidKey, nats.ErrMaxPayload, bus.ErrRefused,
 }

@@ -127,7 +127,7 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 		return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
 	}
 	if fact.Status == "todo" && !claim.IsTreeRoot(issue.Key, issue.Tree) {
-		return intake.Result{}, e.reenterChild(ctx, tx, *issue, fact)
+		return intake.Result{}, e.ReenterChild(ctx, tx, *issue, fact)
 	}
 	return intake.Result{}, nil
 }
@@ -149,6 +149,7 @@ func (e *Engine) agentStatusWrite(ctx context.Context, tx pgx.Tx, issue record.I
 	e.log.Info("workflow: a claim session wrote a lifecycle status; the daemon re-asserts its own", "issue", issue.Key,
 		"session", fact.ActorSession, "wrote", fact.Status, "status", issue.Status)
 	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, record.ParentOf(fact.Parent), fact.Seq
+	issue.HandedOver = fact.HandedOver
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return false, err
 	}
@@ -169,25 +170,27 @@ func (e *Engine) recordChildUnderLiveTree(ctx context.Context, tx pgx.Tx, fact i
 	if err != nil || root == nil {
 		return intake.Result{}, err
 	}
-	live, err := e.liveTree(ctx, tx, *root)
+	live, err := record.TreeLive(ctx, e.store, tx, *root)
 	if err != nil || !live {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.enterChild(ctx, tx, *root, fact, root.Generation)
 }
 
-// reenterChild takes a recorded child set back to todo into a new run under its live tree, the way
+// ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
 // recordChildUnderLiveTree enters an unrecorded one: the run is the child's next generation, so no
 // row its previous run queued (its leaving's suspends) acts on it; the run it interrupted is
 // stopped, the previous run's facts are cleared, and the tree's architect is told. A child whose
 // tree is not live is an orphan, which admission, running after this handler, admits as a root of
-// its own.
-func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue, fact intake.DispatchIssue) error {
+// its own. fact carries the values the new generation takes — a live todo event's for a reopened
+// child, or the child's own already-recorded ones for admission's promotion of a stranded child no
+// live event ever reopened, so the run is exported for that caller too: one re-entry, not two.
+func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue, fact intake.DispatchIssue) error {
 	root, err := e.store.Issue(ctx, tx, child.Tree)
 	if err != nil || root == nil {
 		return err
 	}
-	live, err := e.liveTree(ctx, tx, *root)
+	live, err := record.TreeLive(ctx, e.store, tx, *root)
 	if err != nil || !live {
 		return err
 	}
@@ -214,7 +217,7 @@ func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err := e.enterChild(ctx, tx, *root, fact, next); err != nil {
 		return err
 	}
-	return e.notice(ctx, tx, child.Key, record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child.Key, root.Key)})
+	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
 }
 
 // enterChild records a todo child under root's live tree, admitted at generation, and starts its
@@ -222,7 +225,7 @@ func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
-		Generation: generation, Status: fact.Status, Rank: fact.Rank, LastDispatchSeq: fact.Seq}
+		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}

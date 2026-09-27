@@ -103,10 +103,11 @@ func TestReadPrivateSecretPointer(t *testing.T) {
 	}
 }
 
-// ReadGroupSecretPointer holds a file the reader owns to ReadPrivateSecretPointer's rule. A file
-// another uid owns — a kubelet-mounted Secret, root's, read through the pod's fsGroup — may also be
+// ReadGroupSecretPointer holds a file to ReadPrivateSecretPointer's rule unless root owns it and the
+// reader is not root: a kubelet-mounted Secret, root's, read through the pod's fsGroup, may also be
 // read by its group, and one its group can write or others can touch at all is refused naming the
-// path, the mode and both remedies. A FIFO is refused either way rather than waited on.
+// path, the mode and both remedies. A file the reader owns, or another non-root uid owns, keeps
+// 0600. A FIFO is refused either way rather than waited on.
 func TestReadGroupSecretPointer(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, mode os.FileMode) string {
@@ -156,12 +157,19 @@ func TestReadGroupSecretPointer(t *testing.T) {
 		refused(t, write("own-0604", 0o604), ownerRefusal("0604"))
 		refused(t, fifo, "nats_nkey_seed_file names %s, which is not a regular file")
 	})
-	t.Run("a file another uid owns", func(t *testing.T) {
+	// The test's files are its own; the seams make them read as another uid's.
+	asReader := func(t *testing.T, uid int) {
 		self := readerUID
-		readerUID = func() int { return self() + 1 }
+		readerUID = func() int { return uid }
 		t.Cleanup(func() { readerUID = self })
+	}
+	t.Run("a root-owned file", func(t *testing.T) {
+		asReader(t, os.Geteuid()+1)
+		root := mountOwner
+		mountOwner = uint32(os.Geteuid())
+		t.Cleanup(func() { mountOwner = root })
 		for _, mode := range []os.FileMode{0o600, 0o440, 0o640} {
-			if got, err := ReadGroupSecretPointer("nats_nkey_seed_file", write("other-"+mode.String(), mode)); err != nil || got != "seed" {
+			if got, err := ReadGroupSecretPointer("nats_nkey_seed_file", write("root-"+mode.String(), mode)); err != nil || got != "seed" {
 				t.Errorf("ReadGroupSecretPointer(%#o) = %q, %v; want the trimmed secret", mode, got, err)
 			}
 		}
@@ -170,6 +178,17 @@ func TestReadGroupSecretPointer(t *testing.T) {
 			refused(t, write("refused-"+octal, mode), groupRefusal(octal))
 		}
 		refused(t, fifo, "nats_nkey_seed_file names %s, which is not a regular file")
+	})
+	t.Run("a file another non-root uid owns", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("the test's own files are root's")
+		}
+		asReader(t, os.Geteuid()+1)
+		if got, err := ReadGroupSecretPointer("nats_nkey_seed_file", write("alice-0600", 0o600)); err != nil || got != "seed" {
+			t.Errorf("ReadGroupSecretPointer(0600) = %q, %v; want the trimmed secret", got, err)
+		}
+		refused(t, write("alice-0640", 0o640), ownerRefusal("0640"))
+		refused(t, write("alice-0440", 0o440), ownerRefusal("0440"))
 	})
 }
 

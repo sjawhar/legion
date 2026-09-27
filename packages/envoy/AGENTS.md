@@ -160,7 +160,13 @@ Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOpera
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
 (`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
 breaks at the end of the code's text and a line holding only whitespace in a list item's code read
-back without them. A line of colons in code inside a typed block is kept: the browser editor's
+back without them, and an accepted suggestion writes its code as it reads back (`acceptedCode`):
+in a list item's code, a line it leaves holding only spaces and tabs, CommonMark's blank line, is
+written empty, the spaces and tabs that line keeps around it included, while any other character,
+a no-break space or a form feed among them, is kept, as both readers keep it; then, where only
+line breaks follow it, its text loses the line breaks that end it. A suggestion that runs past the
+code into the next block is written as sent, the rest of that block joining it. Code on other
+lines stays as it was. A line of colons in code inside a typed block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
 them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -
@@ -172,7 +178,50 @@ fixture generator writes for a callout at the top and inside a blockquote, list 
 definition and another callout. Text a `replace` writes that would read as block syntax at a line
 start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::` over a
 paragraph is stored `\---` and so on (the renderer's line-start escapes). Beside an emptied
-paragraph it is written the same way, since an empty paragraph is not written. Everywhere else `replace` is
+paragraph it is written the same way, since an empty paragraph is not written. Accepting a
+suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`, its checks in
+`docs/accept.go`) writes blocks, so it stores what reads back as the live document, and refuses
+what cannot, naming `replace_with`. It first settles the blocks it changed (`settleAccepted`,
+`pmdoc.AgreeWithReadBack`): the empty halves a block replacement leaves of the textblock it lands
+in, which carry no block id, go where the renderer does not write them, and each list and list
+item takes the spread its markdown reads back with, paired as far down as the read-back check
+pairs blocks, so two paragraphs in a tight list item leave the item spread, in a list that already
+reads back otherwise too, a block over an item's text leaves no empty line before its nested list,
+and an item beside them in a list they make loose is spread as its markdown now reads. One the
+accept left unchanged whose spread already read back otherwise before it, such as a spread its
+markdown never carried, keeps that spread. Every other block, mark and node stays as it was. An empty replacement keeps the paragraph it empties, which is not written beside other
+blocks. Outside an ask it then runs, over every document-level block it changed,
+`refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison
+(`refuseReshapedAccept`: `pmdoc.BlockShapeError`). A non-empty replacement inside a typed block is
+checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
+`paragraph+ bullet_list?` rule. Last, the whole document is read back (`refuseMisreadAccept`:
+`pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes
+and text, a column without alignment expected back left as the renderer writes it: an accept is
+refused where a block now reads back otherwise that did not before, such as a task item emptied to
+`- [ ]`, which reads back as a plain item. Each block that reads back otherwise is found as far
+down as its markdown still pairs, and one that already read back otherwise the same way before,
+under the same block id (a paragraph's text differing in the same characters, an attribute with
+the same values, a block pairing with nothing), is not the accept's, even inside the block it
+changes: text beside a task item already read back as plain, or in a paragraph ending in a hard
+break that reads back with a literal backslash, is stored, while a second task item emptied there
+is refused. Nothing else in the document switches the check off, except a document the parser
+already refuses, where the block checks alone judge the accept. That refusal names what reads
+back and advises rejecting. A
+list an accept writes beside a list of its kind is written with the other marker (below), so the
+two read back as the two lists it made. An accept parses its text as blocks
+written into the document (`pmdoc.ParseFragment`: a leading `---` is a rule, as `***` is, except
+that a closed front-matter block is front matter where the text lands at the document's start,
+at the start of a top-level first block's text), so a rule or a list over a whole paragraph is
+written as that block and kept, while one that leaves a block the document cannot read back,
+such as an empty callout in a list item, is refused: the document
+stays as it was and the suggestion stays open. The person accepting cannot change the text, so
+the refusal (`acceptRefusal`) says what the text writes where it lands - for a same-id rewrite of
+a typed block, in the block that typed block stands in - and names what they can
+do (reject the suggestion, or reply asking for text the block can hold), never an edit-route
+operation; it says the text empties a paragraph only when the text renders no content, and then
+offers deleting the paragraph only where the rest of its block stands without it, and the whole
+block only where the paragraph is all it holds. A reject is not checked, since it gives back the
+text the insert started from. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
@@ -214,7 +263,11 @@ reports any emptied container's content rule as `INVALID_OP`; both leave an empt
 definition holding one empty paragraph, which both parsers read back as the definition, so its
 reference stays a reference). `move` relocates the block with
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
-anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
+anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`. An insert's `markdown` is
+read as text written into the document (`pmdoc.ParseFragment`), so a leading `---` line is a rule,
+as `***` is, except that a closed front-matter block is front matter where the insert lands at the
+document's start (`start`, or before the first block); the accept and the insert decide that with
+one rule (`docs.opensDocument`).
 
 A write runs on its transaction's fork of the room, so a browser change made while it is in flight
 merges with it rather than blocking it, and the merge can annihilate the write: `pmdoc.Update`
@@ -249,16 +302,16 @@ found it.
 
 Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
 splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range
-fitting (`pmdoc.Splice`). A replacement fitted into a typed block stays inside it, and a fit never
-replaces the typed block it lands in: a callout takes what its content rule allows, a code block
-included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any block at this
-step, since `Validate` lets an ask hold other blocks while a browser edit passes through. The one
-exception is a replacement holding exactly one block of the typed block's own type under its id,
-at any depth, which is that block rewritten: it replaces the block in place rather than nesting
-inside it, and the replacement's other blocks, and any it sits inside (a blockquote, a list item,
-a typed block under another id), go in the same parent, where they stand in the replacement.
-The same type under another id, or under none, is a new block and lands inside like
-any other. The accept
+fitting (`pmdoc.Splice`). A non-empty replacement fitted into a typed block stays inside it, and a
+fit never replaces the typed block it lands in: a callout takes what its content rule allows, a
+code block included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any
+block at this step, since `Validate` lets an ask hold other blocks while a browser edit passes
+through. The one exception is a replacement holding exactly one block of the typed block's own
+type under its id, at any depth, which is that block rewritten: it replaces the block in place
+rather than nesting inside it, and the replacement's other blocks, and any it sits inside (a
+blockquote, a list item, a typed block under another id), go in the same parent, where they stand
+in the replacement. The same type under another id, or under none, is a new block and lands inside
+like any other. Either way the accept keeps only what reads back as it wrote it (above). The accept
 then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`,
 `docs/marks.go` `refuseBrokenAsks`): an ask is unreadable when settlement's parse fails, when its
 children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph
@@ -745,7 +798,7 @@ canonical markdown.
 
 ## Security
 
-Dispatch treats an agent endpoint and bearer token as one trust-bound configuration: a repository `dispatch.serverUrl` can use only the token in that same repository file, while explicit environment configuration supplies both. The deployed server's `DISPATCH_SERVER_URL` is separate: it overrides the merged `dispatch.serverUrl`, must be an absolute `http` or `https` URL with no path, and is the exact GitHub OAuth callback origin. `NATS_URLS` likewise overrides merged `natsUrls` for the server. A GitHub login the OAuth callback exchanges but `DISPATCH_ALLOWED_LOGINS` does not list is logged (`dispatch: login not allowed login=<login>`) and answered with a 403 HTML page naming that login and linking back to `/auth/start`, so an operator can find who to add; the JSON `LOGIN_NOT_ALLOWED` stays on the API paths. Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate. JSON decoding is limited to 1 MiB, multipart uploads retain their explicit 26 MiB limit, and the GitHub proxy has the same bounded request buffer. The event outbox retries each required issue, route, and author destination with exponential backoff, so a failed or poison delivery cannot be marked complete or starve later notifications. The listener holds one line for both of the bearer kinds `/v1` accepts: the shared-token compare stays constant time and is skipped entirely when no shared token is configured, so no request authenticates against an empty one; a JWT-shaped bearer the verifier rejects is answered 401 and never falls back to the shared token or any other path; and the 401 is the same `unauthorized` in every case, so a rejected caller learns neither the reason class nor which credentials the listener is configured for.
+Dispatch treats an agent endpoint and bearer token as one trust-bound configuration: a repository `dispatch.serverUrl` can use only the token in that same repository file, while explicit environment configuration supplies both. The deployed server's `DISPATCH_SERVER_URL` is separate: it overrides the merged `dispatch.serverUrl`, must be an absolute `http` or `https` URL with no path, and is the exact GitHub OAuth callback origin. `NATS_URLS` likewise overrides merged `natsUrls` for the server. A GitHub login the OAuth callback exchanges but `DISPATCH_ALLOWED_LOGINS` does not list is logged (`dispatch: login not allowed login=<login>`) and answered with a 403 HTML page naming that login and linking back to `/auth/start`, so an operator can find who to add; the JSON `LOGIN_NOT_ALLOWED` stays on the API paths. Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate. JSON decoding is limited to 1 MiB, multipart uploads retain their explicit 26 MiB limit, and the GitHub proxy has the same bounded request buffer. The event outbox retries each required issue, route, and author destination with exponential backoff, so a failed or poison delivery cannot be marked complete or starve later notifications. A destination NATS refuses (`bus.ErrRefused`: an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and counted done, and the event goes on to its other destinations. The listener holds one line for both of the bearer kinds `/v1` accepts: the shared-token compare stays constant time and is skipped entirely when no shared token is configured, so no request authenticates against an empty one; a JWT-shaped bearer the verifier rejects is answered 401 and never falls back to the shared token or any other path; and the 401 is the same `unauthorized` in every case, so a rejected caller learns neither the reason class nor which credentials the listener is configured for.
 
 ## Operational notes
 
@@ -773,8 +826,8 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 
 | Endpoint | Method | Contract |
 | --- | --- | --- |
-| `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID, and `duplicate: true` when JetStream already held this message. Only a `source: "dispatch"` send publishes under a MsgId, so only it can ever answer `duplicate`: a send that declares `github`, `slack` or `ghostwispr` carries a `SourceEventID` minted for it, which its dedupe key does not name (`contracts.DedupeKeyNamesTheUpstreamEvent`); the field is omitted (read as false) otherwise, which is also what an older listener answers. It means "the stream already held this MsgId", which includes the publish path's own reconnect retry whose first attempt landed and lost its acknowledgement. |
-| `/v1/messages/publish` | POST | Publishes a non-agent topic. An optional `dedupe_key` is used verbatim as the envelope's dedupe key (how a re-sent copy stays recognisable to the receiver's own dedupe); it is mutually exclusive with `idempotency_key` — both present is a 400 whose `expected` names both fields — it may not begin with the reserved forward mark `envoy.role.forward.` (a 400 naming `dedupe_key`; the role arbiter drops such an envelope on sight, so accepting it would be a 200 for a message that vanishes), and an empty string is absent; without either key the key is minted. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`. Its 404 adds `reason: "unclaimed"` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window. |
+| `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID, and `duplicate: true` when JetStream already held this message. Only a `source: "dispatch"` send publishes under a MsgId, so only it can ever answer `duplicate`: a send that declares `github`, `slack` or `ghostwispr` carries a `SourceEventID` minted for it, which its dedupe key does not name (`contracts.DedupeKeyNamesTheUpstreamEvent`); the field is omitted (read as false) otherwise, which is also what an older listener answers. It means "the stream already held this MsgId", which includes the publish path's own reconnect retry whose first attempt landed and lost its acknowledgement. A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400. |
+| `/v1/messages/publish` | POST | Publishes a non-agent topic. An optional `dedupe_key` is used verbatim as the envelope's dedupe key (how a re-sent copy stays recognisable to the receiver's own dedupe); it is mutually exclusive with `idempotency_key` — both present is a 400 whose `expected` names both fields — it may not begin with the reserved forward mark `envoy.role.forward.` (a 400 naming `dedupe_key`; the role arbiter drops such an envelope on sight, so accepting it would be a 200 for a message that vanishes), and an empty string is absent; without either key the key is minted. A `notifications.role.<role>` topic requires a live holder and returns that session ID in `holder`. Its 404 adds `reason: "unclaimed"` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the final heartbeat remains in its one-TTL diagnostic window. A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400. |
 | `/v1/roles/<role>` | GET | Returns the live role holder, including its capabilities and `last_seen`. A 404 has `reason: "unclaimed"` when no role claim exists; for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time retained for one TTL. |
 | `/v1/roles/set` | POST | Claims a role for a live session and registers its role topic. Last-claim-wins by default. With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues); any other live holder answers `409 {error, role, holder}` and nothing changes. |
 | `/v1/interests/subscribe` | POST | Persists session topics, route metadata, and optional delivery `capabilities`; registrations without capabilities persist `[]`. The response can include `warnings` when a GitHub repository has no retained events, and when a GitHub topic's token after its owner and name is not one of `contracts.GithubTopicKinds` or a wildcard. When a kind follows the extra tokens, or the name holds an empty token, the name was spelled with its dot, and the warning names the spelling Envoy publishes (`notifications.github.acme.site.io.pr.7.>` → `acme.site_io`). Otherwise the warning says the token is not a GitHub topic kind and names the kinds (`notifications.github.acme.widgets.checks.>`). |
@@ -788,9 +841,11 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`,
 `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional
 fields are omitted. `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is
-`none`, `optional`, or `required`. Every `/v1` 4xx/5xx response, including the startup
-gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`. `expected` appears
-when the caller must provide a field.
+`none`, `optional`, or `required`. A session id or role that becomes a KV key NATS would refuse
+(`bus.EnsureKeyValue`) is a 413 when too long and a 400 when it holds an empty token or
+whitespace, on every route that reads or writes one. Every `/v1` 4xx/5xx response, including
+the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`. `expected`
+appears when the caller must provide a field.
 
 ## Targeted Dispatch messages
 
@@ -843,6 +898,25 @@ earlier) — and records the attempt as `sent` with no error and the reply's id;
 already-failed attempt returns the stored attempt unchanged, and a second `body` on an answered
 attempt returns the stored reply (200).
 
+A human reaches many sessions at once with `POST /api/v1/broadcasts`
+`{body, delivery, session_ids}`. A broadcast is a grouping over the targeted messages above,
+not a second delivery mechanism: one row in `broadcasts` plus one issue-less message per
+recipient carrying its `broadcast_id`, all in one transaction, then the ordinary
+`deliverMessage` path per recipient - so each recipient's attempts, retries and replies are
+exactly a single targeted message's. Recipients are judged against one listener read: a
+selected session that is not live, or does not advertise the chosen mode, is excluded before
+anything is written and named in the response's `excluded`, never switched to another mode
+(the mode is part of what the sender said). Exclusions are not stored; a send with no
+reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. The send answers 201 as soon
+as the messages are committed and delivers behind the request, four recipients at a time, each
+worker on its own `store.WithTransactionTracking` context derived from the server's lifetime
+(the pool's one-connection guard is per context, and a request's context would strand every
+recipient after the one in flight when a tab closes or a deploy shuts the server down). A
+recipient therefore starts with no attempt, and one still carrying none was not sent to.
+`GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and
+`GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies; all
+three routes are human-only, like the one-session route they are built from.
+
 The issue stream retains the targeted `message.created`, `message.delivery`, and
 `message.answered` events for the Conversation card. Issue-less targeted-message events have no
 issue owner, use sequence `0`, and reach their recipient through the synchronous listener send;
@@ -856,25 +930,56 @@ the synchronous listener call records the sent or failed attempt instead of blin
 ## Topic shapes
 
 - GitHub repository topics start with `notifications.github.<owner>.<repo>`, each name one
-  segment with a dot written `_` (`sjawhar/.github` is `notifications.github.sjawhar._github`).
+  segment with a dot written `_` (`sjawhar/.github` is `notifications.github.sjawhar._github`). A
+  ref or workflow file name in a topic is one segment the same way, with whitespace, `*` and `>`,
+  which a published subject may not hold, written `_` too (`SanitizeSubjectSegment`).
   Pull requests use `pr.<n>` for lifecycle (a closed event carries
   `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`), plus
   `pr.<n>.comment`, `pr.<n>.review`, `pr.<n>.mention`, and
-  `pr.<n>.checks` when the head's checks settle. Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"` payload. Every settlement carries its attempt set `check_runs` — the latest GitHub check-run id per check name, sorted by name — plus the listener's `generation` (the record's state version, which rises with every write that changes the record's snapshot, once per write however many observations that write folds in) and `snapshot` (the record's hash). Consumers order same-head settlements by the attempt set, compared per shared name: no id lower and some id higher (or a new name — a new name counts as higher) is newer; every shared id equal and no new name is the same set; no id higher, no new name, and some id lower is older; anything else (a higher or new alongside a lower) is a mixed view and is dropped as a conflict (names only in the stored set are ignored — a check can vanish from GitHub's view, and a record recreated after the seven-day KV TTL starts sparse). Within one producer record per-name ids never decrease, and a consumer's fence is the per-name maximum over every view it has accepted — an accepted set merges into the fence, nothing is pruned — so the fence never decreases either: a newer attempt is newer whatever its completion time, no timestamps take part in ordering, and a name an incomplete view omitted cannot later reappear as new. At the same set the listener's `generation` orders its own settlements: lower is stale; equal is a duplicate when the `snapshot` matches and otherwise a conflict (an equal pair with a different snapshot cannot occur within one record's lifetime; a recreated record may reuse one and is dropped). A live settlement is a possibly incomplete view of the head (a missed webhook, a record recreated after the KV TTL): it decides the outcome of every name it reports — at any id the ordering accepted, including the same run observed in place — and says nothing about the rest: a known failure among them stands (the consumer keeps failure names, not a per-name status map), and the head is red while any failure remains. A consumer that reconciles a verdict from GitHub's rollup compares the rollup's attempt set the same way, but GitHub's read is complete: its failing check runs and failing commit statuses replace the stored ones wholesale. Statuses have no check run and the listener never sees them, so a consumer keeps them apart from check-run failures: a check run that shares a status's name cannot retire it — only GitHub does (likewise a deleted check's failure). A newer rollup set merges into the fence and takes the identity (no listener generation); the same set applies GitHub's verdict and keeps the listener identity for duplicate detection; an older, mixed, or empty-over-fenced set is ignored. A terminal read (green or red) then holds the tie at that set: a live settlement at the same set is accepted only if its effective outcome — the check-run failures it reports plus the stored ones it omits and the stored commit-status failures — agrees with the reconciled verdict, refreshing the listener identity without releasing GitHub's authority; a disagreeing one is stale whatever its generation until the set advances; a pending or cancelled-only read uncertifies a green head, leaves a red one untouched, and holds nothing — it releases any authority held at that set — so the terminal live settlement that follows applies at once, subject to the ordinary generation and duplicate rules (a replay or a lower generation still does not apply). Pending is therefore not a commutative join: a pending read after a live green uncertifies it until the next terminal view. Two remainders. An in-place conclusion change on an existing run id: GitHub's view stands and the listener's is recovered by the next successful, non-skipped read at that set — the dropped delivery is not replayed. A check whose highest run is deleted on GitHub: the fence keeps that id, so a rollup reporting a lower run under the same name is older until a newer run appears. A consumer that orders head changes by the PR's `updated_at` (GitHub's second resolution) accepts a read of a different head at an equal clock — a stale read returning the previous head within the same second as its replacement rewinds that consumer until its next accurate, non-skipped read. A head publishes only when at least one check has a positive run id; legacy checks without one remain in the status groups and failing names but not in `check_runs`. A legacy in-progress check whose completion is never observed holds the head unsettled until it reruns; rerun the affected check to release it. `workflow.<file>.<action>` carries only runs without an associated
+  `pr.<n>.checks` when the head's checks settle. Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"` payload. Every settlement carries its attempt set `check_runs` — the latest GitHub check-run id per check name, sorted by name — plus the listener's `generation` (the record's state version, which rises with every write that changes the record's snapshot, once per write however many observations that write folds in) and `snapshot` (the record's hash). Consumers order same-head settlements by the attempt set, compared per shared name: no id lower and some id higher (or a new name — a new name counts as higher) is newer; every shared id equal and no new name is the same set; no id higher, no new name, and some id lower is older; anything else (a higher or new alongside a lower) is a mixed view and is dropped as a conflict (names only in the stored set are ignored — a check can vanish from GitHub's view, and a record recreated after the seven-day KV TTL starts sparse). Within one producer record per-name ids never decrease, and a consumer's fence is the per-name maximum over every view it has accepted — an accepted set merges into the fence, nothing is pruned — so the fence never decreases either: a newer attempt is newer whatever its completion time, no timestamps take part in ordering, and a name an incomplete view omitted cannot later reappear as new. At the same set the listener's `generation` orders its own settlements: lower is stale; equal is a duplicate when the `snapshot` matches and otherwise a conflict (an equal pair with a different snapshot cannot occur within one record's lifetime; a recreated record may reuse one and is dropped). A live settlement is a possibly incomplete view of the head (a missed webhook, a record recreated after the KV TTL): it decides the outcome of every name it reports — at any id the ordering accepted, including the same run observed in place — and says nothing about the rest: a known failure among them stands (the consumer keeps failure names, not a per-name status map), and the head is red while any failure remains. A consumer that reconciles a verdict from GitHub's rollup compares the rollup's attempt set the same way, but GitHub's read is complete: its failing check runs and failing commit statuses replace the stored ones wholesale. Statuses have no check run and the listener never sees them, so a consumer keeps them apart from check-run failures: a check run that shares a status's name cannot retire it — only GitHub does (likewise a deleted check's failure). A newer rollup set merges into the fence and takes the identity (no listener generation); the same set applies GitHub's verdict and keeps the listener identity for duplicate detection; an older, mixed, or empty-over-fenced set is ignored. A terminal read (green or red) then holds the tie at that set: a live settlement at the same set is accepted only if its effective outcome — the check-run failures it reports plus the stored ones it omits and the stored commit-status failures — agrees with the reconciled verdict, refreshing the listener identity without releasing GitHub's authority; a disagreeing one is stale whatever its generation until the set advances; a pending or cancelled-only read uncertifies a green head, leaves a red one untouched, and holds nothing — it releases any authority held at that set — so the terminal live settlement that follows applies at once, subject to the ordinary generation and duplicate rules (a replay or a lower generation still does not apply). Pending is therefore not a commutative join: a pending read after a live green uncertifies it until the next terminal view. Two remainders. An in-place conclusion change on an existing run id: GitHub's view stands and the listener's is recovered by the next successful, non-skipped read at that set — the dropped delivery is not replayed. A check whose highest run is deleted on GitHub: the fence keeps that id, so a rollup reporting a lower run under the same name is older until a newer run appears. A consumer that orders head changes by the PR's `updated_at` (GitHub's second resolution) accepts a read of a different head at an equal clock — a stale read returning the previous head within the same second as its replacement rewinds that consumer until its next accurate, non-skipped read. A head publishes only when at least one check has a positive run id; legacy checks without one remain in the status groups and failing names but not in `check_runs`. A legacy in-progress check whose completion is never observed holds the head unsettled until it reruns; rerun the affected check to release it. A head whose CI record overflowed its bounds (`maxRecordBytes`, `maxSettlementBytes`), or whose settlement NATS refused, never settles from the listener again; one that had settled before keeps that last settlement. `workflow.<file>.<action>` carries only runs without an associated
   pull request.
 - A branch or tag push publishes `push.branch.<ref>` / `push.tag.<ref>` with the payload fields
   `kind: "push"`, `repo`, `ref`, `after`, `before`, `pusher`, `head_subject` (the head commit's
   first non-empty message line, capped at 2,048 runes with a trailing `…` so the envelope stays
   under NATS's max payload), `commit_count`, `compare_url`, `changed_paths` (the unique paths
   across every pushed commit's `added`, `removed`, and `modified` lists, in first-seen order,
-  newline-separated, at most 100; omitted
-  when no commit is listed, since the payload drops empty strings), and `changed_paths_truncated`
-  (`"true"` when more than 100 unique paths were seen, else `"false"` — present on every push, so
+  newline-separated, at most 100 of them and 32,768 runes of text, each path listed whole or not
+  at all; omitted when no commit is listed, since the payload drops empty strings), and
+  `changed_paths_truncated` (`"true"` when the list stopped at either cap with a unique path left,
+  else `"false"` — present on every push, so
   its absence alone tells a consumer the listener predates the field), and `forced` (`"true"` or
   `"false"`, GitHub's own flag, present on every push the same way). A forced push's commits are
   listed from the merge base, so its `changed_paths` do not describe what it did to the head it
   replaced. Envoy forwards what GitHub sent; what counts as a handoff-only push is the Legion
   daemon's rule, not the listener's.
+- Every other text a webhook payload copies from its body (a title, a ref, a path, a workflow name,
+  a URL) is capped at 2,048 runes with a trailing `…` too (`maxEnvelopeTextRunes`; a comment's or
+  review's body is cut there without one and says so in `body_truncated`), and so is every text a
+  check run copies into the CI store (its name, URL, status, conclusion and times), so no envelope
+  or record grows with the body it came from. The record is keyed by check name, so a name past the
+  cap keeps a digest of the whole name after its `…`, and two names that share their first 2,048
+  runes stay two checks. What NATS still refuses however often it is sent is refused
+  (`bus.ErrRefused`): an envelope past the server's max payload or a subject past the server's 4 KiB
+  protocol line, over which the server would close the listener's connection (`bus.ErrTooLarge`,
+  naming the size), or a subject holding whitespace or an empty token, which no stream matches
+  (`bus.ErrInvalidSubject`). Every KV bucket is opened through `bus.EnsureKeyValue` or
+  `bus.OpenKeyValue`, whose handle checks its keys the same way, since a KV call builds its subjects
+  from the key: a key that would take one past the protocol line, or holding an empty token, is
+  refused before anything is sent. A write is held to the longest subject its key makes (a watcher's
+  create request), so a key written now stays readable, watchable and deletable; any other call only
+  to its own subject, so a key an earlier build stored past that bound still lists and deletes. The
+  stores skip such a key where they cannot read or rewrite it, with a WARN, rather than fail a
+  start, a sweep or a caller's own request, and the reapers delete it. The webhook is answered 422,
+  which Dispatch's redelivery sweep takes as terminal, and logged `<source> publish refused` (or
+  `github ci record refused`); any other failure stays a 503 logged `<source> publish failed`. A
+  head's CI record is bounded at 384 KiB (`maxRecordBytes`, about 1,300 checks) and its settlement
+  at 960 KiB (`maxSettlementBytes`; a failing check's `"` costs three times as much there), since
+  GitHub allows 50,000 check runs in a suite: a check past either is refused the same way, and the
+  record is marked `overflowed` and never settles again. A head that had already settled keeps its
+  last settlement, which nothing supersedes, so a consumer holding it learns about the refused
+  checks only from GitHub's own read. A settlement NATS refuses anyway (a server whose max payload
+  is set lower) marks the record overflowed too, logged once as `checks settlement refused`, rather
+  than being published again every tick.
 - A `pull_request_review` payload carries the review's own `commit_id` and the PR's current
   `head_sha` so consumers can tell whether the review is at head, and `submitted_at` (GitHub's
   RFC 3339 time) and `review_id` (GitHub's review id as a decimal string), so consumers can order

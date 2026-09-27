@@ -12,6 +12,8 @@ import type {
   Ask,
   AskFollower,
   AskRead,
+  BroadcastRead,
+  BroadcastSummary,
   Comment,
   CommentDelivery,
   CreateAgentMessageInput,
@@ -426,6 +428,19 @@ export function createAgentMessage(
     `/api/v1/agents/${encodeURIComponent(sessionID)}/messages`,
     "POST",
     input,
+    options
+  );
+}
+
+export function listBroadcasts(options: ApiOptions = {}): Promise<BroadcastSummary[]> {
+  return request<BroadcastSummary[]>("/api/v1/broadcasts", "GET", undefined, options);
+}
+
+export function getBroadcast(id: string, options: ApiOptions = {}): Promise<BroadcastRead> {
+  return request<BroadcastRead>(
+    `/api/v1/broadcasts/${encodeURIComponent(id)}`,
+    "GET",
+    undefined,
     options
   );
 }

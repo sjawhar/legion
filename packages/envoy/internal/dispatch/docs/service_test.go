@@ -1929,12 +1929,15 @@ func TestShutdownBoundsAdvisoryLockedAppendAndPreservesUpdate(t *testing.T) {
 	if _, err := locker.Exec(context.Background(), `select pg_advisory_xact_lock(hashtext($1))`, artifactID); err != nil {
 		t.Fatalf("lock document append: %v", err)
 	}
-	editDone := make(chan error, 1)
-	go func() {
-		_, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"})
-		editDone <- err
-	}()
-	waitFor(t, time.Second, "durable append blocked", func() bool { return service.hasDurableAppend(artifactID) })
+	// ReplaceText returns once the room has applied the edit, and the room's update observer
+	// counts the durable append before that; the append itself cannot finish while the lock is
+	// held, so the count is still up here.
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write delayed document: %v", err)
+	}
+	if !service.hasDurableAppend(artifactID) {
+		t.Fatal("durable append finished while its advisory lock was held")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	if err := service.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
@@ -1943,10 +1946,7 @@ func TestShutdownBoundsAdvisoryLockedAppendAndPreservesUpdate(t *testing.T) {
 	if err := locker.Commit(context.Background()); err != nil {
 		t.Fatalf("release append lock: %v", err)
 	}
-	if err := <-editDone; err != nil {
-		t.Fatalf("persist delayed update: %v", err)
-	}
-	waitFor(t, time.Second, "delayed durable append commit", func() bool { return !service.hasDurableAppend(artifactID) })
+	waitForPersistedUpdates(t, service, artifactID, 2)
 	reloaded := New(Deps{Store: service.store, Events: events.NewBroker(), Settle: time.Hour})
 	defer reloaded.Shutdown(context.Background())
 	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {

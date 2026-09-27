@@ -223,4 +223,12 @@ func ResumePhaseTask(issue record.Issue) string {
 	return continueLine(issue) + " Resume the existing phase work."
 }
 
+// ChildReenteredNotice is the notice a re-entered child's tree architect is told, whichever path
+// re-enters it: reenterChild for a live tree's reopened child, or admission's
+// reenterStrandedChildren for one a reopen declined to re-enter for want of the label until its
+// root's own promotion made the tree live.
+func ChildReenteredNotice(child, root string) record.Notice {
+	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child, root)}
+}
+
 func (e *Engine) lingerAt() time.Time { return e.now().Add(e.cfg.Linger) }

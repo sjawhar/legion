@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -53,11 +56,35 @@ type workflowRuntime struct {
 	conn            *nats.Conn
 	consumers       *intake.Consumers
 	outbox          *outbox
+	// bootID disambiguates this boot's synthetic Dispatch consumer position facts from another
+	// boot's, or another project's daemon: processed_events is keyed only on (source, event_id),
+	// shared by every project's daemon in the database, and a stream recreated by a later boot
+	// would otherwise repeat the same (ack floor, idle) pairs and have its own releases swallowed
+	// as duplicates of the previous boot's.
+	bootID string
+	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
+	// test shortens it to bound how long a release takes to observe.
+	holdPollInterval time.Duration
+	// holdWarnAfter and holdWarnEvery bound the watchdog log a hold that never releases gets: zero
+	// means the production defaults. A test shortens both to bound how long the warning takes to
+	// observe.
+	holdWarnAfter, holdWarnEvery time.Duration
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
 	failed chan error
+	// readied is the architects claimReady recorded whose waiting notices releaseReadied has not
+	// released yet; readyWake, holding at most one wake, tells it there are some.
+	readyMu   sync.Mutex
+	readied   map[claim.Token]bool
+	readyWake chan struct{}
 }
+
+// readyReleaseTimeout bounds one release of ready architects' waiting notices
+// (outbox.releaseWaiting): a read of a project's waiting notices and their trees, then one update,
+// each well under a second. A release that runs this long holds a database that stopped answering;
+// it is logged, and the notices it would have released still go on their schedule.
+const readyReleaseTimeout = 30 * time.Second
 
 // appMintAttempt bounds one attempt at the boot's App tokens, both Apps' mints: installation
 // discovery, the exchange and the bot identity lookups each answer in well under a second, so an
@@ -128,12 +155,12 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// The database is shared by every project's daemon: the workflow reads this project's issues.
 	records := projectRecords{Store: record.NewStore(), project: cfg.Project}
 	engine := workflow.New(records, engineConfig(cfg, reviewAppLogin), log)
-	admission := admit.New(records, cfg.AdmissionCap, cfg.Project, log)
+	admission := admit.New(records, engine, cfg.AdmissionCap, cfg.Project, log)
 	return &workflowRuntime{
 		pool: st.Pool(), records: records, engine: engine, admission: admission,
 		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
-		failed: make(chan error, 1),
+		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
 	}, nil
 }
 
@@ -177,7 +204,11 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, daemon
 	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
 		Project: cfg.Project, Repositories: []ghrepo.Repository{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	w.bootID = fmt.Sprintf("%d", time.Now().UnixNano())
+	return nil
 }
 
 // natsUser is the seed the daemon's own NATS connection authenticates with — daemonSeed when the
@@ -271,13 +302,32 @@ func (w *workflowRuntime) recordedIssue(ctx context.Context, key string) (*recor
 // reconcile takes Dispatch's bounded boot read to admission. Only admission acts on a snapshot:
 // a move a human made while the daemon was down carries its own event, which the durable stream
 // consumer still holds and delivers with the actor that made it, so nothing here re-derives one.
+// The listing is read first, then the notification stream's own current position (target), then
+// the Dispatch consumer's own: a message published between the listing and target would land in
+// the listing but go uncounted by target, and reading the consumer's position last catches it up
+// as far as this call can before deciding what a record behind target must still wait for.
+//
+// The listing reads every status, not only the workflow's own (todo through retro): Dispatch
+// already returns its complete project list in one call (HTTPClient.ListIssues filters it
+// client-side, at no extra request cost), and a key currently out of that window — moved to
+// backlog, or never past triage — while the daemon was down still needs to be held exactly like
+// one still in it, so a replayed event that predates the move it fell out on cannot be admitted
+// before the move's own event ever arrives.
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
-	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, []string{"todo", "in_progress", "testing", "needs_review", "retro"})
+	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, nil)
 	if err != nil {
 		return fmt.Errorf("list Dispatch issues for admission: %w", err)
 	}
+	target, err := w.consumers.DispatchTarget(ctx)
+	if err != nil {
+		return fmt.Errorf("read notification stream target: %w", err)
+	}
+	position, err := w.consumers.DispatchPosition(ctx)
+	if err != nil {
+		return fmt.Errorf("read Dispatch consumer position: %w", err)
+	}
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		return w.admission.Reconcile(ctx, tx, issues)
+		return w.admission.Reconcile(ctx, tx, issues, target, position)
 	}); err != nil {
 		return fmt.Errorf("reconcile admission: %w", err)
 	}
@@ -356,6 +406,27 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		return nil
 	})
 	group.Go(func() error {
+		w.pollHoldRelease(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.releaseReadied(running)
+		return nil
+	})
+	group.Go(func() error {
+		// A notice the listener accepted but could not forward is queued again (outbox.rehold).
+		sub, err := subscribeNoticeExceptions(w.conn, func(data []byte) {
+			if err := w.outbox.rehold(running, data); err != nil {
+				w.log.Error("role-lane exception not re-held", "error", err)
+			}
+		})
+		if err != nil {
+			return err
+		}
+		<-running.Done()
+		return sub.Unsubscribe()
+	})
+	group.Go(func() error {
 		select {
 		case err := <-w.failed:
 			return fmt.Errorf("workflow supervision fact: %w", err)
@@ -364,6 +435,174 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		}
 	})
 	return group.Wait()
+}
+
+// defaultHoldPollInterval is pollHoldRelease's production ticker period.
+const defaultHoldPollInterval = 2 * time.Second
+
+// defaultHoldWarnAfter and defaultHoldWarnEvery bound the watchdog log a hold that has not
+// released gets: a Dispatch event whose transaction always fails (an unmet precondition, a
+// programming bug) pins the ack floor forever, since the consumer sets no MaxDeliver to ever give
+// up on it, and nothing else says why a labeled root is waiting.
+const (
+	defaultHoldWarnAfter = 2 * time.Minute
+	defaultHoldWarnEvery = 5 * time.Minute
+)
+
+// positionReader is pollHoldRelease's only dependency on the Dispatch consumer: reading its
+// current position. A test substitutes one that fails on demand to prove the poll logs and
+// retries rather than silently ending the hold.
+type positionReader interface {
+	DispatchPosition(ctx context.Context) (intake.DispatchConsumerPosition, error)
+}
+
+// pollHoldRelease is the boot-owned release that replaces intake's per-delivery hook with: while
+// admission holds anything back, it re-reads the Dispatch consumer's own position on a ticker and
+// applies each changed reading as a synthetic fact, independent of any message delivery. A quiet
+// stream after its last backlog message delivers nothing further to trigger a release the old
+// per-delivery hook depended on, and Ack() does not wait for the server: a position read taken
+// immediately after a delivery's own ack can still see the previous one. This ticker is what
+// eventually observes the ack once JetStream has applied it, bounded by its own period, and what
+// closes a hold nothing will ever redeliver — the recreated-consumer and outbox-lag cases alike.
+// A failed read or a failed apply is logged and retried on the next tick — last only adopts a
+// position once ApplyFact for it has actually committed, so an unchanged reading after either
+// kind of failure is retried rather than skipped as already seen; the hold never ends on the
+// strength of an error.
+// The event id folds in the project and this boot (bootID): processed_events is one table
+// shared by every project's daemon, and a stream a later boot recreates would otherwise repeat an
+// earlier boot's (ack floor, idle) pairs and have its own release swallowed as a duplicate of one
+// that ran under the old boot.
+func (w *workflowRuntime) pollHoldRelease(ctx context.Context) {
+	w.pollHoldReleaseWith(ctx, w.consumers)
+}
+
+func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positionReader) {
+	interval := w.holdPollInterval
+	if interval <= 0 {
+		interval = defaultHoldPollInterval
+	}
+	warnAfter, warnEvery := w.holdWarnAfter, w.holdWarnEvery
+	if warnAfter <= 0 {
+		warnAfter = defaultHoldWarnAfter
+	}
+	if warnEvery <= 0 {
+		warnEvery = defaultHoldWarnEvery
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var last intake.DispatchConsumerPosition
+	haveLast := false
+	var heldSince, warnedAt time.Time
+	wasHeld := false
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		if !w.admission.Held() {
+			haveLast, heldSince, warnedAt = false, time.Time{}, time.Time{}
+			if wasHeld {
+				// The hold just cleared: a record a held key's own recording put down between an
+				// earlier release's commit and its AfterCommit (which cleared pending) may still be
+				// sitting in the waiting line, held back by that same release's own promote, which
+				// ran before pending was actually cleared. One more pass, now that pending is
+				// provably empty, promotes it without waiting on an unrelated fact to notice. A
+				// fresh, never-reused event id (a closing pass never repeats a boot's own position
+				// reading) keeps ApplyFact from treating it as the duplicate of whatever position
+				// last released the hold. A failure is retried on the poll's own schedule, same as
+				// a failed position apply: wasHeld only clears once the pass actually succeeds.
+				if err := w.promoteAfterHoldClears(ctx); err != nil {
+					w.log.Warn("apply the post-release promote failed", "error", err)
+					continue
+				}
+			}
+			wasHeld = false
+			continue
+		}
+		wasHeld = true
+		if heldSince.IsZero() {
+			heldSince = time.Now()
+		}
+		position, err := reader.DispatchPosition(ctx)
+		if err != nil {
+			w.log.Error("read Dispatch consumer position for a held release", "error", err)
+			continue
+		}
+		// This never releases on the strength of the timer — only a Reached position does that,
+		// through the ApplyFact below — so a stuck hold stays stuck, but an operator now sees why:
+		// the target it is waiting for and its current ack floor. Not the stream sequence stuck
+		// behind that floor: the notification stream also carries GitHub subjects interleaved with
+		// Dispatch's, so ack_floor+1 can name a message that has nothing to do with this hold.
+		if waiting := time.Since(heldSince); waiting >= warnAfter && time.Since(warnedAt) >= warnEvery {
+			warnedAt = time.Now()
+			w.log.Warn("admission: a hold has not released", "waiting", waiting.Round(time.Second),
+				"target", w.admission.Target(), "ack_floor", position.AckFloorStream)
+		}
+		if haveLast && position == last {
+			continue
+		}
+		eventID := fmt.Sprintf("dispatch-position:%s:%s:%d:%t", w.dispatchProject, w.bootID, position.AckFloorStream, position.Idle)
+		if _, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, position, w.handlers...); err != nil {
+			w.log.Warn("apply Dispatch consumer position failed", "error", err)
+			continue
+		}
+		last, haveLast = position, true
+	}
+}
+
+// promoteAfterHoldClears applies one synthetic DispatchConsumerPosition fact, its event id never
+// reused, once nothing is held: Admission.Apply routes any DispatchConsumerPosition straight to
+// release, which — with pending now provably empty — promotes exactly as a normal promote() would,
+// picking up any candidate a held key's own recording left waiting behind it. The position's
+// own values do not matter here: caughtUp is false whenever pending is empty, so release only
+// reaches its own promoteHolds call, never re-applies a summary.
+func (w *workflowRuntime) promoteAfterHoldClears(ctx context.Context) error {
+	eventID := fmt.Sprintf("dispatch-position:%s:%s:closing:%d", w.dispatchProject, w.bootID, time.Now().UnixNano())
+	_, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, intake.DispatchConsumerPosition{}, w.handlers...)
+	return err
+}
+
+// claimReady records an architect whose claim is ready, for releaseReadied to release the notices
+// waiting for a later attempt that it owns (outbox.releaseWaiting): a relaunched architect is told
+// what it missed at once, ahead of what follows. The ready route calls it before it answers the
+// agent, so it only records the claim and wakes the release.
+func (w *workflowRuntime) claimReady(c supervise.Claim) {
+	if c.Role != claim.RoleArchitect {
+		return
+	}
+	w.readyMu.Lock()
+	w.readied[c.Token] = true
+	w.readyMu.Unlock()
+	select {
+	case w.readyWake <- struct{}{}:
+	default:
+	}
+}
+
+// releaseReadied releases, until ctx ends, the waiting notices of the architects claimReady
+// recorded: each wake takes every architect recorded since the last one, in one release.
+func (w *workflowRuntime) releaseReadied(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.readyWake:
+		}
+		w.readyMu.Lock()
+		architects := slices.Collect(maps.Keys(w.readied))
+		clear(w.readied)
+		w.readyMu.Unlock()
+		if len(architects) == 0 {
+			continue
+		}
+		release, cancel := context.WithTimeout(ctx, readyReleaseTimeout)
+		err := w.outbox.releaseWaiting(release, architects...)
+		cancel()
+		if err != nil && ctx.Err() == nil {
+			w.log.Error("release the notices waiting for ready architects", "architects", architects, "error", err)
+		}
+	}
 }
 
 func (w *workflowRuntime) stop() {

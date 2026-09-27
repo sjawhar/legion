@@ -106,7 +106,10 @@ A spec has two readers: the human who decides reads the **Summary** and **New si
   between two lanes or a halt condition, a question for the platform PO (see
   [Before you ask](#before-you-ask) under Asking).
 - Keep each section to one screen; work that exceeds one screen per section is two specs.
-- Update the spec as decisions land: the spec is the record, comments are the discussion.
+- Update the spec as decisions land: the spec is the record, comments are the discussion. It
+  records decisions and requirements, never progress: no status, timestamps, "Update HH:MMZ"
+  section, PR list, or handoff notes. Progress is not a Dispatch object at all; it lives in your
+  transcript and your pull request (see [Messages](#messages)).
 - Before sending it: no sections conflict, every requirement has exactly one reading, and the
   Summary and every ask block pass the phone test above.
 
@@ -224,10 +227,18 @@ status is." Waiting for the deploy lane is not a status and is never announced.
 ```ts
 // PATCH /api/v1/issues/{key} — status, title, labels, priority, external_links (merged by URL), route, parent
 dispatch_issue_update({ issue: "AGENTC-175", status: "testing" })
+dispatch_issue_update({ issue: "AGENTC-175", status: "done", reason: "Shipped in owner/repo#7; verified on the production dashboard." })
 dispatch_issue_update({ issue: "AGENTC-175", priority: 1 }) // 0–3; see Priority is yours to set
 dispatch_issue_update({ issue: "AGENTC-175", external_links: ["https://github.com/owner/repo/pull/7"] })
 dispatch_issue_update({ issue: "AGENTC-175", parent: "AGENTC-170" }) // same-project key; "" clears the parent
 ```
+
+Closing takes a `reason`, and the tool refuses `status: "done"` without one: it posts the reason on
+the issue as a message, then closes it, because a closed issue refuses messages, comments, and
+artifacts, so a reason left for later has nowhere to go. When the close fails after the post, the
+error names the posted message; after a timeout or a server error it also says the close may have
+landed, so read the issue's status first. A retry points its reason at the posted message rather
+than repeating it.
 
 The two clears differ: `priority` clears with `null`, while `parent` and `route` clear with `""`.
 Guessing the other one is a refusal either way.
@@ -540,9 +551,8 @@ the document's approval state; `stale` means it was approved and then edited - r
 ## The Spec
 
 The spec holds requirements, design, acceptance, decisions, and rejected alternatives, structured per [Writing a spec](#writing-a-spec).
-It changes only when a decision or requirement changes, and every version that records one is named with `summary`. Never write
-progress, status, timestamps, an "Update HH:MMZ" section, a PR list, or handoff notes into the spec. Progress is not a
-Dispatch object at all: it lives in your transcript and your pull request (see [Messages](#messages)).
+It changes only when a decision or requirement changes, and every version that records one is named with `summary`. What it
+never carries is in [Rules](#rules) under Writing a spec.
 
 Read the current document before changing it:
 
@@ -833,7 +843,9 @@ message ref, it returns that message and its reply chain. Reads do not subscribe
 Every read ends with two sections from the reference graph. `Referenced by:` lists what points at the node — every document, ask,
 comment, or message that cites it, plus its structure: child issues, attached documents, anchored and owned asks and comments, replies,
 followers — and `Links:` lists what it cites. Each row is `- <edge kind> <node kind> dispatch://… (<excerpt> · <when>)`; for a
-document source the excerpt is the block containing the mention. Cross-project, always: a message on another project's issue that
+document source the excerpt is the start of the block holding the mention, and a whole list is one block, so every issue named in
+one list previews the list's first item. When a document references many issues and each backlink should read right, give each
+issue its own paragraph (or block), not an item of one list. Cross-project, always: a message on another project's issue that
 cites an ask shows up under that ask. So "what led to this decision" is one `dispatch_read` on the ask, and "who relies on this
 document" one read on the document. Cite with `dispatch://` references (below) whenever you name a node in a body — a bare id or
 title is invisible to the graph.

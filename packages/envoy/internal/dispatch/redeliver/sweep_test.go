@@ -14,6 +14,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
@@ -81,7 +82,7 @@ type harness struct {
 	t       *testing.T
 	webhook *githubapptest.Webhook
 	client  *githubapp.Client
-	state   natsgo.KeyValue
+	state   bus.KeyValue
 	logs    *lockedBuffer
 	clock   *clock
 }
@@ -489,7 +490,7 @@ func TestASweepPausedBeforeItsRequestSendsNothingUnderANewLimit(t *testing.T) {
 
 	paused := &pausedClaim{KeyValue: h.state, entered: make(chan struct{}), release: make(chan struct{})}
 	second := h.sweeper()
-	second.State = paused
+	second.State = bus.KeyValue{KeyValue: paused}
 	reports := make(chan redeliver.Report, 1)
 	go func() {
 		report, err := second.Sweep(context.Background(), redeliver.Options{})

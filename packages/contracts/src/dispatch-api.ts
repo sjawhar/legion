@@ -1562,6 +1562,61 @@ export interface MessageRead {
   readonly replies: Message[];
 }
 
+/**
+ * One human message sent to many sessions at once. A broadcast is a grouping over the
+ * targeted messages Dispatch already sends, not a second delivery mechanism: every recipient
+ * gets an ordinary issue-less `Message` aimed at its own session, so each recipient's thread,
+ * retry and reply behave exactly as they do for a message sent from one agent card. This row
+ * is what they share.
+ */
+export interface Broadcast {
+  readonly id: string;
+  readonly author: Actor;
+  readonly body: string;
+  readonly delivery: MessageDeliveryMode;
+  readonly created_at: string;
+}
+
+/** A broadcast list row: the send, how many sessions it reached, and how many answered. */
+export interface BroadcastSummary extends Broadcast {
+  readonly recipients: number;
+  readonly replies: number;
+}
+
+/** One session's copy of a broadcast: the message it was sent, with its delivery attempts,
+ *  and the replies threaded under it. Delivery runs behind the create response, so a recipient
+ *  starts with no attempt; a recipient still carrying none has not been sent to. */
+export interface BroadcastRecipient {
+  readonly session_id: string;
+  readonly message: Message;
+  readonly replies: Message[];
+}
+
+export interface BroadcastRead extends Broadcast {
+  readonly recipients: BroadcastRecipient[];
+}
+
+/** A session the sender selected that was not sent to. A recipient that does not advertise
+ *  the chosen mode is excluded, never switched to another one: the mode is part of what the
+ *  sender said. Exclusions are reported here and never stored. */
+export interface BroadcastExclusion {
+  readonly session_id: string;
+  readonly title: string;
+  readonly reason: string;
+}
+
+export interface BroadcastCreated extends BroadcastRead {
+  readonly excluded: BroadcastExclusion[];
+}
+
+export interface CreateBroadcastInput {
+  readonly body: string;
+  readonly delivery: MessageDeliveryMode;
+  /** The sessions the human selected. A session named twice is one recipient; one that is no
+   *  longer live, or that does not advertise `delivery`, comes back under `excluded`. */
+  readonly session_ids: readonly string[];
+}
+
 export interface IssueRead {
   readonly issue: IssueDetails;
   readonly events: Event[];

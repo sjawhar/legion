@@ -176,9 +176,9 @@ func TestAnUnusableSeedIsAnErrorNamingItsSource(t *testing.T) {
 }
 
 // A seed file the daemon's own uid owns is held to 0600 by Seed as by SeedFile, so a daemon-owned
-// 0640 seed on a shared host is refused. Seed lets the group read only a file another uid owns (a
-// kubelet-mounted Secret, root's, read through the pod's fsGroup: config.ReadGroupSecretPointer,
-// whose test covers that case; a test cannot make a file root's).
+// 0640 seed on a shared host is refused. Seed lets the group read only a root-owned file read by a
+// non-root uid (a kubelet-mounted Secret, read through the pod's fsGroup:
+// config.ReadGroupSecretPointer, whose test covers that case; a test cannot make a file root's).
 func TestADaemonOwnedSeedIsHeldTo0600(t *testing.T) {
 	userSeed, _ := testnats.User(t)
 	for _, mode := range []os.FileMode{0o640, 0o440, 0o660, 0o604} {

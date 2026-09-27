@@ -698,8 +698,10 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 		t.Fatalf("read the captured Dispatch issue.updated event: %v", err)
 	}
 	// The event is this daemon's project's, with an id of its own: processed events are deduplicated
-	// by Envoy's event id across the shared database.
+	// by Envoy's event id across the shared database. The captured issue carries no labels; this one
+	// is handed to Legion.
 	moved := strings.ReplaceAll(strings.ReplaceAll(string(captured), "CAPTURE", cfg.Project), `"dispatch-15"`, `"dispatch-`+cfg.Project+`"`)
+	moved = strings.Replace(moved, `\"labels\":[]`, `\"labels\":[\"legion\"]`, 1)
 	key := cfg.Project + "-3"
 	var once sync.Once
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -209,6 +209,22 @@ func writeJSONError(w http.ResponseWriter, status int, message string, expected 
 	writeJSON(w, status, apiError{Error: message, Expected: expected})
 }
 
+// writeNATSError answers a request NATS did not serve. What NATS refuses however often it is sent
+// is the caller's own input, so it is answered naming why: a message too large to take whole, or a
+// session id or role whose KV key would make a subject too long (bus.ErrTooLarge), is a 413, and a
+// topic or key NATS does not accept in a subject (bus.ErrInvalidSubject) a 400. Any other failure
+// is status with message.
+func writeNATSError(w http.ResponseWriter, err error, status int, message string) {
+	switch {
+	case errors.Is(err, bus.ErrTooLarge):
+		writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, bus.ErrInvalidSubject):
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeJSONError(w, status, message)
+	}
+}
+
 func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderResult) {
 	response := roleHolderError{
 		Reason: result.state,
@@ -467,7 +483,7 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
 		duplicate, err := d.client.PublishReportingDuplicate(item)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, sendResponse{
@@ -489,7 +505,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			return
 		}
 		if err := sessions.Delete(sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -556,7 +572,7 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 			var err error
 			result, err = resolveLiveRoleHolder(d.registry, d.sessions, role)
 			if err != nil {
-				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 				return
 			}
 			if result.state != roleHolderLive {
@@ -566,7 +582,7 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
 		if err := d.client.Publish(item); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, publishResponse{Envelope: item, Holder: result.holder})
@@ -648,13 +664,13 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 		case http.MethodGet:
 			item, err := registry.Get(sessionID)
 			if err != nil {
-				writeJSONError(w, http.StatusNotFound, err.Error())
+				writeNATSError(w, err, http.StatusNotFound, err.Error())
 				return
 			}
 			writeJSON(w, http.StatusOK, item)
 		case http.MethodDelete:
 			if err := registry.Remove(sessionID, nil); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -716,7 +732,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 		entry.MachineID = machineID
 		entry.SelfSubscribed = true
 		if err := d.sessions.Put(body.SessionID, entry); err != nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
+			writeNATSError(w, err, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
 			return
 		}
 		previous := ""
@@ -728,7 +744,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			// live or not; any other live holder is protected.
 			holder, err := d.registry.RoleHolder(body.Role)
 			if err != nil {
-				writeJSONError(w, http.StatusServiceUnavailable, "read role holder: "+err.Error())
+				writeNATSError(w, err, http.StatusServiceUnavailable, "read role holder: "+err.Error())
 				return
 			}
 			previous = strings.TrimSpace(body.PreviousSessionID)
@@ -754,7 +770,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, item)
@@ -774,7 +790,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		result, err := resolveLiveRoleHolder(d.registry, d.sessions, role)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if result.state != roleHolderLive {
@@ -939,13 +955,13 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 				slog.String("session_id", body.SessionID),
 				slog.Any("topics", body.Topics),
 				slog.String("error", err.Error()))
-			writeJSONError(w, http.StatusServiceUnavailable, err.Error())
+			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
 			return
 		}
 		if body.Port > 0 || body.SelfSubscribed {
 			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
-				writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
+				writeNATSError(w, err, http.StatusServiceUnavailable, "session registry unavailable")
 				return
 			}
 		}
@@ -999,7 +1015,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		}
 		logger.Info("listener unsubscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics))
 		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		removed := body.Topics
