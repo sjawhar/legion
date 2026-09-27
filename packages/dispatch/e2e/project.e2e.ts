@@ -219,7 +219,7 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
     await expect(references).toContainText("depth 2");
     const tabs = page.getByRole("main").getByRole("tab");
     await expect(tabs).toHaveCount(4);
-    for (const [index, name] of ["Spec", "Conversation", "Children", "Artifacts (1)"].entries()) {
+    for (const [index, name] of ["Spec", "Conversation", "Children", "Artifacts (2)"].entries()) {
       await expect(tabs.nth(index)).toHaveAccessibleName(name);
     }
     await expect(page.getByRole("button", { name: /make primary/i })).toHaveCount(0);

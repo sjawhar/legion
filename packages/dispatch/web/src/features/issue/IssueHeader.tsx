@@ -273,8 +273,11 @@ export function IssueHeader({
                 value={drafts.title}
               />
             ) : (
+              // The clamp lives on the inner span, not here: `overflow: hidden` clips at the
+              // padding edge, so a clamped element with vertical padding shows the top of the
+              // line it cut - fragments of a third line under the ellipsis.
               <h1
-                className={`min-w-0 flex-1 break-words rounded-lg border px-2 py-1 text-[22px] leading-7 font-semibold tracking-tight md:py-0 ${borderTransparent} ${textPrimaryOnSurface} line-clamp-2 ${
+                className={`min-w-0 flex-1 break-words rounded-lg border px-2 py-1 text-[22px] leading-7 font-semibold tracking-tight md:py-0 ${borderTransparent} ${textPrimaryOnSurface} ${
                   isClosed ? "" : `cursor-text ${borderStrongHover}`
                 }`}
                 onClick={() => {
@@ -296,7 +299,7 @@ export function IssueHeader({
                 tabIndex={isClosed ? -1 : 0}
                 title={issue.title}
               >
-                {drafts.title}
+                <span className="line-clamp-2">{drafts.title}</span>
               </h1>
             )}
             <PinButton

@@ -416,32 +416,42 @@ export function AskCard({
         <div
           className={`mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs ${textMutedOnSurface}`}
         >
-          {turnLabel === null ? null : (
-            <span
-              className={`shrink-0 font-semibold ${textSecondaryOnSurface}`}
-              data-testid={`turn-${displayedAsk.id}`}
-            >
-              {turnLabel}
-            </span>
-          )}
-          {turnLabel === null ? null : <span aria-hidden="true">·</span>}
-          {/* A block ask the server indexed with no pending author has an empty label; it still
-              says when it was asked rather than opening with a dangling separator. */}
-          {handleCount === 0 ? (
-            <span className="min-w-0 truncate">{authorLabel === "" ? "asked" : authorLabel}</span>
-          ) : (
-            <button
-              aria-expanded={handlesOpen}
-              className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
-              onClick={() => setHandlesOpen((open) => !open)}
-              type="button"
-            >
+          {/* Turn, author and time are one unwrapped group whose author truncates: a separator
+              that wrapped left a line opening - or ending - on a bare "·", and the author is the
+              only part of the three that can give up width. A block ask the server indexed with
+              no pending author has an empty label and still says when it was asked. */}
+          <span className="flex min-w-0 items-center gap-x-1.5 whitespace-nowrap">
+            {turnLabel === null ? null : (
+              <span
+                className={`shrink-0 font-semibold ${textSecondaryOnSurface}`}
+                data-testid={`turn-${displayedAsk.id}`}
+              >
+                {turnLabel}
+              </span>
+            )}
+            {turnLabel === null ? null : (
+              <span className="shrink-0" aria-hidden="true">
+                ·
+              </span>
+            )}
+            {handleCount === 0 ? (
               <span className="min-w-0 truncate">{authorLabel === "" ? "asked" : authorLabel}</span>
-              <ChevronIcon expanded={handlesOpen} />
-            </button>
-          )}
-          <span className="inline-flex shrink-0 items-center gap-x-1">
-            <span aria-hidden="true">·</span>
+            ) : (
+              <button
+                aria-expanded={handlesOpen}
+                className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
+                onClick={() => setHandlesOpen((open) => !open)}
+                type="button"
+              >
+                <span className="min-w-0 truncate">
+                  {authorLabel === "" ? "asked" : authorLabel}
+                </span>
+                <ChevronIcon expanded={handlesOpen} />
+              </button>
+            )}
+            <span className="shrink-0" aria-hidden="true">
+              ·
+            </span>
             <Timestamp at={displayedAsk.created_at} />
           </span>
           {reference === undefined ? null : <CopyRefButton route={reference} />}

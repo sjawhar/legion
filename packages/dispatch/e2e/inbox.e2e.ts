@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { setInterests, setLiveSessions } from "./agents";
 import {
@@ -1068,3 +1068,45 @@ for (const refusal of [
     }
   });
 }
+
+test("an ask card's time stays with its author, never opening a line of its own", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the provenance line only wraps where it must");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Provenance line" });
+  // A live session names itself in a sentence, so the author fills the line and the time is what
+  // the wrap lands on.
+  const author = {
+    actor: {
+      id: "e2e-long-author",
+      kind: "session" as const,
+      origin: {
+        session_title: "Reviewing PR #1489 LEGION-67 production-check screen fixes at 390px",
+        tmux: "dispatch:1.9",
+      },
+    },
+    as: "agent" as const,
+  };
+  await createAsk(issue.key, { question: "Where does the time sit?" }, author);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.locator("[data-testid^='ask-']").first();
+    await expect(card).toBeVisible();
+    const middle = async (locator: Locator) => {
+      const box = await locator.boundingBox();
+      return Math.round((box?.y ?? -1) + (box?.height ?? 0) / 2);
+    };
+    const chip = card.getByRole("button", { name: /Reviewing PR #1489/ });
+    const time = card.locator("time").first();
+    await expect(chip).toBeVisible();
+    await expect(time).toBeVisible();
+    // Who and when are one group: the separator that joins them never starts a line.
+    expect(await middle(time)).toBe(await middle(chip));
+  } finally {
+    await alice.close();
+  }
+});

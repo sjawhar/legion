@@ -158,7 +158,9 @@ function ArtifactRow({
         >
           {artifact.name}
         </Link>
-        <p className={`truncate text-xs ${textMutedOnSurface}`}>
+        {/* The name truncates; its details wrap. Truncating them hid the update time on a row
+            with room to spare. */}
+        <p className={`text-xs ${textMutedOnSurface}`}>
           {artifact.kind} · {versions.length} {versions.length === 1 ? "version" : "versions"} ·
           Updated <Timestamp at={latestVersion?.created_at ?? artifact.created_at} />
         </p>
