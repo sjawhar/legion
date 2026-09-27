@@ -112,10 +112,10 @@ type Notice struct {
 	CatchUp *CatchUp `json:"catch_up,omitempty"`
 }
 
-// CatchUp is what a tree's root architect is told of its tree when its claim is first ready in a
-// generation (a catch-up notice), which is the architect's first instruction: admission launches
-// it with no task. It is the tree as the daemon records it then: the design gate policy and the
-// root's gate, and every issue of the tree.
+// CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
+// (a catch-up notice), which is the architect's first instruction: admission launches it with no
+// task. It is the tree as the daemon records it then: the design gate policy and the root's gate,
+// and every issue of the tree.
 type CatchUp struct {
 	Generation uint64         `json:"generation"`
 	Gate       CatchUpGate    `json:"gate"`
