@@ -2225,6 +2225,37 @@ describe("executeDispatchTool", () => {
     expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
   });
 
+  // A timeout, a transport error, or a 5xx gives no proof the issue stayed open, so the error
+  // must not say it did: an agent that believed it would retry and post its reason twice.
+  test("dispatch_issue_update says the close is unknown when the PATCH times out or 5xxes after the post", async () => {
+    const unknown =
+      "; the reason already landed as message message-7 (dispatch://AGENTC-175/message/message-7), " +
+      "and the close may or may not have taken effect. Read the issue's status before retrying: " +
+      "done means it closed; otherwise retry with a reason that points at message message-7, " +
+      "since retrying this call posts its reason again";
+    for (const [patch, head] of [
+      [
+        (): Response => {
+          throw new DOMException("The operation timed out.", "TimeoutError");
+        },
+        "The operation timed out.",
+      ],
+      [() => refusal(502, "HTTP_502", "Bad Gateway"), "HTTP_502: Bad Gateway"],
+    ] as const) {
+      const server = closingServer({
+        message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+        patch,
+      });
+
+      const failure = await closeCall(server.fetchImpl).catch((error: unknown) => error);
+
+      if (!(failure instanceof Error)) throw new Error(`expected an Error, got ${String(failure)}`);
+      expect(failure.message).toBe(`${head}${unknown}`);
+      expect(failure.message).not.toContain("did not close");
+      expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+    }
+  });
+
   test("dispatch_issue_update sets the parent and reports the move", async () => {
     const patches: unknown[] = [];
     const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

@@ -1732,11 +1732,14 @@ export async function executeDispatchTool(
             ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
             : "";
         if (closingNote === undefined) throw refusalWithCode(error, taken);
-        // The reason is on the issue and the issue is still open: a blind retry would post the
-        // reason a second time, so the error says where the first one is.
-        const landed =
-          `; the reason already landed as message ${closingNote.id} (${closingNote.ref}) but the issue did not close. ` +
-          `Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}`;
+        // The reason is on the issue, so a blind retry would post it a second time: the error
+        // says where the first one is. Only a 4xx is a refusal that proves the issue is still
+        // open; after a 5xx, a timeout, or a transport error the close may have landed anyway.
+        const refused = error instanceof DispatchServiceError && error.status < 500;
+        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const landed = refused
+          ? `${posted} but the issue did not close. Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}`
+          : `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`;
         if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken + landed);
         throw new Error(`${error instanceof Error ? error.message : String(error)}${landed}`, {
           cause: error,

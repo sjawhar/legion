@@ -233,7 +233,9 @@ dispatch_issue_update({ issue: "AGENTC-175", parent: "AGENTC-170" }) // same-pro
 Closing takes a `reason`, and the tool refuses `status: "done"` without one: it posts the reason on
 the issue as a message, then closes it, because a closed issue refuses messages, comments, and
 artifacts, so a reason left for later has nowhere to go. When the close fails after the post, the
-error names the posted message; point the retry's reason at it rather than repeating it.
+error names the posted message; after a timeout or a server error it also says the close may have
+landed, so read the issue's status first. A retry points its reason at the posted message rather
+than repeating it.
 
 The two clears differ: `priority` clears with `null`, while `parent` and `route` clear with `""`.
 Guessing the other one is a refusal either way.

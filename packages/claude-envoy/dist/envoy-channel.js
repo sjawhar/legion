@@ -40330,7 +40330,9 @@ async function executeDispatchTool(input) {
         const taken = error48 instanceof DispatchServiceError && error48.status === 500 && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error48, taken);
-        const landed = `; the reason already landed as message ${closingNote.id} (${closingNote.ref}) but the issue did not close. ` + `Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}`;
+        const refused = error48 instanceof DispatchServiceError && error48.status < 500;
+        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const landed = refused ? `${posted} but the issue did not close. Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}` : `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`;
         if (error48 instanceof DispatchServiceError)
           throw refusalWithCode(error48, taken + landed);
         throw new Error(`${error48 instanceof Error ? error48.message : String(error48)}${landed}`, {
