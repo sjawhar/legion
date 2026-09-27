@@ -165,3 +165,44 @@ test("a session that has published nothing renders as empty, not as a conversati
     await context.close();
   }
 });
+
+test("a session whose plugin cannot stream is told so, not left waiting on a turn", async ({
+  browser,
+}) => {
+  // Two live sessions, identical but for what they advertise: the stream capability is the only
+  // thing that distinguishes a session the relay can reach from one it cannot.
+  const streams: FakeSession = {
+    capabilities: ["aside", "btw", "steer", "agentstream"],
+    dir: "/workspaces/streams",
+    last_seen: Date.now() - 1_000,
+    machine_id: "relay-host",
+    roles: [],
+    session_id: "01a0e0c2-0000-7000-8000-0000000000a1",
+    title: "On the new plugin",
+  };
+  const silent: FakeSession = {
+    ...streams,
+    capabilities: ["aside", "btw", "steer"],
+    session_id: "01a0e0c2-0000-7000-8000-0000000000a2",
+    title: "On an older plugin",
+  };
+  await setLiveSessions([streams, silent]);
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${silent.session_id}/live`);
+    const empty = page.getByTestId("agent-thread-empty");
+    await expect(empty).toHaveText(/cannot stream its conversation/);
+    await expect(empty).toContainText("Update the plugin");
+    // The page still talks to it: delivery does not go through the stream.
+    await expect(page.getByTestId("agent-composer")).toBeVisible();
+
+    await page.goto(`/agents/${streams.session_id}/live`);
+    await expect(page.getByTestId("agent-thread-empty")).toHaveText(
+      "Nothing yet. This session's next turn appears here as it happens."
+    );
+  } finally {
+    await context.close();
+  }
+});

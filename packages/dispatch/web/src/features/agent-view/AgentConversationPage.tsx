@@ -1,4 +1,8 @@
-import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
+import {
+  AGENT_STREAM_CAPABILITY,
+  DELIVERY_CAPABILITIES,
+  type MessageDeliveryMode,
+} from "@legion/contracts";
 import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
@@ -34,6 +38,20 @@ const STATUS: Record<AgentStreamStatus, { dot: string; label: string }> = {
 function deliveryModes(capabilities: readonly string[]): MessageDeliveryMode[] {
   const advertised = DELIVERY_CAPABILITIES.filter((mode) => capabilities.includes(mode));
   return advertised.length === 0 ? ["aside"] : advertised;
+}
+
+/**
+ * What an empty transcript means for this session. A session whose Envoy plugin predates the
+ * live view registers without the stream capability: it never answers the relay's control
+ * subject, so its turns cannot reach this page however long the viewer waits, and saying "the
+ * next turn appears here" was a promise the page could not keep. A session Envoy no longer lists
+ * says nothing about its plugin, so it keeps the neutral wording.
+ */
+function emptyText(agent: { capabilities: readonly string[] } | undefined): string {
+  if (agent !== undefined && !agent.capabilities.includes(AGENT_STREAM_CAPABILITY)) {
+    return "This session cannot stream its conversation: its Envoy plugin predates the live view. Update the plugin and start a new session to watch it here.";
+  }
+  return "Nothing yet. This session's next turn appears here as it happens.";
 }
 
 export function AgentConversationPage(): ReactNode {
@@ -139,6 +157,7 @@ export function AgentConversationPage(): ReactNode {
       <ErrorBoundary region="this conversation" resetKey={sessionId}>
         <AgentRuntimeThread
           conversation={conversation}
+          empty={emptyText(agent)}
           onNew={onNew}
           placeholder={`Message ${label} — delivered as ${mode}…`}
           resetKey={sessionId}

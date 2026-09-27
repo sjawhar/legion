@@ -4,6 +4,13 @@
 
 ### Added
 
+- The session advertises `agentstream` among its Envoy registration capabilities, so Dispatch can
+  tell a session it can stream from one it cannot. A viewer of a session registered without it is
+  told its plugin predates the live view instead of being shown an empty transcript and a promise
+  that the next turn will appear. The string joins the same open `capabilities` list the delivery
+  modes use (`AGENT_STREAM_CAPABILITY` in `@legion/contracts`), so nothing about registration
+  changes for a listener or a Dispatch that does not know it.
+
 - The session publishes its own conversation for Dispatch's agent conversation view (LEGION-232):
   every turn, tool call and streamed update becomes a frame on `agentstream.<session id>.frames`
   over core NATS, a subject family the notification stream does not capture, so the bus retains
