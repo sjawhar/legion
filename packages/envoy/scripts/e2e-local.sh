@@ -465,7 +465,7 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
     const secondSHA = "2222222222222222222222222222222222222222";
     require(checksBySHA.get(firstSHA)?.length === 1, "first head must settle exactly once");
     require(checksBySHA.get(secondSHA)?.length === 3, "second head must settle once then re-settle twice");
-    // Consumers order same-head settlements by the attempt set: per-name ids
+    // Consumers order settlements of one commit by the attempt set: per-name ids
     // never decrease, and at an equal set the generation must not decrease.
     const compareSets = (previous, next) => {
       let advanced = false;

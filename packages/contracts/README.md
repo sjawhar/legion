@@ -55,7 +55,7 @@ share one), so a consumer takes the repository from the payload's `repo`.
 
 ### CI check settlement
 
-`notifications.github.{owner}.{repo}.pr.{number}.checks` publishes once a current PR head's recorded checks and suites settle after the quiet period.
+`notifications.github.{owner}.{repo}.pr.{number}.checks` publishes once a commit of the pull request has its recorded checks and suites settle after the quiet period, whether or not that commit is still the head. The payload's `sha` names the commit, and a consumer decides which commit a settlement stands for.
 
 ## Slack Topic Hierarchy
 
