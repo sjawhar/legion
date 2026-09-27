@@ -141,6 +141,21 @@ Anything else, stop and send the owning architect the `jj -R "$LEGION_WORKSPACE"
 evidence; the architect decides, and an operator performs any operation-log restore with every
 other tree paused.
 
+**Filesystem and process safety:** Your pane runs as the operator's own user, so one mistaken
+path can destroy the machine every agent shares (on 2026-09-13 a probe script's leftover
+`rm -rf "$work" "$HOME"` deleted the operator's SSH and signing keys and stopped every worker).
+The extension refuses, before it runs, a `bash` command, `eval` code, or `hub` process start
+(yours or a `task` subagent's) that would delete, move, truncate, overwrite an existing file by
+redirection or `tee`, or `chmod -R`/`chown -R` anything outside `$LEGION_WORKSPACE` and a
+directory of your own under `/tmp` (never `/tmp` itself or a glob over it). It follows `$HOME`,
+`~`, variables, `cd`, and the scripts a command runs, and it refuses a target it cannot resolve
+(a variable read from input, a command's output), so name paths literally or under
+`$LEGION_WORKSPACE` or `$(mktemp -d)`. `pkill` and `killall` are refused, and `kill` only reaches
+a process you started (a descendant of your Oh My Pi process): stop your own long-running
+processes through the hub tool. The refusal names the target and the rule; rewrite the command
+to stay inside your roots, never around the guard. What it cannot read, a compiled program or
+code whose paths are only known at run time, is still yours to keep inside the workspace.
+
 ## Phase work
 
 Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](../dispatch/SKILL.md#writing-a-spec).

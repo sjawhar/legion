@@ -6,6 +6,36 @@ can ask the `secrets` broker (secretsd) for any agent-tier key. A credential tha
 may hold therefore cannot live in the agent tier without every pane being able to read it.
 Kubernetes deployments (`docs/kubernetes.md`) get a pod boundary instead and do not need this page.
 
+## The pane guard
+
+Because every pane runs as the daemon's own user, the Legion extension (`packages/pi-envoy`) holds
+each phase worker's and root architect's tool calls, and those of any `task` subagent they spawn,
+to a boundary before they run; it refuses the shared jj operation-log rewrites (LEGION-45) and,
+since LEGION-121, destructive commands and signals outside the pane's own work. A `bash` command,
+`eval` code, or `hub` process start may delete (`rm`, `unlink`, `find -delete`,
+`find -exec rm`, `shred`), move (`mv`), truncate (`truncate`), overwrite by redirection or `tee`
+(an existing file only), or recursively change the mode or owner (`chmod -R`, `chown -R`) of paths
+under the pane's issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and a directory of its
+own under `/tmp`, never `/tmp` itself, a glob over it, or its tmux and ssh socket directories. The
+guard parses the command with a bash parser and resolves each target as bash would: through
+`$HOME`, `~`, variables set earlier in the same command, `$(mktemp -d)`, `cd`, braces, command
+substitutions, and the scripts the command runs (`bash <file>`, `sh -c`, `source`, a heredoc fed
+to a shell, a script run by path, python/node/bun scripts); a target it cannot resolve, and a
+command the parser reports as malformed, are refused. `pkill`, `killall`, `fuser -k`, and
+`tmux kill-*` are refused outright, and `kill` only reaches a pid that `/proc` shows descending
+from the pane's own Oh My Pi process. Every refusal names the target, where it resolved, and the
+rule, so the agent can rewrite the command.
+
+The guard reads text before it runs, so it cannot see what is only decided at run time: a compiled
+program or anything a command runs without naming it on the command line (a `make` target, a test
+runner, `npm run`), a program whose name is itself a variable or a command's output
+(`$cmd`, `eval "$(tool)"`), Python or JavaScript whose paths or pids come from values it cannot
+evaluate (the `eval` tool's kernels included), commands outside the families above that overwrite
+a destination (`cp`, `rsync`, `dd`, `ln -f`, `install`), a directory reached through a `cd` that
+failed, and the `write` and `edit` tools. The pane itself still runs as the daemon's user, so a
+refusal is a guard against mistakes, not a sandbox; running panes as a separate user is LEGION-122,
+and the Kubernetes runtime's pod boundary is the hard one.
+
 ## Current decision for the LEGION deployment
 
 On 2026-09-13 Sami decided that the two GitHub App private keys stay in the secrets store's agent
