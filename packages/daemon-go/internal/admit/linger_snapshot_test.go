@@ -136,7 +136,7 @@ func TestReconcileReentersAParkedChildSetBackToTodoInABootSummary(t *testing.T) 
 	}
 }
 
-// Deep review D, sharpened by Review1456: an agent writes an issue's Dispatch status directly
+// Deep review D, sharpened by review feedback: an agent writes an issue's Dispatch status directly
 // (agentStatusWrite records it, LastDispatchSeq included, but never changes issue.Status — the
 // daemon reasserts its own through the outbox instead). A boot listing taken before that reassert
 // lands still shows the agent's own out-of-workflow write, level with what the daemon already
@@ -169,4 +169,37 @@ func TestReconcileLeavesSlotStateUnchangedWhenALevelSnapshotEchoesAnAgentsOutOfW
 		t.Fatalf("reconciled LEGION-AGENT = %#v, want its slot state unchanged: the engine never applied this level-sequence status", got)
 	}
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-AGENT", Index: 0, AdmittedAt: fixedNow}})
+}
+
+// F: putNewRoot, called from applySummary's stored==nil branch at release, never carried the
+// summary's own sequence, so a freshly created root's LastDispatchSeq was always 0 regardless of
+// what the summary actually showed. An older, already-superseded event reaching Apply later then
+// passed applyObservation's own sequence fence (observation.Seq <= stored.LastDispatchSeq, since 0
+// fences nothing) and overwrote what the newer summary had already established.
+func TestAReleasedRootIgnoresAnOlderLateEvent(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-LATE", Title: "late", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 5},
+	}, 10, 0, false)
+	if !admission.Held() {
+		t.Fatal("Held() = false after seeding a behind labeled record, want it held")
+	}
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "position-reached", intake.DispatchConsumerPosition{AckFloorStream: 10}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact position-reached: %v", err)
+	}
+	if got := issue(t, pool, "LEGION-LATE"); !got.HandedOver || got.LastDispatchSeq != 5 {
+		t.Fatalf("released LEGION-LATE = %#v, want handed over with LastDispatchSeq 5 (the summary's own)", got)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-LATE", Index: 0, AdmittedAt: fixedNow}})
+
+	// An older event, already superseded by the summary that created this record, arrives late —
+	// a nak's redelivery, or the outbox's own publish backoff finally catching up.
+	apply(t, pool, admission, "older-late-event", intake.DispatchIssue{Key: "LEGION-LATE", Seq: 3, Type: "issue.updated", Status: "todo", Title: "late", Rank: "A", HandedOver: false}, engineStub{})
+	if got := issue(t, pool, "LEGION-LATE"); !got.HandedOver {
+		t.Fatalf("LEGION-LATE after an older late event = %#v, want HandedOver still true: the event is older than what created the record", got)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-LATE", Index: 0, AdmittedAt: fixedNow}})
 }

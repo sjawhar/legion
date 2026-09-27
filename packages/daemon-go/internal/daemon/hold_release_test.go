@@ -469,3 +469,89 @@ func TestPollHoldReleaseWarnsWhenAHoldPersistsPastItsBound(t *testing.T) {
 		t.Fatalf("warn log = %q, want it to name the target and the ack floor", msg)
 	}
 }
+
+// Quality review B6 + N8: the collapsed held-key rule an earlier round shipped returned for every
+// event on a held unrecorded key, a newer labeled todo included — but ApplyFact's advisory lock is
+// transaction-scoped and frees at commit, before AfterCommit runs (which clears pending), so an
+// event applying in that exact window still saw the key held and, under the collapsed rule,
+// dropped it: refreshed a summary about to be deleted and was acknowledged without recording
+// anything, unrecorded until its next event. B6 restores admit.go's stale-only check, so a
+// genuinely newer event still records in that window regardless of the doomed pending entry. N8:
+// even so, that record is skipped by the same transaction's own promote, which still sees the key
+// held (pending has not cleared yet); nothing else promotes it once AfterCommit finally does clear
+// it. pollHoldReleaseWith's one more pass, once Held() turns false, closes that gap — no database
+// table of held keys, no later event of any kind needed.
+func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsAfterCommitIsRecordedThenPromoted(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
+
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return admission.Reconcile(context.Background(), tx, []dispatch.IssueSummary{
+			{Key: "LEGION-RACE", Title: "race", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
+		}, 10, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
+	}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !admission.Held() {
+		t.Fatal("Held() = false after seeding a behind unlabeled record, want it held")
+	}
+
+	// release's own transaction commits here — its advisory lock is transaction-scoped and frees
+	// right at commit — but its AfterCommit, which clears pending, has not run yet: the exact
+	// window a concurrent event can land in.
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin release tx: %v", err)
+	}
+	result, err := admission.Apply(context.Background(), tx, intake.DispatchConsumerPosition{AckFloorStream: 10})
+	if err != nil {
+		t.Fatalf("apply position fact: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit release tx: %v", err)
+	}
+
+	// The newer labeled todo event lands in that window: LEGION-RACE is still in pending.
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "label-added-in-race-window", intake.DispatchIssue{
+		Key: "LEGION-RACE", Seq: 2, Type: "issue.updated", Status: "todo", Title: "race", Rank: "A", HandedOver: true,
+	}, engine, admission); err != nil {
+		t.Fatalf("apply the racing event: %v", err)
+	}
+	var recorded bool
+	if err := pool.QueryRow(context.Background(), "select exists(select 1 from issues where key = $1)", "LEGION-RACE").Scan(&recorded); err != nil {
+		t.Fatalf("query LEGION-RACE record: %v", err)
+	}
+	if !recorded {
+		t.Fatal("LEGION-RACE not recorded in the race window, want it recorded despite pending still (momentarily) holding it")
+	}
+	var slotted bool
+	if err := pool.QueryRow(context.Background(), "select exists(select 1 from slots where issue = $1)", "LEGION-RACE").Scan(&slotted); err != nil {
+		t.Fatalf("query LEGION-RACE slot: %v", err)
+	}
+	if slotted {
+		t.Fatal("LEGION-RACE already slotted before pending cleared, want it recorded but not yet promoted (that transaction's own promote still saw it held)")
+	}
+
+	// AfterCommit finally runs, clearing pending — exactly what ApplyFact would have done right
+	// after its own commit.
+	for _, after := range result.AfterCommit {
+		after()
+	}
+	if admission.Held() {
+		t.Fatal("Held() = true after AfterCommit ran, want the hold cleared")
+	}
+
+	// N8: the pass pollHoldReleaseWith runs once Held() turns false promotes LEGION-RACE — no
+	// later event of any kind arrives.
+	w := &workflowRuntime{pool: pool, admission: admission, handlers: []intake.Handler{engine, admission}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log}
+	w.promoteAfterHoldClears(context.Background())
+
+	if err := pool.QueryRow(context.Background(), "select exists(select 1 from slots where issue = $1)", "LEGION-RACE").Scan(&slotted); err != nil {
+		t.Fatalf("query LEGION-RACE slot after the closing pass: %v", err)
+	}
+	if !slotted {
+		t.Fatal("LEGION-RACE still unslotted after the closing pass, want it promoted with no later event")
+	}
+}

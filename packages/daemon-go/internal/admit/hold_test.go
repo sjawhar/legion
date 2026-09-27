@@ -23,7 +23,9 @@ import (
 // Boot's Dispatch read is a snapshot with no actor on it, and an agent's own status write looks
 // exactly like a human's in it. Dispatch says how far each issue's event log has run, so an issue
 // whose log is ahead of the record is left to the stream, which carries the actor and applies the
-// same change with it. An issue the stream has nothing newer for is reconciled as before.
+// same change with it. An issue the stream has nothing newer for — a summary genuinely ahead of
+// the record's own sequence, with the consumer caught up to it — applies immediately, including
+// through the engine when its own status changed.
 func TestReconcileLeavesAnIssueTheStreamHoldsNewerEventsFor(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -286,13 +288,14 @@ func TestReconcileHoldsAnUnrecordedKeyBehindTheStreamWhateverItsListedStatus(t *
 	assertSlots(t, pool, nil)
 }
 
-// P2, thread 4114574427, and N6's later collapse: while a key is held, Apply used to drop every
-// event for it, including ones newer than the summary it is held on — so an owner labeling the
-// root after boot could never reach either the record or the held summary, and the stale unlabeled
-// listing snapshot applied at release was the last word forever. A held unrecorded key now only
-// refreshes its own pending summary on a newer event — release, not this call, decides everything
-// for it — so the label-adding event here never reaches the record while held; release admits it
-// from the refreshed summary once the consumer catches up.
+// P2, thread 4114574427, and B6 (reverting N6's collapse, which reintroduced the same class of
+// loss for a different reason — see the daemon package's own test of the exact commit/AfterCommit
+// race that motivated the revert): while a key is held, Apply dropped every event for it, including
+// newer than the summary it is held on — so an owner labeling the root after boot could never
+// reach the record, and the stale unlabeled listing snapshot applied at release was the last word
+// forever. Only a replay at or behind the held summary's own sequence is stale; a newer event is
+// recorded normally — promote still holds the candidate back until release, and applySummary
+// leaves a record already past its summary alone.
 func TestALabelAddedWhileAKeyIsHeldReachesTheRecordAndIsAdmittedAfterRelease(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -304,11 +307,10 @@ func TestALabelAddedWhileAKeyIsHeldReachesTheRecordAndIsAdmittedAfterRelease(t *
 		t.Fatal("Held() = false after seeding an unlabeled behind record, want it held")
 	}
 
-	// The label-adding event, newer than the held summary, arrives while LEGION-8 is still held:
-	// it only refreshes the pending summary, and release decides.
+	// The label-adding event, newer than the held summary, arrives while LEGION-8 is still held.
 	apply(t, pool, admission, "label-added", intake.DispatchIssue{Key: "LEGION-8", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-8", Rank: "A", HandedOver: true}, engineStub{})
-	if got := maybeIssue(t, pool, "LEGION-8"); got != nil {
-		t.Fatalf("LEGION-8 recorded while held = %#v, want none: a held key only refreshes its summary, release decides", got)
+	if got := issue(t, pool, "LEGION-8"); !got.HandedOver || got.Status != "todo" {
+		t.Fatalf("LEGION-8 while held = %#v, want the newer label-adding event recorded (todo, handed over)", got)
 	}
 	assertSlots(t, pool, nil)
 

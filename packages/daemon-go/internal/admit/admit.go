@@ -103,25 +103,37 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 				return intake.Result{}, err
 			}
 		}
-		// A held unrecorded key has no record yet to fence a live event against, so this event
-		// never records or admits anything itself; release decides everything for it from
-		// whatever summary it holds. This just keeps that summary current — replacing it when the
-		// event is newer, a no-op (refreshHeldSummary's own check) when it is a stale replay, a
-		// nak's redelivery or the outbox's own publish backoff.
-		a.mu.Lock()
-		_, held := a.pending[observation.Key]
-		a.mu.Unlock()
-		if held {
-			a.refreshHeldSummary(observation)
-			return intake.Result{}, nil
-		}
 		// An unrecorded todo issue without the label is someone else's work in a project Legion may
 		// share with humans and other agents: Legion records nothing of it until it is handed over.
+		// Neither exit records anything, but each still refreshes a held key's own pending summary:
+		// an event moving the key out of todo, or taking its label off, is real information about
+		// what Dispatch shows now, and leaving the held summary as Reconcile's stale boot listing
+		// found it would have release admit on that stale information instead.
 		if observation.Status != "todo" {
+			a.refreshHeldSummary(observation)
 			return intake.Result{}, nil
 		}
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
+			a.refreshHeldSummary(observation)
+			return intake.Result{}, nil
+		}
+		a.mu.Lock()
+		summary, held := a.pending[observation.Key]
+		a.mu.Unlock()
+		if held && observation.Seq <= summary.LastSeq {
+			// Reconcile already holds this key on the listing's own summary because it found it
+			// behind the stream: an unrecorded key has no record to fence a live event against, so
+			// a replay at or behind that summary's own sequence — a nak's redelivery, the outbox's
+			// own publish backoff — decides nothing. release applies that summary once the
+			// consumer catches up. A newer event, past the sequence the summary was taken at, is
+			// not a stale replay: it is recorded normally below, even while the key is still
+			// technically held — B6: a release that has already committed but not yet run its
+			// AfterCommit (which clears pending) still shows this key as held, and dropping this
+			// event here would lose it once that AfterCommit clears pending out from under it, the
+			// event already acknowledged as processed. promote's own pending membership check —
+			// not this one — is what still holds the freshly recorded candidate back from a slot
+			// until pending is actually clear (N8 covers the pass that follows).
 			return intake.Result{}, nil
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
@@ -247,7 +259,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 			return nil
 		}
 		return a.putNewRoot(ctx, tx, intake.DispatchIssue{
-			Key: summary.Key, Status: summary.Status, Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank, HandedOver: summary.HandedOver,
+			Key: summary.Key, Seq: summary.LastSeq, Status: summary.Status, Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank, HandedOver: summary.HandedOver,
 		}, false)
 	}
 	if summary.LastSeq > 0 && summary.LastSeq < stored.LastDispatchSeq {

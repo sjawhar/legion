@@ -427,6 +427,7 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 	var last intake.DispatchConsumerPosition
 	haveLast := false
 	var heldSince, warnedAt time.Time
+	wasHeld := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -435,8 +436,21 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 		}
 		if !w.admission.Held() {
 			haveLast, heldSince, warnedAt = false, time.Time{}, time.Time{}
+			if wasHeld {
+				// The hold just cleared: a record B6's own held-key recording put down between an
+				// earlier release's commit and its AfterCommit (which cleared pending) may still be
+				// sitting in the waiting line, held back by that same release's own promote, which
+				// ran before pending was actually cleared. One more pass, now that pending is
+				// provably empty, promotes it without waiting on an unrelated fact to notice. A
+				// fresh, never-reused event id (a closing pass never repeats a boot's own position
+				// reading) keeps ApplyFact from treating it as the duplicate of whatever position
+				// last released the hold.
+				w.promoteAfterHoldClears(ctx)
+			}
+			wasHeld = false
 			continue
 		}
+		wasHeld = true
 		if heldSince.IsZero() {
 			heldSince = time.Now()
 		}
@@ -464,6 +478,19 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 			continue
 		}
 		last, haveLast = position, true
+	}
+}
+
+// promoteAfterHoldClears applies one synthetic DispatchConsumerPosition fact, its event id never
+// reused, once nothing is held: Admission.Apply routes any DispatchConsumerPosition straight to
+// release, which — with pending now provably empty — promotes exactly as a normal promote() would,
+// picking up any candidate a held key's own recording left waiting behind it (N8). The position's
+// own values do not matter here: caughtUp is false whenever pending is empty, so release only
+// reaches its own promoteHolds call, never re-applies a summary.
+func (w *workflowRuntime) promoteAfterHoldClears(ctx context.Context) {
+	eventID := fmt.Sprintf("dispatch-position:%s:%s:closing:%d", w.dispatchProject, w.bootID, time.Now().UnixNano())
+	if _, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, intake.DispatchConsumerPosition{}, w.handlers...); err != nil {
+		w.log.Warn("apply the post-release promote failed", "error", err)
 	}
 }
 
