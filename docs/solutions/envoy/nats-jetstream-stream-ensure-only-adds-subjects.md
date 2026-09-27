@@ -34,10 +34,20 @@ subject list from the one another live deployment was compiled with.
 
 A caller that only publishes or only tails - `natstail` (`cmd/natstail`), the MCP server
 (`cmd/mcp`), `envoy-dispatch`'s operator commands - calls `bus.Connect` instead, which neither
-creates the stream nor updates it and refuses a NATS server that is not this machine's unless the
-run sets `ENVOY_ALLOW_REMOTE_NATS=1` (LEGION-249). Until that split an ad-hoc run of any of them
+creates the stream nor updates it (LEGION-249). Until that split an ad-hoc run of any of them
 from a checkout reconfigured production's stream on the way in, because an agent machine's
 `~/.config/opencode/envoy.json` names production's NATS.
+
+Both connects refuse a NATS server that is not this machine's unless the run sets
+`ENVOY_ALLOW_REMOTE_NATS=1`, decided from the URL before anything dials. The owning connect
+carries the rule too because nothing distinguishes the deployed Dispatch from the same binary
+run out of a checkout - both read `natsUrls` from that same `envoy.json` - so a bare
+`envoy-dispatch` in a checkout would otherwise still reconcile production's stream, before its
+own database check even fails. Each deployment states its reach instead:
+`packages/envoy/deploy/compose/{listener,dispatch}.compose.yml`, agent-c's
+`components/envoy/listener.py` and `components/dispatch/service.py`, and the on-prem fleet's
+`~/.dotfiles/envoy/services.ts`. A binary built before the variable ignores it, so the
+deployments can be given it before or after the build that reads it.
 
 `ensureStreamWithConfig` therefore keeps the deployed subjects and appends each of the starting
 binary's subjects the stream lacks (`reconcileSubjects`). It removes a deployed subject in two

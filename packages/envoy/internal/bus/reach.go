@@ -9,12 +9,20 @@ import (
 	"strings"
 )
 
-// AllowRemoteEnvVar names the variable a run sets to "1" to let Connect reach a NATS server that
-// is not this machine's.
+// AllowRemoteEnvVar names the variable a run sets to "1" to reach a NATS server that is not this
+// machine's. Every connect refuses one otherwise, whether or not it owns the stream: a process
+// that reaches another machine's bus publishes into an event stream every agent consumes, and one
+// that owns the stream reconfigures a resource several deployments read.
+//
+// Nothing infers the reach, because nothing can tell the deployed Dispatch from the same binary
+// run out of a checkout: both read natsUrls from ~/.config/opencode/envoy.json, which on an
+// agent's machine names production (LEGION-249). Each deployment states its reach instead
+// (packages/envoy/deploy/compose/*.compose.yml, agent-c's listener and dispatch task
+// definitions, and the on-prem fleet's Pulumi), and a binary built before this variable ignores
+// it, so the deployments can be given it in any order, before or after this build rolls out.
 const AllowRemoteEnvVar = "ENVOY_ALLOW_REMOTE_NATS"
 
-// ErrRemoteNATS is what Connect refuses a NATS server this machine does not run with. Only the
-// deployed services (ConnectOwningStream) reach another machine's bus without saying so.
+// ErrRemoteNATS is what a connect refuses a NATS server this machine does not run with.
 var ErrRemoteNATS = errors.New("bus: refusing a NATS server that is not this machine's")
 
 // refuseRemoteNATS reports the first url naming another machine, unless the run opted in. An
@@ -45,8 +53,9 @@ func localNATSURL(raw string) bool {
 	if err != nil {
 		return false
 	}
-	host := parsed.Hostname()
-	if host == "localhost" {
+	// A host name is case-insensitive and its root dot is not part of the name.
+	host := strings.TrimSuffix(parsed.Hostname(), ".")
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)

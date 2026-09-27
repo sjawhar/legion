@@ -214,11 +214,6 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 // the MCP bridge and envoy-dispatch's operator commands own nothing on the server they reach, and
 // a stream ensure from one of them rewrites a resource several deployments share (LEGION-249).
 //
-// It refuses a NATS server that is not this machine's unless ENVOY_ALLOW_REMOTE_NATS=1 says the
-// run means it: on an agent's machine ~/.config/opencode/envoy.json names production's bus, so a
-// scratch run of one of those commands otherwise reaches production with nothing said about it.
-// An empty urls is nats.go's own default, this machine's server.
-//
 // For the JetStream stream this codebase owns, use ConnectOwningStream.
 func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 	if err := refuseRemoteNATS(urls); err != nil {
@@ -230,9 +225,11 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 // ConnectOwningStream opens a client that also reconciles ENVOY_NOTIFICATIONS against this
 // binary's subjects, retention and duplicate window (ensureStreamWithConfig), creating the stream
 // when the server has none. Only the deployed services call it: envoy-listener and
-// envoy-dispatch's server. The NATS they reach is the one their deployment names, so no locality
-// rule applies to them.
+// envoy-dispatch's server.
 func ConnectOwningStream(urls []string, options ...ConnectOption) (*Client, error) {
+	if err := refuseRemoteNATS(urls); err != nil {
+		return nil, err
+	}
 	return newClient(urls, true, options)
 }
 

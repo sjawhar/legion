@@ -162,7 +162,14 @@ docker exec dispatch-pg psql -U postgres -d dispatch \
   -c "insert into projects (key, name) values ('LOCAL', 'Local project')"
 ```
 
-Then run (or re-run) the server:
+Then run (or re-run) the server. `DISPATCH_NATS_DISABLED=1` keeps this run off
+the bus entirely; drop it and set `NATS_URLS` to a NATS of your own to exercise
+the publish path. Neither line is optional decoration: without one of them the
+server reads `natsUrls` from your `~/.config/opencode/envoy.json`, which on an
+agent machine names the shared production server, and it would reconcile that
+server's `ENVOY_NOTIFICATIONS` stream on the way in. It refuses to start against
+a NATS that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1` says the
+run means it.
 
 ```sh
 cd packages/envoy
@@ -172,6 +179,7 @@ DISPATCH_IDENTITY='header:X-Dispatch-User' \
 DISPATCH_ALLOWED_LOGINS=sjawhar \
 DISPATCH_INSECURE_COOKIE=1 \
 DISPATCH_DEFAULT_PROJECT=LOCAL \
+DISPATCH_NATS_DISABLED=1 \
 go run ./cmd/dispatch
 ```
 

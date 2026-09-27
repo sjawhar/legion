@@ -12,8 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// A deployment of the stream still creates it and reconciles what it finds, whichever NATS its
-// deployment names.
+// A deployment of the stream still creates it and reconciles what it finds on the NATS it names.
 func TestConnectOwningStreamStillReconcilesTheDeployedStream(t *testing.T) {
 	uri := testnats.URL(t)
 	js := deployStream(t, uri)
@@ -24,6 +23,46 @@ func TestConnectOwningStreamStillReconcilesTheDeployedStream(t *testing.T) {
 	}
 	t.Cleanup(client.Close)
 
+	after := streamConfig(t, js)
+	for _, subject := range append(slices.Clone(deployedSubjects), bus.StreamSubjects()...) {
+		if !slices.Contains(after.Subjects, subject) {
+			t.Fatalf("stream subjects = %v, missing %q", after.Subjects, subject)
+		}
+	}
+}
+
+// Owning the stream is no exemption from saying which machine's NATS this is. Nothing separates
+// the deployed Dispatch from the same binary run out of a checkout - both read natsUrls from
+// ~/.config/opencode/envoy.json, which on an agent machine names production - so a bare
+// envoy-dispatch would otherwise reconcile production's stream before its own database check
+// failed. Each deployment sets the variable instead.
+func TestConnectOwningStreamRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
+	uri := testnats.URL(t)
+	js := deployStream(t, uri)
+	before := streamConfig(t, js)
+	remote := remoteLookingURL(t, uri)
+
+	_, err := bus.ConnectOwningStream([]string{remote})
+	if err == nil {
+		t.Fatalf("connect owning the stream on %s succeeded, want a refusal", remote)
+	}
+	if !errors.Is(err, bus.ErrRemoteNATS) {
+		t.Fatalf("connect owning the stream on %s = %v, want a %v", remote, err, bus.ErrRemoteNATS)
+	}
+	if !strings.Contains(err.Error(), remote) || !strings.Contains(err.Error(), bus.AllowRemoteEnvVar) {
+		t.Fatalf("refusal %q does not name both the server %s and the override %s", err, remote, bus.AllowRemoteEnvVar)
+	}
+	if after := streamConfig(t, js); !slices.Equal(after.Subjects, before.Subjects) {
+		t.Fatalf("stream subjects = %v, want the deployed %v", after.Subjects, before.Subjects)
+	}
+
+	// The deployment says so, and the start reconciles that server as it always did.
+	t.Setenv(bus.AllowRemoteEnvVar, "1")
+	client, err := bus.ConnectOwningStream([]string{remote})
+	if err != nil {
+		t.Fatalf("connect owning the stream on %s with %s=1: %v", remote, bus.AllowRemoteEnvVar, err)
+	}
+	t.Cleanup(client.Close)
 	after := streamConfig(t, js)
 	for _, subject := range append(slices.Clone(deployedSubjects), bus.StreamSubjects()...) {
 		if !slices.Contains(after.Subjects, subject) {
