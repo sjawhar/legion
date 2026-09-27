@@ -536,3 +536,52 @@ func TestAnUnroutableNoticeHoldsNothingBackAndFinishesOnItsOwnAttempt(t *testing
 		t.Fatalf("%d rows left, log %q; want the unroutable row finished with one line naming its issue", outboxRows(t, pool), logged.String())
 	}
 }
+
+// A child moved under a child of another tree, whose own sub-architect runs, still belongs to its
+// own tree: the tree's issues are read by tree, so the other tree's issues are no parents of it, and
+// its notice goes to its own tree's owner.
+func TestANoticeOfAChildMovedUnderAnotherTreesSubArchitectStaysWithItsOwnTree(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	other := "LEGION-50"
+	putOutboxIssue(t, pool, records, record.Issue{Key: other, Project: "LEGION", Tree: other, Title: "Other root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-51", Project: "LEGION", Tree: other, Parent: &other, Title: "Other child", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	reparent(t, pool, records, "LEGION-51")
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	architectClaim(t, sup, "LEGION-51", supervise.StateWorking)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now()))
+	publisher := &holderPublisher{}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion", now: time.Now}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	want := architectTopic(t, "LEGION-1")
+	if _, delivered := publisher.snapshot(); len(delivered) != 1 || delivered[0].topic != want || outboxRows(t, pool) != 0 {
+		t.Fatalf("delivered %+v with %d rows left, want the one notice to %s", delivered, outboxRows(t, pool), want)
+	}
+}
+
+// A notice of a tree whose root is not recorded has no architect to go to: it finishes undelivered
+// on its first attempt, with one error line, instead of waiting on a root that cannot be read.
+func TestANoticeOfATreeWhoseRootIsNotRecordedFinishesUndelivered(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	root := "LEGION-1"
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: root, Parent: &root, Title: "Child", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now()))
+	var logged bytes.Buffer
+	publisher := &holderPublisher{}
+	publisher.setAbsent(architectTopic(t, root))
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
+		project: "legion", now: time.Now}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, delivered := publisher.snapshot(); len(delivered) != 0 || outboxRows(t, pool) != 0 ||
+		strings.Count(logged.String(), `level=ERROR msg="outbox notice finished undelivered: it has no architect"`) != 1 {
+		t.Fatalf("delivered %+v with %d rows left, log %q; want the row finished undelivered with one error line", delivered, outboxRows(t, pool), logged.String())
+	}
+}

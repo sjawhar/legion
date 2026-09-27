@@ -461,6 +461,26 @@ func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now 
 	return claimed, nil
 }
 
+func (s *Postgres) TreeIssues(ctx context.Context, tx pgx.Tx, tree string) ([]Issue, error) {
+	rows, err := tx.Query(ctx, "select "+issueColumns+" from issues where tree = $1 order by key", tree)
+	if err != nil {
+		return nil, fmt.Errorf("list the issues of %s: %w", tree, err)
+	}
+	defer rows.Close()
+	issues := []Issue{}
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list the issues of %s: %w", tree, err)
+		}
+		issues = append(issues, *issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the issues of %s: %w", tree, err)
+	}
+	return issues, nil
+}
+
 func (s *Postgres) EarlierNotices(ctx context.Context, tx pgx.Tx, tree string, id int64) ([]OutboxRow, error) {
 	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
 		where kind = $1 and id < $2 and issue in (select key from issues where tree = $3)

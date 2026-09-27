@@ -296,24 +296,18 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	issue, tree, err := r.readNoticeTree(ctx, row)
 	if errors.Is(err, errNoticeUnroutable) {
-		r.log.Info("outbox notice finished undelivered: it has no architect", "row", row.ID, "kind", payload.Kind, "issue", row.Issue, "error", err)
+		r.log.Error("outbox notice finished undelivered: it has no architect", "row", row.ID, "kind", payload.Kind, "issue", row.Issue, "error", err)
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	runs := func(token claim.Token) bool { return claimRuns(r.claimState(token)) }
-	project, err := claim.ProjectToken(issue.Project)
-	var architect claim.Token
-	if err == nil {
-		architect, err = owningArchitect(project, tree.issues, issue, payload.Kind, runs)
-	}
+	architect, err := owningArchitect(tree.project, tree.issues, issue, payload.Kind, runs)
 	if err != nil {
-		r.log.Info("outbox notice finished undelivered: it has no architect", "row", row.ID, "kind", payload.Kind, "issue", row.Issue,
-			"error", fmt.Errorf("%w: %w", errNoticeUnroutable, err))
-		return nil
+		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
 	}
-	if earlier := earlierNoticeFor(project, tree, architect, runs); earlier != 0 {
+	if earlier := earlierNoticeFor(tree, architect, runs); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
 	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
@@ -324,11 +318,7 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	case !errors.Is(published, notify.ErrNoHolder):
 		return fmt.Errorf("publish notice for %s to its architect %s: %w", row.Issue, architect, published)
 	}
-	ended, err := architectEnded(tree, issue, r.claimState(architect))
-	if err != nil {
-		return err
-	}
-	if ended != "" {
+	if ended := architectEnded(tree, r.claimState(architect)); ended != "" {
 		r.log.Info("outbox notice finished undelivered: its architect will not hold its role again",
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "because", ended)
 		return nil
