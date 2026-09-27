@@ -218,22 +218,26 @@ func refuseAcceptedCodeThatReshapes(before, after *pmdoc.Node, match pmdoc.Range
 	if err != nil || reshaped == nil {
 		return err
 	}
-	holding := at.Node
-	if len(at.Ancestors) > 1 {
-		holding = at.Ancestors[len(at.Ancestors)-2]
+	// The document-level block holding the code is the first the accept changed (changedBlocks),
+	// at the same index before and after it.
+	holding, _, _, err := changedBlocks(before, after, match)
+	if err != nil {
+		return err
 	}
-	for _, ancestor := range at.Ancestors {
-		if pmdoc.IsTypedBlock(ancestor.Type) && blockID(broken) == blockID(holding) {
-			holder := holderName(ancestor)
-			return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
-				"replace_with %q changes how the %s holding this code block reads back (%v); reject the suggestion, or reply asking for code the %s can hold",
-				with, holder, reshaped, holder,
-			)}
+	if broken == holding {
+		for _, ancestor := range at.Ancestors {
+			if pmdoc.IsTypedBlock(ancestor.Type) {
+				holder := holderName(ancestor)
+				return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
+					"replace_with %q changes how the %s holding this code block reads back (%v); reject the suggestion, or reply asking for code the %s can hold",
+					with, holder, reshaped, holder,
+				)}
+			}
 		}
 	}
 	return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
 		"replace_with %q changes how the %s reads back (%v); reject the suggestion, or reply asking for a change that stays inside the code block",
-		with, holderName(broken), reshaped,
+		with, holderName(after.Children[broken]), reshaped,
 	)}
 }
 
@@ -270,24 +274,24 @@ func changedBlocks(before, after *pmdoc.Node, match pmdoc.Range) (first, last, l
 	return first, last, max(first, last+len(after.Children)-len(before.Children)), nil
 }
 
-// replacementBroke is the first document-level block the write changed (changedBlocks) that check
-// fails, and what check says of it, when it said nothing of the blocks the match lay in before: a
-// block that already failed the check, or another block that does, is no reason to refuse this
-// write.
-func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (block *pmdoc.Node, broke, err error) {
+// replacementBroke is the index in after of the first document-level block the write changed
+// (changedBlocks) that check fails, and what check says of it, when it said nothing of the blocks
+// the match lay in before: a block that already failed the check, or another block that does, is
+// no reason to refuse this write.
+func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (block int, broke, err error) {
 	first, last, lastAfter, err := changedBlocks(before, after, match)
 	if err != nil {
-		return nil, nil, err
+		return -1, nil, err
 	}
 	for index := first; index <= last; index++ {
 		if check(before.Children[index]) != nil {
-			return nil, nil, nil
+			return -1, nil, nil
 		}
 	}
 	for index := first; index <= lastAfter; index++ {
 		if broke = check(after.Children[index]); broke != nil {
-			return after.Children[index], broke, nil
+			return index, broke, nil
 		}
 	}
-	return nil, nil, nil
+	return -1, nil, nil
 }

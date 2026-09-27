@@ -349,6 +349,10 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return &ErrInvalidOp{Field: "replace_with", Reason: "no part of the document can hold it where the suggestion sits " +
 				"(a table cell's whole text, for one, can only be replaced by inline text)"}
 		}
+		if errors.Is(err, pmdoc.ErrSchema) {
+			return &ErrInvalidOp{Field: "anchor", Reason: fmt.Sprintf("the suggestion runs across blocks that replacing it "+
+				"would join, which the document cannot hold together (%v); reject the suggestion, or suggest a change inside one block", err)}
+		}
 		if err != nil {
 			return err
 		}
@@ -387,31 +391,66 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 // reject deletes them, so the blocks join: that undoes the split an insert made, and a table the
 // span cuts is padded to its width afterwards (pmdoc.PadTables), as the browser's table plugin pads
 // it. Text without the mark between two runs ends a span, so it is kept, where the browser's reject
-// deletes it with them.
+// deletes it with them. A removal the document cannot hold is refused (rejectRefusal).
 func rejectedInsert(tree *pmdoc.Node, id string) (*pmdoc.Node, error) {
 	spans := pmdoc.MarkSpans(tree, string(MarkSuggestion), id)
+	nothing := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{Type: "paragraph"}}}
 	next := tree
 	for index := len(spans) - 1; index >= 0; index-- {
 		span := spans[index]
-		at, _ := pmdoc.ContainingTextblock(next, span.From)
-		nothing := codeReplacement("")
-		if at.Node.Type != "code_block" {
-			var err error
-			if nothing, err = inlineAware("", edgesOf(at, span), opensDocument(next, span.From)); err != nil {
-				return nil, err
-			}
+		if joinsTwoTables(next, span) {
+			return nil, &ErrInvalidOp{Field: "anchor", Reason: "the insert runs from one table into the next, and removing it " +
+				"would join the two tables; accept the suggestion, or remove the text by editing the document"}
 		}
 		spliced, err := pmdoc.Splice(next, span, nothing)
 		if err != nil {
-			return nil, err
+			return nil, rejectRefusal(err)
 		}
 		first, _, lastAfter, err := changedBlocks(next, spliced, span)
 		if err != nil {
 			return nil, err
 		}
 		next = pmdoc.PadTables(spliced, first, lastAfter)
+		if err := next.Validate(); err != nil {
+			return nil, rejectRefusal(err)
+		}
 	}
 	return next, nil
+}
+
+// joinsTwoTables reports whether span runs from a cell of one table into a cell of another. The
+// browser editor's reject joins the two into one table, which Splice does not, so such a reject is
+// refused rather than stored otherwise than the browser would store it.
+func joinsTwoTables(tree *pmdoc.Node, span pmdoc.Range) bool {
+	table := func(position int) *pmdoc.Node {
+		at, _ := pmdoc.ContainingTextblock(tree, position)
+		for _, ancestor := range at.Ancestors {
+			if ancestor.Type == "table" {
+				return ancestor
+			}
+		}
+		return nil
+	}
+	from, to := table(span.From), table(span.To)
+	return from != nil && to != nil && from != to
+}
+
+// rejectRefusal is a reject's refusal of a removal the document cannot hold, which leaves the
+// document as it was and the suggestion open: the person rejecting cannot change the text, so it
+// names what they can do, accept the suggestion or edit the document themselves. An insert that
+// runs into an ask or callout from the text before it would join the two and leave the ask or
+// callout empty, which the browser editor drops; one that runs from one table into the next, or
+// any other removal outside the schema, would join blocks the document cannot hold together.
+func rejectRefusal(err error) error {
+	if errors.Is(err, pmdoc.ErrJoinEmptiesTypedBlock) {
+		return &ErrInvalidOp{Field: "anchor", Reason: "the insert runs into an ask or callout from the text before it, and " +
+			"removing it would join the two and leave the ask or callout empty; accept the suggestion, or remove the text by editing the document"}
+	}
+	if errors.Is(err, pmdoc.ErrSchema) {
+		return &ErrInvalidOp{Field: "anchor", Reason: fmt.Sprintf("removing the insert would join blocks the document "+
+			"cannot hold together (%v); accept the suggestion, or remove the text by editing the document", err)}
+	}
+	return err
 }
 
 // refuseBrokenAsks refuses the first ask a write left unreadable whose id the document could read

@@ -681,34 +681,30 @@ func MarkSpans(doc *Node, markType, id string) []Range {
 	return spans
 }
 
-// FindMark finds the first document-contiguous range covered by a mark identity.
+// FindMark finds the first document-contiguous range covered by a mark identity, the first of
+// its MarkSpans, and its text, the runs joined with a space where a block boundary lies between.
 func FindMark(doc *Node, markType, id string) (Range, string, bool) {
-	var quote strings.Builder
-	var marked Range
-	found := false
-	walk(doc, func(node *Node, _ []int, pos, end int) bool {
-		if node.Type != "text" {
-			return true
-		}
-		if nodeMarkID(node, markType) != id {
-			return !found
-		}
-		if !found {
-			found = true
-			marked = Range{From: pos, To: end}
-			quote.WriteString(node.Text)
-			return true
-		}
-		if pos != marked.To {
-			quote.WriteByte(' ')
-		}
-		marked.To = end
-		quote.WriteString(node.Text)
-		return true
-	})
-	if !found {
+	spans := MarkSpans(doc, markType, id)
+	if len(spans) == 0 {
 		return Range{}, "", false
 	}
+	marked := spans[0]
+	var quote strings.Builder
+	last := -1
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if pos >= marked.To {
+			return false
+		}
+		if node.Type != "text" || pos < marked.From {
+			return true
+		}
+		if last >= 0 && pos != last {
+			quote.WriteByte(' ')
+		}
+		quote.WriteString(node.Text)
+		last = end
+		return true
+	})
 	return marked, quote.String(), true
 }
 

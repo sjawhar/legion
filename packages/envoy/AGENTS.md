@@ -339,10 +339,17 @@ reject does (`rejectedInsert`): the insert's runs that meet across a block bound
 the boundary between them, are one range (`pmdoc.MarkSpans`), so the blocks join, which undoes the
 split an insert made (Enter typed while suggesting), and a table the range cuts is padded to its
 width as the editor's table plugin pads it (`pmdoc.PadTables`, after prosemirror-tables'
-`fixTables`). The one difference from the browser is text without the insert's mark between two of
-its runs, which the browser's reject deletes with them: here each run is deleted and that text is
-kept. The editor leaves such text when someone suggests inside another person's insert, which marks
-their text with an insert of its own, or pastes into it outside suggestion mode. A replacement no level of the document can hold where
+`fixTables`: a header row takes header cells, and each new cell its column's alignment, so the
+column reads back as it was, where `fixTables` makes it left). Where the browser's result differs,
+the reject differs on purpose: text without the insert's mark between two of its runs, which the
+browser's reject deletes with them, is kept, each run deleted on its own (the editor leaves such
+text when someone suggests inside another person's insert, which marks their text with an insert
+of its own, or pastes into it outside suggestion mode); and a removal the document cannot hold is
+refused, `400 INVALID_OP` on `anchor`, advising accepting the suggestion or editing the document
+(`rejectRefusal`), with the document unchanged and the suggestion open. That is an insert running
+into an ask or callout from the text before it, whose join would leave the ask or callout empty
+(the browser drops it), and one running from one table into the next, which the browser joins into
+one table. A replacement no level of the document can hold where
 the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
 `replace_with` (`pmdoc.ErrReplacementDoesNotFit`), and inline text over a range that runs into an
 ask or callout from the text before it, at any depth (inside a blockquote, a list item or another

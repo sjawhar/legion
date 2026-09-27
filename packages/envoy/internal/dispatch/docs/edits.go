@@ -791,6 +791,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			)}
 		}
 		next, err := pmdoc.Splice(tree, r, with)
+		err = invalidSchemaOp("with", err)
 		if err == nil && level != 0 {
 			next, err = pmdoc.SetHeadingLevel(next, r.From, level)
 		}
@@ -826,7 +827,8 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return pmdoc.Splice(tree, r, empty)
+		out, err := pmdoc.Splice(tree, r, empty)
+		return out, invalidSchemaOp("find", err)
 	case "insert":
 		if op.Markdown == "" {
 			return nil, invalidOp("markdown")
@@ -862,7 +864,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		}
 		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
 		if err != nil {
-			return nil, err
+			return nil, invalidSchemaOp("markdown", err)
 		}
 		if err := pmdoc.RepeatedBlockID(tree, out, with); err != nil {
 			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
