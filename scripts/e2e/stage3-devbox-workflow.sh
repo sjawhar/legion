@@ -1009,10 +1009,30 @@ status_actors() {
   note "every lifecycle transition on $root_issue ($(jq -r '[.[] | select(.type | IN("issue.updated", "issue.closed")) | .payload.status] | join(" ")' "$evidence/root-events.json")) records actor legion-daemon:$project; one agent-attributed write was rejected"
   pass
 }
+# Every workflow notice is for the architect that owns its issue, on that architect's role topic:
+# the run's pr-blocked, production-check phase-finished and worker-died reach their architects
+# (checked where each is written), and no phase-worker session of the run receives any notice.
+notices_reach_architects_alone() {
+  begin notices-reach-architects-alone
+  local sessions="$HOME/.omp/profiles/$profile/agent/sessions" negative="$work/worker-notice-negative" worker
+  worker_sessions "$sessions" >"$evidence/worker-sessions.txt"
+  worker_notices "$sessions" >"$evidence/worker-notices.txt"
+  [ -s "$evidence/worker-notices.txt" ] && fail "phase-worker sessions received workflow notices: $(head -3 "$evidence/worker-notices.txt" | tr '\n' ';')"
+  worker=$(head -1 "$evidence/worker-sessions.txt" | cut -f1)
+  [ -n "$worker" ] || fail "no phase-worker session under $sessions to control the check with"
+  mkdir -p "$negative"
+  cp -- "$worker" "$negative/"
+  jq -cn --arg issue "$root_issue" '{type: "custom_message", customType: "envoy-message", content: ("envoy:\n  summary: pr-blocked on " + $issue + "\n")}' >>"$negative/${worker##*/}"
+  expect_failure worker-notice assert_no_worker_notices "$negative"
+  assert_no_worker_notices "$sessions" || fail "the worker-notice assertion did not restore after its negative control"
+  note "$(wc -l <"$evidence/worker-sessions.txt") phase-worker sessions, none holding a workflow notice"
+  pass
+}
 if [ -z "$until" ]; then
   [ "$from" = restart ] || held_worker
   restart_scenarios
   [ -n "$from" ] || status_actors
+  notices_reach_architects_alone
 fi
 
 begin production-untouched
