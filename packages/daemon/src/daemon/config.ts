@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { type Stats, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -12,7 +13,7 @@ import { z } from "zod";
 import type { ImageDigestRef } from "./image-ref";
 import { validateNatsUserSeed } from "./nats-seed";
 import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
-import { readSecretPointer } from "./secrets";
+import { ownerOnlyModeRefusal, readSecretPointer } from "./secrets";
 
 export const GITHUB_APP_ROLES = ["implement", "review"] as const;
 export type GitHubAppRole = (typeof GITHUB_APP_ROLES)[number];
@@ -1191,9 +1192,10 @@ const DAEMON_NATS_SEED: NatsSeedNames = {
 
 /** The seed `names` resolve to: the file the config key names (`file`, already resolved against
  * the config directory), else the file the `_FILE` variable names, else the plain variable; the
- * first source set is authoritative, so an empty pointer, a missing, unreadable, or blank file, a
- * blank variable, or a seed that is not an nkey user seed refuses startup naming the key and path,
- * never the seed and never falling back. Nothing set is undefined. */
+ * first source set is authoritative, so an empty pointer, a seed file its group or others may read,
+ * a missing, unreadable, or blank file, a blank variable, or a seed that is not an nkey user seed
+ * refuses startup naming the key and path, never the seed and never falling back. Nothing set is
+ * undefined. `--check-config` (`resolveSecrets` false) checks the file's mode but never reads it. */
 function resolveNatsSeed(
   names: NatsSeedNames,
   file: string | undefined,
@@ -1204,6 +1206,7 @@ function resolveNatsSeed(
   if (pointer.value !== undefined) {
     const key = pointer.source === "env" ? names.fileVariable : names.fileKey;
     if (pointer.value === "") throw new Error(`${key} is set but empty`);
+    refuseSharedSeedFile(key, pointer.value);
     if (!resolveSecrets) return "(not executed)";
     const seed = readSecretPointer(key, pointer.value);
     validateNatsUserSeed(seed, `${key} (${pointer.value})`);
@@ -1215,6 +1218,22 @@ function resolveNatsSeed(
   if (seed.length === 0) throw new Error(`${names.variable} is set but empty`);
   validateNatsUserSeed(seed, names.variable);
   return seed;
+}
+
+/** Refuses a regular seed file its group or others may read. Only the owner may read either seed:
+ * the TypeScript daemon runs on tmux alone, so it has no kubelet-mounted Secret to let the group
+ * read. A path it cannot stat, or one that is not a regular file, is left to the read, which names
+ * why it fails. */
+function refuseSharedSeedFile(key: string, file: string): void {
+  let stats: Stats;
+  try {
+    stats = statSync(file);
+  } catch {
+    return;
+  }
+  if (!stats.isFile()) return;
+  const refusal = ownerOnlyModeRefusal(key, file, stats.mode);
+  if (refusal !== undefined) throw new Error(refusal);
 }
 
 export function resolveDaemonConfig(

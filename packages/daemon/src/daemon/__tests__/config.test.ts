@@ -1525,6 +1525,14 @@ describe("daemon config", () => {
       fs.writeFileSync(path.join(configDir, "blank"), " \n", { mode: 0o600 });
       fs.writeFileSync(path.join(configDir, "account"), newSeed("createAccount"), { mode: 0o600 });
       fs.writeFileSync(path.join(configDir, "garbage"), "SUNOTASEED", { mode: 0o600 });
+      // Written, then chmodded past the umask: one its group may read, one others may read.
+      for (const [name, mode] of [
+        ["shared", 0o640],
+        ["world", 0o604],
+      ] as const) {
+        fs.writeFileSync(path.join(configDir, name), `${userSeed}\n`);
+        fs.chmodSync(path.join(configDir, name), mode);
+      }
       const tmuxYaml = (...lines: string[]) =>
         loadConfigFromFile(
           ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
@@ -1593,6 +1601,16 @@ describe("daemon config", () => {
             { [seed.variable]: "hunter2" },
             `${seed.variable} does not hold a valid nkey seed`,
           ],
+          [
+            tmuxYaml(`${seed.fileKey}: ./shared`),
+            { [seed.variable]: userSeed },
+            `${seed.fileKey} ${at("shared")} is readable by its group or others (mode 0640); chmod 0600 it`,
+          ],
+          [
+            undefined,
+            { [seed.fileVariable]: at("world") },
+            `${seed.fileVariable} ${at("world")} is readable by its group or others (mode 0604); chmod 0600 it`,
+          ],
         ];
         for (const [configFile, env, message] of cases) {
           let thrown: unknown;
@@ -1608,14 +1626,18 @@ describe("daemon config", () => {
         }
       });
 
-      it("under --check-config (resolveSecrets: false) never reads the file", () => {
-        const { config } = resolveDaemonConfig({
-          configFile: tmuxYaml(`${seed.fileKey}: ./nope`),
-          env: requiredEnv,
-          cliOverrides: overrides,
-          resolveSecrets: false,
-        });
-        expect(config[seed.field]).toBe("(not executed)");
+      it("under --check-config (resolveSecrets: false) never reads the file, but refuses one others may read", () => {
+        const check = (line: string) =>
+          resolveDaemonConfig({
+            configFile: tmuxYaml(line),
+            env: requiredEnv,
+            cliOverrides: overrides,
+            resolveSecrets: false,
+          }).config[seed.field];
+        expect(check(`${seed.fileKey}: ./nope`)).toBe("(not executed)");
+        expect(() => check(`${seed.fileKey}: ./shared`)).toThrow(
+          `${seed.fileKey} ${path.join(configDir, "shared")} is readable by its group or others (mode 0640); chmod 0600 it`
+        );
       });
     });
   }

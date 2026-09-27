@@ -21,6 +21,18 @@ export function readSecretPointer(variable: string, file: string): string {
   return secret;
 }
 
+/** The refusal for a secret file its group or others may read (`mode` is its `stat` mode), naming
+ * `variable` and the path, or undefined when only its owner may. */
+export function ownerOnlyModeRefusal(
+  variable: string,
+  file: string,
+  mode: number
+): string | undefined {
+  const permissions = mode & 0o777;
+  if ((permissions & 0o077) === 0) return undefined;
+  return `${variable} ${file} is readable by its group or others (mode 0${permissions.toString(8)}); chmod 0600 it`;
+}
+
 /** The one Dispatch bearer every pane shares, written once at daemon startup (`index.ts`). */
 export const DISPATCH_TOKEN_SECRET = "dispatch-token";
 

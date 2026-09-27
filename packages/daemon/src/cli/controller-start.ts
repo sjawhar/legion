@@ -20,7 +20,7 @@ import { installLegionCliLauncher, resolveRolePromptsDir } from "../daemon/envir
 import { DEFAULT_OMP_INVOCATION } from "../daemon/omp-pin";
 import { resolveLegionPaths } from "../daemon/paths";
 import { systemPromptArguments, withOmpLaunchPrefix } from "../daemon/runtime-tmux";
-import { writeSecretFile } from "../daemon/secrets";
+import { ownerOnlyModeRefusal, writeSecretFile } from "../daemon/secrets";
 import { installWorkerGhShim, pathWithoutWorkerBin } from "../daemon/worker-bin";
 import { CliError } from "./errors";
 import { readSecretPointer } from "./secret-pointer";
@@ -188,12 +188,8 @@ export function readOperatorTokenFile(file: string): string {
   if (!stats.isFile()) {
     throw new CliError(`operator_token_file names ${file}, which is not a regular file`);
   }
-  const mode = stats.mode & 0o777;
-  if ((mode & 0o077) !== 0) {
-    throw new CliError(
-      `operator_token_file ${file} is readable by its group or others (mode 0${mode.toString(8)}); chmod 0600 it`
-    );
-  }
+  const refusal = ownerOnlyModeRefusal("operator_token_file", file, stats.mode);
+  if (refusal !== undefined) throw new CliError(refusal);
   return readSecretPointer("operator_token_file", file);
 }
 
