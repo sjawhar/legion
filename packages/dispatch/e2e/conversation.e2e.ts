@@ -699,6 +699,13 @@ test("a long session title never widens the Conversation past its column", async
       scroll: node.scrollWidth,
     }));
     expect(overflow.scroll).toBeLessThanOrEqual(overflow.client);
+
+    // Who and when are one group: the time never wraps alone onto the next row.
+    const authorBox = await activity.locator("span[title]").first().boundingBox();
+    const timeBox = await activity.locator("time").first().boundingBox();
+    expect(authorBox).not.toBeNull();
+    expect(timeBox).not.toBeNull();
+    expect(Math.abs((timeBox?.y ?? 0) - (authorBox?.y ?? 0))).toBeLessThanOrEqual(2);
   } finally {
     await context.close();
   }
