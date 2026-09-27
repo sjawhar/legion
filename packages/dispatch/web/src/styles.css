@@ -230,7 +230,7 @@ a {
   font-size: 10px;
   font-weight: 600;
   line-height: 1rem;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.025em;
   text-transform: uppercase;
   color: #62748e; /* slate-500 */
 }
@@ -245,10 +245,12 @@ a {
   color: #45556c; /* slate-600 */
 }
 
+/* The block's own leading text, so it takes the primary-body role: 15px medium, the same as
+   an ask's question and the document's prose, rather than a size of its own. */
 .dispatch-doc [data-proof-block-title] {
-  font-size: 16px;
-  font-weight: 600;
-  line-height: 1.5;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.625;
   color: #0f172b; /* slate-900 */
 }
 
