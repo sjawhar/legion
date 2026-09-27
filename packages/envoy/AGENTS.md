@@ -850,11 +850,12 @@ label as written; the writer escapes a bracket, a pipe, a backslash before punct
 end, an ampersand opening a character reference, and white space as a numeric one, so each label
 reads back and one that needs none is written as it is (`escapeFootnoteLabel`). A definition's later
 lines start four columns past where its container's content starts, whatever indentation stands
-before its `[^` (`browserTextColumn`, `quoteContentColumn`). Goldmark gathers
-the definitions it keeps at the document's end in the order of their first references and drops
-the rest, so the parser puts each back where it was written (`definitionsInPlace`), and while the
-document parses keeps the list goldmark gathers them in ahead of every block written, so a check of
-the block before another meets the block written there (`footnoteDefinitionParser.Close`).
+before its `[^` (`browserTextColumn`, `quoteContentColumn`). Goldmark gathers each definition, as
+it closes, into a list the parser keeps ahead of every block written while the document parses, so
+a check of the block before another meets the block written there (`footnoteDefinitionParser.Close`),
+and the parser puts each definition back where it was written and removes the list once the
+document is read (`definitionsInPlace`). Goldmark's footnote transformer, which would order the
+definitions by first reference, drop the rest and append backlinks, is not used.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

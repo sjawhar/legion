@@ -545,11 +545,6 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*Node, error) {
 	children := make([]*Node, 0, parent.ChildCount())
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
-		// Goldmark puts a footnote's backlink after a definition's last block when that block is
-		// not a paragraph; it is the HTML renderer's decoration, not content.
-		if _, ok := child.(*extensionast.FootnoteBacklink); ok {
-			continue
-		}
 		parsed, err := parseBlock(child, source, footnotes)
 		if err != nil {
 			return nil, err
@@ -813,8 +808,6 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			// The browser editor's parser decodes a label's escapes and character references, and
 			// matches a reference to its definition by the label as written.
 			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": unescapeMarkdownText([]byte(label))}})
-		case *extensionast.FootnoteBacklink:
-			continue
 		case *ast.RawHTML:
 			value := segmentsText(current.Segments, source)
 			if strings.EqualFold(strings.TrimSpace(value), "</span>") {

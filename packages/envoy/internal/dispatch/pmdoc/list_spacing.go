@@ -281,7 +281,7 @@ func browserOnlyShape(root ast.Node) string {
 				shape = "an empty typed block"
 			}
 		case *extensionast.Footnote:
-			if last := lastBlock(node); last != nil && !isParagraph(last) {
+			if last := node.LastChild(); last != nil && !isParagraph(last) {
 				shape = "a footnote definition that ends in a block other than a paragraph"
 			}
 		case *extensionast.Table:
@@ -401,12 +401,7 @@ func emptyDefinition(node ast.Node) bool {
 	if !ok {
 		return false
 	}
-	for child := definition.FirstChild(); child != nil; child = child.NextSibling() {
-		if _, backlink := child.(*extensionast.FootnoteBacklink); !backlink {
-			return false
-		}
-	}
-	return true
+	return definition.ChildCount() == 0
 }
 
 // emptyLines is the blank line node's own line counts as, 1 for an empty footnote definition
@@ -664,11 +659,6 @@ func anyBlock(ast.Node) bool { return true }
 // are the definition's the same way (definitionBlanksInQuote).
 func blankBetweenBlocksBut(item ast.Node, listHolds, definitionHolds func(ast.Node) bool) bool {
 	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
-		// Goldmark appends a backlink, an inline node, after a referenced footnote definition's
-		// last block when that block is not a paragraph; it is no block of the item's.
-		if _, backlink := child.(*extensionast.FootnoteBacklink); backlink {
-			continue
-		}
 		_, afterList := child.PreviousSibling().(*ast.List)
 		_, afterDefinition := child.PreviousSibling().(*extensionast.Footnote)
 		if child != item.FirstChild() && blankBefore(child) && !(afterList && listHolds(child)) && !(afterDefinition && definitionHolds(child)) {
@@ -734,19 +724,9 @@ func lastFencedCode(node ast.Node) *ast.FencedCodeBlock {
 		if code, ok := node.(*ast.FencedCodeBlock); ok {
 			return code
 		}
-		node = lastBlock(node)
+		node = node.LastChild()
 	}
 	return nil
-}
-
-// lastBlock is node's last child, past the backlink goldmark appends, an inline node, after a
-// referenced footnote definition's last block when that block is not a paragraph.
-func lastBlock(node ast.Node) ast.Node {
-	last := node.LastChild()
-	if _, backlink := last.(*extensionast.FootnoteBacklink); backlink {
-		return last.PreviousSibling()
-	}
-	return last
 }
 
 // startsContainer reports whether block opens a container the browser editor's parser keeps open
@@ -789,14 +769,11 @@ func isAncestor(ancestor, node ast.Node) bool {
 }
 
 // nextBlock is the block that follows node's last line in the document, or nil at its end: node's
-// next sibling, or that of its nearest ancestor that has one, past a footnote definition's
-// backlink.
+// next sibling, or that of its nearest ancestor that has one.
 func nextBlock(node ast.Node) ast.Node {
 	for ; node != nil; node = node.Parent() {
-		for next := node.NextSibling(); next != nil; next = next.NextSibling() {
-			if _, backlink := next.(*extensionast.FootnoteBacklink); !backlink {
-				return next
-			}
+		if next := node.NextSibling(); next != nil {
+			return next
 		}
 	}
 	return nil

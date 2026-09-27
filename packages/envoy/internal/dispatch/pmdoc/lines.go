@@ -514,14 +514,15 @@ func (footnotes) Extend(m goldmark.Markdown) {
 	m.Parser().AddOptions(footnoteParserOptions()...)
 }
 
-// footnoteParserOptions registers footnotes: the definition parser (footnoteDefinitionParser),
-// goldmark's reference parser (footnoteReferenceParser), and its transformer, which numbers the
-// references and definitions.
+// footnoteParserOptions registers footnotes: the definition parser (footnoteDefinitionParser) and
+// goldmark's reference parser (footnoteReferenceParser), which numbers the definitions it refers
+// to. Goldmark's footnote transformer is left out: it only orders the definitions, drops those
+// nothing refers to and appends backlinks, and the parser keeps every definition where it is
+// written (definitionsInPlace) and writes no backlink.
 func footnoteParserOptions() []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999)),
 		parser.WithInlineParsers(util.Prioritized(footnoteReferenceParser{extension.NewFootnoteParser()}, 101)),
-		parser.WithASTTransformers(util.Prioritized(extension.NewFootnoteASTTransformer(), 999)),
 	}
 }
 
@@ -626,7 +627,7 @@ func definitionsInPlace(root ast.Node, context parser.Context) {
 		}
 		slot.Parent().ReplaceChild(slot.Parent(), slot, slot.definition)
 	}
-	if list, ok := root.LastChild().(*extensionast.FootnoteList); ok {
+	if list, ok := root.FirstChild().(*extensionast.FootnoteList); ok {
 		root.RemoveChild(root, list)
 	}
 }
