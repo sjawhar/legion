@@ -141,7 +141,7 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 		return nil
 	}
 	delay := noticeReholdDelays[notice.Resends]
-	notice.Resends, notice.StaleSession = notice.Resends+1, exception.RecipientSession
+	notice.Resends++
 	row, err := record.NewOutboxRow(issue, notice, r.now().Add(delay))
 	if err != nil {
 		return fmt.Errorf("%w: exception %s carries a notice the outbox refuses: %w", errNoticeException, envelope.EventID, err)
@@ -200,14 +200,16 @@ func sessionLive(state supervise.ClaimState) bool {
 	}
 }
 
-// releaseReheld makes due at once every copy of a notice waiting out its re-send delay that
-// architect now owns and that failed on a session other than session, once architect's claim is
-// ready on session: its agent registered, took its Envoy role back, and said it can be prompted. A
-// copy waiting minutes for a stopped session's registration to lapse would otherwise hold back
-// every later notice to that architect behind the fence, after the architect is back. Released,
-// the copies go in the order they were written, ahead of the notices behind them. A copy that
-// failed on session itself keeps its delay.
-func (r *outbox) releaseReheld(ctx context.Context, architect claim.Token, session string) error {
+// releaseWaiting makes due at once every notice waiting for a later attempt that architect now
+// owns, once architect's claim is ready: its agent took its Envoy role, or took it back, and said
+// it can be prompted, so a notice sent now reaches it. That covers a copy waiting out its re-send
+// delay, whichever session it failed on (a Go relaunch resumes the claim's session file, so the
+// relaunched agent registers the very session id the stopped one had), and a notice held on the
+// outbox's backoff while nobody held the role. A copy waiting minutes for a stopped session's
+// registration to lapse would otherwise hold back every later notice to that architect behind the
+// fence, after the architect is back. Released, the notices go in the order they were written,
+// ahead of the ones behind them.
+func (r *outbox) releaseWaiting(ctx context.Context, architect claim.Token) error {
 	now := r.now()
 	var waiting []record.OutboxRow
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
@@ -225,7 +227,7 @@ func (r *outbox) releaseReheld(ctx context.Context, architect claim.Token, sessi
 			return fmt.Errorf("decode waiting notice row %d: %w", row.ID, err)
 		}
 		notice, ok := payload.(record.Notice)
-		if !ok || notice.Resends == 0 || notice.StaleSession == session {
+		if !ok {
 			continue
 		}
 		issue, tree, err := r.readNoticeTree(ctx, row)
@@ -253,6 +255,6 @@ func (r *outbox) releaseReheld(ctx context.Context, architect claim.Token, sessi
 	}); err != nil {
 		return fmt.Errorf("release the notices waiting for %s: %w", architect, err)
 	}
-	r.log.Info("outbox notices released: their architect is ready on a new session", "architect", architect, "session", session, "rows", released)
+	r.log.Info("outbox notices released: their architect is ready", "architect", architect, "rows", released)
 	return nil
 }

@@ -116,12 +116,9 @@ func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 				t.Fatalf("read the re-held row: %v", err)
 			}
 			want := `LEGION-2 {"kind": "pr-blocked", "role": "architect", "reason": "max_fix_attempts", "resends": 1}`
-			if tc.recipient != "" {
-				want = `LEGION-2 {"kind": "pr-blocked", "role": "architect", "reason": "max_fix_attempts", "resends": 1, "stale_session": "` + tc.recipient + `"}`
-			}
 			if got := queuedNotices(t, pool); len(got) != 1 || got[0] != want ||
 				!nextAt.Equal(clock.Add(noticeReholdDelays[0]).Truncate(time.Microsecond)) {
-				t.Fatalf("queued %v due %s; want %s, counted as one re-send and naming the session that failed, due %s", got, nextAt, want, clock.Add(noticeReholdDelays[0]))
+				t.Fatalf("queued %v due %s; want %s, counted as one re-send, due %s", got, nextAt, want, clock.Add(noticeReholdDelays[0]))
 			}
 
 			if err := runner.RunOnce(context.Background()); err != nil {
@@ -218,7 +215,7 @@ func TestANoticeIsQueuedAgainAtMostThreeTimes(t *testing.T) {
 	if err := runner.rehold(context.Background(), second.envelope(t)); err != nil {
 		t.Fatalf("rehold the second copy: %v", err)
 	}
-	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-2 {"kind": "pr-blocked", "role": "architect", "resends": 3, "stale_session": "ses_live"}` {
+	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-2 {"kind": "pr-blocked", "role": "architect", "resends": 3}` {
 		t.Fatalf("queued %v, want the third copy", got)
 	}
 	third := laneReport{"evt-third", "delivery_failed", topic, "pr-blocked on LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: 3}, "legion-outbox:9", "ses_live"}
@@ -266,7 +263,7 @@ func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-1 {"kind": "design-approved", "resends": 1, "version": 3, "stale_session": "ses_live"}` {
+	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-1 {"kind": "design-approved", "resends": 1, "version": 3}` {
 		t.Fatalf("queued %v, want the design-approved notice of LEGION-1", got)
 	}
 }
@@ -327,62 +324,70 @@ func TestANoticeReachesAnArchitectThatTakesMinutesToRelaunch(t *testing.T) {
 	}
 }
 
-// Once the architect's claim is ready on a new session, the copy waiting out its re-send delay for
-// the stopped one is due at once. So a notice written after the relaunch is not held behind that
-// copy by the per-architect fence for minutes: it arrives within seconds, after the waiting copy,
-// and the waiting copy arrives once.
+// Once the architect's claim is ready again, the copy waiting out its re-send delay is due at once.
+// So a notice written after the relaunch is not held behind that copy by the per-architect fence for
+// minutes: it arrives within seconds, after the waiting copy, and the waiting copy arrives once. A Go
+// relaunch resumes the claim's session file, so the relaunched agent registers the same session id
+// the stopped one had; a relaunch onto a new session is released the same way.
 func TestANoticeWrittenAfterTheRelaunchIsNotHeldBehindAWaitingCopy(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	noticeTree(t, pool, records, false)
-	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	architectClaimOn(t, sup, "LEGION-1", supervise.StateLaunching, "")
-	start := time.Now()
-	clock := start
-	relaunched := start.Add(4 * time.Minute)
-	written := relaunched.Add(30 * time.Second)
-	publisher := &holderPublisher{}
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion",
-		now: func() time.Time { return clock }}
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, start))
+	for _, tc := range []struct{ name, stopped, relaunched string }{
+		{"the session resumed", "ses_arch", "ses_arch"},
+		{"a new session", "ses_stopped", "ses_new"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			noticeTree(t, pool, records, false)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			architectClaimOn(t, sup, "LEGION-1", supervise.StateLaunching, tc.stopped)
+			start := time.Now()
+			clock := start
+			relaunched := start.Add(4 * time.Minute)
+			written := relaunched.Add(30 * time.Second)
+			publisher := &holderPublisher{}
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion",
+				now: func() time.Time { return clock }}
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, start))
 
-	taken, received, readyDone, writtenDone := 0, []string{}, false, false
-	var arrivedB time.Time
-	for clock.Before(start.Add(15*time.Minute)) && arrivedB.IsZero() {
-		if !readyDone && !clock.Before(relaunched) {
-			// The relaunched session takes the role back and says it is ready.
-			if err := runner.releaseReheld(context.Background(), architectTopicToken(t, "LEGION-1"), "ses_new"); err != nil {
-				t.Fatalf("release at %s: %v", clock.Sub(start), err)
-			}
-			readyDone = true
-		}
-		if !writtenDone && !clock.Before(written) {
-			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", record.Notice{Kind: "design-approved", Version: 2}, clock))
-			writtenDone = true
-		}
-		if err := runner.RunOnce(context.Background()); err != nil {
-			t.Fatalf("run at %s: %v", clock.Sub(start), err)
-		}
-		_, delivered := publisher.snapshot()
-		for _, copy := range delivered[taken:] {
-			if clock.Before(relaunched) {
-				report := laneReport{fmt.Sprintf("evt-%s", copy.key), "receipt_timeout", copy.topic, "pr-blocked on LEGION-2", copy.payload, copy.key, "ses_stopped"}
-				if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
-					t.Fatalf("rehold at %s: %v", clock.Sub(start), err)
+			taken, received, readyDone, writtenDone := 0, []string{}, false, false
+			var arrivedB time.Time
+			for clock.Before(start.Add(15*time.Minute)) && arrivedB.IsZero() {
+				if !readyDone && !clock.Before(relaunched) {
+					// The relaunched agent takes the role back and says it is ready.
+					if err := runner.releaseWaiting(context.Background(), architectTopicToken(t, "LEGION-1")); err != nil {
+						t.Fatalf("release at %s: %v", clock.Sub(start), err)
+					}
+					readyDone = true
 				}
-				continue
+				if !writtenDone && !clock.Before(written) {
+					enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", record.Notice{Kind: "design-approved", Version: 2}, clock))
+					writtenDone = true
+				}
+				if err := runner.RunOnce(context.Background()); err != nil {
+					t.Fatalf("run at %s: %v", clock.Sub(start), err)
+				}
+				_, delivered := publisher.snapshot()
+				for _, copy := range delivered[taken:] {
+					if clock.Before(relaunched) {
+						report := laneReport{fmt.Sprintf("evt-%s", copy.key), "receipt_timeout", copy.topic, "pr-blocked on LEGION-2", copy.payload, copy.key, tc.stopped}
+						if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+							t.Fatalf("rehold at %s: %v", clock.Sub(start), err)
+						}
+						continue
+					}
+					kind := copy.payload.(record.Notice).Kind
+					received = append(received, string(kind))
+					if kind == "design-approved" {
+						arrivedB = clock
+					}
+				}
+				taken = len(delivered)
+				clock = clock.Add(5 * time.Second)
 			}
-			kind := copy.payload.(record.Notice).Kind
-			received = append(received, string(kind))
-			if kind == "design-approved" {
-				arrivedB = clock
+			if fmt.Sprint(received) != "[pr-blocked design-approved]" || arrivedB.IsZero() || arrivedB.Sub(written) > 10*time.Second {
+				t.Fatalf("received %v, the later notice %s after it was written; want the waiting copy then the later notice, within seconds", received, arrivedB.Sub(written))
 			}
-		}
-		taken = len(delivered)
-		clock = clock.Add(5 * time.Second)
-	}
-	if fmt.Sprint(received) != "[pr-blocked design-approved]" || arrivedB.IsZero() || arrivedB.Sub(written) > 10*time.Second {
-		t.Fatalf("received %v, the later notice %s after it was written; want the waiting copy then the later notice, within seconds", received, arrivedB.Sub(written))
+		})
 	}
 }
 
@@ -392,48 +397,47 @@ func architectTopicToken(t *testing.T, issue string) claim.Token {
 	return mustClaimToken(t, issue, claim.RoleArchitect)
 }
 
-// A ready releases only the copies its architect owns now that failed on another session: a copy
-// owned by another architect of the tree, or one that failed on the very session now ready, keeps
-// its delay.
-func TestAReadyArchitectReleasesOnlyItsOwnCopiesThatFailedElsewhere(t *testing.T) {
+// A ready releases every notice its architect owns now that waits for a later attempt, a re-held
+// copy or one held on the outbox's backoff; a notice owned by another architect of the tree keeps
+// its time.
+func TestAReadyArchitectReleasesOnlyItsOwnNotices(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	noticeTree(t, pool, records, false)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	architectClaimOn(t, sup, "LEGION-1", supervise.StateRegistered, "ses_new")
+	architectClaimOn(t, sup, "LEGION-1", supervise.StateRegistered, "ses_arch")
 	architectClaimOn(t, sup, "LEGION-2", supervise.StateWorking, "ses_sub")
 	now := time.Now()
 	later := now.Add(noticeReholdDelays[1])
-	copies := []struct {
-		issue string
-		stale string
+	for _, c := range []struct {
+		issue   string
+		resends int
 	}{
-		{"LEGION-1", "ses_stopped"}, // the root's, failed on the stopped session: released
-		{"LEGION-1", "ses_new"},     // the root's, failed on the session now ready: kept
-		{"LEGION-3", "ses_stopped"}, // the sub-architect's (LEGION-3 is under LEGION-2): kept
-	}
-	for _, c := range copies {
-		enqueueOutbox(t, pool, records, mustOutboxRow(t, c.issue, record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: 1, StaleSession: c.stale}, later))
+		{"LEGION-1", 1}, // a re-held copy of the root's
+		{"LEGION-1", 0}, // the root's, held on backoff
+		{"LEGION-3", 1}, // the sub-architect's: LEGION-3 is under LEGION-2, whose sub-architect runs
+	} {
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, c.issue, record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: c.resends}, later))
 	}
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", now: func() time.Time { return now }}
-	if err := runner.releaseReheld(context.Background(), architectTopicToken(t, "LEGION-1"), "ses_new"); err != nil {
+	if err := runner.releaseWaiting(context.Background(), architectTopicToken(t, "LEGION-1")); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	rows, err := pool.Query(context.Background(), "select issue, payload->>'stale_session', next_at <= $1 from outbox order by id", now)
+	rows, err := pool.Query(context.Background(), "select issue, next_at <= $1 from outbox order by id", now)
 	if err != nil {
 		t.Fatalf("read the copies: %v", err)
 	}
 	defer rows.Close()
 	got := []string{}
 	for rows.Next() {
-		var issue, stale string
+		var issue string
 		var due bool
-		if err := rows.Scan(&issue, &stale, &due); err != nil {
+		if err := rows.Scan(&issue, &due); err != nil {
 			t.Fatalf("scan a copy: %v", err)
 		}
-		got = append(got, fmt.Sprintf("%s/%s due=%t", issue, stale, due))
+		got = append(got, fmt.Sprintf("%s due=%t", issue, due))
 	}
-	if fmt.Sprint(got) != "[LEGION-1/ses_stopped due=true LEGION-1/ses_new due=false LEGION-3/ses_stopped due=false]" {
-		t.Fatalf("copies %v; want only the root's copy that failed on the stopped session due now", got)
+	if fmt.Sprint(got) != "[LEGION-1 due=true LEGION-1 due=true LEGION-3 due=false]" {
+		t.Fatalf("notices %v; want the root's two due now and the sub-architect's kept", got)
 	}
 }
