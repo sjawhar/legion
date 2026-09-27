@@ -191,7 +191,14 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		}
 		setSpread(list, spread, blankBetweenBlocksPastLists)
 	case footnoted && typed:
-		if len(lines.blankLines(list, nextBlock(list), whitespaceLine)) > 0 {
+		// Blank lines past the typed block's closing fence stand outside it.
+		last := len(lines.starts)
+		if next := nextBlock(list); directive.Closed && (next == nil || !isAncestor(directive, next)) {
+			last = lines.lineOf(directive.closer)
+		} else if next != nil {
+			last = lines.lineOf(startOf(next))
+		}
+		if len(lines.blanks(lines.lineOf(startOf(list)), last, whitespaceLine)) > 0 {
 			return "a blank line at or after a list in a typed block in a footnote definition, which the browser editor reads as spacing the list by what follows it"
 		}
 		setSpread(list, false, spreadsNothing)

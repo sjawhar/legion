@@ -154,3 +154,13 @@ In a typed block in a definition[^5].
     -
     text
     :::
+
+After a typed block in a definition[^6].
+
+[^6]: :::callout{#fd kind="note" title="T"}
+    - ```
+      code
+      ```
+    :::
+
+    After the callout.

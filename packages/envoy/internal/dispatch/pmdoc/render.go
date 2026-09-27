@@ -88,7 +88,7 @@ func render(doc *Node) (*renderer, error) {
 	// runs, and an escape is decided within one run: rendering the document without them merges
 	// the runs, so a mark never changes the markdown (`snake_case`, never `snake\_case`).
 	doc = StripAnchorMarks(doc)
-	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
+	if holdsOnlyAnEmptyParagraph(doc) {
 		return &renderer{}, nil
 	}
 	r := &renderer{footnoteLabels: definedFootnoteLabels(doc)}
@@ -288,7 +288,7 @@ func spreadByItsOwnLines(spaced *Node, quoted, nested bool) bool {
 		return false
 	}
 	for _, item := range spaced.Children[:len(spaced.Children)-1] {
-		if !isList(item.Children[len(item.Children)-1]) && !(nested && isEmptyItem(item)) {
+		if !isList(item.Children[len(item.Children)-1]) && !(nested && holdsOnlyAnEmptyParagraph(item)) {
 			return true
 		}
 	}
@@ -344,7 +344,7 @@ func blockEndsInParagraph(block *Node) bool {
 
 // endsInEmptyItem reports whether list's last item holds only an empty paragraph.
 func endsInEmptyItem(list *Node) bool {
-	return isEmptyItem(list.Children[len(list.Children)-1])
+	return holdsOnlyAnEmptyParagraph(list.Children[len(list.Children)-1])
 }
 
 func isList(n *Node) bool {
@@ -368,7 +368,7 @@ func opensAfterParagraph(block *Node) bool {
 		if block.Type == "ordered_list" && int(num(block.Attrs["order"], 1)) != 1 {
 			return false
 		}
-		return !isEmptyItem(block.Children[0])
+		return !holdsOnlyAnEmptyParagraph(block.Children[0])
 	}
 	return false
 }
@@ -421,6 +421,13 @@ func (r *renderer) block(n *Node, prefix string) {
 	case "code_block":
 		language, _ := n.Attrs["language"].(string)
 		fence := codeBlockFence(n)
+		if (r.inFootnote || r.itemDepth > 0 && r.typedPrefix != nil) && emptyCode(n) {
+			// An empty line written between the fences would carry the prefix: in a footnote
+			// definition both parsers keep its whitespace as the code's text, and in a typed block
+			// in a list item it is a blank line the browser editor reads as spacing the item.
+			r.writeSyntax(fence + language + "\n" + prefix + fence)
+			return
+		}
 		r.writeSyntax(fence + language + "\n" + prefix)
 		for _, child := range n.Children {
 			if child.Type != "text" {
@@ -468,6 +475,13 @@ func (r *renderer) block(n *Node, prefix string) {
 		}
 		colons := typedFence(n, len(prefix))
 		fence := strings.Repeat(":", colons)
+		if r.itemDepth > 0 && holdsOnlyAnEmptyParagraph(n) {
+			// Its empty paragraph written as a line would be a blank line in a typed block in a
+			// list item, which the browser editor reads as spacing the item; written as nothing,
+			// both parsers read the typed block back holding it.
+			r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix + fence)
+			return
+		}
 		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
 		outer, outerColons := r.typedPrefix, r.typedColons
 		r.typedPrefix, r.typedColons = &prefix, colons
@@ -476,6 +490,12 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.typedPrefix, r.typedColons = outer, outerColons
 		r.writeSyntax("\n" + prefix + fence)
 	}
+}
+
+// holdsOnlyAnEmptyParagraph reports whether container n holds nothing but one empty paragraph,
+// which both parsers read an empty container as holding (emptyParagraphFirst).
+func holdsOnlyAnEmptyParagraph(n *Node) bool {
+	return len(n.Children) == 1 && n.Children[0].Type == "paragraph" && len(n.Children[0].Children) == 0
 }
 
 // typedFence is the number of colons a typed block whose lines start at column is written with:
@@ -507,7 +527,7 @@ func (r *renderer) list(n *Node, prefix string) {
 		// A task item holding only an empty paragraph is written as an empty item, as the browser
 		// editor writes it: no form of the marker alone reads back as a task, and `- [ ]` reads back
 		// as an item holding the text `[ ]`.
-		emptyTask := len(item.Children) == 1 && item.Children[0].Type == "paragraph" && len(item.Children[0].Children) == 0
+		emptyTask := holdsOnlyAnEmptyParagraph(item)
 		if checked, ok := item.Attrs["checked"].(bool); ok && !emptyTask {
 			if checked {
 				r.writeSyntax("[x] ")
@@ -583,23 +603,18 @@ func (r *renderer) blankAfterItem(list, item *Node, prefix string) bool {
 		return item.Attrs["spread"] == true && !spreadByItsOwnLines(item, false, false)
 	case quoted && isList(last):
 		return spacedAfter(last, true).Attrs["spread"] == true
-	case quoted && r.itemDepth > 0 && isEmptyItem(item):
+	case quoted && r.itemDepth > 0 && holdsOnlyAnEmptyParagraph(item):
 		// Goldmark ends the list item around this list at a blank line after an empty item
 		// (emptyItemEndsOuterItem); in a quote, blank lines after another item or after the list
 		// spread it instead (spreadByItsOwnLines).
 		return false
-	case r.itemDepth > 0 && isEmptyItem(item) && spreadAtAnotherItem(list):
+	case r.itemDepth > 0 && holdsOnlyAnEmptyParagraph(item) && spreadAtAnotherItem(list):
 		// Goldmark ends the list item around this list at a blank line after an empty item
 		// (emptyItemEndsOuterItem), and one after another item spreads the list as well.
 		return false
 	default:
 		return list.Attrs["spread"] == true
 	}
-}
-
-// isEmptyItem reports whether item holds only an empty paragraph.
-func isEmptyItem(item *Node) bool {
-	return len(item.Children) == 1 && item.Children[0].Type == "paragraph" && len(item.Children[0].Children) == 0
 }
 
 // spreadAtAnotherItem reports whether list is spread and one of its items but the last is neither
@@ -609,7 +624,7 @@ func spreadAtAnotherItem(list *Node) bool {
 		return false
 	}
 	for _, item := range list.Children[:len(list.Children)-1] {
-		if !isEmptyItem(item) && !isList(item.Children[len(item.Children)-1]) {
+		if !holdsOnlyAnEmptyParagraph(item) && !isList(item.Children[len(item.Children)-1]) {
 			return true
 		}
 	}
@@ -696,6 +711,16 @@ func (r *renderer) writeCodeText(node *Node, prefix string) {
 func blankLineAhead(text string) bool {
 	end := strings.IndexByte(text, '\n')
 	return end >= 0 && strings.Trim(text[:end], " \t") == ""
+}
+
+// emptyCode reports whether code block node holds no text.
+func emptyCode(node *Node) bool {
+	for _, child := range node.Children {
+		if child.Text != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func codeBlockFence(node *Node) string {

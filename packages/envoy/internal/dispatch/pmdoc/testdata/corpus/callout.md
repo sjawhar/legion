@@ -27,3 +27,16 @@ Text[^c].
 [^c]: :::callout{#c14 kind="note" title="T"}
     Closed inside a definition.
       :::
+
+- :::callout{#c15 kind="note" title="T"}
+  :::
+
+- :::callout{#c16 kind="note" title="T"}
+  ```
+  ```
+  :::
+
+Text[^e].
+
+[^e]: ```
+    ```
