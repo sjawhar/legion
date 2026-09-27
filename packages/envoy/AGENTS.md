@@ -1318,5 +1318,8 @@ a whole local broker stack by hand for manual smoke testing; neither ships in `d
 which builds exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`. Each
 `dev-broker.sh` run creates and drops its own isolated database on the shared `dispatch-pg`
 container, so concurrent instances never evict each other's approver keys via `Reconcile`'s
-tombstone-on-absence behavior.
+tombstone-on-absence behavior, and listens on the port its own `cmd/broker` binds and logs
+(`BROKER_LISTEN_ADDR=127.0.0.1:0`; AGENTC-833), so concurrent instances can never collide on a
+shared port either. `dev-broker.test.sh` proves both kinds of isolation with fakes (no real
+Postgres or network) and runs in CI's `envoy-go` job.
 

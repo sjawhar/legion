@@ -12,17 +12,15 @@
 # Yubico roots. Prints the exports a second shell needs to drive agent-secrets-devkey against it.
 #
 # Each invocation creates and drops its own isolated Postgres database inside the shared
-# dispatch-pg container (named from this run's own WORK_DIR, below) and listens on its own
-# randomly chosen port, so two agent sessions each running their own dev broker stack never
-# contend: every instance seeds a fresh software key for the same hardcoded APPROVER_LOGIN and
-# writes its own scratch rules file naming only its own key, and approvers.Service.Reconcile
-# tombstones any persisted approver_keys row a currently-loaded rules file doesn't name — sharing
-# one database, each instance's reload would tombstone the other's live key out from under it. A
-# shared fixed port has a worse failure mode than a database collision: whichever instance binds
-# first serves both, and the second instance's own bind failure races its readiness check against
-# the first instance's already-live healthz on that same address, so a losing instance could print
-# "ready" and hand out exports pointing at the other instance's broker before its own crash is
-# observed — silent cross-instance confusion, not a loud failure.
+# dispatch-pg container (named from this run's own WORK_DIR, below) and binds an OS-assigned
+# ephemeral port (BROKER_LISTEN_ADDR=127.0.0.1:0), so two agent sessions each running their own
+# dev broker stack never contend: every instance seeds a fresh software key for the same
+# hardcoded APPROVER_LOGIN and writes its own scratch rules file naming only its own key, and
+# approvers.Service.Reconcile tombstones any persisted approver_keys row a currently-loaded rules
+# file doesn't name — sharing one database, each instance's reload would tombstone the other's
+# live key out from under it. cmd/broker (AGENTC-833) binds before it reports anything and logs
+# the address it actually bound; this script waits for that line and reads the real port from it,
+# so a curl success can only ever mean this instance's own broker answered.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,14 +28,15 @@ ENVOY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 POSTGRES_CONTAINER="dispatch-pg"
 
-# A fixed port would let two concurrent instances collide: whichever binds first serves both, and
-# the second one's own bind failure races its own readiness check against the first instance's
-# already-live healthz on that same shared address (a curl success there proves nothing about
-# which instance answered) — so a losing instance could print "ready" and hand out exports
-# pointing at the winner's broker before its own crash is ever observed. Pick a per-invocation
-# port instead, so a readiness success can only ever mean this instance's own broker answered.
-LISTEN_ADDR="127.0.0.1:$(( (RANDOM % 10000) + 20000 ))"
-PUBLIC_URL="http://${LISTEN_ADDR}"
+# The kernel never hands out a port a live listener already holds, so binding 127.0.0.1:0 (an
+# OS-assigned ephemeral port) makes a same-port collision between two dev instances impossible.
+# BROKER_PUBLIC_URL mirrors it (also port 0): cmd/broker/main.go treats a BROKER_PUBLIC_URL whose
+# port is 0 as "derive my public URL from whatever address I actually bind," since
+# BROKER_PUBLIC_URL must be set before boot but the real port is only known once Listen succeeds.
+# Both roles' real, reachable value is read from the broker's own "broker listening" log line
+# once it's running (below).
+LISTEN_ADDR="127.0.0.1:0"
+PUBLIC_URL="http://127.0.0.1:0"
 UI_ORIGIN="${BROKER_UI_ORIGIN:-https://agent-secrets.invalid}"
 UI_TOKEN="${BROKER_UI_TOKEN:-dev}"
 APPROVER_LOGIN="sjawhar"
@@ -49,6 +48,7 @@ BROKER_BIN="$WORK_DIR/broker"
 CA_PEM="$WORK_DIR/dev-attestation-root.pem"
 RULES_FILE="$WORK_DIR/agent-secret-rules.yaml"
 FAKE_SECRETS_FILE="$WORK_DIR/fake-secrets.env"
+BROKER_LOG="$WORK_DIR/broker.log"
 # This instance's own database, named from WORK_DIR's mktemp-generated random suffix (already
 # unique per invocation). Postgres unquoted identifiers fold to lowercase anyway, but lowercase
 # explicitly rather than rely on that.
@@ -165,8 +165,12 @@ echo "dev-broker: inserting approver_key_seeds row..." >&2
 docker exec -i "$POSTGRES_CONTAINER" psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 -q \
   -c "insert into approver_key_seeds (login, credential_id) values ('${APPROVER_LOGIN}', '${CREDENTIAL_ID}') on conflict do nothing;"
 
-# --- Start the broker. ---
-echo "dev-broker: starting broker on $LISTEN_ADDR..." >&2
+# --- Start the broker: BROKER_LISTEN_ADDR/BROKER_PUBLIC_URL of port 0 (above); its own log names
+# the real address once Listen succeeds. Output is teed to BROKER_LOG (read below) and to this
+# script's own stderr, so a human watching this script still sees the broker's own request logs
+# live. ---
+echo "dev-broker: starting broker..." >&2
+: >"$BROKER_LOG"
 BROKER_DATABASE_URL="$POSTGRES_URL" \
 BROKER_PUBLIC_URL="$PUBLIC_URL" \
 BROKER_UI_ORIGIN="$UI_ORIGIN" \
@@ -174,24 +178,48 @@ BROKER_UI_TOKEN="$UI_TOKEN" \
 BROKER_RULES_FILE="$RULES_FILE" \
 BROKER_FAKE_SECRETS_FILE="$FAKE_SECRETS_FILE" \
 BROKER_LISTEN_ADDR="$LISTEN_ADDR" \
-"$BROKER_BIN" -dev-attestation-root "$CA_PEM" &
+"$BROKER_BIN" -dev-attestation-root "$CA_PEM" > >(tee -a "$BROKER_LOG" >&2) 2>&1 &
 BROKER_PID=$!
 
-ready=false
-for _ in $(seq 1 30); do
+# --- Both readiness loops below poll this instance's own process; fail loudly the moment it
+# dies instead of looping until either wait's own timeout finally gives up. ---
+die_if_broker_exited() {
   if ! kill -0 "$BROKER_PID" 2>/dev/null; then
     echo "dev-broker: broker exited during startup" >&2
     wait "$BROKER_PID" || true
     exit 1
   fi
+}
+
+# --- Wait for the broker's own "broker listening" log line (AGENTC-833): only once Listen has
+# actually succeeded does the broker report an address, so this can only ever name this
+# instance's own listener, never a different, already-running one. ---
+BOUND_ADDR=""
+for _ in $(seq 1 30); do
+  die_if_broker_exited
+  # `|| true`: under this script's own set -o pipefail, grep -o finding nothing yet (the normal
+  # case on every iteration before the broker has logged its bound address) exits 1, and since
+  # head/cut on empty input both exit 0, that 1 becomes the whole pipeline's status — which would
+  # trip this script's own errexit and abort before the loop ever gets to sleep and retry.
+  BOUND_ADDR="$(grep -o 'addr=[^ ]*' "$BROKER_LOG" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+  if [ -n "$BOUND_ADDR" ]; then
+    break
+  fi
+  sleep 0.5
+done
+if [ -z "$BOUND_ADDR" ]; then
+  echo "dev-broker: broker never logged its bound address within 15s" >&2
+  exit 1
+fi
+PUBLIC_URL="http://${BOUND_ADDR}"
+LISTEN_ADDR="$BOUND_ADDR"
+
+ready=false
+for _ in $(seq 1 30); do
+  die_if_broker_exited
   if curl -sf "${PUBLIC_URL}/healthz" >/dev/null 2>&1; then
-    # Re-check liveness right before trusting the curl: with a per-instance port (above) this can
-    # only mean our own broker answered, but re-confirm it hasn't died in the instant since, so a
-    # startup crash lands on the "exited during startup" branch above rather than a false "ready."
-    if kill -0 "$BROKER_PID" 2>/dev/null; then
-      ready=true
-      break
-    fi
+    ready=true
+    break
   fi
   sleep 0.5
 done

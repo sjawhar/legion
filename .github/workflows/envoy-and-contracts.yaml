@@ -416,6 +416,9 @@ jobs:
       - name: Unit test envoy Go package
         run: go list ./... | grep -v /integration | xargs go test
         working-directory: packages/envoy
+      - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
+        run: bash scripts/dev-broker.test.sh
+        working-directory: packages/envoy
       - name: Integration test envoy (testcontainers + NATS)
         run: go test ./internal/integration/ -timeout 300s -count=1
         working-directory: packages/envoy

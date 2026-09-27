@@ -11,7 +11,9 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -144,9 +146,6 @@ func main() {
 		Verifier: &approvers.Verifier{Roots: rootPool, Origin: cfg.UIOrigin, AAGUIDs: aaguids},
 	}
 
-	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod}
-	enr.Chain = enroll.NewChainVerifier(st, approversSvc, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
-
 	// onReload reconciles a freshly parsed rules file's approvers section against the persisted
 	// key set before it is adopted (approvers.Service.Reconcile), then refuses the reload — and
 	// keeps the previous rules — when the file's own declared origin no longer matches the
@@ -172,6 +171,34 @@ func main() {
 		func(e error) { slog.Error("rules reload refused; previous rules kept", "error", e) }, onReload)
 	fatal(err)
 
+	// AGENTC-833: bind now, synchronously, right after every guard that can still refuse to
+	// boot has already run (config, ruling 10, migrations, rules reconcile) — the only way any
+	// caller, dev-broker.sh included, can learn which process holds an address is the log line
+	// below, printed only once this exact Listen call has already succeeded. A shared fixed dev
+	// port used to let a losing instance's own readiness curl see a different, already-running
+	// instance's healthz answer and report "ready" pointing at the wrong broker; splitting
+	// Listen from Serve and logging only after a real bind closes that regardless of how the
+	// address is chosen, and dev-broker.sh's BROKER_LISTEN_ADDR=127.0.0.1:0 makes a same-port
+	// collision between two dev instances impossible in the first place — the kernel never hands
+	// out an address a live listener already holds.
+	listener, err := net.Listen("tcp", cfg.ListenAddr)
+	fatal(err)
+	// A configured BROKER_PUBLIC_URL with port 0 is never itself dialable, so it can only be
+	// dev-broker.sh's own "derive my public URL from whatever address I actually bind"
+	// convention (its BROKER_PUBLIC_URL mirrors BROKER_LISTEN_ADDR=127.0.0.1:0): resolve it from
+	// the real bound address before anything checks a request's audience against it. Every
+	// audience-consuming construct below (enr.Chain included) is built after this point, so none
+	// ever sees the stale placeholder. refusePortZeroPublicURLInProduction (ruling-10-style
+	// dev-vs-production gate) already refused this above if BROKER_RULES_S3_URI names a
+	// production rules source, so reaching here means it's safe to apply.
+	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, cfg.RulesS3URI))
+	if u, urlErr := url.Parse(cfg.PublicURL); urlErr == nil && u.Port() == "0" {
+		cfg.PublicURL = "http://" + listener.Addr().String()
+	}
+	slog.Info("broker listening", "addr", listener.Addr().String())
+
+	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod}
+	enr.Chain = enroll.NewChainVerifier(st, approversSvc, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := &requests.Machine{
 		Store: st, Rules: current, Secrets: reader, Approvers: approversSvc,
 		MaxGrant: time.Duration(cfg.MaxGrantSeconds) * time.Second, PendingTTL: agentSecretPendingTTL,
@@ -210,7 +237,6 @@ func main() {
 		Proof:              &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		TrustedProxyHeader: cfg.TrustedProxyHeader})
 	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
 		Handler:           withRequestDeadline(mux, requestDeadline),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -218,9 +244,8 @@ func main() {
 		IdleTimeout:       2 * time.Minute,
 	}
 	go func() {
-		slog.Info("broker listening", "addr", cfg.ListenAddr)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			slog.Error("broker: listen", "error", err)
+		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("broker: serve", "error", err)
 			stop()
 		}
 	}()
@@ -267,4 +292,20 @@ func refuseDevAttestationRootInProduction(devAttestationRoot, rulesS3URI string)
 		return errors.New("-dev-attestation-root is a development flag; production loads rules from S3 and trusts the embedded Yubico roots")
 	}
 	return nil
+}
+
+// refusePortZeroPublicURLInProduction refuses a BROKER_PUBLIC_URL whose port is literally "0"
+// whenever BROKER_RULES_S3_URI names a production rules source (mirrors ruling 10's own
+// dev-vs-production gate above): port 0 is never dialable, so it can only be dev-broker.sh's own
+// "derive my public URL from whatever address I actually bind" convention (BROKER_PUBLIC_URL
+// mirrors BROKER_LISTEN_ADDR=127.0.0.1:0). A stray literal ":0" reaching a real deployment must
+// fail loudly at boot, never silently reinterpret the broker's own public identity as its
+// internal bind address. Extracted from main so a test can drive it directly instead of through
+// fatal, which calls os.Exit.
+func refusePortZeroPublicURLInProduction(publicURL, rulesS3URI string) error {
+	u, err := url.Parse(publicURL)
+	if err != nil || u.Port() != "0" || rulesS3URI == "" {
+		return nil
+	}
+	return fmt.Errorf("BROKER_PUBLIC_URL %q: port 0 is never dialable in production (BROKER_RULES_S3_URI is set); only a local run may use it as dev-broker.sh's derive-from-bind convention", publicURL)
 }
