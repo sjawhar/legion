@@ -1265,6 +1265,7 @@ pass
 begin profile-stays-in-the-run
 # Every session the run's agents wrote is under the run's own home, inside its work directory, and
 # the operator's profile root holds none of the run's profile (make_omp_home, lib/omp-home.sh).
+[ -d "$profile_agent/sessions" ] || fail "no agent session directory at $profile_agent/sessions"
 sessions=$(find "$profile_agent/sessions" -name '*.jsonl' -type f | wc -l)
 [ "$sessions" -gt 0 ] || fail "no agent session under $profile_agent/sessions"
 [ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
