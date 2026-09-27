@@ -1,5 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -13,7 +12,11 @@ import { z } from "zod";
 import type { ImageDigestRef } from "./image-ref";
 import { validateNatsUserSeed } from "./nats-seed";
 import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
-import { ownerOnlyModeRefusal, readSecretPointer } from "./secrets";
+import {
+  checkOwnerOnlySecretPointer,
+  readOwnerOnlySecretPointer,
+  readSecretPointer,
+} from "./secrets";
 
 export const GITHUB_APP_ROLES = ["implement", "review"] as const;
 export type GitHubAppRole = (typeof GITHUB_APP_ROLES)[number];
@@ -1192,10 +1195,13 @@ const DAEMON_NATS_SEED: NatsSeedNames = {
 
 /** The seed `names` resolve to: the file the config key names (`file`, already resolved against
  * the config directory), else the file the `_FILE` variable names, else the plain variable; the
- * first source set is authoritative, so an empty pointer, a seed file its group or others may read,
- * a missing, unreadable, or blank file, a blank variable, or a seed that is not an nkey user seed
- * refuses startup naming the key and path, never the seed and never falling back. Nothing set is
- * undefined. `--check-config` (`resolveSecrets` false) checks the file's mode but never reads it. */
+ * first source set is authoritative, so an empty pointer, a seed file that is not a regular file
+ * only its owner may read (`readOwnerOnlySecretPointer`), a missing, unreadable, or blank file, a
+ * blank variable, or a seed that is not an nkey user seed refuses startup naming the key and path,
+ * never the seed and never falling back. Only the owner may read either seed: the TypeScript daemon
+ * runs on tmux alone, so no kubelet-mounted Secret needs the group to read it. Nothing set is
+ * undefined. `--check-config` (`resolveSecrets` false) checks the file
+ * (`checkOwnerOnlySecretPointer`) but never reads it. */
 function resolveNatsSeed(
   names: NatsSeedNames,
   file: string | undefined,
@@ -1206,8 +1212,11 @@ function resolveNatsSeed(
   if (pointer.value !== undefined) {
     const key = pointer.source === "env" ? names.fileVariable : names.fileKey;
     if (pointer.value === "") throw new Error(`${key} is set but empty`);
-    const seed = readOwnerOnlySeedFile(key, pointer.value, resolveSecrets);
-    if (seed === undefined) return "(not executed)";
+    if (!resolveSecrets) {
+      checkOwnerOnlySecretPointer(key, pointer.value);
+      return "(not executed)";
+    }
+    const seed = readOwnerOnlySecretPointer(key, pointer.value);
     validateNatsUserSeed(seed, `${key} (${pointer.value})`);
     return seed;
   }
@@ -1217,41 +1226,6 @@ function resolveNatsSeed(
   if (seed.length === 0) throw new Error(`${names.variable} is set but empty`);
   validateNatsUserSeed(seed, names.variable);
   return seed;
-}
-
-/** The trimmed seed in `file`, which must be a regular file only its owner may read: opened once
- * (without blocking, so a FIFO cannot hang the daemon), checked with `fstat` on that descriptor,
- * and read from the same descriptor, so nothing swapped in at the path between the check and the
- * read is ever read. A symlink resolves to its target. Only the owner may read either seed: the
- * TypeScript daemon runs on tmux alone, so no kubelet-mounted Secret needs the group to read it.
- * `--check-config` (`resolveSecrets` false) checks the file but reads nothing, returning
- * undefined, and leaves a file it cannot open to the boot that reads it. */
-function readOwnerOnlySeedFile(
-  key: string,
-  file: string,
-  resolveSecrets: boolean
-): string | undefined {
-  let fd: number;
-  try {
-    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
-  } catch (error) {
-    if (!resolveSecrets) return undefined;
-    throw new Error(
-      `${key} names ${file}, which could not be read: ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
-  try {
-    const stats = fstatSync(fd);
-    if (!stats.isFile()) throw new Error(`${key} names ${file}, which is not a regular file`);
-    const refusal = ownerOnlyModeRefusal(key, file, stats.mode);
-    if (refusal !== undefined) throw new Error(refusal);
-    if (!resolveSecrets) return undefined;
-    const seed = readFileSync(fd, "utf8").trim();
-    if (!seed) throw new Error(`${key} names ${file}, which is empty`);
-    return seed;
-  } finally {
-    closeSync(fd);
-  }
 }
 
 export function resolveDaemonConfig(

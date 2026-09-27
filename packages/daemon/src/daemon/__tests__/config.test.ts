@@ -1530,10 +1530,14 @@ describe("daemon config", () => {
       for (const [name, mode] of [
         ["shared", 0o640],
         ["world", 0o604],
+        ["wide", 0o644],
       ] as const) {
         fs.writeFileSync(path.join(configDir, name), `${userSeed}\n`);
         fs.chmodSync(path.join(configDir, name), mode);
       }
+      // A symlink is judged by its target, 0644 here: a reader that judged the link itself (lstat,
+      // O_NOFOLLOW) would refuse it as not a regular file or as unopenable, not by its target's mode.
+      fs.symlinkSync("wide", path.join(configDir, "wide-link"));
       // A FIFO nobody writes: a reader that opened it blocking, or read it before checking what it
       // is, would hang here instead of refusing it.
       execFileSync("mkfifo", ["-m", "0644", path.join(configDir, "fifo")]);
@@ -1619,6 +1623,11 @@ describe("daemon config", () => {
             tmuxYaml(`${seed.fileKey}: ./fifo`),
             { [seed.variable]: userSeed },
             `${seed.fileKey} names ${at("fifo")}, which is not a regular file`,
+          ],
+          [
+            tmuxYaml(`${seed.fileKey}: ./wide-link`),
+            {},
+            `${seed.fileKey} ${at("wide-link")} is readable by its group or others (mode 0644); chmod 0600 it`,
           ],
         ];
         for (const [configFile, env, message] of cases) {
