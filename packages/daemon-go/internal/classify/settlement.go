@@ -43,6 +43,9 @@ const (
 // check's failure stands for the life of the head and of the handoff heads after it, and a rerun
 // whose completion is never observed holds the last verdict until the check runs again.
 type SettlementCandidate struct {
+	// Head is the commit the settlement is for, which need not be the pull request's head
+	// (SettlementFor).
+	Head       string              `json:"head"`
 	CheckRuns  []record.AttemptRun `json:"checkRuns"`
 	Generation int64               `json:"generation"`
 	Snapshot   string              `json:"snapshot"`

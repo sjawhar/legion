@@ -451,12 +451,13 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
 	// that stands for the head can be of the code head it replaced, arriving after it. A
 	// settlement is for the commit it names, never the head by default.
+	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Verdict: fact.Verdict, Failing: fact.Failing}
 	var stands bool
-	if *pr, stands = classify.SettlementFor(*pr, fact.HeadSHA, fact.Verdict); !stands {
+	if *pr, stands = classify.SettlementFor(*pr, candidate); !stands {
 		return intake.Result{}, nil
 	}
 	var applied bool
-	*pr, applied = classify.ApplySettlement(*pr, classify.SettlementCandidate{CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Verdict: fact.Verdict, Failing: fact.Failing})
+	*pr, applied = classify.ApplySettlement(*pr, candidate)
 	if !applied {
 		return intake.Result{}, nil
 	}

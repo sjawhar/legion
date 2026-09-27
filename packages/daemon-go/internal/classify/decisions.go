@@ -41,8 +41,8 @@ func HeadVerdict(pr record.PullRequest) string {
 	return pr.Verdict
 }
 
-// SettlementFor says whether a CI settlement of head, recording verdict, may stand for the pull
-// request's current head, and returns the pull request ready to apply it. It may when head is the
+// SettlementFor says whether a CI settlement of candidate.Head, recording candidate.Verdict, may
+// stand for the pull request's current head, and returns the pull request ready to apply it. It may when head is the
 // current head, or a head the current one replaced through pushes that each changed only .legion/,
 // unless a recorded verdict already stands for the current head from a head nearer it on that
 // path, which outranks it.
@@ -53,11 +53,12 @@ func HeadVerdict(pr record.PullRequest) string {
 // make the outcome depend on the order the two arrive in.
 // A settlement of a head other than the recorded one starts that head's fence afresh, since
 // check runs, generations and snapshots are each head's own.
-func SettlementFor(pr record.PullRequest, head, verdict string) (record.PullRequest, bool) {
+func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
+	head := candidate.Head
 	if !carriedBack(pr.Pushes, pr.HeadSHA, head) {
 		return pr, false
 	}
-	if verdict == "" && HeadVerdict(pr) != "" {
+	if candidate.Verdict == "" && HeadVerdict(pr) != "" {
 		return pr, false
 	}
 	if head == pr.CheckedHead {
