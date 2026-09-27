@@ -893,9 +893,11 @@ func TestProvisionRefusesAWorktreesSymlinkEscape(t *testing.T) {
 }
 
 // A kill between the writes into the temporary entry and its rename (a SIGKILL, an OOM, a pod
-// eviction, a daemon restart) leaves only the temporary directory behind, never the entry itself:
-// the next provisioning finds no entry, clears the stale temporary directory, and restores cleanly
-// instead of treating a half-written entry as done.
+// eviction, a daemon restart) never runs the Go defer that would clean it up, and MkdirTemp's
+// randomized name means a later attempt cannot find it by name either: it is simply left behind.
+// That is harmless, since it plays no part in the present check, which looks at the entry itself:
+// the next provisioning still finds that gone and restores cleanly through a temporary directory of
+// its own.
 func TestProvisionRestoresCleanlyAfterAKillBetweenTheWrites(t *testing.T) {
 	run := newLocalRunner(t)
 	request := provisionRequest(t)
@@ -907,9 +909,9 @@ func TestProvisionRestoresCleanlyAfterAKillBetweenTheWrites(t *testing.T) {
 	if err := os.RemoveAll(admin); err != nil {
 		t.Fatal(err)
 	}
-	// A process killed after mkdir but before every write, or before the rename, leaves exactly
+	// A process killed after MkdirTemp but before every write, or before the rename, leaves exactly
 	// this: a temporary sibling with partial or stale content, and no entry at admin itself.
-	stale := admin + ".tmp"
+	stale := filepath.Join(filepath.Dir(admin), "."+filepath.Base(admin)+".restore-stale")
 	if err := os.MkdirAll(stale, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -923,8 +925,8 @@ func TestProvisionRestoresCleanlyAfterAKillBetweenTheWrites(t *testing.T) {
 	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
 		t.Errorf("git in the restored workspace answers %q, want %q", got, workspace.Dir)
 	}
-	if _, statErr := os.Stat(stale); !errors.Is(statErr, os.ErrNotExist) {
-		t.Errorf("the stale temporary entry %s survived restoration: %v", stale, statErr)
+	if _, statErr := os.Stat(stale); statErr != nil {
+		t.Errorf("the unrelated stale temporary entry %s should be left alone: %v", stale, statErr)
 	}
 }
 
@@ -964,6 +966,35 @@ func TestProvisionRestoresAWorkspaceWithNoRealParentCommit(t *testing.T) {
 	}
 	if !slices.ContainsFunc(logged, func(line string) bool { return strings.Contains(line, "fresh, with no real commit yet") }) {
 		t.Errorf("provisioning logged no restoration: %q", logged)
+	}
+}
+
+// A second workspace whose own directory base name is what this workspace's temporary restore
+// entry would be named survives untouched: the temporary entry's name never collides with a real
+// worktree's own admin id.
+func TestProvisionRestoreDoesNotCollideWithAWorkspaceNamedLikeItsTemporaryEntry(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := os.RemoveAll(gitWorktreeAdmin(t, workspace.Dir)); err != nil {
+		t.Fatal(err)
+	}
+
+	colliding := request
+	colliding.Issue = "WIDGETS-42.TMP"
+	other, err := Provision(context.Background(), run, colliding)
+	if err != nil {
+		t.Fatalf("provision the colliding workspace: %v", err)
+	}
+
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("provision the workspace whose git worktree entry is gone: %v", err)
+	}
+	if got := strings.TrimSpace(runSetup(t, other.Dir, "git", "rev-parse", "--show-toplevel")); got != other.Dir {
+		t.Errorf("git in the colliding workspace answers %q, want %q", got, other.Dir)
 	}
 }
 

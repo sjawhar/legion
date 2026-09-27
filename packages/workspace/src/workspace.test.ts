@@ -14,6 +14,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import {
+  issueWorkspaceDir,
   ownCommitsRevset,
   provisionIssueWorkspace,
   type RunResult,
@@ -2588,22 +2589,24 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(await readdir(elsewhere)).toEqual([]);
   }, 60_000);
 
-  test("restores cleanly after a kill between the writes, which leaves only a temporary sibling behind", async () => {
+  test("restores cleanly after a kill between the writes, leaving an unrelated stale temporary sibling alone", async () => {
     const [{ name, command }] = JJ_BINARIES;
     const stateDir = path.join(await temporaryDirectory(), "state");
     const { workspaceDir, deps } = await realJjRig(command, stateDir);
     await provisionIssueWorkspace("WIDGETS-42", deps);
     const admin = await gitWorktreeAdmin(workspaceDir);
     await rm(admin, { recursive: true, force: true });
-    // A process killed after mkdir but before every write, or before the rename, leaves exactly
-    // this: a temporary sibling with partial or stale content, and no entry at admin itself.
-    const stale = `${admin}.tmp`;
+    // A process killed after mkdtemp but before every write, or before the rename, leaves exactly
+    // this: a temporary sibling with partial or stale content, and no entry at admin itself. Its
+    // randomized name means a later attempt cannot find or clear it by name; it is simply left
+    // behind, which is harmless since the present check looks at admin alone.
+    const stale = path.join(path.dirname(admin), `.${path.basename(admin)}.restore-stale`);
     await mkdir(stale, { recursive: true });
     await writeFile(path.join(stale, "HEAD"), "stale\n", "utf8");
 
     await provisionIssueWorkspace("WIDGETS-42", deps);
     expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
-    expect(existsSync(stale), name).toBeFalse();
+    expect(existsSync(stale), name).toBeTrue();
   }, 60_000);
 
   test("restores a workspace with no real parent commit using jj's own unborn ref and an empty index", async () => {
@@ -2630,6 +2633,20 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const status = await runCommand([SYSTEM_GIT, "status", "--porcelain"], { cwd: workspaceDir });
     expect(status.stdout.trim(), name).toBe("");
     expect(logged, name).toEqual([expect.stringContaining("fresh, with no real commit yet")]);
+  }, 60_000);
+
+  test("does not collide with a second workspace named like its temporary restore entry", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    await rm(await gitWorktreeAdmin(workspaceDir), { recursive: true, force: true });
+
+    const collidingDir = issueWorkspaceDir(stateDir, "acme/widgets", "WIDGETS-42.TMP");
+    await provisionIssueWorkspace("WIDGETS-42.TMP", deps);
+
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitToplevel(collidingDir), name).toBe(collidingDir);
   }, 60_000);
 
   test("removal deletes the git worktree entry a crash after its forget left, with the workspace neither registered nor present", async () => {

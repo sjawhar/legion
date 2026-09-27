@@ -200,11 +200,13 @@ func restoreGitWorktree(ctx context.Context, run Runner, workspace Workspace, lo
 	if !commitID.MatchString(head) {
 		return fmt.Errorf("workspace %s: jj printed no parent commit for its working copy: %q", workspace.Dir, parents.Stdout)
 	}
-	tmp := target + ".tmp"
-	if err := os.RemoveAll(tmp); err != nil {
-		return fmt.Errorf("clear the restore's temporary worktree entry %s: %w", tmp, err)
-	}
-	if err := os.MkdirAll(tmp, 0o755); err != nil {
+	// A random suffix under a leading dot: git assigns a worktree id from its directory's own base
+	// name, and never assigns one beginning with a dot (verified: a directory named ".x" gets the id
+	// "-x"), so no real worktree can ever collide with this temporary one. The random suffix also
+	// keeps two concurrent restores of the same workspace from writing into, and renaming, the same
+	// temporary directory.
+	tmp, err := os.MkdirTemp(worktrees, "."+filepath.Base(target)+".restore-")
+	if err != nil {
 		return fmt.Errorf("restore git worktree %s: %w", target, err)
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
