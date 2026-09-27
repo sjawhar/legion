@@ -293,7 +293,7 @@ func TestANamedVersionRefreshesAnchorsWithNoLiveWriteOfItsOwn(t *testing.T) {
 		t.Fatalf("replace document text: %v", err)
 	}
 	counter.count.Store(0)
-	if _, err := service.NamedVersion(context.Background(), artifactID, "rewritten", alice); err != nil {
+	if _, err := namedVersion(t, service, artifactID, "rewritten", alice); err != nil {
 		t.Fatalf("write named version: %v", err)
 	}
 	if passes := counter.count.Load(); passes != anchorRefreshPasses {

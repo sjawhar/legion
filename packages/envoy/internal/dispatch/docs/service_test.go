@@ -1243,7 +1243,7 @@ func TestUnlinkedDocumentIsAlwaysOpen(t *testing.T) {
 	if !open {
 		t.Fatal("unlinked document is closed")
 	}
-	namedResult, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"})
+	namedResult, err := namedVersion(t, service, artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"})
 	version := namedResult.Version
 	if err != nil {
 		t.Fatalf("name unlinked document version: %v", err)
@@ -1593,7 +1593,7 @@ func TestShutdownDrainsPendingUpdateBeforeSettling(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write document before shutdown: %v", err)
 	}
-	if _, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := namedVersion(t, service, artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write named version before shutdown: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -2047,6 +2047,30 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit seed text: %v", err)
 	}
+}
+
+// namedVersion names a version the way every caller does: inside a transaction joined with
+// Service.Join, whose commit credits the version's authors and publishes its events. It
+// returns NamedVersion's own error, which several tests assert on, and commits only without
+// one.
+func namedVersion(t *testing.T, service *Service, artifactID, summary string, actor model.Actor) (VersionResult, error) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin named version: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	result, err := service.NamedVersion(joined, artifactID, summary, actor)
+	if err != nil {
+		return VersionResult{}, err
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit named version: %v", err)
+	}
+	return result, nil
 }
 
 func alignLatestVersionWithUpdates(t *testing.T, service *Service, artifactID string) {
