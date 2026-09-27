@@ -9,6 +9,10 @@
 #
 # Optional ports: E2E_NATS_PORT (14222), E2E_PORT (19020), E2E_SESSION_PORT (19021).
 set -euo pipefail
+# This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
+# no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
+# NATS_NKEY_SEED or NATS_NKEY_SEED_FILE.
+unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 
 usage() {
   cat <<'EOF'

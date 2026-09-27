@@ -133,7 +133,7 @@ start_listener() {
     offset=$(log_size listener)
     ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
       ENVOY_MACHINE_ID="legion-e2e3-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
         -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
     result=0
     await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
@@ -161,7 +161,7 @@ start_dispatch() {
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
         -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-dispatch"
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
@@ -216,7 +216,7 @@ start_daemon() {
       write_legion_config
     fi
     offset=$(log_size daemon)
-    OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+    OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
       -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
     daemon_pid=$!

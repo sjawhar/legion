@@ -110,6 +110,10 @@ restarts only `dispatch`.
 | `ENVOY_SLACK_SIGNING_SECRET` | conditional | Required when Slack webhooks are enabled. |
 | `ENVOY_GHOSTWISPR_SIGNING_SECRET` | optional | Empty skips Ghost Wispr signature verification. |
 
+A process is given a NATS nkey seed only after its NATS server has nkey users (the server's stage 1,
+which keeps a `no_auth_user` fallback): a server with no users sends no nonce, and the Go client
+refuses the nkey (`nats: nkeys not supported by the server`) instead of connecting without it.
+
 ## Dispatch configuration
 
 Generate the agent token once and record it, with the external database URL, in

@@ -24,6 +24,9 @@ const (
 // readSecretPointer); so is a blank NATS_NKEY_SEED, and a seed that is not a user nkey seed. Neither
 // set is a nil option: the connection carries no credential, as every connection did before servers
 // required one. No error carries the seed.
+// Deploy order: a process gets a seed only after its server has nkey users (the SRE's stage 1, with
+// the no_auth_user fallback); a server with no users sends no nonce, and nats.go then refuses the
+// nkey ("nats: nkeys not supported by the server") rather than connecting without it.
 func nkeyCredential(lookup func(string) (string, bool)) (nats.Option, error) {
 	var seed, source string
 	if file, set := lookup(nkeySeedFileVariable); set {

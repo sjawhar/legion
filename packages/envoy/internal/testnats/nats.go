@@ -48,6 +48,16 @@ var (
 	sharedErr     error
 )
 
+// init runs in every test binary that imports this package, whichever helper its tests use. Every
+// server these helpers start has no users unless a test configures some, and nats.go refuses an
+// nkey when the server sends no nonce ("nats: nkeys not supported by the server"), so an
+// operator's NATS_NKEY_SEED or NATS_NKEY_SEED_FILE never reaches the tests' clients. A test that
+// means to pass a seed sets it itself.
+func init() {
+	os.Unsetenv("NATS_NKEY_SEED")
+	os.Unsetenv("NATS_NKEY_SEED_FILE")
+}
+
 // Main runs the package's tests, then removes the shared server if a test started it, and returns
 // the exit code. A package whose tests use URL calls it from TestMain: os.Exit(testnats.Main(m)).
 func Main(m *testing.M) int {

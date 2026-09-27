@@ -47,7 +47,7 @@ describe.skipIf(process.env.LEGION_E2E !== "1")(
     afterAll(() => {
       open?.stop();
       authorized?.stop();
-    });
+    }, 60_000);
 
     it("with no seed, connects to a server that asks for no credential", async () => {
       const transport = await transportAt(open.url, {});

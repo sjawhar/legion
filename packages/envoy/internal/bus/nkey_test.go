@@ -183,3 +183,21 @@ func TestAnUnusableSeedIsAnErrorNamingItsVariable(t *testing.T) {
 		})
 	}
 }
+
+// A seed against a server with no users is refused, never silently dropped: the server sends no
+// nonce, and nats.go refuses the nkey. This pins the deploy order (a process gets a seed only after
+// its server has nkey users) and catches a change that falls back to connecting without it.
+func TestASeedAgainstAServerWithoutUsersIsRefused(t *testing.T) {
+	uri := testnats.URL(t)
+	seed, _ := testUser(t)
+	unsetNkeyEnvironment(t)
+	t.Setenv("NATS_NKEY_SEED", seed)
+	client, err := bus.Connect([]string{uri})
+	if err == nil {
+		client.Close()
+		t.Fatal("a seed connected to a server with no users")
+	}
+	if !strings.Contains(err.Error(), "nkeys not supported by the server") {
+		t.Fatalf("refusal = %v, want nats.go's nkeys-not-supported error", err)
+	}
+}
