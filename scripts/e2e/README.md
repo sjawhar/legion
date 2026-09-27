@@ -231,7 +231,8 @@ NATS the GitHub bridge subscribes on by its fully-qualified name on the operator
 domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-container-alias-that-is-momentarily-unheld-resolves-through-the-tailnet-to-production.md));
 `prerequisites` refuses a run without
 either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
-neither value. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
+neither value. The bridge connects to that upstream as the nkey user `NATS_NKEY_SEED_FILE` or
+`NATS_NKEY_SEED` in the operator's environment names, and without a credential when neither is set. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
 anyway). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and

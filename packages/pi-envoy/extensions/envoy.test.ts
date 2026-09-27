@@ -135,7 +135,11 @@ const clipboardState = {
   error: undefined as Error | undefined,
 };
 
+// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
+const { nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
+  nkeyAuthenticator,
+  nkeys,
   connect: async ({ name }: { readonly name: string }) => {
     if (natsState.failConnects > 0) {
       natsState.failConnects -= 1;

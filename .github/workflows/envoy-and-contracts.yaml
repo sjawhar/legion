@@ -195,9 +195,13 @@ jobs:
       - name: Typecheck Envoy client
         run: bun run typecheck
         working-directory: packages/envoy-client
+      - name: Pre-pull the NATS image the credential tests run
+        run: docker pull nats:2.10
       - name: Test Envoy client
         run: bun run test
         working-directory: packages/envoy-client
+        env:
+          LEGION_E2E: "1"
       - name: Build Envoy client
         run: bun run build
         working-directory: packages/envoy-client
