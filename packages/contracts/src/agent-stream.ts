@@ -116,6 +116,21 @@ export interface AgentStreamControlMessage {
   readonly type: "replay" | "watch";
 }
 
+/**
+ * Whether the session is answering the relay on its control subject, sent as the stream's
+ * `responder` event whenever the answer changes and once at the start of every connection.
+ *
+ * Nobody answering is not an empty history: the session's plugin predates the live view, or the
+ * session is not running. Only the session itself can tell the two apart, and it does so by
+ * replying at all, which every release that can stream does. The relay retries the replay on
+ * each watch tick while nobody answers, so a session restarted onto a newer plugin turns this
+ * true and delivers its history without the viewer reloading.
+ */
+export interface AgentStreamResponder {
+  readonly v: typeof AGENT_STREAM_PROTOCOL;
+  readonly responding: boolean;
+}
+
 /** What a session answers a replay request with: everything it still holds, oldest first. */
 export interface AgentStreamReplay {
   readonly v: typeof AGENT_STREAM_PROTOCOL;

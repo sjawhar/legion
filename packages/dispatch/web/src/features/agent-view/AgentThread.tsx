@@ -115,9 +115,11 @@ function AssistantMessage(): ReactNode {
  * that frame on every visit, so "worse" here means permanently.
  */
 export function AgentThread({
+  empty,
   placeholder,
   resetKey,
 }: {
+  empty: string;
   placeholder: string;
   resetKey: string;
 }): ReactNode {
@@ -130,8 +132,10 @@ export function AgentThread({
           data-testid="agent-thread"
         >
           <ThreadPrimitive.Empty>
-            <p className={`mt-6 text-sm ${textMutedOnCanvas}`}>
-              Nothing yet. This session's next turn appears here as it happens.
+            {/* Why there is nothing here is the page's to say: a session that cannot stream never
+                fills this space, and "the next turn appears here" would be a promise. */}
+            <p className={`mt-6 text-sm ${textMutedOnCanvas}`} data-testid="agent-thread-empty">
+              {empty}
             </p>
           </ThreadPrimitive.Empty>
           <ThreadPrimitive.Messages components={{ AssistantMessage, UserMessage }} />

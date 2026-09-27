@@ -52,7 +52,7 @@ function Harness({ messages }: { messages: ThreadMessageLike[] }): ReactNode {
   });
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <AgentThread placeholder="Message the session…" resetKey="session-1" />
+      <AgentThread empty="Nothing yet." placeholder="Message the session…" resetKey="session-1" />
     </AssistantRuntimeProvider>
   );
 }
