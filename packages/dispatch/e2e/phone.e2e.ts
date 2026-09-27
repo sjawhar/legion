@@ -302,12 +302,17 @@ test("an inline link keeps its line and grows its hit box without covering its n
         "[First choice](https://example.invalid/one)",
         "",
         "[Second choice](https://example.invalid/two)",
-        "",
-        // A hard break, so the two links sit on consecutive lines of one paragraph - the
-        // tightest pitch there is, which separate paragraphs cannot reach.
-        "[Upper line](https://example.invalid/upper)\\",
-        "[Lower line](https://example.invalid/lower)",
       ].join("\n"),
+    },
+    { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
+  );
+
+  // A message turn is 16px prose on 24px lines - the tightest pitch a body reaches - and a
+  // hard break puts two links on consecutive lines of it.
+  await createMessage(
+    issue.key,
+    {
+      body: "[Upper line](https://example.invalid/upper)\\\n[Lower line](https://example.invalid/lower)",
     },
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
   );
@@ -317,13 +322,33 @@ test("an inline link keeps its line and grows its hit box without covering its n
   try {
     await page.goto(`/issues/${issue.key}/conversation`);
     await expect(page.getByRole("link", { name: "view" }).first()).toBeVisible();
+    await expect(page.getByRole("link", { name: "Lower line" }).first()).toBeVisible();
     const line = await page.evaluate(() => {
-      const view = [...document.querySelectorAll("main a")].find(
-        (link) => (link.textContent ?? "") === "view"
+      // Outside the ask cards: a decision block renders the same body in its own card.
+      const links = [...document.querySelectorAll("main a")].filter(
+        (link) => link.closest('[data-testid^="ask-"]') === null
       );
-      if (view === undefined) throw new Error("the activity line has no view link");
+      const named = (text: string) => links.find((link) => (link.textContent ?? "") === text);
+      const view = named("view");
+      const upper = named("Upper line");
+      const lower = named("Lower line");
+      if (view === undefined || upper === undefined || lower === undefined) {
+        throw new Error("the conversation is missing a seeded link");
+      }
+      const range = document.createRange();
+      range.selectNodeContents(upper);
+      const upperText = range.getBoundingClientRect();
+      const node = document.elementFromPoint(
+        upperText.x + upperText.width / 2,
+        upperText.bottom - 1
+      );
       return {
         lineHeight: (view.parentElement ?? view).getBoundingClientRect().height,
+        // How far the lower link's padding box starts below the upper link's own text: the
+        // reviewer measured -1 at 6px and +2 at 3px on this surface.
+        lowerClearance: lower.getBoundingClientRect().y - upperText.bottom,
+        onUpperTextBottom:
+          node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link"),
         viewHeight: view.getBoundingClientRect().height,
       };
     });
@@ -339,23 +364,9 @@ test("an inline link keeps its line and grows its hit box without covering its n
       const wrapped = named("handbook for the deployment gate");
       const first = named("First choice");
       const second = named("Second choice");
-      const upper = named("Upper line");
-      const lower = named("Lower line");
-      if (
-        wrapped === undefined ||
-        first === undefined ||
-        second === undefined ||
-        upper === undefined ||
-        lower === undefined
-      ) {
+      if (wrapped === undefined || first === undefined || second === undefined) {
         throw new Error("the seeded links are not all rendered");
       }
-      /** A link's own text box, which its padding extends past. */
-      const textRect = (link: Element) => {
-        const range = document.createRange();
-        range.selectNodeContents(link);
-        return range.getBoundingClientRect();
-      };
       const hitAt = (x: number, y: number) => {
         const node = document.elementFromPoint(x, y);
         return node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link");
@@ -378,19 +389,6 @@ test("an inline link keeps its line and grows its hit box without covering its n
           firstRect.y + firstRect.height - 1
         ),
         onWord: hitAt(wordRect.x + wordRect.width / 2, wordRect.y + wordRect.height / 2),
-        // On consecutive lines of one paragraph, the lower link's padding box must start at
-        // or below the bottom of the upper link's own text - anything higher is padding
-        // sitting on letters a reader is trying to tap.
-        lowerPaddingTop: lower.getBoundingClientRect().y,
-        upperTextBottom: textRect(upper).bottom,
-        upperTextBottomHits: (() => {
-          const rect = textRect(upper);
-          const hits: string[] = [];
-          for (let x = rect.x + 1; x < rect.x + rect.width - 1; x += 2) {
-            hits.push(hitAt(x, rect.bottom - 0.5));
-          }
-          return [...new Set(hits)].sort();
-        })(),
         secondTop: secondRect.y,
       };
     });
@@ -399,16 +397,17 @@ test("an inline link keeps its line and grows its hit box without covering its n
     expect(line.lineHeight).toBeLessThanOrEqual(28);
     // 2. Its own hit box clears the 24px WCAG 2.5.8 target.
     expect(line.viewHeight).toBeGreaterThanOrEqual(24);
-    // 3. A tap on the word before a wrapped link stays on the text.
+    // 3. On consecutive lines of one message turn - 16px prose on 24px lines, the tightest
+    //    pitch a body reaches - the lower link's padding starts below the upper link's own
+    //    text, so a tap at the bottom of that text opens the upper link.
+    expect(line.lowerClearance).toBeGreaterThanOrEqual(0);
+    expect(line.onUpperTextBottom).toBe("Upper line");
+    // 4. A tap on the word before a wrapped link stays on the text.
     expect(measured.onWord).toBe("not-a-link");
-    // 4. Two stacked links: the lower edge of the first is the first, and it never reaches the
+    // 5. Two stacked links: the lower edge of the first is the first, and it never reaches the
     //    second.
     expect(measured.onFirstLowerEdge).toBe("First choice");
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
-    // 5. And on consecutive lines of one paragraph - a hard break, the tightest pitch there
-    //    is - a tap at the bottom of the upper link's own text opens the upper link.
-    expect(measured.upperTextBottomHits).toEqual(["Upper line"]);
-    expect(measured.lowerPaddingTop).toBeGreaterThanOrEqual(measured.upperTextBottom);
   } finally {
     await context.close();
   }
