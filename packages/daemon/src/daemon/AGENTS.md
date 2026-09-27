@@ -286,9 +286,9 @@ daemon's own. `resolveDaemonEnvironment` (`environment.ts`, `PANE_ENV_ALLOW_LIST
 `SECRETSD_SOCK`, `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` (both cases), `SSL_CERT_DIR`,
 `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, and `PATH` (which `mise env` then replaces) — lays the
 complete `mise env --json` output over them, and drops any credential-shaped name
-(`isSecretLikeName`, case-insensitive: `*_SECRET`, `*_TOKEN`, `*_GRANT`, `*_KEY`, `*_PASSWORD`,
-`*_PASSWD`, `*_PAT`, `*_CREDENTIALS`, their `*_FILE` twins, and anything containing
-`PRIVATE_KEY`) as a second line of defence. That object is
+(`isSecretLikeName`, case-insensitive: `*_SECRET`, `*_TOKEN`, `*_GRANT`, `*_KEY`, `*_SEED`,
+`*_PASSWORD`, `*_PASSWD`, `*_PAT`, `*_CREDENTIALS`, their `*_FILE` twins, and anything containing
+`PRIVATE_KEY`; so the daemon's own `NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE` never reaches a pane) as a second line of defence. That object is
 `paneEnv`: the environment of every command `createDaemonRunner` runs (jj, git, gh, tmux, both
 start-up probes), therefore of the private tmux server the first `tmux -L legion-<project>`
 command forks, therefore of every pane. On top of it a pane gets only the explicit `-e` pairs
