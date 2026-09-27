@@ -419,6 +419,74 @@ func TestEnrollmentRouteWithOldBearerHeaderIsLauncherInvalid(t *testing.T) {
 	}
 }
 
+// mintLauncherCredential drives a full typed-code machine-login round trip through the HTTP API
+// and returns the resulting launcher credential's id and the machine's own signing key — the same
+// setup TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment exercises route by
+// route, factored out here for tests that just need a live launcher credential to sign proofs
+// with.
+func (ts *testServer) mintLauncherCredential(t *testing.T, loginHint, host string) (credentialID string, key *ecdsa.PrivateKey) {
+	t.Helper()
+	key = newSigningKey(t)
+	compact := signMachineLoginRequest(t, key, ts.URL, loginHint, host)
+	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
+	login := decode[struct {
+		PendingID string `json:"pending_id"`
+		Code      string `json:"code"`
+	}](t, body)
+	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
+	looked := decode[wireRecord](t, body)
+	assertion := ts.Approver.Assert(t, testRPID, testOrigin, decodeChallenge(t, looked.Challenges.Approve))
+	_, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
+		map[string]any{"assertion": json.RawMessage(assertion), "code": login.Code})
+	approved := decode[struct {
+		CredentialID *string `json:"credential_id"`
+	}](t, body)
+	if approved.CredentialID == nil || *approved.CredentialID == "" {
+		t.Fatalf("mintLauncherCredential: approve response = %+v, want a credential_id", approved)
+	}
+	return *approved.CredentialID, key
+}
+
+// TestSessionProofRejectedOnLauncherAuthRoute pins authenticate()'s authLauncher guard: a VALID
+// session proof (an "eid" claim, signed by a live enrollment's own key) is refused with
+// 401 LAUNCHER_INVALID exactly as an unsigned bearer is — it must never be treated as a launcher
+// proof merely because it verifies. Without this guard the handler would receive an empty
+// enroll.Credential and either fail differently downstream or, worse, succeed with the zero value.
+func TestSessionProofRejectedOnLauncherAuthRoute(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/enrollments", map[string]any{
+		"kind": "box", "runtime_id": "box-other", "operator": "sjawhar", "thumbprint": "irrelevant",
+	})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("POST /v1/enrollments (valid session proof) = %d, want 401: %s", status, body)
+	}
+	werr := decode[wireError](t, body)
+	if werr.Code != "LAUNCHER_INVALID" {
+		t.Fatalf("code = %q, want LAUNCHER_INVALID", werr.Code)
+	}
+}
+
+// TestLauncherProofRejectedOnSessionAuthRoute pins the mirror guard on authProof: a VALID
+// launcher proof (an "lid" claim, signed by a live launcher credential's own key) is refused with
+// 401 PROOF_INVALID — it must never be treated as a session proof merely because it verifies.
+func TestLauncherProofRejectedOnSessionAuthRoute(t *testing.T) {
+	ts := newTestServer(t)
+	credentialID, machineKey := ts.mintLauncherCredential(t, "sjawhar", "sami-agents")
+
+	status, body := ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/requests", map[string]any{
+		"request": "irrelevant", "session_id": nil,
+	})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("POST /v1/requests (valid launcher proof) = %d, want 401: %s", status, body)
+	}
+	werr := decode[wireError](t, body)
+	if werr.Code != "PROOF_INVALID" {
+		t.Fatalf("code = %q, want PROOF_INVALID", werr.Code)
+	}
+}
+
 // TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment drives the whole typed-code
 // machine-login flow through the HTTP API end to end, then uses the resulting launcher credential
 // to exercise both launcher-proof enrollment routes: machineLogin, readMachineLogin (pending and
@@ -637,6 +705,19 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 		t.Fatalf("approve response = %+v, want state=approved grant_id set credential_id=nil", approved)
 	}
 	grantID := *approved.GrantID
+
+	// The non-pending half of the challenges-omission rule, for an agent_secret record
+	// specifically (the machine-kind half is covered by
+	// TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment's plain read while
+	// still pending): once decided, a re-read carries no challenges either, whatever the kind.
+	status, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+recordID, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/credential-requests/{id} (after approval) = %d: %s", status, body)
+	}
+	decidedRead := decode[wireRecord](t, body)
+	if decidedRead.State != "approved" || decidedRead.Challenges != nil {
+		t.Fatalf("decided record read = %+v, want state=approved with no challenges", decidedRead)
+	}
 
 	status, body = ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/requests/"+requestID, nil)
 	if status != http.StatusOK {
