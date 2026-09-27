@@ -117,7 +117,7 @@ func browserTextColumn(block ast.Node, lines sourceLines) int {
 // this one read alike only since this one reads it as that parser does - a container holding
 // nothing, or a list item opening with another block, read holding an empty paragraph
 // (emptyParagraphFirst); a table with no body row; a footnote definition ending in a block other
-// than a paragraph, after which goldmark puts the definition's backlink - or "" when it holds none.
+// than a paragraph, whether or not anything refers to it - or "" when it holds none.
 func browserOnlyShape(root ast.Node) string {
 	var shape string
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
@@ -141,8 +141,14 @@ func browserOnlyShape(root ast.Node) string {
 			if node.FirstChild() == nil {
 				shape = "an empty typed block"
 			}
-		case *extensionast.FootnoteBacklink:
-			if _, ok := node.Parent().(*extensionast.Footnote); ok {
+		case *extensionast.Footnote:
+			// Goldmark appends a backlink after a referenced definition's last block when that
+			// block is not a paragraph.
+			last := node.LastChild()
+			if _, backlink := last.(*extensionast.FootnoteBacklink); backlink {
+				last = last.PreviousSibling()
+			}
+			if last != nil && !isParagraph(last) {
 				shape = "a footnote definition that ends in a block other than a paragraph"
 			}
 		case *extensionast.Table:
