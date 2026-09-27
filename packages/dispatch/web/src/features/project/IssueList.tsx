@@ -28,7 +28,10 @@ import { issueIsUnread, UnreadDot } from "./UnreadDot";
 
 function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): ReactNode {
   return (
-    <li aria-label={`${issue.key} ${issue.title}`} className={`border-t py-3 ${borderDefault}`}>
+    <li
+      aria-label={`${issue.key} ${issue.title}`}
+      className={`border-t py-3 first:border-t-0 ${borderDefault}`}
+    >
       <div className="flex flex-wrap items-start justify-between gap-2">
         <Link
           className={`min-w-0 flex-1 text-sm ${linkText} ${linkHoverText}`}
@@ -102,18 +105,24 @@ export function IssueList({ project }: { project: string }): ReactNode {
           return null;
         }
         return (
+          // A band is a divider, not a card: a bordered box with 16 px of padding around one
+          // or two rows spent more height on the grouping than on the issues. The label is the
+          // list's section-label role, quieter than the rows it introduces.
           <details
             aria-label={`${statusLabel(currentStatus)} (${grouped.length})`}
-            className={`mb-3 rounded-xl border px-4 ${borderDefault}`}
+            className="mb-4"
             key={currentStatus}
             open={currentStatus !== "done"}
           >
             <summary
-              className={`min-h-11 cursor-pointer py-3 text-base font-semibold ${textPrimaryOnCanvas}`}
+              className={`flex min-h-11 cursor-pointer items-center text-xs font-semibold tracking-wide uppercase ${textMutedOnCanvas}`}
             >
               {statusLabel(currentStatus)} ({grouped.length})
             </summary>
-            <ul aria-label={`${statusLabel(currentStatus)} issues`}>
+            <ul
+              aria-label={`${statusLabel(currentStatus)} issues`}
+              className={`rounded-xl border px-4 ${borderDefault}`}
+            >
               {grouped.map((issue) => (
                 <IssueRow
                   issue={issue}

@@ -150,9 +150,13 @@ export function ProjectPage(): ReactNode {
 
   return (
     <section>
+      {/* One strip at `md` and above. Every control is `shrink-0`, so something had to give
+          when they outgrew the row: it used to be the last of them - the blocked-on-you pill,
+          pushed off the right edge and unreachable. The title gives instead, truncating, which
+          is what a long project name should do. */}
       <header className="flex flex-wrap items-center gap-2 md:min-h-12 md:flex-nowrap">
         <h1
-          className={`order-1 min-w-0 flex-1 truncate text-[22px] font-semibold tracking-tight md:flex-none ${textPrimaryOnCanvas}`}
+          className={`order-1 min-w-0 flex-1 truncate text-[22px] font-semibold tracking-tight ${textPrimaryOnCanvas}`}
         >
           {project.name}
         </h1>
