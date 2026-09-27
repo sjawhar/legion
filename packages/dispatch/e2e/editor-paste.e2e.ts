@@ -263,18 +263,39 @@ async function openWithCellsSelected(
 }
 
 /** Where a paste lands in the two-row table: the caret after a cell's text, or the cells from one
- * to another. */
+ * to another, a single cell when both name it. */
 type Target = string | readonly [string, string];
 
 function targetName(target: Target): string {
-  return typeof target === "string"
-    ? `at the caret after "${target}"`
+  if (typeof target === "string") return `at the caret after "${target}"`;
+  return target[0] === target[1]
+    ? `onto the cell ${target[0]}`
     : `onto ${target[0]} to ${target[1]}`;
 }
 
 /** Opens the two-row table as alice with the caret after `target`, or with its cells selected. */
 async function openAt(browser: Browser, title: string, target: Target) {
   if (typeof target === "string") return openWithCaret(browser, title, table, target, "end");
+  if (target[0] === target[1]) {
+    // A drag that leaves a cell and comes back to it selects that one cell (prosemirror-tables).
+    const opened = await openIssue(browser, title, table);
+    const editor = documentEditor(opened.page);
+    await expect(editor).toContainText(target[0]);
+    const cell = await editor.getByText(target[0]).boundingBox();
+    const other = await editor
+      .getByText(target[0] === "alpha one" ? "beta two" : "alpha one")
+      .boundingBox();
+    if (!cell || !other) throw new Error("the cells have no layout");
+    await opened.page.mouse.move(cell.x + 5, cell.y + cell.height / 2);
+    await opened.page.mouse.down();
+    await opened.page.mouse.move(other.x + other.width / 2, other.y + other.height / 2, {
+      steps: 5,
+    });
+    await opened.page.mouse.move(cell.x + cell.width / 2, cell.y + cell.height / 2, { steps: 5 });
+    await opened.page.mouse.up();
+    await expect(opened.page.locator(".selectedCell")).toHaveCount(1);
+    return opened;
+  }
   const opened = await openWithCellsSelected(browser, target[0], target[1], "shift-click");
   await expect(opened.page.locator(".selectedCell")).not.toHaveCount(0);
   return opened;
@@ -378,6 +399,51 @@ for (const [name, clipboard, target, stored] of [
       await alice.close();
     }
   });
+}
+
+// A copied cell holding more than one block, as a Docs cell of two paragraphs or a list does, keeps
+// all of it, joined into its one line the way the caret path joins pasted text. Fitting the parsed
+// cell into a Milkdown cell, which holds one paragraph, once kept only the first block.
+const cellBlocks = [
+  ["two paragraphs", "<p>x</p><p>y</p>", "x y"],
+  ["a list", "<ul><li>a</li><li>b</li></ul>", "a b"],
+] as const;
+for (const [blocks, cellHtml, joined] of cellBlocks) {
+  const clipboard = {
+    html: `<table><tr><td>${cellHtml}</td><td>z</td></tr></table>`,
+    text: `${joined}\tz`,
+  };
+  for (const [target, stored] of [
+    [
+      "delta",
+      `| alpha one | beta two |  |\n| :--- | :--- | :--- |\n| gamma three | ${joined} | z |\n`,
+    ],
+    ["alpha", `| ${joined} | z |\n| :--- | :--- |\n| gamma three | delta four |\n`],
+    [
+      ["delta four", "delta four"],
+      `| alpha one | beta two |\n| :--- | :--- |\n| gamma three | ${joined} |\n`,
+    ],
+    [
+      ["gamma three", "delta four"],
+      `| alpha one | beta two |\n| :--- | :--- |\n| ${joined} | z |\n`,
+    ],
+    [["alpha one", "delta four"], `| ${joined} | z |\n| :--- | :--- |\n| ${joined} | z |\n`],
+  ] as const) {
+    test(`cells, one holding ${blocks}, pasted ${targetName(target)} keep all of it`, async ({
+      browser,
+    }) => {
+      const { alice, issue, page } = await openAt(browser, "Block cell paste", target);
+      try {
+        await paste(page, clipboard);
+
+        await expect
+          .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+          .toBe(stored);
+      } finally {
+        await alice.close();
+      }
+    });
+  }
 }
 
 // A copied table's row with no cells (an empty <tr>) carries nothing to paste, so the grid paste
