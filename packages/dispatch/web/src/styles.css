@@ -144,6 +144,28 @@ a {
   max-width: none;
 }
 
+/* A document's own headings are content, not the page's identity. `@legion/proof-editor` sizes
+   `h1` at 2em, so an issue specification that opens with a heading repeating the issue title
+   printed that title twice, the second time at nearly twice the size of the page title 40px
+   above it, and wrapped it over three lines on a phone before a reader met a sentence of the
+   document. The scale is capped at the page title's own 22px and descends from there. The
+   library's stylesheet is unlayered, so the override has to outrank `.milkdown h1` (0,1,1);
+   `.dispatch-doc .milkdown h1` (0,2,1) does. */
+.dispatch-doc .milkdown h1 {
+  font-size: 1.375rem;
+  line-height: 1.3;
+}
+
+.dispatch-doc .milkdown h2 {
+  font-size: 1.125rem;
+  line-height: 1.4;
+}
+
+.dispatch-doc .milkdown h3 {
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
 .dispatch-doc .dispatch-mark-active,
 .dispatch-doc .dispatch-block-active {
   box-shadow: inset 0 -2px 0 #0084d1; /* sky-600 */
