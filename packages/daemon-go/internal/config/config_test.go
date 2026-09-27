@@ -980,8 +980,8 @@ func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 }
 
 // Every top-level key of the shipped schema (CONFIG_SCHEMA, packages/daemon/src/daemon/config.ts:
-// 37 keys, and nats_daemon_nkey_seed_file, which #1494 adds to it) plus the new postgres_dsn, and
-// the class it is in at Stage 2. No shipped key may fall through to the typo refusal. Stage 2 moved
+// 38 keys, nats_daemon_nkey_seed_file among them since #1494) plus the new postgres_dsn, and the
+// class it is in at Stage 2. No shipped key may fall through to the typo refusal. Stage 2 moved
 // fifteen keys from known-later to modelled.
 func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	const (

@@ -433,21 +433,24 @@ at error as `NATS refused the daemon a permission: its NATS user lacks that gran
 `operation` and `subject`; the server reports a refusal asynchronously, and nats.go's default
 handler would only write it to stderr, outside the daemon's log. Every other asynchronous error is
 logged at warn with the `subject` of the subscription it names, a dropped connection at warn as
-`NATS connection lost` with its `error`, and the reconnect at info as `NATS connection restored`
-with its `server`.
+`NATS connection lost` with its `error`, the reconnect at info as `NATS connection restored`
+with its `server`, and a terminal close (a fatal server `-ERR`, or reconnects run out) at error,
+once, as `NATS connection closed` with its `error`; the workflow's `workflow intake stopped` error
+then names the same cause as the connection's last error.
 
 Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
-every daemon gets it and restarts, and each boot line must read `paneUser=false`; only then is the
+every daemon gets it and restarts, and each boot line must name the daemon's own user: a Go
+daemon's `legion daemon connects to NATS` line reads `paneUser=false`, and a TypeScript daemon's
+`[legion] daemon NATS connects as nkey user U…` line reads `its own daemon user, not the pane user`
+(#1494, `packages/daemon/src/daemon/AGENTS.md`). Only then is the
 `legion-pane` seed written. A clean boot line proves the user, not every grant: the check before
 the pane seed is written also has each daemon consume a Dispatch and a GitHub event with no error
 line, and searches each daemon's log for `NATS refused the daemon` (either daemon's line), since a missing
 grant on the exceptions lane (`notifications.envoy.exceptions.notifications.role.>`) still boots
-healthy and consumes both events, and that error line is its only sign. A TypeScript daemon reads a
-seed of its own only with #1494 (the TypeScript daemon's seed, `packages/daemon/src/daemon/AGENTS.md`);
-until that lands it connects as the pane seed, so its step waits for #1494. With it, the check also
-has it send a control directive, since its `legion.ctl` publish is refused only when it first sends
-one (`packages/daemon/src/daemon/AGENTS.md`). `legion-pane` is never granted the daemon's
+healthy and consumes both events, and that error line is its only sign. The check also has a
+TypeScript daemon send a control directive, since its `legion.ctl` publish is refused only when it
+first sends one (`packages/daemon/src/daemon/AGENTS.md`). `legion-pane` is never granted the daemon's
 subjects above. Reversed, a daemon holding only the `legion-pane` seed connects as `legion-pane`,
 and each refused subject logs the error line above (a refused consumer or subscription never
 delivers).
