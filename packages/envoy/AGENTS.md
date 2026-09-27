@@ -794,7 +794,10 @@ quote's end count as anything, and none spreads the list (`definitionEndSpreadsI
 `blanksAfterDefinitionItem`); and a quote and a footnote definition together mix the two
 (`footnotedQuoteListSpread`). A blank line after a fenced code block no fence closed is the code's
 and spreads nothing, even where the code's text drops it, unless a quote between ends at it
-(`keepsBlankLinesAfter`). The renderer writes each spacing so that it reads back
+(`keepsBlankLinesAfter`). The code's text drops that line where it ends a list item or a footnote
+definition that flow content follows (a paragraph, a heading, a rule, a fence, a typed block or a
+table), or a quote no container opens right after, and keeps it before a quote, a list item or a
+definition, as that parser reads it (`blankTaker`). The renderer writes each spacing so that it reads back
 (`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
 a list where one would spread what it follows, none inside a list item after a list ending in
 an empty item, where goldmark ends the item at a blank line, and none in a quote after a footnote
