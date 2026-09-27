@@ -1,7 +1,9 @@
 import { canonicalRepo } from "@legion/contracts/repo";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
-import { api } from "../../api/client";
+import { Link } from "react-router-dom";
+
+import { api, isCredentialFeatureOff } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
 import type { RepoProject } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
@@ -9,6 +11,8 @@ import {
   borderDefault,
   dangerHoverText,
   dangerText,
+  linkHoverText,
+  linkText,
   textMutedOnCanvas,
   textMutedOnSurface,
   textPrimaryOnCanvas,
@@ -16,6 +20,7 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { credentialPendingQuery } from "../credentials/pending";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentTokensSection } from "./AgentTokensSection";
 import { ArchitectureSourcesSection } from "./ArchitectureSourcesSection";
@@ -43,6 +48,7 @@ export function SettingsPage(): ReactNode {
   const [failedAction, setFailedAction] = useState<FailedAction>();
   const mappings = useQuery({ queryKey: ["repo-projects"], queryFn: () => api.listRepoProjects() });
   const projects = useQuery(projectsQuery());
+  const credentialsAvailable = useQuery(credentialPendingQuery());
   const putMapping = useMutation<
     RepoProject,
     Error,
@@ -122,6 +128,27 @@ export function SettingsPage(): ReactNode {
       <div className={settingsSectionGap}>
         <ProjectsSection />
         <AgentTokensSection />
+        {credentialsAvailable.isPending ||
+        isCredentialFeatureOff(credentialsAvailable.error) ? null : (
+          <section aria-labelledby="approver-keys-heading">
+            <h2
+              className={`text-xl font-semibold ${textPrimaryOnCanvas}`}
+              id="approver-keys-heading"
+            >
+              Approver keys
+            </h2>
+            <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
+              Register or endorse the WebAuthn keys the broker trusts you to approve credential
+              requests with, and review your live grants.
+            </p>
+            <Link
+              className={`mt-2 inline-block text-sm font-medium ${linkText} ${linkHoverText}`}
+              to="/credentials/keys"
+            >
+              Manage approver keys →
+            </Link>
+          </section>
+        )}
         <section aria-labelledby="repository-projects-heading">
           <h2
             className={`text-xl font-semibold ${textPrimaryOnCanvas}`}
