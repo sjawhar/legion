@@ -25,17 +25,29 @@ import (
 // (packages/daemon/src/daemon/events.ts).
 const noticeExceptionSubjects = "notifications.envoy.exceptions." + roleTopicPrefix + "*"
 
-// noticeReholdDelay spaces the copies of a notice whose forward failed. The listener takes a
-// registered holder as live for its session's TTL and accepts a publish for it, so while a session
-// that stopped running stays registered, each copy is accepted and then reported undelivered in
-// turn. Once the registration lapses, the listener refuses the publish itself (notify.ErrNoHolder),
-// and the executor holds the row until a session holds the role again.
-const noticeReholdDelay = 30 * time.Second
+// The listener's liveness windows for a role holder (packages/envoy/internal/session): a session's
+// registration lives for listenerSessionTTL after its last heartbeat (registry.go), delivery drops
+// a holder whose claim went unrefreshed for listenerClaimStale (claim.go, ClaimStaleAfter), and the
+// plugin heartbeats every pluginHeartbeat. A session that stops running can therefore stay a
+// registered holder for up to the longer of the two windows, and until then the listener accepts a
+// publish for it, forwards it, and reports it undelivered.
+const (
+	listenerSessionTTL = 5 * time.Minute
+	listenerClaimStale = 5 * time.Minute
+	pluginHeartbeat    = 2 * time.Minute
+)
 
-// noticeReholdCap is how many times one notice is queued again, as the TypeScript daemon re-sends
-// one at most three times (processes.ts, resendToRootArchitect): a holder that keeps its
-// registration alive but never confirms a delivery would otherwise be sent copies without end.
-const noticeReholdCap = 3
+// noticeReholdDelays is how long each copy of a notice whose forward failed waits: the nth copy
+// waits the nth delay after the report of the one before it. The first catches a quick relaunch,
+// the second one heartbeat later, and the last is sent after any registration a stopped session
+// left behind must have lapsed, past both windows with a minute to spare. That copy then either
+// reaches the relaunched session or is refused (notify.ErrNoHolder) and held by the executor until
+// a session holds the role again, so nothing is dropped while the architect's claim lives. There
+// are three, as the TypeScript daemon re-sends one at most three times (processes.ts,
+// resendToRootArchitect): a holder that keeps its registration alive but never confirms a delivery
+// would otherwise be sent copies without end, and the report of its last copy is logged and queues
+// nothing.
+var noticeReholdDelays = [...]time.Duration{30 * time.Second, pluginHeartbeat, max(listenerSessionTTL, listenerClaimStale) + time.Minute}
 
 // outboxDedupeKey is the dedupe key the outbox publishes every row under (notice), which names
 // the row: a report carrying another key is not about a notice of this daemon.
@@ -78,10 +90,10 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // (registered, ready, working or idle) is a slow holder that has the notice, as the TypeScript
 // daemon reads it (processes.ts, handleException), so it is logged and nothing is queued.
 //
-// The notice goes back through the executor as a new row of its issue, due after
-// noticeReholdDelay and counted in its Resends, so it is routed, fenced and held as any notice is.
-// It is queued again at most noticeReholdCap times; the report of the last copy is logged and
-// queues nothing. A report about another daemon's publish, another project, a role that is not an
+// The notice goes back through the executor as a new row of its issue, due after the next of
+// noticeReholdDelays and counted in its Resends, so it is routed, fenced and held as any notice
+// is. It is queued again once per delay; the report of its last copy is logged and queues
+// nothing. A report about another daemon's publish, another project, a role that is not an
 // architect, or anything but a notice changes nothing. The exception lane has no redelivery, so a
 // report that cannot be read is logged here and dropped. One published copy of a row is queued
 // again once, keyed by the row's dedupe key: a publish whose 200 was lost is retried under the
@@ -123,13 +135,14 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	default:
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}
-	if notice.Resends >= noticeReholdCap {
+	if notice.Resends >= len(noticeReholdDelays) {
 		r.log.Warn("outbox notice not re-held again: it was queued again the most times a notice is",
 			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "resends", notice.Resends)
 		return nil
 	}
+	delay := noticeReholdDelays[notice.Resends]
 	notice.Resends++
-	row, err := record.NewOutboxRow(issue, notice, r.now().Add(noticeReholdDelay))
+	row, err := record.NewOutboxRow(issue, notice, r.now().Add(delay))
 	if err != nil {
 		return fmt.Errorf("%w: exception %s carries a notice the outbox refuses: %w", errNoticeException, envelope.EventID, err)
 	}

@@ -116,8 +116,8 @@ func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 				t.Fatalf("read the re-held row: %v", err)
 			}
 			if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-2 {"kind": "pr-blocked", "role": "architect", "reason": "max_fix_attempts", "resends": 1}` ||
-				!nextAt.Equal(clock.Add(noticeReholdDelay).Truncate(time.Microsecond)) {
-				t.Fatalf("queued %v due %s; want the one notice of LEGION-2, counted as one re-send, due %s", got, nextAt, clock.Add(noticeReholdDelay))
+				!nextAt.Equal(clock.Add(noticeReholdDelays[0]).Truncate(time.Microsecond)) {
+				t.Fatalf("queued %v due %s; want the one notice of LEGION-2, counted as one re-send, due %s", got, nextAt, clock.Add(noticeReholdDelays[0]))
 			}
 
 			if err := runner.RunOnce(context.Background()); err != nil {
@@ -126,7 +126,7 @@ func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 			if _, delivered := publisher.snapshot(); len(delivered) != 0 {
 				t.Fatalf("delivered %+v before the re-hold delay passed", delivered)
 			}
-			clock = clock.Add(noticeReholdDelay)
+			clock = clock.Add(noticeReholdDelays[0])
 			if err := runner.RunOnce(context.Background()); err != nil {
 				t.Fatalf("run once due: %v", err)
 			}
@@ -264,5 +264,61 @@ func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {
 	}
 	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-1 {"kind": "design-approved", "resends": 1, "version": 3}` {
 		t.Fatalf("queued %v, want the design-approved notice of LEGION-1", got)
+	}
+}
+
+// A relaunch can take minutes to take the Envoy role back. Until then the listener still forwards
+// to the stopped session's registration and reports each copy as a late receipt from it, and once
+// that registration lapses (here 5 minutes after the session stopped) it refuses the publish, and
+// the executor holds the row. The copies are spaced so that the last is sent after any such
+// registration has lapsed, so an architect that takes the role back after four minutes, or after
+// seven, still receives the notice once, and nothing is dropped at the cap.
+func TestANoticeReachesAnArchitectThatTakesMinutesToRelaunch(t *testing.T) {
+	for _, relaunch := range []time.Duration{4 * time.Minute, 7 * time.Minute} {
+		t.Run(relaunch.String(), func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			noticeTree(t, pool, records, false)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			architectClaimOn(t, sup, "LEGION-1", supervise.StateRegistered, "ses_new")
+			start := time.Now()
+			clock := start
+			lapsed, relaunched := start.Add(5*time.Minute), start.Add(relaunch)
+			var logged bytes.Buffer
+			publisher := &holderPublisher{}
+			runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion",
+				now: func() time.Time { return clock }}
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, start))
+
+			taken, received := 0, []outboxPublish{}
+			for clock.Before(start.Add(15*time.Minute)) && len(received) == 0 {
+				if !clock.Before(lapsed) && clock.Before(relaunched) {
+					publisher.setAbsent(architectTopic(t, "LEGION-1"))
+				} else {
+					publisher.setAbsent()
+				}
+				if err := runner.RunOnce(context.Background()); err != nil {
+					t.Fatalf("run at %s: %v", clock.Sub(start), err)
+				}
+				_, delivered := publisher.snapshot()
+				for _, copy := range delivered[taken:] {
+					if clock.Before(relaunched) {
+						// The stopped session's registration takes the copy, and the listener reports it.
+						report := laneReport{fmt.Sprintf("evt-%s", copy.key), "receipt_timeout", copy.topic, "pr-blocked on LEGION-2", copy.payload, copy.key, "ses_stopped"}
+						if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+							t.Fatalf("rehold at %s: %v", clock.Sub(start), err)
+						}
+						continue
+					}
+					received = append(received, copy)
+				}
+				taken = len(delivered)
+				clock = clock.Add(5 * time.Second)
+			}
+			if len(received) != 1 || strings.Contains(logged.String(), "level=WARN") {
+				t.Fatalf("after %s: %d copies taken, received %+v by the relaunched session, log %q; want the notice received once, nothing dropped",
+					clock.Sub(start), taken, received, logged.String())
+			}
+		})
 	}
 }
