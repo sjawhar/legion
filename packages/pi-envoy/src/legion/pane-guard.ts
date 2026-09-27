@@ -1685,6 +1685,18 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     }
     case "tar":
     case "unzip": {
+      const extracting =
+        base === "unzip" ||
+        rest.some((arg, index) => {
+          const text = literalText(arg.exp);
+          return (
+            text === "--extract" ||
+            text === "--get" ||
+            (text?.startsWith("-") === true && !text.startsWith("--") && text.includes("x")) ||
+            (index === 0 && /^[A-Za-z]*x[A-Za-z]*$/.test(text ?? ""))
+          );
+        });
+      if (!extracting) return;
       const targetDirectories: Arg[] = [];
       const short = base === "tar" ? "-C" : "-d";
       const long = base === "tar" ? "--directory" : "--destination";

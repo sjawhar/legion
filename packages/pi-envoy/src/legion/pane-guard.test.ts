@@ -224,6 +224,14 @@ describe("resolution", () => {
       expect(reason ?? "", command).toContain(home);
     }
   });
+  test("allows tar to create or list an archive after changing directory", () => {
+    for (const command of [
+      'tar -czf /tmp/archive.tgz -C "$HOME" .',
+      'tar -tf fixture.tar -C "$HOME"',
+    ]) {
+      expect(bash(command), command).toBeUndefined();
+    }
+  });
   test("follows find -exec through a shell and execution wrappers", () => {
     for (const command of [
       "find ~ -type d -exec sh -c 'rm -rf \"$1\"' _ {} \\;",
