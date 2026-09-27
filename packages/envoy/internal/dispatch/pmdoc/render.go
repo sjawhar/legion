@@ -32,11 +32,8 @@ type renderer struct {
 	otherListMarker bool
 	// footnoteLabels is every footnote label the document defines (footnoteLabelSet).
 	footnoteLabels footnoteLabelSet
-	// listsReadLoose is, for each list the blocks being written stand in, outermost first, whether
-	// goldmark's looseness reads its spread as it is (loosenessReadsSpread); bareEmptyCode writes an
-	// empty code block in a typed block in a list item as its fences alone, and wroteBlankEmptyCode
-	// records one written with a line between them (emptyCodeWrittenBare).
-	listsReadLoose                     []bool
+	// bareEmptyCode writes an empty code block in a typed block in a list item as its fences alone,
+	// and wroteBlankEmptyCode records one written with a line between them (emptyCodeWrittenBare).
 	bareEmptyCode, wroteBlankEmptyCode bool
 	err                                error
 	blockOffsets                       []BlockOffset
@@ -422,8 +419,7 @@ func (r *renderer) list(n *Node, prefix string) {
 	if n.Type == "ordered_list" {
 		start = int(num(n.Attrs["order"], 1))
 	}
-	r.listsReadLoose = append(r.listsReadLoose, loosenessReadsSpread(n))
-	defer func() { r.listsReadLoose = r.listsReadLoose[:len(r.listsReadLoose)-1] }()
+	readsLoose := loosenessReadsSpread(n)
 	for index, item := range n.Children {
 		if item.Type != "list_item" {
 			r.err = fmt.Errorf("%w: list contains %q", ErrSchema, item.Type)
@@ -471,7 +467,7 @@ func (r *renderer) list(n *Node, prefix string) {
 			}
 			children = children[1:]
 		}
-		r.enter(item, indent)
+		r.enterItem(item, indent, readsLoose)
 		r.itemBlocks(children, item.Attrs["spread"] == true, prefix, indent, skipped && marker != "* ")
 		r.leave()
 	}

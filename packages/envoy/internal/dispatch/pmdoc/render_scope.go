@@ -23,6 +23,9 @@ type scope struct {
 	quotes   int
 	footnote *footnoteScope
 	typed    *typedScope
+	// listReadsLoose reports, in a list item's frame, whether goldmark's looseness reads the item's
+	// list's spread as it is (loosenessReadsSpread).
+	listReadsLoose bool
 }
 
 // footnoteScope is a footnote definition the blocks being written stand in: how many quotes stand
@@ -64,6 +67,13 @@ func (r *renderer) enterTyped(container *Node, prefix string, colons int) {
 	r.enter(container, prefix)
 	frame := &r.scopes[len(r.scopes)-1]
 	frame.typed = &typedScope{prefix: prefix, colons: colons, quotes: frame.quotes}
+}
+
+// enterItem enters a list item of a list whose spread goldmark's looseness reads as it is, or not
+// (listReadsLoose).
+func (r *renderer) enterItem(item *Node, indent string, listReadsLoose bool) {
+	r.enter(item, indent)
+	r.scopes[len(r.scopes)-1].listReadsLoose = listReadsLoose
 }
 
 func (r *renderer) leave() { r.scopes = r.scopes[:len(r.scopes)-1] }
@@ -109,7 +119,6 @@ func (r *renderer) inItemBelowQuotes() bool {
 // alone (bareEmptyCode).
 func (r *renderer) emptyCodeWrittenBare() bool {
 	typed := false
-	items := 0
 	for index := len(r.scopes) - 1; index >= 0; index-- {
 		switch r.scopes[index].node.Type {
 		case "blockquote":
@@ -118,10 +127,9 @@ func (r *renderer) emptyCodeWrittenBare() bool {
 			return true
 		case "list_item":
 			if !typed {
-				items++
 				continue
 			}
-			if r.bareEmptyCode || r.scopes[index].node.Attrs["spread"] != true || !r.listsReadLoose[len(r.listsReadLoose)-1-items] {
+			if r.bareEmptyCode || r.scopes[index].node.Attrs["spread"] != true || !r.scopes[index].listReadsLoose {
 				return true
 			}
 			r.wroteBlankEmptyCode = true
