@@ -78,3 +78,15 @@ Text.
 > 	```
 > 	code after a tab
 > 	```
+
+Para.
+> 	2. a
+
+Para.
+> 	2) a
+
+Para.
+> 	10. a
+
+Para.
+> 2. a

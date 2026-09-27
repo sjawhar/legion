@@ -171,6 +171,19 @@ func opensAfterParagraph(block *Node) bool {
 	return false
 }
 
+// opensWithListThatCannotInterrupt reports whether block is a quote whose first block, or the
+// first block of a quote it opens with, is a list whose first item cannot interrupt a paragraph
+// (opensAfterParagraph).
+func opensWithListThatCannotInterrupt(block *Node) bool {
+	for block.Type == "blockquote" && len(block.Children) > 0 {
+		block = block.Children[0]
+		if isList(block) {
+			return !opensAfterParagraph(block)
+		}
+	}
+	return false
+}
+
 // writesBlankAfterItem reports whether blank lines follow item, before the next item of list. The
 // browser editor's parser reads them as spreading the list, except where the lines carry a quote's
 // or a footnote definition's prefix: in a footnote definition, a quote around it or inside it

@@ -416,6 +416,12 @@ func (r *renderer) list(n *Node, prefix string) {
 					}
 				}
 				r.writeSyntax("\n" + strings.Repeat(strings.TrimRight(prefix, " ")+"\n", blanks) + indent)
+				// A quote on the line after a paragraph opens there, and a list opening it whose
+				// first item cannot interrupt a paragraph would not: a quote line first leaves the
+				// list its own line.
+				if blanks == 0 && afterParagraph && opensWithListThatCannotInterrupt(child) {
+					r.writeSyntax(">\n" + indent)
+				}
 			}
 			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0 && marker != "* ")
 			r.otherListMarker = otherMarkers[childIndex]

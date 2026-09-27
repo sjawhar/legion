@@ -40,17 +40,19 @@ func (reader markdownReader) parse(source []byte) ast.Node {
 // bareMarkerLine is a line holding only a list marker.
 var bareMarkerLine = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]*$`)
 
-// emptyItemGuard is a list parser that opens no empty list item - a marker with nothing after it
-// on its line - that would interrupt a paragraph, as the browser editor's parser reads it. Goldmark
+// emptyItemGuard is a list parser that opens no list whose first item could not interrupt a
+// paragraph - an empty item, a marker with nothing after it on its line, or an ordered item
+// numbered from other than one - where it would, as the browser editor's parser reads it. Goldmark
 // refuses one only while the paragraph is the block last opened; that parser also refuses one
 // opening a container on a line that already interrupted the paragraph, so `- a\n  - -` is an item
-// holding the text `-`, and `- a\n  > -` a quote holding it.
+// holding the text `-`, `- a\n  > -` a quote holding it, and `a\n> 2. b` a quote holding the
+// paragraph `2. b`.
 type emptyItemGuard struct{ parser.BlockParser }
 
 func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	line, segment := reader.PeekLine()
 	bare := bareMarkerLine.Match(bytes.TrimRight(line, "\n"))
-	if bare && parent.ChildCount() == 0 && interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
+	if (bare || orderedFromOtherThanOne(line)) && parent.ChildCount() == 0 && interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
 		return nil, parser.NoChildren
 	}
 	// After an indented code block, blank lines between or not, the browser editor's parser opens
