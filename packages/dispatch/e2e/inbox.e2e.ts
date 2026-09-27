@@ -73,18 +73,21 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
     }
 
     const blockingCard = page.getByTestId(`ask-${blocking.id}`);
-    // Session identifiers come first; the tmux target keeps its lower-priority slot, and the
-    // ask's own reference closes the line.
+    // The ask's own reference is on the provenance line; the session's own handles - its ID,
+    // its title, its tmux target - fold behind the author chip, so the line fits a phone and a
+    // 280 px margin without pushing the reference out of reach (LEGION-67).
     const reference = `dispatch://${issue.key}/ask/${blocking.id}`;
+    await expect(blockingCard.getByRole("button", { name: /^Copy / })).toHaveCount(1);
+    await blockingCard.getByRole("button", { expanded: false, name: /e2e-session/ }).click();
     const copyButtons = blockingCard.getByRole("button", { name: /^Copy / });
     await expect(copyButtons).toHaveCount(4);
     expect(
       await copyButtons.evaluateAll((buttons) => buttons.map((button) => button.ariaLabel))
     ).toEqual([
+      `Copy reference ${reference}`,
       "Copy session ID e2e-session",
       "Copy session title e2e-session-title",
       "Copy tmux target dev:4.7",
-      `Copy reference ${reference}`,
     ]);
     await blockingCard.getByRole("button", { name: "Copy session ID e2e-session" }).click();
     await expect(blockingCard.getByText("Copied", { exact: true })).toBeVisible();
@@ -223,14 +226,32 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
   });
 
   try {
+    const streamResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/events"
+    );
     const reloaded = page.reload();
-    await listRequested.promise;
+    // A reload is a cold client: the server starts its stream at the current head and replays
+    // nothing. Posting the hidden reply before that stream is open means the frame never
+    // reaches the page, no pending marker is ever set, and everything below passes without
+    // testing anything. Wait for the stream as the sibling above does.
+    await Promise.all([listRequested.promise, streamResponse]);
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
-    await page.waitForTimeout(150);
+    // The held Inbox response must not land until the browser has handled the hidden ask's
+    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on;
+    // a reply posted after it on the visible ask does. Event ids are delivered in order, so
+    // the marker appearing proves the frame before it was processed.
+    await createComment(
+      visibleIssue.key,
+      { ask_id: visibleAsk.id, body: "Ordering marker." },
+      session
+    );
+    await expect(
+      page.getByTestId(`ask-${visibleAsk.id}`).getByText("Ordering marker.")
+    ).toBeVisible();
     releaseList.resolve();
     await reloaded;
 
@@ -979,3 +1000,71 @@ test("a stale Inbox body landing inside the debounce seeds a later card's thread
     await alice.close();
   }
 });
+
+// A refused snooze or assignment is the row's widest content, and the server writes the reason:
+// `snoozed_until must be in the future` is the handler's own, and a future one may be longer.
+// Left to set its own width it pushed the row - and the whole document - past a phone viewport,
+// so the reader scrolled sideways to reach Retry. The control group is bounded to the row and
+// the alert wraps inside it; this covers both the handler's refusal and a long one.
+for (const refusal of [
+  { label: "the handler's own reason", reason: "snoozed_until must be in the future" },
+  {
+    label: "a long reason",
+    reason:
+      "snoozed_until must be in the future, and this deployment refuses a moment more than one year ahead of the request it arrived on",
+  },
+]) {
+  test(`a refused snooze wraps inside the row and never widens the page: ${refusal.label}`, async ({
+    browser,
+  }) => {
+    await createProject({ key: "CORE", name: "Core" });
+    const issue = await createIssue({ project: "CORE", title: "Deal with it later" });
+    const ask = await createAsk(issue.key, { question: "Which approach?" }, session);
+
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const viewport = page.viewportSize()?.width ?? 0;
+      expect(viewport).toBeGreaterThan(0);
+      await page.route(`**/api/v1/me/asks/${ask.id}/snooze`, (route) =>
+        route.fulfill({
+          body: JSON.stringify({ code: "INVALID_SNOOZE", error: refusal.reason }),
+          contentType: "application/json",
+          status: 400,
+        })
+      );
+      await page.goto("/");
+      const row = page.getByRole("listitem").filter({ has: page.getByTestId(`ask-${ask.id}`) });
+      await expect(row).toBeVisible();
+      await row.getByLabel(`Snooze ${issue.key}`).selectOption("tomorrow");
+
+      const retry = row.getByRole("button", { name: "Retry" });
+      await expect(retry).toBeVisible();
+      await expect(retry).toBeInViewport();
+      // The document never grows past the viewport: no sideways scroll to reach the refusal.
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        viewport
+      );
+      // The refusal never draws over the issue key. Where it lands is the row's own business:
+      // beside the key when the row is wide enough (desktop, since a no-margin route gives the
+      // Inbox the whole width) and on the line below when it is not (a phone). Asserting
+      // "below" pinned one of those two layouts and went red on the other.
+      const key = await page.locator("[data-inbox-owner]").first().boundingBox();
+      // The refusal itself, not its Retry: the alert is the wide thing, and measuring the
+      // narrow control inside it checked something the assertion does not claim.
+      const alert = await row.getByRole("alert").boundingBox();
+      expect(key).not.toBeNull();
+      expect(alert).not.toBeNull();
+      const overlaps =
+        key !== null &&
+        alert !== null &&
+        alert.x < key.x + key.width &&
+        alert.x + alert.width > key.x &&
+        alert.y < key.y + key.height &&
+        alert.y + alert.height > key.y;
+      expect(overlaps).toBe(false);
+    } finally {
+      await alice.close();
+    }
+  });
+}

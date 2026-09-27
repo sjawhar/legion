@@ -70,10 +70,12 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool runs from hides it or
 // is hidden by it. A provider key must name a variable nothing else in the pod sets, since the shim
 // refuses one its own environment names and would replace one Oh My Pi's environment gains after
-// (the pod baseline), and skips one whose `<NAME>_FILE` pointer the pod sets (shim.ReadProviderEnv).
-// launchSecrets are the secrets every launch's spec carries, by name. configure runs it, and the
-// daemon before its boot and for `legion start --check-config`.
-func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecrets []string) error {
+// (the pod baseline), and skips one whose `<NAME>_FILE` pointer the pod sets (shim.ReadProviderEnv);
+// and it must not read a providers secret's key, which the shim would export into Oh My Pi's
+// environment under the provider key's name. launchSecrets are the secrets every launch's spec
+// carries, by name, and providersSecrets those of them the providers Secret carries. configure runs
+// it, and the daemon before its boot and for `legion start --check-config`.
+func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecrets, providersSecrets []string) error {
 	variables := podVariables(pod, launchSecrets)
 	for _, name := range slices.Sorted(maps.Keys(pod.Env)) {
 		if s := variables[name]; !s.operatorMay {
@@ -109,6 +111,9 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 		}
 		if s, set := variables[name+"_FILE"]; set {
 			return fmt.Errorf("provider_keys names %s, whose pointer %s_FILE %s: the shim skips a key whose pointer the pod sets", name, name, s.who)
+		}
+		if key := providerKeys[name]; slices.Contains(providersSecrets, key) {
+			return fmt.Errorf("provider_keys names %s from the providers Secret's key %s, which the pod mounts as the launch secret %s: the shim would export that secret into Oh My Pi's environment as %s", name, key, key, name)
 		}
 	}
 	return nil

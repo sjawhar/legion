@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -169,9 +169,11 @@ func (w *workflowRuntime) bind(url, token string) {
 
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
 // notification stream refuses boot rather than leaving a daemon that reads no events. Boot runs it
-// before reconcile, whose Dispatch listing covers only what precedes a consumer created now.
-func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error {
-	conn, err := nats.Connect(strings.Join(cfg.NatsURLs, ","))
+// before reconcile, whose Dispatch listing covers only what precedes a consumer created now. It
+// connects as the NATS user seed is the nkey seed of — the one boot resolved and every pane
+// receives (launchSecrets) — or with no credential when seed is "".
+func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, seed string) error {
+	conn, err := natsauth.Connect(cfg.NatsURLs, seed)
 	if err != nil {
 		return fmt.Errorf("connect Envoy NATS: %w", err)
 	}

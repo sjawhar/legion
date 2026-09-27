@@ -176,7 +176,8 @@ func TestLoadAllowsStage2ConfigWithoutWorkflowKeys(t *testing.T) {
 
 // Every key Stage 2 models, set to a value other than its default, lands in Config as written —
 // a relative path resolved against the file's directory, as the shipped loader resolves
-// `instructions`, `envoy_token_file`, and `operator_token_file` (loadConfigFromFile, config.ts).
+// `instructions`, `envoy_token_file`, `nats_nkey_seed_file`, and `operator_token_file`
+// (loadConfigFromFile, config.ts).
 func TestLoadReadsEveryStage2Key(t *testing.T) {
 	path := writeConfigFile(t, minimalFile+`port: 14000
 daemon_url: http://127.0.0.1:14000/
@@ -199,6 +200,7 @@ operator_token_file: tokens/OPERATOR_TOKEN
 envoy_url: http://127.0.0.1:19020
 nats_urls: [nats://127.0.0.1:4222, nats://127.0.0.1:4223, nats://127.0.0.1:4222]
 envoy_token_file: /run/legion/ENVOY_TOKEN
+nats_nkey_seed_file: secrets/legion-pane.nk
 `)
 	dir := filepath.Dir(path)
 
@@ -234,6 +236,7 @@ envoy_token_file: /run/legion/ENVOY_TOKEN
 	// occurrence kept. The launch prefix is argv and keeps its repeats (readArgv, config.ts).
 	want.NatsURLs = []string{"nats://127.0.0.1:4222", "nats://127.0.0.1:4223"}
 	want.EnvoyTokenFile = "/run/legion/ENVOY_TOKEN"
+	want.NatsNkeySeedFile = filepath.Join(dir, "secrets/legion-pane.nk")
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load =\n%+v\nwant\n%+v", cfg, want)
 	}
@@ -748,6 +751,11 @@ func TestLoadRefuses(t *testing.T) {
 			want: "envoy_token_file must not be empty",
 		},
 		{
+			name: "nats_nkey_seed_file blank",
+			body: minimalFile + "nats_nkey_seed_file: \"\"\n",
+			want: "nats_nkey_seed_file must not be empty",
+		},
+		{
 			// `secrets` in a pane reads its config and sops's age identity from the pane's own XDG
 			// home, which is the daemon's isolated one: it cannot decrypt there, and handing it the
 			// age identity would hand every pane every agent-tier secret on the box.
@@ -1009,6 +1017,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "slow_command_timeout_seconds", line: "slow_command_timeout_seconds: 300", class: modelled},
 		{key: "envoy_url", line: "envoy_url: http://127.0.0.1:9020", class: modelled},
 		{key: "envoy_token_file", line: "envoy_token_file: /var/run/legion/ENVOY_TOKEN", class: modelled},
+		{key: "nats_nkey_seed_file", line: "nats_nkey_seed_file: /var/run/legion/NATS_NKEY_SEED", class: modelled},
 		{key: "nats_urls", line: "nats_urls: [nats://127.0.0.1:4222]", class: modelled},
 		{key: "operator_token_file", line: "operator_token_file: /var/run/legion/OPERATOR_TOKEN", class: modelled},
 

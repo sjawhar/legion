@@ -10,6 +10,7 @@ import {
 import { parse } from "yaml";
 import { z } from "zod";
 import type { ImageDigestRef } from "./image-ref";
+import { validateNatsUserSeed } from "./nats-seed";
 import { DEFAULT_OMP_INVOCATION } from "./omp-pin";
 import { readSecretPointer } from "./secrets";
 
@@ -132,6 +133,18 @@ export interface DaemonConfig {
    */
   envoyToken?: string;
   /**
+   * The NATS nkey user seed (the shared `legion-pane` user) the daemon connects to Envoy's NATS
+   * as, and the `NATS_NKEY_SEED` secret every root, worker, and controller it spawns receives as a
+   * 0600 file (`NATS_NKEY_SEED_FILE`), which their pi-envoy connections read. Resolved at load from
+   * `nats_nkey_seed_file` (a relative path is resolved against the config file's directory) or
+   * `NATS_NKEY_SEED_FILE` — the file's trimmed contents — or, lower in precedence, the
+   * `NATS_NKEY_SEED` environment value. A set pointer must work: an empty one, or a missing,
+   * unreadable, or blank file, refuses startup naming the key and the path, and so does a seed
+   * that is not an nkey user seed. Optional: an unset seed changes nothing, and every connection
+   * carries no credential.
+   */
+  natsNkeySeed?: string;
+  /**
    * The bearer `legion controller start` presents to `POST /legion/v1/controller/secret`. The
    * loader refuses `operator_token_file` (the tmux daemon launches its own controller), so only a
    * `DaemonConfig` built directly carries one (LEGION-25 Part B).
@@ -244,11 +257,12 @@ export interface ResolveDaemonConfigOptions {
   env?: Record<string, string | undefined>;
   configFile?: Record<string, unknown>;
   cliOverrides?: Partial<DaemonConfig>;
-  /** When false, an `envoy_token_file` / `ENVOY_TOKEN_FILE` pointer is validated as a path but the
-   * file is never read — `envoyToken` becomes the same "(not executed)" placeholder
-   * `loadGitHubApps` uses for an unexecuted key command — so `legion start --check-config` can
-   * validate a `legion.yaml` whose token file is not on this machine. Defaults to true (the daemon
-   * always reads the real token). */
+  /** When false, an `envoy_token_file` / `ENVOY_TOKEN_FILE` or `nats_nkey_seed_file` /
+   * `NATS_NKEY_SEED_FILE` pointer is validated as a path but the file is never read — `envoyToken`
+   * and `natsNkeySeed` become the same "(not executed)" placeholder `loadGitHubApps` uses for an
+   * unexecuted key command — so `legion start --check-config` can validate a `legion.yaml` whose
+   * secret files are not on this machine. Defaults to true (the daemon always reads the real
+   * values). */
   resolveSecrets?: boolean;
 }
 
@@ -305,6 +319,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   bind: null,
   envoy_url: null,
   envoy_token_file: null,
+  nats_nkey_seed_file: null,
   operator_token_file: null,
   // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-dispatch_url
   // error below instead of the generic "Unknown config key" message. Never mapped to a field.
@@ -1025,6 +1040,13 @@ export function loadConfigFromFile(
       ? tokenPath
       : path.resolve(configDir, tokenPath);
   }
+  const natsNkeySeedFile = readString(config.nats_nkey_seed_file, "nats_nkey_seed_file");
+  if (natsNkeySeedFile !== undefined) {
+    const seedPath = requireNonEmpty(natsNkeySeedFile, "nats_nkey_seed_file");
+    fields.natsNkeySeedFile = path.isAbsolute(seedPath)
+      ? seedPath
+      : path.resolve(configDir, seedPath);
+  }
   const operatorTokenFile = readString(config.operator_token_file, "operator_token_file");
   if (operatorTokenFile !== undefined) {
     const tokenPath = requireNonEmpty(operatorTokenFile, "operator_token_file");
@@ -1236,6 +1258,31 @@ export function resolveDaemonConfig(
           : "(not executed)";
     } else if (env.ENVOY_TOKEN !== undefined && env.ENVOY_TOKEN.trim().length > 0) {
       envoyToken = env.ENVOY_TOKEN.trim();
+    }
+  }
+  // The same precedence for the NATS seed: `nats_nkey_seed_file`, then `NATS_NKEY_SEED_FILE`, then
+  // the plain `NATS_NKEY_SEED`; a set pointer must work.
+  const natsNkeySeedFile = resolveValue(
+    undefined,
+    fileString(fields, "natsNkeySeedFile"),
+    env.NATS_NKEY_SEED_FILE,
+    undefined
+  );
+  let natsNkeySeed = opts.cliOverrides?.natsNkeySeed;
+  if (natsNkeySeed === undefined) {
+    if (natsNkeySeedFile.value !== undefined) {
+      const key = natsNkeySeedFile.source === "env" ? "NATS_NKEY_SEED_FILE" : "nats_nkey_seed_file";
+      if (natsNkeySeedFile.value === "") throw new Error(`${key} is set but empty`);
+      if (opts.resolveSecrets ?? true) {
+        natsNkeySeed = readSecretPointer(key, natsNkeySeedFile.value);
+        validateNatsUserSeed(natsNkeySeed, `${key} (${natsNkeySeedFile.value})`);
+      } else {
+        natsNkeySeed = "(not executed)";
+      }
+    } else if (env.NATS_NKEY_SEED !== undefined) {
+      natsNkeySeed = env.NATS_NKEY_SEED.trim();
+      if (natsNkeySeed.length === 0) throw new Error("NATS_NKEY_SEED is set but empty");
+      validateNatsUserSeed(natsNkeySeed, "NATS_NKEY_SEED");
     }
   }
   // The tmux daemon launches its own controller, so an operator token would only be a second way
@@ -1548,6 +1595,7 @@ export function resolveDaemonConfig(
       bind: bind.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
       envoyToken,
+      natsNkeySeed,
       dispatchUrl: resolvedDispatchUrl,
       dispatchToken,
       projects: configuredProjects,

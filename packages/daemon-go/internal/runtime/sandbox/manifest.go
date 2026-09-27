@@ -94,8 +94,9 @@ type launch struct {
 	// (workspace.Location under TreeRoot).
 	workspace string
 	// secrets are the claim Secret's keys beside the provisioning token, each reaching the main
-	// container as a `<NAME>_FILE` pointer: the boot token, the spec's, and the Dispatch bearer
-	// when Dispatch is configured.
+	// container as a `<NAME>_FILE` pointer: the boot token, the spec's but the providers Secret's
+	// own (Options.ProvidersSecrets, which the runtime points at the providers mount whatever the
+	// spec carries), and the Dispatch bearer when Dispatch is configured.
 	secrets map[string]string
 	// root is the tree's root claim, whose Sandbox owns the tree volume; isRoot is spec's claim
 	// being it.
@@ -143,6 +144,9 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	secrets := maps.Clone(spec.Secrets)
 	if secrets == nil {
 		secrets = map[string]string{}
+	}
+	for _, name := range r.providersSecrets {
+		delete(secrets, name)
 	}
 	secrets[bootTokenKey] = spec.BootToken
 	if r.dispatchToken != "" {
@@ -411,20 +415,42 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 
 // providers are the providers Secret's volume and its read-only mount at ProvidersDir: the
 // configured keys alone, each a file named for the variable Oh My Pi reads, which is what the shim
-// exports into Oh My Pi's environment (--provider-env-dir, shim.ReadProviderEnv). Neither without
-// provider keys, so a deployment with none needs no such Secret.
+// exports into Oh My Pi's environment (--provider-env-dir, shim.ReadProviderEnv), and each
+// providers secret (Options.ProvidersSecrets), a file of its own name that the shim skips, since
+// the container's `<NAME>_FILE` points at it (providersPointers). Neither without provider keys or
+// providers secrets, so a deployment with none needs no such Secret.
 func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
-	if len(r.providerKeys) == 0 {
+	if !r.mountsProviders() {
 		return nil, nil
 	}
 	var items []corev1.KeyToPath
 	for _, variable := range sortedKeys(r.providerKeys) {
 		items = append(items, corev1.KeyToPath{Key: r.providerKeys[variable], Path: variable})
 	}
+	for _, name := range r.providersSecrets {
+		items = append(items, corev1.KeyToPath{Key: name, Path: name})
+	}
 	return []corev1.Volume{{Name: providersVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 			SecretName: ProvidersSecretName(r.project), Items: items, DefaultMode: new(int32(0o440)),
 		}}}},
 		[]corev1.VolumeMount{{Name: providersVolume, MountPath: ProvidersDir, ReadOnly: true}}
+}
+
+// mountsProviders reports whether every pod mounts the providers Secret: some provider key or
+// providers secret is configured.
+func (r *Runtime) mountsProviders() bool {
+	return len(r.providerKeys) > 0 || len(r.providersSecrets) > 0
+}
+
+// providersPointers are the `<NAME>_FILE` pointer of each providers secret to its file in the
+// providers mount, in the worker's container and the image probe's alike: set by the runtime for
+// every pod that mounts the Secret, whatever a spec carries, so the shim never exports the secret.
+func (r *Runtime) providersPointers() []corev1.EnvVar {
+	var env []corev1.EnvVar
+	for _, name := range r.providersSecrets {
+		env = append(env, corev1.EnvVar{Name: name + "_FILE", Value: ProvidersDir + "/" + name})
+	}
+	return env
 }
 
 // operatorEnv is the operator's variables for the agent's container, in name order.
@@ -499,7 +525,8 @@ func (r *Runtime) initWaitSeconds() int64 {
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every
 // tmux pane is told (runtime/tmux/spawn.go, panePairs), then the operator's (runtime.kubernetes.pod),
-// then the spec's own, then one `<NAME>_FILE` pointer per secret into the boot projection. None of
+// then the spec's own, then one `<NAME>_FILE` pointer per secret into the boot projection, then one
+// per providers secret into the providers mount. None of
 // them repeats another: the runtime refuses a spec naming one of its own (runtimeOwned), and the
 // daemon an operator's variable naming one of the runtime's or a spec's. LEGION_GRANT_FILE names
 // runtime.GrantFile on the state volume, which is empty at start: the extension makes its
@@ -548,7 +575,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	for _, name := range sortedKeys(l.secrets) {
 		add(name+"_FILE", BootDir+"/"+name)
 	}
-	return env
+	return append(env, r.providersPointers()...)
 }
 
 // nodeSelector is the Legion pool's label and the configured selector, which configure keeps off

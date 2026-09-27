@@ -3,6 +3,7 @@ import path from "node:path";
 import type { GrantResponse, LegionRole } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { messageFor } from "@legion/envoy-client/errors";
+import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import { logger } from "@oh-my-pi/pi-utils";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import pkg from "../package.json";
@@ -639,6 +640,7 @@ export default function legionExtension(pi: PiApi): void {
     const connection = await connect({
       servers: [...defaults.natsUrls],
       name: `legion-control-${sessionID}`,
+      ...natsAuthOptions(process.env),
       reconnect: true,
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,

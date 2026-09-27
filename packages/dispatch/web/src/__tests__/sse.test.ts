@@ -150,7 +150,9 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
     ) {
       throw new Error("issue-less message event is missing its session target");
     }
-    return [["agents", target.slice("session:".length), "messages"]];
+    // An issue-less targeted message is also how a broadcast reaches one recipient, so the
+    // open broadcast views refresh with the agent's own conversation.
+    return [["agents", target.slice("session:".length), "messages"], ["broadcast"]];
   }
   if (event.issue_key === null) {
     if (event.artifact_id === null || event.artifact_id === undefined) {

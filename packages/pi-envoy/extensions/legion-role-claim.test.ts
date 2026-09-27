@@ -2,7 +2,11 @@ import { afterEach, beforeEach, expect, mock, test } from "bun:test";
 import { agentSubject, roleToken } from "@legion/contracts";
 import type { ZodNumberProperty } from "../src/pi-types";
 
+// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
+const { nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
+  nkeyAuthenticator,
+  nkeys,
   connect: async () => ({
     isClosed: () => false,
     close: async () => undefined,

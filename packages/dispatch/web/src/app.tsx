@@ -13,7 +13,7 @@ import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
 import { RefPreviewHost } from "./features/refs/RefPreview";
-import { parseIssuePath, parseProjectPath } from "./features/refs/routes";
+import { parseIssuePath, parseProjectPath, routeHasMargin } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
 import { SearchPalette } from "./features/search/SearchPalette";
 import { SettingsPage } from "./features/settings/SettingsPage";
@@ -74,6 +74,20 @@ const DocumentPage = lazy(() =>
 
 const AgentsPage = lazy(() =>
   import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage }))
+);
+
+const AgentConversationPage = lazy(() =>
+  import("./features/agent-view/AgentConversationPage").then((module) => ({
+    default: module.AgentConversationPage,
+  }))
+);
+
+const BroadcastsPage = lazy(() =>
+  import("./features/agents/BroadcastsPage").then((module) => ({ default: module.BroadcastsPage }))
+);
+
+const BroadcastPage = lazy(() =>
+  import("./features/agents/BroadcastPage").then((module) => ({ default: module.BroadcastPage }))
 );
 
 function IssuePageFallback(): ReactNode {
@@ -139,7 +153,7 @@ function InboxPage(): ReactNode {
   useDocumentTitle("Inbox · Dispatch");
   return (
     <section>
-      <h1 className="mb-6 text-[22px] font-semibold tracking-tight">Inbox</h1>
+      <h1 className="mb-4 text-[22px] font-semibold tracking-tight">Inbox</h1>
       <Inbox />
     </section>
   );
@@ -261,24 +275,28 @@ function NavigationContents({
           onSearch();
         }}
       />
-      <p className={`mt-3 text-sm ${railMutedText}`}>Signed in as {user.login}</p>
-      <button
-        className={`mt-1 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${railAccentText} ${railAccentHoverText}`}
-        disabled={signOutPending}
-        onClick={onSignOut}
-        type="button"
-      >
-        Sign out
-      </button>
-      {signOutError ? (
-        <p className={`mt-1 text-sm ${railDangerText}`} role="alert">
-          Couldn&apos;t sign out.{" "}
-          <button className="font-medium underline" onClick={onSignOut} type="button">
-            Retry
-          </button>
-        </p>
-      ) : null}
       <Sidebar onHide={compact ? undefined : onHideSidebar} onNavigate={onClose} user={user} />
+      {/* Identity is chrome: who you are and how to leave are read once, while the navigation
+          above is read on every visit, so the footer sits under it rather than over it. */}
+      <div className={`mt-auto border-t pt-4 ${railBorder}`}>
+        <p className={`px-2 text-sm ${railMutedText}`}>Signed in as {user.login}</p>
+        <button
+          className={`mt-1 px-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${railAccentText} ${railAccentHoverText}`}
+          disabled={signOutPending}
+          onClick={onSignOut}
+          type="button"
+        >
+          Sign out
+        </button>
+        {signOutError ? (
+          <p className={`mt-1 px-2 text-sm ${railDangerText}`} role="alert">
+            Couldn&apos;t sign out.{" "}
+            <button className="font-medium underline" onClick={onSignOut} type="button">
+              Retry
+            </button>
+          </p>
+        ) : null}
+      </div>
     </>
   );
 }
@@ -307,19 +325,30 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
     },
     String
   );
+  const location = useLocation();
+  // The shell reserves a gutter for a rail only where that rail exists. The collapsed-margin
+  // rail exists only where the route has a margin, so it is reserved from exactly the answer
+  // `features/margin/Margin.tsx` renders from; two answers that disagree leave 80 px of
+  // padding beside a rail that is not there. "Full width" means no expanded column on either
+  // side - on a route with no margin, a hidden sidebar is enough.
+  const hasMargin = routeHasMargin(location.pathname, location.search);
+  const marginRailShown = hasMargin && marginHidden;
+  const marginColumnShown = hasMargin && !marginHidden;
+  const fullWidth = sidebarHidden && !marginColumnShown;
   const mainLayoutClass =
-    sidebarHidden && marginHidden
+    sidebarHidden && marginRailShown
       ? "xl:w-full xl:pl-20 xl:pr-20"
-      : sidebarHidden
-        ? "xl:pl-20"
-        : marginHidden
-          ? "xl:pr-20"
-          : "";
+      : sidebarHidden && !hasMargin
+        ? "xl:w-full xl:pl-20"
+        : sidebarHidden
+          ? "xl:pl-20"
+          : marginRailShown
+            ? "xl:pr-20"
+            : "";
   const connection = useConnectionState();
   const inbox = useQuery(inboxQuery());
   const needsYouCount = inbox.data === undefined ? 0 : waitingOnYou(inbox.data).length;
 
-  const location = useLocation();
   const mainRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const isFirstRender = useRef(true);
@@ -458,7 +487,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             <aside
               aria-label="Navigation"
               aria-modal="true"
-              className={`fixed inset-y-0 left-0 z-30 w-80 max-w-[calc(100vw-2rem)] border-b p-5 shadow-2xl ${railBorder} ${railBg} ${railText}`}
+              className={`fixed inset-y-0 left-0 z-30 flex w-80 max-w-[calc(100vw-2rem)] flex-col overflow-y-auto border-b p-5 shadow-2xl ${railBorder} ${railBg} ${railText}`}
               ref={drawer.containerRef}
               role="dialog"
             >
@@ -489,14 +518,18 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           // longer shifts what they are looking at.
           <aside
             aria-label="Navigation"
-            className={`relative order-1 min-h-dvh w-80 max-w-none border-r p-5 [overflow-anchor:none] ${railBorder} ${railBg} ${railText}`}
+            className={`relative order-1 w-80 max-w-none border-r [overflow-anchor:none] ${railBorder} ${railBg} ${railText}`}
           >
-            {navigation}
+            {/* The aside stretches to the page's height, so the navigation is a viewport-tall
+                column that sticks inside it: on a long issue the links stay reachable, and the
+                identity footer sits at the bottom of the screen rather than the bottom of the
+                document. */}
+            <div className="sticky top-0 flex h-dvh flex-col overflow-y-auto p-5">{navigation}</div>
           </aside>
         )}
         <main
           className={`min-w-0 flex-1 p-6 pb-32 outline-none xl:order-2 xl:pb-6 ${mainLayoutClass}`}
-          data-shell-layout={sidebarHidden && marginHidden ? "full-width" : "standard"}
+          data-shell-layout={fullWidth ? "full-width" : "standard"}
           data-testid="main-content"
           id="main-content"
           ref={mainRef}
@@ -507,6 +540,9 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Routes>
                 <Route element={<InboxPage />} path="/" />
                 <Route element={<AgentsPage />} path="/agents" />
+                <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
+                <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
+                <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
                 <Route element={<IssuePage />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
                 <Route element={<ProjectPage />} path="/projects/:key/architecture" />

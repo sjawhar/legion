@@ -103,7 +103,11 @@ export interface AgentEndEvent {
 }
 
 /** A message entering the session: a user prompt (the daemon's RPC `prompt` among them), a custom
- * message, an assistant reply, or a tool result. */
+ * message, an assistant reply, or a tool result. `message_update` carries the same shape for a
+ * message still being produced — one per streamed delta, with the partial message — and
+ * `message_end` for one that has settled. Measured on omp 18.3.2, the three are emitted
+ * concurrently: a message's `message_end` can reach a handler before its `message_start`, so a
+ * handler must not depend on their order. */
 export interface MessageStartEvent {
   readonly message: unknown;
 }
@@ -158,6 +162,8 @@ export interface PiEventContract {
   readonly agent_start: { readonly event: unknown; readonly result: undefined };
   readonly agent_end: { readonly event: AgentEndEvent; readonly result: undefined };
   readonly message_start: { readonly event: MessageStartEvent; readonly result: undefined };
+  readonly message_update: { readonly event: MessageStartEvent; readonly result: undefined };
+  readonly message_end: { readonly event: MessageStartEvent; readonly result: undefined };
   readonly session_stop: {
     readonly event: SessionStopEvent;
     readonly result: SessionStopEventResult;
