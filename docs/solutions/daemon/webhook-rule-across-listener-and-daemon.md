@@ -56,11 +56,12 @@ caught this before implementation; it is the first thing to check, not the last.
 ## 2. The listener forwards facts; the daemon owns the policy
 
 The listener gained `changed_paths` (unique paths across every commit's three lists, first-seen
-order, newline-joined, capped at 100) and `changed_paths_truncated` (`"true"`/`"false"`), computed
-by `githubPushChangedPaths` with **no** knowledge of `.legion/`. The daemon's `classifyPush`
-owns `HANDOFF_PATH_PREFIX` and the every-path rule. Envoy's own guidance ("It does not own Legion
-workflow policy") is the reason, and the payoff is concrete: the `.legion/` rule can change in
-TypeScript, unit-tested in-process, without touching Go or redeploying the listener.
+order, newline-joined, capped at 100 paths and 32,768 runes of text) and `changed_paths_truncated`
+(`"true"`/`"false"`), computed by `githubPushChangedPaths` with **no** knowledge of `.legion/`. The
+daemon's `classifyPush` owns `HANDOFF_PATH_PREFIX` and the every-path rule. Envoy's own guidance
+("It does not own Legion workflow policy") is the reason, and the payoff is concrete: the
+`.legion/` rule can change in TypeScript, unit-tested in-process, without touching Go or
+redeploying the listener.
 
 Two wire facts bit during implementation and belong in any consumer of a new normalized field:
 

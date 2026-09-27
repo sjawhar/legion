@@ -41,7 +41,7 @@
     "mdast-util-directive": "^3.1.0",
     "micromark-extension-directive": "^4.0.0",
     "micromark-util-types": "^2.0.2",
-    "proof-sdk-upstream": "github:sjawhar/proof-sdk#c2697996af3ca82817e8ce8748a56b491717bd21",
+    "proof-sdk-upstream": "github:sjawhar/proof-sdk#06fc1977f1fee637d92c6393965555e88ab9adcb",
     "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
@@ -54,6 +54,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
     "@types/bun": "latest",
+    "happy-dom": "^20.14.0",
     "typescript": "^5.3.0"
   }
 }

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -32,7 +31,7 @@ func TestApplyFactAdmitsRootAndQueuesWhenFull(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	apply(t, pool, admission, "root-todo", intake.DispatchIssue{Key: "LEGION-208", Seq: 1, Type: "issue.updated", Status: "todo", Title: "Admission", Rank: "B"}, engineStub{})
+	apply(t, pool, admission, "root-todo", intake.DispatchIssue{Key: "LEGION-208", Seq: 1, Type: "issue.updated", Status: "todo", Title: "Admission", Rank: "B", HandedOver: handed}, engineStub{})
 	root := issue(t, pool, "LEGION-208")
 	if root.Phase != phase.Admitted || root.Status != "in_progress" || root.Tree != root.Key {
 		t.Fatalf("admitted root = %#v, want admitted root with truthful in_progress status and its own tree", root)
@@ -43,7 +42,7 @@ func TestApplyFactAdmitsRootAndQueuesWhenFull(t *testing.T) {
 		{kind: record.OutboxKindSupervise, issue: "LEGION-208", payload: record.SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 1}},
 	})
 
-	apply(t, pool, admission, "queued-todo", intake.DispatchIssue{Key: "LEGION-209", Seq: 1, Type: "issue.updated", Status: "todo", Title: "Queued", Rank: "A"}, engineStub{})
+	apply(t, pool, admission, "queued-todo", intake.DispatchIssue{Key: "LEGION-209", Seq: 1, Type: "issue.updated", Status: "todo", Title: "Queued", Rank: "A", HandedOver: handed}, engineStub{})
 	queued := issue(t, pool, "LEGION-209")
 	if queued.Status != "todo" || queued.Tree != queued.Key {
 		t.Fatalf("queued root = %#v, want slotless root with its observed todo status", queued)
@@ -63,9 +62,9 @@ func TestApplyFactPromotesWaitingRootsInRankOrder(t *testing.T) {
 	seedSlotted(t, pool, "LEGION-ACTIVE-2", "B")
 
 	for _, event := range []intake.DispatchIssue{
-		{Key: "LEGION-C", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank C", Rank: "C"},
-		{Key: "LEGION-A", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank A", Rank: "A"},
-		{Key: "LEGION-B", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank B", Rank: "B"},
+		{Key: "LEGION-C", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank C", Rank: "C", HandedOver: handed},
+		{Key: "LEGION-A", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank A", Rank: "A", HandedOver: handed},
+		{Key: "LEGION-B", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank B", Rank: "B", HandedOver: handed},
 	} {
 		apply(t, pool, admission, "arrive-"+event.Key, event, engineStub{})
 	}
@@ -105,7 +104,7 @@ func TestApplyFactAdmitsOrphanAndLogsOnce(t *testing.T) {
 	var logs bytes.Buffer
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(&logs, nil)))
 
-	apply(t, pool, admission, "orphan-todo", intake.DispatchIssue{Key: "LEGION-ORPHAN", Seq: 1, Type: "issue.updated", Status: "todo", Title: "orphan", Parent: "LEGION-MISSING", Rank: "A"}, engineStub{})
+	apply(t, pool, admission, "orphan-todo", intake.DispatchIssue{Key: "LEGION-ORPHAN", Seq: 1, Type: "issue.updated", Status: "todo", Title: "orphan", Parent: "LEGION-MISSING", Rank: "A", HandedOver: handed}, engineStub{})
 	orphan := issue(t, pool, "LEGION-ORPHAN")
 	if orphan.Parent == nil || *orphan.Parent != "LEGION-MISSING" || orphan.Tree != orphan.Key {
 		t.Fatalf("orphan record = %#v, want root tree preserving missing parent", orphan)
@@ -131,60 +130,6 @@ func TestApplyFactDropsWaitingIssueWhenHumanMovesItOutOfTodo(t *testing.T) {
 			assertSlots(t, pool, nil)
 			assertWaiting(t, pool, nil)
 		})
-	}
-}
-
-// A root created in triage is the controller's to triage, so its creation, and nothing after it,
-// wakes the controller: the stream's redelivery of that event and a later edit made while it is
-// still in triage add nothing, and the root is not recorded.
-func TestARootCreatedInTriageWakesTheControllerOnce(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	created := intake.DispatchIssue{Key: "LEGION-300", Seq: 1, Type: "issue.created", Status: "triage", Title: "New", Rank: "A"}
-
-	apply(t, pool, admission, "created", created, engineStub{})
-	apply(t, pool, admission, "created", created, engineStub{})
-	apply(t, pool, admission, "renamed", intake.DispatchIssue{Key: "LEGION-300", Seq: 2, Type: "issue.updated", Status: "triage", Title: "Renamed", Rank: "A"}, engineStub{})
-	assertEffects(t, pool, []effect{
-		{kind: record.OutboxKindControllerNotice, issue: "LEGION-300", payload: record.ControllerNotice{Kind: "triage"}},
-	})
-	assertWaiting(t, pool, nil)
-}
-
-// A child created in triage is its parent's architect's, and a recorded root set back to triage is
-// a human's move on work the daemon already holds: neither wakes the controller for triage.
-func TestNoTriageWakeForAChildOrARecordedRoot(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		run  func(t *testing.T, pool *pgxpool.Pool, admission *Admission)
-	}{
-		{"a child created in triage", func(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
-			apply(t, pool, admission, "child", intake.DispatchIssue{Key: "LEGION-301", Seq: 1, Type: "issue.created", Status: "triage", Title: "Child", Parent: "LEGION-300", Rank: "A"}, engineStub{})
-		}},
-		{"a recorded root set back to triage", func(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
-			seedWaiting(t, pool, "LEGION-302", "A")
-			apply(t, pool, admission, "back", intake.DispatchIssue{Key: "LEGION-302", Seq: 2, Type: "issue.updated", Status: "triage", Title: "waiting", Rank: "A"}, engineStub{})
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			tc.run(t, pool, newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil))))
-			assertEffects(t, pool, nil)
-		})
-	}
-}
-
-// The stream can redeliver a NAK'd issue.created after a later event, under another event id,
-// recorded the root: by then the root is the daemon's, so the late creation wakes nobody.
-func TestALateCreationOfARecordedRootWakesNobody(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	apply(t, pool, admission, "todo", intake.DispatchIssue{Key: "LEGION-304", Seq: 2, Type: "issue.updated", Status: "todo", Title: "New", Rank: "A"}, engineStub{})
-	before := effects(t, pool)
-
-	apply(t, pool, admission, "created", intake.DispatchIssue{Key: "LEGION-304", Seq: 1, Type: "issue.created", Status: "triage", Title: "New", Rank: "A"}, engineStub{})
-	if got := effects(t, pool); !reflect.DeepEqual(got, before) {
-		t.Fatalf("outbox effects after the late creation = %#v, want those before it, %#v", got, before)
 	}
 }
 
@@ -230,7 +175,7 @@ func TestApplyFactReadmitsLingeringRootAndIgnoresOwnStatusEcho(t *testing.T) {
 	lingering := record.Issue{Key: "LEGION-LINGER", Project: "LEGION", Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}
 	putIssue(t, pool, lingering)
 
-	fact := intake.DispatchIssue{Key: lingering.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: lingering.Title, Rank: lingering.Rank}
+	fact := intake.DispatchIssue{Key: lingering.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: lingering.Title, Rank: lingering.Rank, HandedOver: handed}
 	apply(t, pool, admission, "readmit", fact, engine)
 	readmitted := issue(t, pool, lingering.Key)
 	if readmitted.Generation != 4 || readmitted.LingerUntil != nil || readmitted.Phase != phase.Admitted || readmitted.Status != "in_progress" {
@@ -271,7 +216,7 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 	putIssue(t, pool, record.Issue{Key: "LEGION-210", Project: "LEGION", Title: "finished child", Tree: root.Key, Parent: &parentKey,
 		Phase: phase.Done, Generation: 1, Status: "done", Rank: "C", LastDispatchSeq: 1})
 
-	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine)
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
 
 	assertEffects(t, pool, []effect{
 		{kind: record.OutboxKindDispatchStatus, issue: root.Key, payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
@@ -317,7 +262,7 @@ func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain
 	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 0 {
 		t.Fatalf("the merged child while its tree lingers = %s with %d implementer starts, want production_check with none", got.Phase, starts)
 	}
-	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine)
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
 	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 1 {
 		t.Fatalf("the merged child after re-admission = %s with %d implementer starts, want production_check with its implementer started", got.Phase, starts)
 	}
@@ -427,7 +372,7 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			seedSlotted(t, pool, "LEGION-100", "A")
-			root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Admitted, Generation: 2, Status: "todo", Rank: "B", LastDispatchSeq: 2}
+			root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Admitted, Generation: 2, Status: "todo", Rank: "B", HandedOver: true, LastDispatchSeq: 2}
 			putIssue(t, pool, root)
 			parentKey := root.Key
 			child := record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "child", Tree: root.Key, Parent: &parentKey,
@@ -543,7 +488,7 @@ func TestApplyFactRecordsRankTitleAndParentChangesAtTheSameStatus(t *testing.T) 
 	seedWaiting(t, pool, "LEGION-2", "B")
 	seedWaiting(t, pool, "LEGION-3", "C")
 
-	apply(t, pool, admission, "rerank", intake.DispatchIssue{Key: "LEGION-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "renamed", Parent: "LEGION-9", Rank: "AB"}, engine)
+	apply(t, pool, admission, "rerank", intake.DispatchIssue{Key: "LEGION-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "renamed", Parent: "LEGION-9", Rank: "AB", HandedOver: handed}, engine)
 	got := issue(t, pool, "LEGION-3")
 	if got.Rank != "AB" || got.Title != "renamed" || got.Parent == nil || *got.Parent != "LEGION-9" || got.LastDispatchSeq != 2 {
 		t.Fatalf("observed record = %#v, want rank AB, title renamed, parent LEGION-9, seq 2", got)
@@ -585,7 +530,7 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 		}
 	})
 
-	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: key, Seq: 2, Type: "issue.updated", Status: "todo", Title: "lingering", Rank: "A"}, engine)
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: key, Seq: 2, Type: "issue.updated", Status: "todo", Title: "lingering", Rank: "A", HandedOver: handed}, engine)
 	readmitted := issue(t, pool, key)
 	if readmitted.Generation != 2 || readmitted.Phase != phase.Admitted || readmitted.ReadyPendingVersion != nil {
 		t.Fatalf("readmitted = %#v, want generation 2, admitted, no READY pending", readmitted)
@@ -639,16 +584,18 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 
 // A signed-off child reopened to todo belongs to its tree while the tree is live: a child under a
 // live tree takes no slot and runs under that tree's architect (decision 11; the shipped
-// admitOnTodo). The workflow re-enters it, starting the child's next generation under the open
-// gate; its tree and slots stay the tree's. Under a lingering tree the child is an orphan,
-// and admission admits it as a root of its own, as the shipped daemon does.
+// admitOnTodo), and needs no label of its own. The workflow re-enters it, starting the child's next
+// generation under the open gate; its tree and slots stay the tree's. Under a lingering tree the
+// child is an orphan, and admission admits it as a root of its own, as the shipped daemon does —
+// handed to Legion by its label, as every root is.
 func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		lingering bool
+		name       string
+		lingering  bool
+		handedOver bool
 	}{
 		{name: "live tree"},
-		{name: "lingering tree", lingering: true},
+		{name: "lingering tree", lingering: true, handedOver: handed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -684,7 +631,7 @@ func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *test
 				}
 			})
 
-			apply(t, pool, admission, "child-reopened", intake.DispatchIssue{Key: child, Seq: 3, Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B"}, engine)
+			apply(t, pool, admission, "child-reopened", intake.DispatchIssue{Key: child, Seq: 3, Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B", HandedOver: tc.handedOver}, engine)
 			reopened := issue(t, pool, child)
 			var architectStarts, told int
 			for _, got := range effects(t, pool) {
@@ -801,7 +748,7 @@ func TestReconcileReadmitsALingeringRootSetBackToTodo(t *testing.T) {
 	until := fixedNow.Add(time.Hour)
 	putIssue(t, pool, record.Issue{Key: "LEGION-LINGER", Project: "LEGION", Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until})
 
-	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-LINGER", Title: "lingering", Status: "todo", Rank: "A"}})
+	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-LINGER", Title: "lingering", Status: "todo", Rank: "A", HandedOver: handed}})
 	readmitted := issue(t, pool, "LEGION-LINGER")
 	if readmitted.Generation != 4 || readmitted.LingerUntil != nil || readmitted.Phase != phase.Admitted || readmitted.Status != "in_progress" {
 		t.Fatalf("reconciled root = %#v, want generation 4, admitted, and no linger", readmitted)
@@ -837,7 +784,7 @@ func TestReadmissionClearsTheGenerationOfEveryIssueOfTheTree(t *testing.T) {
 		}
 	})
 
-	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-LINGER", Title: "lingering", Status: "todo", Rank: "A"}})
+	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-LINGER", Title: "lingering", Status: "todo", Rank: "A", HandedOver: handed}})
 
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
@@ -878,9 +825,9 @@ func TestReconcileFillsRaisedCapInRankOrderAndIsIdempotent(t *testing.T) {
 	seedWaiting(t, pool, "LEGION-C", "C")
 	admission.cap = 2
 	summaries := []dispatch.IssueSummary{
-		{Key: "LEGION-C", Title: "C", Status: "todo", Rank: "C"},
-		{Key: "LEGION-B", Title: "B", Status: "todo", Rank: "B"},
-		{Key: "LEGION-A", Title: "A", Status: "todo", Rank: "A"},
+		{Key: "LEGION-C", Title: "C", Status: "todo", Rank: "C", HandedOver: handed},
+		{Key: "LEGION-B", Title: "B", Status: "todo", Rank: "B", HandedOver: handed},
+		{Key: "LEGION-A", Title: "A", Status: "todo", Rank: "A", HandedOver: handed},
 	}
 
 	reconcile(t, pool, admission, summaries)
@@ -900,54 +847,22 @@ func TestReconcileFillsRaisedCapInRankOrderAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// A status change applies through Reconcile only when the summary's own sequence is genuinely
+// newer than the record's, and the consumer has caught up to it — otherwise it is either deferred
+// (behind) or, level with what is already recorded, left alone (see hold_test.go's
+// TestReconcileLeavesAnIssueTheStreamHoldsNewerEventsFor and applySummary).
 func TestReconcileReleasesSlotWhoseDispatchStatusLeftActiveSet(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	seedSlotted(t, pool, "LEGION-ACTIVE", "A")
 
-	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-ACTIVE", Title: "active", Status: "done", Rank: "A"}})
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-ACTIVE", Title: "active", Status: "done", Rank: "A", LastSeq: 1},
+	}, 1, 1, true)
 	assertSlots(t, pool, nil)
 	if got := issue(t, pool, "LEGION-ACTIVE"); got.Status != "done" {
 		t.Fatalf("reconciled status = %q, want done", got.Status)
 	}
-}
-
-// Boot's Dispatch read is a snapshot with no actor on it, and an agent's own status write looks
-// exactly like a human's in it. Dispatch says how far each issue's event log has run, so an issue
-// whose log is ahead of the record is left to the stream, which carries the actor and applies the
-// same change with it. An issue the stream has nothing newer for is reconciled as before.
-func TestReconcileLeavesAnIssueTheStreamHoldsNewerEventsFor(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	seedSlotted(t, pool, "LEGION-ACTIVE", "A")
-	inTx(t, pool, func(tx pgx.Tx) {
-		stored, err := record.NewStore().Issue(context.Background(), tx, "LEGION-ACTIVE")
-		if err != nil || stored == nil {
-			t.Fatalf("read the seeded issue: (%+v, %v)", stored, err)
-		}
-		stored.LastDispatchSeq = 10
-		if err := record.NewStore().PutIssue(context.Background(), tx, *stored); err != nil {
-			t.Fatalf("seed the issue's applied sequence: %v", err)
-		}
-	})
-
-	reconcile(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-ACTIVE", Title: "active", Status: "done", Rank: "A", LastSeq: 11},
-	})
-
-	if got := issue(t, pool, "LEGION-ACTIVE"); got.Status != "in_progress" {
-		t.Fatalf("reconciled status = %q, want in_progress: the stream holds the event that changed it", got.Status)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ACTIVE", Index: 0, AdmittedAt: fixedNow}})
-
-	// The same issue once the record has caught up with Dispatch's log: nothing newer is coming.
-	reconcile(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-ACTIVE", Title: "active", Status: "done", Rank: "A", LastSeq: 10},
-	})
-	if got := issue(t, pool, "LEGION-ACTIVE"); got.Status != "done" {
-		t.Fatalf("reconciled status = %q, want done once the record has caught up", got.Status)
-	}
-	assertSlots(t, pool, nil)
 }
 
 func TestCapturedDispatchTodoEventAdmitsAndProjectsActiveSlot(t *testing.T) {
@@ -972,7 +887,12 @@ func TestCapturedDispatchTodoEventAdmitsAndProjectsActiveSlot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read captured Dispatch issue.updated event: %v", err)
 	}
-	if _, err := js.Publish(context.Background(), "notifications.dispatch.issue.CAPTURE-3.issue.updated", captured); err != nil {
+	// The captured issue carries no labels; this one is handed to Legion.
+	labeled := strings.Replace(string(captured), `\"labels\":[]`, `\"labels\":[\"legion\"]`, 1)
+	if labeled == string(captured) {
+		t.Fatal("the captured event has no empty labels to hand the issue over with")
+	}
+	if _, err := js.Publish(context.Background(), "notifications.dispatch.issue.CAPTURE-3.issue.updated", []byte(labeled)); err != nil {
 		t.Fatalf("publish captured Dispatch event: %v", err)
 	}
 	testwait.Eventually(t, "captured event admission", func() bool {

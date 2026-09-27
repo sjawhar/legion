@@ -92,6 +92,7 @@ func TestPanePairs(t *testing.T) {
 		envoyURL:  "http://127.0.0.1:9020",
 		natsURLs:  []string{"nats://a:4222", "nats://b:4222"},
 	}
+	spec.Secrets["NATS_NKEY_SEED"] = "SU-seed"
 	files := secretFiles("/state", spec)
 	got := panePairs(spec, in, files)
 	want := []string{
@@ -117,6 +118,7 @@ func TestPanePairs(t *testing.T) {
 		"-e", "JJ_USER=legion-tester",
 		"-e", "LEGION_BOOT_TOKEN_FILE=/state/secrets/legion-omp-legion-43-tester",
 		"-e", "ENVOY_TOKEN_FILE=/state/secrets/legion-omp-legion-43-tester-envoy_token",
+		"-e", "NATS_NKEY_SEED_FILE=/state/secrets/legion-omp-legion-43-tester-nats_nkey_seed",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("panePairs =\n%q\nwant\n%q", got, want)

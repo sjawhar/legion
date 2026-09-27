@@ -1,6 +1,7 @@
 import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
+  Advised,
   Artifact,
   Ask,
   AskRead,
@@ -1674,6 +1675,7 @@ export async function executeDispatchTool(
     case "dispatch_issue_update": {
       const issueKey = issue();
       const status = optionalString(args, "status");
+      const reason = optionalString(args, "reason");
       const title = optionalString(args, "title");
       const route = optionalString(args, "route");
       const parent = optionalString(args, "parent");
@@ -1683,14 +1685,33 @@ export async function executeDispatchTool(
       const requestedLinks = Array.isArray(args.external_links)
         ? [...new Set(args.external_links as string[])]
         : undefined;
+      let before: IssueDetails;
+      try {
+        before = await client.getIssue(issueKey);
+      } catch (error) {
+        throw refusalWithCode(error);
+      }
+      // The schema admits reason only beside status done. A closed issue refuses messages,
+      // comments, and artifacts, so the reason is posted first and the close waits on it.
+      let closingNote: { readonly id: string; readonly ref: string } | undefined;
+      if (reason !== undefined) {
+        try {
+          const message = await client.message(issueKey, { body: reason, actor });
+          closingNote = {
+            id: message.id,
+            ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id),
+          };
+        } catch (error) {
+          throw refusalWithCode(error, "; the reason was not posted, so the close was not sent");
+        }
+      }
       // The server replaces the whole link set; the common call is "link the pull request
       // I just opened", so merge by URL and keep every existing link (and its kind).
-      let newLinks: string[] = [];
+      const linked = before.external_links.map((link) => link.url);
+      const newLinks = requestedLinks?.filter((url) => !linked.includes(url)) ?? [];
+      let after: Advised<Issue>;
       try {
-        const before = await client.getIssue(issueKey);
-        const linked = before.external_links.map((link) => link.url);
-        newLinks = requestedLinks?.filter((url) => !linked.includes(url)) ?? [];
-        const after = await client.updateIssue(issueKey, {
+        after = await client.updateIssue(issueKey, {
           ...(status === undefined ? {} : { status }),
           ...(title === undefined ? {} : { title }),
           ...(labels === undefined ? {} : { labels }),
@@ -1703,46 +1724,6 @@ export async function executeDispatchTool(
             : { external_links: [...before.external_links, ...newLinks.map((url) => ({ url }))] }),
           actor,
         });
-        const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
-        const changes = [
-          ...(status === undefined ? [] : [`status ${before.status} -> ${after.status}`]),
-          ...(title === undefined ? [] : [`title "${after.title}"`]),
-          ...(labels === undefined
-            ? []
-            : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`]),
-          ...(priority === undefined
-            ? []
-            : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`]),
-          ...(requestedLinks === undefined
-            ? []
-            : [
-                newLinks.length === 0
-                  ? `already linked ${requestedLinks.join(", ")} ${linkCount}`
-                  : `linked ${newLinks.join(", ")} ${linkCount}`,
-              ]),
-          ...(route === undefined
-            ? []
-            : [after.route === null ? "route cleared" : `route ${after.route}`]),
-          ...(parent === undefined
-            ? []
-            : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`]),
-          ...(components === undefined ? [] : [componentsChange(components, after.components)]),
-        ];
-        const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
-          setsStatus: status !== undefined,
-        });
-        return {
-          text: [
-            `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
-            ...adviceLines,
-          ].join("\n"),
-          details: {
-            issue: after.key,
-            status: after.status,
-            external_links: after.external_links.map((link) => link.url),
-            ...(after.advice === undefined ? {} : { advice: after.advice }),
-          },
-        };
       } catch (error) {
         // A URL links exactly one issue. A server from before EXTERNAL_LINK_TAKEN answers the
         // unique-index violation with 500 INTERNAL, which names nothing; say what it means.
@@ -1750,8 +1731,64 @@ export async function executeDispatchTool(
           error instanceof DispatchServiceError && error.status === 500 && newLinks.length > 0
             ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
             : "";
-        throw refusalWithCode(error, taken);
+        if (closingNote === undefined) throw refusalWithCode(error, taken);
+        // The reason is on the issue, so a blind retry would post it a second time: the error
+        // says where the first one is. Only a 4xx is a refusal that proves the issue is still
+        // open; after a 5xx, a timeout, or a transport error the close may have landed anyway.
+        const refused = error instanceof DispatchServiceError && error.status < 500;
+        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const landed = refused
+          ? `${posted} but the issue did not close. Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}`
+          : `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`;
+        if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken + landed);
+        throw new Error(`${error instanceof Error ? error.message : String(error)}${landed}`, {
+          cause: error,
+        });
       }
+      const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
+      const changes = [
+        ...(closingNote === undefined
+          ? []
+          : [`reason posted as message ${closingNote.id} (${closingNote.ref})`]),
+        ...(status === undefined ? [] : [`status ${before.status} -> ${after.status}`]),
+        ...(title === undefined ? [] : [`title "${after.title}"`]),
+        ...(labels === undefined
+          ? []
+          : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`]),
+        ...(priority === undefined
+          ? []
+          : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`]),
+        ...(requestedLinks === undefined
+          ? []
+          : [
+              newLinks.length === 0
+                ? `already linked ${requestedLinks.join(", ")} ${linkCount}`
+                : `linked ${newLinks.join(", ")} ${linkCount}`,
+            ]),
+        ...(route === undefined
+          ? []
+          : [after.route === null ? "route cleared" : `route ${after.route}`]),
+        ...(parent === undefined
+          ? []
+          : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`]),
+        ...(components === undefined ? [] : [componentsChange(components, after.components)]),
+      ];
+      const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
+        setsStatus: status !== undefined,
+      });
+      return {
+        text: [
+          `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
+          ...adviceLines,
+        ].join("\n"),
+        details: {
+          issue: after.key,
+          status: after.status,
+          external_links: after.external_links.map((link) => link.url),
+          ...(closingNote === undefined ? {} : { message: closingNote.id }),
+          ...(after.advice === undefined ? {} : { advice: after.advice }),
+        },
+      };
     }
     case "dispatch_claim": {
       const issueKey = issue();

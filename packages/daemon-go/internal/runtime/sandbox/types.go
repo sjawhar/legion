@@ -87,6 +87,17 @@ type Options struct {
 	// name, each reaching the agent as a `<NAME>_FILE` pointer, which CheckPod refuses the operator's
 	// pod and a provider key.
 	LaunchSecrets []string
+	// ProvidersSecrets are the launch secrets, of LaunchSecrets, that the providers Secret carries
+	// under their own names. The runtime never copies one into a claim's Secret: every pod mounts
+	// the providers Secret's key of that name at ProvidersDir beside the provider keys, and its
+	// `<NAME>_FILE` pointer names that file, in the worker's container and the image probe's alike,
+	// so the shim never exports it into Oh My Pi's environment.
+	ProvidersSecrets []string
+	// NATSUser is the public key of the NATS nkey user the daemon's own seed is, "" when it has
+	// none. The image probe passes only when it read, through its providers secrets' pointers, the
+	// seed of this same user (bootprobe.NATSUser), so a providers Secret holding a blank, invalid,
+	// or other seed refuses boot instead of every agent's connection.
+	NATSUser string
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--no-extensions --extension <plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.

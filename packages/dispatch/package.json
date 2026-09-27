@@ -10,7 +10,7 @@
     "test": "bun test web/src",
     "e2e": "bun run build:web && playwright test --config e2e/playwright.config.ts",
     "e2e:deployed": "playwright test --config e2e/playwright.config.ts",
-    "e2e:install": "playwright install chromium",
+    "e2e:install": "playwright install chromium webkit",
     "typecheck": "bunx tsc --noEmit",
     "lint": "bunx biome check web/src e2e"
   },
@@ -28,6 +28,7 @@
     "vite": "^5"
   },
   "dependencies": {
+    "@assistant-ui/react": "0.15.22",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@hocuspocus/provider": "^2.15.2",

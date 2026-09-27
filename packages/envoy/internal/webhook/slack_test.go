@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/sjawhar/envoy/internal/bus"
 	"net/http/httptest"
 	"strconv"
 	"strings"
@@ -123,6 +124,15 @@ func TestSlackHandler(t *testing.T) {
 			secret:        "s",
 			publishErr:    fmt.Errorf("nats down"),
 			wantStatus:    503,
+			wantPublished: 1,
+		},
+		{
+			name:          "a publish refused as too large returns 422",
+			method:        "POST",
+			body:          validEventCallback,
+			secret:        "s",
+			publishErr:    fmt.Errorf("publish: %w", bus.ErrTooLarge),
+			wantStatus:    422,
 			wantPublished: 1,
 		},
 		{

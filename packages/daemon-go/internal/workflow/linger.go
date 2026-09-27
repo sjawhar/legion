@@ -3,7 +3,6 @@ package workflow
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -89,22 +88,4 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 		}
 	}
 	return intake.Result{}, nil
-}
-
-func (e *Engine) liveTree(ctx context.Context, tx pgx.Tx, root record.Issue) (bool, error) {
-	if root.Lingers() {
-		return false, nil
-	}
-	slots, err := e.store.Slots(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	if slices.ContainsFunc(slots, func(slot record.Slot) bool { return slot.Issue == root.Key }) {
-		return true, nil
-	}
-	issues, err := e.store.Issues(ctx, tx)
-	if err != nil {
-		return false, err
-	}
-	return slices.ContainsFunc(record.Waiting(issues, slots), func(waiting record.Issue) bool { return waiting.Key == root.Key }), nil
 }

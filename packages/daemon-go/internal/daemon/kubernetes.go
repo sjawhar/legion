@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"maps"
 	"net"
-	"slices"
 	"strconv"
 	"time"
 
@@ -20,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 )
@@ -43,32 +42,44 @@ var workerImageTools = sandbox.Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git
 // deterministic refusal as a boot that never ends.
 var imageProbeRetry = bootprobe.Image
 
-// prepareSandbox is what Agent Sandbox needs before anything is opened (C1's translation, C3):
-// the cluster's client from runtime.kubernetes' kubeconfig, the Options every value of the
-// configuration becomes, the worker stream on tcp://<bind>:<worker_stream_port> (the address
-// every pod's shim dials), and the image probe. None of the host's own agent machinery runs: no Oh
-// My Pi invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a
+// sandboxReads is what Agent Sandbox needs that readBoot reads: the cluster's client and the
+// runtime's Options.
+type sandboxReads struct {
+	client *rest.Config
+	opts   sandbox.Options
+}
+
+// readSandbox is Agent Sandbox's share of readBoot (C1's translation, C3): the cluster's client from
+// runtime.kubernetes' kubeconfig, and the Options every value of the configuration becomes, with
+// the worker stream on tcp://<bind>:<worker_stream_port> (the address every pod's shim dials) and
+// natsUser, the public key of the daemon's NATS nkey seed's user ("" with none), which the image
+// probe holds the providers Secret's seed to. None of the host's own agent machinery is read: no
+// Oh My Pi invocation or plugin gate (the image probe proves the image's), no Dispatch token file (a
 // pod reads its bearer from its claim's Secret), no secretsd provider keys (a pod mounts its keys
 // from the providers Secret), and no host gh, git, or jj (a pod runs the image's).
-func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, p *plan) error {
+func readSandbox(cfg config.Config, project, dispatchToken, natsUser string, lookup func(string) (string, bool), log *slog.Logger) (sandboxReads, error) {
 	k := *cfg.Runtime.Kubernetes
 	rc, err := kubeClient(k)
 	if err != nil {
-		return err
+		return sandboxReads{}, err
 	}
-	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
-	if err := CheckOperatorPod(cfg); err != nil {
-		return err
-	}
-	opts, err := sandboxOptions(cfg, k, p.project, p.stream, dispatchToken, log)
+	stream := "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
+	opts, err := sandboxOptions(cfg, k, project, stream, dispatchToken, lookup, log)
 	if err != nil {
-		return err
+		return sandboxReads{}, err
 	}
+	opts.NATSUser = natsUser
+	return sandboxReads{client: rc, opts: opts}, nil
+}
+
+// prepareSandbox is the runtime over readSandbox's client and Options, and the image probe.
+func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan) error {
+	p.stream = reads.opts.StreamURL
 	if o.runtime != nil {
 		p.newRuntime, p.probe = o.runtime, o.probe
 		return nil
 	}
-	p.newRuntime = sandboxRuntime(rc, opts, cfg.SlowCommandTimeout)
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, cfg.SlowCommandTimeout)
 	p.probe = func(ctx context.Context, rt runtime.Runtime) error {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {
@@ -115,8 +126,9 @@ func kubeClient(k config.Kubernetes) (*rest.Config, error) {
 
 // sandboxOptions translates the configuration into the runtime's Options, all but the connection
 // directory and the token source, which boot hands the factory. It refuses what the cluster would
-// refuse only at the first pod: a role's request above its limit.
-func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dispatchToken string, log *slog.Logger) (sandbox.Options, error) {
+// refuse only at the first pod: a role's request above its limit. lookup is the daemon's
+// environment, which can name the NATS nkey seed (launchSecrets).
+func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dispatchToken string, lookup func(string) (string, bool), log *slog.Logger) (sandbox.Options, error) {
 	treeVolume, err := resource.ParseQuantity(k.TreeVolume)
 	if err != nil {
 		return sandbox.Options{}, fmt.Errorf("runtime.kubernetes.tree_volume: %w", err)
@@ -148,7 +160,8 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		Tools:            workerImageTools,
 		Pod:              sandbox.Pod(k.Pod),
 		ProviderKeys:     providerSecretKeys(cfg.ProviderKeys),
-		LaunchSecrets:    launchSecretNames(cfg),
+		LaunchSecrets:    launchSecretNames(cfg, lookup),
+		ProvidersSecrets: providersSecrets(cfg, lookup),
 		BootTimeout:      cfg.WorkerBootTimeout,
 		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
 		TerminationGrace: cfg.WorkerStopTimeout,
@@ -158,21 +171,15 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 	}, nil
 }
 
-// CheckOperatorPod is the Sandbox runtime's refusal of an operator pod or provider key that
-// collides with Legion's own (sandbox.CheckPod) over the configuration, run before anything is
-// opened: boot runs it, and so does `legion start --check-config`, which starts no runtime.
-func CheckOperatorPod(cfg config.Config) error {
-	if cfg.Runtime.Kubernetes == nil {
-		return nil
+// providersSecrets are the launch secrets a pod reads from the providers Secret's key of the same
+// name, never from a copy in its own Secret: the NATS nkey seed, when the daemon has one. The one
+// copy the cluster holds is the deployment's, in the Secret every pod already mounts; the daemon's
+// own file (or variable) is where the daemon reads it, and the two must hold the same seed.
+func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []string {
+	if natsauth.Configured(cfg.NatsNkeySeedFile, lookup) {
+		return []string{natsauth.SeedVariable}
 	}
-	return sandbox.CheckPod(sandbox.Pod(cfg.Runtime.Kubernetes.Pod), providerSecretKeys(cfg.ProviderKeys),
-		workerImageTools, launchSecretNames(cfg))
-}
-
-// launchSecretNames are the names of the secrets every launch's spec carries (launchSecrets), which
-// the runtime refuses the operator's pod and a provider key for.
-func launchSecretNames(cfg config.Config) []string {
-	return slices.Sorted(maps.Keys(launchSecrets(cfg)))
+	return nil
 }
 
 // providerSecretKeys are provider_keys as the runtime takes them: each variable Oh My Pi reads,

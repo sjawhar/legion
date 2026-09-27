@@ -54,7 +54,7 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 		// A READY the gate refused before migration 0016 kept the merger's packet has none: it
 		// would post a message of the outbox marker alone, and a merge queue publish without a
 		// packet fails the whole approval. That READY cannot tell anyone to merge, so it is void,
-		// the issue stays in merging, and the tree's architect is told why.
+		// the issue stays in merging, and the architect that owns the issue is told why.
 		if row.Summary == "" {
 			issue.ReadyPendingVersion = nil
 			if err := e.store.PutIssue(ctx, tx, issue); err != nil {

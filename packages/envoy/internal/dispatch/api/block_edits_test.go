@@ -376,6 +376,342 @@ func TestDocumentEditsWriteAColonLineIntoCodeInsideATypedBlock(t *testing.T) {
 	}
 }
 
+// An accept whose blocks read back as written is stored, including one that writes blocks, such
+// as a rule or a list over a whole paragraph, and a line of dashes is such a rule. Blocks at a
+// list item's start follow its empty first paragraph, and an emptied paragraph is not written
+// where the rest of its block stands without it. Where the text lands at the document's start, a
+// closed front-matter block that opens it is front matter. What the live document holds after a
+// non-empty accept is what its markdown reads back as: the token of a document seeded with the
+// stored markdown is the accepted document's, so two paragraphs in a tight list item leave the
+// item spread, and a block over an item's text leaves no empty paragraph before its nested list.
+func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	const (
+		paragraph  = "Intro.\n\nBody.\n\nAfter.\n"
+		listItem   = "Intro.\n\n- Body.\n- two\n"
+		longItem   = "Intro.\n\n- Body.\n\n  more\n- two\n"
+		ordered    = "Intro.\n\n1. Body.\n2. two\n"
+		nestedItem = "Intro.\n\n- Body.\n  - nested\n- two\n"
+		blockquote = "Intro.\n\n> Body.\n"
+		callout    = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
+		footnote   = "x[^1]\n\n[^1]: Body.\n"
+		code       = "Intro.\n\n```\nBody.\n```\n"
+	)
+	text := func(artifactID string) string {
+		markdown, err := documentService.Text(context.Background(), artifactID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return markdown
+	}
+	suggest := func(t *testing.T, key, spec, with string) (string, model.Comment) {
+		t.Helper()
+		issue := createInteractionIssue(t, handler, key, "accept "+with, spec)
+		created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
+			"suggestion": map[string]string{"replace_with": with}, "actor": sessionActor(),
+		})
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+		}
+		return issue.PrimaryArtifactID, decodeBody[model.Comment](t, created)
+	}
+	for index, test := range []struct{ name, spec, with, want string }{
+		{"text", paragraph, "Changed.", "Intro.\n\nChanged.\n\nAfter.\n"},
+		{"a rule over a paragraph", paragraph, "***", "Intro.\n\n---\n\nAfter.\n"},
+		// An accept's text goes inside the document, so a leading `---` is a rule, as `***` is,
+		// never the front matter that would open a document and swallow the line.
+		{"dashes over a paragraph", paragraph, "---", "Intro.\n\n---\n\nAfter.\n"},
+		{"dashes inside a paragraph", "Intro.\n\nSay Body. now.\n\nAfter.\n", "---", "Intro.\n\nSay&#32;\n\n---\n\n&#32;now.\n\nAfter.\n"},
+		{"a list over a paragraph", paragraph, "- a", "Intro.\n\n- a\n\nAfter.\n"},
+		{"two paragraphs over one", paragraph, "a\n\nb", "Intro.\n\na\n\nb\n\nAfter.\n"},
+		{"dashes inside a line", paragraph, "--- a note", "Intro.\n\n--- a note\n\nAfter.\n"},
+		{"text in a list item", listItem, "Changed.", "Intro.\n\n- Changed.\n- two\n"},
+		{"two paragraphs in a list item", listItem, "a\n\nb", "Intro.\n\n- a\n\n  b\n- two\n"},
+		{"a rule in a list item", listItem, "***", "Intro.\n\n- ***\n- two\n"},
+		{"a list in a list item", listItem, "- a", "Intro.\n\n- - a\n- two\n"},
+		{"code in a list item", listItem, "```\nc\n```", "Intro.\n\n- ```\n  c\n  ```\n- two\n"},
+		{"a list in a list item holding two paragraphs", longItem, "- a", "Intro.\n\n- - a\n\n  more\n- two\n"},
+		{"a list in an ordered item", ordered, "- a", "Intro.\n\n1. - a\n2. two\n"},
+		{"nothing in a list item", listItem, "", "Intro.\n\n- \n- two\n"},
+		{"nothing in a list item holding two paragraphs", longItem, "", "Intro.\n\n- more\n- two\n"},
+		{"nothing in a list item holding a nested list", nestedItem, "", "Intro.\n\n- - nested\n- two\n"},
+		{"a heading in a list item holding a nested list", nestedItem, "# H", "Intro.\n\n- # H\n  - nested\n- two\n"},
+		{"code in a list item holding a nested list", nestedItem, "```\nc\n```", "Intro.\n\n- ```\n  c\n  ```\n  - nested\n- two\n"},
+		// Code text is written literally, but markdown drops the line breaks that end it, so an
+		// accept stores its code without them, as it reads back.
+		{"code text ending in a backslash and a line break", code, "x\\\n", "Intro.\n\n```\nx\\\n```\n"},
+		{"code text ending in spaces and a line break", code, "x  \n", "Intro.\n\n```\nx  \n```\n"},
+		// A line holding only whitespace in a list item's code reads back empty, so an accept
+		// writes the line it brings so.
+		{"a whitespace line in a list item's code", "- ```\n  Body.\n  ```\n", " ", "- ```\n  \n  ```\n"},
+		{"a form-feed line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\f", "- ```\n  a\n  \f\n  b\n  ```\n"},
+		{"a no-break space line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\u00a0", "- ```\n  a\n  \u00a0\n  b\n  ```\n"},
+		{"a vertical tab line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\v", "- ```\n  a\n  \v\n  b\n  ```\n"},
+		{"an ideographic space line in a list item's code", "- ```\n  a\n  Body.\n  b\n  ```\n", "\u3000", "- ```\n  a\n  \u3000\n  b\n  ```\n"},
+		{"nothing between no-break spaces on a line of a list item's code", "- ```\n  \u00a0Body.\u00a0\n  ```\n", "", "- ```\n  \u00a0\u00a0\n  ```\n"},
+		{"text ending in a whitespace line at the end of a list item's code", "- ```\n  Body.\n  ```\n", "x\n  ", "- ```\n  x\n  ```\n"},
+		{"nothing over an indented line of a list item's code", "- item\n\n  ```\n    Body.\n  ```\n", "", "- item\n\n  ```\n  \n  ```\n"},
+		{"two paragraphs beside an item holding a nested list", "- Body.\n- two\n  - nested\n", "x\n\ny", "- x\n\n  y\n- two\n\n  - nested\n"},
+		{"two paragraphs beside an item holding a quote, in an ordered list", "1. Body.\n2. two\n   > q\n", "x\n\ny", "1. x\n\n   y\n2. two\n\n   > q\n"},
+		// An emptied footnote definition holds one empty paragraph, which reads back as the
+		// definition, so its reference stays a reference.
+		{"nothing in a footnote definition", footnote, "", "x[^1]\n\n[^1]: \n"},
+		{"a rule in a footnote definition", footnote, "***", "x[^1]\n\n[^1]: ---\n"},
+		{"a list in a footnote definition", footnote, "- a", "x[^1]\n\n[^1]: - a\n"},
+		{"front matter over an opening heading", "# Body.\n\nText.\n", "---\nstatus: draft\n---\n\n# Body.", "---\nstatus: draft\n---\n\n# Body.\n\nText.\n"},
+		{"front matter over an opening paragraph", "Body.\n\nAfter.\n", "---\ntitle: x\n---\n\nBody.", "---\ntitle: x\n---\n\nBody.\n\nAfter.\n"},
+		// A line of colons in text is written escaped, so it reads back as the text it is and never
+		// as a typed block's fence.
+		{"colons in a paragraph", paragraph, ":::\nb", "Intro.\n\n\\::: b\n\nAfter.\n"},
+		{"colons in a blockquote", blockquote, ":::\nb", "Intro.\n\n> \\::: b\n"},
+		{"colons in a callout", callout, ":::", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\\:::\n:::\n"},
+		// A document that writes nothing reads back as the one empty paragraph it holds.
+		{"nothing over a document's only paragraph", "Body.\n", "", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			artifactID, comment := suggest(t, "K"+string(rune('A'+index/26))+string(rune('A'+index%26)), test.spec, test.with)
+			if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
+				t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+			}
+			if after := text(artifactID); after != test.want {
+				t.Fatalf("after accepting = %q, want %q", after, test.want)
+			}
+			if test.with == "" {
+				// An emptied paragraph stays in the live document where the markdown drops it.
+				return
+			}
+			_, token, err := documentService.TextWithToken(context.Background(), artifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seeded := createInteractionIssue(t, handler, "S"+string(rune('A'+index/26))+string(rune('A'+index%26)), "seeded "+test.name, test.want)
+			if _, readBack, err := documentService.TextWithToken(context.Background(), seeded.PrimaryArtifactID); err != nil || readBack != token {
+				t.Fatalf("the accepted document's token = %s, but its markdown reads back as %s (%v)", token, readBack, err)
+			}
+		})
+	}
+	// An unclosed `---` that opens the document is a rule there, as `***` is.
+	opening := map[string]string{}
+	for index, with := range []string{"---", "***"} {
+		artifactID, comment := suggest(t, "H"+string(rune('A'+index)), "# Body.\n\nText.\n", with)
+		if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
+			t.Fatalf("accept %q: status=%d body=%s", with, accepted.Code, accepted.Body.String())
+		}
+		opening[with] = text(artifactID)
+	}
+	if opening["---"] != opening["***"] {
+		t.Fatalf("accepting `---` over an opening heading = %q, want what `***` writes, %q", opening["---"], opening["***"])
+	}
+}
+
+// acceptCase is a suggestion of with over quote in a document seeded with spec, after replacing
+// emptied's text with refill through the edit route (as an edit can leave a document that already
+// reads back otherwise), and what accepting it does: refused naming says, or stored as want.
+type acceptCase struct{ name, spec, quote, with, emptied, refill, says, want string }
+
+// checkAccept accepts test's suggestion and checks the outcome. A refusal is 400 INVALID_OP naming
+// test.says, with the document unchanged and the suggestion open. A stored accept reads back as
+// the live document: a document seeded with the stored markdown holds the accepted one's token,
+// except after an empty replacement, whose emptied paragraph stays in the live document, and in a
+// document the edit left reading back otherwise already.
+func checkAccept(t *testing.T, handler http.Handler, documentService *docs.Service, key string, test acceptCase) {
+	t.Helper()
+	issue := createInteractionIssue(t, handler, key, test.name, test.spec)
+	if test.emptied != "" {
+		edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+			"ops": []map[string]any{{"op": "replace", "find": test.emptied, "with": test.refill}},
+		}, "alice")
+		if edited.Code != http.StatusOK || !strings.Contains(edited.Body.String(), `"changed":true`) {
+			t.Fatalf("empty %q: status=%d body=%s", test.emptied, edited.Code, edited.Body.String())
+		}
+	}
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
+		"suggestion": map[string]string{"replace_with": test.with}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+	stored, token, err := documentService.TextWithToken(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if test.says != "" {
+		if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_OP"`) || !strings.Contains(accepted.Body.String(), test.says) {
+			t.Fatalf("accept: status=%d body=%s, want 400 INVALID_OP saying %q", accepted.Code, accepted.Body.String(), test.says)
+		}
+		if stored != before {
+			t.Fatalf("after refused accept = %q, want unchanged %q", stored, before)
+		}
+		read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+		if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
+			t.Fatalf("suggestion after refusal: status=%d body=%s, want it open", read.Code, read.Body.String())
+		}
+		return
+	}
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+	if stored != test.want {
+		t.Fatalf("after accepting = %q, want %q", stored, test.want)
+	}
+	if test.with == "" || test.emptied != "" {
+		return
+	}
+	seeded := createInteractionIssue(t, handler, "S"+key, "seeded "+test.name, stored)
+	if _, readBack, err := documentService.TextWithToken(context.Background(), seeded.PrimaryArtifactID); err != nil || readBack != token {
+		t.Fatalf("the accepted document's token = %s, but its markdown reads back as %s (%v)", token, readBack, err)
+	}
+}
+
+// An accept is judged by the whole document it would store. Two lists of one kind side by side
+// are written with different markers, so they read back as two lists wherever an accept leaves
+// them: a list written beside one, text that joins away what stood between two, or blocks an
+// accept writes where a callout it rewrites or consumes stood. A task item emptied of its text
+// reads back as a plain item, so emptying one is refused, naming that and advising rejecting. What
+// the document already reads back otherwise is not the accept's: a task item read back as plain,
+// a paragraph ending in a hard break that reads back with a literal backslash. Text elsewhere, or
+// beside it in the same block, is stored, and a second task item emptied is still refused.
+func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	const (
+		callout = ":::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::"
+		task    = "leaves blocks the document reads back otherwise (a task item reads back as a plain list item); reject the suggestion"
+	)
+	for index, test := range []acceptCase{
+		{name: "a list before a list", spec: "Intro.\n\nBody.\n\n- y\n", quote: "Body.", with: "- x", want: "Intro.\n\n- x\n\n* y\n"},
+		{name: "a list after a list", spec: "Intro.\n\n- y\n\nBody.\n", quote: "Body.", with: "- x", want: "Intro.\n\n- y\n\n* x\n"},
+		{name: "an ordered list before an ordered list", spec: "Intro.\n\nBody.\n\n1. y\n", quote: "Body.", with: "1. x", want: "Intro.\n\n1. x\n\n1) y\n"},
+		{name: "two bullet lists", spec: "Intro.\n\nBody.\n\nAfter.\n", quote: "Body.", with: "- a\n\n* b", want: "Intro.\n\n- a\n\n* b\n\nAfter.\n"},
+		{name: "nothing between two lists", spec: "- a\n\nBody.\n\n- b\n", quote: "Body.", want: "- a\n\n\n\n* b\n"},
+		{name: "text joining a list item to the paragraph before a list", spec: "- y\n- Body.\n\nAfter here.\n\n- z\n", quote: "Body. After", with: "x", want: "- y\n- x here.\n\n* z\n"},
+		{name: "a list beside a callout's rewrite, before a list", spec: "- y\n\n" + callout + "\n", quote: "Body.", with: "- x\n\n" + callout, want: "- y\n\n* x\n\n" + callout + "\n"},
+		{name: "a list consuming a callout beside a list", spec: "Intro.\n\n" + callout + "\n\n- After here.\n", quote: "Body. After", with: "- a", want: "Intro.\n\n- a\n\n* &#32;here.\n"},
+		{name: "nothing in a task item", spec: "- [ ] Body.\n- [x] two\n", quote: "Body.", says: task},
+		{name: "nothing in a task item, in a document already reading another back as a plain item", spec: "- [ ] Done\n\nIntro.\n\n- [ ] Body.\n", quote: "Body.", emptied: "Done", says: task},
+		{name: "text in a document already reading a task item back as a plain item", spec: "- [ ] Done\n\nBody.\n", quote: "Body.", emptied: "Done", with: "Changed.", want: "- [ ] \n\nChanged.\n"},
+		// A block that already reads back otherwise the same way is not the accept's, though the
+		// accept changes it: text beside a stale break in it is stored, a new break is refused.
+		{name: "text beside a task item already read back as plain, in its list", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "Changed.", want: "- [ ] \n- [x] Changed.\n\nAfter.\n"},
+		{name: "nothing in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n", quote: "Body.", emptied: "Gone.", says: task},
+		{name: "two paragraphs in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "two\n\nparas", want: "- [ ] \n- [x] two\n\n  paras\n\nAfter.\n"},
+		{name: "text from code into the paragraph after it", spec: "Intro.\n\n```\nabc\n```\n\nNext here.\n", quote: "abc Next", with: "x", want: "Intro.\n\n```\nx here.\n```\n"},
+		{name: "text from a list item's code into the next item", spec: "- ```\n  abc\n  ```\n- Next\n", quote: "abc Next", with: "x", want: "- ```\n  x\n  ```\n"},
+		{name: "text ending in a break over code that already ends in one", spec: "Intro.\n\n```\nabc\n```\n", quote: "abc", emptied: "abc", refill: "abc\n", with: "xyz\n", want: "Intro.\n\n```\nxyz\n\n```\n"},
+		{name: "text beside code the document already writes with ending breaks", spec: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\n```\nc\n```\n:::\n", quote: "Body.", emptied: "c", refill: "c\n\n", with: "Changed.", want: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nChanged.\n\n```\nc\n\n\n```\n:::\n"},
+		{name: "text in a paragraph already reading back with a literal backslash", spec: "Body. more\\\nxyz\n\nAfter.\n", quote: "Body.", emptied: "xyz", with: "Changed.", want: "Changed. more\\\n\n\nAfter.\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checkAccept(t, handler, documentService, "L"+string(rune('A'+index)), test)
+		})
+	}
+}
+
+// An empty accept inside a typed block stores the block holding the one empty paragraph it reads
+// back holding, and is refused where that does not read back, as in a list item, and for an ask,
+// whose question paragraph+ bullet_list? cannot be empty.
+func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	for index, test := range []struct {
+		name, spec, code, want string
+	}{
+		{"a top-level callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n", "", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\n:::\n"},
+		{"a nested callout", "::::callout{#outer kind=\"note\" title=\"T\"}\n:::callout{#inner kind=\"note\" title=\"T\"}\nBody.\n:::\n::::\n", "", "::::callout{#outer kind=\"note\" title=\"T\"}\n:::callout{#inner kind=\"note\" title=\"T\"}\n\n:::\n::::\n"},
+		{"a callout in a blockquote", "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n", "", "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> \n> :::\n"},
+		{"a callout in a list item", "- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  Body.\n  :::\n", "INVALID_OP", ""},
+		{"an ask", ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n:::\n", "INVALID_ASK_BLOCK", ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "T"+string(rune('A'+index)), "empty typed block", test.spec)
+			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
+				"suggestion": map[string]string{"replace_with": ""}, "actor": sessionActor(),
+			})
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+			}
+			comment := decodeBody[model.Comment](t, created)
+			before, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
+			if test.code == "" {
+				if accepted.Code != http.StatusOK {
+					t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+				}
+				if after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID); err != nil || after != test.want {
+					t.Fatalf("after accepting = %q (%v), want %q", after, err, test.want)
+				}
+				return
+			}
+			if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("accept: status=%d body=%s, want 400 %s", accepted.Code, accepted.Body.String(), test.code)
+			}
+			after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
+			if err != nil || after != before {
+				t.Fatalf("after refused accept = %q (%v), want unchanged %q", after, err, before)
+			}
+			read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+			if read.Code != http.StatusOK || decodeBody[model.Comment](t, read).Resolved {
+				t.Fatalf("suggestion after refusal: status=%d body=%s, want it open", read.Code, read.Body.String())
+			}
+		})
+	}
+}
+
+// An accept in or around a typed block is judged by what the typed block reads back as: lists of
+// one kind side by side in a callout are written with different markers, as they are in the
+// blockquote a callout rewritten under its own id stands in, and read back as written. Blocks a
+// same-id rewrite puts where the typed block stood are refused naming that block, a list item for
+// an empty callout, which cannot be written there.
+func TestAcceptingASuggestionAroundATypedBlock(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	const (
+		callout = ":::callout{#c1 kind=\"note\" title=\"T\"}\n"
+		rewrite = callout + "Body2.\n:::\n\n- x\n"
+	)
+	for index, test := range []acceptCase{
+		{name: "a list beside a list in a callout", spec: "Intro.\n\n" + callout + "Body.\n\n- y\n:::\n", quote: "Body.", with: "- x", want: "Intro.\n\n" + callout + "- x\n\n* y\n:::\n"},
+		{name: "a list beside a list in a blockquote inside a callout", spec: callout + "> Body.\n>\n> - y\n:::\n", quote: "Body.", with: "- x", want: callout + "> - x\n>\n> * y\n:::\n"},
+		{name: "a callout rewritten beside a list in a blockquote", spec: "Intro.\n\n> " + callout + "> Body.\n> :::\n>\n> - y\n", quote: "Body.", with: rewrite,
+			want: "Intro.\n\n> " + callout + "> Body2.\n> :::\n>\n> - x\n>\n> * y\n"},
+		{name: "an empty callout beside a callout rewritten in a list item", spec: "- Lead.\n\n  " + callout + "  Body.\n  :::\n", quote: "Body.",
+			with: callout + "Re.\n:::\n\n:::callout{kind=\"note\" title=\"T\"}\n:::", says: "writes two callouts in this list item"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			checkAccept(t, handler, documentService, "N"+string(rune('A'+index)), test)
+		})
+	}
+}
+
 // A code block's text is literal, so a replace there writes with exactly as sent - whitespace at
 // its edges, markdown syntax, a reference, a tab - through the edits route and through an
 // accepted suggestion alike.

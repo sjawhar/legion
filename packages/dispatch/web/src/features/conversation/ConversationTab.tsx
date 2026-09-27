@@ -1346,7 +1346,12 @@ export function ConversationTab({
                 ref={registerObserved}
               >
                 <div className="min-w-0 flex-1">
-                  <AskCard ask={item.ask} thread="collapsed" />
+                  {/* The margin shows this same open ask beside the document, so a full
+                      two-row composer here is the question, its options and its answer
+                      controls twice on one screen. The timeline is the record: it carries the
+                      compact density, whose options answer in one click and whose note field
+                      is one disclosure away. */}
+                  <AskCard ask={item.ask} thread="collapsed" variant="compact" />
                 </div>
                 <TurnPin disabled={hasFailedOps} onPin={onPin} pinned={pinned} />
               </li>
@@ -1354,17 +1359,40 @@ export function ConversationTab({
           }
           return (
             <li
-              className={`flex items-baseline gap-2 px-2 text-xs ${textMutedOnCanvas}`}
+              className={`flex flex-wrap items-baseline gap-x-2 px-2 text-xs ${textMutedOnCanvas}`}
               data-event-seq={item.lastSeq}
               data-kind="activity"
               data-turn={item.id}
               key={item.id}
               ref={registerObserved}
             >
-              <span className="font-medium">{resolveAuthor(item.author, titles).label}</span>
-              <ActivityLine description={item.description} event={item.event} issueKey={issueKey} />
-              <span aria-hidden="true">·</span>
-              <Timestamp at={item.at} />
+              {/* The author keeps its whole width until the row runs out, then truncates with
+                  the full label on hover - a live session title can be a sentence, and left to
+                  set its own width it pushed the line, the turns list and the document past
+                  the viewport. The description keeps a floor so it wraps as prose rather than
+                  one word per line. */}
+              {/* Who and when are one group that never breaks: the time used to wrap alone to
+                  the start of the next row once the author took most of the line. The author
+                  truncates inside it, with the full label on hover - a live session title can
+                  be a whole sentence - and only the description wraps, with a floor so it
+                  wraps as prose rather than one word per line. */}
+              <span className="flex max-w-full min-w-0 shrink-0 items-baseline gap-x-2 whitespace-nowrap">
+                <span
+                  className="min-w-0 truncate font-medium"
+                  title={resolveAuthor(item.author, titles).label}
+                >
+                  {resolveAuthor(item.author, titles).label}
+                </span>
+                <span aria-hidden="true">·</span>
+                <Timestamp at={item.at} />
+              </span>
+              <span className="min-w-48 flex-1 break-words">
+                <ActivityLine
+                  description={item.description}
+                  event={item.event}
+                  issueKey={issueKey}
+                />
+              </span>
             </li>
           );
         })}

@@ -12,10 +12,11 @@
 // `runtime.kubernetes` block's own values, and the keys outside it every pod needs.
 //
 // Load reads the file and nothing it names: a path key (`instructions`, `envoy_token_file`,
-// `operator_token_file`, `runtime.kubernetes.kubeconfig`) is resolved against the file's directory
-// and kept as a path. What sits at that path is read at boot, by ReadSecretPointer,
-// MaterializeDeploymentInstructions, and the runtime's client, so a configuration validates on a
-// machine that has none of the files it names.
+// `nats_nkey_seed_file`, `operator_token_file`, `runtime.kubernetes.kubeconfig`) is resolved
+// against the file's directory and kept as a path. What sits at that path is read at boot, by
+// ReadSecretPointer, ReadDeploymentInstructions, and the runtime's client, so a configuration loads
+// on a machine that has none of the files it names; `legion start --check-config` then reads them
+// as boot does (daemon.CheckStart).
 package config
 
 import (
@@ -106,6 +107,10 @@ type Config struct {
 	// EnvoyTokenFile is the Envoy bearer's file, "" when none; every pane receives the token as
 	// a 0600 file of its own.
 	EnvoyTokenFile string
+	// NatsNkeySeedFile is the file holding the NATS nkey user seed the daemon connects as and every
+	// pane receives, "" when the file names none (natsauth.Seed then reads NATS_NKEY_SEED_FILE or
+	// NATS_NKEY_SEED from the daemon's environment).
+	NatsNkeySeedFile string
 
 	// Stage 3's workflow dependencies. DispatchTokenFile remains a pointer here: boot reads the
 	// bearer only after every local configuration refusal has passed.
@@ -216,6 +221,7 @@ type fileConfig struct {
 	EnvoyURL          *string
 	NatsURLs          []string
 	EnvoyTokenFile    *string
+	NatsNkeySeedFile  *string
 	DispatchURL       *string
 	DispatchTokenFile *string
 	Projects          map[string]Project
@@ -331,6 +337,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.NatsURLs, err = readNatsURLs(value, key)
 		case "envoy_token_file":
 			file.EnvoyTokenFile, err = readNonEmptyString(value, key)
+		case "nats_nkey_seed_file":
+			file.NatsNkeySeedFile, err = readNonEmptyString(value, key)
 		case "dispatch_url":
 			file.DispatchURL, err = readString(value, key)
 		case "dispatch_token_file":
@@ -898,6 +906,9 @@ func resolveStage2(file fileConfig, configDir string, cfg *Config) error {
 	cfg.NatsURLs = file.NatsURLs
 	if file.EnvoyTokenFile != nil {
 		cfg.EnvoyTokenFile = underConfig(*file.EnvoyTokenFile, configDir)
+	}
+	if file.NatsNkeySeedFile != nil {
+		cfg.NatsNkeySeedFile = underConfig(*file.NatsNkeySeedFile, configDir)
 	}
 	return nil
 }

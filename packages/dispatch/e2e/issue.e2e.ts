@@ -329,7 +329,7 @@ test("editing the parent line moves the issue across Children tabs live", async 
   try {
     await parentPage.goto(`/issues/${newParent.key}`);
     await parentPage.getByRole("tab", { name: "Children" }).click();
-    await expect(parentPage.getByText("No child issues.")).toBeVisible();
+    await expect(parentPage.getByText("No child issues")).toBeVisible();
 
     await moverPage.goto(`/issues/${mover.key}`);
     await expect(moverPage.getByRole("link", { name: oldParent.key })).toBeVisible();
@@ -352,7 +352,7 @@ test("editing the parent line moves the issue across Children tabs live", async 
 
     // And child.removed empties it again, still without a reload.
     await expect(movedRow).toHaveCount(0);
-    await expect(parentPage.getByText("No child issues.")).toBeVisible();
+    await expect(parentPage.getByText("No child issues")).toBeVisible();
   } finally {
     await context.close();
   }

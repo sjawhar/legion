@@ -97,7 +97,8 @@ arrives as a wake. At every start, before anything else:
    `issues.<KEY>.architect.state` is `failed` and whose `issues.<KEY>.phase` is not `done`, exactly
    as the matching wake below. A parked tree (root phase `done`: it lingers or is closed) needs
    nothing from you: a failed architect ignores the park and reads `failed` until the tree closes.
-2. List the project's triage issues with `dispatch_issues({project, status: "triage", limit: 250})`.
+2. List the project's triage issues handed to Legion with
+   `dispatch_issues({project, status: "triage", label: "legion", limit: 250})`.
    When its first line ends `(showing N of M)`, it is one page: say in your summary how many rows
    it left unread. The rows show no parent, so open each row with `dispatch_read`: one whose
    `Links:` name a `child_of` issue is a child, which its parent's architect owns, so leave it,
@@ -105,11 +106,23 @@ arrives as a wake. At every start, before anything else:
    of this issue, not its parent). Of the rest, triage each that `legion state --json` does not
    record under `issues` as a new issue. A root recorded there and now in `triage` is work the
    daemon holds that a human pulled back: never re-admit it yourself; name it in your summary to
-   the human ("<KEY> was pulled back to triage; what do you want?"). This listing is also the only
-   way you learn of an unrecorded root moved back into triage, or of a child detached to a root
-   while it is in triage, since the daemon wakes you only on a root's creation.
+   the human ("<KEY> was pulled back to triage; what do you want?").
 
 The issue record and Dispatch are the truth; the topic is the wake.
+
+### Issues handed to Legion (Go daemon)
+
+The Go daemon works only the issues handed to it with the Dispatch label `legion` (in any case),
+since its project may be shared with humans and other agents. It never admits a root in `todo`
+without the label, and wakes you for a root in `triage` only while the root carries it and is
+unrecorded: on its creation with the label, and on each change to it after that while it stays
+in triage, the change that adds the label included (the dashboard creates an issue without
+labels, so a human adds it from the issue header). Leave an issue without the label alone:
+handing work to Legion is its owner's decision, so never triage, park, label, or comment on it.
+A child needs no label: it runs under its tree's architect once its root is admitted.
+`legion status <KEY> todo` admits a root only while it carries the label, so a root you file for
+Legion to run carries it (`labels: ["legion"]` in `dispatch_issue`). Taking the label off a
+waiting root drops it from the waiting line; taking it off an admitted tree does not stop it.
 
 ## Deployment instructions
 
@@ -137,7 +150,7 @@ quoted here.
 
 | Wake | Content | Controller action |
 |---|---|---|
-| New issue created in the Dispatch project (`issue.created`, status `triage`; under the TypeScript daemon resync heals misses, under the Go daemon the boot step above does). From the Go daemon: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for a root only | issue key + triage context (incl. pre-existing children) | Triage: `legion status <KEY> todo` to admit, or set `backlog`/`icebox` to park |
+| New issue created in the Dispatch project (`issue.created`, status `triage`; under the TypeScript daemon resync heals misses, under the Go daemon the boot step above does). From the Go daemon: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above) | issue key + triage context (incl. pre-existing children) | Triage: `legion status <KEY> todo` to admit, or set `backlog`/`icebox` to park |
 | Backlog eligibility | slot freed / priority change | Reconsider parked items and move the eligible root to `todo` |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; issue-scoped human Q&A goes through `dispatch_ask` from the owning architect, not here |
 | Resync report | artifact-driven anomaly list (zero-owner trees, untriaged-open, launch-failed, admission-drift) | Verify against fresh state, then heal |
@@ -172,9 +185,9 @@ quoted here.
    legion status <issue> backlog
    ```
 
-   (or `icebox` for longer-term deferral). Dispatch status is the durable record;
-   there is no separate marker to maintain. Do not triage a system-created child as a root
-   issue.
+   (or `icebox` for longer-term deferral). Dispatch status is the durable record; there is no
+   other marker to maintain, beyond the Go daemon's `legion` label, which parking leaves in
+   place. Do not triage a system-created child as a root issue.
 4. When you post a triage note (a `dispatch_comment` on the issue saying what you decided and
    why), name who will be asked: `Assigned to <login>, who will get this tree's questions`,
    or, when the `Assignee:` line says `unassigned`, `Unassigned — nobody's Inbox shows this
@@ -197,7 +210,8 @@ architect, not the controller.
 For an independence judgment, verify the child and its parent against current daemon state
 and the Dispatch issue. If the work belongs in an independent root:
 
-1. File a **fresh root issue** with `dispatch_issue({ project, title, spec })` (no `parent`).
+1. File a **fresh root issue** with `dispatch_issue({ project, title, spec })` (no `parent`;
+   under the Go daemon add `labels: ["legion"]`, without which it is never admitted).
    `project` is the issue key's prefix before `-<n>` (e.g. `LEGSMOKE-3` → `LEGSMOKE`) — not
    the role-token `<project>` (the daemon's own project, e.g. `acme`), a different string.
 2. Park the child (`legion status <child> icebox`) and leave

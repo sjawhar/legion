@@ -76,6 +76,20 @@ const AgentsPage = lazy(() =>
   import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage }))
 );
 
+const AgentConversationPage = lazy(() =>
+  import("./features/agent-view/AgentConversationPage").then((module) => ({
+    default: module.AgentConversationPage,
+  }))
+);
+
+const BroadcastsPage = lazy(() =>
+  import("./features/agents/BroadcastsPage").then((module) => ({ default: module.BroadcastsPage }))
+);
+
+const BroadcastPage = lazy(() =>
+  import("./features/agents/BroadcastPage").then((module) => ({ default: module.BroadcastPage }))
+);
+
 function IssuePageFallback(): ReactNode {
   return (
     <div aria-busy="true">
@@ -526,6 +540,9 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Routes>
                 <Route element={<InboxPage />} path="/" />
                 <Route element={<AgentsPage />} path="/agents" />
+                <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
+                <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
+                <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
                 <Route element={<IssuePage />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
                 <Route element={<ProjectPage />} path="/projects/:key/architecture" />
