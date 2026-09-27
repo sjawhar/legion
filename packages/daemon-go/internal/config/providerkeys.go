@@ -140,7 +140,7 @@ func runSecretsGet(key ProviderKey, flag string, env []string) ([]byte, error) {
 		return nil, fmt.Errorf("provider_keys.%s: the secrets command is not on PATH, so %s cannot be read", key.Env, key.Secret)
 	}
 	cmd := exec.Command(binary, args...)
-	cmd.Env = env
+	cmd.Env = runtime.WithoutNATSSeeds(env)
 	cmd.Stdin = os.Stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

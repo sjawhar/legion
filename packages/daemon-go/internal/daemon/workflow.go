@@ -183,10 +183,12 @@ func (w *workflowRuntime) bind(url, token string) {
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
 // notification stream refuses boot rather than leaving a daemon that reads no events. Boot runs it
 // before reconcile, whose Dispatch listing covers only what precedes a consumer created now. It
-// connects as the NATS user seed is the nkey seed of — the one boot resolved and every pane
-// receives (launchSecrets) — or with no credential when seed is "".
-func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, seed string) error {
-	conn, err := natsauth.Connect(cfg.NatsURLs, seed)
+// connects as nc, the user readBoot chose (natsConnection), after logging it, and logs what the
+// server reports about the connection: every permission it refuses at error, every disconnect at
+// warn and every reconnect at info (natsauth.LogEvents).
+func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc natsConnection) error {
+	nc.log(w.log)
+	conn, err := natsauth.Connect(cfg.NatsURLs, nc.seed, natsauth.LogEvents(w.log))
 	if err != nil {
 		return fmt.Errorf("connect Envoy NATS: %w", err)
 	}
@@ -364,7 +366,8 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	group, running := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		if err := w.consumers.Run(running, w.pool, w.handlers...); err != nil {
-			return fmt.Errorf("workflow intake stopped: %w", err)
+			// A terminal close's cause is the connection's alone (natsauth.WithLastError).
+			return fmt.Errorf("workflow intake stopped: %w", natsauth.WithLastError(err, w.conn))
 		}
 		return nil
 	})

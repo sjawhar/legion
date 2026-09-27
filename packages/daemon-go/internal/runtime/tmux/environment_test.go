@@ -148,6 +148,9 @@ func TestPaneEnvironment(t *testing.T) {
 		"TMUX=/tmp/tmux-1000/default,1,0",
 		"OMP_SESSION_ID=01a0",
 		"ANTHROPIC_API_KEY=leaked",
+		// The daemon's own NATS seed, which no pane may hold (LEGION-279).
+		"NATS_DAEMON_NKEY_SEED=leaked",
+		"NATS_DAEMON_NKEY_SEED_FILE=/leaked/nats-daemon.seed",
 		// The operator's session bus, which the keyring behind their hawk login answers on: a
 		// tmux stage proof hands it to its model key command alone (scripts/e2e/lib/
 		// install-model-gateway.sh), never to a pane.

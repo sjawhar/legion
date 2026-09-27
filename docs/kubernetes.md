@@ -364,20 +364,24 @@ image probe.
 
 The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
 directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
-`legion-pane` user the daemon's own NATS connection authenticates as. A set source that is empty,
+`legion-pane` user every pod connects as, and the user the daemon's own NATS connection
+authenticates as when it has no seed of its own (below). A set source that is empty,
 missing, unreadable, blank, readable by more than its owner, or not an nkey user seed refuses boot,
 naming the key and the path. One exception: when root owns the file and the daemon is not root,
 its group may read it, since a daemon running as a non-root uid in a pod reads a mounted Secret —
 always root's — only through the pod's `fsGroup`. Mount it with `defaultMode: 0440`, never the
 kubelet's default `0644`, which others can read; any other seed file, the daemon's own or another
-user's, stays 0600. `legion start --check-config` reads the seed as boot does, and its OK line then
-names the seed's user by public key (`Config OK: project=<project> nats-nkey-user=U…`), never the
-seed. With one, every pod's
+user's, stays 0600. A daemon running as root in a pod has no such exception: under `fsGroup` its
+mount is `root:<fsGroup>` 0440, which the reader refuses for a root reader, so give that pod no
+`fsGroup` and mount the Secret with `defaultMode: 0400`, or pass the seed as `NATS_NKEY_SEED` (and
+the daemon's own as `NATS_DAEMON_NKEY_SEED`) from a `secretKeyRef`. `legion start --check-config`
+reads the seed as boot does, and its OK line then names the seed's user by public key
+(`Config OK: project=<project> nats-nkey-user=U…`), never the seed. With one, every pod's
 `NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the providers Secret's own
 `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`,
 whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same
 seed in the providers Secret under that key. The image probe refuses boot when the kubelet cannot
-mount the key, when it holds no user seed, and when its user is not the daemon's own seed's (the
+mount the key, when it holds no user seed, and when its user is not the pane seed's (the
 probe reports the user's public key, never the seed); it reads the key by the daemon's rule above.
 A probe that reports no user at all is an image whose `legion probe-image` predates the report, and
 the refusal says to build the image from the daemon's commit: a current one exits 1 on a blank or
@@ -386,6 +390,70 @@ names it, so the seed is never a variable of Oh My Pi or the tools it runs. With
 carries no pointer and mounts no such key. While the daemon has a seed, `provider_keys` may neither
 name `NATS_NKEY_SEED` (on either runtime) nor read the Secret's `NATS_NKEY_SEED` key under another
 name, and `pod.env` may not set `NATS_NKEY_SEED_FILE`.
+
+The daemon's own NATS seed is optional too, and no pod ever gets it: `nats_daemon_nkey_seed_file`
+(relative to `legion.yaml`'s directory), else `NATS_DAEMON_NKEY_SEED_FILE`, else
+`NATS_DAEMON_NKEY_SEED` in the daemon's environment, is the `legion-daemon` user the daemon's
+connection authenticates as. That user's grants, which `legion-pane` does not hold, are exactly
+what the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
+`$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
+`$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (its two
+durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`), and subscribe
+`notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>`. It publishes on no core
+subject: role and controller notices go to the Envoy listener over HTTP, and control directives
+over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subjects were verified
+live: a server granting exactly them logged no refusal across a boot creating both durables, a
+restart onto the existing ones, Dispatch and GitHub events acknowledged and a poison message
+terminated, and its trace showed no other API subject (no `$JS.API.INFO`, no
+`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead). It is read by the same rule
+and refusals as the pane seed, the
+group-readable mount included, and neither seed falls back to the other: an unusable
+daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane
+seed, and with neither, with no credential. Keep it out of the providers Secret, which every pod
+mounts: in-cluster, put it in a Secret of its own, mounted into the daemon's pod alone with
+`defaultMode: 0440` (0400 with no `fsGroup` for a daemon running as root, as above; on a host, a
+0600 file the daemon's uid owns), and name that file in
+`nats_daemon_nkey_seed_file`. No launch carries it, and a tmux pane's environment drops its
+variables with every other credential-shaped name. That keeps the seed out of what the daemon
+hands a pane, not out of a pane's reach: on the tmux runtime every pane runs as the daemon's own
+uid, so a pane process can read the daemon's seed file, or `/proc/<daemon pid>/environ` when the
+raw `NATS_DAEMON_NKEY_SEED` is used. The daemon/pane split limits what a leaked pane seed can do,
+not what a pane process can do; the process boundary holds only when the daemon runs apart from
+its agents, as a user or in a pod of its own (the Kubernetes runtime). Every command the daemon itself starts (git and
+jj in a managed repository's checkout, `mise where`, a key command) runs without
+`NATS_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED`, so a seed passed by value never reaches a repository's
+tooling; still, prefer the file forms (`nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, or the
+`_FILE` variables), since a value stays in the daemon's own process environment. At boot the
+daemon logs, once, `legion daemon connects to NATS` with `user=U…` (the public key, never the
+seed), `paneUser=true|false`, and `seed=daemon|pane|none`. `legion start --check-config` reads it
+as boot does and adds
+`nats-daemon-nkey-user=U…` to its OK line. Every permission the server refuses the daemon's
+connection, a subscription or a publish (its JetStream consumers' API requests included), is logged
+at error as `NATS refused the daemon a permission: its NATS user lacks that grant` with its
+`operation` and `subject`; the server reports a refusal asynchronously, and nats.go's default
+handler would only write it to stderr, outside the daemon's log. Every other asynchronous error is
+logged at warn with the `subject` of the subscription it names, a dropped connection at warn as
+`NATS connection lost` with its `error`, the reconnect at info as `NATS connection restored`
+with its `server`, and a terminal close (a fatal server `-ERR`, or reconnects run out) at error,
+once, as `NATS connection closed` with its `error`; the workflow's `workflow intake stopped` error
+then names the same cause as the connection's last error.
+
+Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
+`legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
+every daemon gets it and restarts, and each boot line must name the daemon's own user: a Go
+daemon's `legion daemon connects to NATS` line reads `paneUser=false`, and a TypeScript daemon's
+`[legion] daemon NATS connects as nkey user U…` line reads `its own daemon user, not the pane user`
+(#1494, `packages/daemon/src/daemon/AGENTS.md`). Only then is the
+`legion-pane` seed written. A clean boot line proves the user, not every grant: the check before
+the pane seed is written also has each daemon consume a Dispatch and a GitHub event with no error
+line, and searches each daemon's log for `NATS refused the daemon` (either daemon's line), since a missing
+grant on the exceptions lane (`notifications.envoy.exceptions.notifications.role.>`) still boots
+healthy and consumes both events, and that error line is its only sign. The check also has a
+TypeScript daemon send a control directive, since its `legion.ctl` publish is refused only when it
+first sends one (`packages/daemon/src/daemon/AGENTS.md`). `legion-pane` is never granted the daemon's
+subjects above. Reversed, a daemon holding only the `legion-pane` seed connects as `legion-pane`,
+and each refused subject logs the error line above (a refused consumer or subscription never
+delivers).
 
 ### Anatomy of a Sandbox pod
 
@@ -1070,8 +1138,8 @@ deploy/kubernetes/daemon/controller.yaml.example`); `nats_urls` is required; `di
 `dispatch_token_file` go together; and relative paths resolve against the file's own directory, with
 no `~`. The operator token and the NATS nkey seed each sit in a file only you can read (mode 0600):
 a group- or world-readable one is refused naming the path and mode (`… is readable by its group or
-others (mode 0640); chmod 0600 it`). The daemon's own seed read holds a file it owns to the same
-rule, and lets the group read only a root-owned file, as a pod's kubelet-mounted Secret is
+others (mode 0640); chmod 0600 it`). The daemon's read of either of its seeds holds a file it owns
+to the same rule, and lets the group read only a root-owned file, as a pod's kubelet-mounted Secret is
 ([Configuration](#configuration)).
 
 **Starting it.** Run `legion controller start --config controller.yaml`, where `daemon_url` (or
@@ -1096,8 +1164,10 @@ keeping nothing until the daemon has answered, the command:
    `--append-system-prompt`, no `--resume`, no `--mode rpc`) with the controller's environment
    (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_API=go`, `LEGION_DAEMON_URL`,
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, the Envoy and Dispatch
-   endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it), and
-   exits with Oh My Pi's exit code.
+   endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
+   of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE`
+   (the controller is pane-side, and never gets the daemon's seed), and exits with Oh My Pi's exit
+   code.
 
 A refusal before the secret is written removes the directories made for the probe, so the state
 directory is as it was.

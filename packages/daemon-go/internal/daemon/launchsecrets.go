@@ -18,10 +18,11 @@ type launchSecret struct {
 }
 
 // launchSecrets are the secrets every launch's spec carries, in name order: the Envoy bearer, when
-// the daemon has one, and the NATS nkey seed, when the configuration or the daemon's environment
-// (lookup) names one (natsauth.Seed) — the seed the daemon's own NATS connection authenticates
-// with. Which of them there are is known from the configuration and the environment alone, so
-// checkOperatorConfig names them without reading a file.
+// the daemon has one, and the pane NATS nkey seed, when the configuration or the daemon's
+// environment (lookup) names one (natsauth.Seed). The daemon's own NATS connection authenticates
+// with that seed only when the daemon has no seed of its own (natsauth.DaemonSeed,
+// chooseNATSConnection), which no launch carries. Which of them there are is known from the
+// configuration and the environment alone, so checkOperatorConfig names them without reading a file.
 func launchSecrets(cfg config.Config, lookup func(string) (string, bool)) []launchSecret {
 	var secrets []launchSecret
 	if cfg.EnvoyTokenFile != "" {
