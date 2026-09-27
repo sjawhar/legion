@@ -146,3 +146,89 @@ test("the document editor renders headings and ordered lists with real typograph
 
   await context.close();
 });
+
+/** Enough projects that the navigation is taller than any viewport under test. */
+async function seedManyProjects(count: number): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    const key = `P${String(index).padStart(2, "0")}`;
+    await createProject({ key, name: `Project ${key}` });
+  }
+}
+
+// The sidebar's footer holds Sign out, and the navigation above it grows with the project list.
+// A column that is only as tall as the viewport at its minimum pushes the footer and the lower
+// links off the bottom of the screen, where a reader reaches them only by scrolling to the end
+// of the page - or, on a phone, not at all, because the drawer is fixed to the viewport.
+test("the sidebar scrolls, so Sign out is reachable with a navigation taller than the viewport", async ({
+  browser,
+}, testInfo) => {
+  await seedManyProjects(17);
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const compact = testInfo.project.name !== "chromium";
+
+  try {
+    if (compact) {
+      await page.setViewportSize({ height: 390, width: 844 });
+    } else {
+      await page.setViewportSize({ height: 720, width: 1280 });
+    }
+    await page.goto("/");
+
+    if (compact) {
+      await page.getByRole("button", { name: "Open navigation" }).click();
+    }
+    const signOut = page.getByRole("button", { name: "Sign out" });
+    await expect(signOut).toBeAttached();
+    // The rail is its own scroll container: the footer comes into view by scrolling the rail,
+    // and the page itself never moves. It used to sit past the end of a long issue, reachable
+    // only by scrolling the document to its end - or, in the drawer, not at all.
+    await signOut.scrollIntoViewIfNeeded();
+    await expect(signOut).toBeInViewport();
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+    await signOut.focus();
+    await expect(signOut).toBeInViewport();
+    await expect(signOut).toBeFocused();
+    // Every project link is reachable by scrolling that container, still not the page.
+    const lastProject = page.getByRole("link", { name: /P16/ });
+    await lastProject.scrollIntoViewIfNeeded();
+    await expect(lastProject).toBeInViewport();
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  } finally {
+    await context.close();
+  }
+});
+
+// The right gutter is reserved for the collapsed-margin rail, and that rail only exists where
+// the route has a margin. Reading the raw preference instead left 80px of padding on the right
+// of the Inbox, beside nothing.
+test("a route with no margin reserves no gutter for a margin rail", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the rails are a desktop layout");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Has a margin" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    await page.setViewportSize({ height: 900, width: 1440 });
+    await page.goto(`/issues/${issue.key}`);
+    await page.getByRole("button", { name: "Hide margin" }).click();
+    await expect(page.getByTestId("margin-rail")).toBeVisible();
+    const main = page.getByTestId("main-content");
+    expect(await main.evaluate((node) => getComputedStyle(node).paddingRight)).toBe("80px");
+
+    await page.goto("/");
+    await expect(page.getByTestId("margin-rail")).toHaveCount(0);
+    expect(await main.evaluate((node) => getComputedStyle(node).paddingRight)).toBe("24px");
+    await expect(main).toHaveAttribute("data-shell-layout", "standard");
+
+    await page.getByRole("button", { name: "Hide sidebar" }).click();
+    await expect(main).toHaveAttribute("data-shell-layout", "full-width");
+    expect(await main.evaluate((node) => getComputedStyle(node).paddingRight)).toBe("24px");
+    expect(await main.evaluate((node) => getComputedStyle(node).paddingLeft)).toBe("80px");
+  } finally {
+    await context.close();
+  }
+});

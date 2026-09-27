@@ -1,6 +1,5 @@
 import {
   AckPolicy,
-  type Authenticator,
   type ConnectionOptions,
   type ConsumerConfig,
   type ConsumerInfo,
@@ -12,56 +11,10 @@ import {
   NatsError,
   nanos,
   nkeyAuthenticator,
-  nkeys,
   StringCodec,
 } from "nats";
 import { createCancellableSleep } from "./cancellable-sleep";
 import type { DaemonConfig } from "./config";
-import { readSecretPointer } from "./secrets";
-
-/** The part of nats.js's `nkeys` export this module uses; nats.js types the export `any`. */
-const seedKeys: { fromSeed(seed: Uint8Array): { getPublicKey(): string } } = nkeys;
-
-/** The `connect` options naming the NATS user the daemon connects as, from its environment: the
- * trimmed contents of the file `NATS_NKEY_SEED_FILE` names, else `NATS_NKEY_SEED`. A set variable
- * is authoritative, and the file pointer wins over the seed: an empty pointer, or a missing,
- * unreadable or blank file, throws naming the variable and the path (`readSecretPointer`), never
- * a fallback to `NATS_NKEY_SEED` or to no credential; so does a blank `NATS_NKEY_SEED`, and a seed
- * that is not a user nkey seed. Neither set is `{}`: the connection carries no credential, as
- * every connection did before servers required one. No error carries the seed. The panes' clients
- * read the same two variables (`@legion/envoy-client/nats-auth`), which `isSecretLikeName` keeps
- * out of every pane's environment. */
-export function natsAuthOptions(env: NodeJS.ProcessEnv): {
-  readonly authenticator?: Authenticator;
-} {
-  const { NATS_NKEY_SEED_FILE: file, NATS_NKEY_SEED: plain } = env;
-  let seed: string;
-  let source: string;
-  if (file !== undefined) {
-    if (file === "") throw new Error("NATS_NKEY_SEED_FILE is set but empty");
-    seed = readSecretPointer("NATS_NKEY_SEED_FILE", file);
-    source = `NATS_NKEY_SEED_FILE (${file})`;
-  } else if (plain !== undefined) {
-    seed = plain.trim();
-    if (seed.length === 0) throw new Error("NATS_NKEY_SEED is set but empty");
-    source = "NATS_NKEY_SEED";
-  } else {
-    return {};
-  }
-  const bytes = new TextEncoder().encode(seed);
-  let publicKey: string;
-  try {
-    publicKey = seedKeys.fromSeed(bytes).getPublicKey();
-  } catch (error) {
-    throw new Error(
-      `${source} does not hold a valid nkey seed: ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
-  if (!publicKey.startsWith("U")) {
-    throw new Error(`${source} holds an nkey seed that is not a user's (public key ${publicKey})`);
-  }
-  return { authenticator: nkeyAuthenticator(bytes) };
-}
 
 /**
  * The delivery outcomes a durable JetStream message can resolve to. Exactly
@@ -291,17 +244,18 @@ export interface JetStreamConnection {
   drain(): Promise<void>;
 }
 
-/** Connects as the NATS user the environment names (`natsAuthOptions`): an unusable seed
- * throws before any dial, so the daemon refuses to start naming the variable. */
+/** Connects as the NATS nkey user `config.natsNkeySeed` names (resolved and validated at load),
+ * and without a credential when the daemon has none. */
 export async function createNatsTransport(
   config: DaemonConfig,
-  connectFn: (opts: ConnectionOptions) => Promise<JetStreamConnection> = connect,
-  env: NodeJS.ProcessEnv = process.env
+  connectFn: (opts: ConnectionOptions) => Promise<JetStreamConnection> = connect
 ): Promise<NatsTransport> {
   const connection = await connectFn({
     servers: config.natsUrls,
     name: `legion-daemon-${config.project}`,
-    ...natsAuthOptions(env),
+    ...(config.natsNkeySeed === undefined
+      ? {}
+      : { authenticator: nkeyAuthenticator(new TextEncoder().encode(config.natsNkeySeed)) }),
     reconnect: true,
     maxReconnectAttempts: -1,
     reconnectTimeWait: 2_000,

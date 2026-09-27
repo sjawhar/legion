@@ -49,12 +49,13 @@ export function grantSecretName(roleToken: string): string {
 }
 
 /** Every secret name a daemon may hand a process beyond its own boot token or controller secret
- * (`ProcessManager.sharedProcessSecrets`, whose keys are typed by this list). A constant, not the
- * current config: the prune keeps and reaps a pane's files by the names a pane *could* have been
- * given, so a daemon restarted without `envoy_token_file` still keeps the `<role token>-envoy_token`
- * file a surviving pane from the previous configuration names in its `ENVOY_TOKEN_FILE`; and both
- * runtimes tell a process's own secret from a shared one by this list, never by position. */
-export const SHARED_SECRET_NAMES = ["ENVOY_TOKEN"] as const;
+ * (`ProcessManager.sharedProcessSecrets`, whose keys are typed by this list): the Envoy listener
+ * bearer and the `legion-pane` NATS nkey seed. A constant, not the current config: the prune keeps
+ * and reaps a pane's files by the names a pane *could* have been given, so a daemon restarted
+ * without `envoy_token_file` still keeps the `<role token>-envoy_token` file a surviving pane from
+ * the previous configuration names in its `ENVOY_TOKEN_FILE`; and both runtimes tell a process's
+ * own secret from a shared one by this list, never by position. */
+export const SHARED_SECRET_NAMES = ["ENVOY_TOKEN", "NATS_NKEY_SEED"] as const;
 export type SharedSecretName = (typeof SHARED_SECRET_NAMES)[number];
 
 export function isSharedSecretName(name: string): name is SharedSecretName {

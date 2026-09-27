@@ -475,3 +475,17 @@ export function buildInboxPath(route: InboxRoute = {}): string {
   const search = query.toString();
   return search === "" ? "/" : `/?${search}`;
 }
+
+/**
+ * Whether this route has a margin at all: an issue, or a standalone project document. Nothing
+ * else does, so the shell reserves no gutter for one and `features/margin/Margin.tsx` renders
+ * nothing there. One helper because two answers that disagree leave an 80 px gutter beside a
+ * column that is not there. It answers from the route rather than from the resolved margin
+ * owner, whose document form only appears once the artifact query lands.
+ */
+export function routeHasMargin(pathname: string, search = ""): boolean {
+  return (
+    parseIssuePath(pathname, search) !== undefined ||
+    parseProjectPath(pathname, search)?.kind === "document"
+  );
+}

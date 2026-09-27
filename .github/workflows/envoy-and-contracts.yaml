@@ -57,6 +57,7 @@ jobs:
       contracts: ${{ steps.filter.outputs.contracts }}
       envoy_client: ${{ steps.filter.outputs.envoy_client }}
       envoy: ${{ steps.filter.outputs.envoy }}
+      envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
@@ -81,6 +82,17 @@ jobs:
               - 'skills/dispatch/**'
               - 'go.work'
               - 'go.work.sum'
+            # The local acceptance run drives the Go listener and renders every frame with the
+            # shared TypeScript renderer, so a change to either side, or to the contracts both
+            # read, must run it.
+            envoy_e2e_local:
+              - 'packages/envoy/**'
+              - 'packages/envoy-client/**'
+              - 'packages/contracts/**'
+              - 'go.work'
+              - 'go.work.sum'
+              - 'package.json'
+              - 'bun.lock'
             plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
@@ -427,6 +439,45 @@ jobs:
           path: |
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
+
+  # packages/envoy/scripts/e2e-local.sh: signed GitHub fixtures and a direct message through a real
+  # listener and NATS, every frame rendered by both inbound renderers (renderInbound and Go's
+  # Deliverer.Text) and checked against the acceptance contract.
+  envoy-e2e-local:
+    needs: changes
+    if: needs.changes.outputs.envoy_e2e_local == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      E2E_NATS_CONTAINER: envoy-e2e-nats-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache-dependency-path: packages/envoy/go.sum
+      # The same bounded retry envoy-go gives its test images: a registry connection reset during
+      # the script's own implicit pull would fail the run for a reason outside it.
+      - name: Pull the NATS image the script starts
+        run: |
+          nats_image=$(sed -n 's/^docker run .* \(nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)
+          [ -n "$nats_image" ] || { echo "::error::no nats image on the docker run line of scripts/e2e-local.sh"; exit 1; }
+          for attempt in 1 2 3; do
+            docker pull "$nats_image" && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 10
+          done
+        working-directory: packages/envoy
+      - name: Local end-to-end acceptance
+        run: bash scripts/e2e-local.sh
+        working-directory: packages/envoy
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: envoy-e2e-local-evidence-${{ github.run_attempt }}
+          path: packages/envoy/out/e2e
 
   daemon-go:
     needs: changes
