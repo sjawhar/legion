@@ -369,3 +369,60 @@ func (f *failingSlotsStore) Slots(ctx context.Context, tx pgx.Tx) ([]record.Slot
 	}
 	return f.Store.Slots(ctx, tx)
 }
+
+// P2/B4: the held check at Apply's unrecorded branch used to run before the triage wake, so a
+// labeled triage root created while the daemon was down — held because Reconcile's boot listing
+// now covers every status — never woke the controller: its replayed issue.created (seq at or
+// behind the held summary) returned before the wake branch ever ran. The held check now gates
+// only the todo record-and-admit path below it; the triage wake runs on every observation of an
+// unrecorded root, held or not.
+func TestATriageRootIsWokenEvenWhileItsKeyIsHeld(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-TRIAGE", Title: "triage root", Status: "triage", Rank: "A", HandedOver: true, LastSeq: 5},
+	}, 10, 0, false)
+	if !admission.Held() {
+		t.Fatal("Held() = false after seeding a behind triage record, want it held")
+	}
+
+	apply(t, pool, admission, "triage-created", intake.DispatchIssue{Key: "LEGION-TRIAGE", Seq: 1, Type: "issue.created", Status: "triage", Title: "triage root", Rank: "A", HandedOver: true}, engineStub{})
+	assertEffects(t, pool, []effect{
+		{kind: record.OutboxKindControllerNotice, issue: "LEGION-TRIAGE", payload: record.ControllerNotice{Kind: "triage"}},
+	})
+	if got := maybeIssue(t, pool, "LEGION-TRIAGE"); got != nil {
+		t.Fatalf("triage root recorded while held = %#v, want none: a triage root is never a todo candidate", got)
+	}
+}
+
+// Deep review B: a newer event that creates no record for a held unrecorded key was lost — an
+// event moving the key out of todo, or taking its label off, records nothing, so release then
+// applied the stale boot summary as if that event had never arrived. The held summary now updates
+// to match a newer event even when the event itself creates no record.
+func TestANewerEventThatCreatesNoRecordRefreshesTheHeldSummary(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-G", Title: "g", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+	}, 10, 0, false)
+	if !admission.Held() {
+		t.Fatal("Held() = false after seeding a behind labeled todo record, want it held")
+	}
+
+	// seq 3, newer than the held summary, takes the label off: creates no record (still
+	// unrecorded, unlabeled), but must not leave the stale labeled summary in place.
+	apply(t, pool, admission, "label-removed", intake.DispatchIssue{Key: "LEGION-G", Seq: 3, Type: "issue.updated", Status: "todo", Title: "g", Rank: "A", HandedOver: false}, engineStub{})
+	if got := maybeIssue(t, pool, "LEGION-G"); got != nil {
+		t.Fatalf("LEGION-G recorded while held after an unlabeling event = %#v, want none", got)
+	}
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "position-reached", intake.DispatchConsumerPosition{AckFloorStream: 10}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact position-reached: %v", err)
+	}
+	if got := maybeIssue(t, pool, "LEGION-G"); got != nil {
+		t.Fatalf("released LEGION-G = %#v, want it left unrecorded: the newer unlabeling event, not the stale labeled listing, is what release must apply", got)
+	}
+	assertSlots(t, pool, nil)
+}

@@ -62,6 +62,10 @@ type workflowRuntime struct {
 	// holdPollInterval is pollHoldRelease's ticker period; zero means the production default. A
 	// test shortens it to bound how long a release takes to observe.
 	holdPollInterval time.Duration
+	// holdWarnAfter and holdWarnEvery bound the watchdog log a hold that never releases gets: zero
+	// means the production defaults. A test shortens both to bound how long the warning takes to
+	// observe.
+	holdWarnAfter, holdWarnEvery time.Duration
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -370,6 +374,15 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 // defaultHoldPollInterval is pollHoldRelease's production ticker period.
 const defaultHoldPollInterval = 2 * time.Second
 
+// defaultHoldWarnAfter and defaultHoldWarnEvery bound the watchdog log a hold that has not
+// released gets: a Dispatch event whose transaction always fails (an unmet precondition, a
+// programming bug) pins the ack floor forever, since the consumer sets no MaxDeliver to ever give
+// up on it, and nothing else says why a labeled root is waiting.
+const (
+	defaultHoldWarnAfter = 2 * time.Minute
+	defaultHoldWarnEvery = 5 * time.Minute
+)
+
 // positionReader is pollHoldRelease's only dependency on the Dispatch consumer: reading its
 // current position. A test substitutes one that fails on demand to prove the poll logs and
 // retries rather than silently ending the hold.
@@ -402,10 +415,18 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 	if interval <= 0 {
 		interval = defaultHoldPollInterval
 	}
+	warnAfter, warnEvery := w.holdWarnAfter, w.holdWarnEvery
+	if warnAfter <= 0 {
+		warnAfter = defaultHoldWarnAfter
+	}
+	if warnEvery <= 0 {
+		warnEvery = defaultHoldWarnEvery
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	var last intake.DispatchConsumerPosition
 	haveLast := false
+	var heldSince, warnedAt time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -413,13 +434,25 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 		case <-ticker.C:
 		}
 		if !w.admission.Held() {
-			haveLast = false
+			haveLast, heldSince, warnedAt = false, time.Time{}, time.Time{}
 			continue
+		}
+		if heldSince.IsZero() {
+			heldSince = time.Now()
 		}
 		position, err := reader.DispatchPosition(ctx)
 		if err != nil {
 			w.log.Error("read Dispatch consumer position for a held release", "error", err)
 			continue
+		}
+		// This never releases on the strength of the timer — only a Reached position does that,
+		// through the ApplyFact below — so a stuck hold stays stuck, but an operator now sees why:
+		// the target it is waiting for, its current ack floor, and the stream sequence stuck
+		// behind that floor.
+		if waiting := time.Since(heldSince); waiting >= warnAfter && time.Since(warnedAt) >= warnEvery {
+			warnedAt = time.Now()
+			w.log.Warn("admission: a hold has not released", "waiting", waiting.Round(time.Second),
+				"target", w.admission.Target(), "ack_floor", position.AckFloorStream, "stuck_seq", position.AckFloorStream+1)
 		}
 		if haveLast && position == last {
 			continue

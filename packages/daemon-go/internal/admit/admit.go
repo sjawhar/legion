@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"sync"
 	"time"
 
@@ -88,6 +89,35 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 		return intake.Result{}, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
 	}
 	if stored == nil {
+		handed := observation.HandedOver
+		// A root in triage handed to Legion is the controller's to triage, so each observation of it
+		// while it is unrecorded wakes the controller: its creation with the label, or the edit that
+		// adds it, since the dashboard creates an issue without labels. The controller triages from
+		// Dispatch and the daemon's state, never from the wake. A root without the label is not
+		// Legion's and wakes nobody. This runs before any hold check: a hold defers only whether an
+		// unrecorded todo is admitted, never whether an unrecorded triage root wakes the
+		// controller. The record stays empty, as for any root not yet todo; Reconcile's boot
+		// listing reads every status now, but a triage root is never a todo candidate it admits.
+		if observation.Status == "triage" && observation.Parent == "" && handed {
+			if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: "triage"}, a.now()); err != nil {
+				return intake.Result{}, err
+			}
+		}
+		// An unrecorded todo issue without the label is someone else's work in a project Legion may
+		// share with humans and other agents: Legion records nothing of it until it is handed over.
+		// Neither exit records anything, but each still refreshes a held key's own pending summary:
+		// an event moving the key out of todo, or taking its label off, is real information about
+		// what Dispatch shows now, and leaving the held summary as Reconcile's stale boot listing
+		// found it would have release admit on that stale information instead.
+		if observation.Status != "todo" {
+			a.refreshHeldSummary(observation)
+			return intake.Result{}, nil
+		}
+		if !handed {
+			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
+			a.refreshHeldSummary(observation)
+			return intake.Result{}, nil
+		}
 		a.mu.Lock()
 		summary, held := a.pending[observation.Key]
 		a.mu.Unlock()
@@ -100,27 +130,6 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 			// not a stale replay: it is recorded normally below, and promote's own pending
 			// membership check — not this one — is what still holds the candidate back from a
 			// slot until release.
-			return intake.Result{}, nil
-		}
-		handed := observation.HandedOver
-		// A root in triage handed to Legion is the controller's to triage, so each observation of it
-		// while it is unrecorded wakes the controller: its creation with the label, or the edit that
-		// adds it, since the dashboard creates an issue without labels. The controller triages from
-		// Dispatch and the daemon's state, never from the wake. A root without the label is not
-		// Legion's and wakes nobody. The record stays empty, as for any root not yet todo; the boot
-		// listing (Reconcile) never sees it, reading only the workflow's statuses, todo to retro.
-		if observation.Status == "triage" && observation.Parent == "" && handed {
-			if err := a.enqueue(ctx, tx, observation.Key, record.ControllerNotice{Kind: "triage"}, a.now()); err != nil {
-				return intake.Result{}, err
-			}
-		}
-		// An unrecorded todo issue without the label is someone else's work in a project Legion may
-		// share with humans and other agents: Legion records nothing of it until it is handed over.
-		if observation.Status != "todo" {
-			return intake.Result{}, nil
-		}
-		if !handed {
-			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
 			return intake.Result{}, nil
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
@@ -255,6 +264,31 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 	seq := stored.LastDispatchSeq
 	if summary.LastSeq > seq {
 		seq = summary.LastSeq
+	}
+	if record.OutOfWorkflow(summary.Status) && summary.Status != stored.Status {
+		// A snapshot that moves a recorded issue out of the workflow (backlog, icebox, triage, or
+		// done) is the fact a live Dispatch event of the same move would carry, so it runs through
+		// the engine's own leave/beginLinger first — arming a root's linger, or parking a child and
+		// telling its architect — exactly as that event would. Left to recordObservation alone, the
+		// record would move to the snapshot's status with no suspend and no linger, and the
+		// record's LastDispatchSeq would reach the snapshot's own sequence, so the real event, once
+		// it finally arrives, would be dropped by Engine.dispatchIssue's sequence check — nothing
+		// would ever run the transition this snapshot stands in for. A snapshot showing "todo" is
+		// not this case: Reconcile's own readmit and recordObservation already own a root's or a
+		// live tree's child's return to todo below, unchanged. Re-read afterward: the engine's own
+		// write (phase, hold, linger) must not be clobbered by recordObservation writing back the
+		// stale copy this call fetched before the engine ran.
+		if _, err := a.engine.Apply(ctx, tx, intake.DispatchIssue{
+			Key: summary.Key, Seq: summary.LastSeq, Status: summary.Status, Title: summary.Title,
+			Parent: deref(summary.Parent), Rank: summary.Rank, HandedOver: handed,
+		}); err != nil {
+			return fmt.Errorf("apply engine transition for %s: %w", summary.Key, err)
+		}
+		refreshed, err := a.store.Issue(ctx, tx, summary.Key)
+		if err != nil {
+			return fmt.Errorf("re-read %s after its engine transition: %w", summary.Key, err)
+		}
+		stored = refreshed
 	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
 		return a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, seq)
@@ -439,15 +473,16 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 // captured when it deferred that key. release, not promote, is what clears pending — it empties
 // the whole set at once, so this need only check membership.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, error) {
-	return a.promoteExcept(ctx, tx, nil)
+	return a.promoteHolds(ctx, tx, true)
 }
 
-// promoteExcept is promote, treating every key in releasing as already unheld: release calls this
-// with the keys its own caughtUp position just resolved, which still name entries in a.pending —
-// clearing them only happens after this whole call's transaction commits (see release) — so
-// without this exclusion promote's own membership check would hold them back in the very call
-// that released them.
-func (a *Admission) promoteExcept(ctx context.Context, tx pgx.Tx, releasing map[string]dispatch.IssueSummary) (int, error) {
+// promoteHolds is promote; respectHolds false is release's own call, once every held key's own
+// summary has already been applied and its freed slots released: release always ignores every
+// hold, never a subset, since it only ever runs once the consumer has caught up to every key
+// Reconcile deferred. The in-memory pending set itself only clears after that whole call's
+// transaction commits (see release), so without this, promote's own membership check would hold
+// every one of them back in the very call that released them.
+func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, error) {
 	if a.cap <= 0 {
 		return 0, nil
 	}
@@ -465,7 +500,7 @@ func (a *Admission) promoteExcept(ctx context.Context, tx pgx.Tx, releasing map[
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
-		if _, releasing := releasing[candidate.Key]; !releasing {
+		if respectHolds {
 			a.mu.Lock()
 			_, held := a.pending[candidate.Key]
 			a.mu.Unlock()
@@ -512,6 +547,36 @@ func (a *Admission) Held() bool {
 	return len(a.pending) > 0
 }
 
+// Target is the notification stream position Held's hold is waiting for: the highest target any
+// currently deferred key was captured against. Zero while nothing is held. A boot-owned watchdog
+// reads it to name what a long-lived hold is still waiting to reach.
+func (a *Admission) Target() int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.target
+}
+
+// refreshHeldSummary keeps a held, unrecorded key's own pending summary — the one release
+// eventually applies — current with a live event that is newer than it but creates no record: an
+// event moving the key out of todo, or taking its label off, teaches nothing to the record (there
+// is none yet), but it is real information about what Dispatch shows now. Left alone, release
+// would apply the stale boot summary Reconcile originally deferred, as if this event had never
+// arrived. A key that is not held, or an event at or behind the held summary's own sequence, is
+// left untouched.
+func (a *Admission) refreshHeldSummary(observation intake.DispatchIssue) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	summary, held := a.pending[observation.Key]
+	if !held || observation.Seq <= summary.LastSeq {
+		return
+	}
+	a.pending[observation.Key] = dispatch.IssueSummary{
+		Key: observation.Key, Title: observation.Title, Status: observation.Status,
+		Parent: record.ParentOf(observation.Parent), Rank: observation.Rank,
+		HandedOver: observation.HandedOver, LastSeq: observation.Seq,
+	}
+}
+
 // release applies the Dispatch consumer's current position: once it has Reached target, every key
 // Reconcile deferred is re-applied through applySummary — the listing's own snapshot for it, in
 // case the stream never delivers the event that would otherwise have caught it up — before
@@ -525,7 +590,7 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 	caughtUp := len(a.pending) > 0 && position.Reached(a.target)
 	var releasing map[string]dispatch.IssueSummary
 	if caughtUp {
-		releasing = a.pending
+		releasing = maps.Clone(a.pending)
 	}
 	a.mu.Unlock()
 
@@ -547,7 +612,7 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 			return intake.Result{}, err
 		}
 	}
-	admitted, err := a.promoteExcept(ctx, tx, releasing)
+	admitted, err := a.promoteHolds(ctx, tx, !caughtUp)
 	if err != nil {
 		return intake.Result{}, err
 	}

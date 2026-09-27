@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -411,4 +413,59 @@ func (f *failingPositionReader) DispatchPosition(context.Context) (intake.Dispat
 		return intake.DispatchConsumerPosition{}, errors.New("injected transient failure")
 	}
 	return f.position, nil
+}
+
+// Non-blocking: a Dispatch event whose transaction always fails pins the ack floor forever (the
+// consumer sets no MaxDeliver), so the hold never releases and, before this, nothing in the log
+// said why. Once a hold has persisted past a bound, the poll warns on its own schedule — never
+// releasing on the strength of the timer, only naming what it is still waiting for: the target,
+// the current ack floor, and the stream sequence stuck behind it.
+func TestPollHoldReleaseWarnsWhenAHoldPersistsPastItsBound(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	var logBuf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logBuf, nil))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
+			Key: "LEGION-EDGE", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
+			Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
+		})
+	}); err != nil {
+		t.Fatalf("seed root: %v", err)
+	}
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return admission.Reconcile(context.Background(), tx, []dispatch.IssueSummary{
+			{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+		}, 5, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
+	}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if !admission.Held() {
+		t.Fatal("Held() = false after seeding a behind record, want it held")
+	}
+
+	// A reader stuck at an ack floor that never reaches target 5: the hold this poll would
+	// otherwise never explain.
+	reader := &failingPositionReader{position: intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false}}
+	w := &workflowRuntime{
+		pool: pool, admission: admission, handlers: []intake.Handler{engine, admission},
+		dispatchProject: "CAPTURE", bootID: "test-boot", log: log,
+		holdPollInterval: 5 * time.Millisecond, holdWarnAfter: 20 * time.Millisecond, holdWarnEvery: 20 * time.Millisecond,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { w.pollHoldReleaseWith(ctx, reader); close(done) }()
+
+	testwait.Eventually(t, "the poll warns about a hold that has not released", func() bool {
+		return strings.Contains(logBuf.String(), "admission: a hold has not released")
+	})
+	cancel()
+	<-done
+
+	msg := logBuf.String()
+	if !strings.Contains(msg, "target=5") || !strings.Contains(msg, "ack_floor=0") || !strings.Contains(msg, "stuck_seq=1") {
+		t.Fatalf("warn log = %q, want it to name the target, the ack floor, and the stuck stream sequence", msg)
+	}
 }
