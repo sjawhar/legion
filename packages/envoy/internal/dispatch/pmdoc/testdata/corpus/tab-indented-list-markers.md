@@ -90,3 +90,23 @@ Para.
 
 Para.
 > 2. a
+
+A tab after a marker in a quote:
+
+> -		code after two tabs
+
+Text.
+
+> 1.		code after an ordered marker
+
+Text.
+
+>	-		code after a tab after the quote marker
+
+Text.
+
+> -	  	code after a tab, spaces and a tab
+
+Text.
+
+- -		code in a nested item

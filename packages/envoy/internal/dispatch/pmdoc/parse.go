@@ -61,7 +61,7 @@ func blockParsers() []util.PrioritizedValue {
 		case listParser:
 			parsers[index].Value = tabIndented{emptyItemGuard{block}, listMarkerStart}
 		case listItemParser:
-			parsers[index].Value = tabIndented{block, listMarkerStart}
+			parsers[index].Value = tabIndented{listItemColumns{block}, listMarkerStart}
 		case setextParser:
 			parsers[index].Value = tabIndented{block, setextUnderline}
 		case fenceParser:

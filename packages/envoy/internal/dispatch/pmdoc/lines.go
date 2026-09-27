@@ -199,6 +199,47 @@ func footnoteDefinitionsByKey(pc parser.Context) map[string]*extensionast.Footno
 	return byKey
 }
 
+// listItemColumns is goldmark's list item parser measuring the spaces and tabs after an item's
+// marker from the column they stand at. Goldmark measures them from their place in what is left of
+// the line, as if it began where the containers around the item leave off, so inside a quote or a
+// list item whose text does not start at a multiple of four columns a tab there spans the wrong
+// columns: `> -\t\ta` read `  a` as its code, where the browser editor's parser reads `a`.
+type listItemColumns struct{ parser.BlockParser }
+
+// listMarkerOpening is a list item's marker opening what is left of a line.
+var listMarkerOpening = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])`)
+
+func (p listItemColumns) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
+	// The line starts with a partly taken tab's padding as spaces, at the reader's offset.
+	line, _ := reader.PeekLine()
+	column := reader.LineOffset()
+	marker := listMarkerOpening.FindIndex(line)
+	if marker == nil || column%4 == 0 {
+		return p.BlockParser.Open(parent, reader, pc)
+	}
+	after := line[marker[1]:]
+	if indent := bytes.IndexFunc(after, func(char rune) bool { return char != ' ' && char != '\t' }); bytes.IndexByte(after[:max(indent, 0)], '\t') < 0 {
+		return p.BlockParser.Open(parent, reader, pc)
+	}
+	row, position := reader.Position()
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	item, ok := node.(*ast.ListItem)
+	if !ok || state != parser.HasChildren {
+		return node, state
+	}
+	// Goldmark's placement of the item's text, with the tabs' stops where they are.
+	reader.SetPosition(row, position)
+	from := column + marker[1]
+	offset, _ := util.IndentWidth(after, from)
+	if offset > 4 {
+		offset = 1
+	}
+	advance, padding := util.IndentPosition(after, from, offset)
+	item.Offset = marker[1] + offset
+	reader.AdvanceAndSetPadding(marker[1]+advance, padding)
+	return node, state
+}
+
 // setPadding sets reader's padding and drops the line it has peeked, which goldmark's
 // SetPadding keeps: a zero advance drops it.
 func setPadding(reader gmtext.Reader, padding int) {
