@@ -46,8 +46,9 @@ run out of a checkout - both read `natsUrls` from that same `envoy.json` - so a 
 own database check even fails. Each deployment states its reach instead:
 `packages/envoy/deploy/compose/{listener,dispatch}.compose.yml`, agent-c's
 `components/envoy/listener.py` and `components/dispatch/service.py`, and the on-prem fleet's
-`~/.dotfiles/envoy/services.ts`. A binary built before the variable ignores it, so the
-deployments can be given it before or after the build that reads it.
+`~/.dotfiles/envoy/services.ts`. Each of those must carry the variable **before** an image whose
+binaries read it runs there: without it the start refuses the shared NATS the deployment names
+and exits. Setting it early is free, because a binary built before the variable ignores it.
 
 `ensureStreamWithConfig` therefore keeps the deployed subjects and appends each of the starting
 binary's subjects the stream lacks (`reconcileSubjects`). It removes a deployed subject in two

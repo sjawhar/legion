@@ -18,8 +18,10 @@ import (
 // run out of a checkout: both read natsUrls from ~/.config/opencode/envoy.json, which on an
 // agent's machine names production (LEGION-249). Each deployment states its reach instead
 // (packages/envoy/deploy/compose/*.compose.yml, agent-c's listener and dispatch task
-// definitions, and the on-prem fleet's Pulumi), and a binary built before this variable ignores
-// it, so the deployments can be given it in any order, before or after this build rolls out.
+// definitions, and the on-prem fleet's Pulumi), and it must be set there BEFORE a binary that
+// reads it runs on that deployment: without it, this one refuses the shared NATS its deployment
+// names and exits. Setting it early costs nothing, because a binary built before the variable
+// ignores it.
 const AllowRemoteEnvVar = "ENVOY_ALLOW_REMOTE_NATS"
 
 // ErrRemoteNATS is what a connect refuses a NATS server this machine does not run with.
