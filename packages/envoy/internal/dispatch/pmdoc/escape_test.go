@@ -896,6 +896,10 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"- > :::callout{#e kind=\"note\" title=\"T\"}\n  > \n  > :::\n",
 		":::callout{#t1 kind=\"note\" title=\"T\"}\n- ```\n  \n  ```\n:::\n",
 		"x[^f1]\n\n[^f1]: > ```\n    > \n    > ```\n",
+		// A blank code line in a list item in a quote inside a footnote definition carries the
+		// quote's marker after the definition's indentation, so the definition takes that
+		// indentation there as on any line, and the item's stays as main wrote it.
+		"x[^f2]\n\n[^f2]: > - a\n    >\n    >   ```\n    >   \n    >   ```\n",
 		"- :::callout{#t1 kind=\"note\" title=\"T\"}\n  > ```\n  > \n  > ```\n  :::\n",
 		// No blank lines after an item that ends in a list in a quote, where that list is spread by
 		// the blank line after its own first item.

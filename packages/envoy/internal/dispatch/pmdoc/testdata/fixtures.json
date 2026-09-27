@@ -4047,7 +4047,7 @@
   },
   {
     "name": "footnote-block-indents",
-    "markdown": "Refs[^1][^2][^3][^4][^5].\n\n[^1]: ```\n     x\n    ```\n\n[^2]: - a\n      ```\n      x\n      ```\n\n[^3]: - a\n\n      b\n\n[^4]: > ```\n    >  x\n    > ```\n\n[^5]: 1. a\n       ```\n        y\n       ```\n",
+    "markdown": "Refs[^1][^2][^3][^4][^5].\n\n[^1]: ```\n     x\n    ```\n\n[^2]: - a\n      ```\n      x\n      ```\n\n[^3]: - a\n\n      b\n\n[^4]: > ```\n    >  x\n    > ```\n\n[^5]: 1. a\n       ```\n        y\n       ```\n\nA definition[^bl] whose code holds only blank lines:\n\n[^bl]: a\n\n    ```\n\n\n    ```\n\nAnd one[^bm] whose code opens with one:\n\n[^bm]: a\n\n    ```\n\n    c\n    ```\n\nIn a quote, a definition[^bq] whose code holds a blank line:\n\n> [^bq]: ```\n>     c\n>\n>     d\n>     ```\n\nAnd one[^br] in a quoted list item:\n\n> - a\n>   [^br]: ```\n>       c\n>\n>       d\n>       ```\n\nAnd one[^bs] whose blank code line holds spaces:\n\n> [^bs]: ```\n>     c\n>    \n>     d\n>     ```\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -4313,11 +4313,312 @@
               ]
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A definition"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "bl"
+              }
+            },
+            {
+              "type": "text",
+              "text": " whose code holds only blank lines:"
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "bl",
+            "blockId": "b-000023"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000024"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a"
+                }
+              ]
+            },
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000025"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "\n"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000026"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "And one"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "bm"
+              }
+            },
+            {
+              "type": "text",
+              "text": " whose code opens with one:"
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "bm",
+            "blockId": "b-000027"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000028"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a"
+                }
+              ]
+            },
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000029"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "\nc"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000030"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "In a quote, a definition"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "bq"
+              }
+            },
+            {
+              "type": "text",
+              "text": " whose code holds a blank line:"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000031"
+          },
+          "content": [
+            {
+              "type": "footnote_definition",
+              "attrs": {
+                "label": "bq",
+                "blockId": "b-000032"
+              },
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000033"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "c\n\nd"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000034"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "And one"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "br"
+              }
+            },
+            {
+              "type": "text",
+              "text": " in a quoted list item:"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000035"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000036"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000037"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000038"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "footnote_definition",
+                      "attrs": {
+                        "label": "br",
+                        "blockId": "b-000039"
+                      },
+                      "content": [
+                        {
+                          "type": "code_block",
+                          "attrs": {
+                            "language": null,
+                            "blockId": "b-000040"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "c\n\nd"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000041"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "And one"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "bs"
+              }
+            },
+            {
+              "type": "text",
+              "text": " whose blank code line holds spaces:"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000042"
+          },
+          "content": [
+            {
+              "type": "footnote_definition",
+              "attrs": {
+                "label": "bs",
+                "blockId": "b-000043"
+              },
+              "content": [
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000044"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "c\n   \nd"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AVoBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEEUmVmc4cBAQMSZm9vdG5vdGVfcmVmZXJlbmNlKAABBgVsYWJlbAF3ATGHAQYDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAQgFbGFiZWwBdwEyhwEIAxJmb290bm90ZV9yZWZlcmVuY2UoAAEKBWxhYmVsAXcBM4cBCgMSZm9vdG5vdGVfcmVmZXJlbmNlKAABDAVsYWJlbAF3ATSHAQwDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAQ4FbGFiZWwBdwE1hwEOBgQAARABLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAxNmb290bm90ZV9kZWZpbml0aW9uBwABEwMKY29kZV9ibG9jawcAARQGBAABFQIgeCgAARQHYmxvY2tJZAF3CGItMDAwMDAzKAABEwVsYWJlbAF3ATEoAAETB2Jsb2NrSWQBdwhiLTAwMDAwMocBEwMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAARsDC2J1bGxldF9saXN0BwABHAMJbGlzdF9pdGVtBwABHQMJcGFyYWdyYXBoBwABHgYEAAEfAWEoAAEeB2Jsb2NrSWQBdwhiLTAwMDAwN4cBHgMKY29kZV9ibG9jawcAASIGBAABIwF4KAABIgdibG9ja0lkAXcIYi0wMDAwMDgoAAEdBWxhYmVsAXcD4oCiKAABHQhsaXN0VHlwZQF3BmJ1bGxldCgAAR0Gc3ByZWFkAXkoAAEdB2Jsb2NrSWQBdwhiLTAwMDAwNigAARwGc3ByZWFkAXkoAAEcB2Jsb2NrSWQBdwhiLTAwMDAwNSgAARsFbGFiZWwBdwEyKAABGwdibG9ja0lkAXcIYi0wMDAwMDSHARsDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAEuAwtidWxsZXRfbGlzdAcAAS8DCWxpc3RfaXRlbQcAATADCXBhcmFncmFwaAcAATEGBAABMgFhKAABMQdibG9ja0lkAXcIYi0wMDAwMTKHATEDCXBhcmFncmFwaAcAATUGBAABNgFiKAABNQdibG9ja0lkAXcIYi0wMDAwMTMoAAEwBWxhYmVsAXcD4oCiKAABMAhsaXN0VHlwZQF3BmJ1bGxldCgAATAGc3ByZWFkAXgoAAEwB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAS8Gc3ByZWFkAXkoAAEvB2Jsb2NrSWQBdwhiLTAwMDAxMCgAAS4FbGFiZWwBdwEzKAABLgdibG9ja0lkAXcIYi0wMDAwMDmHAS4DE2Zvb3Rub3RlX2RlZmluaXRpb24HAAFBAwpibG9ja3F1b3RlBwABQgMKY29kZV9ibG9jawcAAUMGBAABRAIgeCgAAUMHYmxvY2tJZAF3CGItMDAwMDE2KAABQgdibG9ja0lkAXcIYi0wMDAwMTUoAAFBBWxhYmVsAXcBNCgAAUEHYmxvY2tJZAF3CGItMDAwMDE0hwFBAxNmb290bm90ZV9kZWZpbml0aW9uBwABSwMMb3JkZXJlZF9saXN0BwABTAMJbGlzdF9pdGVtBwABTQMJcGFyYWdyYXBoBwABTgYEAAFPAWEoAAFOB2Jsb2NrSWQBdwhiLTAwMDAyMIcBTgMKY29kZV9ibG9jawcAAVIGBAABUwIgeSgAAVIHYmxvY2tJZAF3CGItMDAwMDIxKAABTQVsYWJlbAF3A+KAoigAAU0IbGlzdFR5cGUBdwZidWxsZXQoAAFNBnNwcmVhZAF5KAABTQdibG9ja0lkAXcIYi0wMDAwMTkoAAFMBW9yZGVyAX0BKAABTAZzcHJlYWQBeSgAAUwHYmxvY2tJZAF3CGItMDAwMDE4KAABSwVsYWJlbAF3ATUoAAFLB2Jsb2NrSWQBdwhiLTAwMDAxNwA=",
-    "rendered_by_milkdown": "Refs[^1][^2][^3][^4][^5].\n\n[^1]: ```\n     x\n    ```\n\n[^2]: * a\n      ```\n      x\n      ```\n\n[^3]: * a\n\n      b\n\n[^4]: > ```\n    >  x\n    > ```\n\n[^5]: 1. a\n       ```\n        y\n       ```\n"
+    "yjs_update_v1_b64": "Ab8BAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBBFJlZnOHAQEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAQYFbGFiZWwBdwExhwEGAxJmb290bm90ZV9yZWZlcmVuY2UoAAEIBWxhYmVsAXcBMocBCAMSZm9vdG5vdGVfcmVmZXJlbmNlKAABCgVsYWJlbAF3ATOHAQoDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAQwFbGFiZWwBdwE0hwEMAxJmb290bm90ZV9yZWZlcmVuY2UoAAEOBWxhYmVsAXcBNYcBDgYEAAEQAS4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAARMDCmNvZGVfYmxvY2sHAAEUBgQAARUCIHgoAAEUB2Jsb2NrSWQBdwhiLTAwMDAwMygAARMFbGFiZWwBdwExKAABEwdibG9ja0lkAXcIYi0wMDAwMDKHARMDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAEbAwtidWxsZXRfbGlzdAcAARwDCWxpc3RfaXRlbQcAAR0DCXBhcmFncmFwaAcAAR4GBAABHwFhKAABHgdibG9ja0lkAXcIYi0wMDAwMDeHAR4DCmNvZGVfYmxvY2sHAAEiBgQAASMBeCgAASIHYmxvY2tJZAF3CGItMDAwMDA4KAABHQVsYWJlbAF3A+KAoigAAR0IbGlzdFR5cGUBdwZidWxsZXQoAAEdBnNwcmVhZAF5KAABHQdibG9ja0lkAXcIYi0wMDAwMDYoAAEcBnNwcmVhZAF5KAABHAdibG9ja0lkAXcIYi0wMDAwMDUoAAEbBWxhYmVsAXcBMigAARsHYmxvY2tJZAF3CGItMDAwMDA0hwEbAxNmb290bm90ZV9kZWZpbml0aW9uBwABLgMLYnVsbGV0X2xpc3QHAAEvAwlsaXN0X2l0ZW0HAAEwAwlwYXJhZ3JhcGgHAAExBgQAATIBYSgAATEHYmxvY2tJZAF3CGItMDAwMDEyhwExAwlwYXJhZ3JhcGgHAAE1BgQAATYBYigAATUHYmxvY2tJZAF3CGItMDAwMDEzKAABMAVsYWJlbAF3A+KAoigAATAIbGlzdFR5cGUBdwZidWxsZXQoAAEwBnNwcmVhZAF4KAABMAdibG9ja0lkAXcIYi0wMDAwMTEoAAEvBnNwcmVhZAF5KAABLwdibG9ja0lkAXcIYi0wMDAwMTAoAAEuBWxhYmVsAXcBMygAAS4HYmxvY2tJZAF3CGItMDAwMDA5hwEuAxNmb290bm90ZV9kZWZpbml0aW9uBwABQQMKYmxvY2txdW90ZQcAAUIDCmNvZGVfYmxvY2sHAAFDBgQAAUQCIHgoAAFDB2Jsb2NrSWQBdwhiLTAwMDAxNigAAUIHYmxvY2tJZAF3CGItMDAwMDE1KAABQQVsYWJlbAF3ATQoAAFBB2Jsb2NrSWQBdwhiLTAwMDAxNIcBQQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAUsDDG9yZGVyZWRfbGlzdAcAAUwDCWxpc3RfaXRlbQcAAU0DCXBhcmFncmFwaAcAAU4GBAABTwFhKAABTgdibG9ja0lkAXcIYi0wMDAwMjCHAU4DCmNvZGVfYmxvY2sHAAFSBgQAAVMCIHkoAAFSB2Jsb2NrSWQBdwhiLTAwMDAyMSgAAU0FbGFiZWwBdwPigKIoAAFNCGxpc3RUeXBlAXcGYnVsbGV0KAABTQZzcHJlYWQBeSgAAU0HYmxvY2tJZAF3CGItMDAwMDE5KAABTAVvcmRlcgF9ASgAAUwGc3ByZWFkAXkoAAFMB2Jsb2NrSWQBdwhiLTAwMDAxOCgAAUsFbGFiZWwBdwE1KAABSwdibG9ja0lkAXcIYi0wMDAwMTeHAUsDCXBhcmFncmFwaAcAAWAGBAABYQxBIGRlZmluaXRpb26HAWEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAW4FbGFiZWwBdwJibIcBbgYEAAFwIyB3aG9zZSBjb2RlIGhvbGRzIG9ubHkgYmxhbmsgbGluZXM6KAABYAdibG9ja0lkAXcIYi0wMDAwMjKHAWADE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGVAQMJcGFyYWdyYXBoBwABlgEGBAABlwEBYSgAAZYBB2Jsb2NrSWQBdwhiLTAwMDAyNIcBlgEDCmNvZGVfYmxvY2sHAAGaAQYEAAGbAQEKKAABmgEHYmxvY2tJZAF3CGItMDAwMDI1KAABlQEFbGFiZWwBdwJibCgAAZUBB2Jsb2NrSWQBdwhiLTAwMDAyM4cBlQEDCXBhcmFncmFwaAcAAaABBgQAAaEBB0FuZCBvbmWHAaEBAxJmb290bm90ZV9yZWZlcmVuY2UoAAGpAQVsYWJlbAF3AmJthwGpAQYEAAGrARsgd2hvc2UgY29kZSBvcGVucyB3aXRoIG9uZTooAAGgAQdibG9ja0lkAXcIYi0wMDAwMjaHAaABAxNmb290bm90ZV9kZWZpbml0aW9uBwAByAEDCXBhcmFncmFwaAcAAckBBgQAAcoBAWEoAAHJAQdibG9ja0lkAXcIYi0wMDAwMjiHAckBAwpjb2RlX2Jsb2NrBwABzQEGBAABzgECCmMoAAHNAQdibG9ja0lkAXcIYi0wMDAwMjkoAAHIAQVsYWJlbAF3AmJtKAAByAEHYmxvY2tJZAF3CGItMDAwMDI3hwHIAQMJcGFyYWdyYXBoBwAB1AEGBAAB1QEYSW4gYSBxdW90ZSwgYSBkZWZpbml0aW9uhwHVAQMSZm9vdG5vdGVfcmVmZXJlbmNlKAAB7gEFbGFiZWwBdwJicYcB7gEGBAAB8AEfIHdob3NlIGNvZGUgaG9sZHMgYSBibGFuayBsaW5lOigAAdQBB2Jsb2NrSWQBdwhiLTAwMDAzMIcB1AEDCmJsb2NrcXVvdGUHAAGRAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAZICAwpjb2RlX2Jsb2NrBwABkwIGBAABlAIEYwoKZCgAAZMCB2Jsb2NrSWQBdwhiLTAwMDAzMygAAZICBWxhYmVsAXcCYnEoAAGSAgdibG9ja0lkAXcIYi0wMDAwMzIoAAGRAgdibG9ja0lkAXcIYi0wMDAwMzGHAZECAwlwYXJhZ3JhcGgHAAGdAgYEAAGeAgdBbmQgb25lhwGeAgMSZm9vdG5vdGVfcmVmZXJlbmNlKAABpgIFbGFiZWwBdwJicocBpgIGBAABqAIXIGluIGEgcXVvdGVkIGxpc3QgaXRlbTooAAGdAgdibG9ja0lkAXcIYi0wMDAwMzSHAZ0CAwpibG9ja3F1b3RlBwABwQIDC2J1bGxldF9saXN0BwABwgIDCWxpc3RfaXRlbQcAAcMCAwlwYXJhZ3JhcGgHAAHEAgYEAAHFAgFhKAABxAIHYmxvY2tJZAF3CGItMDAwMDM4hwHEAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAcgCAwpjb2RlX2Jsb2NrBwAByQIGBAABygIEYwoKZCgAAckCB2Jsb2NrSWQBdwhiLTAwMDA0MCgAAcgCBWxhYmVsAXcCYnIoAAHIAgdibG9ja0lkAXcIYi0wMDAwMzkoAAHDAgVsYWJlbAF3A+KAoigAAcMCCGxpc3RUeXBlAXcGYnVsbGV0KAABwwIGc3ByZWFkAXkoAAHDAgdibG9ja0lkAXcIYi0wMDAwMzcoAAHCAgZzcHJlYWQBeSgAAcICB2Jsb2NrSWQBdwhiLTAwMDAzNigAAcECB2Jsb2NrSWQBdwhiLTAwMDAzNYcBwQIDCXBhcmFncmFwaAcAAdkCBgQAAdoCB0FuZCBvbmWHAdoCAxJmb290bm90ZV9yZWZlcmVuY2UoAAHiAgVsYWJlbAF3AmJzhwHiAgYEAAHkAiQgd2hvc2UgYmxhbmsgY29kZSBsaW5lIGhvbGRzIHNwYWNlczooAAHZAgdibG9ja0lkAXcIYi0wMDAwNDGHAdkCAwpibG9ja3F1b3RlBwABigMDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGLAwMKY29kZV9ibG9jawcAAYwDBgQAAY0DB2MKICAgCmQoAAGMAwdibG9ja0lkAXcIYi0wMDAwNDQoAAGLAwVsYWJlbAF3AmJzKAABiwMHYmxvY2tJZAF3CGItMDAwMDQzKAABigMHYmxvY2tJZAF3CGItMDAwMDQyAA==",
+    "rendered_by_milkdown": "Refs[^1][^2][^3][^4][^5].\n\n[^1]: ```\n     x\n    ```\n\n[^2]: * a\n      ```\n      x\n      ```\n\n[^3]: * a\n\n      b\n\n[^4]: > ```\n    >  x\n    > ```\n\n[^5]: 1. a\n       ```\n        y\n       ```\n\nA definition[^bl] whose code holds only blank lines:\n\n[^bl]: a\n\n    ```\n\n\n    ```\n\nAnd one[^bm] whose code opens with one:\n\n[^bm]: a\n\n    ```\n\n    c\n    ```\n\nIn a quote, a definition[^bq] whose code holds a blank line:\n\n> [^bq]: ```\n>     c\n>\n>     d\n>     ```\n\nAnd one[^br] in a quoted list item:\n\n> * a\n>   [^br]: ```\n>       c\n>\n>       d\n>       ```\n\nAnd one[^bs] whose blank code line holds spaces:\n\n> [^bs]: ```\n>     c\n>        \n>     d\n>     ```\n"
   },
   {
     "name": "footnote-ending-in-a-block-in-an-item",

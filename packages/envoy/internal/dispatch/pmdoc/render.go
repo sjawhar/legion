@@ -260,7 +260,12 @@ func (r *renderer) block(n *Node, prefix string) {
 			r.writeSyntax(fence + language + "\n" + prefix + fence)
 			return
 		}
-		r.writeSyntax(fence + language + "\n" + prefix)
+		r.writeSyntax(fence + language + "\n")
+		var text strings.Builder
+		for _, child := range n.Children {
+			text.WriteString(child.Text)
+		}
+		r.writeCodeLinePrefix(text.String(), prefix)
 		for _, child := range n.Children {
 			if child.Type != "text" {
 				r.err = fmt.Errorf("%w: code block contains %q", ErrSchema, child.Type)
@@ -612,14 +617,26 @@ func (r *renderer) writeCodeText(node *Node, prefix string) {
 		}
 		end := offset + newline + 1
 		r.writeText(value[offset:end])
-		// A blank line does not take a footnote definition's indentation, and both parsers keep
-		// what it holds as the code's, so a blank code line there, behind indentation alone, is
-		// written without it.
-		if !r.inFootnote || strings.TrimSpace(prefix) != "" || !blankLineAhead(value[end:]) {
-			r.writeSyntax(prefix)
-		}
+		r.writeCodeLinePrefix(value[end:], prefix)
 		offset = end
 	}
+}
+
+// writeCodeLinePrefix writes prefix ahead of a code line, the first of rest. A blank line does not
+// take a footnote definition's indentation, and both parsers keep what it holds as the code's, so a
+// blank code line there, where no quote stands inside the definition to carry its marker after
+// that indentation, is written with the prefix only through its last quote marker (`> `), since
+// every container around the code goes on across a blank line without its indentation - the
+// code's first line as well as a later one.
+func (r *renderer) writeCodeLinePrefix(rest, prefix string) {
+	if r.inFootnote && r.quoteDepth == r.footnoteQuotes && blankLineAhead(rest) {
+		if marker := strings.LastIndex(prefix, "> "); marker >= 0 {
+			prefix = prefix[:marker+len("> ")]
+		} else {
+			prefix = ""
+		}
+	}
+	r.writeSyntax(prefix)
 }
 
 // blankLineAhead reports whether text's first line, its last included, holds only spaces and tabs.
