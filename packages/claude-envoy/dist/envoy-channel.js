@@ -38912,7 +38912,14 @@ class DispatchClient {
     return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
   }
   async getArchitectureSource(project) {
-    return this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
+    try {
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
+    } catch (error48) {
+      if (error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "SOURCE_NOT_FOUND") {
+        return null;
+      }
+      throw error48;
+    }
   }
   async resolveAsk(id, input) {
     return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
