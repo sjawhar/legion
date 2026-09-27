@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 /**
  * Proof Editor — headless (Node/Bun, no DOM) markdown <-> ProseMirror entry
  * point, published alongside ./lib.ts as @sjawhar/proof-editor/headless.
@@ -31,6 +29,7 @@ import remarkFrontmatter from 'remark-frontmatter';
 import remarkGfm from 'remark-gfm';
 import remarkParse from 'remark-parse';
 import remarkStringify from 'remark-stringify';
+import type { Options as RemarkStringifyOptions } from 'remark-stringify';
 import { unified } from 'unified';
 
 import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-block-ext.js';
@@ -64,7 +63,7 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
   // context for schema plugins to materialize their node/mark specs.
   ctx.inject(nodesCtx, []);
   ctx.inject(marksCtx, []);
-  ctx.inject(remarkStringifyOptionsCtx, { handlers: {}, encode: [] });
+  ctx.inject(remarkStringifyOptionsCtx, { handlers: {}, encode: [] } as RemarkStringifyOptions);
 
   // Some schema serializers reference the editor view (e.g. paragraph serialization
   // checks if the node is the last block). Provide a minimal stub updated per
@@ -130,7 +129,7 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
         proofMark: proofMarkHandler,
         dispatchMark: dispatchMarkHandler,
       },
-    });
+    } as RemarkStringifyOptions);
   const serializer = SerializerState.create(schema as never, serializeProcessor as never) as unknown as (
     doc: ProseMirrorNode,
   ) => string;

@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 import { test } from './harness.js';
 import { EditorState, TextSelection } from '@milkdown/kit/prose/state';
 import { splitBlock } from '@milkdown/kit/prose/commands';
@@ -15,7 +13,7 @@ import {
   withBlockIds,
 } from '../editor/schema/block-ids.js';
 
-function assert(condition: boolean, message: string): void {
+function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
@@ -92,7 +90,7 @@ await test('block IDs preserve GFM task-list attrs, DOM rendering, and markdown 
   assert(checked.attrs.checked === true, `checked task attrs = ${JSON.stringify(checked.attrs)}`);
   assert(blockIdOf(unchecked) !== null && blockIdOf(checked) !== null, 'task items lost their block ids');
 
-  const dom = schema.nodes.list_item.spec.toDOM!(unchecked) as unknown[];
+  const dom = schema.nodes.list_item.spec.toDOM!(unchecked) as unknown as unknown[];
   const attrs = dom[1] as Record<string, unknown>;
   assert(attrs['data-item-type'] === 'task', `task item DOM attrs = ${JSON.stringify(attrs)}`);
   assert(attrs['data-checked'] === false, `unchecked task DOM attrs = ${JSON.stringify(attrs)}`);
@@ -219,7 +217,7 @@ await test('a remote (collaboration) transaction is never stamped locally', asyn
 await test('block specs render data-block-id and read it back from the DOM', async () => {
   const { schema, parseMarkdown } = await createHeadlessProof({ blockId: counter('b') });
   const doc = parseMarkdown('Hello');
-  const spec = schema.nodes.paragraph.spec.toDOM!(doc.child(0)) as unknown[];
+  const spec = schema.nodes.paragraph.spec.toDOM!(doc.child(0)) as unknown as unknown[];
   const attrs = spec[1] as Record<string, unknown>;
   assert(attrs['data-block-id'] === 'b-1', `toDOM attrs = ${JSON.stringify(attrs)}`);
   const rule = schema.nodes.paragraph.spec.parseDOM![0] as { getAttrs?: (dom: unknown) => Record<string, unknown> | false | null };

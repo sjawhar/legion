@@ -10,7 +10,7 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["bun", "vite/client"],
     "paths": {
-      "proof-sdk-upstream/src/*": ["../proof-editor/src/upstream-runtime.d.ts"]
+      "proof-sdk-upstream/src/*": ["../proof-editor/upstream/*"]
     }
   },
   "include": ["web/src/**/*.ts", "web/src/**/*.tsx", "web/vite.config.ts", "e2e/**/*.ts"]
