@@ -411,21 +411,23 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 14 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
+  // Exactly 15 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
   // and Projects queries, me/state, issue detail, the shared inbox query for the
   // margin's open-ask count, the stream connection, two active-sessions/Conversation
   // event reads, the primary artifact's comments, the margin's own issue-asks list,
   // Conversation's live-agent query, the one block-schema fetch every document
-  // surface shares for the session, and the header's lookup of the project's
+  // surface shares for the session, the header's lookup of the project's
   // architecture source (the `Components:` line offers its picker only when the
   // project has a source; the component tree itself is fetched only once the picker
-  // opens, never on load). The header's assignee picker reads the sign-in allowlist
-  // only once the reader reaches for it, so it is not in this count. The phone
-  // project (iphone) does not fetch the sidebar while its drawer is closed, so it
-  // uses 12. Asserted exactly (not a ceiling) so a panel that starts eagerly fetching
-  // before its tab is ever opened trips this immediately instead of only breaking
-  // some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 12 : 14);
+  // opens, never on load), and me/agents/state, whose unread replies the Agents badge
+  // counts on every page (the sidebar's on desktop, the compact header's on phone).
+  // The header's assignee picker reads the sign-in allowlist only once the reader
+  // reaches for it, so it is not in this count. The phone project (iphone) does not
+  // fetch the sidebar while its drawer is closed, so it uses 13. Asserted exactly (not
+  // a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
+  // trips this immediately instead of only breaking some looser upper bound.
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 13 : 15);
+  expect(apiRequestUrls.filter((url) => url.endsWith("/api/v1/me/agents/state"))).toHaveLength(1);
   expect(apiRequestUrls.some((url) => url.endsWith("/api/v1/projects/CORE/architecture"))).toBe(
     false
   );
