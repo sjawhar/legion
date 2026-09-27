@@ -151,8 +151,9 @@ not exist. In order:
    nothing. Go logs no line for a forgotten registration; its one provisioning log line is the
    set-aside's.
 
-An existing workspace gets `update-stale`, the fetch, the credential config writes, and nothing
-with `bookmark` in it. The reactivation test's complete expected argv list is that check.
+An existing workspace gets `update-stale`, the fetch, its git worktree entry restored if a prune
+deleted it (`jj log` and `git read-tree`, only then) and locked, the credential config writes, and
+nothing with `bookmark` in it. The reactivation test's complete expected argv list is that check.
 
 ## The silent-fallback shape both review edge cases had
 

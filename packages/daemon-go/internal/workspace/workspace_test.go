@@ -633,10 +633,11 @@ func TestRemoveForgetsTheWorkspace(t *testing.T) {
 }
 
 // Every workspace of the shared clone has its own git worktree entry, and provisioning or removing
-// one workspace touches no other's, even one whose directory this process cannot see: another
-// tree's volume, or another host's mount of the clone. A bare `git worktree prune` takes such an
-// entry for stale and deletes it, and git then fails in that workspace while jj keeps working.
-// Each workspace provisioning adds is locked, so a bare prune anyone else runs skips it too.
+// one workspace touches no other's, even one whose directory this process cannot see, as an
+// isolated session on the same host that mounts only its own checkout cannot. A bare `git worktree
+// prune` takes such an entry for stale and deletes it, and git then fails in that workspace while jj
+// keeps working. Each workspace provisioning adds is locked, so a bare prune anyone else runs skips
+// it too.
 func TestProvisioningAndRemovalTouchOnlyTheirOwnGitWorktree(t *testing.T) {
 	run := newLocalRunner(t)
 	otherRequest := provisionRequest(t)
@@ -648,7 +649,7 @@ func TestProvisioningAndRemovalTouchOnlyTheirOwnGitWorktree(t *testing.T) {
 	if locked := gitWorktreeLocks(t, other.Clone); !locked[other.Dir] {
 		t.Errorf("provisioning left the new workspace's git worktree unlocked: %v", locked)
 	}
-	// An entry another process added carries no lock; this one is out of view, as another tree's is.
+	// An entry another process added carries no lock; this one is out of this process's view.
 	unlockGitWorktree(t, other.Clone, other.Dir)
 	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
 	if err := os.Rename(other.Dir, elsewhere); err != nil {
@@ -713,11 +714,149 @@ func TestProvisionLocksAnExistingUnlockedWorkspace(t *testing.T) {
 	}
 }
 
+// git writes a relative worktree pointer between real paths, so provisioning finds its own entry
+// through a symlinked repos directory: it locks it, re-adds the workspace after its directory went,
+// and removal deletes it.
+func TestGitWorktreeEntriesThroughASymlinkedClone(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	if err := os.MkdirAll(request.StateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(request.StateDir, "repos")); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if locked := gitWorktreeLocks(t, workspace.Clone); !locked[workspace.Dir] {
+		t.Errorf("provisioning left the workspace's git worktree unlocked: %v", locked)
+	}
+	if err := os.RemoveAll(workspace.Dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("re-provision the registered missing workspace: %v", err)
+	}
+	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
+		t.Errorf("git in the re-added workspace answers %q, want %q", got, workspace.Dir)
+	}
+	if err := Remove(context.Background(), run, workspace); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if locks := gitWorktreeLocks(t, workspace.Clone); len(locks) != 0 {
+		t.Errorf("Remove left git worktrees registered: %v", locks)
+	}
+}
+
+// A bare prune that could not see the workspace deleted its entry: git fails there while jj works.
+// The next provisioning restores the entry at the working copy's parent, with an index to match and
+// the working copy untouched, and locks it.
+func TestProvisionRestoresALostGitWorktree(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	var logged []string
+	request.Log = func(line string) { logged = append(logged, line) }
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace.Dir, "tracked.txt"), []byte("committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, workspace.Dir, "jj", "commit", "-m", "tracked")
+	parent := strings.TrimSpace(runSetup(t, workspace.Dir, "jj", "log", "-r", "@-", "--no-graph", "-T", "commit_id"))
+	if err := os.WriteFile(filepath.Join(workspace.Dir, "notes.txt"), []byte("in progress\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(gitWorktreeAdmin(t, workspace.Dir)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("provision the workspace whose git worktree entry is gone: %v", err)
+	}
+	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "HEAD")); got != parent {
+		t.Errorf("git HEAD in the restored workspace = %s, want the working copy's parent %s", got, parent)
+	}
+	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "status", "--porcelain")); got != "?? notes.txt" {
+		t.Errorf("git status in the restored workspace = %q, want only the uncommitted notes.txt", got)
+	}
+	if notes, err := os.ReadFile(filepath.Join(workspace.Dir, "notes.txt")); err != nil || string(notes) != "in progress\n" {
+		t.Errorf("the working copy's notes.txt = %q, %v; want it untouched", notes, err)
+	}
+	if locked := gitWorktreeLocks(t, workspace.Clone); !locked[workspace.Dir] {
+		t.Errorf("the restored git worktree is unlocked: %v", locked)
+	}
+	if !slices.ContainsFunc(logged, func(line string) bool { return strings.Contains(line, "restored it at "+parent) }) {
+		t.Errorf("provisioning logged no restoration: %q", logged)
+	}
+}
+
+// A pointer naming a directory outside the shared clone's git worktrees is nothing provisioning
+// creates or may write into: it is refused by name.
+func TestProvisionRefusesAGitPointerOutsideTheClone(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "worktrees", "widgets-42")
+	if err := os.WriteFile(filepath.Join(workspace.Dir, ".git"), []byte("gitdir: "+elsewhere+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Provision(context.Background(), run, request)
+	if err == nil || !strings.Contains(err.Error(), "outside the shared clone's") {
+		t.Fatalf("provision with a pointer outside the clone = %v, want it refused", err)
+	}
+	if _, statErr := os.Stat(elsewhere); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("provisioning created %s: %v", elsewhere, statErr)
+	}
+}
+
+// A crash between Remove's forget and its entry deletion leaves a workspace neither registered nor
+// present, with its locked entry still in the clone; the next Remove deletes it.
+func TestRemoveDeletesTheEntryACrashAfterTheForgetLeft(t *testing.T) {
+	run := newLocalRunner(t)
+	workspace, err := Provision(context.Background(), run, provisionRequest(t))
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := os.RemoveAll(workspace.Dir); err != nil {
+		t.Fatal(err)
+	}
+	runSetup(t, workspace.Clone, "jj", "workspace", "forget", filepath.Base(workspace.Dir), "--ignore-working-copy", "-R", workspace.Clone)
+	if _, registered := gitWorktreeLocks(t, workspace.Clone)[workspace.Dir]; !registered {
+		t.Fatal("the forget already removed the git worktree entry; the crash shape is not reproduced")
+	}
+	if err := Remove(context.Background(), run, workspace); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if locks := gitWorktreeLocks(t, workspace.Clone); len(locks) != 0 {
+		t.Errorf("Remove left git worktrees registered: %v", locks)
+	}
+}
+
 // unlockGitWorktree deletes the lock of the git worktree the workspace at dir names in its .git
 // file, leaving the entry as a process that locks nothing leaves it, and fails the test unless git
-// then reports the worktree unlocked. The pointer is relative to dir when git writes relative
-// worktree paths (jj asks for them; git 2.48 and later honour it).
+// then reports the worktree unlocked.
 func unlockGitWorktree(t *testing.T, clone, dir string) {
+	t.Helper()
+	if err := os.Remove(filepath.Join(gitWorktreeAdmin(t, dir), "locked")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	locks := gitWorktreeLocks(t, clone)
+	if locked, registered := locks[dir]; !registered || locked {
+		t.Fatalf("git does not report %s registered and unlocked after unlocking it: %v", dir, locks)
+	}
+}
+
+// gitWorktreeAdmin is the admin directory the workspace at dir names in its .git file. The pointer
+// is relative to dir when git writes relative worktree paths (jj asks for them; git 2.48 and later
+// honour it).
+func gitWorktreeAdmin(t *testing.T, dir string) string {
 	t.Helper()
 	pointer, err := os.ReadFile(filepath.Join(dir, ".git"))
 	if err != nil {
@@ -730,29 +869,21 @@ func unlockGitWorktree(t *testing.T, clone, dir string) {
 	if !filepath.IsAbs(admin) {
 		admin = filepath.Join(dir, admin)
 	}
-	if err := os.Remove(filepath.Join(admin, "locked")); err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatal(err)
-	}
-	locks := gitWorktreeLocks(t, clone)
-	if locked, registered := locks[dir]; !registered || locked {
-		t.Fatalf("git does not report %s registered and unlocked after unlocking it: %v", dir, locks)
-	}
+	return admin
 }
 
 // gitWorktreeLocks is every linked worktree git registers in clone, by path, and whether it is
-// locked: git's own account (`git worktree list --porcelain`), one block per worktree.
+// locked: git's own account (`git worktree list --porcelain`), one block per worktree after the
+// clone's own, which git always lists first.
 func gitWorktreeLocks(t *testing.T, clone string) map[string]bool {
 	t.Helper()
 	listed := runSetup(t, clone, "git", "--git-dir="+filepath.Join(clone, ".git"), "worktree", "list", "--porcelain")
 	locks := map[string]bool{}
-	for _, block := range strings.Split(strings.TrimSpace(listed), "\n\n") {
+	for _, block := range strings.Split(strings.TrimSpace(listed), "\n\n")[1:] {
 		lines := strings.Split(block, "\n")
 		path, ok := strings.CutPrefix(lines[0], "worktree ")
 		if !ok {
 			t.Fatalf("git worktree list printed a block with no worktree line: %q", block)
-		}
-		if path == clone {
-			continue
 		}
 		locks[path] = slices.ContainsFunc(lines[1:], func(line string) bool {
 			return line == "locked" || strings.HasPrefix(line, "locked ")

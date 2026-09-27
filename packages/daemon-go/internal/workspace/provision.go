@@ -60,10 +60,12 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 		return Workspace{}, err
 	}
 
-	if !exists {
-		if err := createWorkspace(ctx, run, workspace, request.Log); err != nil {
+	if exists {
+		if err := restoreGitWorktree(ctx, run, workspace, request.Log); err != nil {
 			return Workspace{}, err
 		}
+	} else if err := createWorkspace(ctx, run, workspace, request.Log); err != nil {
+		return Workspace{}, err
 	}
 	// Every workspace provisioning touches has its git worktree entry locked, one added before
 	// provisioning locked any included, so a bare `git worktree prune` that cannot see it skips it.

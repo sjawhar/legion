@@ -394,7 +394,8 @@ func ownCommitsRevset(workspaceName string) string {
 
 // Remove ports workspace.ts's removeIssueWorkspace. The workspace directory goes first so a crash
 // leaves the registered-but-missing state that Provision repairs with forget and add. jj's forget
-// leaves the colocated worktree of a directory already gone, so Remove deletes that entry itself.
+// leaves the colocated worktree of a directory already gone, so Remove deletes that entry itself,
+// also when the workspace is neither registered nor present (a crash after the forget).
 // workspace is Location's, which names the clone; any other is refused before anything is removed.
 func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	if !located(workspace) {
@@ -425,13 +426,6 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 			return err
 		}
 		commits = nonEmptyLines(own.Stdout)
-	}
-	directoryExists, err := pathExists(workspace.Dir)
-	if err != nil {
-		return err
-	}
-	if !registered && !directoryExists {
-		return nil
 	}
 	if err := os.RemoveAll(workspace.Dir); err != nil {
 		return fmt.Errorf("remove workspace directory: %w", err)

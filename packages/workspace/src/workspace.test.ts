@@ -1,6 +1,16 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, watch } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -221,7 +231,8 @@ function workspaceListCommand(repoCloneDir: string): string[] {
   ];
 }
 /** Every linked worktree git registers in the clone, by path, and whether it is locked: git's own
- * account (`git worktree list --porcelain`), one block per worktree, the clone's own left out. */
+ * account (`git worktree list --porcelain`), one block per worktree after the clone's own, which
+ * git always lists first. */
 async function gitWorktreeLocks(repoCloneDir: string): Promise<Record<string, boolean>> {
   const listed = await runCommand([
     SYSTEM_GIT,
@@ -232,12 +243,12 @@ async function gitWorktreeLocks(repoCloneDir: string): Promise<Record<string, bo
   ]);
   expect(listed.exitCode, listed.stderr).toBe(0);
   const locks: Record<string, boolean> = {};
-  for (const block of listed.stdout.trim().split("\n\n")) {
+  for (const block of listed.stdout.trim().split("\n\n").slice(1)) {
     const [first = "", ...rest] = block.split("\n");
     if (!first.startsWith("worktree ")) throw new Error(`git worktree list printed ${block}`);
-    const worktree = first.slice("worktree ".length);
-    if (worktree === repoCloneDir) continue;
-    locks[worktree] = rest.some((line) => line === "locked" || line.startsWith("locked "));
+    locks[first.slice("worktree ".length)] = rest.some(
+      (line) => line === "locked" || line.startsWith("locked ")
+    );
   }
   return locks;
 }
@@ -247,14 +258,18 @@ async function gitToplevel(dir: string): Promise<string> {
   expect(toplevel.exitCode, `git rev-parse in ${dir}: ${toplevel.stderr}`).toBe(0);
   return toplevel.stdout.trim();
 }
-/** Deletes the lock of the git worktree the workspace at `dir` names in its `.git` file, leaving
- * the entry as a process that locks nothing leaves it, and fails the test unless git then reports
- * the worktree unlocked. The pointer is relative to `dir` when git writes relative worktree paths
- * (jj asks for them; git 2.48 and later honour it). */
-async function unlockGitWorktree(repoCloneDir: string, dir: string): Promise<void> {
+/** The admin directory the workspace at `dir` names in its `.git` file. The pointer is relative to
+ * `dir` when git writes relative worktree paths (jj asks for them; git 2.48 and later honour it). */
+async function gitWorktreeAdmin(dir: string): Promise<string> {
   const pointer = (await readFile(path.join(dir, ".git"), "utf8")).trim();
   expect(pointer, `${dir}/.git`).toStartWith("gitdir: ");
-  await rm(path.resolve(dir, pointer.slice("gitdir: ".length), "locked"), { force: true });
+  return path.resolve(dir, pointer.slice("gitdir: ".length));
+}
+/** Deletes the lock of the git worktree the workspace at `dir` names in its `.git` file, leaving
+ * the entry as a process that locks nothing leaves it, and fails the test unless git then reports
+ * the worktree unlocked. */
+async function unlockGitWorktree(repoCloneDir: string, dir: string): Promise<void> {
+  await rm(path.join(await gitWorktreeAdmin(dir), "locked"), { force: true });
   expect(await gitWorktreeLocks(repoCloneDir), `${dir} after unlocking it`).toMatchObject({
     [dir]: false,
   });
@@ -2469,5 +2484,79 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       name
     ).toBeFalse();
     expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [workspaceDir]: true });
+  }, 60_000);
+
+  test("finds its own git worktree through a symlinked repos directory: locks it, re-adds the workspace after its directory went, and removal deletes it", async () => {
+    // git writes a relative worktree pointer between real paths.
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    await mkdir(stateDir, { recursive: true });
+    await symlink(await temporaryDirectory(), path.join(stateDir, "repos"));
+    const { repoCloneDir, workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [workspaceDir]: true });
+    await rm(workspaceDir, { recursive: true, force: true });
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+    await removeIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({});
+  }, 60_000);
+
+  test("restores a git worktree entry a bare prune deleted, at the working copy's parent with a matching index and the working copy untouched, and locks it", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { repoCloneDir, workspaceDir, jj, commitOf, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    await writeFile(path.join(workspaceDir, "tracked.txt"), "committed\n", "utf8");
+    await jj(["commit", "-m", "tracked"], { cwd: workspaceDir });
+    const parent = await commitOf("@-", workspaceDir);
+    await writeFile(path.join(workspaceDir, "notes.txt"), "in progress\n", "utf8");
+    await rm(await gitWorktreeAdmin(workspaceDir), { recursive: true, force: true });
+
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+    let logged: string[];
+    try {
+      await provisionIssueWorkspace("WIDGETS-42", deps);
+      logged = errorSpy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      errorSpy.mockRestore();
+    }
+    const git = (args: string[]) => runCommand([SYSTEM_GIT, ...args], { cwd: workspaceDir });
+    expect((await git(["rev-parse", "HEAD"])).stdout.trim(), name).toBe(parent);
+    expect((await git(["status", "--porcelain"])).stdout.trim(), name).toBe("?? notes.txt");
+    expect(await readFile(path.join(workspaceDir, "notes.txt"), "utf8"), name).toBe(
+      "in progress\n"
+    );
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [workspaceDir]: true });
+    expect(logged, name).toEqual([expect.stringContaining(`restored it at ${parent}`)]);
+  }, 60_000);
+
+  test("refuses by name a git pointer outside the shared clone's worktrees, creating nothing there", async () => {
+    const [{ command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    const elsewhere = path.join(await temporaryDirectory(), "worktrees", "widgets-42");
+    await writeFile(path.join(workspaceDir, ".git"), `gitdir: ${elsewhere}\n`, "utf8");
+    await expect(provisionIssueWorkspace("WIDGETS-42", deps)).rejects.toThrow(
+      "outside the shared clone's"
+    );
+    expect(existsSync(elsewhere)).toBeFalse();
+  }, 60_000);
+
+  test("removal deletes the git worktree entry a crash after its forget left, with the workspace neither registered nor present", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { repoCloneDir, workspaceDir, jj, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    await rm(workspaceDir, { recursive: true, force: true });
+    await jj(["workspace", "forget", "widgets-42", "--ignore-working-copy", "-R", repoCloneDir]);
+    expect(Object.keys(await gitWorktreeLocks(repoCloneDir)), name).toEqual([workspaceDir]);
+    await expect(removeIssueWorkspace("WIDGETS-42", deps)).resolves.toEqual({
+      workspaceDir,
+      removed: false,
+      abandoned: [],
+    });
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({});
   }, 60_000);
 });
