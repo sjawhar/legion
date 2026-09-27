@@ -11,16 +11,18 @@ import "strings"
 // a footnote definition outside quotes, where the browser editor reads any blank line after it as
 // spreading it, or, inside a list item, the list ends in an empty item, at a blank line after which
 // goldmark ends the list item around it or a quote the list stands in (emptyItemEndsOuterItem).
-func (r *renderer) blanksAfterList(list, next *Node, prefix string) int {
-	spaced, blanks := r.spacingAfterList(list, next, prefix)
+// exact reports whether the count is one of those two; the one blank line everywhere else spaces
+// nothing, so a list item may write none instead.
+func (r *renderer) blanksAfterList(list, next *Node, prefix string) (blanks int, exact bool) {
+	spaced, spacing := r.spacingAfterList(list, next, prefix)
 	typedInFootnote := r.inFootnote && r.typedPrefix != nil && !strings.Contains(prefix, ">")
 	switch {
 	case spaced != nil && spaced.Attrs["spread"] == true:
-		return blanks
-	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && blanks == 1 || typedInFootnote || r.itemDepth > 0 && endsInEmptyItem(list)):
-		return 0
+		return spacing, true
+	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && spacing == 1 || typedInFootnote || r.itemDepth > 0 && endsInEmptyItem(list)):
+		return 0, true
 	default:
-		return 1
+		return 1, false
 	}
 }
 

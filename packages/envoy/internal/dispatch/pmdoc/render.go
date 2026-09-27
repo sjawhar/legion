@@ -162,7 +162,7 @@ func (r *renderer) blocksNoTrailing(nodes []*Node, prefix string) {
 		if i > 0 {
 			blanks := 1
 			if previous := nodes[i-1]; isList(previous) {
-				blanks = r.blanksAfterList(previous, n, prefix)
+				blanks, _ = r.blanksAfterList(previous, n, prefix)
 			}
 			r.writeSyntax("\n" + strings.Repeat(strings.TrimRight(prefix, " ")+"\n", blanks) + prefix)
 		}
@@ -403,14 +403,13 @@ func (r *renderer) list(n *Node, prefix string) {
 					blanks = 1
 				}
 				if previous := children[childIndex-1]; isList(previous) {
-					after := r.blanksAfterList(previous, child, indent)
-					spaced, _ := r.spacingAfterList(previous, child, indent)
+					after, exact := r.blanksAfterList(previous, child, indent)
 					switch {
-					case after != 1:
+					case exact:
 						blanks = after
-					// One blank line spreads what it spaces, or keeps a block that cannot open
-					// on the line after a paragraph off the paragraph the list ends in.
-					case spaced != nil && spaced.Attrs["spread"] == true || !isList(child) && !opensAfterParagraph(child) && endsInParagraph(previous):
+					// One blank line keeps a block that cannot open on the line after a paragraph
+					// off the paragraph the list ends in.
+					case !isList(child) && !opensAfterParagraph(child) && endsInParagraph(previous):
 						blanks = 1
 					}
 				}
