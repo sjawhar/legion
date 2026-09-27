@@ -127,16 +127,15 @@ func TestAPermissionTheServerRefusesIsLoggedAtError(t *testing.T) {
 	}
 }
 
-// A server's fatal -ERR closes the connection and hands its cause to no handler (the disconnect
-// handler gets nil), so an error that ends the daemon's consumers names it from the connection.
-func TestAFatalServerErrorIsNamedFromTheConnection(t *testing.T) {
+// fakeServer is the address of a NATS server that admits one client, answers its first PING, and
+// then sends it then, raw protocol lines.
+func fakeServer(t *testing.T, then string) string {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	// A server that admits the client, answers its first PING, then ends it with an -ERR nats.go
-	// treats as fatal.
 	go func() {
 		c, err := ln.Accept()
 		if err != nil {
@@ -154,12 +153,19 @@ func TestAFatalServerErrorIsNamedFromTheConnection(t *testing.T) {
 				break
 			}
 		}
-		_, _ = io.WriteString(c, "PONG\r\n-ERR 'Unknown Protocol Operation'\r\n")
+		_, _ = io.WriteString(c, "PONG\r\n"+then)
 		_, _ = io.Copy(io.Discard, c)
 	}()
+	return "nats://" + ln.Addr().String()
+}
+
+// A server's fatal -ERR closes the connection and hands its cause to no handler (the disconnect
+// handler gets nil), so the close is logged once at error with it, and an error that ends the
+// daemon's consumers names it from the connection.
+func TestAFatalServerErrorIsNamedFromTheConnection(t *testing.T) {
 	var out lockedBuffer
 	closed := make(chan struct{}, 1)
-	conn, err := natsauth.Connect([]string{"nats://" + ln.Addr().String()}, "", nats.Timeout(5*time.Second),
+	conn, err := natsauth.Connect([]string{fakeServer(t, "-ERR 'Unknown Protocol Operation'\r\n")}, "", nats.Timeout(5*time.Second),
 		natsauth.LogEvents(slog.New(slog.NewTextHandler(&out, nil))),
 		signalled(make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1), closed))
 	if err != nil {
@@ -175,6 +181,58 @@ func TestAFatalServerErrorIsNamedFromTheConnection(t *testing.T) {
 	want := `level=ERROR msg="NATS connection closed" error="nats: Unknown Protocol Operation"`
 	if logged := out.String(); strings.Count(logged, "NATS connection closed") != 1 || !strings.Contains(logged, want) {
 		t.Errorf("log = %s\nwant exactly one line containing %s", logged, want)
+	}
+}
+
+// A permission refusal stays the connection's LastError while it lives, and is no cause of
+// anything later: WithLastError does not name it on the live connection, and the daemon's own
+// Close afterwards logs no close.
+func TestTheDaemonsOwnCloseAfterARefusalLogsNoClose(t *testing.T) {
+	var out lockedBuffer
+	refused, closed := make(chan struct{}, 1), make(chan struct{}, 1)
+	conn, err := natsauth.Connect([]string{fakeServer(t, "-ERR 'Permissions Violation for Subscription to \"legion.denied\"'\r\n")}, "", nats.Timeout(5*time.Second),
+		natsauth.LogEvents(slog.New(slog.NewTextHandler(&out, nil))),
+		signalled(refused, make(chan struct{}, 1), make(chan struct{}, 1), closed))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	wait(t, refused, "the refusal", &out)
+	if conn.LastError() == nil {
+		t.Fatal("the refusal is not the connection's LastError, so this test proves nothing")
+	}
+	stopped := errors.New("consume: stopped")
+	if got := natsauth.WithLastError(stopped, conn); got != stopped {
+		t.Errorf("WithLastError on the live connection = %q, want %q alone", got, stopped)
+	}
+	conn.Close()
+	// A close callback, when there is one, is dispatched at once; a second is ample.
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+	}
+	if logged := out.String(); strings.Contains(logged, "NATS connection closed") {
+		t.Errorf("the daemon's own close was logged:\n%s", logged)
+	}
+}
+
+// A connection lost with no reconnect to follow is a terminal close, logged once at error with the
+// connection's cause.
+func TestAConnectionLostWithoutReconnectLogsOneClose(t *testing.T) {
+	proxy := dropProxy(t, strings.TrimPrefix(testnats.URL(t), "nats://"))
+	var out lockedBuffer
+	closed := make(chan struct{}, 1)
+	conn, err := natsauth.Connect([]string{"nats://" + proxy.addr}, "", nats.Timeout(5*time.Second), nats.NoReconnect(),
+		natsauth.LogEvents(slog.New(slog.NewTextHandler(&out, nil))),
+		signalled(make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1), closed))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	proxy.drop()
+	wait(t, closed, "the close", &out)
+	logged := out.String()
+	if strings.Count(logged, "NATS connection closed") != 1 || !strings.Contains(logged, `level=ERROR msg="NATS connection closed" error=`) {
+		t.Errorf("log = %s\nwant exactly one line containing the closed error line", logged)
 	}
 }
 
@@ -214,16 +272,16 @@ func TestAnAsynchronousErrorIsLoggedWithItsSubscriptionSubject(t *testing.T) {
 }
 
 // A connection the network drops is logged at warn with its cause, and its reconnect at info naming
-// the server; the connection's own close logs neither.
+// the server.
 func TestADisconnectAndItsReconnectAreLogged(t *testing.T) {
 	upstream := strings.TrimPrefix(testnats.URL(t), "nats://")
 	proxy := dropProxy(t, upstream)
 	var out lockedBuffer
-	disconnected, reconnected, closed := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1)
+	disconnected, reconnected := make(chan struct{}, 1), make(chan struct{}, 1)
 	conn, err := natsauth.Connect([]string{"nats://" + proxy.addr}, "", nats.Timeout(5*time.Second),
 		nats.ReconnectWait(10*time.Millisecond), nats.ReconnectJitter(0, 0),
 		natsauth.LogEvents(slog.New(slog.NewTextHandler(&out, nil))),
-		signalled(make(chan struct{}, 1), disconnected, reconnected, closed))
+		signalled(make(chan struct{}, 1), disconnected, reconnected, make(chan struct{}, 1)))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -231,11 +289,7 @@ func TestADisconnectAndItsReconnectAreLogged(t *testing.T) {
 	wait(t, disconnected, "the disconnect", &out)
 	wait(t, reconnected, "the reconnect", &out)
 	conn.Close()
-	wait(t, closed, "the close", &out)
 	logged := out.String()
-	if strings.Contains(logged, "NATS connection closed") {
-		t.Errorf("the connection's own close was logged: %s", logged)
-	}
 	for _, want := range []string{
 		`level=WARN msg="NATS connection lost" error=`,
 		`level=INFO msg="NATS connection restored" server=nats://` + proxy.addr + "\n",

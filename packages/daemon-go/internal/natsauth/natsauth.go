@@ -172,7 +172,8 @@ var permissionRefusal = regexp.MustCompile(`(?i)(publish|subscription) to "([^"]
 // subject of the subscription it names, and every disconnect, with its cause; at info, every
 // reconnect, with the server. nats.go's default handler writes a refusal to stderr unlabelled and
 // nothing for the rest. It owns the connection's AsyncErrorCB, DisconnectedErrCB, ReconnectedCB and
-// ClosedCB: an option after it that sets one replaces its handler.
+// ClosedCB: an option after it that sets one replaces its handler. It also sets
+// NoCallbacksAfterClientClose, so the daemon's own Close runs neither of the last two.
 func LogEvents(log *slog.Logger) nats.Option {
 	return func(o *nats.Options) error {
 		o.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
@@ -190,8 +191,7 @@ func LogEvents(log *slog.Logger) nats.Option {
 			}
 			log.Error("NATS refused the daemon a permission: its NATS user lacks that grant", "operation", operation, "subject", subject, "error", err)
 		}
-		// A nil cause is the connection closing: the daemon's own Close, or a terminal close, which
-		// ClosedCB logs with its cause.
+		// A nil cause is a terminal close, which ClosedCB logs with its cause.
 		o.DisconnectedErrCB = func(_ *nats.Conn, err error) {
 			if err != nil {
 				log.Warn("NATS connection lost", "error", err)
@@ -200,8 +200,10 @@ func LogEvents(log *slog.Logger) nats.Option {
 		o.ReconnectedCB = func(c *nats.Conn) {
 			log.Info("NATS connection restored", "server", c.ConnectedUrlRedacted())
 		}
-		// The connection's LastError is a terminal close's cause, and nil after the daemon's own Close,
-		// which is no error to report.
+		// The daemon's own Close runs no callback (NoCallbacksAfterClientClose), so a close here is
+		// terminal and its cause is the connection's LastError. A permission refusal or a slow
+		// consumer also sets LastError and leaves it set, but only while the connection is up.
+		o.NoCallbacksAfterClientClose = true
 		o.ClosedCB = func(c *nats.Conn) {
 			if err := c.LastError(); err != nil {
 				log.Error("NATS connection closed", "error", err)
@@ -211,9 +213,14 @@ func LogEvents(log *slog.Logger) nats.Option {
 	}
 }
 
-// WithLastError is err naming conn's last error, the cause of a terminal close (a fatal server
-// -ERR, reconnects exhausted) that nats.go hands no handler; err itself when conn has none.
+// WithLastError is err naming the last error of conn, when conn is closed: the cause of a terminal
+// close (a fatal server -ERR, reconnects exhausted) that nats.go hands no handler. It is err itself
+// while conn is up, whose LastError may be an earlier asynchronous error (a permission refusal, a
+// slow consumer) that caused nothing, and when a closed conn has none.
 func WithLastError(err error, conn *nats.Conn) error {
+	if !conn.IsClosed() {
+		return err
+	}
 	if last := conn.LastError(); last != nil {
 		return fmt.Errorf("%w (the NATS connection's last error: %v)", err, last)
 	}
