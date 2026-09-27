@@ -77,6 +77,16 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			refused: "* - 1.\n\n  [^m]:     indented code\n",
 		},
 		{
+			// An item's content starts one column past its marker where its marker line holds
+			// nothing, or indented code, however far in its first block stands.
+			name:    "an empty list item in an item whose marker line holds nothing, then that item's next list item",
+			refused: "2. \n     ===\n\n   - 1.\n\n   - *\n",
+		},
+		{
+			name:    "an empty list item in a quote in an item opening with indented code, then a paragraph the quote holds",
+			refused: "*     indented code\n  > ===\n\n  > 1.\n  >\n  > text a\n",
+		},
+		{
 			// The empty item's content starts on the next line, so the ordered list is the outer
 			// item's, and so is the paragraph after the blank line.
 			name:    "an empty list item holding a list on its next line, then a blank line and a paragraph",

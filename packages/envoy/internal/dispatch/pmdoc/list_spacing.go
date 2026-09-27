@@ -140,11 +140,34 @@ func emptyItemEndsOuterItem(item *ast.ListItem, lines sourceLines) bool {
 		if lines.blanksBefore(startOf(next), func(line []byte) bool { return markersOrWhitespace(line) && carries(line) }) < blanks || !carries(lines.text(line)) {
 			continue
 		}
-		if lines.textColumn(lines.pastQuoteMarkers(lines.starts[line], depth)) >= browserTextColumn(outer.FirstChild(), lines) {
+		if lines.textColumn(lines.pastQuoteMarkers(lines.starts[line], depth)) >= lines.itemContentColumn(outer) {
 			return true
 		}
 	}
 	return false
+}
+
+// itemContentColumn is the column item's content starts at as the browser editor's parser measures
+// it: where its first block's text does (browserTextColumn), except where the rest of the item's
+// marker line is blank or indented code, five columns or more, where it is one column past the
+// marker, however far in the first block then stands.
+func (l sourceLines) itemContentColumn(item ast.Node) int {
+	start := startOf(item)
+	line := l.starts[l.lineOf(start)]
+	marker := start
+	for marker < len(l.source) && (l.source[marker] == ' ' || l.source[marker] == '\t') {
+		marker++
+	}
+	end := marker + len(listMarker.Find(l.source[marker:]))
+	text := end
+	for text < len(l.source) && (l.source[text] == ' ' || l.source[text] == '\t') {
+		text++
+	}
+	markerEnd, textStart := columnOf(l.source[line:end]), columnOf(l.source[line:text])
+	if text == len(l.source) || l.source[text] == '\n' || textStart-markerEnd >= 5 {
+		return markerEnd + 1
+	}
+	return browserTextColumn(item.FirstChild(), l)
 }
 
 // leadingQuoteMarkers is how many quote markers open line, each with the spaces and tabs before it.

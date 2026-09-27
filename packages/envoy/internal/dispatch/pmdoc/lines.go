@@ -399,6 +399,9 @@ var (
 	// listMarkerStart is a list marker opening a line's text: a bullet, or an ordered item's number
 	// and delimiter, followed by a space, a tab or the line's end.
 	listMarkerStart = regexp.MustCompile(`^(?:[-+*]|[0-9]{1,9}[.)])(?:[ \t]|\n|$)`)
+	// listMarker is a list item's marker alone: a bullet, or an ordered item's number and
+	// delimiter.
+	listMarker = regexp.MustCompile(`^(?:[-+*]|[0-9]{1,9}[.)])`)
 	// setextUnderline is a setext heading's underline.
 	setextUnderline = regexp.MustCompile(`^(?:=+|-+)[ \t]*(?:\n|$)`)
 )
