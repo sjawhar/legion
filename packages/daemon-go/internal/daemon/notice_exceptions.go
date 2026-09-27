@@ -32,6 +32,11 @@ const noticeExceptionSubjects = "notifications.envoy.exceptions." + roleTopicPre
 // and the executor holds the row until a session holds the role again.
 const noticeReholdDelay = 30 * time.Second
 
+// noticeReholdCap is how many times one notice is queued again, as the TypeScript daemon re-sends
+// one at most three times (processes.ts, resendToRootArchitect): a holder that keeps its
+// registration alive but never confirms a delivery would otherwise be sent copies without end.
+const noticeReholdCap = 3
+
 // outboxDedupeKey is the dedupe key the outbox publishes every row under (notice), which names
 // the row: a report carrying another key is not about a notice of this daemon.
 var outboxDedupeKey = regexp.MustCompile(`^legion-outbox:[0-9]+$`)
@@ -41,15 +46,16 @@ var outboxDedupeKey = regexp.MustCompile(`^legion-outbox:[0-9]+$`)
 var errNoticeException = errors.New("malformed role-lane exception")
 
 // roleLaneException is the listener's report of one failed role-lane forward, the payload of its
-// exception envelope: the original envelope's topic, summary, payload and dedupe key, and why the
-// forward failed.
+// exception envelope: the original envelope's topic, summary, payload and dedupe key, the session
+// the forward went to, and why it failed.
 type roleLaneException struct {
-	OriginalTopic  string `json:"original_topic"`
-	EventID        string `json:"event_id"`
-	Reason         string `json:"reason"`
-	PayloadSummary string `json:"payload_summary"`
-	Payload        string `json:"payload"`
-	DedupeKey      string `json:"dedupe_key"`
+	OriginalTopic    string `json:"original_topic"`
+	EventID          string `json:"event_id"`
+	Reason           string `json:"reason"`
+	RecipientSession string `json:"recipient_session"`
+	PayloadSummary   string `json:"payload_summary"`
+	Payload          string `json:"payload"`
+	DedupeKey        string `json:"dedupe_key"`
 }
 
 // subscribeNoticeExceptions subscribes rehold to every role-lane exception on conn.
@@ -63,17 +69,23 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 
 // rehold queues a notice again when the listener reports that its forward to the owning
 // architect's session failed after the publish was accepted: the forward failed
-// (`delivery_failed`), the holder lapsed between the two (`no_holder`), or the holder did not
-// confirm it in time (`receipt_timeout`) while the architect's claim has no live session. That
-// last is what a session that stopped running but is still registered produces: the listener
-// forwards to it and waits for a receipt that never comes. A late receipt while the claim's
-// session is live (registered, ready, working or idle) is a slow holder that has the notice, as
-// the TypeScript daemon reads it (processes.ts, handleException), so it is logged and nothing is
-// queued. The notice goes back through the executor as a new row of its issue, due after
-// noticeReholdDelay, so it is routed, fenced and held as any notice is. A report about another
-// daemon's publish, another project, a role that is not an architect, or anything but a notice
-// changes nothing. The exception lane has no redelivery, so a report that cannot be read is
-// logged here and dropped. Each report is queued at most once, keyed by its envelope's event id.
+// (`delivery_failed`), the holder lapsed between the two (`no_holder`), or the session the
+// listener forwarded to did not confirm it in time (`receipt_timeout`) and is not the claim's own
+// live session. A session that stopped running but is still registered produces that last one:
+// the listener forwards to it and waits for a receipt that never comes. So does the relaunch
+// window, where the claim's new session has registered with the daemon but its plugin has not yet
+// taken the Envoy role back from the stopped one. A late receipt from the claim's own live session
+// (registered, ready, working or idle) is a slow holder that has the notice, as the TypeScript
+// daemon reads it (processes.ts, handleException), so it is logged and nothing is queued.
+//
+// The notice goes back through the executor as a new row of its issue, due after
+// noticeReholdDelay and counted in its Resends, so it is routed, fenced and held as any notice is.
+// It is queued again at most noticeReholdCap times; the report of the last copy is logged and
+// queues nothing. A report about another daemon's publish, another project, a role that is not an
+// architect, or anything but a notice changes nothing. The exception lane has no redelivery, so a
+// report that cannot be read is logged here and dropped. One published copy of a row is queued
+// again once, keyed by the row's dedupe key: a publish whose 200 was lost is retried under the
+// same key, and the listener reports each failed forward under a fresh event id.
 func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if r.supervisor == nil {
 		return errors.New("notice re-hold has no claim supervisor")
@@ -100,22 +112,30 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	switch exception.Reason {
 	case "receipt_timeout":
 		architect := claim.Token(strings.TrimPrefix(exception.OriginalTopic, roleTopicPrefix))
-		if sessionLive(r.claimState(architect)) {
-			r.log.Info("outbox notice receipt was late; its architect's session is live, so nothing is re-sent",
-				"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey)
-			return nil
+		if machine, ok := r.supervisor.Machine(architect); ok {
+			if c := machine.Claim(); exception.RecipientSession != "" && exception.RecipientSession == c.Session && sessionLive(c.State) {
+				r.log.Info("outbox notice receipt was late; its architect's session is live, so nothing is re-sent",
+					"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "session", c.Session)
+				return nil
+			}
 		}
 	case "delivery_failed", "no_holder":
 	default:
 		return fmt.Errorf("%w: exception %s names reason %q", errNoticeException, envelope.EventID, exception.Reason)
 	}
+	if notice.Resends >= noticeReholdCap {
+		r.log.Warn("outbox notice not re-held again: it was queued again the most times a notice is",
+			"issue", issue, "kind", notice.Kind, "topic", exception.OriginalTopic, "key", exception.DedupeKey, "reason", exception.Reason, "resends", notice.Resends)
+		return nil
+	}
+	notice.Resends++
 	row, err := record.NewOutboxRow(issue, notice, r.now().Add(noticeReholdDelay))
 	if err != nil {
 		return fmt.Errorf("%w: exception %s carries a notice the outbox refuses: %w", errNoticeException, envelope.EventID, err)
 	}
 	queued := false
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		fresh, err := r.records.MarkProcessed(ctx, tx, "envoy-exception", envelope.EventID)
+		fresh, err := r.records.MarkProcessed(ctx, tx, "envoy-exception", exception.DedupeKey)
 		if err != nil || !fresh {
 			return err
 		}
@@ -133,8 +153,8 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 
 // exceptionNotice reads the notice a report is about: a publish of this daemon's outbox (its
 // dedupe key names a row) to the role topic of an architect of this project, whose summary is the
-// executor's own "<kind> on <issue>" and whose payload is that notice. ok is false for a report
-// about anything else.
+// executor's own "<kind> on <issue>" for an issue of this project and whose payload is that
+// notice. ok is false for a report about anything else.
 func (r *outbox) exceptionNotice(exception roleLaneException) (string, record.Notice, bool) {
 	if !outboxDedupeKey.MatchString(exception.DedupeKey) {
 		return "", record.Notice{}, false
@@ -150,7 +170,7 @@ func (r *outbox) exceptionNotice(exception roleLaneException) (string, record.No
 		return "", record.Notice{}, false
 	}
 	kind, issue, found := strings.Cut(exception.PayloadSummary, " on ")
-	if !found || record.NoticeKind(kind) != notice.Kind || !claim.IsIssueKey(issue) {
+	if !found || record.NoticeKind(kind) != notice.Kind || !claim.IsIssueKey(issue) || !strings.HasPrefix(issue, r.dispatchProject+"-") {
 		return "", record.Notice{}, false
 	}
 	return issue, notice, true

@@ -84,6 +84,9 @@ type Notice struct {
 	Verdict string      `json:"verdict,omitempty"`
 	Version int         `json:"version,omitempty"`
 	Reason  string      `json:"reason,omitempty"`
+	// Resends counts the times the notice was queued again after the listener could not forward
+	// it to its architect's session (the daemon's rehold), which stops at a cap.
+	Resends int `json:"resends,omitempty"`
 }
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }

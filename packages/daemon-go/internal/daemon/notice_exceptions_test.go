@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,24 +20,41 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
-// exceptionEnvelope is the listener's report of a failed role-lane forward, as
+// laneReport is the listener's report of a failed role-lane forward, as
 // packages/envoy/cmd/listener/delivery.go publishes it: an envoy envelope whose payload names the
-// original topic, summary, payload and dedupe key, and the reason.
-func exceptionEnvelope(t *testing.T, eventID, reason, topic, summary string, payload any, key string) []byte {
+// original topic, summary, payload and dedupe key, the session the forward went to, and the reason.
+type laneReport struct {
+	eventID, reason, topic, summary string
+	payload                         any
+	key, recipient                  string
+}
+
+func (r laneReport) envelope(t *testing.T) []byte {
 	t.Helper()
-	encoded, err := json.Marshal(payload)
+	encoded, err := json.Marshal(r.payload)
 	if err != nil {
 		t.Fatalf("encode payload: %v", err)
 	}
-	exception, err := json.Marshal(roleLaneException{OriginalTopic: topic, EventID: "evt-original", Reason: reason, PayloadSummary: summary, Payload: string(encoded), DedupeKey: key})
+	exception, err := json.Marshal(map[string]string{"original_topic": r.topic, "event_id": "evt-original", "reason": r.reason, "recipient_session": r.recipient,
+		"payload_summary": r.summary, "payload": string(encoded), "dedupe_key": r.key})
 	if err != nil {
 		t.Fatalf("encode exception: %v", err)
 	}
-	envelope, err := json.Marshal(map[string]any{"event_id": eventID, "source": "envoy", "topic": "notifications.envoy.exceptions." + topic, "payload": string(exception)})
+	envelope, err := json.Marshal(map[string]any{"event_id": r.eventID, "source": "envoy", "topic": "notifications.envoy.exceptions." + r.topic, "payload": string(exception)})
 	if err != nil {
 		t.Fatalf("encode envelope: %v", err)
 	}
 	return envelope
+}
+
+// architectClaimOn creates issue's architect claim in state, registered as session.
+func architectClaimOn(t *testing.T, sup *supervisor, issue string, state supervise.ClaimState, session string) {
+	t.Helper()
+	if _, _, err := sup.Create(context.Background(), supervise.Claim{
+		Token: mustClaimToken(t, issue, claim.RoleArchitect), Project: "legion", Tree: "LEGION-1", Issue: issue, Role: claim.RoleArchitect, State: state, Session: session,
+	}, ""); err != nil {
+		t.Fatalf("create the architect claim of %s: %v", issue, err)
+	}
 }
 
 // queuedNotices is every queued notice row, as "<kind> on <issue>" with its payload.
@@ -57,42 +77,47 @@ func queuedNotices(t *testing.T, pool *pgxpool.Pool) []string {
 }
 
 // A notice the listener accepted but could not forward to the owning architect's session is
-// queued again as a row of its issue, due after the re-hold delay: the forward failed
-// (delivery_failed), the registration lapsed between the publish and the forward (no_holder), or
-// the receipt never came while the architect's claim has no live session (receipt_timeout from a
-// session that stopped running but is still registered). Once it is due and a session holds the
-// role, the executor delivers it to the owner.
+// queued again as a row of its issue, due after the re-hold delay and counted as one re-send: the
+// forward failed (delivery_failed), the registration lapsed between the publish and the forward
+// (no_holder), or the receipt never came from a session that is not the claim's live one
+// (receipt_timeout). That last covers a session that stopped running while still registered, and
+// the relaunch window, where the claim's new session registered with the daemon before its plugin
+// took the Envoy role back from the stopped one. Once it is due and a session holds the role, the
+// executor delivers it to the owner.
 func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 	for _, tc := range []struct {
-		reason    string
-		architect supervise.ClaimState
+		name, reason       string
+		architect          supervise.ClaimState
+		session, recipient string
 	}{
-		{"delivery_failed", supervise.StateWorking},
-		{"no_holder", supervise.StateWorking},
-		{"receipt_timeout", supervise.StateLaunching},
+		{"a failed forward", "delivery_failed", supervise.StateWorking, "ses_live", "ses_live"},
+		{"a holder that lapsed", "no_holder", supervise.StateWorking, "ses_live", ""},
+		{"a late receipt while the claim relaunches", "receipt_timeout", supervise.StateLaunching, "", "ses_stopped"},
+		{"a late receipt from the stopped session after the new one registered", "receipt_timeout", supervise.StateRegistered, "ses_new", "ses_stopped"},
 	} {
-		t.Run(tc.reason, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			noticeTree(t, pool, records, false)
 			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-			architectClaim(t, sup, "LEGION-1", tc.architect)
+			architectClaimOn(t, sup, "LEGION-1", tc.architect, tc.session)
 			clock := time.Now()
 			publisher := &holderPublisher{}
 			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion",
 				now: func() time.Time { return clock }}
 			notice := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}
+			report := laneReport{"evt-exception", tc.reason, architectTopic(t, "LEGION-1"), "pr-blocked on LEGION-2", notice, "legion-outbox:7", tc.recipient}
 
-			if err := runner.rehold(context.Background(), exceptionEnvelope(t, "evt-exception", tc.reason, architectTopic(t, "LEGION-1"), "pr-blocked on LEGION-2", notice, "legion-outbox:7")); err != nil {
+			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
 				t.Fatalf("rehold: %v", err)
 			}
 			var nextAt time.Time
 			if err := pool.QueryRow(context.Background(), "select next_at from outbox where kind = 'notice'").Scan(&nextAt); err != nil {
 				t.Fatalf("read the re-held row: %v", err)
 			}
-			if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-2 {"kind": "pr-blocked", "role": "architect", "reason": "max_fix_attempts"}` ||
+			if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-2 {"kind": "pr-blocked", "role": "architect", "reason": "max_fix_attempts", "resends": 1}` ||
 				!nextAt.Equal(clock.Add(noticeReholdDelay).Truncate(time.Microsecond)) {
-				t.Fatalf("queued %v due %s; want the one notice of LEGION-2, due %s", got, nextAt, clock.Add(noticeReholdDelay))
+				t.Fatalf("queued %v due %s; want the one notice of LEGION-2, counted as one re-send, due %s", got, nextAt, clock.Add(noticeReholdDelay))
 			}
 
 			if err := runner.RunOnce(context.Background()); err != nil {
@@ -112,34 +137,34 @@ func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 	}
 }
 
-// Only a failed forward of this daemon's notice to an architect of its project is queued again. A
-// late receipt while the architect's session is live is a slow holder that has the notice. Any
-// other report — another project's role, a
-// phase worker's role, the merge queue's READY, another publisher's key, a summary that is not the
-// executor's own, a payload that is not a notice — is someone else's, and changes nothing.
+// Only a failed forward of this daemon's notice about an issue of its project, to an architect of
+// its project, is queued again. A late receipt from the claim's own live session is a slow holder
+// that has the notice. Any other report — another project's role or issue, a phase worker's role,
+// the merge queue's READY, another publisher's key, a summary that is not the executor's own, a
+// payload that is not a notice — is someone else's, and changes nothing.
 func TestAReportThatIsNotAFailedNoticeForwardChangesNothing(t *testing.T) {
 	notice := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}
 	root := "notifications.role.legion-legion-legion-1-architect"
 	for _, tc := range []struct {
-		name, reason, topic, summary string
-		payload                      any
-		key                          string
+		name   string
+		report laneReport
 	}{
-		{"a late receipt from a live session", "receipt_timeout", root, "pr-blocked on LEGION-2", notice, "legion-outbox:7"},
-		{"another project's architect", "delivery_failed", "notifications.role.legion-other-legion-1-architect", "pr-blocked on LEGION-2", notice, "legion-outbox:7"},
-		{"a phase worker's role", "delivery_failed", "notifications.role.legion-legion-legion-2-planner", "pr-blocked on LEGION-2", notice, "legion-outbox:7"},
-		{"the merge queue's READY", "delivery_failed", "notifications.role.merge-queue", "READY #42 at abc123", "READY #42 at abc123", "legion-outbox:7"},
-		{"another publisher's key", "delivery_failed", root, "pr-blocked on LEGION-2", notice, "envoy.agent.42"},
-		{"a summary of another kind", "delivery_failed", root, "held on LEGION-2", notice, "legion-outbox:7"},
-		{"a summary naming no issue", "delivery_failed", root, "pr-blocked on everything", notice, "legion-outbox:7"},
-		{"a payload that is not a notice", "delivery_failed", root, "pr-blocked on LEGION-2", map[string]string{"kind": "pr-blocked", "packet": "READY"}, "legion-outbox:7"},
+		{"a late receipt from the claim's live session", laneReport{"evt-exception", "receipt_timeout", root, "pr-blocked on LEGION-2", notice, "legion-outbox:7", "ses_live"}},
+		{"another project's architect", laneReport{"evt-exception", "delivery_failed", "notifications.role.legion-other-legion-1-architect", "pr-blocked on LEGION-2", notice, "legion-outbox:7", "ses_live"}},
+		{"another project's issue", laneReport{"evt-exception", "delivery_failed", root, "pr-blocked on OTHER-2", notice, "legion-outbox:7", "ses_live"}},
+		{"a phase worker's role", laneReport{"evt-exception", "delivery_failed", "notifications.role.legion-legion-legion-2-planner", "pr-blocked on LEGION-2", notice, "legion-outbox:7", "ses_live"}},
+		{"the merge queue's READY", laneReport{"evt-exception", "delivery_failed", "notifications.role.merge-queue", "READY #42 at abc123", "READY #42 at abc123", "legion-outbox:7", "ses_live"}},
+		{"another publisher's key", laneReport{"evt-exception", "delivery_failed", root, "pr-blocked on LEGION-2", notice, "envoy.agent.42", "ses_live"}},
+		{"a summary of another kind", laneReport{"evt-exception", "delivery_failed", root, "held on LEGION-2", notice, "legion-outbox:7", "ses_live"}},
+		{"a summary naming no issue", laneReport{"evt-exception", "delivery_failed", root, "pr-blocked on everything", notice, "legion-outbox:7", "ses_live"}},
+		{"a payload that is not a notice", laneReport{"evt-exception", "delivery_failed", root, "pr-blocked on LEGION-2", map[string]string{"kind": "pr-blocked", "packet": "READY"}, "legion-outbox:7", "ses_live"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-			architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
-			runner := &outbox{log: quietLogger(), pool: pool, records: record.NewStore(), supervisor: sup, project: "legion", now: time.Now}
-			if err := runner.rehold(context.Background(), exceptionEnvelope(t, "evt-exception", tc.reason, tc.topic, tc.summary, tc.payload, tc.key)); err != nil {
+			architectClaimOn(t, sup, "LEGION-1", supervise.StateWorking, "ses_live")
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: record.NewStore(), supervisor: sup, project: "legion", now: time.Now}
+			if err := runner.rehold(context.Background(), tc.report.envelope(t)); err != nil {
 				t.Fatalf("rehold: %v", err)
 			}
 			if got := queuedNotices(t, pool); len(got) != 0 {
@@ -149,21 +174,22 @@ func TestAReportThatIsNotAFailedNoticeForwardChangesNothing(t *testing.T) {
 	}
 }
 
-// The listener sends each report once, but a report handled twice queues its notice once: the
-// exception's event id is recorded with the row. A report that cannot be read is refused.
-func TestAReportIsQueuedOnceAndAnUnreadableOneIsRefused(t *testing.T) {
+// One published copy of a row is queued again once, however many reports name it: a publish whose
+// 200 was lost is retried under the same row key, and the listener reports each failed forward
+// with a fresh event id. A report that cannot be read is refused.
+func TestARowCopyIsQueuedOnceAndAnUnreadableReportIsRefused(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	runner := &outbox{log: quietLogger(), pool: pool, records: record.NewStore(), supervisor: sup, project: "legion", now: time.Now}
-	report := exceptionEnvelope(t, "evt-exception", "delivery_failed", "notifications.role.legion-legion-legion-1-architect", "pr-blocked on LEGION-2",
-		record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, "legion-outbox:7")
-	for range 2 {
-		if err := runner.rehold(context.Background(), report); err != nil {
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: record.NewStore(), supervisor: sup, project: "legion", now: time.Now}
+	notice := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}
+	for _, eventID := range []string{"evt-first-forward", "evt-retried-forward", "evt-retried-forward"} {
+		report := laneReport{eventID, "delivery_failed", "notifications.role.legion-legion-legion-1-architect", "pr-blocked on LEGION-2", notice, "legion-outbox:7", "ses_live"}
+		if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
 			t.Fatalf("rehold: %v", err)
 		}
 	}
 	if got := queuedNotices(t, pool); len(got) != 1 {
-		t.Fatalf("queued %v after the same report twice, want one row", got)
+		t.Fatalf("queued %v after three reports of one row copy, want one row", got)
 	}
 	for _, malformed := range [][]byte{[]byte("not json"), []byte(`{"event_id":"evt-2","source":"agent","payload":"{}"}`), []byte(`{"event_id":"evt-3","source":"envoy","payload":"not json"}`)} {
 		if err := runner.rehold(context.Background(), malformed); err == nil {
@@ -175,6 +201,31 @@ func TestAReportIsQueuedOnceAndAnUnreadableOneIsRefused(t *testing.T) {
 	}
 }
 
+// A notice is queued again at most three times, as the TypeScript daemon re-sends one at most three
+// times: a holder that keeps its registration alive but never confirms a delivery would otherwise
+// be sent copies without end. The report of the third copy is logged once and queues nothing.
+func TestANoticeIsQueuedAgainAtMostThreeTimes(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	var logged bytes.Buffer
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: record.NewStore(), supervisor: sup, project: "legion", now: time.Now}
+	topic := "notifications.role.legion-legion-legion-1-architect"
+	second := laneReport{"evt-second", "delivery_failed", topic, "pr-blocked on LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: 2}, "legion-outbox:8", "ses_live"}
+	if err := runner.rehold(context.Background(), second.envelope(t)); err != nil {
+		t.Fatalf("rehold the second copy: %v", err)
+	}
+	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-2 {"kind": "pr-blocked", "role": "architect", "resends": 3}` {
+		t.Fatalf("queued %v, want the third copy", got)
+	}
+	third := laneReport{"evt-third", "delivery_failed", topic, "pr-blocked on LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Resends: 3}, "legion-outbox:9", "ses_live"}
+	if err := runner.rehold(context.Background(), third.envelope(t)); err != nil {
+		t.Fatalf("rehold the third copy: %v", err)
+	}
+	if got := queuedNotices(t, pool); len(got) != 1 || strings.Count(logged.String(), `msg="outbox notice not re-held again`) != 1 {
+		t.Fatalf("queued %v, log %q; want no fourth copy and one line saying so", got, logged.String())
+	}
+}
+
 // The report arrives over core NATS on the original role topic's exceptions subject; the
 // subscription hears it there and queues the notice again.
 func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {
@@ -182,7 +233,7 @@ func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {
 	records := record.NewStore()
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	runner := &outbox{log: quietLogger(), pool: pool, records: records, supervisor: sup, project: "legion", now: time.Now}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", now: time.Now}
 	conn, err := nats.Connect(testnats.URL(t), nats.Timeout(time.Second))
 	if err != nil {
 		t.Fatalf("connect NATS: %v", err)
@@ -199,8 +250,8 @@ func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 	topic := "notifications.role.legion-legion-legion-1-architect"
-	report := exceptionEnvelope(t, "evt-exception", "delivery_failed", topic, "design-approved on LEGION-1", record.Notice{Kind: "design-approved", Version: 3}, "legion-outbox:9")
-	if err := conn.Publish("notifications.envoy.exceptions."+topic, report); err != nil {
+	report := laneReport{"evt-exception", "delivery_failed", topic, "design-approved on LEGION-1", record.Notice{Kind: "design-approved", Version: 3}, "legion-outbox:9", "ses_live"}
+	if err := conn.Publish("notifications.envoy.exceptions."+topic, report.envelope(t)); err != nil {
 		t.Fatalf("publish the report: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -211,7 +262,7 @@ func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-1 {"kind": "design-approved", "version": 3}` {
+	if got := queuedNotices(t, pool); len(got) != 1 || got[0] != `LEGION-1 {"kind": "design-approved", "resends": 1, "version": 3}` {
 		t.Fatalf("queued %v, want the design-approved notice of LEGION-1", got)
 	}
 }
