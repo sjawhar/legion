@@ -375,6 +375,48 @@ func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 	}
 }
 
+// TestSendHandlerRefusesAModeThatIsNotADeliveryMode proves the listener decides what a delivery
+// mode is, rather than deferring to what the target session advertises. `capabilities` is an
+// open string list the session itself writes at registration, so "no session advertises a bogus
+// capability" was an assumption about every present and future client, not a property of this
+// boundary. A session that advertises "agentstream" and a frame claiming that mode used to pass
+// both checks and reach the receiver; now the mode itself is refused, as the Dispatch server's
+// own `validDelivery` refuses it.
+func TestSendHandlerRefusesAModeThatIsNotADeliveryMode(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put("ses_target", session.SessionEntry{
+		Port:         1,
+		MachineID:    "test-machine",
+		Dir:          "/test/ses_target",
+		Title:        "planner",
+		Capabilities: []string{"aside", "btw", "steer", "agentstream"},
+	}); err != nil {
+		t.Fatalf("register target session: %v", err)
+	}
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+
+	rr := httptest.NewRecorder()
+	requestJSON := fmt.Sprintf(
+		`{"target_session":"ses_target","message":"Can this ship?","payload":%s}`,
+		mustJSONString(t, `{"delivery":{"attempt":1,"mode":"agentstream"}}`),
+	)
+	sendHandler(state).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(requestJSON)))
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body: %s)", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if response.Error != "session ses_target (planner) sent a delivery mode that cannot be read unambiguously" {
+		t.Fatalf("error = %q, want the unreadable-delivery refusal shape", response.Error)
+	}
+}
+
 // TestSendHandlerRefusesUnadvertisedModeFromDerivedPayload proves the guard
 // checks messageEnvelope's effective payload, not only the optional HTTP
 // payload field. A long structured message becomes the receiver's payload.
@@ -1295,7 +1337,7 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
 	}
-	routeClient, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	routeClient, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open session registry connection: %v", err)
 	}
@@ -1521,6 +1563,96 @@ func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 		response.Urgency != "blocking" ||
 		response.ExpectsReply != "required" {
 		t.Fatalf("optional fields = %+v", response)
+	}
+}
+
+// A caller's message NATS cannot take whole is the caller's to fix, so both message routes answer
+// it 413 and say how large it was against the server's max payload, rather than a 500 that reads
+// as the listener's own failure.
+func TestMessageHandlersAnswerAMessageNATSCannotTakeWholeWith413(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, map[string][]string{}, map[string]int{"ses_target": 1})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	message := strings.Repeat("m", 2<<20)
+	for _, tc := range []struct {
+		path    string
+		handler http.Handler
+		body    map[string]string
+	}{
+		{"/v1/messages/publish", publishHandler(state), map[string]string{
+			"topic": "notifications.github.example-org.example-repo.pr.1", "message": message,
+		}},
+		{"/v1/messages/send", sendHandler(state), map[string]string{"target_session": "ses_target", "message": message}},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			body, err := json.Marshal(tc.body)
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			recorder := httptest.NewRecorder()
+			tc.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(string(body))))
+			if recorder.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want 413; body = %.300s", recorder.Code, recorder.Body.String())
+			}
+			if got := recorder.Body.String(); !strings.Contains(got, "max payload of 1048576 bytes") {
+				t.Fatalf("body = %.300s, want it to name the server's max payload", got)
+			}
+		})
+	}
+}
+
+// A session id or role a caller names becomes a KV key, and a key NATS would refuse (one long enough
+// to take its subject past the server's protocol line, which would close the connection every
+// subscription and watcher of the listener runs on, or one holding an empty token, which no stream
+// matches) is the caller's to fix: every /v1 route that reads or writes one answers 413 or 400, as
+// for a message NATS cannot take, and the connection stays up.
+func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	resetListenerTestState(t, client.Conn)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	if err := sessions.Put("ses_live", session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register ses_live: %v", err)
+	}
+	mux := http.NewServeMux()
+	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+
+	long := strings.Repeat("s", 5000)
+	longRole := strings.Repeat("r", 4100)
+	for _, tc := range []struct {
+		name, method, path, body string
+		want                     int
+	}{
+		{"subscribe a long session id", http.MethodPost, "/v1/interests/subscribe", `{"session_id":"` + long + `","self_subscribed":true}`, http.StatusRequestEntityTooLarge},
+		{"subscribe a session id holding an empty token", http.MethodPost, "/v1/interests/subscribe", `{"session_id":"sess..x","self_subscribed":true}`, http.StatusBadRequest},
+		{"unsubscribe a long session id", http.MethodPost, "/v1/interests/unsubscribe", `{"session_id":"` + long + `","topics":["notifications.agent.x"]}`, http.StatusRequestEntityTooLarge},
+		{"read a long session id's interests", http.MethodGet, "/v1/interests/" + long, "", http.StatusRequestEntityTooLarge},
+		{"remove a long session id's interests", http.MethodDelete, "/v1/interests/" + long, "", http.StatusRequestEntityTooLarge},
+		{"remove a long session id", http.MethodDelete, "/v1/sessions/" + long, "", http.StatusRequestEntityTooLarge},
+		{"read a long role", http.MethodGet, "/v1/roles/" + long, "", http.StatusRequestEntityTooLarge},
+		{"claim a long role", http.MethodPost, "/v1/roles/set", `{"session_id":"ses_live","role":"` + longRole + `"}`, http.StatusRequestEntityTooLarge},
+		{"publish to a long role", http.MethodPost, "/v1/messages/publish", `{"topic":"notifications.role.` + longRole + `","message":"hi"}`, http.StatusRequestEntityTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body = %.300s", recorder.Code, tc.want, recorder.Body.String())
+			}
+			if !client.Conn.IsConnected() {
+				t.Fatalf("the refusal left the connection %v, want it connected", client.Conn.Status())
+			}
+		})
 	}
 }
 

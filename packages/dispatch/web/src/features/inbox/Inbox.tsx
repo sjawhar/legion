@@ -25,6 +25,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
+import { CredentialRequestsSection } from "../credentials/CredentialRequestsSection";
 import { PriorityControl } from "../issue/PriorityControl";
 import { useIssueAssignee } from "../issue/useIssueAssignee";
 import { actorLabel } from "../refs/actor";
@@ -122,11 +123,13 @@ function AssignToMe({
         {write.pending ? "Assigning…" : "Assign to me"}
       </button>
       {write.failed ? (
-        <QueryError
-          message={write.error ?? `Could not assign ${issueKey} to you.`}
-          onRetry={write.retry}
-          retrying={write.pending}
-        />
+        <div className="basis-full">
+          <QueryError
+            message={write.error ?? `Could not assign ${issueKey} to you.`}
+            onRetry={write.retry}
+            retrying={write.pending}
+          />
+        </div>
       ) : null}
     </>
   );
@@ -179,58 +182,71 @@ function InboxItem({
       onPointerLeave={onRelease}
       tabIndex={-1}
     >
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        {ask.document === undefined ? (
-          owner === null ? (
-            <p className={`text-sm ${textMutedOnCanvas}`}>{title}</p>
+      {/* One line: the issue this question belongs to on the left, the controls that defer or
+          reroute it on the right. It wraps rather than overlapping - a refusal from Snooze or
+          Assign to me is a full-width row inside the right group, so it never draws over the
+          issue key - and the reply chip truncates rather than squeezing the title away. */}
+      <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <div className="flex min-w-0 grow basis-48 items-baseline gap-2">
+          {ask.document === undefined ? (
+            owner === null ? (
+              <p className={`truncate text-sm ${textMutedOnCanvas}`}>{title}</p>
+            ) : (
+              <Link
+                className={`flex min-w-0 grow items-baseline gap-2 text-sm ${linkText} ${linkHoverText}`}
+                data-inbox-owner=""
+                to={buildIssuePath({ id: ask.id, key: owner, kind: "ask" })}
+                {...referenceTriggerProps({ key: owner, kind: "issue" })}
+              >
+                <span className="shrink-0 font-semibold">{owner}</span>
+                <span className="truncate">{title}</span>
+              </Link>
+            )
           ) : (
             <Link
-              className={`flex flex-col items-start gap-1 text-sm md:inline-flex md:flex-row md:items-baseline md:gap-2 ${linkText} ${linkHoverText}`}
+              className={`min-w-0 grow truncate text-sm font-semibold ${linkText} ${linkHoverText}`}
               data-inbox-owner=""
-              to={buildIssuePath({ id: ask.id, key: owner, kind: "ask" })}
-              {...referenceTriggerProps({ key: owner, kind: "issue" })}
+              to={buildProjectPath({
+                item: { id: ask.id, kind: "ask" },
+                kind: "document",
+                project: ask.document.project,
+                slug: ask.document.slug,
+              })}
+              {...referenceTriggerProps({
+                kind: "document",
+                project: ask.document.project,
+                slug: ask.document.slug,
+              })}
             >
-              <span className="font-semibold">{owner}</span>
-              <span>{title}</span>
+              {ask.document.project} · {ask.document.name}
             </Link>
-          )
-        ) : (
-          <Link
-            className={`flex flex-col items-start gap-1 text-sm font-semibold md:inline-flex md:flex-row md:items-baseline md:gap-2 ${linkText} ${linkHoverText}`}
-            data-inbox-owner=""
-            to={buildProjectPath({
-              item: { id: ask.id, kind: "ask" },
-              kind: "document",
-              project: ask.document.project,
-              slug: ask.document.slug,
-            })}
-            {...referenceTriggerProps({
-              kind: "document",
-              project: ask.document.project,
-              slug: ask.document.slug,
-            })}
-          >
-            {ask.document.project} · {ask.document.name}
-          </Link>
-        )}
-        <InboxRowChip ask={ask} />
-        {ask.issue_key === null ? null : (
-          <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
-        )}
-        {ask.issue_key !== null && (section === "unassigned" || assignLive) ? (
-          <AssignToMe
+          )}
+          <span className="min-w-0 max-w-[40%] shrink truncate">
+            <InboxRowChip ask={ask} />
+          </span>
+        </div>
+        {/* `max-w-full` bounds the group to the row: `shrink-0` alone lets a server's own
+            refusal reason - `snoozed_until must be in the future`, or anything longer - set the
+            group's width and widen the whole document past the viewport on a phone. */}
+        <div className="flex max-w-full shrink-0 flex-wrap items-center gap-1">
+          {ask.issue_key === null ? null : (
+            <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
+          )}
+          {ask.issue_key !== null && (section === "unassigned" || assignLive) ? (
+            <AssignToMe
+              askId={ask.id}
+              issueKey={ask.issue_key}
+              onLive={onAssignLive}
+              viewer={viewer}
+            />
+          ) : null}
+          <SnoozeControl
             askId={ask.id}
-            issueKey={ask.issue_key}
-            onLive={onAssignLive}
-            viewer={viewer}
+            label={owner ?? title}
+            onLive={onSnoozeLive}
+            snoozedUntil={section === "later" ? ask.snoozed_until : null}
           />
-        ) : null}
-        <SnoozeControl
-          askId={ask.id}
-          label={owner ?? title}
-          onLive={onSnoozeLive}
-          snoozedUntil={section === "later" ? ask.snoozed_until : null}
-        />
+        </div>
       </div>
       <AskCard
         ask={ask}
@@ -494,6 +510,7 @@ export function Inbox(): ReactNode {
   if (shown.length === 0 && held === undefined) {
     return (
       <div className="space-y-6">
+        <CredentialRequestsSection />
         {viewSwitch}
         {chip}
         <EmptyState
@@ -537,23 +554,25 @@ export function Inbox(): ReactNode {
   // it - its draft, selection, disclosures, and focus stay, and the viewport anchor can find it.
   return (
     <ViewportAnchor
-      className="space-y-6"
+      className="space-y-4"
       group="data-inbox-section"
       item={ROW_ATTRIBUTE}
       ref={viewport}
       rootRef={listRef}
     >
+      <CredentialRequestsSection />
       {viewSwitch}
       {chip}
       {agent === undefined ? <BlockedOnYou asks={inView(inbox.data)} /> : null}
       <ul className="space-y-3">
         {sections.flatMap(({ rows, section, shownRows }, index) => [
           <li
-            className={index === 0 ? undefined : "pt-3"}
+            className={index === 0 ? undefined : "pt-2"}
             key={`heading-${section}`}
             role="presentation"
           >
-            <h2 className={`text-base font-semibold ${textMutedOnCanvas}`}>
+            {/* A band divider, not a heading that competes with the questions under it. */}
+            <h2 className={`text-xs font-semibold tracking-wide uppercase ${textMutedOnCanvas}`}>
               {COLLAPSED_SECTIONS[section] === true ? (
                 <DisclosureToggle
                   expanded={laterOpen}

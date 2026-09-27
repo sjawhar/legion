@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -44,7 +45,7 @@ func TestAnInFlightChildSetBackToTodoSuspendsThePreviousRunsWorker(t *testing.T)
 			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parentKey,
 				Phase: tc.phase, Generation: 1, Status: "in_progress", Rank: "V", LastDispatchSeq: 4})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: tc.role, Claim: "child-worker", Rounds: 1})
-			engine := testEngine()
+			engine := testEngine(config.DesignGateRootIssues, nil)
 
 			if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-back-to-todo", intake.DispatchIssue{
 				Key: "LEGION-209", Seq: 5, Type: "issue.updated", Status: "todo", Title: "child", Parent: "LEGION-208", Rank: "V",
@@ -110,7 +111,7 @@ func TestACompletionFromAnInterruptedRunIsRefused(t *testing.T) {
 	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parentKey,
 		Phase: phase.Planning, Generation: 2, Status: "in_progress", Rank: "V", LastDispatchSeq: 6})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "child-planner"})
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 
 	result, err := intake.ApplyFact(ctx, pool, "api", "stale-handoff", intake.HandoffComplete{
 		Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "child-planner", Summary: "the plan of the run that was interrupted",

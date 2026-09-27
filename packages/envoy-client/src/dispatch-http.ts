@@ -29,6 +29,7 @@ import type {
   GraphReferences,
   Issue,
   IssueDetails,
+  IssuePriority,
   IssueRead,
   IssueReferences,
   IssueSummary,
@@ -73,6 +74,8 @@ export interface ListIssuesOptions {
   readonly status?: string;
   readonly parent?: string;
   readonly label?: string;
+  /** Each value repeats as `priority=`; `"none"` matches an issue with no priority. */
+  readonly priority?: readonly (IssuePriority | "none")[];
   readonly updated_since?: string;
 }
 
@@ -237,8 +240,9 @@ export class DispatchClient {
     return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
   }
 
-  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row. */
-  async getArchitectureSource(project: string): Promise<ArchitectureSource> {
+  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row, or `null`
+   *  when the project has none. Having none is an answer, not a failure. */
+  async getArchitectureSource(project: string): Promise<ArchitectureSource | null> {
     return this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
   }
 
@@ -522,6 +526,8 @@ export class DispatchClient {
       for (const [name, value] of Object.entries(query)) {
         if (typeof value === "string" || typeof value === "number") {
           url.searchParams.set(name, String(value));
+        } else if (Array.isArray(value)) {
+          for (const item of value) url.searchParams.append(name, String(item));
         }
       }
     }

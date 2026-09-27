@@ -19,9 +19,9 @@ import (
 // after Join, drops whatever a transaction that did not commit left behind.
 //
 // Settlement's operations run in a transaction of its own, which no caller joined, so its ledger
-// carries no `tx` and marks itself `settling` instead. A named version no caller joined makes its
-// own transaction too (NamedVersion's withTx), and collects its events in a ledger that is
-// neither joined nor settling.
+// carries no `tx` and marks itself `settling` instead. Those are the only two ledgers there are:
+// every operation that writes a document either joins its caller's transaction or is
+// settlement's own.
 type Ledger struct {
 	service *Service
 	tx      pgx.Tx
@@ -145,6 +145,19 @@ func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
 		return nil
 	}
 	return l.live[artifactID]
+}
+
+// LostOps reports which operations of this transaction's write to artifactID the live document
+// no longer held once the write was published, which the caller reads after Commit. The second
+// return is false when no verdict was reached - the transaction wrote nothing to that document,
+// or its publish failed and the room is reloading - which the caller reports as undetermined
+// rather than as survival (LEGION-269).
+func (l *Ledger) LostOps(artifactID string) ([]int, bool) {
+	write := l.liveWriteFor(artifactID)
+	if write == nil || !write.lostVerdict {
+		return nil, false
+	}
+	return write.lost, true
 }
 
 func (l *Ledger) addLiveWrite(write *liveWrite) {

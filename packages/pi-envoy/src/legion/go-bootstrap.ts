@@ -2,7 +2,6 @@ import { messageFor } from "@legion/envoy-client/errors";
 import {
   controllerToken,
   legionControllerNoticeSubject,
-  legionNoticeSubject,
   legionProjectToken,
   type LegionRole,
 } from "@legion/contracts";
@@ -226,15 +225,10 @@ export async function bootstrapGoClaim(
         roleToken: claim.claimToken,
         secret: claim.secret,
       });
+      // The claim's role topic is where the Go daemon sends every notice for an architect (the
+      // notice executor, packages/daemon-go/internal/daemon/outbox.go): no issue topic carries one,
+      // so no claim subscribes to one.
       await claimEnvoyRole(sessionID, claim.claimToken, context);
-      await subscribeLegionNotice(
-        sessionID,
-        legionNoticeSubject(
-          requiredEnvironment(process.env, "LEGION_PROJECT"),
-          claim.role === "architect" ? claim.tree : claim.issue
-        ),
-        context
-      );
       await callGoReadyWithRetry("claims/ready", () => daemon.ready(ready));
       onEnvoyRoleRegained(async (role, reason) => {
         if (role !== claim.claimToken) return;

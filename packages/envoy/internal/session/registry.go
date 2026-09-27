@@ -3,13 +3,13 @@ package session
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
@@ -94,15 +94,12 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 	if err != nil {
 		return nil, err
 	}
-	kv, err := js.KeyValue(SessionBucket)
-	if errors.Is(err, nats.ErrBucketNotFound) {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{
-			Bucket:   SessionBucket,
-			TTL:      opts.ttl,
-			Replicas: opts.replicas,
-			Storage:  nats.FileStorage,
-		})
-	}
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
+		Bucket:   SessionBucket,
+		TTL:      opts.ttl,
+		Replicas: opts.replicas,
+		Storage:  nats.FileStorage,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -281,19 +278,11 @@ func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 func (r *SessionRegistry) Delete(sessionID string) error {
 	revision := r.cachedRevision(sessionID)
 	kv := r.watcher.KV()
-	entry, err := kv.Get(sessionID)
-	opts := []nats.DeleteOpt{}
-	if err == nil {
-		if entry.Revision() > revision {
-			revision = entry.Revision()
-		}
-		opts = append(opts, nats.LastRevision(entry.Revision()))
-	} else if !errors.Is(err, nats.ErrKeyNotFound) {
+	read, err := kv.DeleteAtRead(sessionID)
+	if err != nil {
 		return err
 	}
-	if err := kv.Delete(sessionID, opts...); err != nil {
-		return err
-	}
+	revision = max(revision, read)
 	entries, err := kv.History(sessionID)
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
@@ -133,7 +134,7 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	child := exec.CommandContext(bounded, executable, args...)
 	child.Dir = command.Dir
-	env, err := pinGitConfig(without(merge(merge(os.Environ(), transportEnvironment), command.Env), "GIT_CONFIG_PARAMETERS"))
+	env, err := pinGitConfig(without(merge(merge(runtime.WithoutNATSSeeds(os.Environ()), transportEnvironment), command.Env), "GIT_CONFIG_PARAMETERS"))
 	if err != nil {
 		return Result{}, err
 	}

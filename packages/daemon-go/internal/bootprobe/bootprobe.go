@@ -150,3 +150,24 @@ func ConfirmedContract(output string) (int, bool) {
 	}
 	return contract, true
 }
+
+// natsUserPrefix begins the line `legion probe-image` prints, before its OK line, when its
+// environment names a NATS nkey seed (a pod's NATS_NKEY_SEED_FILE): the public key of the user
+// that seed is, never the seed.
+const natsUserPrefix = "probe-image: nats-nkey-user="
+
+// NATSUserLine is that line for the nkey user whose public key is public.
+func NATSUserLine(public string) string { return natsUserPrefix + public }
+
+// natsUser is a NATSUserLine.
+var natsUser = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(natsUserPrefix) + `(\S+)$`)
+
+// NATSUser is the nkey user's public key a NATSUserLine in output names, and "" when output holds
+// none: the probe's environment named no seed, or its CLI predates the line.
+func NATSUser(output string) string {
+	match := natsUser.FindStringSubmatch(output)
+	if match == nil {
+		return ""
+	}
+	return match[1]
+}

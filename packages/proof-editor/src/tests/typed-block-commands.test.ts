@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 import { test } from './harness.js';
 import { history, undo } from '@milkdown/kit/prose/history';
 import { EditorState, TextSelection } from '@milkdown/kit/prose/state';

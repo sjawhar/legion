@@ -168,8 +168,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				if errors.Is(err, cistore.ErrInvalidHeadSHA) {
 					log.Printf("github ci head skipped: invalid sha=%q pr=%s", sha, number)
 				} else {
-					log.Printf("github ci head record failed: %v", err)
-					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					deliveryFailed(w, "github ci head record", err)
 					return
 				}
 			}
@@ -180,8 +179,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			for _, o := range obs {
 				if o.CheckName == "" {
 					if err := ci.RecordSuite(o); err != nil {
-						log.Printf("github ci suite record failed: %v", err)
-						http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+						deliveryFailed(w, "github ci suite record", err)
 						return
 					}
 					continue
@@ -197,8 +195,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 					}
 				}
 				if err := ci.Record(o); err != nil {
-					log.Printf("github ci record failed: %v", err)
-					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					deliveryFailed(w, "github ci record", err)
 					return
 				}
 			}
@@ -223,8 +220,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				return
 			}
 			if err := publisher.Publish(item); err != nil {
-				log.Printf("github publish failed: %v", err)
-				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+				deliveryFailed(w, "github publish", err)
 				return
 			}
 		}

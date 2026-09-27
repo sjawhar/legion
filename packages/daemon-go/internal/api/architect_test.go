@@ -32,6 +32,8 @@ func TestArchitectFactRoutesRejectMissingGrantID(t *testing.T) {
 		"/legion/v1/phase/backward",
 		"/legion/v1/phase/retry",
 		"/legion/v1/signoff",
+		"/legion/v1/children/park",
+		"/legion/v1/children/rerun",
 	} {
 		t.Run(route, func(t *testing.T) {
 			recorder := h.request(http.MethodPost, route, map[string]any{}, nil)
@@ -481,6 +483,96 @@ func TestWaveReleaseRetryFinishesAWaveAPartialFailureLeftHalfReleased(t *testing
 	}
 	if len(statuses.writes) != 1 || statuses.writes[0] != (statusWrite{issue: "LEGION-210", status: "todo"}) {
 		t.Fatalf("Dispatch writes = %#v, want only the child the failed attempt had not released", statuses.writes)
+	}
+}
+
+// An architect parks a child of its tree and runs a parked or signed-off child again by the same
+// Dispatch status a human would move it by: backlog, then todo. Each write's event takes the human
+// move's path through the workflow, which parks the child (leave) or starts its next run under the
+// live tree (reenterChild); the routes apply no fact of their own. The tree root is never a child,
+// a child already out of the workflow has nothing to park, a running child is parked before it
+// runs again, and a lingering tree runs nothing more.
+func TestParkAndRerunMoveAChildOfTheTreeByItsDispatchStatus(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209", "LEGION-210")
+	setIssue(t, h, "LEGION-210", func(issue *record.Issue) { issue.Phase, issue.Status = phase.Done, "done" })
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	child := func(route, issue string) *httptest.ResponseRecorder {
+		return h.request(http.MethodPost, "/legion/v1/children/"+route, map[string]any{"grantId": architect.grant(t), "issue": issue}, nil)
+	}
+
+	if recorder := child("park", "LEGION-209"); recorder.Code != http.StatusOK || strings.TrimSpace(recorder.Body.String()) != "{}" {
+		t.Fatalf("park = %d %s, want 200 {}", recorder.Code, recorder.Body)
+	}
+	if recorder := child("rerun", "LEGION-210"); recorder.Code != http.StatusOK || strings.TrimSpace(recorder.Body.String()) != "{}" {
+		t.Fatalf("rerun = %d %s, want 200 {}", recorder.Code, recorder.Body)
+	}
+	want := []statusWrite{{issue: "LEGION-209", status: "backlog"}, {issue: "LEGION-210", status: "todo"}}
+	if len(statuses.writes) != 2 || statuses.writes[0] != want[0] || statuses.writes[1] != want[1] {
+		t.Fatalf("Dispatch writes = %#v, want %#v", statuses.writes, want)
+	}
+
+	for _, tc := range []struct {
+		route, issue string
+		status       int
+		code         string
+	}{
+		{route: "park", issue: "LEGION-208", status: http.StatusForbidden, code: "CHILD_REQUIRED"},
+		{route: "rerun", issue: "LEGION-208", status: http.StatusForbidden, code: "CHILD_REQUIRED"},
+		{route: "park", issue: "LEGION-210", status: http.StatusConflict, code: "CHILD_NOT_RUNNING"},
+		{route: "rerun", issue: "LEGION-209", status: http.StatusConflict, code: "CHILD_RUNNING"},
+		{route: "park", issue: "LEGION-777", status: http.StatusNotFound, code: "ISSUE_NOT_FOUND"},
+		{route: "rerun", issue: "not a key", status: http.StatusBadRequest, code: "INVALID_ISSUE"},
+	} {
+		t.Run(tc.route+" "+tc.issue, func(t *testing.T) {
+			recorder := child(tc.route, tc.issue)
+			if tc.status != http.StatusBadRequest && tc.status != http.StatusNotFound && !strings.Contains(recorder.Body.String(), tc.issue) {
+				t.Fatalf("refusal %s does not name %s", recorder.Body, tc.issue)
+			}
+			assertFailure(t, recorder, tc.status, tc.code)
+		})
+	}
+	foreign := newLiveClaim(t, h, "LEGION-999", claim.RoleArchitect)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/children/park", map[string]any{
+		"grantId": foreign.grant(t), "issue": "LEGION-209",
+	}, nil), http.StatusForbidden, "ISSUE_OUTSIDE_TREE")
+	worker := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/children/rerun", map[string]any{
+		"grantId": worker.grant(t), "issue": "LEGION-210",
+	}, nil), http.StatusForbidden, "ARCHITECT_REQUIRED")
+
+	until := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	setIssue(t, h, "LEGION-208", func(issue *record.Issue) { issue.Phase, issue.LingerUntil = phase.Done, &until })
+	assertFailure(t, child("rerun", "LEGION-210"), http.StatusConflict, "TREE_LINGERING")
+	setIssue(t, h, "LEGION-208", func(issue *record.Issue) { issue.Phase, issue.LingerUntil = phase.Implementing, nil })
+
+	statuses.err = &dispatch.Error{Status: http.StatusServiceUnavailable, Code: "UNAVAILABLE", Message: "Dispatch is down"}
+	assertFailure(t, child("rerun", "LEGION-210"), http.StatusBadGateway, "UNAVAILABLE")
+	statuses.err = errors.New("connection refused")
+	assertFailure(t, child("park", "LEGION-209"), http.StatusBadGateway, "DISPATCH_FAILED")
+
+	if len(statuses.writes) != 2 {
+		t.Fatalf("Dispatch writes after refusals = %#v, want only the park and the re-run", statuses.writes)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("facts = %#v, want none: the Dispatch write's event moves the child", got)
+	}
+}
+
+// setIssue rewrites one recorded issue in place.
+func setIssue(t *testing.T, h *harness, key string, change func(*record.Issue)) {
+	t.Helper()
+	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		records := record.NewStore()
+		issue, err := records.Issue(context.Background(), tx, key)
+		if err != nil {
+			return err
+		}
+		change(issue)
+		return records.PutIssue(context.Background(), tx, *issue)
+	})
+	if err != nil {
+		t.Fatalf("set issue %s: %v", key, err)
 	}
 }
 

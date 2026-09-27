@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { quiesceDocuments } from "./api";
+
 const tables = [
   "agent_tokens",
   "repo_projects",
@@ -10,6 +12,7 @@ const tables = [
   "events",
   "refs",
   "messages",
+  "broadcasts",
   "comments",
   "asks",
   "doc_checkpoints",
@@ -89,19 +92,10 @@ export async function clearIssueCreator(issueKey: string): Promise<void> {
   ]);
 }
 
-const resetAttempts = 3;
-
-function hasDeadlockSqlState(error: unknown): boolean {
-  if (
-    typeof error !== "object" ||
-    error === null ||
-    !("stderr" in error) ||
-    typeof error.stderr !== "string"
-  ) {
-    return false;
-  }
-  return /^ERROR:\s+40P01:/m.test(error.stderr);
-}
+// The DO block waits for every other session to leave its transaction. That is a barrier, not a
+// fix: the server's document settlements run on their own timers, so one can open a transaction
+// after the check and before TRUNCATE takes its locks. resetDatabase closes that by quiescing
+// the document service first.
 
 async function resetDatabaseOnce(): Promise<void> {
   await execFileAsync("psql", [
@@ -139,27 +133,14 @@ async function resetDatabaseOnce(): Promise<void> {
 }
 
 /**
- * Truncates every table. The initial wait reduces contention from the prior scenario's document
- * settlement, but a server transaction can begin after that check and before TRUNCATE acquires
- * its locks. PostgreSQL resolves that structural race with SQLSTATE 40P01 by aborting one
- * participant, so retry only that error a bounded number of times.
+ * Truncates every table, after the server has closed every live document and finished the
+ * settlements in flight. A settlement locks its document's owner row and then reads
+ * artifact_versions, while TRUNCATE takes an exclusive lock on every table in its own order;
+ * with both running PostgreSQL breaks the cycle by aborting one of them (LEGION-168), which is
+ * either a failed reset or a settlement that dies mid-scenario. Quiescing first leaves the
+ * server with nothing to run, so the two never overlap.
  */
 export async function resetDatabase(): Promise<void> {
-  for (let attempt = 1; attempt <= resetAttempts; attempt++) {
-    try {
-      await resetDatabaseOnce();
-      return;
-    } catch (error) {
-      if (!hasDeadlockSqlState(error)) {
-        throw error;
-      }
-      const retrying = attempt < resetAttempts;
-      console.warn(
-        `dispatch e2e database reset deadlock (SQLSTATE 40P01) on attempt ${attempt}/${resetAttempts}${retrying ? "; retrying" : "; retry limit reached"}`
-      );
-      if (!retrying) {
-        throw error;
-      }
-    }
-  }
+  await quiesceDocuments();
+  await resetDatabaseOnce();
 }

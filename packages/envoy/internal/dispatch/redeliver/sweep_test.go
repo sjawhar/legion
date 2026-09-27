@@ -14,6 +14,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
@@ -81,7 +82,7 @@ type harness struct {
 	t       *testing.T
 	webhook *githubapptest.Webhook
 	client  *githubapp.Client
-	state   natsgo.KeyValue
+	state   bus.KeyValue
 	logs    *lockedBuffer
 	clock   *clock
 }
@@ -489,7 +490,7 @@ func TestASweepPausedBeforeItsRequestSendsNothingUnderANewLimit(t *testing.T) {
 
 	paused := &pausedClaim{KeyValue: h.state, entered: make(chan struct{}), release: make(chan struct{})}
 	second := h.sweeper()
-	second.State = paused
+	second.State = bus.KeyValue{KeyValue: paused}
 	reports := make(chan redeliver.Report, 1)
 	go func() {
 		report, err := second.Sweep(context.Background(), redeliver.Options{})
@@ -671,5 +672,48 @@ func TestDryRunReportsWithoutActing(t *testing.T) {
 	h.sweep(redeliver.Options{})
 	if got := h.requests(); len(got) != 0 {
 		t.Fatalf("the continuous sweep requested %v, want nothing outside its hour", got)
+	}
+}
+
+// The running sweep's summary line counts every outcome, so each delivery it lists is under one of
+// them. A failure GitHub has since recorded OK stays in the sweep's hour as closed: while the
+// summary left closed out, production logged deliveries=65 with every count at zero for the hour
+// after all 65 were redelivered and delivered.
+func TestTheSweepSummaryCountsEveryOutcome(t *testing.T) {
+	h := newHarness(t)
+	h.fail("guid-settled", http.StatusServiceUnavailable, time.Minute)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-settled"); got != redeliver.Redelivered {
+		t.Fatalf("first sweep: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	h.clock.advance(redeliver.Interval)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-settled"); got != redeliver.Delivered {
+		t.Fatalf("second sweep: outcome %q, want %q", got, redeliver.Delivered)
+	}
+	h.clock.advance(redeliver.Interval)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.sweeper().Run(ctx, time.Hour)
+	}()
+	for deadline := time.Now().Add(10 * time.Second); h.logs.count("webhook redelivery sweep") == 0; {
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("no summary line:\n%s", h.logs)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	want := []string{
+		" failed_attempts=1", " deliveries=1",
+		" redelivered=0", " would_redeliver=0", " request_refused=0", " rate_limited=0",
+		" waiting=0", " pending=0", " delivered=0", " terminal=0", " exhausted=0",
+		" closed=1", " claimed_elsewhere=0", " complete=true",
+	}
+	if h.logs.count("webhook redelivery sweep", want...) != 1 {
+		t.Fatalf("summary line does not carry %v:\n%s", want, h.logs)
 	}
 }

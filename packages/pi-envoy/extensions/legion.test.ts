@@ -74,7 +74,11 @@ const natsConnections: {
 }[] = [];
 /** A connect for a connection name calls its gate, when a test sets one, and waits on it. */
 const natsConnectGates = new Map<string, () => Promise<void>>();
+// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
+const { nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
+  nkeyAuthenticator,
+  nkeys,
   connect: async (options: { readonly name: string }) => {
     await natsConnectGates.get(options.name)?.();
     const endings: (() => void)[] = [];
@@ -461,6 +465,7 @@ function sessionContext(
       ensureOnDisk,
     },
     setInterval: () => undefined,
+    setTimeout: () => undefined,
     ui: { notify: () => undefined },
   };
 }
@@ -4921,7 +4926,12 @@ describe("Legion OMP extension", () => {
       ).resolves.toMatchObject({
         isError: true,
         content: [
-          { type: "text", text: "handoff_complete is not available to a root architect session" },
+          {
+            type: "text",
+            text: expect.stringContaining(
+              "handoff_complete is not available to a root architect session; a root architect reads handoffs with `legion handoff read"
+            ),
+          },
         ],
       });
     });
@@ -5191,7 +5201,7 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     });
   });
 
-  test("subscribes each Go role to the notice topic it owns", async () => {
+  test("subscribes no Go role to an issue's notice topic", async () => {
     const architect = await goPane({
       role: "architect",
       tree: "REPO-42",
@@ -5209,12 +5219,13 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     });
     await worker.start();
 
-    expect(natsConnections.flatMap((connection) => connection.subjects)).toEqual(
-      expect.arrayContaining([
-        "notifications.legion.omp.REPO-42",
-        "notifications.legion.omp.REPO-43",
-      ])
-    );
+    // The Go daemon sends every notice to the owning architect's role topic, which the architect
+    // claims as its Envoy role; a phase worker subscribed to its issue's topic would be woken by
+    // notices meant for the architect.
+    const subjects = natsConnections.flatMap((connection) => connection.subjects);
+    expect(
+      subjects.filter((subject) => subject.startsWith("notifications.legion.omp.REPO-"))
+    ).toEqual([]);
   });
 
   test("mints and atomically replaces a Go claim grant for every bash command", async () => {

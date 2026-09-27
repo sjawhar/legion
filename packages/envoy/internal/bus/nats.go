@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -40,7 +41,7 @@ func WithPublishAcknowledgementClock(clock AcknowledgementClock) ConnectOption {
 	return func(o *connectOpts) { o.publishAcknowledgementClock = clock }
 }
 
-// WithReplicas overrides the stream replica count (default 1).
+// WithReplicas overrides the replica count of the stream ConnectOwningStream ensures (default 1).
 func WithReplicas(n int) ConnectOption {
 	return func(o *connectOpts) { o.replicas = n }
 }
@@ -66,6 +67,7 @@ type Client struct {
 	Conn                        *nats.Conn
 	js                          nats.JetStreamContext
 	urls                        []string
+	credential                  nats.Option
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
 
@@ -152,17 +154,24 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	return opts
 }
 
-func connect(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
-	return connectWithContext(context.Background(), name, urls, reconnectCB, closedCB)
+func connect(name string, urls []string, credential nats.Option, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
+	return connectWithContext(context.Background(), name, urls, credential, reconnectCB, closedCB)
 }
 
-func connectWithContext(ctx context.Context, name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
+// connectWithContext dials urls with envoy's options and, when credential is not nil, as the NATS
+// user it names (nkeyCredential).
+func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
 	var lastErr error
 	for range 10 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		next := options(name, urls, reconnectCB, closedCB)
+		if credential != nil {
+			if err := credential(&next); err != nil {
+				return nil, err
+			}
+		}
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
@@ -209,29 +218,71 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 	return nil, lastErr
 }
 
-// Dial opens a tuned core NATS connection using envoy's standard options
-// (5s connect timeout, infinite reconnect every second, retry-loop for the
-// initial 10 attempts). Callers that only need core pub/sub —
-// no JetStream stream creation, no durable consumer — should use this.
-// The NATS Go client auto-resubscribes core subscriptions on reconnect,
-// so no callbacks are needed for plain subscribers.
+// Dial opens a tuned core NATS connection using envoy's standard options (5s connect timeout,
+// infinite reconnect every second, retry-loop for the initial 10 attempts), as the NATS user the
+// environment names (nkeyCredential). A caller that needs core pub/sub on a connection of its own
+// uses it: nats.go re-subscribes core subscriptions on reconnect by itself, so it needs none of
+// Client's recovery, and it touches no stream. It refuses a NATS server that is not this machine's
+// on the same terms as Connect.
 //
-// For JetStream-backed durable consumers, use Connect instead.
+// For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
+// this codebase owns, ConnectOwningStream.
 func Dial(name string, urls []string) (*nats.Conn, error) {
-	return connect(name, urls, nil, nil)
+	if err := refuseRemoteNATS(urls); err != nil {
+		return nil, err
+	}
+	credential, err := nkeyCredential(os.LookupEnv)
+	if err != nil {
+		return nil, err
+	}
+	return connect(name, urls, credential, nil, nil)
 }
 
+// Connect opens a client that publishes and subscribes without touching the shared
+// ENVOY_NOTIFICATIONS stream. Every caller that only publishes or only tails uses it -- natstail,
+// the MCP bridge and envoy-dispatch's operator commands own nothing on the server they reach, and
+// a stream ensure from one of them rewrites a resource several deployments share (LEGION-249).
+//
+// Every client, from Connect or ConnectOwningStream, connects as the NATS user the environment
+// names: NATS_NKEY_SEED_FILE or NATS_NKEY_SEED (nkeyCredential). An unusable seed is an error
+// before any dial; neither variable set connects without a credential. Every connection the client
+// dials later, to recover, is the same user's.
+//
+// For the JetStream stream this codebase owns, use ConnectOwningStream.
 func Connect(urls []string, options ...ConnectOption) (*Client, error) {
+	if err := refuseRemoteNATS(urls); err != nil {
+		return nil, err
+	}
+	return newClient(urls, false, options)
+}
+
+// ConnectOwningStream opens a client that also reconciles ENVOY_NOTIFICATIONS against this
+// binary's subjects, retention and duplicate window (ensureStreamWithConfig), creating the stream
+// when the server has none. Only the deployed services call it: envoy-listener and
+// envoy-dispatch's server.
+func ConnectOwningStream(urls []string, options ...ConnectOption) (*Client, error) {
+	if err := refuseRemoteNATS(urls); err != nil {
+		return nil, err
+	}
+	return newClient(urls, true, options)
+}
+
+func newClient(urls []string, ownsStream bool, options []ConnectOption) (*Client, error) {
 	opts := connectOpts{replicas: 1, publishAcknowledgementClock: wallClock{}}
 	for _, o := range options {
 		o(&opts)
 	}
+	credential, err := nkeyCredential(os.LookupEnv)
+	if err != nil {
+		return nil, err
+	}
 	c := &Client{
 		urls:                        urls,
+		credential:                  credential,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		stopCh:                      make(chan struct{}),
 	}
-	nc, err := connect("envoy", urls, c.onReconnect, c.onClosed)
+	nc, err := connect("envoy", urls, credential, c.onReconnect, c.onClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -240,11 +291,13 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 		nc.Close()
 		return nil, err
 	}
-	cfg := *streamCfg
-	cfg.Replicas = opts.replicas
-	if err := ensureStreamWithConfig(js, &cfg); err != nil {
-		nc.Close()
-		return nil, err
+	if ownsStream {
+		cfg := *streamCfg
+		cfg.Replicas = opts.replicas
+		if err := ensureStreamWithConfig(js, &cfg); err != nil {
+			nc.Close()
+			return nil, err
+		}
 	}
 	c.Conn = nc
 	c.js = js
@@ -644,7 +697,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		}
 	}
 
-	nc, err := connectWithContext(ctx, "envoy", c.urls, c.onReconnect, c.onClosed)
+	nc, err := connectWithContext(ctx, "envoy", c.urls, c.credential, c.onReconnect, c.onClosed)
 	if err != nil {
 		return err
 	}
@@ -672,6 +725,71 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 func usesCoreTransport(topic string) bool {
 	return strings.HasPrefix(topic, contracts.RoleTopicPrefix) ||
 		strings.HasPrefix(topic, "notifications.envoy.exceptions."+contracts.RoleTopicPrefix)
+}
+
+// ErrRefused is returned for an envelope that is refused the same way however often it is
+// published, so a caller answers it as a refusal rather than a failure to retry. It is ErrTooLarge
+// or ErrInvalidSubject.
+var ErrRefused = errors.New("refused")
+
+// refusal is a kind of ErrRefused. Its text names only the kind, since every line and answer that
+// reports a refusal already says it is one (`github publish refused: too large to publish whole`).
+type refusal string
+
+func (r refusal) Error() string { return string(r) }
+
+func (r refusal) Is(target error) bool { return target == ErrRefused }
+
+// ErrTooLarge is the ErrRefused of an envelope too large to publish whole: a message past the NATS
+// server's max payload, which nats.go refuses before sending it, a subject past maxSubjectBytes, a
+// KV key whose subject would be, or a CI record or settlement past the bound its store keeps below
+// those. Its error names the size and the bound.
+var ErrTooLarge error = refusal("too large to publish whole")
+
+// ErrInvalidSubject is the ErrRefused of a subject NATS does not accept: an empty one or one holding
+// whitespace, which nats.go refuses, or one holding an empty token (`a..b`, or a leading or trailing
+// dot), which no stream's subjects match, so a JetStream publish waits out its deadline for an
+// answer that never comes and a core publish is dropped. Its error names the subject, or the KV key
+// that would have made it.
+var ErrInvalidSubject error = refusal("not a subject NATS accepts")
+
+// maxSubjectBytes bounds a subject the bus publishes on, or a KV call builds from a key. The server
+// closes a connection whose protocol line runs past its max control line (4 KiB by default) and
+// nats.go does not check it, so a longer subject would close the connection every subscription and
+// watcher of the client runs on, a core publish reporting success first. Besides the subject, the
+// longest line nats.go sends here, `HPUB <subject> <reply> <header size> <total size>`, holds a
+// 38-byte reply inbox (`_INBOX.<nuid>.<token>`), two sizes of at most seven digits (the 1 MiB max
+// payload), its verb, spaces and line ending: 62 bytes, which 64 covers.
+const maxSubjectBytes = 4<<10 - 64
+
+// checkSubject refuses, before anything is sent, a subject the server would close the connection
+// over (ErrTooLarge) and one NATS does not accept (ErrInvalidSubject).
+func checkSubject(subject string) error {
+	if len(subject) > maxSubjectBytes {
+		return fmt.Errorf("%w: a subject of %d bytes, past %d", ErrTooLarge, len(subject), maxSubjectBytes)
+	}
+	if !validSubject(subject) {
+		return fmt.Errorf("%w: %q", ErrInvalidSubject, subject)
+	}
+	return nil
+}
+
+// validSubject reports whether NATS accepts subject: it is not empty, holds no whitespace, and has
+// no empty token.
+func validSubject(subject string) bool {
+	return subject != "" && subject[0] != '.' && subject[len(subject)-1] != '.' &&
+		!strings.Contains(subject, "..") && !strings.ContainsAny(subject, " \t\r\n")
+}
+
+// refused names nats.go's refusal of a message past the server's max payload as the ErrTooLarge it
+// is, naming its envelope of size bytes. checkSubject has already refused every subject nats.go
+// would.
+func (c *Client) refused(err error, size int) error {
+	if errors.Is(err, nats.ErrMaxPayload) {
+		return fmt.Errorf("%w: an envelope of %d bytes against the server's max payload of %d bytes",
+			ErrTooLarge, size, c.Conn.MaxPayload())
+	}
+	return err
 }
 
 // Publish routes role lanes and their delivery-exception lanes through core
@@ -706,6 +824,9 @@ func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error
 // several topics under one key - a GitHub comment that mentions the trigger is published on its
 // mention topic beside its comment topic - and each of those must be retained.
 func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
+	if err := checkSubject(item.Topic); err != nil {
+		return false, err
+	}
 	data, err := json.Marshal(item)
 	if err != nil {
 		return false, err
@@ -727,7 +848,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 		ack, err = c.js.Publish(item.Topic, data, options...)
 	}
 	if err != nil {
-		return false, err
+		return false, c.refused(err, len(data))
 	}
 	return ack.Duplicate, nil
 }
@@ -742,6 +863,9 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 // from item.Topic when an authoritative router forwards an envelope while
 // retaining its original topic for the recipient.
 func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
+	if err := checkSubject(subject); err != nil {
+		return err
+	}
 	data, err := json.Marshal(item)
 	if err != nil {
 		return err
@@ -751,7 +875,7 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	return c.Conn.Publish(subject, data)
+	return c.refused(c.Conn.Publish(subject, data), len(data))
 }
 
 // ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
@@ -769,6 +893,9 @@ var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 // The flush is bounded by the same window as the receipt wait, so the call
 // never outlives timeout by the client's default 10 s flush.
 func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
+	if err := checkSubject(subject); err != nil {
+		return err
+	}
 	data, err := json.Marshal(item)
 	if err != nil {
 		return err
@@ -786,7 +913,7 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 	}
 	defer receipt.Unsubscribe()
 	if err := c.Conn.PublishRequest(subject, inbox, data); err != nil {
-		return err
+		return c.refused(err, len(data))
 	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {

@@ -147,10 +147,14 @@ func hasCapability(capabilities []string, value string) bool {
 //     the send outright. A malformed or unreadable targeted frame is never treated as if it
 //     were untagged: presence of the exact "delivery" key is itself a claim that this send is
 //     targeted, and an unreadable claim is refused, not waved through.
-//   - "delivery" is present and its mode reads unambiguously as a single non-empty string:
-//     mode=<that string>, err=nil. An unrecognised (non-enum) mode string is not a case this
-//     function decides: it returns that string like any other, and the ordinary capability
-//     check refuses it because no session advertises a bogus capability.
+//   - "delivery" is present and its mode reads unambiguously as one of the three delivery
+//     modes: mode=<that string>, err=nil.
+//   - "delivery" is present and its mode reads unambiguously as something else: mode="",
+//     err!=nil, refused like any other unreadable claim. This used to be waved through on the
+//     grounds that the capability check behind it would refuse a mode no session advertises -
+//     but `capabilities` is an open list from the registry, so a session that advertises a
+//     bogus string is exactly what makes that argument fail. The Dispatch server's
+//     `validDelivery` already refuses the same set at its own boundary; this is the listener's.
 func frameDeliveryMode(payload *string) (mode string, err error) {
 	if payload == nil {
 		return "", nil
@@ -183,7 +187,18 @@ func frameDeliveryMode(payload *string) (mode string, err error) {
 	if mode == "" {
 		return "", fmt.Errorf("delivery.mode is present but empty")
 	}
+	if !isDeliveryMode(mode) {
+		return "", fmt.Errorf("delivery.mode %q is not a delivery mode", mode)
+	}
 	return mode, nil
+}
+
+// isDeliveryMode reports whether value is one of the three targeted-delivery modes. The list is
+// DELIVERY_CAPABILITIES in packages/contracts/src/dispatch-api.ts, spelled here as the Dispatch
+// server spells it in its own `validDelivery`: the two sides talk over HTTP, not a shared Go
+// import.
+func isDeliveryMode(value string) bool {
+	return value == "aside" || value == "btw" || value == "steer"
 }
 
 // hasCaseVariantSibling reports whether keys contains some key that case-insensitively, but
@@ -207,6 +222,22 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 
 func writeJSONError(w http.ResponseWriter, status int, message string, expected ...string) {
 	writeJSON(w, status, apiError{Error: message, Expected: expected})
+}
+
+// writeNATSError answers a request NATS did not serve. What NATS refuses however often it is sent
+// is the caller's own input, so it is answered naming why: a message too large to take whole, or a
+// session id or role whose KV key would make a subject too long (bus.ErrTooLarge), is a 413, and a
+// topic or key NATS does not accept in a subject (bus.ErrInvalidSubject) a 400. Any other failure
+// is status with message.
+func writeNATSError(w http.ResponseWriter, err error, status int, message string) {
+	switch {
+	case errors.Is(err, bus.ErrTooLarge):
+		writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, bus.ErrInvalidSubject):
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeJSONError(w, status, message)
+	}
 }
 
 func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderResult) {
@@ -467,7 +498,7 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
 		duplicate, err := d.client.PublishReportingDuplicate(item)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, sendResponse{
@@ -489,7 +520,7 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 			return
 		}
 		if err := sessions.Delete(sessionID); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -556,7 +587,7 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 			var err error
 			result, err = resolveLiveRoleHolder(d.registry, d.sessions, role)
 			if err != nil {
-				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 				return
 			}
 			if result.state != roleHolderLive {
@@ -566,7 +597,7 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
 		if err := d.client.Publish(item); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, publishResponse{Envelope: item, Holder: result.holder})
@@ -648,13 +679,13 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 		case http.MethodGet:
 			item, err := registry.Get(sessionID)
 			if err != nil {
-				writeJSONError(w, http.StatusNotFound, err.Error())
+				writeNATSError(w, err, http.StatusNotFound, err.Error())
 				return
 			}
 			writeJSON(w, http.StatusOK, item)
 		case http.MethodDelete:
 			if err := registry.Remove(sessionID, nil); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
-				writeJSONError(w, http.StatusInternalServerError, err.Error())
+				writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -716,7 +747,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 		entry.MachineID = machineID
 		entry.SelfSubscribed = true
 		if err := d.sessions.Put(body.SessionID, entry); err != nil {
-			writeJSONError(w, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
+			writeNATSError(w, err, http.StatusServiceUnavailable, "refresh role claimant registration: "+err.Error())
 			return
 		}
 		previous := ""
@@ -728,7 +759,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			// live or not; any other live holder is protected.
 			holder, err := d.registry.RoleHolder(body.Role)
 			if err != nil {
-				writeJSONError(w, http.StatusServiceUnavailable, "read role holder: "+err.Error())
+				writeNATSError(w, err, http.StatusServiceUnavailable, "read role holder: "+err.Error())
 				return
 			}
 			previous = strings.TrimSpace(body.PreviousSessionID)
@@ -754,7 +785,7 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 			return
 		}
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, item)
@@ -774,7 +805,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		result, err := resolveLiveRoleHolder(d.registry, d.sessions, role)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if result.state != roleHolderLive {
@@ -939,13 +970,13 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 				slog.String("session_id", body.SessionID),
 				slog.Any("topics", body.Topics),
 				slog.String("error", err.Error()))
-			writeJSONError(w, http.StatusServiceUnavailable, err.Error())
+			writeNATSError(w, err, http.StatusServiceUnavailable, err.Error())
 			return
 		}
 		if body.Port > 0 || body.SelfSubscribed {
 			if err := d.sessions.Put(body.SessionID, sessionEntryFromSubscribe(body, machineID)); err != nil {
 				logger.Error("listener session registry put failed", slog.String("session_id", body.SessionID), slog.String("error", err.Error()))
-				writeJSONError(w, http.StatusServiceUnavailable, "session registry unavailable")
+				writeNATSError(w, err, http.StatusServiceUnavailable, "session registry unavailable")
 				return
 			}
 		}
@@ -999,7 +1030,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		}
 		logger.Info("listener unsubscribe", slog.String("session_id", body.SessionID), slog.Any("topics", body.Topics))
 		if err := d.registry.Remove(body.SessionID, body.Topics); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writeNATSError(w, err, http.StatusInternalServerError, err.Error())
 			return
 		}
 		removed := body.Topics

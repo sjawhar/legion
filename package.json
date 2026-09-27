@@ -31,7 +31,6 @@
   },
   "patchedDependencies": {
     "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
-    "@milkdown/plugin-clipboard@7.22.1": "patches/@milkdown%2Fplugin-clipboard@7.22.1.patch",
-    "@sjawhar/proof-editor@github:sjawhar/proof-sdk#24a5fc9": "patches/proof-sdk-upstream@24a5fc94.patch"
+    "@milkdown/plugin-clipboard@7.22.1": "patches/@milkdown%2Fplugin-clipboard@7.22.1.patch"
   }
 }

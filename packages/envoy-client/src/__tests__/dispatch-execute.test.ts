@@ -59,11 +59,9 @@ const createdIssueLine =
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
+/** A project with no architecture source: the read answers null, never a refusal. */
 function sourceNotFound(): Response {
-  return new Response(JSON.stringify({ code: "SOURCE_NOT_FOUND", error: "source not found" }), {
-    status: 404,
-    headers: { "Content-Type": "application/json" },
-  });
+  return new Response("null", { headers: { "Content-Type": "application/json" } });
 }
 
 function architectureSource(project: string) {
@@ -1450,6 +1448,7 @@ describe("executeDispatchTool", () => {
         status: "todo",
         parent: "AGENTC-9",
         label: "bug",
+        priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
       },
       cwd: "/workspace",
@@ -1464,13 +1463,17 @@ describe("executeDispatchTool", () => {
       "/api/v1/issues",
       "/api/v1/agents",
     ]);
-    expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
-      project: "AGENTC",
-      status: "todo",
-      parent: "AGENTC-9",
-      label: "bug",
-      updated_since: "2026-09-01T00:00:00Z",
-    });
+    // Each priority repeats as its own parameter, and null asks for issues with no priority.
+    expect([...(requests[0]?.searchParams ?? [])]).toEqual([
+      ["project", "AGENTC"],
+      ["status", "todo"],
+      ["parent", "AGENTC-9"],
+      ["label", "bug"],
+      ["priority", "0"],
+      ["priority", "1"],
+      ["priority", "none"],
+      ["updated_since", "2026-09-01T00:00:00Z"],
+    ]);
     expect(result.details).toEqual({
       issues: [
         {
@@ -2022,7 +2025,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", status: "done" },
+        args: { issue: "AGENTC-175", status: "testing" },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2082,6 +2085,178 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(/Issue update requires at least one field besides issue/);
+  });
+
+  test("dispatch_issue_update refuses status done without a reason before any request", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    for (const args of [
+      { issue: "AGENTC-175", status: "done" },
+      { issue: "AGENTC-175", status: "done", reason: " " },
+    ]) {
+      await expect(
+        executeDispatchTool({
+          tool: "dispatch_issue_update",
+          args,
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl,
+        })
+      ).rejects.toThrow(
+        /status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts/
+      );
+    }
+  });
+
+  /** Records every request; the messages route and the PATCH answer with the given responses. */
+  function closingServer(answers: { message: () => Response; patch: () => Response }) {
+    const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      const method = init?.method ?? "GET";
+      requests.push({
+        method,
+        pathname,
+        ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
+      });
+      if (pathname === "/api/v1/issues/AGENTC-175/messages") return answers.message();
+      if (pathname !== "/api/v1/issues/AGENTC-175") {
+        throw new Error(`unexpected request: ${method} ${pathname}`);
+      }
+      if (method === "GET") {
+        return response({
+          key: "AGENTC-175",
+          title: "x",
+          status: "retro",
+          labels: [],
+          route: null,
+          external_links: [],
+        });
+      }
+      return answers.patch();
+    };
+    return { requests, fetchImpl: fetchImpl as typeof fetch };
+  }
+
+  const refusal = (status: number, code: string, error: string) =>
+    new Response(JSON.stringify({ code, error }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  const closeCall = (fetchImpl: typeof fetch) =>
+    executeDispatchTool({
+      tool: "dispatch_issue_update",
+      args: { issue: "AGENTC-175", status: "done", reason: "Shipped in owner/repo#7." },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+  test("dispatch_issue_update posts the reason as a message, then closes the issue", async () => {
+    const server = closingServer({
+      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      patch: () =>
+        response({
+          key: "AGENTC-175",
+          title: "x",
+          status: "done",
+          labels: [],
+          route: null,
+          external_links: [],
+        }),
+    });
+
+    const result = await closeCall(server.fetchImpl);
+
+    expect(server.requests.map(({ method, pathname }) => `${method} ${pathname}`)).toEqual([
+      "GET /api/v1/issues/AGENTC-175",
+      "POST /api/v1/issues/AGENTC-175/messages",
+      "PATCH /api/v1/issues/AGENTC-175",
+    ]);
+    expect(server.requests[1]?.body).toMatchObject({
+      body: "Shipped in owner/repo#7.",
+      actor: { kind: "session", id: "session-42" },
+    });
+    expect(server.requests[2]?.body).toMatchObject({ status: "done" });
+    expect(server.requests[2]?.body).not.toHaveProperty("reason");
+    expect(result.text).toStartWith(
+      "AGENTC-175: reason posted as message message-7 (dispatch://AGENTC-175/message/message-7); status retro -> done"
+    );
+    expect(result.details).toMatchObject({
+      issue: "AGENTC-175",
+      status: "done",
+      message: "message-7",
+    });
+  });
+
+  test("dispatch_issue_update leaves the issue open when the reason cannot be posted", async () => {
+    const server = closingServer({
+      message: () => refusal(409, "ISSUE_CLOSED", "issue is closed"),
+      patch: () => {
+        throw new Error("the close must not be sent");
+      },
+    });
+
+    await expect(closeCall(server.fetchImpl)).rejects.toThrow(
+      "ISSUE_CLOSED: issue is closed; the reason was not posted, so the close was not sent"
+    );
+    expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
+  });
+
+  test("dispatch_issue_update names the posted reason when the close fails after it", async () => {
+    const server = closingServer({
+      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      patch: () => refusal(409, "ISSUE_CLAIMED", "claimed by session other"),
+    });
+
+    await expect(closeCall(server.fetchImpl)).rejects.toThrow(
+      "ISSUE_CLAIMED: claimed by session other; the reason already landed as message message-7 " +
+        "(dispatch://AGENTC-175/message/message-7) but the issue did not close. Retrying this call " +
+        "posts its reason again, so fix what refused the close, then retry with a reason that " +
+        "points at message message-7"
+    );
+    expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+  });
+
+  // A timeout, a transport error, or a 5xx gives no proof the issue stayed open, so the error
+  // must not say it did: an agent that believed it would retry and post its reason twice.
+  test("dispatch_issue_update says the close is unknown when the PATCH times out or 5xxes after the post", async () => {
+    const unknown =
+      "; the reason already landed as message message-7 (dispatch://AGENTC-175/message/message-7), " +
+      "and the close may or may not have taken effect. Read the issue's status before retrying: " +
+      "done means it closed; otherwise retry with a reason that points at message message-7, " +
+      "since retrying this call posts its reason again";
+    for (const [patch, head] of [
+      [
+        (): Response => {
+          throw new DOMException("The operation timed out.", "TimeoutError");
+        },
+        "The operation timed out.",
+      ],
+      [() => refusal(502, "HTTP_502", "Bad Gateway"), "HTTP_502: Bad Gateway"],
+    ] as const) {
+      const server = closingServer({
+        message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+        patch,
+      });
+
+      const failure = await closeCall(server.fetchImpl).catch((error: unknown) => error);
+
+      if (!(failure instanceof Error)) throw new Error(`expected an Error, got ${String(failure)}`);
+      expect(failure.message).toBe(`${head}${unknown}`);
+      expect(failure.message).not.toContain("did not close");
+      expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+    }
   });
 
   test("dispatch_issue_update sets the parent and reports the move", async () => {
@@ -2953,6 +3128,75 @@ describe("executeDispatchTool", () => {
       changed: false,
       token: "sha256:unchanged",
     });
+  });
+
+  // A concurrent browser deletion that lands after the version is written is past undoing, so the
+  // edit reports it: the version records text the live document no longer has (LEGION-269). An
+  // edit that survives reads exactly as it always did.
+  test("names the operations whose text the live document no longer has", async () => {
+    const editResponse = (body: Record<string, unknown>) => {
+      return async (url: RequestInfo | URL): Promise<Response> => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            primary_artifact_id: "artifact-42",
+            artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          });
+        }
+        if (path === "/api/v1/artifacts/artifact-42/edits") return response(body);
+        throw new Error(`unexpected request: ${path}`);
+      };
+    };
+    const edit = async (body: Record<string, unknown>) =>
+      await executeDispatchTool({
+        tool: "dispatch_doc_edit",
+        args: {
+          issue: "DSP-42",
+          artifact: "spec",
+          ops: [{ op: "replace", find: "draft", with: "final" }],
+        },
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-42",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: editResponse(body) as typeof fetch,
+      });
+
+    const lost = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: [0],
+    });
+    expect(lost.text).toContain(
+      "; version 7 carries text the live document no longer has: a concurrent change removed what operation 0 wrote — re-read the document"
+    );
+    expect(lost.details).toMatchObject({ lost_ops: [0] });
+
+    const survived = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: [],
+    });
+    expect(survived.text).toContain("Applied 1 ops (version 7)");
+    expect(survived.text).not.toContain("no longer has");
+
+    const undetermined = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: null,
+    });
+    expect(undetermined.text).toContain(
+      "; could not confirm this edit survived, because the live document is being reloaded — re-read it"
+    );
   });
 
   // A Dispatch server predating the edit token returns none, and the result reads as it always

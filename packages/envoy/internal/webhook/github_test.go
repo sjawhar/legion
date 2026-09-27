@@ -6,9 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -135,6 +138,7 @@ func TestGitHubHandler(t *testing.T) {
 		signature      string
 		mentionTrigger string
 		publishErr     error
+		recordErr      error
 		wantStatus     int
 		wantPublished  int
 		wantRecorded   int
@@ -257,6 +261,43 @@ func TestGitHubHandler(t *testing.T) {
 			wantPublished: 1,
 		},
 		{
+			// An envelope NATS cannot take whole is refused the same way on every redelivery, so it
+			// is answered 4xx, which a redelivery sweep takes as terminal.
+			name:          "a publish refused as too large returns 422",
+			method:        "POST",
+			body:          pushEvent,
+			delivery:      "d-too-large",
+			event:         "push",
+			secret:        "s",
+			publishErr:    fmt.Errorf("publish: %w", bus.ErrTooLarge),
+			wantStatus:    422,
+			wantPublished: 1,
+		},
+		{
+			name:          "a publish NATS refuses for its subject returns 422",
+			method:        "POST",
+			body:          pushEvent,
+			delivery:      "d-bad-subject",
+			event:         "push",
+			secret:        "s",
+			publishErr:    fmt.Errorf("publish: %w", bus.ErrInvalidSubject),
+			wantStatus:    422,
+			wantPublished: 1,
+		},
+		{
+			// The CI store refuses a check its head's record has no room left for, and a
+			// redelivery would find none either.
+			name:         "a check the CI store refuses as too large returns 422",
+			method:       "POST",
+			body:         checkRun,
+			delivery:     "d-ci-too-large",
+			event:        "check_run",
+			secret:       "s",
+			recordErr:    fmt.Errorf("record: %w", bus.ErrTooLarge),
+			wantStatus:   422,
+			wantRecorded: 1,
+		},
+		{
 			name:           "custom mention trigger fan-out",
 			method:         "POST",
 			body:           issueCommentCustomMention,
@@ -272,7 +313,7 @@ func TestGitHubHandler(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pub := &mockPublisher{err: tc.publishErr}
-			recorder := &mockRecorder{}
+			recorder := &mockRecorder{err: tc.recordErr}
 			trigger := tc.mentionTrigger
 			if trigger == "" {
 				trigger = "@legion"
@@ -316,6 +357,38 @@ func TestGitHubHandler(t *testing.T) {
 						t.Errorf("published[%d].Topic = %q, want %q", i, pub.published[i].Topic, wantTopic)
 					}
 				}
+			}
+		})
+	}
+}
+
+// An alert pages on the `<source> publish failed` line, which says a publish did not complete and
+// may on a redelivery. An envelope refused as too large never will, so it is logged as a refusal
+// and pages no one, while a publish that failed still logs the failure.
+func TestAPublishRefusedAsTooLargeIsNotLoggedAsAFailure(t *testing.T) {
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	push := []byte(`{"ref":"refs/heads/main","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`)
+	for _, tc := range []struct {
+		name      string
+		err       error
+		want, not string
+	}{
+		{"a refusal", fmt.Errorf("publish: %w", bus.ErrTooLarge), "github publish refused:", "github publish failed"},
+		{"a failure", errors.New("nats: no response from stream"), "github publish failed:", "github publish refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged.Reset()
+			handler := GitHubHandler("s", "@legion", "", &mockPublisher{err: tc.err}, &mockRecorder{})
+			req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(push))
+			req.Header.Set("X-GitHub-Delivery", "d-log")
+			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("X-Hub-Signature-256", githubSign("s", push))
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			if got := logged.String(); !strings.Contains(got, tc.want) || strings.Contains(got, tc.not) {
+				t.Fatalf("log = %q, want a %q line and no %q line", got, tc.want, tc.not)
 			}
 		})
 	}

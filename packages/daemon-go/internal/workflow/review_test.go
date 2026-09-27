@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -38,7 +39,7 @@ func TestAReviewEndsWhenTheReviewerCompletesIt(t *testing.T) {
 			pool := migratedPool(t)
 			ctx := context.Background()
 			seedReview(t, pool, tc.verdict)
-			engine := testEngine()
+			engine := testEngine(config.DesignGateRootIssues, nil)
 			review := func() {
 				t.Helper()
 				if _, err := intake.ApplyFact(ctx, pool, "github", "review", intake.PullRequestReview{
@@ -89,7 +90,7 @@ func TestAnApprovalWaitsForGreenChecksAfterTheReviewerCompletes(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedReview(t, pool, "")
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 	if _, err := intake.ApplyFact(ctx, pool, "github", "review", intake.PullRequestReview{
 		Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head"}, engine); err != nil {
 		t.Fatalf("apply the review: %v", err)
@@ -190,7 +191,7 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 				verdict = ""
 			}
 			seedReview(t, pool, verdict)
-			engine := testEngine()
+			engine := testEngine(config.DesignGateRootIssues, nil)
 			// A head's push replaces the head before it; head-x is a late push's, whose head was
 			// never the current one.
 			before := map[string]string{"head-2": "head", "head-3": "head-2", "head-x": "older", "head-l": "head"}
@@ -288,7 +289,7 @@ func TestACommentLeavesTheRoundsRequestForChanges(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedReview(t, pool, "")
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 	for i, fact := range []intake.Fact{
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", Body: "rename the widget"},
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", Body: "one more thought"},
@@ -318,7 +319,7 @@ func TestAReviewFromAnEarlierRoundDeliveredAgainRecordsNothing(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedReview(t, pool, "green")
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 	requestChanges := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 10, State: "changes_requested", CommitID: "head", Body: "round 1"}
 	for i, fact := range []intake.Fact{
 		requestChanges,
@@ -351,7 +352,7 @@ func TestAReviewOutsideReviewingRecordsNoRound(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedReview(t, pool, "green")
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 	rounds := func() int {
 		t.Helper()
 		var n int
@@ -399,7 +400,7 @@ func TestAReviewWhileHeldFromReviewingDecidesTheRound(t *testing.T) {
 			pool := migratedPool(t)
 			ctx := context.Background()
 			seedReview(t, pool, "green")
-			engine := testEngine()
+			engine := testEngine(config.DesignGateRootIssues, nil)
 			for i, fact := range []intake.Fact{
 				intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleReviewer},
 				intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 11, State: tc.state, CommitID: "head", Body: "the review"},
@@ -429,7 +430,7 @@ func TestAReopenedPullRequestKeepsItsNewestReview(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedReview(t, pool, "green")
-	engine := testEngine()
+	engine := testEngine(config.DesignGateRootIssues, nil)
 	for i, fact := range []intake.Fact{
 		intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, ID: 12, State: "approved", CommitID: "head", Body: "approved"},
 		intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"},
@@ -465,7 +466,7 @@ func TestARetryEndsARoundWhoseReviewerCompletedBeforeTheHold(t *testing.T) {
 			pool := migratedPool(t)
 			ctx := context.Background()
 			seedReview(t, pool, "green")
-			engine := testEngine()
+			engine := testEngine(config.DesignGateRootIssues, nil)
 			for i, fact := range []intake.Fact{
 				intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"},
 				intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleReviewer},

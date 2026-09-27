@@ -143,3 +143,24 @@ func TestASecondTakeByTheSameTestFailsAtOnce(t *testing.T) {
 		t.Errorf("a second take by the same test failed with %q, not the re-entry refusal", again.message)
 	}
 }
+
+// StartNkeyAuthorized's readiness wait refuses a server that admits a client with no credential:
+// such a server enforces no nkey users, and every refusal a test expects of it would pass for the
+// wrong reason. The shared server, which asks for no credential, stands in for one.
+func TestTheNkeyReadinessWaitRefusesAServerThatAdmitsAnyone(t *testing.T) {
+	url := URL(t)
+	wait := &fatalRecorder{TB: t}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		answering(wait, url)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the readiness wait is still waiting on a server that admits anyone")
+	}
+	if want := "admitted a client with no credential"; !strings.Contains(wait.message, want) {
+		t.Errorf("the readiness wait ended with %q, want it to say %q", wait.message, want)
+	}
+}

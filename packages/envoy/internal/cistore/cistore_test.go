@@ -14,6 +14,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
@@ -88,7 +89,7 @@ func connectNATS(t testing.TB) (*natsgo.Conn, func()) {
 func openStore(t testing.TB, conn *natsgo.Conn) *Store {
 	t.Helper()
 	name := testBucket(t)
-	st, err := Open(conn, WithReplicas(1), WithTTL(time.Hour), func(o *openOpts) { o.bucket = name })
+	st, err := Open(conn, logging.New("test"), WithReplicas(1), WithTTL(time.Hour), func(o *openOpts) { o.bucket = name })
 	if err != nil {
 		t.Fatalf("open cistore: %v", err)
 	}
@@ -203,7 +204,7 @@ func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
 func useKV(t testing.TB, s *Store, kv natsgo.KeyValue) {
 	t.Helper()
 	s.watcher.Stop()
-	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)
+	s.watcher = kvwatch.New("cistore", bus.KeyValue{KeyValue: kv}, s.applyWatched, s.resetCache)
 	s.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
