@@ -35,20 +35,15 @@ func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
 // blanksAfterDefinitionItem is how many blank lines follow item, in a list in a quote, where it
 // ends in a footnote definition, before next, the next item or the block after the list: those
 // lines are the definition's (definitionEndSpreadsItem), so an item spread by none of its own
-// lines takes one before a quote, a list or a definition after the list and two before anything
-// else, and none spreads the list. Otherwise it takes none before such a container and before
-// the next item, and one before anything else, which would continue the definition's paragraph -
-// except after a definition ending in a list no line continues (endsInClosedList), where it takes
-// none.
+// lines takes what spreads it (definitionSpreadBlanks), and none spreads the list. Otherwise it
+// takes none before a quote, a list or a definition and before the next item, and one before
+// anything else, which would continue the definition's paragraph - except after a definition
+// ending in a list no line continues (endsInClosedList), where it takes none.
 func (r *renderer) blanksAfterDefinitionItem(item, next *Node) int {
-	container := next != nil && quoteListOrDefinition(next)
 	if item.Attrs["spread"] == true && !spreadByItsOwnLines(item, true, r.scope().items > 0) {
-		if container {
-			return 1
-		}
-		return 2
+		return definitionSpreadBlanks(next)
 	}
-	if container || next == nil || next.Type == "list_item" || endsInClosedList(item.Children[len(item.Children)-1]) {
+	if next != nil && quoteListOrDefinition(next) || next == nil || next.Type == "list_item" || endsInClosedList(item.Children[len(item.Children)-1]) {
 		return 0
 	}
 	return 1
@@ -58,6 +53,17 @@ func (r *renderer) blanksAfterDefinitionItem(item, next *Node) int {
 // are the definition's: in a quote, outside a footnote definition (blanksAfterDefinitionItem).
 func (r *renderer) definitionEndsItem(item *Node) bool {
 	return r.scope().quotes > 0 && !r.inFootnote() && item.Children[len(item.Children)-1].Type == "footnote_definition"
+}
+
+// definitionSpreadBlanks is how many blank lines after a footnote definition in a quote spread the
+// list item holding it, before next, as the browser editor's parser counts them there, where they
+// are the definition's (definitionBlanksInQuote, definitionEndSpreadsItem): one before a quote, a
+// list or a definition, and two before anything else, the next item and the quote's end included.
+func definitionSpreadBlanks(next *Node) int {
+	if next != nil && quoteListOrDefinition(next) {
+		return 1
+	}
+	return 2
 }
 
 // quoteListOrDefinition reports whether block is a quote, a list or a footnote definition, which
