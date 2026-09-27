@@ -41,16 +41,25 @@ func ReadSecretPointer(variable, file string) (string, error) {
 // separately). The open does not block, so a FIFO is refused rather than waited on. The contents
 // never appear in an error.
 func ReadPrivateSecretPointer(variable, file string) (string, error) {
-	return ownerOnly.read(variable, file)
+	return readSecretFile(variable, file, func(os.FileInfo) secretMode { return ownerOnly })
 }
 
-// ReadGroupSecretPointer is ReadPrivateSecretPointer for a secret its group may read too: the NATS
-// nkey seed the daemon reads. A daemon running as a non-root uid in a pod reads a kubelet-mounted
-// Secret file only through the pod's fsGroup — the file is root's, and group-readable — so the
-// group's read bit is allowed, and its write bit and every bit for others are refused.
+// ReadGroupSecretPointer is ReadPrivateSecretPointer for the NATS nkey seed the daemon reads, whose
+// group may read it when another uid owns it: a daemon running as a non-root uid in a pod reads a
+// kubelet-mounted Secret file, root's, only through the pod's fsGroup. Such a file is refused only
+// when its group can write it or others can touch it at all. A file the reading uid owns — a seed
+// on a shared host — is held to ReadPrivateSecretPointer's 0600.
 func ReadGroupSecretPointer(variable, file string) (string, error) {
-	return ownerAndGroup.read(variable, file)
+	return readSecretFile(variable, file, func(info os.FileInfo) secretMode {
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok && int(stat.Uid) != readerUID() {
+			return groupMount
+		}
+		return ownerOnly
+	})
 }
+
+// readerUID is the uid whose own files ReadGroupSecretPointer holds to 0600; tests replace it.
+var readerUID = os.Geteuid
 
 // secretMode is the mode a secret file must keep: forbidden holds the permission bits refused, and
 // says and fix word the refusal.
@@ -60,12 +69,13 @@ type secretMode struct {
 }
 
 var (
-	ownerOnly     = secretMode{0o077, "is readable by its group or others", "chmod 0600 it"}
-	ownerAndGroup = secretMode{0o027, "is writable by its group or open to others", "chmod g-w,o-rwx it"}
+	ownerOnly  = secretMode{0o077, "is readable by its group or others", "chmod 0600 it"}
+	groupMount = secretMode{0o027, "is writable by its group or open to others", "chmod g-w,o-rwx it, or mount it with defaultMode: 0440"}
 )
 
-// read is ReadPrivateSecretPointer's open, check, and read, refusing the bits m forbids.
-func (m secretMode) read(variable, file string) (string, error) {
+// readSecretFile is ReadPrivateSecretPointer's open, check, and read, refusing the bits of the mode
+// modeFor answers for the open file.
+func readSecretFile(variable, file string, modeFor func(os.FileInfo) secretMode) (string, error) {
 	f, err := os.OpenFile(file, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("%s names %s, which could not be read: %w", variable, file, err)
@@ -78,7 +88,7 @@ func (m secretMode) read(variable, file string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("%s names %s, which is not a regular file", variable, file)
 	}
-	if mode := info.Mode().Perm(); mode&m.forbidden != 0 {
+	if m, mode := modeFor(info), info.Mode().Perm(); mode&m.forbidden != 0 {
 		return "", fmt.Errorf("%s %s %s (mode %#o); %s", variable, file, m.says, mode, m.fix)
 	}
 	contents, err := io.ReadAll(f)

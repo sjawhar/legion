@@ -1,6 +1,7 @@
 package natsauth_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -155,9 +156,9 @@ func TestAnUnusableSeedIsAnErrorNamingItsSource(t *testing.T) {
 		{"a file holding an account seed", "", map[string]string{"NATS_NKEY_SEED_FILE": accountSeed}, "NATS_NKEY_SEED_FILE (" + accountSeed + ") holds an nkey seed that is not a user's"},
 		{"a blank variable", "", map[string]string{"NATS_NKEY_SEED": "  "}, "NATS_NKEY_SEED is set but empty"},
 		{"a variable holding no seed", "", map[string]string{"NATS_NKEY_SEED": "hunter2"}, "NATS_NKEY_SEED does not hold a valid nkey seed"},
-		{"a key file others can read", public, nil, "nats_nkey_seed_file " + public + " is writable by its group or open to others (mode 0604); chmod g-w,o-rwx it"},
+		{"a key file others can read", public, nil, "nats_nkey_seed_file " + public + " is readable by its group or others (mode 0604); chmod 0600 it"},
 		{"a file others can read", "", map[string]string{"NATS_NKEY_SEED_FILE": public, "NATS_NKEY_SEED": userSeed},
-			"NATS_NKEY_SEED_FILE " + public + " is writable by its group or open to others (mode 0604); chmod g-w,o-rwx it"},
+			"NATS_NKEY_SEED_FILE " + public + " is readable by its group or others (mode 0604); chmod 0600 it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			seed, err := natsauth.Seed(tc.key, env(tc.env))
@@ -174,46 +175,27 @@ func TestAnUnusableSeedIsAnErrorNamingItsSource(t *testing.T) {
 	}
 }
 
-// Seed, the daemon's reader, takes a file its group can read and refuses one its group can write or
-// others can touch: a daemon running as a non-root uid in a pod reads a kubelet-mounted Secret file
-// only through the pod's fsGroup, the file being root's and group-readable. SeedFile, which `legion
-// controller start` reads on the operator's own machine, refuses any group or other bit.
-func TestTheDaemonReadsAGroupReadableSeedAndTheControllerDoesNot(t *testing.T) {
+// A seed file the daemon's own uid owns is held to 0600 by Seed as by SeedFile, so a daemon-owned
+// 0640 seed on a shared host is refused. Seed lets the group read only a file another uid owns (a
+// kubelet-mounted Secret, root's, read through the pod's fsGroup: config.ReadGroupSecretPointer,
+// whose test covers that case; a test cannot make a file root's).
+func TestADaemonOwnedSeedIsHeldTo0600(t *testing.T) {
 	userSeed, _ := testnats.User(t)
-	withMode := func(mode os.FileMode) string {
-		t.Helper()
+	for _, mode := range []os.FileMode{0o640, 0o440, 0o660, 0o604} {
 		path := testnats.SeedFile(t, userSeed+"\n")
 		if err := os.Chmod(path, mode); err != nil {
 			t.Fatal(err)
 		}
-		return path
-	}
-	shared, writable, public := withMode(0o640), withMode(0o660), withMode(0o604)
-
-	if got, err := natsauth.Seed(shared, env(nil)); err != nil || got != userSeed {
-		t.Errorf("Seed(0640 key file) = %v; want its seed", err)
-	}
-	if got, err := natsauth.Seed("", env(map[string]string{"NATS_NKEY_SEED_FILE": shared})); err != nil || got != userSeed {
-		t.Errorf("Seed(0640 NATS_NKEY_SEED_FILE) = %v; want its seed", err)
-	}
-	want := "nats_nkey_seed_file " + writable + " is writable by its group or open to others (mode 0660); chmod g-w,o-rwx it"
-	if got, err := natsauth.Seed(writable, env(nil)); err == nil || err.Error() != want || got != "" {
-		t.Errorf("Seed(0660 key file) = %v; want %q", err, want)
-	}
-	for _, tc := range []struct {
-		name, path, want string
-	}{
-		{"its group can read", shared, "nats_nkey_seed_file " + shared + " is readable by its group or others (mode 0640); chmod 0600 it"},
-		{"others can read", public, "nats_nkey_seed_file " + public + " is readable by its group or others (mode 0604); chmod 0600 it"},
-	} {
-		t.Run("SeedFile refuses a file "+tc.name, func(t *testing.T) {
-			seed, err := natsauth.SeedFile(tc.path)
-			if err == nil || err.Error() != tc.want {
-				t.Fatalf("SeedFile = %v, want %q", err, tc.want)
+		refusal := fmt.Sprintf(" %s is readable by its group or others (mode %#o); chmod 0600 it", path, mode)
+		for name, read := range map[string]func() (string, error){
+			"Seed(key)":                 func() (string, error) { return natsauth.Seed(path, env(nil)) },
+			"Seed(NATS_NKEY_SEED_FILE)": func() (string, error) { return natsauth.Seed("", env(map[string]string{"NATS_NKEY_SEED_FILE": path})) },
+			"SeedFile":                  func() (string, error) { return natsauth.SeedFile(path) },
+		} {
+			seed, err := read()
+			if err == nil || !strings.HasSuffix(err.Error(), refusal) || seed != "" || strings.Contains(err.Error(), userSeed) {
+				t.Errorf("%s(%#o) answered a seed: %t, error %v; want no seed and the refusal ending %q", name, mode, seed != "", err, refusal)
 			}
-			if seed != "" || strings.Contains(err.Error(), userSeed) {
-				t.Fatalf("SeedFile answered or carried the seed: %v", err)
-			}
-		})
+		}
 	}
 }

@@ -37,6 +37,21 @@ func launchSecrets(cfg config.Config, lookup func(string) (string, bool)) []laun
 	return secrets
 }
 
+// ReadLaunchSecrets reads every launch secret (launchSecrets), by name, refusing the first that
+// cannot be read: boot hands them to every launch, and `legion start --check-config` reads them
+// the same way, so a file boot refuses never passes the check.
+func ReadLaunchSecrets(cfg config.Config, lookup func(string) (string, bool)) (map[string]string, error) {
+	secrets := map[string]string{}
+	for _, secret := range launchSecrets(cfg, lookup) {
+		value, err := secret.read()
+		if err != nil {
+			return nil, err
+		}
+		secrets[secret.name] = value
+	}
+	return secrets, nil
+}
+
 // launchSecretNames are the names of the secrets every launch's spec carries (launchSecrets), which
 // a provider key and the operator's pod may not collide with.
 func launchSecretNames(cfg config.Config, lookup func(string) (string, bool)) []string {

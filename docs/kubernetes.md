@@ -359,22 +359,23 @@ daemon or running a key command.
 The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
 directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
 `legion-pane` user the daemon's own NATS connection authenticates as. A set source that is empty,
-missing, unreadable, blank, writable by its group, open to others, or not an nkey user seed refuses
-boot, naming the key and the path. Its group may read the file: a daemon running as a non-root uid
-in a pod reads a mounted Secret only through the pod's `fsGroup` (the kubelet's file is root's), so
-mount it with `defaultMode: 0440`, never the kubelet's default `0644`, which others can read. `legion start
---check-config` reads the seed exactly as boot does and refuses with boot's words; its OK line then
-names the seed's user by public key (`Config OK: project=<project> nats-nkey-user=U…`), never the
-seed. With one, every pod's
+missing, unreadable, blank, readable by more than its owner, or not an nkey user seed refuses boot,
+naming the key and the path. One exception: when another uid owns the file, its group may read it,
+since a daemon running as a non-root uid in a pod reads a mounted Secret — root's — only through the
+pod's `fsGroup`. Mount it with `defaultMode: 0440`, never the kubelet's default `0644`, which others
+can read; a seed file the daemon's own uid owns stays 0600. `legion start --check-config` reads the
+seed and the Envoy bearer's file exactly as boot does and refuses with boot's words; its OK line
+then names the seed's user by public key (`Config OK: project=<project> nats-nkey-user=U…`), never
+the seed. With one, every pod's
 `NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the providers Secret's own
 `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`,
 whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same
 seed in the providers Secret under that key. The image probe refuses boot when the kubelet cannot
 mount the key, when it holds no user seed, and when its user is not the daemon's own seed's (the
-probe reports the user's public key, never the seed). A probe that reports no user at all is an
-image whose `legion probe-image` predates the report, and the refusal says to rebuild the worker
-image at or after 1a7aca7b: a current one exits 1 on a blank or invalid key. The shim skips the
-file, since the pointer
+probe reports the user's public key, never the seed); it reads the key by the daemon's rule above.
+A probe that reports no user at all is an image whose `legion probe-image` predates the report, and
+the refusal says to build the image from the daemon's commit: a current one exits 1 on a blank or
+invalid key. The shim skips the file, since the pointer
 names it, so the seed is never a variable of Oh My Pi or the tools it runs. With none, a pod
 carries no pointer and mounts no such key. While the daemon has a seed, `provider_keys` may neither
 name `NATS_NKEY_SEED` (on either runtime) nor read the Secret's `NATS_NKEY_SEED` key under another
@@ -1063,9 +1064,9 @@ deploy/kubernetes/daemon/controller.yaml.example`); `nats_urls` is required; `di
 `dispatch_token_file` go together; and relative paths resolve against the file's own directory, with
 no `~`. The operator token and the NATS nkey seed each sit in a file only you can read (mode 0600):
 a group- or world-readable one is refused naming the path and mode (`… is readable by its group or
-others (mode 0640); chmod 0600 it`). This is stricter than the daemon's own seed read, which lets
-the file's group read it ([Configuration](#configuration)): the controller's file is on your machine,
-not in a pod.
+others (mode 0640); chmod 0600 it`). The daemon's own seed read holds a file it owns to the same
+rule, and lets the group read only a file another uid owns, as a pod's kubelet-mounted Secret is
+([Configuration](#configuration)).
 
 **Starting it.** Run `legion controller start --config controller.yaml`, where `daemon_url` (or
 `--daemon-url <url>`, which replaces it) is the daemon's API as your machine reaches it. In order, and

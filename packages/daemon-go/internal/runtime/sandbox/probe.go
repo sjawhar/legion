@@ -442,7 +442,7 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // workers run their agents on their models. When the daemon has a NATS nkey seed (Options.NATSUser),
 // the probe must also name the same user as the seed its pointer read (bootprobe.NATSUser), a
 // refusal otherwise. Naming none is the image's: a current CLI whose pointer holds a blank or
-// invalid seed exits 1 (natsauth.MountedSeed), and a key the kubelet cannot mount never starts the
+// invalid seed exits 1 (natsauth.Seed), and a key the kubelet cannot mount never starts the
 // container, so only a CLI that predates the user line succeeds without one. Naming another is the
 // providers Secret holding another seed. An image whose CLI predates a flag the probe command
 // passes stops at the flags, and its Failed pod is refused naming the flag its CLI lacks.
@@ -488,7 +488,7 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 		switch got := bootprobe.NATSUser(logTail); got {
 		case r.natsUser:
 		case "":
-			return imageRefusal(digest, "pod %s named no nkey user, where the daemon's own seed is user %s: its legion CLI predates the probe's nats-nkey-user line: rebuild the worker image at or after 1a7aca7b — log tail: %s",
+			return imageRefusal(digest, "pod %s named no nkey user, where the daemon's own seed is user %s: its legion CLI predates the probe's nats-nkey-user line: build the image from this daemon's commit — log tail: %s",
 				name, r.natsUser, logTail)
 		default:
 			return bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s read nkey user %s through its NATS_NKEY_SEED_FILE, the providers Secret %s's NATS_NKEY_SEED, where the daemon's own seed is user %s: put the daemon's seed in that key — log tail: %s",

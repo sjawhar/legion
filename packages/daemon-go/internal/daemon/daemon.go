@@ -365,13 +365,9 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if err := CheckOperatorConfig(cfg, lookup); err != nil {
 		return plan{}, err
 	}
-	secrets := map[string]string{}
-	for _, secret := range launchSecrets(cfg, lookup) {
-		value, err := secret.read()
-		if err != nil {
-			return plan{}, err
-		}
-		secrets[secret.name] = value
+	secrets, err := ReadLaunchSecrets(cfg, lookup)
+	if err != nil {
+		return plan{}, err
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)

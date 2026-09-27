@@ -33,12 +33,14 @@ func Configured(file string, lookup func(string) (string, bool)) bool {
 // Seed is the nkey seed of the NATS user a process connects as: the trimmed contents of file, the
 // file the configuration's SeedFileKey names ("" when it names none); else those of the file
 // NATS_NKEY_SEED_FILE names; else NATS_NKEY_SEED. The first source set is authoritative: an empty
-// NATS_NKEY_SEED_FILE, or a missing, unreadable, blank, group-writable, or other-accessible file, is
-// an error naming the key or variable and the path (config.ReadGroupSecretPointer: a daemon running
-// as a non-root uid in a pod reads a kubelet-mounted Secret file through the pod's fsGroup, so its
-// group may read it), never a fallback to the next source or to no credential; so is a blank
-// NATS_NKEY_SEED, and a seed that is not a user nkey seed. None set is "": the connection carries no
-// credential, as every connection did before servers required one. No error carries the seed.
+// NATS_NKEY_SEED_FILE, or a missing, unreadable, or blank file, or one whose mode lets more than
+// its owner read it, is an error naming the key or variable and the path, never a fallback to the
+// next source or to no credential; so is a blank NATS_NKEY_SEED, and a seed that is not a user nkey
+// seed. The file's group may read it only when another uid owns it (config.ReadGroupSecretPointer):
+// a non-root process in a pod — the daemon, or `legion probe-image` in the probe pod — reads a
+// kubelet-mounted Secret file, root's, through the pod's fsGroup. None set is "": the connection
+// carries no credential, as every connection did before servers required one. No error carries the
+// seed.
 // Deploy order: a process gets a seed only after its server has nkey users (the SRE's stage 1, with
 // the no_auth_user fallback); a server with no users sends no nonce, and nats.go then refuses the
 // nkey ("nats: nkeys not supported by the server") rather than connecting without it.
@@ -55,17 +57,6 @@ func Seed(file string, lookup func(string) (string, bool)) (string, error) {
 // on the operator's own machine, before handing its Oh My Pi that file.
 func SeedFile(file string) (string, error) {
 	return fileSource(SeedFileKey, file, config.ReadPrivateSecretPointer).seed()
-}
-
-// MountedSeed is Seed of the two variables alone, reading NATS_NKEY_SEED_FILE whatever its mode: a
-// pod's pointer names the providers Secret's key, which the kubelet mounts readable by the pod's
-// group, and which only that pod can read. `legion probe-image` checks it inside the probe pod.
-func MountedSeed(lookup func(string) (string, bool)) (string, error) {
-	src, ok := resolve("", lookup, config.ReadSecretPointer)
-	if !ok {
-		return "", nil
-	}
-	return src.seed()
 }
 
 // source is one place a seed is read from: its name, which every refusal carries, and read, which
