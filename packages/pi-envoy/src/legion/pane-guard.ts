@@ -1441,7 +1441,7 @@ function runFunction(
     walkNode(definition.body, child, ctx, false);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
-    throw new Refusal(error.snippet, error.line, error.detail, definition.file ?? error.file);
+    throw new Refusal(error.snippet, error.line, error.detail, error.file ?? definition.file);
   }
   outer.vars = child.vars;
   outer.exported = child.exported;
@@ -1475,7 +1475,7 @@ function functionOutput(
     walkNode(definition.body, child, ctx, false);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;
-    throw new Refusal(error.snippet, error.line, error.detail, definition.file ?? error.file);
+    throw new Refusal(error.snippet, error.line, error.detail, error.file ?? definition.file);
   }
   return child.output?.length === 0 ? undefined : child.output;
 }
@@ -1647,7 +1647,25 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     }
 
     case "rsync": {
-      const destination = operands(rest, "").operands.at(-1);
+      const destination = operands(rest, "efTBM", [
+        "--backup-dir",
+        "--block-size",
+        "--bwlimit",
+        "--chmod",
+        "--chown",
+        "--exclude",
+        "--exclude-from",
+        "--files-from",
+        "--filter",
+        "--include",
+        "--include-from",
+        "--log-file",
+        "--out-format",
+        "--password-file",
+        "--remote-option",
+        "--rsync-path",
+        "--temp-dir",
+      ]).operands.at(-1);
       if (destination !== undefined) {
         checkTargets("rsync", "synchronize and delete into", [destination], true, st, ctx, site);
       }
@@ -2012,6 +2030,14 @@ function checkXargs(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void
     "--eof",
     "--arg-file",
   ]);
+  let replacement: string | undefined;
+  for (const [index, arg] of list.entries()) {
+    const text = literalText(arg.exp);
+    if (text === "-i" || text === "--replace") replacement = "{}";
+    else if (text === "-I") replacement = literalText(list[index + 1]?.exp);
+    else if (text?.startsWith("-I")) replacement = text.slice(2);
+    else if (text?.startsWith("--replace=")) replacement = text.slice(10);
+  }
   const first = found.operands[0];
   const inner = unwrap(
     first === undefined ? [] : list.slice(list.indexOf(first)),
@@ -2019,7 +2045,20 @@ function checkXargs(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void
     ctx,
     site
   ).argv;
-  const program = path.basename(literalText(inner[0]?.exp) ?? "");
+  const replacementName = "LEGION_GUARD_XARGS_REPLACEMENT";
+  const argv =
+    replacement === undefined
+      ? inner
+      : inner.map((arg) => {
+          const text = literalText(arg.exp);
+          return text === undefined || !text.includes(replacement)
+            ? arg
+            : {
+                text: arg.text,
+                exp: [literal(text.replaceAll(replacement, `"$${replacementName}"`))],
+              };
+        });
+  const program = path.basename(literalText(argv[0]?.exp) ?? "");
   if (FILE_COMMANDS.has(program) || SIGNAL_COMMANDS.has(program)) {
     throw new Refusal(
       site.snippet,
@@ -2028,20 +2067,24 @@ function checkXargs(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void
         `the paths or pids on the command line (or use \`find <dir> -delete\`) so it can check them`
     );
   }
+  const overlay = new Map<string, Expansion>();
+  if (replacement !== undefined) {
+    overlay.set(replacementName, [unknown("an xargs replacement")]);
+  }
   const invocation: Invocation = {
-    args: inner,
+    args: argv,
     site,
-    overlay: new Map(),
+    overlay,
     redirects: [],
     pipeIn: false,
   };
   if (SHELLS.has(program)) {
-    runShell(inner.slice(1), invocation, st, ctx);
+    runShell(argv.slice(1), invocation, st, ctx);
     return;
   }
   const interpreter = interpreterLanguage(program);
   if (interpreter !== undefined)
-    runInterpreter(program, interpreter, inner.slice(1), invocation, st, ctx);
+    runInterpreter(program, interpreter, argv.slice(1), invocation, st, ctx);
 }
 function checkKill(list: readonly Arg[], ctx: Ctx, site: Site): void {
   const words = list.map((arg) => literalText(arg.exp));
@@ -2474,7 +2517,19 @@ function checkCode(
     { env, cwd: cwd ?? "/", tmpdir: env.TMPDIR ?? "/tmp", ipython },
     {
       path: (call, verb, target) => {
-        const verdict = judgePath([literal(target)], { ...st, cwd: cwd ?? "/" }, ctx, {
+        const pieces: Piece[] = [];
+        let cursor = 0;
+        for (const name of target.unknown) {
+          const marker = `"$${name}"`;
+          const at = target.text.indexOf(marker, cursor);
+          if (at === -1) continue;
+          if (at > cursor) pieces.push(literal(target.text.slice(cursor, at)));
+          pieces.push({ ...unknown(`a \`${call}\` interpolation`), lenient: true });
+          cursor = at + marker.length;
+        }
+        if (cursor < target.text.length) pieces.push(literal(target.text.slice(cursor)));
+        if (pieces.length === 0) pieces.push(literal(target.text));
+        const verdict = judgePath(pieces, { ...st, cwd: cwd ?? "/" }, ctx, {
           follow: verb !== "delete" && verb !== "move",
           overwrite: verb === "overwrite",
         });

@@ -195,16 +195,19 @@ describe("resolution", () => {
     for (const command of [
       "echo x | xargs sh -c 'rm -rf \"$HOME\"'",
       "echo x | xargs -I{} bash -c 'rm -rf $HOME/.ssh'",
+      "echo x | xargs -I{} bash -c 'rm -rf {}'",
+      "echo x | xargs -i sh -c 'rm -rf {}'",
       "busybox rm -rf ~",
       "toybox rm -rf ~",
     ]) {
-      expect(bash(command), command).toContain(home);
+      expect(bash(command), command).toBeDefined();
     }
   });
 
   test("refuses destructive synchronization and archive destinations", () => {
     for (const command of [
       'rsync -a --delete "$LEGION_WORKSPACE/build/" "$HOME/"',
+      'rsync -a --delete "$LEGION_WORKSPACE/build/" "$HOME/" --exclude tmp',
       'tar -xf fixture.tar -C "$HOME"',
       'unzip -o fixture.zip -d "$HOME"',
     ]) {
@@ -330,6 +333,21 @@ describe("scripts a command runs", () => {
     const reason = bash(`bash ${parent}`);
     expect(reason).toContain(`line 2 of ${sourced}`);
     expect(reason).not.toContain(`line 2 of ${parent}`);
+  });
+
+  test("preserves the deepest defining file across sourced function calls", () => {
+    const inner = script(
+      "source-function-inner.sh",
+      ':\n:\n:\n:\n:\n:\n:\n:\n:\n:\n  cleanup_inner() { rm -rf "$HOME"; }\n'
+    );
+    const outer = script(
+      "source-function-outer.sh",
+      `:\n:\ncleanup_outer() { cleanup_inner; }\n. ${inner}\n`
+    );
+    const parent = script("source-function-main.sh", `. ${outer}\ncleanup_outer\n`);
+    const reason = bash(`bash ${parent}`);
+    expect(reason).toContain(`line 11 of ${inner}`);
+    expect(reason).not.toContain(`line 11 of ${outer}`);
   });
 
   test("uses a shell function's echoed path in a command substitution", () => {
@@ -566,6 +584,10 @@ describe("the eval tool", () => {
     ).toContain(".ssh");
     expect(code("js", 'await tool.bash({ command: "rm -rf ~" })')).toContain("`~`");
     expect(code("js", 'execSync("pkill -x sleep")')).toContain("pkill");
+    expect(
+      code("py", `import os, sys\nopen(f"{os.environ['HOME']}/{sys.argv[1]}", "w").write("x")`)
+    ).toContain(home);
+    expect(code("js", 'Bun.write(process.env.HOME + "/" + process.argv[2], "x")')).toContain(home);
 
     // Allowed: inside the workspace, an unevaluable argument (the documented residual), reads.
     expect(

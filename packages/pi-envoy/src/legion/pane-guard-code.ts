@@ -21,13 +21,18 @@ export const UNKNOWN_MARKER = "__LEGION_GUARD_UNKNOWN__";
 /** A value the evaluator knows, or `undefined` for one it cannot know before the code runs. */
 type Value = string | readonly Value[] | undefined;
 
+export interface CodePath {
+  readonly text: string;
+  readonly unknown: readonly string[];
+}
+
 /** What the scanner found, handed back to the shell half of the guard, which owns the policy. */
 export interface CodeSinks {
-  /** A filesystem call on `target` (a known path string). */
+  /** A filesystem call on a partially-known `target`. */
   readonly path: (
     call: string,
     verb: "delete" | "move" | "truncate" | "overwrite",
-    target: string
+    target: CodePath
   ) => void;
   /** A signal to `pid` (a known integer string); a process group when `group` is set. */
   readonly signal: (call: string, pid: string, group: boolean) => void;
@@ -386,10 +391,10 @@ interface Scope {
 function joinPath(parts: readonly Value[]): Value {
   let joined = "";
   for (const part of parts) {
-    if (typeof part !== "string") return undefined;
-    if (part.startsWith("/")) joined = part;
-    else if (joined === "" || joined.endsWith("/")) joined += part;
-    else joined += `/${part}`;
+    const text = typeof part === "string" ? part : `"$${UNKNOWN_MARKER}"`;
+    if (text.startsWith("/")) joined = text;
+    else if (joined === "" || joined.endsWith("/")) joined += text;
+    else joined += `/${text}`;
   }
   return joined;
 }
@@ -828,12 +833,12 @@ export function scanCode(
             ? bunFileTarget(receiverTokens, scope)
             : evaluate(receiverTokens, scope);
         const call = `${receiverTokens.map((t) => t.text).join("")}.${method}()`;
-        if (typeof receiver === "string") sinks.path(call, verb, absoluteOrSelf(receiver, scope));
+        if (typeof receiver === "string") sinks.path(call, verb, codePath(receiver, scope));
         if (verb === "move") {
           const end = closing(tokens, k + 2);
           const [destination] = splitArguments(tokens, k + 3, end).positional;
           const value = destination === undefined ? undefined : evaluate(destination, scope);
-          if (typeof value === "string") sinks.path(call, verb, absoluteOrSelf(value, scope));
+          if (typeof value === "string") sinks.path(call, verb, codePath(value, scope));
         }
       }
       continue;
@@ -883,7 +888,7 @@ export function scanCode(
       const [verb, ...indexes] = pathCall;
       for (const index of indexes) {
         const target = value(index);
-        if (typeof target === "string") sinks.path(callee, verb, absoluteOrSelf(target, scope));
+        if (typeof target === "string") sinks.path(callee, verb, codePath(target, scope));
       }
       continue;
     }
@@ -892,7 +897,7 @@ export function scanCode(
       const modeSpan = args.positional[1] ?? args.keyword.get("mode");
       const mode = modeSpan === undefined ? "r" : evaluate(modeSpan, scope);
       if (typeof target === "string" && typeof mode === "string" && mode.includes("w")) {
-        sinks.path(callee, "overwrite", absoluteOrSelf(target, scope));
+        sinks.path(callee, "overwrite", codePath(target, scope));
       }
       continue;
     }
@@ -913,6 +918,10 @@ function absoluteOrSelf(target: string, scope: Scope): string {
 
 const PATH_CONSTRUCTORS = ["Path", "pathlib", "PosixPath", "PurePath", "PurePosixPath"];
 /** pathlib methods that return a path, so a chain of them is still one. */
+function codePath(value: string, scope: Scope): CodePath {
+  return { text: absoluteOrSelf(value, scope), unknown: unknownNames(value) };
+}
+
 const PATH_METHODS = ["expanduser", "resolve", "absolute", "joinpath", "with_name", "with_suffix"];
 
 /** Whether a receiver is a pathlib path: a `Path` constructor followed only by methods that
