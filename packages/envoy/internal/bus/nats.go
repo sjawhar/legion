@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -66,6 +67,7 @@ type Client struct {
 	Conn                        *nats.Conn
 	js                          nats.JetStreamContext
 	urls                        []string
+	credential                  nats.Option
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
 
@@ -152,17 +154,24 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	return opts
 }
 
-func connect(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
-	return connectWithContext(context.Background(), name, urls, reconnectCB, closedCB)
+func connect(name string, urls []string, credential nats.Option, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
+	return connectWithContext(context.Background(), name, urls, credential, reconnectCB, closedCB)
 }
 
-func connectWithContext(ctx context.Context, name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
+// connectWithContext dials urls with envoy's options and, when credential is not nil, as the NATS
+// user it names (nkeyCredential).
+func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
 	var lastErr error
 	for range 10 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		next := options(name, urls, reconnectCB, closedCB)
+		if credential != nil {
+			if err := credential(&next); err != nil {
+				return nil, err
+			}
+		}
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
@@ -210,10 +219,11 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 }
 
 // Dial opens a tuned core NATS connection using envoy's standard options (5s connect timeout,
-// infinite reconnect every second, retry-loop for the initial 10 attempts). A caller that needs
-// core pub/sub on a connection of its own uses it: nats.go re-subscribes core subscriptions on
-// reconnect by itself, so it needs none of Client's recovery, and it touches no stream. It
-// refuses a NATS server that is not this machine's on the same terms as Connect.
+// infinite reconnect every second, retry-loop for the initial 10 attempts), as the NATS user the
+// environment names (nkeyCredential). A caller that needs core pub/sub on a connection of its own
+// uses it: nats.go re-subscribes core subscriptions on reconnect by itself, so it needs none of
+// Client's recovery, and it touches no stream. It refuses a NATS server that is not this machine's
+// on the same terms as Connect.
 //
 // For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
 // this codebase owns, ConnectOwningStream.
@@ -221,13 +231,22 @@ func Dial(name string, urls []string) (*nats.Conn, error) {
 	if err := refuseRemoteNATS(urls); err != nil {
 		return nil, err
 	}
-	return connect(name, urls, nil, nil)
+	credential, err := nkeyCredential(os.LookupEnv)
+	if err != nil {
+		return nil, err
+	}
+	return connect(name, urls, credential, nil, nil)
 }
 
 // Connect opens a client that publishes and subscribes without touching the shared
 // ENVOY_NOTIFICATIONS stream. Every caller that only publishes or only tails uses it -- natstail,
 // the MCP bridge and envoy-dispatch's operator commands own nothing on the server they reach, and
 // a stream ensure from one of them rewrites a resource several deployments share (LEGION-249).
+//
+// Every client, from Connect or ConnectOwningStream, connects as the NATS user the environment
+// names: NATS_NKEY_SEED_FILE or NATS_NKEY_SEED (nkeyCredential). An unusable seed is an error
+// before any dial; neither variable set connects without a credential. Every connection the client
+// dials later, to recover, is the same user's.
 //
 // For the JetStream stream this codebase owns, use ConnectOwningStream.
 func Connect(urls []string, options ...ConnectOption) (*Client, error) {
@@ -253,12 +272,17 @@ func newClient(urls []string, ownsStream bool, options []ConnectOption) (*Client
 	for _, o := range options {
 		o(&opts)
 	}
+	credential, err := nkeyCredential(os.LookupEnv)
+	if err != nil {
+		return nil, err
+	}
 	c := &Client{
 		urls:                        urls,
+		credential:                  credential,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		stopCh:                      make(chan struct{}),
 	}
-	nc, err := connect("envoy", urls, c.onReconnect, c.onClosed)
+	nc, err := connect("envoy", urls, credential, c.onReconnect, c.onClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -673,7 +697,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		}
 	}
 
-	nc, err := connectWithContext(ctx, "envoy", c.urls, c.onReconnect, c.onClosed)
+	nc, err := connectWithContext(ctx, "envoy", c.urls, c.credential, c.onReconnect, c.onClosed)
 	if err != nil {
 		return err
 	}

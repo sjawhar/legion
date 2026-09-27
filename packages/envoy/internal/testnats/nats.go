@@ -218,6 +218,25 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 	return ctr, uri
 }
 
+// StartNkeyAuthorized runs a NATS test container on Image, with JetStream, that accepts only
+// clients authenticating as the nkey user whose public key is user, removed when the test ends,
+// and returns its client URL.
+func StartNkeyAuthorized(t testing.TB, user string) string {
+	t.Helper()
+	ctx := context.Background()
+	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ { nkey: %q } ]\n}\n", user)
+	ctr, err := tcnats.Run(ctx, Image, tcnats.WithConfigFile(strings.NewReader(config)))
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		t.Fatalf("start nkey-authorized NATS: %v", err)
+	}
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	return uri
+}
+
 // StartRestartable runs a NATS test container a test can stop and start as a server restarts, and
 // returns it, once it answers, with a URL that stays the server's across every restart. The URL's
 // port is a listener this process holds for the test's life, which relays each connection to
