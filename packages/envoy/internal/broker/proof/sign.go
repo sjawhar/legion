@@ -15,12 +15,16 @@ import (
 
 const typeHeader = "agent-secrets-proof+jwt"
 
+// claims is a session proof's payload: exactly one of EnrollmentID or LauncherID identifies who
+// is proving they hold the signing key — an enrolled session (eid) or a key-bound launcher
+// credential authenticating itself directly (lid, AGENTC-393 Plan A machine logins).
 type claims struct {
 	JTI          string `json:"jti"`
 	IssuedAt     int64  `json:"iat"`
 	Method       string `json:"htm"`
 	URL          string `json:"htu"`
-	EnrollmentID string `json:"eid"`
+	EnrollmentID string `json:"eid,omitempty"`
+	LauncherID   string `json:"lid,omitempty"`
 }
 
 func NewKey() (*ecdsa.PrivateKey, error) {
@@ -41,7 +45,9 @@ func thumbprintOf(jwk jose.JSONWebKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum), nil
 }
 
-func Sign(key *ecdsa.PrivateKey, enrollmentID, method, url string, now time.Time) (string, error) {
+// sign signs c over method, url and now, filling in jti/iat/htm/htu; the caller has already set
+// c's eid or lid.
+func sign(key *ecdsa.PrivateKey, method, url string, now time.Time, c claims) (string, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, &jose.SignerOptions{
 		EmbedJWK:     true,
 		ExtraHeaders: map[jose.HeaderKey]any{jose.HeaderType: typeHeader},
@@ -49,7 +55,11 @@ func Sign(key *ecdsa.PrivateKey, enrollmentID, method, url string, now time.Time
 	if err != nil {
 		return "", err
 	}
-	payload, err := json.Marshal(claims{JTI: uuid.NewString(), IssuedAt: now.Unix(), Method: method, URL: url, EnrollmentID: enrollmentID})
+	c.JTI = uuid.NewString()
+	c.IssuedAt = now.Unix()
+	c.Method = method
+	c.URL = url
+	payload, err := json.Marshal(c)
 	if err != nil {
 		return "", err
 	}
@@ -58,4 +68,17 @@ func Sign(key *ecdsa.PrivateKey, enrollmentID, method, url string, now time.Time
 		return "", err
 	}
 	return sig.CompactSerialize()
+}
+
+// Sign builds and signs a session proof identifying enrollmentID (the "eid" claim) — a session's
+// own ongoing authentication.
+func Sign(key *ecdsa.PrivateKey, enrollmentID, method, url string, now time.Time) (string, error) {
+	return sign(key, method, url, now, claims{EnrollmentID: enrollmentID})
+}
+
+// SignLauncher builds and signs a session proof identifying launcherID directly (the "lid"
+// claim) — a key-bound launcher credential's own ongoing authentication once a machine login is
+// approved, with no enrollment involved at all.
+func SignLauncher(key *ecdsa.PrivateKey, launcherID, method, url string, now time.Time) (string, error) {
+	return sign(key, method, url, now, claims{LauncherID: launcherID})
 }

@@ -2,6 +2,7 @@ package proof
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -48,9 +49,9 @@ func fixture(t *testing.T) (*Verifier, string, string) {
 
 func TestValidProofPasses(t *testing.T) {
 	v, compact, _ := fixture(t)
-	id, err := v.Verify(context.Background(), compact, "POST", "https://secrets.test/v1/requests", time.Now())
-	if err != nil || id != "enr-1" {
-		t.Fatalf("expected enr-1, got %q %v", id, err)
+	sub, err := v.Verify(context.Background(), compact, "POST", "https://secrets.test/v1/requests", time.Now())
+	if err != nil || sub.EnrollmentID != "enr-1" || sub.LauncherID != "" {
+		t.Fatalf("expected Subject{EnrollmentID: enr-1}, got %+v %v", sub, err)
 	}
 }
 
@@ -247,5 +248,123 @@ func TestJtiRetainedForTheWholeAcceptanceWindow(t *testing.T) {
 	}
 	if lastAccepted := now.Add(v.Skew); retainedUntil.Before(lastAccepted) {
 		t.Fatalf("jti retained until %s, but a replay is accepted until %s", retainedUntil, lastAccepted)
+	}
+}
+
+// signRawClaims signs c directly, bypassing Sign/SignLauncher's own eid/lid exclusivity, for
+// tests that need an otherwise well-formed proof carrying an invalid combination of eid/lid.
+func signRawClaims(t *testing.T, key *ecdsa.PrivateKey, c claims) string {
+	t.Helper()
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, &jose.SignerOptions{
+		EmbedJWK:     true,
+		ExtraHeaders: map[jose.HeaderKey]any{jose.HeaderType: typeHeader},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := signer.Sign(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := sig.CompactSerialize()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return compact
+}
+
+// TestEidAndLidAreMutuallyExclusive pins that a proof naming both an enrollment and a launcher
+// credential, or neither, is refused before either Lookup hook is ever consulted.
+func TestEidAndLidAreMutuallyExclusive(t *testing.T) {
+	key, err := NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp, err := Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &Verifier{
+		Skew:           time.Minute,
+		Lookup:         func(_ context.Context, _ string) (string, bool, error) { return tp, true, nil },
+		LookupLauncher: func(_ context.Context, _ string) (string, bool, error) { return tp, true, nil },
+		Replay:         func(_ context.Context, _ string, _ time.Time) (bool, error) { return true, nil },
+	}
+	now := time.Now()
+	base := claims{IssuedAt: now.Unix(), Method: "POST", URL: "https://secrets.test/v1/requests"}
+
+	both := base
+	both.JTI, both.EnrollmentID, both.LauncherID = "both-jti", "enr-1", "lid-1"
+	if _, err := v.Verify(context.Background(), signRawClaims(t, key, both), "POST", "https://secrets.test/v1/requests", now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("both eid and lid must fail with ErrInvalid, got %v", err)
+	}
+
+	neither := base
+	neither.JTI = "neither-jti"
+	if _, err := v.Verify(context.Background(), signRawClaims(t, key, neither), "POST", "https://secrets.test/v1/requests", now); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("neither eid nor lid must fail with ErrInvalid, got %v", err)
+	}
+}
+
+// TestLauncherProofResolvesThroughLookupLauncher pins that an "lid" proof is dispatched to
+// LookupLauncher (never Lookup), resolves its Subject.LauncherID, and refuses a proof signed by
+// any key other than the one LookupLauncher's thumbprint names.
+func TestLauncherProofResolvesThroughLookupLauncher(t *testing.T) {
+	key, err := NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tp, err := Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	v := &Verifier{
+		Skew: time.Minute,
+		Lookup: func(_ context.Context, _ string) (string, bool, error) {
+			t.Fatal("Lookup must not be called for an lid proof")
+			return "", false, nil
+		},
+		LookupLauncher: func(_ context.Context, id string) (string, bool, error) {
+			if id == "lid-1" {
+				return tp, true, nil
+			}
+			return "", false, nil
+		},
+		Replay: func(_ context.Context, jti string, _ time.Time) (bool, error) {
+			if seen[jti] {
+				return false, nil
+			}
+			seen[jti] = true
+			return true, nil
+		},
+	}
+	now := time.Now()
+	compact, err := SignLauncher(key, "lid-1", "POST", "https://secrets.test/v1/requests", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := v.Verify(context.Background(), compact, "POST", "https://secrets.test/v1/requests", time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if sub.LauncherID != "lid-1" || sub.EnrollmentID != "" {
+		t.Fatalf("subject = %+v, want LauncherID=lid-1 and empty EnrollmentID", sub)
+	}
+
+	other, err := NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongKeyCompact, err := SignLauncher(other, "lid-1", "POST", "https://secrets.test/v1/requests", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Verify(context.Background(), wrongKeyCompact, "POST", "https://secrets.test/v1/requests", time.Now()); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("proof for lid-1 signed by another key must fail, got %v", err)
 	}
 }

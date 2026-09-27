@@ -1,24 +1,30 @@
-// Package enroll issues launcher credentials and turns them into live enrollments: a launcher
-// (an operator's box, a Kubernetes pod, or the host agent-secrets-helper of Plan B) proves it
-// holds a bearer credential and, for a pod, a projected service-account token bound to that pod,
-// and receives a leased enrollment keyed by its own signing key's thumbprint. proof.Verifier reads
-// enrollments back through Lookup and Replay to authenticate later session proofs.
+// Package enroll issues key-bound launcher credentials and turns them into live enrollments. A
+// launcher (an operator's box, a Kubernetes pod, or the host agent-secrets-helper of Plan B)
+// signs its own future requests with the private key whose thumbprint and public JWK a launcher
+// credential is minted against — machine.Service.ApplyDecision mints one once a human approves a
+// typed-code machine login (AGENTC-393 Plan A) — and, for a pod, also proves a projected
+// service-account token bound to that pod, receiving a leased enrollment keyed by its own signing
+// key's thumbprint. proof.Verifier reads enrollments back through Lookup and Replay, and launcher
+// credentials back through AuthenticateLauncher (its LookupLauncher hook), to authenticate later
+// session and machine proofs. There is no bearer token anywhere in this package: a launcher
+// credential authenticates by the same key it was minted against, never a shared secret.
 package enroll
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/broker/dispatch"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
 )
 
@@ -38,15 +44,13 @@ type Credential struct {
 }
 
 type Enrollment struct {
-	ID            uuid.UUID
-	Kind          string
-	RuntimeID     string
-	Operator      *string
-	ApproverKind  string
-	ApproverIssue *string
-	Thumbprint    string
-	SessionID     *string
-	PodToken      string
+	ID         uuid.UUID
+	Kind       string
+	RuntimeID  string
+	Operator   *string
+	Thumbprint string
+	SessionID  *string
+	PodToken   string
 	// Subject is a pod enrollment's verified service-account subject, set by Create from the
 	// projected token itself and never from the caller; nil for box and host.
 	Subject      *string
@@ -68,6 +72,12 @@ type Service struct {
 	Lease time.Duration
 	Pod   PodVerifier
 
+	// Chain re-verifies a launcher credential's issuance chain on every AuthenticateLauncher
+	// call: a launcher_credentials row is never trusted on its own, since it must still trace
+	// back to a genuinely signed, human-approved credential-request record. NewChainVerifier
+	// builds one against this same Store and an approvers.Service.
+	Chain *record.ChainVerifier
+
 	// testConflictHook, when set, runs once a 23505 insert conflict is detected in createAttempt,
 	// before the recovery lookup. It exists only so a test can deterministically reproduce the
 	// race where the conflicting row is revoked between the failed insert and that lookup; no
@@ -75,53 +85,138 @@ type Service struct {
 	testConflictHook func()
 }
 
-func hash(token string) []byte { s := sha256.Sum256([]byte(token)); return s[:] }
-
 // execer is satisfied by both *pgxpool.Pool (via Store.Pool) and pgx.Tx, so mintLauncherCredential
-// can run either standalone (MintLauncherCredential) or joined to a caller's own transaction
-// (MintLauncherCredentialTx) — the latter is what launcher.Service's applyAsk uses, so a crash
-// between minting the credential and flipping its own request row to "issued" rolls back both
-// together instead of leaving an orphaned, unrecoverable credential.
+// can run either standalone or joined to a caller's own transaction —
+// machine.Service.ApplyDecision's own approval commit, so a crash between minting and recording
+// its decision rolls back both together instead of leaving an orphaned, unrecoverable credential.
 type execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-func (s *Service) mintLauncherCredential(ctx context.Context, exec execer, operator, service *string, host, askID string) (uuid.UUID, string, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return uuid.Nil, "", err
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
-	id := uuid.New()
+// mintLauncherCredential inserts a launcher credential bound to a signing key — never a bearer
+// token: a launcher's own key (thumbprint, embedded JWK) is exactly what a later
+// proof.SignLauncher proof presents, and exactly what AuthenticateLauncher's issuance-chain
+// re-verification checks against recordID's approved credential-request record. recordID may be
+// "" only for a credential with no backing record at all (test fixtures unrelated to the
+// machine-login flow); AuthenticateLauncher refuses such a credential outright.
+func (s *Service) mintLauncherCredential(ctx context.Context, exec execer, operator, service *string, host, thumbprint string, jwk json.RawMessage, recordID string, expires time.Time) (uuid.UUID, error) {
 	if operator != nil {
 		operator = new(dispatch.CanonicalLogin(*operator))
 	}
-	_, err := exec.Exec(ctx, `insert into launcher_credentials (id, operator, service, host, token_hash, issued_via_ask) values ($1,$2,$3,$4,$5,$6)`,
-		id, operator, service, host, hash(token), nullable(askID))
+	id := uuid.New()
+	_, err := exec.Exec(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, expires_at) values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		id, operator, service, host, thumbprint, []byte(jwk), nullable(recordID), expires)
 	if err != nil {
-		return uuid.Nil, "", err
+		return uuid.Nil, err
 	}
-	return id, token, nil
+	return id, nil
 }
 
-func (s *Service) MintLauncherCredential(ctx context.Context, operator *string, service *string, host, askID string) (uuid.UUID, string, error) {
-	return s.mintLauncherCredential(ctx, s.Store.Pool, operator, service, host, askID)
+// MintLauncherCredentialTx mints a launcher credential inside tx, joined to the caller's own
+// transaction — machine.Service.ApplyDecision's own approval commit.
+func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, operator, service *string, host, thumbprint string, jwk json.RawMessage, recordID string, expires time.Time) (uuid.UUID, error) {
+	return s.mintLauncherCredential(ctx, tx, operator, service, host, thumbprint, jwk, recordID, expires)
 }
 
-// MintLauncherCredentialTx is MintLauncherCredential run inside a caller-owned transaction, so the
-// insert commits or rolls back atomically with whatever else that transaction does.
-func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, operator, service *string, host, askID string) (uuid.UUID, string, error) {
-	return s.mintLauncherCredential(ctx, tx, operator, service, host, askID)
+// NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
+// re-verification uses, wired against st: FetchRecord and FetchApproval read straight from
+// Postgres. VerifyAssertion does not re-run the approver's WebAuthn signature check — a stored
+// assertion's own authenticator signature counter is a one-time proof by design: re-verifying it
+// through approvers.Service.VerifyAssertion a second time always fails as a replay of itself,
+// since that first, real re-verification already advanced sign_count to match the assertion's
+// own fixed counter value. What can genuinely change between decision time and now is whether
+// the approving key is still trusted at all, so VerifyAssertion instead extracts the credential
+// id the stored assertion names and checks that key's own current state: a key later revoked
+// (or tombstoned) stops authenticating everything it ever approved, exactly as
+// approvers.Service.RevokeKey's cascade intends, without re-litigating a signature that was
+// already checked once, permanently, in credential_requests' own append-only ledger.
+func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *record.ChainVerifier {
+	return &record.ChainVerifier{
+		Audience: audience,
+		Skew:     skew,
+		FetchRecord: func(ctx context.Context, recordID string) (string, time.Time, bool, error) {
+			var body string
+			var createdAt time.Time
+			err := st.Pool.QueryRow(ctx, `select body, created_at from credential_requests where id=$1 and kind='launcher_credential'`, recordID).Scan(&body, &createdAt)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return "", time.Time{}, false, nil
+			}
+			if err != nil {
+				return "", time.Time{}, false, err
+			}
+			return body, createdAt, true, nil
+		},
+		FetchApproval: func(ctx context.Context, recordID string) (json.RawMessage, bool, error) {
+			var assertion json.RawMessage
+			err := st.Pool.QueryRow(ctx, `select assertion from credential_request_events where record_id=$1 and event='approved'`, recordID).Scan(&assertion)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, false, nil
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			return assertion, true, nil
+		},
+		VerifyAssertion: func(ctx context.Context, login string, _ [32]byte, assertion json.RawMessage) error {
+			parsed, err := protocol.ParseCredentialRequestResponseBytes(assertion)
+			if err != nil {
+				return fmt.Errorf("parse stored assertion: %w", err)
+			}
+			credentialID := base64.RawURLEncoding.EncodeToString(parsed.RawID)
+			var storedLogin, state string
+			err = st.Pool.QueryRow(ctx, `select login, state from approver_keys where credential_id=$1`, credentialID).Scan(&storedLogin, &state)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("approver key %s no longer exists", credentialID)
+			}
+			if err != nil {
+				return err
+			}
+			if state != "active" {
+				return fmt.Errorf("approver key %s is %s, not active", credentialID, state)
+			}
+			if login != "" && record.CanonicalLogin(login) != storedLogin {
+				return fmt.Errorf("approver key %s belongs to %s, not %s", credentialID, storedLogin, login)
+			}
+			return nil
+		},
+	}
 }
 
-func (s *Service) AuthenticateLauncher(ctx context.Context, bearer string) (Credential, error) {
-	var c Credential
-	err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host from launcher_credentials where token_hash=$1 and revoked_at is null`, hash(bearer)).
-		Scan(&c.ID, &c.Operator, &c.Service, &c.Host)
+// AuthenticateLauncher answers proof.Verifier's LookupLauncher hook directly: given a launcher
+// credential's own id (the "lid" claim of a proof.SignLauncher proof), it resolves the live,
+// unexpired credential row and re-verifies its entire issuance chain through s.Chain — a
+// launcher_credentials row is never trusted on its own, so a row inserted without a genuine
+// approved credential-request record behind it never authenticates. A missing, expired, revoked,
+// or chain-broken credential all answer ("", false, nil); only a genuine dependency failure is a
+// non-nil error, matching Lookup's own contract.
+func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string, bool, error) {
+	if _, err := uuid.Parse(lid); err != nil {
+		return "", false, nil
+	}
+	var thumbprint string
+	var recordID *string
+	var expiresAt time.Time
+	err := s.Store.Pool.QueryRow(ctx, `select key_thumbprint, record_id, expires_at from launcher_credentials where id=$1 and revoked_at is null`, lid).
+		Scan(&thumbprint, &recordID, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return Credential{}, ErrUnauthenticated
+		return "", false, nil
 	}
-	return c, err
+	if err != nil {
+		return "", false, err
+	}
+	if !expiresAt.After(time.Now()) {
+		return "", false, nil
+	}
+	if recordID == nil {
+		return "", false, nil
+	}
+	if _, err := s.Chain.Verify(ctx, *recordID); err != nil {
+		if errors.Is(err, record.ErrChainBroken) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return thumbprint, true, nil
 }
 
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
@@ -168,9 +263,9 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 		return Enrollment{}, false, err
 	}
 	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, approver_kind, approver_issue, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
-		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-		in.ID, in.Kind, in.RuntimeID, in.Operator, in.ApproverKind, in.ApproverIssue, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
+	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		in.ID, in.Kind, in.RuntimeID, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 		// The failed insert aborted tx, which still holds its pooled connection. Release it before

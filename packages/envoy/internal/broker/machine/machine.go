@@ -1,0 +1,354 @@
+// Package machine implements AGENTC-393 Plan A machine logins: a typed-code approval flow that
+// mints key-bound launcher credentials. A machine (an operator's box, a Kubernetes pod, or an
+// automated service like the Legion daemon) signs a credential-request object naming the
+// operator it logs in as (login_hint) and a single launcher_credential authorization detail, and
+// polls Login's pendingID for a human to approve the confirmation code Login also mints.
+// Machine-login records are decided here, not in requests.Machine: ApplyDecision verifies the
+// human's WebAuthn assertion itself and, on approval, mints the credential directly — there is
+// no Dispatch ask anywhere in this flow, and no bearer token in any response.
+package machine
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/go-jose/go-jose/v4"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/sjawhar/envoy/internal/broker/approvers"
+	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/broker/rules"
+	"github.com/sjawhar/envoy/internal/broker/store"
+)
+
+var (
+	// ErrNotFound is returned by Read and ApplyDecision when no record matches the given
+	// pending id / record id.
+	ErrNotFound = errors.New("machine login not found")
+	// ErrCodeMismatch is ApplyDecision's refusal when the caller's code does not match the
+	// record's own: the human is deciding a different login than the one their terminal or
+	// dashboard actually shows, refused before the assertion is even checked.
+	ErrCodeMismatch = errors.New("confirmation code does not match")
+	// ErrAlreadyDecided is ApplyDecision's refusal when a concurrent decision already recorded
+	// the record's one terminal event first.
+	ErrAlreadyDecided = errors.New("this machine login has already been decided")
+)
+
+type Service struct {
+	Store     *store.Store
+	Enroll    *enroll.Service
+	Approvers *approvers.Service
+	Rules     *rules.Current
+
+	Audience           string
+	Skew               time.Duration
+	PendingTTL         time.Duration
+	CredentialLifetime time.Duration
+}
+
+// confirmationAlphabet has 32 symbols, none easily confused with another (no 0/O, no 1/I), so a
+// random byte maps onto it without bias. Moved here verbatim from the deleted launcher package.
+const confirmationAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// confirmationCode is eight random symbols from confirmationAlphabet as XXXX-XXXX.
+func confirmationCode() (string, error) {
+	raw := make([]byte, 8)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	code := make([]byte, 0, 9)
+	for i, b := range raw {
+		if i == 4 {
+			code = append(code, '-')
+		}
+		code = append(code, confirmationAlphabet[int(b)%len(confirmationAlphabet)])
+	}
+	return string(code), nil
+}
+
+// hashPendingID is the sha256 of a pending id — machine_login_polls' primary key, so the raw
+// capability a machine polls with is never itself stored. Moved here verbatim from the deleted
+// launcher package.
+func hashPendingID(raw string) []byte {
+	sum := sha256.Sum256([]byte(raw))
+	return sum[:]
+}
+
+// randomPendingID mints the opaque capability a machine polls Read with.
+func randomPendingID() (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// embeddedJWK extracts the raw JWK embedded in a request object's JWS header. It is called only
+// after record.VerifyRequestObject already checked that JWS's signature and structure, so
+// ApplyDecision can store the exact public key material a launcher credential is bound to.
+func embeddedJWK(compact string) (json.RawMessage, error) {
+	sig, err := jose.ParseSigned(compact, []jose.SignatureAlgorithm{jose.ES256})
+	if err != nil || len(sig.Signatures) != 1 || sig.Signatures[0].Protected.JSONWebKey == nil {
+		return nil, fmt.Errorf("%w: no embedded key", record.ErrRequestInvalid)
+	}
+	return sig.Signatures[0].Protected.JSONWebKey.MarshalJSON()
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// Login verifies a signed machine credential-request object and opens a pending record for a
+// human to approve or deny: login_hint is required (it names the operator whose approver key
+// must decide it) and authorization_details must carry exactly one launcher_credential entry.
+// Nothing here touches Dispatch; the record and its poll row are the whole state, and rate
+// limiting this unauthenticated route is the api layer's job, not this one's.
+func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, code string, err error) {
+	now := time.Now()
+	obj, err := record.VerifyRequestObject(compactRequest, s.Audience, s.Skew, now)
+	if err != nil {
+		return "", "", err
+	}
+	if obj.LoginHint == "" {
+		return "", "", fmt.Errorf("%w: login_hint is required for a machine login", record.ErrRequestInvalid)
+	}
+	if len(obj.Details) != 1 || obj.Details[0].Type != "launcher_credential" {
+		return "", "", fmt.Errorf("%w: exactly one launcher_credential detail is required", record.ErrRequestInvalid)
+	}
+
+	code, err = confirmationCode()
+	if err != nil {
+		return "", "", err
+	}
+	pendingID, err = randomPendingID()
+	if err != nil {
+		return "", "", err
+	}
+
+	body := record.Body{
+		Request:         compactRequest,
+		Approver:        record.CanonicalLogin(obj.LoginHint),
+		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-", Operator: ""},
+		LifetimeSeconds: int(s.CredentialLifetime.Seconds()),
+		RulesVersion:    s.Rules.Get().Version,
+		ExpiresAt:       now.Add(s.PendingTTL).UTC().Truncate(time.Second),
+		Code:            code,
+	}
+	recordID := body.ID()
+
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `insert into credential_requests (id, body, kind, approver, code, expires_at) values ($1,$2,'launcher_credential',$3,$4,$5)`,
+		recordID, body.Canonical(), body.Approver, body.Code, body.ExpiresAt); err != nil {
+		return "", "", err
+	}
+	if _, err := tx.Exec(ctx, `insert into machine_login_polls (pending_id_hash, record_id) values ($1,$2)`, hashPendingID(pendingID), recordID); err != nil {
+		return "", "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", err
+	}
+	return pendingID, code, nil
+}
+
+// ApplyDecision decides a pending machine login. code must match the record's own — a wrong code
+// means the human is looking at a different login than the one they're deciding, refused before
+// the assertion is even checked (CODE_MISMATCH). assertion must verify against
+// ApproveChallenge(recordID) to approve or DenyChallenge(recordID) to deny, signed by the
+// record's own approver. Approval mints the credential — bound to the request object's own key
+// (thumbprint and embedded JWK), with lifetime CredentialLifetime counted from the decision — in
+// the same transaction that records the decision, so a crash between the two never orphans a
+// credential no decision names.
+func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bool, assertion json.RawMessage, code string) (state, credentialID string, err error) {
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback(ctx)
+
+	var canonical, approver, storedCode string
+	var createdAt time.Time
+	err = tx.QueryRow(ctx, `select body, approver, code, created_at from credential_requests where id=$1 and kind='launcher_credential'`, recordID).
+		Scan(&canonical, &approver, &storedCode, &createdAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if code != storedCode {
+		return "", "", ErrCodeMismatch
+	}
+
+	body, err := record.ParseBody(canonical)
+	if err != nil {
+		return "", "", err
+	}
+	if body.ID() != recordID {
+		return "", "", fmt.Errorf("%w: stored body does not reproduce its own id", record.ErrRequestInvalid)
+	}
+
+	event, challenge := "denied", record.DenyChallenge(recordID)
+	if approve {
+		event, challenge = "approved", record.ApproveChallenge(recordID)
+	}
+	if _, err := s.Approvers.VerifyAssertion(ctx, tx, approver, challenge, assertion); err != nil {
+		return "", "", err
+	}
+
+	var credID *string
+	if approve {
+		obj, err := record.VerifyRequestObject(body.Request, s.Audience, s.Skew, createdAt)
+		if err != nil {
+			return "", "", err
+		}
+		jwk, err := embeddedJWK(body.Request)
+		if err != nil {
+			return "", "", err
+		}
+		detail := obj.Details[0]
+		var operator, service *string
+		if detail.Service != "" {
+			service = &detail.Service
+		} else {
+			op := approver
+			operator = &op
+		}
+		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operator, service, detail.Identifier, obj.Thumbprint, jwk, recordID,
+			time.Now().Add(time.Duration(body.LifetimeSeconds)*time.Second))
+		if err != nil {
+			return "", "", err
+		}
+		idStr := id.String()
+		credID = &idStr
+	}
+
+	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, assertion, credential_id, actor) values ($1,$2,$3,$4,$5)`,
+		recordID, event, []byte(assertion), credID, approver); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return "", "", ErrAlreadyDecided
+		}
+		return "", "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", err
+	}
+	if approve {
+		return "issued", *credID, nil
+	}
+	return "denied", "", nil
+}
+
+// Read answers a machine's own poll: the record's current state and, once issued, its minted
+// credential's id — never a token.
+func (s *Service) Read(ctx context.Context, pendingID string) (state, credentialID string, err error) {
+	var recordID string
+	err = s.Store.Pool.QueryRow(ctx, `select record_id from machine_login_polls where pending_id_hash=$1`, hashPendingID(pendingID)).Scan(&recordID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return s.recordState(ctx, recordID)
+}
+
+// recordState answers a record's current state ("pending" absent any terminal event, else the
+// event's own name) and, once issued, its minted credential's id.
+func (s *Service) recordState(ctx context.Context, recordID string) (state, credentialID string, err error) {
+	var event string
+	var credID *string
+	err = s.Store.Pool.QueryRow(ctx, `select event, credential_id from credential_request_events where record_id=$1 and event in ('approved','denied','expired','cancelled')`, recordID).
+		Scan(&event, &credID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "pending", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	if event == "approved" {
+		return "issued", deref(credID), nil
+	}
+	return event, "", nil
+}
+
+// RecordView is a machine login record as the operator's UI sees it, resolved by its
+// human-readable confirmation code: enough to show what is being decided and to build the
+// WebAuthn assertion request an Approve or Deny button signs.
+type RecordView struct {
+	RecordID         string
+	Host             string
+	Service          string // "" for a personal (non-service) login
+	Approver         string
+	State            string
+	CredentialID     string
+	CreatedAt        time.Time
+	ExpiresAt        time.Time
+	ApproveChallenge []byte
+	DenyChallenge    []byte
+}
+
+// LookupByCode resolves a pending machine login by its confirmation code, for the operator's own
+// UI: it never needs the machine's opaque pending id, only the code its terminal or dashboard
+// shows.
+func (s *Service) LookupByCode(ctx context.Context, code string) (RecordView, error) {
+	var id, canonical, approver string
+	var createdAt, expiresAt time.Time
+	err := s.Store.Pool.QueryRow(ctx, `select id, body, approver, created_at, expires_at from credential_requests
+		where code=$1 and kind='launcher_credential' order by created_at desc limit 1`, code).
+		Scan(&id, &canonical, &approver, &createdAt, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RecordView{}, ErrNotFound
+	}
+	if err != nil {
+		return RecordView{}, err
+	}
+	body, err := record.ParseBody(canonical)
+	if err != nil {
+		return RecordView{}, err
+	}
+	obj, err := record.VerifyRequestObject(body.Request, s.Audience, s.Skew, createdAt)
+	if err != nil {
+		return RecordView{}, err
+	}
+	detail := obj.Details[0]
+	state, credentialID, err := s.recordState(ctx, id)
+	if err != nil {
+		return RecordView{}, err
+	}
+	approveCh := record.ApproveChallenge(id)
+	denyCh := record.DenyChallenge(id)
+	return RecordView{
+		RecordID: id, Host: detail.Identifier, Service: detail.Service, Approver: approver,
+		State: state, CredentialID: credentialID, CreatedAt: createdAt, ExpiresAt: expiresAt,
+		ApproveChallenge: approveCh[:], DenyChallenge: denyCh[:],
+	}, nil
+}
+
+// ExpirePending writes an 'expired' event for every launcher_credential record whose own
+// expires_at has passed now and that has no terminal event yet. The insert's own ON CONFLICT
+// target is credential_request_events' partial unique index on (record_id) where event names a
+// decision, so a record a concurrent ApplyDecision just decided is silently left alone rather
+// than raising a constraint violation.
+func (s *Service) ExpirePending(ctx context.Context, now time.Time) error {
+	_, err := s.Store.Pool.Exec(ctx, `insert into credential_request_events (record_id, event, actor)
+		select id, 'expired', 'broker' from credential_requests
+		where kind='launcher_credential' and expires_at < $1
+		on conflict (record_id) where event in ('approved','denied','expired','cancelled') do nothing`, now)
+	return err
+}
