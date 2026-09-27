@@ -41,10 +41,11 @@ the destination of `rsync`, `tar`, and `unzip` when their command line names one
 distinguish one pane's allowed `/tmp` directory from another. A running shell started through `hub`
 can receive later unguarded input, and `xd://debug` can launch an unguarded program. The documented
 residuals are `git -C <path> clean`, Python loop values, an aliased CommonJS `require`, an `eval`
-trap whose outer exit timing is not modeled, and a `TMUX` value that begins with a comma and
-therefore names no socket path. This is a mistake-guard, not a sandbox: it exists because an agent
-probe deleted the operator's home directory. LEGION-122 and the Kubernetes pod boundary are the
-hard isolation controls.
+trap whose outer exit timing is not modeled, an `xargs` replacement string inserted into code passed
+to an interpreter (the placeholder is evaluated relative to the pane unless the code itself names a
+forbidden prefix), and a `TMUX` value that begins with a comma and therefore names no socket path.
+This is a mistake-guard, not a sandbox: it exists because an agent probe deleted the operator's home
+directory. LEGION-122 and the Kubernetes pod boundary are the hard isolation controls.
 
 ## Current decision for the LEGION deployment
 
