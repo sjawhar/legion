@@ -848,26 +848,38 @@ for (const [target, spec, quote, pasted, stored] of [
 // text at the caret. A lone callout, a lone ask, a list or a table pasted into an ask's question, as
 // plain text or as HTML, joins the question as text, since an ask holds only its question and one
 // options list. Each once split the ask, and the ask's own options moved to a new ask under an
-// empty question.
-for (const [shape, clipboard, question] of [
-  ["a lone callout as plain text", { html: "", text: loneCallout }, "Which here?Careful."],
-  ["a lone ask as plain text", { html: "", text: loneAsk }, "Which here?Which one? A B"],
-  ["a list as plain text", { html: "", text: "- x\n- y\n" }, "Which here?x y"],
-  ["a list as HTML", { html: "<ul><li>x</li><li>y</li></ul>", text: "x\ny" }, "Which here?x y"],
+// empty question. Text joining a bold question takes the bold only when it is one line, as a
+// one-line paste does anywhere else: a lone callout or a list pasted there once came out bold too.
+const question = "Which here?";
+const boldQuestion = "**Which here?**";
+const calloutText = { html: "", text: loneCallout };
+const listText = { html: "", text: "- x\n- y\n" };
+const tableHtml = {
+  html: "<table><tr><th>one</th><th>two</th></tr><tr><td>1</td><td>2</td></tr></table>",
+  text: "one\ttwo\n1\t2",
+};
+for (const [shape, before, clipboard, stored] of [
+  ["a lone callout as plain text", question, calloutText, "Which here?Careful."],
+  ["a lone ask as plain text", question, { html: "", text: loneAsk }, "Which here?Which one? A B"],
+  ["a list as plain text", question, listText, "Which here?x y"],
   [
-    "a table as HTML",
-    {
-      html: "<table><tr><th>one</th><th>two</th></tr><tr><td>1</td><td>2</td></tr></table>",
-      text: "one\ttwo\n1\t2",
-    },
-    "Which here?one two 1 2",
+    "a list as HTML",
+    question,
+    { html: "<ul><li>x</li><li>y</li></ul>", text: "x\ny" },
+    "Which here?x y",
   ],
+  ["a table as HTML", question, tableHtml, "Which here?one two 1 2"],
+  ["one line as plain text", boldQuestion, { html: "", text: "x" }, "**Which here?x**"],
+  ["a lone callout as plain text", boldQuestion, calloutText, "**Which here?**Careful."],
+  ["a list as plain text", boldQuestion, listText, "**Which here?**x y"],
 ] as const) {
-  test(`${shape} pasted into an ask's question joins the question`, async ({ browser }) => {
+  test(`${shape} pasted after the question ${JSON.stringify(before)} stores ${JSON.stringify(stored)}`, async ({
+    browser,
+  }) => {
     const { alice, issue, page } = await openWithCaret(
       browser,
       "Paste into a question",
-      ':::ask{#q1 urgency="med" multiple="false"}\nWhich here?\n\n- X\n- Y\n:::\n',
+      `:::ask{#q1 urgency="med" multiple="false"}\n${before}\n\n- X\n- Y\n:::\n`,
       "Which here?",
       "end"
     );
@@ -878,41 +890,10 @@ for (const [shape, clipboard, question] of [
         .poll(async () =>
           withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
         )
-        .toBe(`:::ask{#q1}\n${question}\n\n- X\n- Y\n:::\n`);
+        .toBe(`:::ask{#q1}\n${stored}\n\n- X\n- Y\n:::\n`);
       await expect
         .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.block_id))
         .toEqual(["q1"]);
-    } finally {
-      await alice.close();
-    }
-  });
-}
-
-// Text flattened into a bold question takes the bold only when it is one line, as a one-line paste
-// does anywhere else: a lone callout or a list pasted there once came out bold too.
-for (const [shape, text, question] of [
-  ["one line", "x", "**Which here?x**"],
-  ["a lone callout", loneCallout, "**Which here?**Careful."],
-  ["a list", "- x\n- y\n", "**Which here?**x y"],
-] as const) {
-  test(`${shape} pasted as plain text after a bold question stores ${JSON.stringify(question)}`, async ({
-    browser,
-  }) => {
-    const { alice, issue, page } = await openWithCaret(
-      browser,
-      "Paste into a bold question",
-      ':::ask{#q1 urgency="med" multiple="false"}\n**Which here?**\n\n- X\n- Y\n:::\n',
-      "Which here?",
-      "end"
-    );
-    try {
-      await paste(page, { html: "", text });
-
-      await expect
-        .poll(async () =>
-          withoutAttributes((await getArtifactText(issue.primary_artifact_id)).markdown)
-        )
-        .toBe(`:::ask{#q1}\n${question}\n\n- X\n- Y\n:::\n`);
     } finally {
       await alice.close();
     }
