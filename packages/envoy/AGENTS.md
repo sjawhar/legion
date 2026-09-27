@@ -570,14 +570,16 @@ renderer writes a list whose kind matches the block before it - past an empty pa
 it writes as nothing - with its kind's other marker, `*` after `-` and `)` after `.`, alternating
 as the browser editor does (`otherListMarkers`); a list anywhere else keeps `-` or `.`. An edit
 that leaves two lists side by side (deleting or emptying what stood between them, inserting or
-accepting a list beside one) therefore stores the two lists it made.
+accepting a list beside one) therefore stores the two lists it made, and a `replace` refusal that
+names a list item's marker names the one it is written with (`BlockMarker.Other`).
 
 A container that holds nothing is read as the browser editor's parser reads it, holding one empty
 paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
 definition, and a list item that opens with another block (`- # h`) holds an empty paragraph ahead
 of it. A table with no body row holds one empty row, which the renderer writes as nothing. The
 renderer writes a list item's empty first paragraph as nothing, with the next block on the
-marker's line, a rule there as `***` (`- ---` is a thematic break at the list's level). A task
+marker's line, a rule there with the other character from the marker's, `***`, and `---` after
+`* ` (`- ---` and `* ***` are thematic breaks at the list's level). A task
 item cannot be written so, since its marker's line would carry the next block as the task's text
 and the browser reads no other form of it as a task: a task item whose emptied first paragraph has
 another block after it does not render, and an edit that would leave one is refused.

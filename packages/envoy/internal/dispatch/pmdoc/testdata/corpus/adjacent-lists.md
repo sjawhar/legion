@@ -22,3 +22,15 @@ Text.
 
 * callout
 :::
+
+Text.
+
+- a
+* ---
+
+Text.
+
+- outer
+  - x
+  * ---
+  * y

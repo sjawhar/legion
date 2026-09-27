@@ -124,6 +124,8 @@ func TestAdjacentListsAnEditLeavesReadBackAsTwoLists(t *testing.T) {
 		name, spec, want string
 		op               map[string]any
 		accept           string
+		// items is how many items the two lists hold together, two when unset.
+		items int
 	}{
 		{name: "a delete of the paragraph between them", spec: "- a\n\nBetween.\n\n- b\n", want: "- a\n\n* b\n",
 			op: map[string]any{"op": "delete", "find": "Between."}},
@@ -135,6 +137,10 @@ func TestAdjacentListsAnEditLeavesReadBackAsTwoLists(t *testing.T) {
 			op: map[string]any{"op": "insert", "after": "Intro.", "markdown": "1. x"}},
 		{name: "an accepted list over the paragraph before one", spec: "Intro.\n\nBody.\n\n- y\n", want: "Intro.\n\n- x\n\n* y\n",
 			accept: "- x\n"},
+		{name: "a delete beside a list whose item opens with a rule", spec: "- a\n\nBetween.\n\n- ***\n", want: "- a\n\n* ---\n",
+			op: map[string]any{"op": "delete", "find": "Between."}},
+		{name: "a delete beside a list whose later item opens with a rule", spec: "- a\n\nBetween.\n\n- b\n- ***\n", want: "- a\n\n* b\n* ---\n",
+			op: map[string]any{"op": "delete", "find": "Between."}, items: 3},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			issue := createInteractionIssue(t, handler, "AL"+string(rune('A'+index)), test.name, test.spec)
@@ -166,14 +172,18 @@ func TestAdjacentListsAnEditLeavesReadBackAsTwoLists(t *testing.T) {
 			if err != nil {
 				t.Fatalf("stored %q does not read back: %v", markdown, err)
 			}
-			lists := 0
+			lists, items := 0, 0
 			for _, block := range back.Children {
 				if block.Type == "bullet_list" || block.Type == "ordered_list" {
 					lists++
+					items += len(block.Children)
 				}
 			}
 			if lists != 2 {
 				t.Fatalf("stored %q reads back holding %d lists, want 2", markdown, lists)
+			}
+			if want := max(test.items, 2); items != want {
+				t.Fatalf("stored %q reads back holding %d items, want %d", markdown, items, want)
 			}
 		})
 	}

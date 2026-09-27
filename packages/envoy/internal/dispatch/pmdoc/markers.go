@@ -19,21 +19,28 @@ const (
 )
 
 // BlockMarker is one block marker. Level carries a heading's level; Number carries an ordered
-// item's own number, the one the renderer writes before its text.
+// item's own number, the one the renderer writes before its text; Other reports a list item
+// written with its list kind's other marker (`*`, `)`), as a list beside a list of its kind is
+// (otherListMarkers).
 type BlockMarker struct {
 	Kind   MarkerKind
 	Level  int
 	Number int
+	Other  bool
 }
 
 // Markdown renders the marker the way the document renderer writes it, for error text.
 func (m BlockMarker) Markdown() string {
-	switch m.Kind {
-	case MarkerHeading:
+	switch {
+	case m.Kind == MarkerHeading:
 		return strings.Repeat("#", max(m.Level, 1)) + " "
-	case MarkerOrdered:
+	case m.Kind == MarkerOrdered && m.Other:
+		return strconv.Itoa(max(m.Number, 1)) + ") "
+	case m.Kind == MarkerOrdered:
 		return strconv.Itoa(max(m.Number, 1)) + ". "
-	case MarkerBullet:
+	case m.Kind == MarkerBullet && m.Other:
+		return "* "
+	case m.Kind == MarkerBullet:
 		return "- "
 	default:
 		return ""
@@ -98,11 +105,12 @@ func textblockMarker(doc, node *Node, path []int) BlockMarker {
 	}
 	item := path[len(path)-2]
 	list := nodeAtPath(doc, path[:len(path)-2])
+	other := otherListMarkers(nodeAtPath(doc, path[:len(path)-3]).Children)[path[len(path)-3]]
 	switch list.Type {
 	case "ordered_list":
-		return BlockMarker{Kind: MarkerOrdered, Number: int(num(list.Attrs["order"], 1)) + item}
+		return BlockMarker{Kind: MarkerOrdered, Number: int(num(list.Attrs["order"], 1)) + item, Other: other}
 	case "bullet_list":
-		return BlockMarker{Kind: MarkerBullet}
+		return BlockMarker{Kind: MarkerBullet, Other: other}
 	}
 	return BlockMarker{}
 }

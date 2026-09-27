@@ -307,7 +307,8 @@ func (r *renderer) list(n *Node, prefix string) {
 		// An empty first paragraph is written as nothing, with the next block on the marker's line:
 		// a blank line after an empty marker line would end the item, and both parsers read an item
 		// that opens with another block as holding an empty paragraph first (`- # h`). A rule there
-		// is written `***`, since `- ---` is a thematic break at the list's level. A task item cannot
+		// is written with the other character from the marker's, since `- ---` and `* ***` are
+		// thematic breaks at the list's level: `***`, and `---` after `* `. A task item cannot
 		// be written so: its marker's line would carry the next block as the task's text, and the
 		// browser editor reads no other form of it as a task.
 		children := item.Children
@@ -333,7 +334,7 @@ func (r *renderer) list(n *Node, prefix string) {
 					r.writeSyntax("\n" + indent)
 				}
 			}
-			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0)
+			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0 && marker != "* ")
 			r.otherListMarker = markers[childIndex]
 			r.block(child, indent)
 		}
