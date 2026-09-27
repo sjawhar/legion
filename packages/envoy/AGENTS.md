@@ -849,7 +849,9 @@ reads back and one that needs none is written as it is (`escapeFootnoteLabel`). 
 lines start four columns past where its container's content starts, whatever indentation stands
 before its `[^` (`browserTextColumn`, `quoteContentColumn`). Goldmark gathers
 the definitions it keeps at the document's end in the order of their first references and drops
-the rest, so the parser puts each back where it was written (`definitionsInPlace`).
+the rest, so the parser puts each back where it was written (`definitionsInPlace`), and while the
+document parses keeps the list goldmark gathers them in ahead of every block written, so a check of
+the block before another meets the block written there (`footnoteDefinitionParser.Close`).
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

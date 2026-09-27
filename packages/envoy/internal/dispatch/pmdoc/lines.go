@@ -596,7 +596,10 @@ func (s *footnoteSlot) Dump(source []byte, level int) { ast.DumpHelper(s, source
 // Close leaves a slot where the definition is written and hands goldmark the definition from the
 // document's level, where goldmark puts the list it gathers definitions in when it closes the first
 // one: a list put inside a definition would leave the document with the definition that holds it,
-// and goldmark reads no text in blocks outside the document.
+// and goldmark reads no text in blocks outside the document. That list goes ahead of the blocks
+// written, where no check of the block before another (interruptsOpenBlock) meets it while the
+// document parses: goldmark put it at the document's end, between the blocks written before and
+// after the definition closed.
 func (p footnoteDefinitionParser) Close(node ast.Node, reader gmtext.Reader, pc parser.Context) {
 	slot := &footnoteSlot{definition: node}
 	node.Parent().InsertBefore(node.Parent(), node, slot)
@@ -608,6 +611,9 @@ func (p footnoteDefinitionParser) Close(node ast.Node, reader gmtext.Reader, pc 
 	}
 	root.AppendChild(root, node)
 	p.BlockParser.Close(node, reader, pc)
+	if list := node.Parent(); list != root.FirstChild() {
+		root.InsertBefore(root, root.FirstChild(), list)
+	}
 }
 
 // definitionsInPlace puts each footnote definition back where it is written, in place of its slot,

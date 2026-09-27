@@ -70,3 +70,39 @@ Next.
 
     code
 2. b
+
+Next.
+
+The same after a footnote definition, which goldmark gathers apart while the document parses:
+
+x[^n]
+
+[^n]: d
+
+10. 
+
+
+    # h
+11. x
+
+Next.
+
+Next.
+
+[^o]: d
+
+1.
+
+    code
+2. b
+
+Next.
+
+- a
+
+[^m]: d
+
+1.
+
+    code
+2. b
