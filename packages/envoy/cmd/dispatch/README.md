@@ -116,7 +116,11 @@ envoy-dispatch redeliver-webhooks --since 72h --dry-run   # list what would be r
 envoy-dispatch redeliver-webhooks --since 72h             # redeliver under the sweep's rules
 ```
 
-It reads the same App credentials and NATS configuration as the server.
+It reads the same App credentials and NATS configuration as the server, but owns nothing on the
+bus: unlike the server it neither creates nor updates `ENVOY_NOTIFICATIONS`, and it refuses a
+NATS server that is not the machine it runs on, naming the URL. Run inside the Dispatch
+container it reaches that deployment's NATS with `ENVOY_ALLOW_REMOTE_NATS=1
+envoy-dispatch redeliver-webhooks …`.
 
 ## Identity
 
@@ -311,6 +315,10 @@ Document events publish retained envelopes on
 `notifications.dispatch.document.<PROJECT>.<slug>.<type>`. Use
 `go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1`
 to print one matching envelope from the `natsUrls` configured in `envoy.json`.
+`natstail` owns nothing on the bus - it neither creates nor updates
+`ENVOY_NOTIFICATIONS` - and refuses a NATS server that is not this machine's:
+prefix the command with `ENVOY_ALLOW_REMOTE_NATS=1` where `envoy.json` names a
+shared server, as an agent devbox's does.
 
 A caller resolved by header identity without a stored GitHub token receives
 `503` with code `GITHUB_TOKEN_UNAVAILABLE` from GitHub proxy routes.

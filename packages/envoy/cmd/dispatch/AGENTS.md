@@ -211,6 +211,13 @@ Document events publish retained envelopes on
 go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1
 ```
 
+`natstail` publishes nothing and owns nothing on the bus: it neither creates nor
+updates `ENVOY_NOTIFICATIONS`, and it refuses a NATS server that is not this
+machine's, naming the URL. A machine whose `envoy.json` names a shared NATS
+(an agent devbox names production's) runs it with
+`ENVOY_ALLOW_REMOTE_NATS=1 go run ./cmd/natstail …`, which is the run saying it
+means that server.
+
 ## Checks
 
 ```sh
