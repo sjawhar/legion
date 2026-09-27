@@ -23,8 +23,7 @@ type typedDirective struct {
 	Closed bool
 	// closer is where the line of the fence that closed the typed block starts, once Closed.
 	closer int
-	indent int
-	// fence is the number of colons the directive opened with; only a line of exactly as many
+	// fence is the number of colons the directive opened with; only a line of at least as many
 	// closes it, so a typed block written with a longer fence holds one written with a shorter.
 	fence int
 }
@@ -67,7 +66,7 @@ func (p *typedDirectiveParser) Open(_ ast.Node, reader gmtext.Reader, pc parser.
 		return nil, parser.NoChildren
 	}
 	reader.AdvanceToEOL()
-	return &typedDirective{Name: name, Attrs: attrs, indent: indent, fence: colonRun(line[offset:])}, parser.HasChildren
+	return &typedDirective{Name: name, Attrs: attrs, fence: colonRun(line[offset:])}, parser.HasChildren
 }
 
 func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ parser.Context) parser.State {
@@ -77,10 +76,10 @@ func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ p
 	}
 	line, segment := reader.PeekLine()
 	indent, offset := util.IndentWidth(line, reader.LineOffset())
-	// A fence closes the typed block when it is indented no further than the opener. The opener
-	// of a typed block that begins a footnote definition stands after the definition's `]: `, one
-	// column past where the definition's later lines start.
-	if indent <= directive.indent && offset < len(line) && fenceColons(string(line[offset:])) == directive.fence {
+	// A line of at least the fence's colons indented less than four columns past where the typed
+	// block's lines start closes it, as the browser editor's parser closes it, whatever block inside
+	// it the line would otherwise continue.
+	if indent < 4 && offset < len(line) && fenceColons(string(line[offset:])) >= directive.fence {
 		directive.Closed = true
 		directive.closer = segment.Start
 		reader.AdvanceToEOL()
@@ -98,9 +97,8 @@ func (p *typedDirectiveParser) Close(_ ast.Node, _ gmtext.Reader, _ parser.Conte
 // advances to the next multiple of four from the column it stands at, so in a typed block two
 // columns in, a tab reaches only two past it. A line in a blockquote begins with its `>` and closes
 // nothing outside it. Such a line is a line of code, or the fence of a typed block nested where its
-// fence is written so. That parser closes n at such a line of at least as many colons as n's fence,
-// and this one at a line of exactly as many indented no further than n's opener, so a fence longer
-// than every such line reads the same in both (typedFence).
+// fence is written so. Both parsers close n at such a line of at least as many colons as n's
+// fence, so a fence longer than every such line keeps them in n (typedFence).
 func closingColons(n *Node, column int) int {
 	longest := 0
 	var visit func(node *Node, at int)

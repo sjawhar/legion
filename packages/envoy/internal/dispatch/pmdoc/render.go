@@ -16,8 +16,8 @@ type renderer struct {
 	// sibling node of the same link.
 	labelBrackets labelBrackets
 	// typedPrefix is the prefix the innermost typed block's lines are written at, or nil outside
-	// one. A lone `:::` closes the block only as a line at that prefix, which only a paragraph
-	// written at the same prefix can produce.
+	// one. A lone `:::` closes the block as a line less than four columns past that prefix
+	// (typedFenceReach), which a paragraph written there can produce.
 	typedPrefix *string
 	// heldLineStart is the current line's first text character, held until the line is written.
 	heldLineStart *lineCandidate

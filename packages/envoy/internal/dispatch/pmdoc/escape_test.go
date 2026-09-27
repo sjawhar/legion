@@ -61,13 +61,14 @@ func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *
 	}
 	after := paragraph(text("After."))
 	for name, doc := range map[string]*Node{
-		"a paragraph of tildes":        {Type: "doc", Children: []*Node{paragraph(text("~~~")), after}},
-		"tildes with an info string":   {Type: "doc", Children: []*Node{paragraph(text("~~~ go")), after}},
-		"tildes after a hard break":    {Type: "doc", Children: []*Node{paragraph(text("a"), hardBreak, text("~~~")), after}},
-		"tildes in a list item":        {Type: "doc", Children: []*Node{{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{paragraph(text("~~~"))}}}}, after}},
-		"tildes in a blockquote":       {Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{paragraph(text("~~~"))}}, after}},
-		"tildes in a typed block":      {Type: "doc", Children: []*Node{callout(paragraph(text("~~~"))), after}},
-		"::: after a hard break in it": {Type: "doc", Children: []*Node{callout(paragraph(text("a"), hardBreak, text(":::")), paragraph(text("Inside."))), after}},
+		"a paragraph of tildes":                       {Type: "doc", Children: []*Node{paragraph(text("~~~")), after}},
+		"tildes with an info string":                  {Type: "doc", Children: []*Node{paragraph(text("~~~ go")), after}},
+		"tildes after a hard break":                   {Type: "doc", Children: []*Node{paragraph(text("a"), hardBreak, text("~~~")), after}},
+		"tildes in a list item":                       {Type: "doc", Children: []*Node{{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{paragraph(text("~~~"))}}}}, after}},
+		"tildes in a blockquote":                      {Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{paragraph(text("~~~"))}}, after}},
+		"tildes in a typed block":                     {Type: "doc", Children: []*Node{callout(paragraph(text("~~~"))), after}},
+		"::: after a hard break in it":                {Type: "doc", Children: []*Node{callout(paragraph(text("a"), hardBreak, text(":::")), paragraph(text("Inside."))), after}},
+		"::: after a hard break in a list item in it": {Type: "doc", Children: []*Node{callout(&Node{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{paragraph(text("a"), hardBreak, text(":::"))}}}}, paragraph(text("Inside."))), after}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			markdown := mustRender(t, doc)
@@ -875,10 +876,10 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"1. Step one\n\n   ---\n2. -1 means unlimited\n",
 		"> - a\n>\n>   ---\n> - -b\n",
 		"- a\\\n  <br>\n- <- x\n",
-		// A lone `:::` inside a blockquote or list within a typed block cannot close it.
+		// A lone `:::` inside a blockquote within a typed block, or on a list marker's line, cannot
+		// close it.
 		":::callout{#c1 kind=\"note\" title=\"T\"}\n> :::\n:::\n",
 		":::callout{#c1 kind=\"note\" title=\"T\"}\n- :::\n:::\n",
-		":::callout{#c1 kind=\"note\" title=\"T\"}\n- a\\\n  :::\n:::\n",
 		":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- first\n- :::\n:::\n",
 		":::callout{#c1 kind=\"note\" title=\"T\"}\n1. :::\n:::\n",
 		// A task item's checkbox is already on the line, so its text opens no block.

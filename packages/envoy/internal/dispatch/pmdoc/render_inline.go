@@ -65,9 +65,10 @@ type lineCandidate struct {
 	// afterLine reports whether the line continues its textblock, so the line before is read
 	// with it.
 	afterLine bool
-	// atTypedPrefix reports whether the textblock is written at the prefix of the typed block
-	// around it, where a lone `:::` line closes that block.
-	atTypedPrefix bool
+	// closesTyped reports whether a lone `:::` line of the textblock would close the typed block
+	// around it: the textblock is written less than four columns past the typed block's own lines,
+	// with no quote marker between (typedFenceReach).
+	closesTyped bool
 	// prefix is the prefix the textblock's lines are written at.
 	prefix string
 }
@@ -215,7 +216,7 @@ func (r *renderer) endLine(continues bool) {
 	line := string(written[lineFrom:])
 	width := utf8.RuneLen(candidate.char)
 	escape := escaped(candidate.char)
-	if !candidate.atTypedPrefix || !closesTypedBlock(line, candidate.prefix) {
+	if !candidate.closesTyped || !closesTypedBlock(line, candidate.prefix) {
 		readFrom, before := lineFrom, ""
 		if candidate.afterLine && lineFrom > 0 {
 			readFrom = markdownLineStart(written, lineFrom-1)
@@ -409,10 +410,10 @@ func markdownLineStart(written []byte, offset int) int {
 func (r *renderer) holdLineStart(before string, char rune, position *inlinePosition, prefix string) {
 	r.writeText(before)
 	r.heldLineStart = &lineCandidate{
-		at:            r.b.Len(),
-		char:          char,
-		afterLine:     position.afterLine,
-		atTypedPrefix: r.typedPrefix != nil && *r.typedPrefix == prefix,
-		prefix:        prefix,
+		at:          r.b.Len(),
+		char:        char,
+		afterLine:   position.afterLine,
+		closesTyped: r.typedPrefix != nil && typedFenceReach(*r.typedPrefix, prefix),
+		prefix:      prefix,
 	}
 }

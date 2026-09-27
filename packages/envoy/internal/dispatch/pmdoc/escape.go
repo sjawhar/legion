@@ -301,10 +301,19 @@ func taskCheckboxText(value string, offset int) bool {
 		(len(rest) == 3 || strings.IndexByte(" \t\n", rest[3]) >= 0)
 }
 
-// closesTypedBlock reports whether line, written at the prefix of the typed block around it, is
-// the lone `:::` that closes the block, which the line read on its own cannot show.
+// closesTypedBlock reports whether line, written at prefix within the reach of the typed block
+// around it (typedFenceReach), is the lone `:::` that closes the block, which the line read on its
+// own cannot show.
 func closesTypedBlock(line, prefix string) bool {
 	return strings.TrimSpace(strings.TrimPrefix(line, prefix)) == ":::"
+}
+
+// typedFenceReach reports whether a line written at prefix starts less than four columns past a
+// typed block's lines, written at typed, with no quote marker between, where both parsers read a
+// fence as closing the typed block whatever block inside it the line would otherwise continue.
+func typedFenceReach(typed, prefix string) bool {
+	rest, ok := strings.CutPrefix(prefix, typed)
+	return ok && len(rest) < 4 && strings.Trim(rest, " ") == ""
 }
 
 // lineReadsAsText reports whether a written line reads the same with its text's first character

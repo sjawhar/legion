@@ -520,11 +520,12 @@ exists, and refuses to run without `dispatch.server_url`.
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive
-syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of exactly as
-many colons as the opener. The browser editor's parser closes it at a line of at least as many
-colons indented less than four columns, even inside a fenced code block it holds, so the renderer
-writes three colons, or one more than the longest such line inside the typed block
-(`closingColons`): a nested typed block's fence, or a line of code, measured in the written line's
+syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of colons.
+Both parsers close it at a line of at least as many colons as the opener, indented less than four
+columns past where its lines start, whatever block inside it the line would otherwise continue - a
+paragraph, a list item or a fenced code block - so the renderer escapes a lone `:::` in text
+written within that reach, and writes three colons, or one more than the longest such line inside
+the typed block (`closingColons`): a nested typed block's fence, or a line of code, measured in the written line's
 columns - the width of the list markers and `> ` around it, and a tab advancing to the next
 multiple of four from the column it stands at. A callout nested directly in a callout is written `::::callout{…}` …
 `::::`, as the browser editor writes it. There is
