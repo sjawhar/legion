@@ -29,15 +29,18 @@ func ReadBack(doc *Node) (*Node, error) {
 	return Parse(markdown)
 }
 
-// NewMisread names how after, which a write made from before by turning before's document-level
-// blocks first to last into after's blocks first to lastAfter, reads back otherwise where before
-// read back as written, or is "" when it does not. A block the write changed is judged whatever
-// before held there; an unchanged one only when before read it back as written, and an attribute
-// before already read back with another value (a table cell's alignment) is not the write's. A
-// before whose markdown the parser refuses (a browser edit can leave one) gives nothing to judge
-// against, and is "" whether or not after parses: the checks that read each changed block alone
-// still refuse one the write leaves unreadable.
-func NewMisread(before, after *Node, first, last, lastAfter int) string {
+// NewMisread names how after, which a write made from before, reads back otherwise where before
+// did not, or is "" when it does not. Each block that reads back otherwise is found as far down as
+// its markdown still pairs with what reads back (misreads), and one that before already read back
+// otherwise the same way, under the same block id, is not the write's: a textblock whose text
+// differs in the same characters, an attribute with the same values, or a block that pairs with
+// nothing. So a write beside a stale misread, or inside the block that holds one, is judged by what
+// it changed, while a new misread in that block is still named. An attribute before read back with
+// another value anywhere (a table cell's alignment) is not compared. A before whose markdown the
+// parser refuses (a browser edit can leave one) gives nothing to judge against, and is "" whether
+// or not after parses: the checks that read each changed block alone still refuse one the write
+// leaves unreadable.
+func NewMisread(before, after *Node) string {
 	backAfter, err := ReadBack(after)
 	if err != nil {
 		if _, beforeErr := ReadBack(before); beforeErr != nil {
@@ -46,7 +49,7 @@ func NewMisread(before, after *Node, first, last, lastAfter int) string {
 		return err.Error()
 	}
 	written := StripAnchorMarks(after)
-	if _, misread := alignBlocks(written, backAfter, skip{}); len(misread) == 0 {
+	if readDifference(written, backAfter, skip{}) == "" {
 		return ""
 	}
 	backBefore, err := ReadBack(before)
@@ -55,26 +58,83 @@ func NewMisread(before, after *Node, first, last, lastAfter int) string {
 	}
 	previous := StripAnchorMarks(before)
 	drift := skip{names: attributeDrift(previous, backBefore)}
-	_, misreadBefore := alignBlocks(previous, backBefore, drift)
-	_, misread := alignBlocks(written, backAfter, drift)
-	indexes := make([]int, 0, len(misread))
-	for index := range misread {
+	type sameMisread struct{ id, differs string }
+	known := map[sameMisread]bool{}
+	for _, stale := range misreads(previous, backBefore, drift) {
+		known[sameMisread{stale.id, stale.differs}] = true
+	}
+	for _, found := range misreads(written, backAfter, drift) {
+		if found.id == "" || !known[sameMisread{found.id, found.differs}] {
+			return found.reason
+		}
+	}
+	return ""
+}
+
+// misread is a block that reads back otherwise: its id, what differs (the same for the same
+// misread whatever else changed around it), and how a reader is told.
+type misread struct {
+	id, differs, reason string
+}
+
+// misreads lists the blocks under want, a block as written, that read back otherwise in got, in
+// document order, each as far down as the two still pair: children pair one to one when both hold
+// as many, and otherwise as alignChildren pairs them, a child it cannot pair naming itself.
+func misreads(want, got *Node, ignore skip) []misread {
+	var found []misread
+	collectMisreads(want, got, ignore, &found)
+	return found
+}
+
+func collectMisreads(want, got *Node, ignore skip, found *[]misread) {
+	add := func(differs, reason string) {
+		*found = append(*found, misread{id: blockIDOf(want), differs: want.Type + " " + differs, reason: reason})
+	}
+	if want.Type != got.Type {
+		add("as "+got.Type, readDifference(want, got, ignore))
+		return
+	}
+	if reason := attributeReason(want, got, ignore); reason != "" {
+		add(reason, reason)
+	}
+	if isTextblock(want.Type) {
+		if !inlineEqual(want.Children, got.Children) {
+			wanted, read := textContent(want), textContent(got)
+			add("text "+differingSpan(wanted, read), fmt.Sprintf("%s reads back holding %q, not %q", blockName(want.Type), read, wanted))
+		}
+		return
+	}
+	written := writtenChildren(want)
+	if len(written) == len(got.Children) {
+		for index, child := range written {
+			collectMisreads(child, got.Children[index], ignore, found)
+		}
+		return
+	}
+	_, unpaired := alignChildren(want.Type, written, got.Children, ignore)
+	indexes := make([]int, 0, len(unpaired))
+	for index := range unpaired {
 		indexes = append(indexes, index)
 	}
 	sort.Ints(indexes)
 	for _, index := range indexes {
-		if index >= first && index <= lastAfter {
-			return misread[index]
-		}
-		old := index
-		if index > lastAfter {
-			old = index - (lastAfter - last)
-		}
-		if _, already := misreadBefore[old]; !already {
-			return misread[index]
-		}
+		child := written[index]
+		*found = append(*found, misread{id: blockIDOf(child), differs: child.Type + " unpaired", reason: unpaired[index]})
 	}
-	return ""
+}
+
+// differingSpan is what wanted and read hold between the text they start and end with alike.
+func differingSpan(wanted, read string) string {
+	w, r := []rune(wanted), []rune(read)
+	prefix := 0
+	for prefix < len(w) && prefix < len(r) && w[prefix] == r[prefix] {
+		prefix++
+	}
+	suffix := 0
+	for suffix < len(w)-prefix && suffix < len(r)-prefix && w[len(w)-1-suffix] == r[len(r)-1-suffix] {
+		suffix++
+	}
+	return fmt.Sprintf("%q as %q", string(w[prefix:len(w)-suffix]), string(r[prefix:len(r)-suffix]))
 }
 
 // AgreeWithReadBack is doc with its document-level blocks first to last, which a write changed,
@@ -193,45 +253,57 @@ func writtenIndexes(doc *Node) []int {
 const resyncWindow = 8
 
 // alignBlocks pairs doc's written document-level blocks, anchor marks stripped, with back's, what
-// its markdown reads back as, in order: each pair reads back as written (attributes named in ignore
-// aside), and each block that does not is named by its index in doc with how it reads back. Past a
-// block that reads back otherwise the pairing resumes at the nearest pair that reads back as
-// written, so two lists that meet are both named and the blocks after them pair again.
+// its markdown reads back as (alignChildren), naming each block that reads back otherwise by its
+// index in doc.
 func alignBlocks(doc, back *Node, ignore skip) ([][2]int, map[int]string) {
-	written := writtenChildren(doc)
 	indexes := writtenIndexes(doc)
+	pairs, unpaired := alignChildren(doc.Type, writtenChildren(doc), back.Children, ignore)
+	misread := make(map[int]string, len(unpaired))
+	for index, reason := range unpaired {
+		misread[indexes[index]] = reason
+	}
+	return pairs, misread
+}
+
+// alignChildren pairs written blocks, a parent's children, with back's in order: each pair reads
+// back as written
+// (what ignore names aside), and each written block that does not is named by its index with how
+// it reads back. Past a block that reads back otherwise the pairing resumes at the nearest pair
+// that reads back as written, so two lists that meet are both named and the blocks after them pair
+// again.
+func alignChildren(parent string, written, back []*Node, ignore skip) ([][2]int, map[int]string) {
 	var pairs [][2]int
 	misread := map[int]string{}
 	i, j := 0, 0
-	for i < len(written) && j < len(back.Children) {
-		reason := readDifference(written[i], back.Children[j], ignore)
+	for i < len(written) && j < len(back) {
+		reason := readDifference(written[i], back[j], ignore)
 		if reason == "" {
 			pairs = append(pairs, [2]int{i, j})
 			i, j = i+1, j+1
 			continue
 		}
-		di, dj, found := resync(written, back.Children, i, j, ignore)
+		di, dj, found := resync(written, back, i, j, ignore)
 		if !found {
 			break
 		}
 		if di == 0 {
 			// back holds blocks the document does not: the block before wrote them.
-			misread[indexes[max(i-1, 0)]] = reason
+			misread[max(i-1, 0)] = reason
 		}
 		for k := i; k < i+di; k++ {
-			misread[indexes[k]] = reason
+			misread[k] = reason
 		}
 		i, j = i+di, j+dj
 	}
 	for k := i; k < len(written); k++ {
 		reason := blockName(written[k].Type) + " reads back as nothing"
-		if j < len(back.Children) {
-			reason = readDifference(written[k], back.Children[j], ignore)
+		if j < len(back) {
+			reason = readDifference(written[k], back[j], ignore)
 		}
-		misread[indexes[k]] = reason
+		misread[k] = reason
 	}
-	if i == len(written) && j < len(back.Children) && len(written) > 0 {
-		misread[indexes[len(written)-1]] = endOf("doc") + " reads back as " + blockName(back.Children[j].Type)
+	if i == len(written) && j < len(back) && len(written) > 0 {
+		misread[len(written)-1] = endOf(parent) + " reads back as " + blockName(back[j].Type)
 	}
 	return pairs, misread
 }

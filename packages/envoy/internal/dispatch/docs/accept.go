@@ -59,18 +59,14 @@ func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textb
 	return &ErrInvalidOp{Field: "replace_with", Reason: acceptRefusal(before, after, match, at, with, replacement, broke)}
 }
 
-// refuseMisreadAccept refuses an accept whose document reads back otherwise where the accept
-// reached (pmdoc.NewMisread): a block it changed, or one beside them that read back as written
-// before, its attributes and text as well as its blocks, such as a task item emptied to `- [ ]`,
-// which reads back as a plain item. What already read back otherwise before the accept, a block or
-// an attribute, is not the accept's. The checks before it read one block at a time; this one reads
-// the blocks beside each other. The refusal names what reads back and advises rejecting.
-func refuseMisreadAccept(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	first, last, lastAfter, err := changedBlocks(before, after, match)
-	if err != nil {
-		return err
-	}
-	misread := pmdoc.NewMisread(before, after, first, last, lastAfter)
+// refuseMisreadAccept refuses an accept whose document reads back otherwise where it did not
+// before (pmdoc.NewMisread), its attributes and text as well as its blocks, such as a task item
+// emptied to `- [ ]`, which reads back as a plain item. A block that already read back otherwise
+// the same way before the accept, the one it changed included, is not the accept's. The checks
+// before it read one block at a time; this one reads the blocks beside each other. The refusal
+// names what reads back and advises rejecting.
+func refuseMisreadAccept(before, after *pmdoc.Node, with string) error {
+	misread := pmdoc.NewMisread(before, after)
 	if misread == "" {
 		return nil
 	}

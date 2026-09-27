@@ -171,11 +171,16 @@ checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks
 `paragraph+ bullet_list?` rule. Last, the whole document is read back (`refuseMisreadAccept`:
 `pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes
 and text, a column without alignment expected back left as the renderer writes it: an accept is
-refused where what it changed, or a block that read back as written beside it, now reads back
-otherwise, such as a task item emptied to `- [ ]`, which reads back as a plain item. What read
-back otherwise before the accept, a block or an attribute, is not its to refuse, and nothing else
-in the document switches the check off, except a document the parser already refuses, where the
-block checks alone judge the accept. That refusal names what reads back and advises rejecting. A
+refused where a block now reads back otherwise that did not before, such as a task item emptied to
+`- [ ]`, which reads back as a plain item. Each block that reads back otherwise is found as far
+down as its markdown still pairs, and one that already read back otherwise the same way before,
+under the same block id (a paragraph's text differing in the same characters, an attribute with
+the same values, a block pairing with nothing), is not the accept's, even inside the block it
+changes: text beside a task item already read back as plain, or in a paragraph ending in a hard
+break that reads back with a literal backslash, is stored, while a second task item emptied there
+is refused. Nothing else in the document switches the check off, except a document the parser
+already refuses, where the block checks alone judge the accept. That refusal names what reads
+back and advises rejecting. A
 list an accept writes beside a list of its kind is written with the other marker (below), so the
 two read back as the two lists it made. An accept parses its text as blocks
 written into the document (`pmdoc.ParseFragment`: a leading `---` is a rule, as `***` is, except
