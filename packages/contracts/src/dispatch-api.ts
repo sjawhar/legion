@@ -702,6 +702,18 @@ export interface Suggestion {
 }
 
 /**
+ * `POST /api/v1/comments/{id}/accept` answers the comment plus whether the live document already
+ * lacks the text the accept wrote: a concurrent browser change removed it after the accept's
+ * version was rendered and before the write reached the room, which is past undoing (LEGION-269).
+ * A loss inside the earlier window is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` instead, and leaves the
+ * suggestion open. `null` is a check that reached no verdict, which is not the same statement as
+ * `false`; `undefined` is a Dispatch server predating the check.
+ */
+export interface AcceptSuggestionResponse extends Comment {
+  readonly lost?: boolean | null;
+}
+
+/**
  * The payload of every `comment.*` event. It is the comment row as it stood when the event was
  * written, and events are retained verbatim, so the row's later additions are optional here:
  * `mentions` and `deliveries` were added on 2026-09-18 (#1188), and every comment event recorded
@@ -1588,6 +1600,14 @@ export interface EditArtifactResponse {
   readonly changed?: boolean;
   /** Zero-based index of each operation that left the document as it found it. */
   readonly unchanged_ops?: number[];
+  /** Zero-based index of each operation whose text the live document no longer carried once this
+   *  edit reached it: a concurrent browser change removed it after the version was rendered and
+   *  before the write was published, which is past undoing, so the version records text the live
+   *  document does not have. An empty array is the ordinary outcome. `null` is a check that
+   *  reached no verdict, which is not the same statement; `undefined` is a Dispatch server
+   *  predating the check (LEGION-269). A loss inside the earlier window is refused outright with
+   *  `409 EDIT_LOST_TO_CONCURRENT_CHANGE`, not reported here. */
+  readonly lost_ops?: number[] | null;
   /** Opaque SHA-256 token for the full Proof document state this edit produced, including inline
    *  marks: the document precondition for the caller's next edit, with no read in between. Absent
    *  from a Dispatch server predating it. */

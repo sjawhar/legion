@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 /**
  * Stable block identity.
  *
@@ -23,10 +21,13 @@
  */
 import type { Ctx } from '@milkdown/kit/ctx';
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
-import type { Node as ProseMirrorNode, NodeSpec, DOMOutputSpec, ParseRule } from '@milkdown/kit/prose/model';
+import type { Node as ProseMirrorNode, DOMOutputSpec, TagParseRule } from '@milkdown/kit/prose/model';
 import type { Transaction } from '@milkdown/kit/prose/state';
 import { Mapping } from '@milkdown/kit/prose/transform';
+import type { NodeSchema } from '@milkdown/kit/transformer';
 import { $prose } from '@milkdown/kit/utils';
+import type { $NodeSchema } from '@milkdown/kit/utils';
+import { withDomAttributes } from './dom-attributes';
 import {
   blockquoteSchema,
   bulletListSchema,
@@ -45,6 +46,8 @@ import {
   tableRowSchema,
   tableSchema,
 } from '@milkdown/preset-gfm';
+import { codeBlockSchemaExt } from 'proof-sdk-upstream/src/editor/schema/code-block-ext';
+import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { ySyncPluginKey } from 'y-prosemirror';
 
 export const BLOCK_ID_ATTR = 'blockId';
@@ -80,35 +83,14 @@ function readBlockId(dom: unknown): string | null {
   return value === null || value === '' ? null : value;
 }
 
-function isAttrsObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value) && !('nodeType' in value);
-}
 
-/** Adds `data-block-id` to a DOMOutputSpec without disturbing the rest of it. */
 function withDomBlockId(spec: DOMOutputSpec, blockId: string | null): DOMOutputSpec {
-  if (blockId === null) return spec;
-  if (Array.isArray(spec)) {
-    const [tag, second, ...rest] = spec as unknown[];
-    if (isAttrsObject(second)) {
-      return [tag, { ...second, [BLOCK_ID_DOM_ATTR]: blockId }, ...rest] as unknown as DOMOutputSpec;
-    }
-    return [tag, { [BLOCK_ID_DOM_ATTR]: blockId }, second, ...rest].filter(
-      (part) => part !== undefined,
-    ) as unknown as DOMOutputSpec;
-  }
-  if (typeof spec === 'object' && spec !== null && 'dom' in spec) {
-    (spec.dom as Element).setAttribute?.(BLOCK_ID_DOM_ATTR, blockId);
-    return spec;
-  }
-  if (typeof spec === 'object' && spec !== null && 'setAttribute' in spec) {
-    (spec as Element).setAttribute(BLOCK_ID_DOM_ATTR, blockId);
-  }
-  return spec;
+  return blockId === null ? spec : withDomAttributes(spec, { [BLOCK_ID_DOM_ATTR]: blockId });
 }
 
-function withParsedBlockId(rule: ParseRule): ParseRule {
+function withParsedBlockId(rule: TagParseRule): TagParseRule {
   if (!('tag' in rule)) return rule;
-  const { getAttrs, attrs: staticAttrs, ...rest } = rule as ParseRule & {
+  const { getAttrs, attrs: staticAttrs, ...rest } = rule as TagParseRule & {
     getAttrs?: (dom: HTMLElement) => Record<string, unknown> | false | null;
     attrs?: Record<string, unknown>;
   };
@@ -119,11 +101,11 @@ function withParsedBlockId(rule: ParseRule): ParseRule {
       if (base === false) return false;
       return { ...(base ?? {}), [BLOCK_ID_ATTR]: readBlockId(dom) };
     },
-  } as ParseRule;
+  } as TagParseRule;
 }
 
-/** Extends a block NodeSpec with the `blockId` attribute and its DOM round-trip. */
-export function withBlockIdSpec(spec: NodeSpec): NodeSpec {
+/** Extends a block NodeSchema with the `blockId` attribute and its DOM round-trip. */
+export function withBlockIdSpec(spec: NodeSchema): NodeSchema {
   const toDOM = spec.toDOM;
   return {
     ...spec,
@@ -133,17 +115,17 @@ export function withBlockIdSpec(spec: NodeSpec): NodeSpec {
   };
 }
 
-type SchemaFactory = (ctx: Ctx) => NodeSpec;
-
-function extend(schema: { extendSchema: (handler: (prev: SchemaFactory) => SchemaFactory) => unknown }) {
-  return schema.extendSchema((prev) => (ctx) => withBlockIdSpec(prev(ctx)));
+function extend<T extends string>(schema: $NodeSchema<T>): $NodeSchema<T> {
+  return schema.extendSchema((prev) => (ctx: Ctx) => withBlockIdSpec(prev(ctx)));
 }
 
 /**
- * The preset block schemas re-registered with `blockId`. `code_block` and
- * `frontmatter` are the fork's own schemas and extend themselves in their modules.
+ * Every block schema is re-registered with `blockId`, including the upstream
+ * code-block and frontmatter schemas the consumer imports.
  */
 export const blockIdSchemas = [
+  codeBlockSchemaExt,
+  frontmatterSchema,
   paragraphSchema,
   headingSchema,
   blockquoteSchema,

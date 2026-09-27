@@ -373,6 +373,30 @@ notice_deliveries() {
   { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -cF -- "$3" || true
 }
 notice_delivered() { [ "$(notice_deliveries "$@")" -ge 1 ]; }
+# worker_sessions SESSIONS prints each phase-worker session file under SESSIONS and the role it
+# claims, tab-separated. A session's role is its newest Envoy role claim; an architect or controller
+# session is not a phase worker's.
+worker_sessions() {
+  local f role
+  while IFS= read -r f; do
+    role=$(jq -R -r 'fromjson? | select(.customType == "envoy-role-claim") | .data.role' "$f" | tail -1)
+    case "$role" in *-planner | *-implementer | *-tester | *-reviewer | *-merger) printf '%s\t%s\n' "$f" "$role" ;; esac
+  done < <(find "$1" -type f -name '*.jsonl' | sort)
+}
+# worker_notices SESSIONS prints one line for each workflow notice delivered into a phase-worker
+# session under SESSIONS: the session file, the role it claims, and the delivery's summary. Every
+# notice kind is for the architect that owns its issue, published on that architect's role topic, so
+# a phase worker's session holds none.
+worker_notices() {
+  local f role
+  while IFS=$'\t' read -r f role; do
+    jq -R -r --arg file "${f##*/}" --arg role "$role" '
+      fromjson? | select(.customType == "envoy-message") | (.content | tostring)
+      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status) on [^\\n]*)")
+      | "\($file) \($role) \(.summary)"' "$f"
+  done < <(worker_sessions "$1")
+}
+assert_no_worker_notices() { [ -z "$(worker_notices "$1")" ]; }
 
 # ---- negative controls ----------------------------------------------------------------------------
 

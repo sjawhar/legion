@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 import type { Node as ProseMirrorNode, NodeType } from '@milkdown/kit/prose/model';
 import type { EditorState, Transaction } from '@milkdown/kit/prose/state';
 

@@ -571,6 +571,10 @@ nothing and the document is intact. Nothing retries it for you: the Dispatch cli
 Wait a few seconds and make the same call again. A second refusal in a row is worth telling your human about,
 with the document's reference.
 
+`dispatch_doc_read` can answer it too, though it writes nothing: a read never opens a live room, and waits out
+a room that is reloading, so it is refused only when the document's durable copy cannot be read or decoded.
+Retry it the same way.
+
 ## Typed blocks
 
 The server declares typed document blocks at `GET /api/v1/schema/blocks`. Write one only with the

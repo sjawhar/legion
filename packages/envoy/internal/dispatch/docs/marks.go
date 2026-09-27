@@ -266,6 +266,8 @@ func (s *Service) RejectSuggestion(ctx context.Context, artifactID, id string, a
 func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor, accept bool) error {
 	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
+		// Read before the Yjs transaction opens: the state vector takes the document lock.
+		since := authoredClock(ctx, artifactID, doc)
 		tree, err := treeOf(doc)
 		if err != nil {
 			return err
@@ -295,7 +297,10 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return nil
 		}
 
-		with := replaceWith
+		// A suggestion's text reaches the document with line feeds alone (pmdoc.LineFeeds). It is
+		// stored so when the suggestion is created, but one created before that holds its text as
+		// sent.
+		with := pmdoc.LineFeeds(replaceWith)
 		if !accept {
 			with = ""
 		}
@@ -334,14 +339,23 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 				return err
 			}
 		}
-		var updateErr error
-		transact(func(txn *crdt.Transaction) {
-			updateErr = pmdoc.Update(txn, fragment, next)
-		})
-		if updateErr != nil {
+		// An accept is one implicit operation, so every run its own update inserts is its own and
+		// no tree diff tells them apart: recordInsertedText reads the blocks it inserted into and
+		// this hands them straight back (editBatch.writes, LEGION-269). It stamps no block ids -
+		// a replacement's blocks are minted by pmdoc.Parse already, and EnsureBlockIDs would also
+		// repair a repeat the live document carries, which is settlement's to repair and a
+		// write's to leave as it found it (TestWritesBesideALiveRepeatedBlockIDAreTaken). Text
+		// left in a block with no id at all - the far half of a split, which no caller can
+		// address either - is simply not tracked, so the check under-reports there rather than
+		// naming a block nobody can name.
+		written := editBatch{tree: next, operations: 1}
+		return recordInsertedText(ctx, artifactID, id, fragment, since, written.writes, func() error {
+			var updateErr error
+			transact(func(txn *crdt.Transaction) {
+				updateErr = pmdoc.Update(txn, fragment, next)
+			})
 			return updateErr
-		}
-		return nil
+		})
 	})
 }
 
@@ -498,15 +512,20 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 		if refreshed == mark.anchor {
 			continue
 		}
-		encoded, err := json.Marshal(refreshed)
-		if err != nil {
-			return fmt.Errorf("encode anchor: %w", err)
-		}
 		table := "asks"
 		if mark.markType == string(MarkComment) || mark.markType == string(MarkSuggestion) {
 			table = "comments"
 		}
-		if _, err := tx.Exec(ctx, fmt.Sprintf(`update %s set anchor = $2 where id = $1`, table), mark.id, encoded); err != nil {
+		// Only the two fields this refresh owns are written. The row was read before the
+		// events and lookups below, so writing the whole anchor column back would erase what
+		// another writer - the one-time block-id backfill - put in it in between (LEGION-149).
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`
+			update %s
+			set anchor = jsonb_set(
+				jsonb_set(anchor, '{quote}', to_jsonb($2::text)),
+				'{orphaned}', to_jsonb($3::boolean))
+			where id = $1
+		`, table), mark.id, refreshed.Quote, refreshed.Orphaned); err != nil {
 			return fmt.Errorf("update %s anchor: %w", table, err)
 		}
 		event, err := s.anchorRefreshEvent(ctx, tx, mark, actor)

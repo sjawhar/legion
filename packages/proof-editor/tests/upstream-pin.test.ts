@@ -1,15 +1,13 @@
 /**
- * The pinned dependency has to arrive patched, and its types have to agree with the copy this
- * package re-exports on its public surface. Both fail silently otherwise.
+ * The pin has to carry every fix the fork's `library` line carries, and `upstream/` — the
+ * declarations tsc reads in its place (AGENTS.md § The upstream boundary) — has to be what the
+ * pinned sources emit. Both otherwise fail silently: nothing in this repository reads those
+ * editor modules until a browser renders a document with them, and a stale declaration is a
+ * shape tsc believes and the runtime does not have.
  *
- * `patchedDependencies` keys a patch on `<name>@<version>`, and a git dependency's version is its
- * ref string. Bun applies nothing when the key stops matching — no warning, exit 0 — so a pin
- * bump that misses the root `package.json` key (LEGION-287 step 2 moves the pin) puts peer-cursor
- * colours and mark decorations back into inline `style` attributes, which is the Dark Reader
- * redraw loop legion #1234 fixed. Nothing else observes that before a browser tab wedges: the
- * decorations are built inside the mark plugin's own view, with no exported seam, so the patched
- * lines are read where they live. Each string below is one hunk of
- * patches/proof-sdk-upstream@24a5fc94.patch.
+ * Each fix case below is one member of that line, read where it lives, because none of them has
+ * an exported seam a unit test could call. A cut that loses one — the first cut of the cleaned
+ * line lost the cursor label — passes every other check in the repository.
  */
 
 import { expect, test } from "bun:test";
@@ -18,53 +16,50 @@ import { join } from "node:path";
 
 const upstreamSrc = join(import.meta.dir, "..", "node_modules", "proof-sdk-upstream", "src");
 
-test("the pinned dependency arrives with the Dark Reader patch applied", () => {
+test("the pinned dependency carries the Dark Reader fix", () => {
   const marks = readFileSync(join(upstreamSrc, "editor/plugins/marks.ts"), "utf8");
+  expect(marks).not.toContain("const STYLES =");
   expect(marks).not.toContain("style: STYLES.compose_anchor");
   expect(marks).not.toContain("span.style.cssText = STYLES.insert");
-  expect(marks).toContain(
-    "class: [cssClass, glowClass].filter(Boolean).join(' '),\n            'data-mark-id': mark.id,"
-  );
+  expect(marks).toContain("class: [cssClass, glowClass].filter(Boolean).join(' '),");
 
   const cursors = readFileSync(join(upstreamSrc, "editor/plugins/collab-cursors.ts"), "utf8");
-  expect(cursors).not.toContain("cursorWidget.style.setProperty('--proof-collab-cursor-color'");
-  expect(cursors).toContain(
-    "cursorWidget.setAttribute('data-proof-collab-cursor', proofSelectionStyleFor(color));"
-  );
-  expect(cursors).toContain("'data-proof-collab-selection': proofSelectionStyleFor(color),");
-  expect(cursors).toContain("proof-collab-selection-styles");
+  expect(cursors).not.toContain("cursorWidget.style.setProperty");
+  expect(cursors).not.toContain("'data-proof-collab-selection':");
+  expect(cursors).toContain("function ensureCollabColorStyles");
+  expect(cursors).toContain("proof-collab-selection--");
 });
 
-test("src/upstream-types.ts still describes the files it was copied from", () => {
-  const copied = readFileSync(join(import.meta.dir, "..", "src", "upstream-types.ts"), "utf8");
-  const regions = [
-    ...copied.matchAll(
-      /\/\* --- copied from proof-sdk src\/(\S+) @ 24a5fc94 --- \*\/([\s\S]*?)\/\* --- end copy --- \*\//g
-    ),
-  ];
-  const named: Record<string, string[]> = {};
-  for (const [, path, body] of regions) {
-    const declarations = (body ?? "")
-      .split(/\n(?=export (?:type|interface) )/)
-      .slice(1)
-      .map((block) => block.trimEnd());
-    named[path ?? ""] = declarations.map((block) => block.split("\n")[0] ?? "");
-    const pinned = readFileSync(join(upstreamSrc, path ?? ""), "utf8");
-    for (const declaration of declarations) {
-      expect(pinned).toContain(declaration);
-    }
-  }
-  // Losing a region's markers would silently stop checking it, so the set is pinned by name.
-  expect(named).toEqual({
-    "editor/plugins/heatmap-decorations.ts": [
-      "export type HeatMapMode = 'hidden' | 'subtle' | 'background' | 'full';",
-    ],
-    "formats/marks.ts": [
-      "export type MarkKind =",
-      "export type SuggestionStatus = 'pending' | 'accepted' | 'rejected';",
-      "export interface MarkRange {",
-      "export interface CommentReply {",
-      "export interface StoredMark {",
-    ],
-  });
+test("the pinned dependency keeps the collaboration cursor label inline", () => {
+  // A block label lets a browser move a post-update text selection into the cursor decoration,
+  // which interrupts local typing after a remote edit.
+  const cursors = readFileSync(join(upstreamSrc, "editor/plugins/collab-cursors.ts"), "utf8");
+  expect(cursors).toContain("const label = document.createElement('span');");
+  expect(cursors).toContain("label.contentEditable = 'false';");
+  expect(cursors).not.toContain("const label = document.createElement('div');");
 });
+
+test("the pinned dependency renders replacement suggestions", () => {
+  // The suggestion mark's DOM attributes have to stay primitive: spreading the ctx attrs put
+  // "[object Object]" on the span. And the replace-insert widget is keyed by its replacement,
+  // so a changed replacement redraws instead of keeping the first content it rendered.
+  const proofMarks = readFileSync(join(upstreamSrc, "editor/schema/proof-marks.ts"), "utf8");
+  expect(proofMarks).not.toContain("const attrs = ctx.get(proofSuggestionAttr.key)(mark);");
+
+  const marks = readFileSync(join(upstreamSrc, "editor/plugins/marks.ts"), "utf8");
+  expect(marks).toMatch(/key: `replace-insert-\$\{mark\.id\}-\$\{replacementContent\}`/);
+});
+
+// The timeout is explicit because the case spawns tsc over the whole upstream closure — two
+// TypeScript programs — and that is the work, not a hang. Bun's 5 s default is under the cost on
+// a two-core runner, where the timeout would read exactly like a stale `upstream/`.
+test("upstream/ is what the pinned sources emit", async () => {
+  const generator =
+    await Bun.$`bun ${join(import.meta.dir, "..", "scripts", "upstream-declarations.ts")} --check`
+      .cwd(join(import.meta.dir, ".."))
+      .nothrow()
+      .quiet();
+  const output = generator.stdout.toString() + generator.stderr.toString();
+  expect(output).toContain("matches the pin");
+  expect(generator.exitCode).toBe(0);
+}, 120_000);

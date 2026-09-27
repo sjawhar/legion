@@ -54,10 +54,14 @@ func TestSmoke(t *testing.T) {
 		}),
 		network.WithNetwork([]string{"listener"}, net),
 		testcontainers.WithEnv(map[string]string{
-			"NATS_URLS":         "nats://nats:4222",
-			"ENVOY_LISTEN_HOST": "0.0.0.0",
-			"ENVOY_MACHINE_ID":  "smoke-test",
-			"PORT":              "9020",
+			"NATS_URLS": "nats://nats:4222",
+			// The listener owns ENVOY_NOTIFICATIONS on a NATS that is not its own container, as
+			// every deployed listener does; without this the connect refuses it
+			// (internal/bus/reach.go).
+			"ENVOY_ALLOW_REMOTE_NATS": "1",
+			"ENVOY_LISTEN_HOST":       "0.0.0.0",
+			"ENVOY_MACHINE_ID":        "smoke-test",
+			"PORT":                    "9020",
 			// A non-loopback bind refuses to start without a token; the smoke
 			// exercises the same bearer path a deployed listener requires.
 			"ENVOY_API_TOKEN": smokeAPIToken,

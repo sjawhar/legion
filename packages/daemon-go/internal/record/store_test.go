@@ -584,7 +584,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	st := migratedStore(t)
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason"},
-		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "last_handoff", "decision"},
+		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision"},
 		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},

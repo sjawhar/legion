@@ -135,8 +135,10 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("revise document: %v", err)
 	}
-	if _, err := documentService.NamedVersion(context.Background(), issue.PrimaryArtifactID, "revised", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("settle revised version: %v", err)
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("settle revised version: status=%d body=%s", named.Code, named.Body.String())
 	}
 	got = readApproval(t, handler, issue.PrimaryArtifactID)
 	if got.Approval.State != "stale" || got.Approval.LatestVersion != 2 || *got.Approval.Version != 1 {
@@ -185,8 +187,10 @@ func TestEditedLegacyTableCellPipeDocumentStalesApproval(t *testing.T) {
 	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one\\|three` |\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("edit legacy document: %v", err)
 	}
-	if _, err := documentService.NamedVersion(context.Background(), issue.PrimaryArtifactID, "human edit", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("record human version: %v", err)
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "human edit"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("record human version: status=%d body=%s", named.Code, named.Body.String())
 	}
 	got := readApproval(t, handler, issue.PrimaryArtifactID)
 	if got.Approval == nil || got.Approval.State != "stale" || got.Approval.LatestVersion != 2 || got.Approval.Version == nil || *got.Approval.Version != 1 {
@@ -227,5 +231,29 @@ func TestHeaderChangesRequestedAnswersTheOpenApprovalAskAndNeedsAReason(t *testi
 	log := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
 	if !strings.Contains(log.Body.String(), `"type":"artifact.changes_requested"`) || !strings.Contains(log.Body.String(), `"reason":"Name the rollback path."`) {
 		t.Fatalf("events = %s, want artifact.changes_requested with the reason", log.Body.String())
+	}
+}
+
+// An architect writes a spec whose decisions are ask blocks and a human approves it straight
+// away. Settlement indexes those blocks seconds later, over words nobody has touched since. A
+// version minted for that indexing stales an approval a human has just given, and Legion's
+// design gate - open exactly while the approved version is the latest - closes with nothing in
+// the event stream to explain it (LEGION-273).
+func TestApprovedSpecStaysApprovedThroughItsAskBlockSettlement(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Approve the decisions", "Context\n\n"+transportAsk)
+	approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews", map[string]any{"state": "approved"}, "alice")
+	if approved.Code != http.StatusCreated {
+		t.Fatalf("approve the spec: status=%d body=%s", approved.Code, approved.Body.String())
+	}
+	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "approved" || got.Approval.LatestVersion != 1 {
+		t.Fatalf("approval of the spec as written = %#v, want approved at version 1", got.Approval)
+	}
+
+	// The settlement has run once it has indexed the decision block.
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "decision", "Which transport?")
+	got := readApproval(t, handler, issue.PrimaryArtifactID)
+	if got.Approval.State != "approved" || got.Approval.LatestVersion != 1 || got.Approval.Version == nil || *got.Approval.Version != 1 {
+		t.Fatalf("approval after the settlement that indexed the block = %#v, want it still approved at version 1", got.Approval)
 	}
 }

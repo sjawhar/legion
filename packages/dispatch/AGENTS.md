@@ -141,7 +141,9 @@ to `failed` — a rose dot — and renders the error under the toolbar rather th
 Playwright. The editor entry, typed blocks and block ids are legion's own, in
 `packages/proof-editor` (its AGENTS.md has the boundary); a gap there is fixed there. Only the
 editor modules that package imports — marks, the mark popover, the schema plugins — still belong
-to `sjawhar/proof-sdk`, and a gap in one of those is fixed there, not worked around here.
+to `sjawhar/proof-sdk`, pinned at its cleaned `library` source commit, and a gap in one of those
+is fixed there, not worked around here. That source itself keeps decoration paint out of inline
+attributes, so a Dark Reader rewrite cannot trigger an editor redraw loop.
 Live document block links use `#b-<blockId>`: once Proof is ready, Dispatch focuses and pulses that stable block. Copying a document block link uses the selected block's `blockId`; historical versions stay read-only markdown views.
 
 Before constructing Proof, Dispatch fetches `/api/v1/schema/blocks` once and keeps the schema by
@@ -286,11 +288,15 @@ navigation, so a copy-button test asserts the written value rather than only the
 common shapes): `page.mouse` on a touch context still emits mouse events, which never reach
 dnd-kit's TouchSensor, so the board's long-press, tap and swipe rows on the `iphone` project use it.
 
-`e2e/seed.ts` truncates the test database before each scenario, first waiting for open server
-transactions from the prior scenario's document settlement. A server transaction can still begin
-between that check and the multi-table `TRUNCATE`, so the helper logs and retries PostgreSQL
-deadlocks (`SQLSTATE 40P01`) up to three attempts. For a deployed server, set
-`PLAYWRIGHT_DATABASE_URL` for the same database and `E2E_AGENT_TOKEN` for bearer-seeded API calls.
+`e2e/seed.ts` truncates the test database before each scenario. It first quiesces the server
+(`POST /api/v1/artifacts/_test/quiesce`, mounted by `DISPATCH_TEST_HOOKS=1`), which closes every
+live document and waits for the settlements in flight: a settlement locks its document's owner
+row and then reads `artifact_versions`, while `TRUNCATE` takes an exclusive lock on every table
+in its own order, and the two crossing is a PostgreSQL deadlock that kills either the reset or
+the settlement. With no live room and no armed settlement timer the two cannot overlap, so the
+reset does not retry. It still waits for any open server transaction before truncating. For a
+deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database and `E2E_AGENT_TOKEN` for
+bearer-seeded API calls.
 
 ## Phone acceptance
 

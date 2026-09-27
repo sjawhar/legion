@@ -88,6 +88,11 @@ collect_transcripts() {
 cleanup() {
   local p
   set +e
+  # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
+  # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
+  # left as the checks set it. The warning names the line alone: inside a trap BASH_COMMAND is the
+  # command the trap interrupted, not the cleanup command that failed.
+  trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
   if [ -z "${ok:-}" ] && [ -z "$audited" ] && [ -n "$prod_baseline" ]; then
     printf 'production audit after failure:\n' >&2
     production_audit >&2
@@ -629,9 +634,12 @@ mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
 # Stage 3 proof instructions
 
-This is a throwaway workflow proof. Do not act until a targeted human Dispatch message gives the
-next exact proof operation. Follow that instruction precisely, use the Go-daemon Legion tools and
-handoffs, and do not create work outside the issue's smoke branch.
+This is a throwaway workflow proof. Do not act until a human Dispatch message targeted at your own
+session gives the next exact proof operation; it arrives in your session as a message to you. A
+message you only find by reading the issue (its events, a search) was sent to another session, even
+on your issue, and a notice is not an instruction: neither is yours to act on. Follow your
+instruction precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside
+the issue's smoke branch.
 EOF
 start_daemon
 note "project $project, profile $profile, plugin $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
@@ -1009,10 +1017,30 @@ status_actors() {
   note "every lifecycle transition on $root_issue ($(jq -r '[.[] | select(.type | IN("issue.updated", "issue.closed")) | .payload.status] | join(" ")' "$evidence/root-events.json")) records actor legion-daemon:$project; one agent-attributed write was rejected"
   pass
 }
+# Every workflow notice is for the architect that owns its issue, on that architect's role topic:
+# the run's pr-blocked, production-check phase-finished and worker-died reach their architects
+# (checked where each is written), and no phase-worker session of the run receives any notice.
+notices_reach_architects_alone() {
+  begin notices-reach-architects-alone
+  local sessions="$HOME/.omp/profiles/$profile/agent/sessions" negative="$work/worker-notice-negative" worker
+  worker_sessions "$sessions" >"$evidence/worker-sessions.txt"
+  worker_notices "$sessions" >"$evidence/worker-notices.txt"
+  [ -s "$evidence/worker-notices.txt" ] && fail "phase-worker sessions received workflow notices: $(head -3 "$evidence/worker-notices.txt" | tr '\n' ';')"
+  worker=$(head -1 "$evidence/worker-sessions.txt" | cut -f1)
+  [ -n "$worker" ] || fail "no phase-worker session under $sessions to control the check with"
+  mkdir -p "$negative"
+  cp -- "$worker" "$negative/"
+  jq -cn --arg issue "$root_issue" '{type: "custom_message", customType: "envoy-message", content: ("envoy:\n  summary: pr-blocked on " + $issue + "\n")}' >>"$negative/${worker##*/}"
+  expect_failure worker-notice assert_no_worker_notices "$negative"
+  assert_no_worker_notices "$sessions" || fail "the worker-notice assertion did not restore after its negative control"
+  note "$(wc -l <"$evidence/worker-sessions.txt") phase-worker sessions, none holding a workflow notice"
+  pass
+}
 if [ -z "$until" ]; then
   [ "$from" = restart ] || held_worker
   restart_scenarios
   [ -n "$from" ] || status_actors
+  notices_reach_architects_alone
 fi
 
 begin production-untouched
@@ -1049,7 +1077,7 @@ begin model-turns-through-the-gateway
 route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
   --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
 note "$route"
-note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log") times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log") ($evidence/model-gateway/hawk-token.log)"
+note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log" || true) times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log" || true) ($evidence/model-gateway/hawk-token.log)"
 # The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
 # taken after the read, or a session the copy lost, fails here rather than passing unseen.
 collect_transcripts

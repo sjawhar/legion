@@ -1295,7 +1295,7 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open interest registry: %v", err)
 	}
-	routeClient, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	routeClient, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("open session registry connection: %v", err)
 	}

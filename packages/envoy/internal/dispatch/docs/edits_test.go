@@ -1792,20 +1792,24 @@ func TestApplyOperationReplaceSetsAHeadingLevelOnlyFromALevelNamingFind(t *testi
 
 // The refusal quotes the marker the reader will see in the document, not a stand-in: AGENTC-193's
 // item was `7.`, and telling that reader the block renders `1.` sends them looking for a
-// different bullet.
+// different bullet. A list beside a list of its kind is written with the kind's other marker.
 func TestApplyOperationReplaceRefusalQuotesTheBlocksRealMarker(t *testing.T) {
-	tree, err := parseInput("7. Launcher contract\n8. Acceptance\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct{ find, want string }{
-		{find: "Launcher contract", want: `"7. "`},
-		{find: "Acceptance", want: `"8. "`},
+	for _, test := range []struct{ markdown, find, with, want string }{
+		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Launcher contract", with: "9. Launcher contract", want: `"7. "`},
+		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Acceptance", with: "9. Acceptance", want: `"8. "`},
+		{markdown: "0. Launcher contract\n1. Acceptance\n", find: "Launcher contract", with: "9. Launcher contract", want: `"0. "`},
+		{markdown: "- a\n\n* b\n", find: "b", with: "* c", want: `"* "`},
+		{markdown: "1. a\n\n1) b\n2) c\n", find: "c", with: "2) d", want: `"2) "`},
+		{markdown: "- outer\n  - x\n  * y\n", find: "y", with: "- z", want: `"* "`},
 	} {
-		_, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: "9. " + test.find})
+		tree, err := parseInput(test.markdown)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 		var invalid *ErrInvalidOp
 		if !errors.As(err, &invalid) {
-			t.Fatalf("replace in %q = %v, want invalid with", test.find, err)
+			t.Fatalf("replace %q in %q = %v, want invalid with", test.find, test.markdown, err)
 		}
 		if !strings.Contains(invalid.Reason, test.want) {
 			t.Fatalf("reason = %q, want it to quote %s", invalid.Reason, test.want)
@@ -2231,41 +2235,39 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	}
 }
 
-// Emptying the paragraph a callout holding only it in a footnote definition is refused, and the
-// advice is to delete the callout: the definition is then left holding an empty paragraph, which
-// reads back, so its reference stays a footnote reference rather than literal text.
-func TestApplyOperationEmptyingACalloutInAFootnoteAdvisesDeletingTheCallout(t *testing.T) {
+// Emptying the paragraph a callout holds in a footnote definition is taken: the callout reads back
+// holding one empty paragraph, as the browser editor's parser reads it, so the definition keeps
+// its callout and its reference stays a footnote reference rather than literal text.
+func TestApplyOperationEmptyingACalloutInAFootnoteKeepsTheCallout(t *testing.T) {
 	tree, err := parseInput("x[^1]\n\n[^1]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    Body.\n    :::\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	pmdoc.EnsureBlockIDs(tree)
-	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
-	var invalid *ErrInvalidOp
-	if !errors.As(err, &invalid) || !strings.Contains(invalid.Reason, `delete {block:"c1"}`) {
-		t.Fatalf("emptying the callout's paragraph = %v, want INVALID_OP advising delete {block:\"c1\"}", err)
-	}
-	next, err := applyOperation(tree, model.EditOp{Op: "delete", Block: "c1"})
+	next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
 	if err != nil {
-		t.Fatalf("the advised delete = %v", err)
+		t.Fatalf("emptying the callout's paragraph = %v, want it taken", err)
 	}
 	markdown, err := renderTree(next)
 	if err != nil {
 		t.Fatal(err)
 	}
 	back, err := parseInput(markdown)
-	if err != nil {
-		t.Fatalf("after the advised delete, %q does not read back: %v", markdown, err)
+	if err != nil || !back.Equal(next) {
+		t.Fatalf("after emptying, %q does not read back as written (%v)", markdown, err)
 	}
-	var references int
+	var references, callouts int
 	pmdoc.Walk(back, func(node *pmdoc.Node) bool {
-		if node.Type == "footnote_reference" {
+		switch node.Type {
+		case "footnote_reference":
 			references++
+		case "callout":
+			callouts++
 		}
 		return true
 	})
-	if references != 1 {
-		t.Fatalf("after the advised delete, %q holds %d footnote references, want 1", markdown, references)
+	if references != 1 || callouts != 1 {
+		t.Fatalf("after emptying, %q holds %d footnote references and %d callouts, want 1 and 1", markdown, references, callouts)
 	}
 }
 

@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 /**
  * Proof Editor — standalone library entry point.
  *
@@ -51,7 +49,7 @@ import { yCursorPlugin, yCursorPluginKey, ySyncPluginKey } from 'y-prosemirror';
 import type { Awareness } from 'y-protocols/awareness';
 import type * as Y from 'yjs';
 import type { EditorView } from '@milkdown/kit/prose/view';
-import type { Ctx } from '@milkdown/ctx';
+import type { Ctx, MilkdownPlugin } from '@milkdown/ctx';
 
 import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-marks';
 import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-block-ext';
@@ -63,7 +61,7 @@ import { proofMarkHandler } from 'proof-sdk-upstream/src/formats/remark-proof-ma
 
 import { authoredTrackerPlugin } from 'proof-sdk-upstream/src/editor/plugins/authored-tracker';
 import { heatmapPlugin, heatmapCtx } from 'proof-sdk-upstream/src/editor/plugins/heatmap-decorations';
-import type { HeatMapMode } from './upstream-types';
+import type { HeatMapMode } from 'proof-sdk-upstream/src/editor/plugins/heatmap-decorations';
 import { agentCursorPlugin, agentCursorCtx } from 'proof-sdk-upstream/src/editor/plugins/agent-cursor';
 import { setCurrentActor } from 'proof-sdk-upstream/src/editor/actor';
 import { suggestionsPlugins } from 'proof-sdk-upstream/src/editor/plugins/suggestions';
@@ -100,7 +98,7 @@ export type {
   BlockTypeSchema,
   HostBlockRenderer,
 } from './block-schema';
-export type { StoredMark } from './upstream-types';
+export type { StoredMark } from 'proof-sdk-upstream/src/editor/plugins/marks';
 export { BLOCK_ID_ATTR, BLOCK_ID_DOM_ATTR, blockIdOf, isIdentifiedBlock, setBlockIdGenerator } from './editor/schema/block-ids';
 export { createTypedBlockCommands } from './typed-block-commands';
 export type {
@@ -260,9 +258,11 @@ export async function createProofEditor(
     .use(libraryRemarkDirectivePlugin)
     .use(opts.blockSchema ? typedBlockRemarkPlugin(opts.blockSchema) : [])
     .use(frontmatterSchema)
-    .use(codeBlockExtPlugins)
+    // `use` flattens its argument twice, so an array of composed schemas — each of them a pair
+    // of plugins — is an argument Milkdown accepts but its own signature cannot express.
+    .use(codeBlockExtPlugins as unknown as MilkdownPlugin[])
     // Every block carries a stable blockId (see ./editor/schema/block-ids.ts).
-    .use(opts.blockSchema ? blockSchemaPlugins(opts.blockSchema, opts.renderBlock) : [])
+    .use(opts.blockSchema ? (blockSchemaPlugins(opts.blockSchema, opts.renderBlock) as unknown as MilkdownPlugin[]) : [])
     .use(blockIdPlugins)
     .use(history)
     .use(listener)
@@ -270,8 +270,8 @@ export async function createProofEditor(
     .use(cursor)
     .use(clipboard)
     // Register proof mark schemas, plus this library's own dispatchAsk mark
-    .use(proofMarkPlugins)
-    .use(dispatchMarkPlugins)
+    .use(proofMarkPlugins as unknown as MilkdownPlugin[])
+    .use(dispatchMarkPlugins as unknown as MilkdownPlugin[])
     // Register remark plugins for proof marks and dispatchAsk parsing
     .use(remarkProofMarksPlugin)
     .use(remarkDispatchMarksPlugin)

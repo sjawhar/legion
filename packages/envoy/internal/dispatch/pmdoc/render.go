@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -28,6 +29,8 @@ type renderer struct {
 	inFootnote bool
 	// asteriskRule makes the next rule written `***` rather than `---` (list).
 	asteriskRule bool
+	// otherListMarker makes the next list written with its kind's other marker (otherListMarkers).
+	otherListMarker bool
 	// footnoteLabels is every footnote label the document defines, lowercased: text shaped like a
 	// reference to one would read as that reference.
 	footnoteLabels map[string]bool
@@ -127,10 +130,12 @@ func definedFootnoteLabels(doc *Node) map[string]bool {
 }
 
 func (r *renderer) blocks(nodes []*Node, prefix string) {
+	otherMarkers := otherListMarkers(nodes)
 	for i, n := range nodes {
 		if i > 0 {
 			r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n")
 		}
+		r.otherListMarker = otherMarkers[i]
 		r.block(n, prefix)
 	}
 	if len(nodes) > 0 {
@@ -139,11 +144,48 @@ func (r *renderer) blocks(nodes []*Node, prefix string) {
 }
 
 func (r *renderer) blocksNoTrailing(nodes []*Node, prefix string) {
+	otherMarkers := otherListMarkers(nodes)
 	for i, n := range nodes {
 		if i > 0 {
 			r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + prefix)
 		}
+		r.otherListMarker = otherMarkers[i]
 		r.block(n, prefix)
+	}
+}
+
+// otherListMarkers reports, for each of a container's blocks, whether it is a list written with
+// its kind's other marker (`*` for `-`, `)` for `.`): a list of the same kind as the block before
+// it, past any empty paragraph, which is written as nothing, takes the marker that list did not,
+// so the two read back as two lists, as the browser editor writes them. Written with one marker,
+// two lists side by side read back as one.
+func otherListMarkers(blocks []*Node) []bool {
+	other := make([]bool, len(blocks))
+	previous := -1
+	for index, block := range blocks {
+		if block.Type == "paragraph" && len(block.Children) == 0 {
+			continue
+		}
+		if (block.Type == "bullet_list" || block.Type == "ordered_list") && previous >= 0 && blocks[previous].Type == block.Type {
+			other[index] = !other[previous]
+		}
+		previous = index
+	}
+	return other
+}
+
+// listItemMarker is the marker a list item is written with: `- `, or `N. ` in an ordered list, or,
+// in a list written with its kind's other marker (otherListMarkers), `* ` or `N) `.
+func listItemMarker(ordered bool, number int, other bool) string {
+	switch {
+	case ordered && other:
+		return strconv.Itoa(number) + ") "
+	case ordered:
+		return strconv.Itoa(number) + ". "
+	case other:
+		return "* "
+	default:
+		return "- "
 	}
 }
 
@@ -241,6 +283,7 @@ func typedFence(n *Node, column int) int {
 }
 
 func (r *renderer) list(n *Node, prefix string) {
+	other := r.otherListMarker
 	start := 1
 	if n.Type == "ordered_list" {
 		start = int(num(n.Attrs["order"], 1))
@@ -256,10 +299,7 @@ func (r *renderer) list(n *Node, prefix string) {
 				r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + prefix)
 			}
 		}
-		marker := "- "
-		if n.Type == "ordered_list" {
-			marker = fmt.Sprintf("%d. ", start+index)
-		}
+		marker := listItemMarker(n.Type == "ordered_list", start+index, other)
 		r.writeSyntax(marker)
 		if checked, ok := item.Attrs["checked"].(bool); ok {
 			if checked {
@@ -269,12 +309,29 @@ func (r *renderer) list(n *Node, prefix string) {
 			}
 		}
 		indent := prefix + strings.Repeat(" ", len(marker))
-		for childIndex, child := range item.Children {
+		// An empty first paragraph is written as nothing, with the next block on the marker's line:
+		// a blank line after an empty marker line would end the item, and both parsers read an item
+		// that opens with another block as holding an empty paragraph first (`- # h`). A rule there
+		// is written with the other character from the marker's, since `- ---` and `* ***` are
+		// thematic breaks at the list's level: `***`, and `---` after `* `. A task item cannot
+		// be written so: its marker's line would carry the next block as the task's text, and the
+		// browser editor reads no other form of it as a task.
+		children := item.Children
+		skipped := len(children) > 1 && children[0].Type == "paragraph" && len(children[0].Children) == 0
+		if skipped {
+			if _, task := item.Attrs["checked"].(bool); task {
+				r.err = fmt.Errorf("%w: a task item whose first paragraph is empty cannot hold another block after it; the browser editor reads no such item as a task", ErrSchema)
+				return
+			}
+			children = children[1:]
+		}
+		otherMarkers := otherListMarkers(children)
+		for childIndex, child := range children {
 			// A tight item writes its blocks on consecutive lines, where a paragraph would run on
 			// into a paragraph after it and underline itself with a rule's `---`. The browser
 			// editor's writer puts a blank line between two paragraphs (the item then reads back
 			// spread) and writes a rule `***`, and so does this renderer.
-			afterParagraph := childIndex > 0 && item.Children[childIndex-1].Type == "paragraph"
+			afterParagraph := childIndex > 0 && children[childIndex-1].Type == "paragraph"
 			if childIndex > 0 {
 				if item.Attrs["spread"] == true || afterParagraph && child.Type == "paragraph" {
 					r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + indent)
@@ -282,7 +339,8 @@ func (r *renderer) list(n *Node, prefix string) {
 					r.writeSyntax("\n" + indent)
 				}
 			}
-			r.asteriskRule = child.Type == "hr" && afterParagraph && item.Attrs["spread"] != true
+			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0 && marker != "* ")
+			r.otherListMarker = otherMarkers[childIndex]
 			r.block(child, indent)
 		}
 	}
@@ -304,6 +362,11 @@ func (r *renderer) table(table *Node, prefix string) {
 	}
 	r.writeSyntax(" |")
 	for _, row := range table.Children[1:] {
+		// A row with no cells is written as nothing: a table with only such rows reads back
+		// holding one, as the browser editor's parser reads a table with no body row.
+		if len(row.Children) == 0 {
+			continue
+		}
 		r.writeSyntax("\n" + prefix)
 		r.tableRow(row, false, prefix)
 	}
@@ -362,7 +425,7 @@ func (r *renderer) writeCodeText(node *Node, prefix string) {
 // ending.
 func blankLineAhead(text string) bool {
 	end := strings.IndexByte(text, '\n')
-	return end >= 0 && strings.Trim(text[:end], " \t\r") == ""
+	return end >= 0 && strings.Trim(text[:end], " \t") == ""
 }
 
 func codeBlockFence(node *Node) string {
@@ -406,7 +469,7 @@ func isBareAutolink(value string) bool {
 	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
 		return false
 	}
-	if strings.ContainsAny(value, " \t\r\n()<>") {
+	if strings.ContainsAny(value, " \t\n()<>") {
 		return false
 	}
 	return !strings.ContainsAny(value[len(value)-1:], ".,!?;:")

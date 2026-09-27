@@ -20,14 +20,29 @@ const (
 	Held            Phase = "held"
 )
 
-// FileBacked says whether a phase ends with a handoff file its role writes and commits: the
-// planner's, the implementer's implementing rounds, the tester's, and the reviewer's. Retro, the
-// production check, and the merger's READY write none, and report the commit they stand on.
-func FileBacked(p Phase) bool {
+// HandoffFile is the handoff a phase ends with, .legion/<word>.json, and whether it ends with one
+// its role writes and commits: the planner's, the implementer's implementing rounds, the tester's,
+// and the reviewer's, each under the word its role's prompt passes to the legion tool's
+// handoff_write (packages/pi-envoy/roles/*.md). Retro, the production check, and the merger's
+// READY write none, and report the commit they stand on.
+func HandoffFile(p Phase) (string, bool) {
 	switch p {
-	case Planning, Implementing, Testing, Reviewing:
-		return true
+	case Planning:
+		return "plan", true
+	case Implementing:
+		return "implement", true
+	case Testing:
+		return "test", true
+	case Reviewing:
+		return "review", true
 	default:
-		return false
+		return "", false
 	}
+}
+
+// FileBacked says whether a phase ends with a handoff file its role writes and commits
+// (HandoffFile).
+func FileBacked(p Phase) bool {
+	_, ok := HandoffFile(p)
+	return ok
 }

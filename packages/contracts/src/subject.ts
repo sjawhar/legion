@@ -8,21 +8,13 @@ export type LegionNoticeSubject<
   Issue extends string = string,
 > = `${typeof LEGION_NOTICE_TOPIC_PREFIX}${Project}.${Issue}`;
 
-export function legionNoticeSubject<Project extends string, Issue extends string>(
-  project: Project,
-  issue: Issue
-): LegionNoticeSubject<Project, Issue>;
-export function legionNoticeSubject(project: string, issue: string) {
-  return `${LEGION_NOTICE_TOPIC_PREFIX}${project}.${issue}`;
-}
-
 /** The Go daemon's controller topic for `project` (the project token): the notice family's one
  * member that names no issue, since no issue key can be `controller`. What the Go daemon publishes
  * here is listed at `notify.ControllerTopic` (packages/daemon-go/internal/notify). */
 export function legionControllerNoticeSubject<Project extends string>(
   project: Project
 ): LegionNoticeSubject<Project, "controller"> {
-  return legionNoticeSubject(project, "controller");
+  return `${LEGION_NOTICE_TOPIC_PREFIX}${project}.controller`;
 }
 
 export const DISPATCH_TOPIC_PREFIX = "notifications.dispatch." as const;
