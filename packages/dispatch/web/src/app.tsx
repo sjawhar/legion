@@ -44,8 +44,6 @@ import {
   railAccentHoverText,
   railAccentText,
   railActiveBg,
-  railBadgeBg,
-  railBadgeText,
   railBg,
   railBorder,
   railDangerText,
@@ -53,6 +51,8 @@ import {
   railFocusOverlayText,
   railHoverBg,
   railMutedText,
+  railNeedsYouBadgeBg,
+  railNeedsYouBadgeText,
   railText,
   skeletonBg,
   statusConnecting,
@@ -460,7 +460,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               </Link>
               {needsYouCount === 0 ? null : (
                 <span
-                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railBadgeBg} ${railBadgeText}`}
+                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
                 >
                   Needs you {needsYouCount}
                 </span>

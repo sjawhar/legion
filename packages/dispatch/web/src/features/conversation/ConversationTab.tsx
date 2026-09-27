@@ -1223,9 +1223,11 @@ export function ConversationTab({
           </button>
         )}
         <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnCanvas}`}>
+          {/* The 44px target is the label, which is already `min-h-11`; putting it on the box
+              itself drew a checkbox three times the size of every other control. */}
           <input
             checked={showActivity}
-            className={`${checkboxAccent} min-h-11 min-w-11`}
+            className={checkboxAccent}
             onChange={(event) => setShowActivity(event.target.checked)}
             type="checkbox"
           />
