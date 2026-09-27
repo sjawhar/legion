@@ -5,6 +5,7 @@ import {
   type ReactNode,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -33,6 +34,7 @@ import {
   inputClasses,
   linkHoverText,
   linkText,
+  scrollFadeTrailing,
   secondaryButtonBorder,
   secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
@@ -97,6 +99,35 @@ export function IssueHeader({
       parentInputRef.current?.focus();
     }
   }, [parentEditing]);
+  const railRef = useRef<HTMLDivElement>(null);
+  // Whether the details rail has anywhere left to scroll, which is what its trailing fade says.
+  // Three things change the answer and none of them is a render of this component alone: the
+  // reader scrolling the rail, the viewport resizing, and the rail's own content arriving (the
+  // labels, the subscriber count, a GitHub title). The ResizeObserver watches the rail and its
+  // content wrapper is the rail itself, so the layout effect re-measures on every render too -
+  // measuring is two reads and no write unless the answer changed.
+  const [railScrollable, setRailScrollable] = useState(false);
+  useLayoutEffect(() => {
+    const node = railRef.current;
+    if (node === null) {
+      return;
+    }
+    // A fractional layout leaves scrollLeft a hair short of the end; one pixel of slack keeps a
+    // rail scrolled to its end from wearing the fade.
+    const measure = () =>
+      setRailScrollable(node.scrollWidth - node.clientWidth - node.scrollLeft > 1);
+    measure();
+    node.addEventListener("scroll", measure, { passive: true });
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    for (const child of node.children) {
+      observer.observe(child);
+    }
+    return () => {
+      node.removeEventListener("scroll", measure);
+      observer.disconnect();
+    };
+  });
   const [subscribersOpen, setSubscribersOpen] = useState(false);
   const [referencesOpen, setReferencesOpen] = useState(false);
   const { titles: agentTitles } = useAgents(issue.created_by?.kind === "session");
@@ -391,9 +422,14 @@ export function IssueHeader({
             </button>
           )}
         </div>
+        {/* The details line scrolls sideways rather than widening the page, and at a phone width
+            its cut lands inside an item - the Labels control alone is wider than the rail. The
+            fade says the cut is a scroll, and it is off at the end of the scroll, where a fade
+            would hide the last item instead. */}
         <div
-          className="flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto [scrollbar-width:thin] md:[&_button]:min-h-7 md:[&_button]:py-0"
+          className={`flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto [scrollbar-width:thin] md:[&_button]:min-h-7 md:[&_button]:py-0 ${railScrollable ? scrollFadeTrailing : ""}`}
           data-testid="issue-metadata-rail"
+          ref={railRef}
         >
           {whoseTurn === null ? null : (
             <span

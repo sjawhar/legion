@@ -1025,3 +1025,51 @@ test("a clamped title shows two lines and no fragment of the third", async ({
     await context.close();
   }
 });
+
+test("the details rail fades its trailing edge only while it has somewhere to scroll", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the rail only overflows at a phone width");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Rail fade" });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    const rail = page.getByTestId("issue-metadata-rail");
+    const masked = () => rail.evaluate((element) => getComputedStyle(element).maskImage !== "none");
+    const overflow = () => rail.evaluate((element) => element.scrollWidth - element.clientWidth);
+
+    // A bare issue's details fit a desktop rail: nothing to scroll to, so nothing to fade.
+    await page.setViewportSize({ height: 900, width: 1920 });
+    await page.goto(`/issues/${issue.key}`);
+    await expect(rail).toBeVisible();
+    await expect.poll(overflow).toBe(0);
+    expect(await masked()).toBe(false);
+
+    // At a phone width the same details run past the rail, and the cut lands inside a control -
+    // the Labels button alone is wider than the rail is.
+    await patchIssue(issue.key, {
+      labels: ["frontend", "documentation", "needs-design", "observability"],
+    });
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.reload();
+    await expect(page.getByTestId("issue-labels")).toBeVisible();
+    await expect.poll(overflow).toBeGreaterThan(0);
+    await expect.poll(masked).toBe(true);
+
+    // At the end of the scroll the last item is all there is; a fade there would hide it.
+    await rail.evaluate((element) => {
+      element.scrollLeft = element.scrollWidth;
+    });
+    await expect.poll(masked).toBe(false);
+
+    // Scrolling back re-arms it.
+    await rail.evaluate((element) => {
+      element.scrollLeft = 0;
+    });
+    await expect.poll(masked).toBe(true);
+  } finally {
+    await context.close();
+  }
+});
