@@ -1027,12 +1027,22 @@ for (const refusal of [
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
         viewport
       );
-      // The refusal sits below the issue key, never over it.
+      // The refusal never draws over the issue key. Where it lands is the row's own business:
+      // beside the key when the row is wide enough (desktop, since a no-margin route gives the
+      // Inbox the whole width) and on the line below when it is not (a phone). Asserting
+      // "below" pinned one of those two layouts and went red on the other.
       const key = await page.locator("[data-inbox-owner]").first().boundingBox();
       const alert = await retry.boundingBox();
       expect(key).not.toBeNull();
       expect(alert).not.toBeNull();
-      expect((alert?.y ?? 0) >= (key?.y ?? 0) + (key?.height ?? 0)).toBe(true);
+      const overlaps =
+        key !== null &&
+        alert !== null &&
+        alert.x < key.x + key.width &&
+        alert.x + alert.width > key.x &&
+        alert.y < key.y + key.height &&
+        alert.y + alert.height > key.y;
+      expect(overlaps).toBe(false);
     } finally {
       await alice.close();
     }
