@@ -99,7 +99,12 @@ reach the stream adds nothing to the stream.
   for it was recorded as refused (an accepted request whose answer was lost).
 - Giving up logs `level=ERROR msg="webhook redelivery exhausted"`. A 4xx logs
   `level=ERROR msg="webhook delivery refused terminally"`. Each is logged once per delivery.
-  Every sweep logs an INFO `msg="webhook redelivery sweep"` line with its counts.
+  Every sweep logs an INFO `msg="webhook redelivery sweep"` line: `failed_attempts` (the failed
+  attempts listed), `deliveries` (the GUIDs they belong to), and one count per outcome, which add
+  up to `deliveries`. `closed` is a delivery an earlier sweep settled (GitHub recorded it `OK`, or
+  it was given up on): its failed attempt stays listed until it is older than the sweep's hour, so
+  after a burst of failures is redelivered, the next hour's sweeps count the burst as `closed`.
+  `pending` is a redelivery GitHub accepted and has not made yet.
 - A sweep looks back one hour. After a gap in sweeping (Dispatch down), it resumes from its
   cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
 
