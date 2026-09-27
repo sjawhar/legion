@@ -858,8 +858,10 @@ async function lockGitWorktree(cloneDir: string, dir: string): Promise<void> {
  * worktree repair` cannot rebuild a missing entry. It writes what `git worktree add` would, at the
  * path the pointer names: `gitdir`, `commondir`, and `HEAD` at the working-copy commit's first
  * parent, as jj keeps it; then the index from HEAD with `git read-tree`, which writes no
- * working-tree file. A workspace with no `.git` (jj 0.44), or whose entry exists, is left alone; a
- * pointer outside the clone's git worktrees is refused. */
+ * working-tree file. A failure past that point removes whatever was written, so a later
+ * provisioning still finds the entry gone and restores it, instead of skipping a half-written one.
+ * A workspace with no `.git` (jj 0.44), or whose entry exists, is left alone; a pointer outside the
+ * clone's git worktrees is refused, since a tree agent can write the workspace's `.git`. */
 async function restoreGitWorktree(
   deps: CommandDeps,
   cloneDir: string,
@@ -878,7 +880,7 @@ async function restoreGitWorktree(
   const name = path.basename(target);
   if (path.dirname(target) !== worktrees || name === "." || name === "..") {
     throw new Error(
-      `Workspace ${workspaceDir} names git worktree ${target}, outside the shared clone's ${worktrees}; its git side was not restored`
+      `Workspace ${workspaceDir}'s .git, which a tree agent can write, names ${target} outside the shared clone's ${worktrees}; provisioning refuses to create or write it. Remove the workspace so the next provisioning adds it again`
     );
   }
   const parents = await runChecked(
@@ -902,10 +904,16 @@ async function restoreGitWorktree(
     );
   }
   await mkdir(target, { recursive: true });
-  await writeFile(path.join(target, "gitdir"), `${path.join(dir, ".git")}\n`);
-  await writeFile(path.join(target, "commondir"), `${path.join("..", "..")}\n`);
-  await writeFile(path.join(target, "HEAD"), `${head}\n`);
-  await runChecked(deps, ["git", "read-tree", "HEAD"], { cwd: workspaceDir });
+  let restored = false;
+  try {
+    await writeFile(path.join(target, "gitdir"), `${path.join(dir, ".git")}\n`);
+    await writeFile(path.join(target, "commondir"), `${path.join("..", "..")}\n`);
+    await writeFile(path.join(target, "HEAD"), `${head}\n`);
+    await runChecked(deps, ["git", "read-tree", "HEAD"], { cwd: workspaceDir });
+    restored = true;
+  } finally {
+    if (!restored) await rm(target, { recursive: true, force: true });
+  }
   console.error(
     `[legion] workspace ${workspaceDir} had lost its git worktree entry ${target} (a git worktree prune that could not see the workspace deletes it): restored it at ${head}, the working copy untouched`
   );

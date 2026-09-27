@@ -28,9 +28,10 @@ type recordingRunner struct {
 	timeout time.Duration
 	runner  Runner
 
-	mu        sync.Mutex
-	commands  []Command
-	killClone bool
+	mu           sync.Mutex
+	commands     []Command
+	killClone    bool
+	failReadTree bool
 }
 
 func (r *recordingRunner) Timeout() time.Duration { return r.timeout }
@@ -51,6 +52,9 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 			return Result{}, fmt.Errorf("create partial clone: %w", err)
 		}
 		return Result{ExitCode: 137, Stderr: "clone interrupted"}, nil
+	}
+	if r.failReadTree && commandWith(command.Argv, "git", "read-tree", "HEAD") {
+		return Result{ExitCode: 1, Stderr: "forced read-tree failure for test"}, nil
 	}
 
 	actual := command
@@ -791,6 +795,38 @@ func TestProvisionRestoresALostGitWorktree(t *testing.T) {
 	}
 	if !slices.ContainsFunc(logged, func(line string) bool { return strings.Contains(line, "restored it at "+parent) }) {
 		t.Errorf("provisioning logged no restoration: %q", logged)
+	}
+}
+
+// A failed git read-tree while restoring a lost git worktree entry leaves nothing at the target: the
+// next provisioning still finds the entry gone and restores it, instead of skipping the restore
+// because a half-written entry already exists.
+func TestProvisionCleansUpAFailedRestore(t *testing.T) {
+	run := newLocalRunner(t)
+	request := provisionRequest(t)
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	admin := gitWorktreeAdmin(t, workspace.Dir)
+	if err := os.RemoveAll(admin); err != nil {
+		t.Fatal(err)
+	}
+
+	run.failReadTree = true
+	if _, err := Provision(context.Background(), run, request); err == nil {
+		t.Fatal("provision with a forced read-tree failure = <nil>, want it refused")
+	}
+	if _, statErr := os.Stat(admin); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the failed restore left %s behind: %v", admin, statErr)
+	}
+	run.failReadTree = false
+
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("provision after the failed restore: %v", err)
+	}
+	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
+		t.Errorf("git in the restored workspace answers %q, want %q", got, workspace.Dir)
 	}
 }
 

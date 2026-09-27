@@ -2531,6 +2531,30 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     expect(logged, name).toEqual([expect.stringContaining(`restored it at ${parent}`)]);
   }, 60_000);
 
+  test("cleans up a failed restore so the next provisioning still finds the entry gone, rather than skipping it because a half-written one exists", async () => {
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { workspaceDir, deps } = await realJjRig(command, stateDir);
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    const admin = await gitWorktreeAdmin(workspaceDir);
+    await rm(admin, { recursive: true, force: true });
+
+    const failingReadTree = {
+      ...deps,
+      run: async (cmd: string[], opts?: RunCall["opts"]): Promise<RunResult> => {
+        if (cmd[0] === "git" && cmd[1] === "read-tree") {
+          return { exitCode: 1, stdout: "", stderr: "forced read-tree failure for test" };
+        }
+        return deps.run(cmd, opts);
+      },
+    };
+    await expect(provisionIssueWorkspace("WIDGETS-42", failingReadTree), name).rejects.toThrow();
+    expect(existsSync(admin), name).toBeFalse();
+
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+  }, 60_000);
+
   test("refuses by name a git pointer outside the shared clone's worktrees, creating nothing there", async () => {
     const [{ command }] = JJ_BINARIES;
     const stateDir = path.join(await temporaryDirectory(), "state");
