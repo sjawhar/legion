@@ -955,9 +955,12 @@ function artifactByReference(
   const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
   // Dispatch suffixes a slug two documents would share, so one document's filename can be
   // another's slug; a bare reference both answer to names two documents, and only an id tells
-  // them apart.
+  // them apart. Only a document answers to its filename there, as in Dispatch's own fallback, so
+  // an image or file of that name names no second document.
   if (bySlug !== undefined) {
-    const named = byName.filter((candidate) => candidate.id !== bySlug.id);
+    const named = byName.filter(
+      (candidate) => candidate.id !== bySlug.id && candidate.kind === "doc"
+    );
     if (named.length > 0) {
       throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
     }
@@ -977,7 +980,7 @@ async function resolveArtifact(
   client: DispatchClient,
   owner: Owner,
   artifactReference: string | undefined,
-  canonical = false
+  { canonical = false }: { readonly canonical?: boolean } = {}
 ): Promise<ResolvedArtifact> {
   if (owner.kind === "project") {
     if (artifactReference === undefined) {
@@ -1637,12 +1640,9 @@ export async function executeDispatchTool(
   const refDocument =
     ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
   const resolveDocument = (documentOwner: Owner, reference: string | undefined) =>
-    resolveArtifact(
-      client,
-      documentOwner,
-      reference,
-      reference !== undefined && reference === refDocument
-    );
+    resolveArtifact(client, documentOwner, reference, {
+      canonical: reference !== undefined && reference === refDocument,
+    });
   const owner =
     ownerArguments.owner?.kind === "issue"
       ? {
@@ -1996,7 +1996,9 @@ export async function executeDispatchTool(
           client.getComments(issueKey)
         );
       } else if (ref !== null) {
-        const artifact = (await resolveArtifact(client, ref.owner, ref.artifact, true)).artifact;
+        const artifact = (
+          await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true })
+        ).artifact;
         document = artifact;
         id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () =>
           client.getArtifactComments(artifact.id)
@@ -2429,7 +2431,7 @@ export async function executeDispatchTool(
           ref.owner.kind === "issue"
             ? client.listIssueAsks(ref.owner.issue)
             : client.getArtifactAsks(
-                (await resolveArtifact(client, ref.owner, ref.artifact, true)).artifact.id,
+                (await resolveDocument(ref.owner, ref.artifact)).artifact.id,
                 "all"
               )
         );
@@ -2454,7 +2456,7 @@ export async function executeDispatchTool(
             ref.owner.kind === "issue"
               ? client.getComments(ref.owner.issue)
               : client.getArtifactComments(
-                  (await resolveArtifact(client, ref.owner, ref.artifact, true)).artifact.id
+                  (await resolveDocument(ref.owner, ref.artifact)).artifact.id
                 )
         );
         const comment = await client.getComment(id);

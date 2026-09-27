@@ -39782,7 +39782,7 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
     return byId;
   const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
   if (bySlug !== undefined) {
-    const named = byName.filter((candidate) => candidate.id !== bySlug.id);
+    const named = byName.filter((candidate) => candidate.id !== bySlug.id && candidate.kind === "doc");
     if (named.length > 0) {
       throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
     }
@@ -39797,7 +39797,7 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   }
   return artifact;
 }
-async function resolveArtifact(client, owner, artifactReference, canonical = false) {
+async function resolveArtifact(client, owner, artifactReference, { canonical = false } = {}) {
   if (owner.kind === "project") {
     if (artifactReference === undefined) {
       throw new Error("artifact is required for a project document");
@@ -40223,7 +40223,9 @@ async function executeDispatchTool(input) {
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
   const refDocument = ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
-  const resolveDocument = (documentOwner2, reference) => resolveArtifact(client, documentOwner2, reference, reference !== undefined && reference === refDocument);
+  const resolveDocument = (documentOwner2, reference) => resolveArtifact(client, documentOwner2, reference, {
+    canonical: reference !== undefined && reference === refDocument
+  });
   const owner = ownerArguments.owner?.kind === "issue" ? {
     kind: "issue",
     issue: await resolveExistingIssue(client, ownerArguments.owner.issue)
@@ -40512,7 +40514,7 @@ async function executeDispatchTool(input) {
         const issueKey = ref.owner.issue;
         id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => client.getComments(issueKey));
       } else if (ref !== null) {
-        const artifact = (await resolveArtifact(client, ref.owner, ref.artifact, true)).artifact;
+        const artifact = (await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true })).artifact;
         document = artifact;
         id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => client.getArtifactComments(artifact.id));
       }
@@ -40831,7 +40833,7 @@ ${trailer.join(`
     case "dispatch_read": {
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveArtifact(client, ref.owner, ref.artifact, true)).artifact.id, "all"));
+        const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));
         const askRead = await client.getAsk(id);
         const askRef = refTarget(ref, "ask", id);
         return {
@@ -40841,7 +40843,7 @@ ${trailer.join(`
       }
       if (ownerArguments.ref?.kind === "comment") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments((await resolveArtifact(client, ref.owner, ref.artifact, true)).artifact.id));
+        const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments((await resolveDocument(ref.owner, ref.artifact)).artifact.id));
         const comment = await client.getComment(id);
         const commentRef = refTarget(ref, "comment", id);
         return {

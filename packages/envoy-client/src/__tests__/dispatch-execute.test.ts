@@ -3130,6 +3130,80 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe("# shared-reference");
   });
 
+  // Only documents answer to a filename (Dispatch's own filename fallback reads documents alone),
+  // so an image or file whose filename is a document's slug names no second document.
+  test("a document slug that an image's or file's filename repeats resolves to the document", async () => {
+    const project = await readDocument(
+      { project: "GREF", artifact: "diagram" },
+      projectDispatch(
+        [
+          projectDocument("artifact-doc", "diagram", "Diagram notes"),
+          { ...projectDocument("artifact-image", "diagram-2", "diagram"), kind: "image" },
+          { ...projectDocument("artifact-file", "diagram-3", "diagram"), kind: "file" },
+        ],
+        []
+      )
+    );
+    expect(project.text).toBe("# artifact-doc");
+
+    const issue = await readDocument({ issue: "DSP-42", artifact: "diagram" }, (async (
+      url: RequestInfo | URL
+    ): Promise<Response> => {
+      const request = new URL(String(url));
+      if (request.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-spec",
+          artifacts: [
+            { id: "artifact-spec", slug: "spec", name: "spec.md", kind: "doc", primary: true },
+            {
+              id: "artifact-doc",
+              slug: "diagram",
+              name: "Diagram notes",
+              kind: "doc",
+              primary: false,
+            },
+            {
+              id: "artifact-image",
+              slug: "diagram-2",
+              name: "diagram",
+              kind: "image",
+              primary: false,
+            },
+          ],
+        });
+      }
+      const text = request.pathname.match(/^\/api\/v1\/artifacts\/([^/]+)\/text$/);
+      if (text?.[1] !== undefined) return response({ markdown: `# ${text[1]}`, version: 1 });
+      if (request.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+      throw new Error(`unexpected request: ${request.pathname}`);
+    }) as typeof fetch);
+    expect(issue.text).toBe("# artifact-doc");
+  });
+
+  test("a bare project reference fails with the route read's error, and with the list read's after a route hit", async () => {
+    const documents = [projectDocument("artifact-v2", "plan-v2", "plan v2")];
+    const failing = (target: string) =>
+      (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const request = new URL(String(url));
+        if (request.pathname + request.search === target) {
+          return new Response(JSON.stringify({ code: "UNAVAILABLE", error: `${target} failed` }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return projectDispatch(documents, [])(url, init);
+      }) as typeof fetch;
+    for (const target of [
+      "/api/v1/projects/GREF/artifacts/plan-v2",
+      "/api/v1/projects/GREF/artifacts?unlinked=true",
+    ]) {
+      await expect(
+        readDocument({ project: "GREF", artifact: "plan-v2" }, failing(target))
+      ).rejects.toThrow(`${target} failed`);
+    }
+  });
+
   // A dispatch:// reference's document part is a slug, the address the dashboard and Dispatch's
   // own routes use, so it names one document even where the same text is another's filename.
   test("a dispatch:// document reference resolves by slug, never refused for a filename clash", async () => {
@@ -3153,8 +3227,14 @@ describe("executeDispatchTool", () => {
           primary_artifact_id: "artifact-spec",
           artifacts: [
             { id: "artifact-spec", slug: "spec", name: "spec.md", primary: true },
-            { id: "artifact-v2", slug: "spec-v2", name: "spec v2", primary: false },
-            { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", primary: false },
+            { id: "artifact-v2", slug: "spec-v2", name: "spec v2", kind: "doc", primary: false },
+            {
+              id: "artifact-v2-2",
+              slug: "spec-v2-2",
+              name: "spec-v2",
+              kind: "doc",
+              primary: false,
+            },
           ],
         });
       }
@@ -6178,8 +6258,8 @@ test("a reference that is one document's slug and another's filename is refused 
       artifacts: [
         { id: "artifact-spec", slug: "spec", name: "spec.md", primary: true },
         { id: "artifact-notes", slug: "notes-md", name: "notes.md", primary: false },
-        { id: "artifact-v2", slug: "spec-v2", name: "spec v2", primary: false },
-        { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", primary: false },
+        { id: "artifact-v2", slug: "spec-v2", name: "spec v2", kind: "doc", primary: false },
+        { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", kind: "doc", primary: false },
       ],
     });
   const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
