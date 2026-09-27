@@ -102,9 +102,18 @@ function armOrphanWatchdog(session: string) {
 }
 
 /** Names one real-tmux test's private server/session from a UUID rather than a fixed label.
- * There is no server until the test's first tmux command; teardown's `kill-server` addresses only
- * this run's own minted socket, never another test's, and a watchdog reaps that same private
- * server if this process dies before teardown runs (see `armOrphanWatchdog`). */
+ * There is no server until the test's first tmux command; teardown kills only the named session
+ * -- never `kill-server` (the whole-server primitive `tmux-e2e-isolation.test.ts` refuses
+ * anywhere in this source tree, #1208: a shared host could still be running another run's server
+ * under a name this one's UUID happens to collide with, however unlikely, and `kill-server` would
+ * tear down every session on it, not just this test's own). Since this session is always the
+ * server's only one, killing it ends the server too -- tmux exits once its last session is gone
+ * -- so this stays as complete a teardown as `kill-server` would be, just scoped to the one name
+ * this run actually minted. A watchdog reaps that same private server if this process dies before
+ * teardown runs (see `armOrphanWatchdog`): its own `kill-server` is the one exception the guard
+ * does not need to cover, since it is a shell string the watchdog's script builds, addressed at
+ * the exact socket this call already owns, and it only ever runs after this process has already
+ * died -- there is no session left standing to name instead. */
 export function createTmuxTestServer(label: string): TmuxTestServer {
   const project = `${label}${randomUUID().replaceAll("-", "")}`;
   const session = `legion-${project}`;
@@ -116,7 +125,7 @@ export function createTmuxTestServer(label: string): TmuxTestServer {
     socket: session,
     argv,
     teardown: async () => {
-      await run(argv("kill-server"));
+      await run(argv("kill-session", "-t", session));
       watchdog.kill();
     },
   };

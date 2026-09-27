@@ -94,19 +94,20 @@ func randomHex(t *testing.T, n int) string {
 // otherwise keep the server alive forever. setsid is not asked to --fork: a process os/exec starts
 // is never its own process-group leader, so setsid calls setsid() in place rather than forking,
 // and the returned Cmd's pid is the actual watchdog loop, now in a session and process group of
-// its own that a SIGKILL to this test binary's own process group cannot reach. The loop polls this
-// process's own liveness and the server's, exiting the moment either says there is nothing left to
-// watch; newRig's Cleanup kills it outright once its own kill-server returns, so the watchdog
+// its own that a SIGKILL to this test binary's own process group cannot reach. The loop polls only
+// this process's own liveness -- there is no server yet to check at arm time (newRig calls this
+// before the rig's first tmux command), so a session-existence check here would exit the watchdog
+// within milliseconds of arming, before the test ever creates one, guarding nothing; kill-server is
+// idempotent (tmux reports an already-exited or never-created server without creating one), so
+// running it unconditionally once this process dies is safe whether or not a server ever existed.
+// newRig's Cleanup kills the watchdog outright once its own kill-server returns, so the watchdog
 // never outlives both the test and the server it guards.
 func armOrphanWatchdog(t *testing.T, session string, env []string) *exec.Cmd {
 	t.Helper()
 	script := fmt.Sprintf(
-		"while kill -0 %d 2>/dev/null; do\n"+
-			"  tmux -L %s has-session -t %s 2>/dev/null || exit 0\n"+
-			"  sleep 3\n"+
-			"done\n"+
+		"while kill -0 %d 2>/dev/null; do sleep 3; done\n"+
 			"tmux -L %s kill-server 2>/dev/null",
-		os.Getpid(), session, session, session,
+		os.Getpid(), session,
 	)
 	cmd := exec.Command("setsid", "sh", "-c", script)
 	cmd.Env = env
