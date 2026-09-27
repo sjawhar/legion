@@ -691,3 +691,57 @@ func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testin
 		})
 	}
 }
+
+// A private repository whose plan has no rulesets answers the rulesets read 403, "make this
+// repository public to enable this feature" (docs/solutions/legion/controller-gate-2-required-checks-live-reads.md).
+// It can define no ruleset, so none requires a check there, and READY rests on the branch's
+// protection alone: posted when that requires nothing, refused when it requires a check the head
+// lacks.
+func TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets(t *testing.T) {
+	for _, tc := range []struct {
+		name, branch string
+		posted       bool
+	}{
+		{"and no branch protection", `{"name":"main","protected":false}`, true},
+		{"and branch protection requiring a check the head lacks", `{"name":"main","protected":true,"protection":{"required_status_checks":{"contexts":["legacy"]}}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := "/repos/acme/widgets"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case repo + "/pulls/42":
+					_, _ = w.Write([]byte(`{"head":{"sha":"c0de0000000000000000000000000000000000ff"},"base":{"ref":"main"}}`))
+				case repo + "/rules/branches/main":
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"message":"Upgrade to GitHub Pro or make this repository public to enable this feature.","status":"403"}`))
+				case repo + "/branches/main":
+					_, _ = w.Write([]byte(tc.branch))
+				case repo + "/commits/c0de0000000000000000000000000000000000ff/check-runs":
+					_, _ = w.Write([]byte(`{"total_count":0,"check_runs":[]}`))
+				case repo + "/commits/c0de0000000000000000000000000000000000ff/status":
+					_, _ = w.Write([]byte(`{"statuses":[]}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			workspace := t.TempDir()
+			t.Setenv("LEGION_ROLE", "merger")
+			t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+			bodies := handoffDaemon(t, phase.Merging)
+			t.Setenv("LEGION_GITHUB_API_URL", server.URL)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb)
+			if tc.posted {
+				if code != 0 || len(*bodies) != 1 {
+					t.Fatalf("READY = %d, daemon read %v, stderr %q; want it posted", code, *bodies, errb.String())
+				}
+				return
+			}
+			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), `has no result for the required check "legacy"`) {
+				t.Fatalf("READY = %d, daemon read %v, stderr %q; want a refusal naming the protected branch's check", code, *bodies, errb.String())
+			}
+		})
+	}
+}

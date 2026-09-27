@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -101,7 +102,8 @@ func workspaceRepository(workspace string) (ghrepo.Repository, error) {
 }
 
 // requiredChecks is every check name base requires: the required status checks of the rulesets
-// that apply to it, and of its branch protection.
+// that apply to it, and of its branch protection. A repository whose plan has no rulesets has none
+// of the first (rulesetsUnavailable).
 func requiredChecks(ctx context.Context, github githubREST, base string) ([]string, error) {
 	// A branch name's slashes stay path segments, as GitHub's branch routes take them.
 	branch := strings.ReplaceAll(url.PathEscape(base), "%2F", "/")
@@ -113,7 +115,7 @@ func requiredChecks(ctx context.Context, github githubREST, base string) ([]stri
 			} `json:"required_status_checks"`
 		} `json:"parameters"`
 	}
-	if err := github.get(ctx, "/rules/branches/"+branch, &rules); err != nil {
+	if err := github.get(ctx, "/rules/branches/"+branch, &rules); err != nil && !rulesetsUnavailable(err) {
 		return nil, err
 	}
 	var protected struct {
@@ -221,7 +223,27 @@ func (g githubREST) get(ctx context.Context, path string, into any) error {
 		return err
 	}
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("GitHub answered GET %s with %d: %s", path, response.StatusCode, strings.TrimSpace(string(body)))
+		return githubAnswer{path: path, status: response.StatusCode, body: strings.TrimSpace(string(body))}
 	}
 	return json.Unmarshal(body, into)
+}
+
+// githubAnswer is a GitHub REST answer other than 200.
+type githubAnswer struct {
+	path   string
+	status int
+	body   string
+}
+
+func (a githubAnswer) Error() string {
+	return fmt.Sprintf("GitHub answered GET %s with %d: %s", a.path, a.status, a.body)
+}
+
+// rulesetsUnavailable is GitHub's answer to the rulesets read of a private repository whose plan
+// has no rulesets: 403, its message ending "make this repository public to enable this feature"
+// (docs/solutions/legion/controller-gate-2-required-checks-live-reads.md, observed on
+// sjawhar/legion-smoke). Such a repository can define no ruleset, so no ruleset requires a check.
+func rulesetsUnavailable(err error) bool {
+	var answer githubAnswer
+	return errors.As(err, &answer) && answer.status == http.StatusForbidden && strings.Contains(answer.body, "make this repository public to enable this feature")
 }
