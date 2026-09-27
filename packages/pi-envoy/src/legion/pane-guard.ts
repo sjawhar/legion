@@ -101,6 +101,8 @@ interface State {
   readonly script: string | undefined;
   /** The `$0` a `bash -c` invocation supplies; a script otherwise names itself. */
   argv0: Expansion | undefined;
+  /** The known output of a function's final `echo`, when a substitution consumes it. */
+  output: Expansion | undefined;
   /** Functions available in this shell, with their definition source for diagnostic locations. */
   functions: Map<string, FunctionDefinition>;
   /** EXIT handlers run when this shell finishes, after its last assignment. */
@@ -408,6 +410,16 @@ function parameterExpansion(
   if (name === "BASH_SOURCE" && part.index === "0" && st.script !== undefined) {
     return [[literal(st.script)]];
   }
+  const indexed = lookup(name, st, ctx);
+  if (
+    part.index !== undefined &&
+    indexed !== undefined &&
+    indexed.length > 0 &&
+    indexed.every((piece) => piece.descendantPid)
+  ) {
+    return [[...indexed]];
+  }
+  if (part.index === "@" || part.index === "*") return parameter(name, quoted, st, ctx);
   if (part.length || part.indirect || part.slice || part.replace || part.index !== undefined) {
     return [[unknown(`\`${part.text}\``)]];
   }
@@ -452,6 +464,11 @@ function substitution(
 ): Piece[] {
   const only = script?.commands.length === 1 ? script.commands[0]?.command : undefined;
   const invocation = substitutionInvocation(only, st, ctx);
+  const definition = invocation === undefined ? undefined : st.functions.get(invocation.base);
+  if (definition !== undefined && invocation !== undefined) {
+    const output = functionOutput(invocation.base, definition, invocation.rest, st, ctx);
+    if (output !== undefined) return [...output];
+  }
   if (invocation !== undefined) {
     if (invocation.base === "pwd" && invocation.rest.length === 0 && st.cwd !== undefined) {
       return [literal(st.cwd)];
@@ -874,7 +891,18 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         }
       } else {
         const body = clone(st);
-        body.vars.set(name, [unknown(`\`$${name}\`, a loop variable`)]);
+        const signalSafe = words.every((word) => {
+          const text = literalText(word.exp);
+          return (
+            text === "" || (word.exp.length > 0 && word.exp.every((piece) => piece.descendantPid))
+          );
+        });
+        body.vars.set(
+          name,
+          signalSafe
+            ? [unknown(`\`$${name}\`, a loop variable`, true)]
+            : [unknown(`\`$${name}\`, a loop variable`)]
+        );
         walkList(node.body.commands, body, ctx);
         branches.push(body);
       }
@@ -1017,12 +1045,20 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
     visitParts(assignment.indexParts, st, ctx);
     for (const word of assignment.array ?? []) visitWord(word, st, ctx);
     if (assignment.name === undefined) continue;
+    const expanded =
+      assignment.value === undefined
+        ? [literal("")]
+        : (expandWord(assignment.value, st, ctx)[0] ?? []);
+    const descendantPid = expanded.length > 0 && expanded.every((piece) => piece.descendantPid);
     const value =
       assignment.array !== undefined || assignment.append || assignment.index !== undefined
-        ? [unknown(`\`$${assignment.name}\`, an array or appended value`)]
-        : assignment.value === undefined
-          ? [literal("")]
-          : (expandWord(assignment.value, st, ctx)[0] ?? []);
+        ? [
+            unknown(
+              `\`$${assignment.name}\`, an array or appended value`,
+              descendantPid || undefined
+            ),
+          ]
+        : expanded;
     overlay.set(assignment.name, value);
     // `a=1 b=$a` alone assigns left to right in this shell.
     if (command.name === undefined) st.vars.set(assignment.name, value);
@@ -1206,6 +1242,25 @@ function runFunction(
   outer.backgroundStarted ||= child.backgroundStarted;
 }
 
+function functionOutput(
+  name: string,
+  definition: FunctionDefinition,
+  args: readonly Arg[],
+  outer: State,
+  ctx: Ctx
+): Expansion | undefined {
+  if (outer.runningFunctions.has(name)) return undefined;
+  const child: State = {
+    ...clone(outer),
+    positional: args.map((arg) => arg.exp),
+    source: definition.source,
+    output: undefined,
+  };
+  child.runningFunctions.add(name);
+  walkNode(definition.body, child, ctx, false);
+  return child.output;
+}
+
 function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
   const unwrapped = unwrap(invocation.args, outer, ctx, invocation.site);
   const argv = unwrapped.argv;
@@ -1223,6 +1278,9 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     return;
   }
   switch (base) {
+    case "echo":
+      outer.output = rest.length === 1 ? rest[0]?.exp : undefined;
+      return;
     case "cd":
     case "pushd": {
       const target = operands(rest, "").operands[0];
@@ -1277,8 +1335,13 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     case "printf": {
       const at = rest.findIndex((arg) => literalText(arg.exp) === "-v");
       const variable = at === -1 ? undefined : literalText(rest[at + 1]?.exp);
-      if (variable !== undefined)
+      if (variable !== undefined) {
         outer.vars.set(variable, [unknown(`\`$${variable}\` (printf -v)`)]);
+        return;
+      }
+      if (literalText(rest[0]?.exp) === "%s\\n" && rest.length === 2) {
+        outer.output = rest[1]?.exp;
+      }
       return;
     }
     case "eval": {
@@ -1292,7 +1355,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     case "trap": {
-      const text = literalText(rest[0]?.exp);
+      const text = literalText(operands(rest, "").operands[0]?.exp);
       if (text === "-") {
         outer.traps = [];
       } else if (text !== undefined && !text.startsWith("-")) {
@@ -1634,6 +1697,7 @@ function checkKill(list: readonly Arg[], ctx: Ctx, site: Site): void {
   if (signal === "0") return;
   for (const arg of list.slice(i)) {
     const text = literalText(arg.exp);
+    if (text === "") continue;
     if (arg.exp.some((p) => p.lenient)) continue;
     if (arg.exp.length > 0 && arg.exp.every((piece) => piece.descendantPid)) continue;
     if (text?.startsWith("%")) continue;
@@ -1710,6 +1774,7 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
     source: "",
     script: undefined,
     argv0: undefined,
+    output: undefined,
     functions: new Map(),
     traps: [],
     runningFunctions: new Set(),
@@ -2177,6 +2242,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     runningFunctions: new Set(),
     script: undefined,
     argv0: undefined,
+    output: undefined,
     functions: new Map(),
     traps: [],
   });

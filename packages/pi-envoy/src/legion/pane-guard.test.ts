@@ -21,6 +21,27 @@ const repository = path.resolve(import.meta.dir, "../../../..");
 let repositoryGuard: PaneGuard;
 let repositoryEnv: NodeJS.ProcessEnv;
 
+const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
+  ".github/scripts/release-push.sh": "a positional parameter",
+  "packages/claude-envoy/scripts/smoke-channel.sh": "tmux kill-session",
+  "packages/dispatch/e2e/acceptance/omp-roundtrip.sh": "tmux kill-session",
+  "packages/envoy/deploy/scripts/autodeploy.sh": "dispatch-backups",
+  "packages/envoy/deploy/scripts/autodeploy_test.sh": "dumps[i]",
+  "packages/envoy/scripts/dev-broker.test.sh": "$instance_pid",
+  "packages/envoy/scripts/e2e-api.sh": "$(<",
+  "packages/envoy/scripts/verify-cluster.sh": "cannot parse",
+  "packages/pi-envoy/scripts/grant-rig/setup.sh": "profiles/l12rig",
+  "packages/pi-envoy/scripts/smoke-btw.sh": "tmux kill-session",
+  "packages/pi-envoy/scripts/smoke-delivery.sh": "tmux kill-session",
+  "scripts/e2e/controller-start-tmux.sh": "tmux kill-server",
+  "scripts/e2e/lib/check-model-route.sh": "$control",
+  "scripts/e2e/lib/install-model-gateway.sh": "realpath -m",
+  "scripts/e2e/stage2-tmux-supervision.sh": "realpath -m",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "tmux kill-server",
+  "scripts/e2e/stage3-devbox-workflow.sh": "tmux kill-server",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "$p",
+};
+
 beforeAll(() => {
   base = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-"));
   scratch = path.join(base, "tmp");
@@ -47,8 +68,12 @@ beforeAll(() => {
     TMPDIR: scratch,
     PATH: "/usr/bin:/bin",
   };
-  repositoryGuard = createPaneGuard({ workspace: repository, ompPid: process.pid, scratch });
-  repositoryEnv = { ...env, LEGION_WORKSPACE: repository };
+  repositoryGuard = createPaneGuard({
+    workspace: repository,
+    ompPid: process.pid,
+    scratch: "/tmp",
+  });
+  repositoryEnv = { ...env, HOME: "/home/ubuntu", LEGION_WORKSPACE: repository, TMPDIR: "/tmp" };
 });
 
 afterAll(() => {
@@ -220,17 +245,41 @@ describe("scripts a command runs", () => {
     expect(bash('f() { rm -rf "$1"; }; f "$LEGION_WORKSPACE/build"')).toBeUndefined();
   });
 
-  test("reads every tracked shell script from its repository workspace", () => {
+  test("uses a shell function's echoed path in a command substitution", () => {
+    const generated = script(
+      "function-output.sh",
+      'work="$(mktemp -d)"\nfixture() { local root="$work/$1"; mkdir -p "$root"; echo "$root"; }\nroot=$(fixture green)\nrm -rf "$root"\n'
+    );
+    expect(bash(`bash ${generated}`)).toBeUndefined();
+  });
+
+  test("uses a shell function's printf path in a command substitution", () => {
+    const generated = script(
+      "function-printf.sh",
+      'work="$(mktemp -d)"\nheader() { local file="$work/header"; : > "$file"; printf \'%s\\n\' "$file"; }\npath=$(header)\nrm -f "$path"\n'
+    );
+    expect(bash(`bash ${generated}`)).toBeUndefined();
+  });
+
+  test("checks every tracked shell script against the documented allow-list", () => {
     const listed = spawnSync("git", ["ls-files", "-z", "--", ":(glob)**/*.sh"], {
       cwd: repository,
       encoding: "utf8",
     });
     if (listed.status !== 0) throw new Error(listed.stderr);
-    const scripts = listed.stdout.split("\0").filter((file) => file !== "");
-    const unreadable = scripts
-      .map((file) => repositoryGuard.bash(`bash ${file}`, repository, repositoryEnv))
-      .filter((reason) => reason?.includes("cannot resolve the script"));
-    expect(unreadable).toEqual([]);
+    const refusals = Object.fromEntries(
+      listed.stdout
+        .split("\0")
+        .filter((file) => file !== "")
+        .flatMap((file) => {
+          const reason = repositoryGuard.bash(`bash ${file}`, repository, repositoryEnv);
+          return reason === undefined ? [] : [[file, reason]];
+        })
+    );
+    expect(Object.keys(refusals).sort()).toEqual(Object.keys(EXPECTED_SCRIPT_REFUSALS).sort());
+    for (const [file, reason] of Object.entries(EXPECTED_SCRIPT_REFUSALS)) {
+      expect(refusals[file], file).toContain(reason);
+    }
   });
 
   test("refuses the incident's shape: a probe script whose last line removes its work dir and $HOME", () => {
@@ -383,6 +432,15 @@ describe("signals", () => {
         `is not a descendant of this pane's Oh My Pi process (pid ${process.pid})`
       );
       expect(bash("kill -9 -1")).toContain("process group 1");
+      expect(
+        bash(`ids=(); sleep 60 & ids[0]=$!; for pid in "\${ids[@]}"; do kill "$pid"; done`)
+      ).toBeUndefined();
+      expect(
+        bash(
+          `declare -a ids=(); sleep 60 & ids[0]=$!; for pid in "\${ids[@]}"; do kill "$pid"; done`
+        )
+      ).toBeUndefined();
+      expect(bash(`sleep 60 & ids[0]=$!; n=0; kill "\${ids[$n]}"`)).toBeUndefined();
       expect(bash("kill $$")).toContain("this pane's own Oh My Pi process");
       expect(bash("pkill -x sleep")).toContain("by name or pattern");
       expect(bash("killall sleep")).toContain("by name or pattern");
@@ -392,6 +450,15 @@ describe("signals", () => {
       expect(bash(`echo ${process.ppid} | xargs kill`)).toContain("standard input");
       // Allowed without a pid lookup: a job, the shell's own last background job, a probe.
       expect(bash("sleep 60 & kill $!")).toBeUndefined();
+      expect(bash('pid=""; kill "$pid"')).toBeUndefined();
+      expect(
+        bash(
+          'sleep 60 & first=$!; sleep 60 & second=$!; for pid in "$first" "$second"; do kill "$pid"; done'
+        )
+      ).toBeUndefined();
+      expect(
+        bash('empty=""; sleep 60 & child=$!; for pid in "$empty" "$child"; do kill "$pid"; done')
+      ).toBeUndefined();
       expect(bash("kill %1")).toBeUndefined();
       expect(bash("kill -0 1")).toBeUndefined();
       expect(bash("kill -l")).toBeUndefined();
@@ -405,6 +472,10 @@ describe("signals", () => {
       child.kill();
       await child.exited;
     }
+  });
+
+  test("follows a trap handler after `--`", () => {
+    expect(bash("trap -- 'rm -rf ~' EXIT")).toContain(home);
   });
 
   test("walks /proc ancestry past intermediate processes", () => {
