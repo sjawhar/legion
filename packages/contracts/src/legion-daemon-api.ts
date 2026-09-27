@@ -48,6 +48,8 @@ import { LEGION_ROLES } from "./legion-roles";
  * external:true, sessionId, registeredAt}`) and `POST /legion/v1/controller/secret`. A
  * contract-5 plugin's strict state parse fails on the external record the moment an operator's
  * controller registers. 7 — `/gh-token` no longer accepts merge intent: Legion never merges.
+ * 8 — `pluginVersion` on `/process/started`, `/worker/started`, and `/controller/ready`, and a
+ * tree's or role's `workspaceLost` record on the state response (#1167).
  * 9 — LEGION-279: `NATS_NKEY_SEED_FILE` on every pane and pod when the daemon has the
  * `legion-pane` NATS nkey seed (`nats_nkey_seed_file`); the plugin's bundled
  * `@legion/envoy-client/nats-auth` connects both its NATS connections as that user. A contract-8
