@@ -89,13 +89,17 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 	}
 	if stored == nil {
 		a.mu.Lock()
-		_, held := a.pending[observation.Key]
+		summary, held := a.pending[observation.Key]
 		a.mu.Unlock()
-		if held {
+		if held && observation.Seq <= summary.LastSeq {
 			// Reconcile already holds this key on the listing's own summary because it found it
 			// behind the stream: an unrecorded key has no record to fence a live event against, so
-			// nothing reaching it here — a stale replay of whatever put it behind, or any other
-			// event — decides anything. release applies that summary once the consumer catches up.
+			// a replay at or behind that summary's own sequence — a nak's redelivery, the outbox's
+			// own publish backoff — decides nothing. release applies that summary once the
+			// consumer catches up. A newer event, past the sequence the summary was taken at, is
+			// not a stale replay: it is recorded normally below, and promote's own pending
+			// membership check — not this one — is what still holds the candidate back from a
+			// slot until release.
 			return intake.Result{}, nil
 		}
 		handed := observation.HandedOver
@@ -166,7 +170,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		}
 		behind := stored == nil && summary.LastSeq > 0 || stored != nil && summary.LastSeq > stored.LastDispatchSeq
 		if behind && !caughtUp {
-			a.log.Info("admission reconcile: the stream may still hold or redeliver an event for this issue; holding it for the consumer to catch up",
+			a.log.Debug("admission reconcile: the stream may still hold or redeliver an event for this issue; holding it for the consumer to catch up",
 				"issue", summary.Key, "status", summary.Status, "dispatch", summary.LastSeq)
 			deferred[summary.Key] = summary
 			continue

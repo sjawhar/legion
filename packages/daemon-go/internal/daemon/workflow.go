@@ -253,8 +253,15 @@ func (w *workflowRuntime) recordedIssue(ctx context.Context, key string) (*recor
 // the Dispatch consumer's own: a message published between the listing and target would land in
 // the listing but go uncounted by target, and reading the consumer's position last catches it up
 // as far as this call can before deciding what a record behind target must still wait for.
+//
+// The listing reads every status, not only the workflow's own (todo through retro): Dispatch
+// already returns its complete project list in one call (HTTPClient.ListIssues filters it
+// client-side, at no extra request cost), and a key currently out of that window — moved to
+// backlog, or never past triage — while the daemon was down still needs to be held exactly like
+// one still in it, so a replayed event that predates the move it fell out on cannot be admitted
+// before the move's own event ever arrives.
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
-	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, []string{"todo", "in_progress", "testing", "needs_review", "retro"})
+	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, nil)
 	if err != nil {
 		return fmt.Errorf("list Dispatch issues for admission: %w", err)
 	}
@@ -378,8 +385,11 @@ type positionReader interface {
 // immediately after a delivery's own ack can still see the previous one. This ticker is what
 // eventually observes the ack once JetStream has applied it, bounded by its own period, and what
 // closes a hold nothing will ever redeliver — the recreated-consumer and outbox-lag cases alike.
-// A failed read is logged and retried on the next tick; the hold never ends on the strength of an
-// error. The event id folds in the project and this boot (bootID): processed_events is one table
+// A failed read or a failed apply is logged and retried on the next tick — last only adopts a
+// position once ApplyFact for it has actually committed, so an unchanged reading after either
+// kind of failure is retried rather than skipped as already seen; the hold never ends on the
+// strength of an error.
+// The event id folds in the project and this boot (bootID): processed_events is one table
 // shared by every project's daemon, and a stream a later boot recreates would otherwise repeat an
 // earlier boot's (ack floor, idle) pairs and have its own release swallowed as a duplicate of one
 // that ran under the old boot.
@@ -414,11 +424,12 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 		if haveLast && position == last {
 			continue
 		}
-		last, haveLast = position, true
 		eventID := fmt.Sprintf("dispatch-position:%s:%s:%d:%t", w.dispatchProject, w.bootID, position.AckFloorStream, position.Idle)
 		if _, err := intake.ApplyFact(ctx, w.pool, "dispatch", eventID, position, w.handlers...); err != nil {
 			w.log.Warn("apply Dispatch consumer position failed", "error", err)
+			continue
 		}
+		last, haveLast = position, true
 	}
 }
 

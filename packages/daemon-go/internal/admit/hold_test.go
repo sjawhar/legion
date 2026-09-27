@@ -284,6 +284,39 @@ func TestReconcileHoldsAnUnrecordedKeyBehindTheStreamWhateverItsListedStatus(t *
 	assertSlots(t, pool, nil)
 }
 
+// P2, thread 4114574427: while a key is held, Apply dropped every event for it, including ones
+// newer than the summary it is held on — so an owner labeling the root after boot could never
+// reach the record, and the stale unlabeled listing snapshot applied at release was the last word
+// forever. Only a replay at or behind the held summary's own sequence is stale; a newer event is
+// recorded normally — promote still holds the candidate back until release, and applySummary
+// leaves a record already past its summary alone.
+func TestALabelAddedWhileAKeyIsHeldReachesTheRecordAndIsAdmittedAfterRelease(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-8", Title: "LEGION-8", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
+	}, 10, 0, false)
+	if !admission.Held() {
+		t.Fatal("Held() = false after seeding an unlabeled behind record, want it held")
+	}
+
+	// The label-adding event, newer than the held summary, arrives while LEGION-8 is still held.
+	apply(t, pool, admission, "label-added", intake.DispatchIssue{Key: "LEGION-8", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-8", Rank: "A", HandedOver: true}, engineStub{})
+	if got := issue(t, pool, "LEGION-8"); !got.HandedOver || got.Status != "todo" {
+		t.Fatalf("LEGION-8 while held = %#v, want the newer label-adding event recorded (todo, handed over)", got)
+	}
+	assertSlots(t, pool, nil)
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "position-reached", intake.DispatchConsumerPosition{AckFloorStream: 10}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact position-reached: %v", err)
+	}
+	if got := issue(t, pool, "LEGION-8"); !got.HandedOver || got.Status != "in_progress" {
+		t.Fatalf("released LEGION-8 = %#v, want admitted (the newer label-adding event, not the stale unlabeled listing)", got)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-8", Index: 0, AdmittedAt: fixedNow}})
+}
+
 // A release whose own promote fails after it decided the consumer had caught up must leave the
 // hold intact: clearing pending before this call's transaction actually commits would say the hold
 // is resolved when nothing of it is durable, so a later, unrelated call would trust a release that
