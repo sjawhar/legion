@@ -26,6 +26,11 @@ type typedDirective struct {
 	// fence is the number of colons the directive opened with; only a line of at least as many
 	// closes it, so a typed block written with a longer fence holds one written with a shorter.
 	fence int
+	// indent is how many columns past its container's lines the opening line's text starts. The
+	// browser editor's parser takes up to that many columns of indentation off each of the typed
+	// block's lines, as off a fenced code block's, so a typed block nested inside it, and every
+	// other block, is read from there.
+	indent int
 }
 
 func (n *typedDirective) Dump(source []byte, level int) {
@@ -66,7 +71,7 @@ func (p *typedDirectiveParser) Open(_ ast.Node, reader gmtext.Reader, pc parser.
 		return nil, parser.NoChildren
 	}
 	reader.AdvanceToEOL()
-	return &typedDirective{Name: name, Attrs: attrs, fence: colonRun(line[offset:])}, parser.HasChildren
+	return &typedDirective{Name: name, Attrs: attrs, fence: colonRun(line[offset:]), indent: indent}, parser.HasChildren
 }
 
 func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ parser.Context) parser.State {
@@ -84,6 +89,10 @@ func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ p
 		directive.closer = segment.Start
 		reader.AdvanceToEOL()
 		return parser.Close
+	}
+	if strip := min(indent, directive.indent); strip > 0 && offset < len(line) {
+		pos, padding := util.IndentPosition(line, reader.LineOffset(), strip)
+		reader.AdvanceAndSetPadding(pos, padding)
 	}
 	return parser.Continue | parser.HasChildren
 }

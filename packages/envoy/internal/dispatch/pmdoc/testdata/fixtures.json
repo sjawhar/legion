@@ -1883,7 +1883,7 @@
   },
   {
     "name": "callout-nested",
-    "markdown": "::::callout{#callout-nested-1 kind=\"note\" title=\"Outer\"}\nOuter text.\n\n:::callout{#callout-nested-2 kind=\"warning\" title=\"Inner\"}\nInner text.\n:::\n::::\n\n::::callout{#callout-nested-3 kind=\"note\" title=\"Code\"}\n```text\na\n:::\nb\n```\n::::\n\nAfter.\n",
+    "markdown": "::::callout{#callout-nested-1 kind=\"note\" title=\"Outer\"}\nOuter text.\n\n:::callout{#callout-nested-2 kind=\"warning\" title=\"Inner\"}\nInner text.\n:::\n::::\n\n::::callout{#callout-nested-3 kind=\"note\" title=\"Code\"}\n```text\na\n:::\nb\n```\n::::\n\nAfter.\n\nA callout whose opening line is indented, holding code:\n\n  ::::callout{#ind kind=\"note\" title=\"T\"}\n      b\n  ::::\n\nAnd one holding a callout its closing line, indented past the outer opener's column, closes:\n\n  ::::callout{#ino kind=\"note\" title=\"T\"}\n  :::callout{#inn kind=\"note\" title=\"T\"}\n  a\n     :::\n  ::::\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -1965,11 +1965,90 @@
               "text": "After."
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A callout whose opening line is indented, holding code:"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "T",
+            "blockId": "ind"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000006"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "b"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "And one holding a callout its closing line, indented past the outer opener's column, closes:"
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "T",
+            "blockId": "ino"
+          },
+          "content": [
+            {
+              "type": "callout",
+              "attrs": {
+                "kind": "note",
+                "title": "T",
+                "blockId": "inn"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000008"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AR0BAAcBC3Byb3NlbWlycm9yAwdjYWxsb3V0BwABAAMJcGFyYWdyYXBoBwABAQYEAAECC091dGVyIHRleHQuKAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDB2NhbGxvdXQHAAEPAwlwYXJhZ3JhcGgHAAEQBgQAARELSW5uZXIgdGV4dC4oAAEQB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQ8Ea2luZAF3B3dhcm5pbmcoAAEPBXRpdGxlAXcFSW5uZXIoAAEPB2Jsb2NrSWQBdxBjYWxsb3V0LW5lc3RlZC0yKAABAARraW5kAXcEbm90ZSgAAQAFdGl0bGUBdwVPdXRlcigAAQAHYmxvY2tJZAF3EGNhbGxvdXQtbmVzdGVkLTGHAQADB2NhbGxvdXQHAAEkAwpjb2RlX2Jsb2NrBwABJQYEAAEmB2EKOjo6CmIoAAElCGxhbmd1YWdlAXcEdGV4dCgAASUHYmxvY2tJZAF3CGItMDAwMDAzKAABJARraW5kAXcEbm90ZSgAASQFdGl0bGUBdwRDb2RlKAABJAdibG9ja0lkAXcQY2FsbG91dC1uZXN0ZWQtM4cBJAMJcGFyYWdyYXBoBwABMwYEAAE0BkFmdGVyLigAATMHYmxvY2tJZAF3CGItMDAwMDA0AA==",
-    "rendered_by_milkdown": "::::callout{#callout-nested-1 kind=\"note\" title=\"Outer\"}\nOuter text.\n\n:::callout{#callout-nested-2 kind=\"warning\" title=\"Inner\"}\nInner text.\n:::\n::::\n\n:::callout{#callout-nested-3 kind=\"note\" title=\"Code\"}\n```text\na\n:::\nb\n```\n:::\n\nAfter.\n"
+    "yjs_update_v1_b64": "ATkBAAcBC3Byb3NlbWlycm9yAwdjYWxsb3V0BwABAAMJcGFyYWdyYXBoBwABAQYEAAECC091dGVyIHRleHQuKAABAQdibG9ja0lkAXcIYi0wMDAwMDGHAQEDB2NhbGxvdXQHAAEPAwlwYXJhZ3JhcGgHAAEQBgQAARELSW5uZXIgdGV4dC4oAAEQB2Jsb2NrSWQBdwhiLTAwMDAwMigAAQ8Ea2luZAF3B3dhcm5pbmcoAAEPBXRpdGxlAXcFSW5uZXIoAAEPB2Jsb2NrSWQBdxBjYWxsb3V0LW5lc3RlZC0yKAABAARraW5kAXcEbm90ZSgAAQAFdGl0bGUBdwVPdXRlcigAAQAHYmxvY2tJZAF3EGNhbGxvdXQtbmVzdGVkLTGHAQADB2NhbGxvdXQHAAEkAwpjb2RlX2Jsb2NrBwABJQYEAAEmB2EKOjo6CmIoAAElCGxhbmd1YWdlAXcEdGV4dCgAASUHYmxvY2tJZAF3CGItMDAwMDAzKAABJARraW5kAXcEbm90ZSgAASQFdGl0bGUBdwRDb2RlKAABJAdibG9ja0lkAXcQY2FsbG91dC1uZXN0ZWQtM4cBJAMJcGFyYWdyYXBoBwABMwYEAAE0BkFmdGVyLigAATMHYmxvY2tJZAF3CGItMDAwMDA0hwEzAwlwYXJhZ3JhcGgHAAE8BgQAAT03QSBjYWxsb3V0IHdob3NlIG9wZW5pbmcgbGluZSBpcyBpbmRlbnRlZCwgaG9sZGluZyBjb2RlOigAATwHYmxvY2tJZAF3CGItMDAwMDA1hwE8AwdjYWxsb3V0BwABdgMKY29kZV9ibG9jawcAAXcGBAABeAFiKAABdwdibG9ja0lkAXcIYi0wMDAwMDYoAAF2BGtpbmQBdwRub3RlKAABdgV0aXRsZQF3AVQoAAF2B2Jsb2NrSWQBdwNpbmSHAXYDCXBhcmFncmFwaAcAAX4GBAABf1xBbmQgb25lIGhvbGRpbmcgYSBjYWxsb3V0IGl0cyBjbG9zaW5nIGxpbmUsIGluZGVudGVkIHBhc3QgdGhlIG91dGVyIG9wZW5lcidzIGNvbHVtbiwgY2xvc2VzOigAAX4HYmxvY2tJZAF3CGItMDAwMDA3hwF+AwdjYWxsb3V0BwAB3QEDB2NhbGxvdXQHAAHeAQMJcGFyYWdyYXBoBwAB3wEGBAAB4AEBYSgAAd8BB2Jsb2NrSWQBdwhiLTAwMDAwOCgAAd4BBGtpbmQBdwRub3RlKAAB3gEFdGl0bGUBdwFUKAAB3gEHYmxvY2tJZAF3A2lubigAAd0BBGtpbmQBdwRub3RlKAAB3QEFdGl0bGUBdwFUKAAB3QEHYmxvY2tJZAF3A2lubwA=",
+    "rendered_by_milkdown": "::::callout{#callout-nested-1 kind=\"note\" title=\"Outer\"}\nOuter text.\n\n:::callout{#callout-nested-2 kind=\"warning\" title=\"Inner\"}\nInner text.\n:::\n::::\n\n:::callout{#callout-nested-3 kind=\"note\" title=\"Code\"}\n```text\na\n:::\nb\n```\n:::\n\nAfter.\n\nA callout whose opening line is indented, holding code:\n\n:::callout{#ind kind=\"note\" title=\"T\"}\n```\nb\n```\n:::\n\nAnd one holding a callout its closing line, indented past the outer opener's column, closes:\n\n::::callout{#ino kind=\"note\" title=\"T\"}\n:::callout{#inn kind=\"note\" title=\"T\"}\na\n:::\n::::\n"
   },
   {
     "name": "callout",
