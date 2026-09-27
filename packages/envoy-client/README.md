@@ -80,7 +80,10 @@ from those specifications and do not add aliases or host-specific descriptions.
 session actor: `status` (a Legion lifecycle status), `title`, `labels` (replacing the set),
 `priority` (`0` for P0 down to `3` for P3, or `null` to clear it), `route`,
 and `external_links`, which it merges into the issue's existing links by URL rather than replacing
-them; `rank`, the board's own order, is not exposed. The result is one line —
+them; `rank`, the board's own order, is not exposed. Closing an issue (`status: "done"`)
+requires `reason`, which it posts as an issue message before the PATCH, since a closed issue
+refuses messages; a failed post sends no PATCH, and a PATCH that fails after the post names the
+posted message. The result is one line —
 `KEY: status a -> b; priority -> P1; linked <url> (N links)`, with `priority cleared` on a clear
-— and a server refusal keeps its `code` (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`)
-at the head of the thrown message.
+and `reason posted as message <id> (<ref>)` ahead of a close — and a server refusal keeps its
+`code` (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`) at the head of the thrown message.

@@ -14147,11 +14147,16 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_issue_update",
-    example: { issue: "DSP-1", status: "in_progress" },
-    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, or attach it to architecture components. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. external_links are " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link. components replaces the issue's own attachment. A closed issue " + "takes only rank, components, and a reopening status (any status but done); everything " + "else, priority included, waits for the reopen. " + "priority is yours to set and a human overrides it; rank, the board's own order, is not " + "settable here. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
+    example: {
+      issue: "DSP-1",
+      status: "done",
+      reason: "Shipped in owner/repo#7; verified on the production dashboard."
+    },
+    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, or attach it to architecture components. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. external_links are " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link. components replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. A closed issue takes only rank, components, " + "and a reopening status (any status but done); everything else, priority included, waits " + "for the reopen. " + "priority is yours to set and a human overrides it; rank, the board's own order, is not " + "settable here. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       status: z2.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
+      reason: z2.string({ max: 2000 }).describe("Required with status done, and only with it: why the issue is closing, at most 2,000 characters. Posted on the issue as a message before it closes.").optional(),
       title: z2.string({ min: 1 }).describe("Replacement title.").optional(),
       labels: z2.array(z2.string({ min: 1, max: 40 }), { max: 20 }).describe("Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label.").optional(),
       priority: z2.number({ int: true, min: 0, max: 3 }).nullable().optional().describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
@@ -14163,9 +14168,10 @@ var dispatchToolSpecs = [
     validation: {
       check: (value) => {
         const input = value;
-        return typeof input.status === "string" || typeof input.title === "string" || Array.isArray(input.labels) || typeof input.priority === "number" || input.priority === null || Array.isArray(input.external_links) || typeof input.route === "string" || typeof input.parent === "string" || typeof input.components === "object" && input.components !== null;
+        const reasonFits = input.status === "done" ? typeof input.reason === "string" && input.reason.trim() !== "" : input.reason === undefined;
+        return reasonFits && (typeof input.status === "string" || typeof input.title === "string" || Array.isArray(input.labels) || typeof input.priority === "number" || input.priority === null || Array.isArray(input.external_links) || typeof input.route === "string" || typeof input.parent === "string" || typeof input.components === "object" && input.components !== null);
       },
-      message: "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components."
+      message: "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components. " + "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done."
     },
     strict: true
   },
@@ -16557,6 +16563,7 @@ async function executeDispatchTool(input) {
     case "dispatch_issue_update": {
       const issueKey = issue2();
       const status = optionalString(args, "status");
+      const reason = optionalString(args, "reason");
       const title = optionalString(args, "title");
       const route = optionalString(args, "route");
       const parent = optionalString(args, "parent");
@@ -16564,12 +16571,29 @@ async function executeDispatchTool(input) {
       const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? args.labels : undefined;
       const requestedLinks = Array.isArray(args.external_links) ? [...new Set(args.external_links)] : undefined;
-      let newLinks = [];
+      let before;
       try {
-        const before = await client.getIssue(issueKey);
-        const linked = before.external_links.map((link) => link.url);
-        newLinks = requestedLinks?.filter((url2) => !linked.includes(url2)) ?? [];
-        const after = await client.updateIssue(issueKey, {
+        before = await client.getIssue(issueKey);
+      } catch (error48) {
+        throw refusalWithCode(error48);
+      }
+      let closingNote;
+      if (reason !== undefined) {
+        try {
+          const message = await client.message(issueKey, { body: reason, actor });
+          closingNote = {
+            id: message.id,
+            ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
+          };
+        } catch (error48) {
+          throw refusalWithCode(error48, "; the reason was not posted, so the close was not sent");
+        }
+      }
+      const linked = before.external_links.map((link) => link.url);
+      const newLinks = requestedLinks?.filter((url2) => !linked.includes(url2)) ?? [];
+      let after;
+      try {
+        after = await client.updateIssue(issueKey, {
           ...status === undefined ? {} : { status },
           ...title === undefined ? {} : { title },
           ...labels === undefined ? {} : { labels },
@@ -16580,39 +16604,50 @@ async function executeDispatchTool(input) {
           ...requestedLinks === undefined ? {} : { external_links: [...before.external_links, ...newLinks.map((url2) => ({ url: url2 }))] },
           actor
         });
-        const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
-        const changes = [
-          ...status === undefined ? [] : [`status ${before.status} -> ${after.status}`],
-          ...title === undefined ? [] : [`title "${after.title}"`],
-          ...labels === undefined ? [] : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`],
-          ...priority === undefined ? [] : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`],
-          ...requestedLinks === undefined ? [] : [
-            newLinks.length === 0 ? `already linked ${requestedLinks.join(", ")} ${linkCount}` : `linked ${newLinks.join(", ")} ${linkCount}`
-          ],
-          ...route === undefined ? [] : [after.route === null ? "route cleared" : `route ${after.route}`],
-          ...parent === undefined ? [] : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`],
-          ...components === undefined ? [] : [componentsChange(components, after.components)]
-        ];
-        const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
-          setsStatus: status !== undefined
-        });
-        return {
-          text: [
-            `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
-            ...adviceLines
-          ].join(`
-`),
-          details: {
-            issue: after.key,
-            status: after.status,
-            external_links: after.external_links.map((link) => link.url),
-            ...after.advice === undefined ? {} : { advice: after.advice }
-          }
-        };
       } catch (error48) {
         const taken = error48 instanceof DispatchServiceError && error48.status === 500 && newLinks.length > 0 ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
-        throw refusalWithCode(error48, taken);
+        if (closingNote === undefined)
+          throw refusalWithCode(error48, taken);
+        const refused = error48 instanceof DispatchServiceError && error48.status < 500;
+        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const landed = refused ? `${posted} but the issue did not close. Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}` : `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`;
+        if (error48 instanceof DispatchServiceError)
+          throw refusalWithCode(error48, taken + landed);
+        throw new Error(`${error48 instanceof Error ? error48.message : String(error48)}${landed}`, {
+          cause: error48
+        });
       }
+      const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
+      const changes = [
+        ...closingNote === undefined ? [] : [`reason posted as message ${closingNote.id} (${closingNote.ref})`],
+        ...status === undefined ? [] : [`status ${before.status} -> ${after.status}`],
+        ...title === undefined ? [] : [`title "${after.title}"`],
+        ...labels === undefined ? [] : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`],
+        ...priority === undefined ? [] : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`],
+        ...requestedLinks === undefined ? [] : [
+          newLinks.length === 0 ? `already linked ${requestedLinks.join(", ")} ${linkCount}` : `linked ${newLinks.join(", ")} ${linkCount}`
+        ],
+        ...route === undefined ? [] : [after.route === null ? "route cleared" : `route ${after.route}`],
+        ...parent === undefined ? [] : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`],
+        ...components === undefined ? [] : [componentsChange(components, after.components)]
+      ];
+      const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
+        setsStatus: status !== undefined
+      });
+      return {
+        text: [
+          `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
+          ...adviceLines
+        ].join(`
+`),
+        details: {
+          issue: after.key,
+          status: after.status,
+          external_links: after.external_links.map((link) => link.url),
+          ...closingNote === undefined ? {} : { message: closingNote.id },
+          ...after.advice === undefined ? {} : { advice: after.advice }
+        }
+      };
     }
     case "dispatch_claim": {
       const issueKey = issue2();
