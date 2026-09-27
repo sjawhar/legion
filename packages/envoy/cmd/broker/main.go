@@ -79,6 +79,7 @@ func main() {
 	cfg, err := config.Load(os.Getenv)
 	fatal(err)
 	fatal(refuseDevAttestationRootInProduction(*devAttestationRoot, cfg.RulesS3URI))
+	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, cfg.RulesS3URI))
 	st, err := store.Open(ctx, cfg.DatabaseURL)
 	fatal(err)
 	fatal(st.Migrate(ctx))
@@ -172,8 +173,9 @@ func main() {
 	fatal(err)
 
 	// AGENTC-833: bind now, synchronously, right after every guard that can still refuse to
-	// boot has already run (config, ruling 10, migrations, rules reconcile) — the only way any
-	// caller, dev-broker.sh included, can learn which process holds an address is the log line
+	// boot has already run (config, ruling 10, the port-0 public-URL guard, migrations, rules
+	// reconcile) — the only way any caller, dev-broker.sh included, can learn which process
+	// holds an address is the log line
 	// below, printed only once this exact Listen call has already succeeded. A shared fixed dev
 	// port used to let a losing instance's own readiness curl see a different, already-running
 	// instance's healthz answer and report "ready" pointing at the wrong broker; splitting
@@ -189,9 +191,9 @@ func main() {
 	// the real bound address before anything checks a request's audience against it. Every
 	// audience-consuming construct below (enr.Chain included) is built after this point, so none
 	// ever sees the stale placeholder. refusePortZeroPublicURLInProduction (ruling-10-style
-	// dev-vs-production gate) already refused this above if BROKER_RULES_S3_URI names a
-	// production rules source, so reaching here means it's safe to apply.
-	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, cfg.RulesS3URI))
+	// dev-vs-production gate) already refused this above, right after
+	// refuseDevAttestationRootInProduction — before st.Migrate, any S3 read, and this Listen call
+	// — so reaching here means it's safe to apply.
 	if u, urlErr := url.Parse(cfg.PublicURL); urlErr == nil && u.Port() == "0" {
 		cfg.PublicURL = "http://" + listener.Addr().String()
 	}

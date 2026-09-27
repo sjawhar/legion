@@ -113,6 +113,49 @@ func TestNonZeroPortPublicURLIsFineEvenWithRulesS3URI(t *testing.T) {
 	}
 }
 
+// TestMainRefusesPortZeroPublicURLWithRulesS3URI drives the REAL compiled binary's main(), not
+// refusePortZeroPublicURLInProduction directly, for the same reason
+// TestMainRefusesDevAttestationRootWithRulesS3URI does: a commit once moved this guard's only
+// call site to run after st.Migrate, two S3 reads, and net.Listen, so a misconfigured production
+// boot would migrate the production database and bind a socket before ever refusing. This builds
+// cmd/broker once, execs it with BROKER_PUBLIC_URL=http://127.0.0.1:0 and BROKER_RULES_S3_URI set
+// (plus an unreachable BROKER_DATABASE_URL and just enough other required BROKER_* variables for
+// config.Load to succeed — the refusal must run before store.Open, so no real Postgres or AWS
+// credential, and no successful bind, is ever needed), and asserts the process exits non-zero
+// naming the port-0 refusal on stderr and never logs "broker listening": a regression that runs
+// the guard after Listen would still refuse eventually, but only after already printing that
+// line and binding a real socket.
+func TestMainRefusesPortZeroPublicURLWithRulesS3URI(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "broker")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.1")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(binPath)
+	cmd.Env = append(os.Environ(),
+		"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
+		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
+		"BROKER_UI_ORIGIN=https://dispatch.invalid",
+		"BROKER_UI_TOKEN=test-token-0123456789abcdef0123456789abcdef",
+		"BROKER_RULES_S3_URI=s3://bucket/agent-secret-rules.yaml",
+	)
+	out, err := cmd.CombinedOutput()
+	exitErr, isExit := err.(*exec.ExitError)
+	if err == nil || !isExit || exitErr.ExitCode() == 0 {
+		t.Fatalf("broker BROKER_PUBLIC_URL=http://127.0.0.1:0 with BROKER_RULES_S3_URI set: want a nonzero exit, got err=%v output=%s", err, out)
+	}
+	const wantSubstring = `port 0 is never dialable in production`
+	if !strings.Contains(string(out), wantSubstring) {
+		t.Fatalf("broker refused to boot (exit %d) but its output didn't name the reason: %s\nwant it to contain: %s",
+			exitErr.ExitCode(), out, wantSubstring)
+	}
+	if strings.Contains(string(out), "broker listening") {
+		t.Fatalf(`broker refused to boot but still logged "broker listening" first — the guard ran after binding: %s`, out)
+	}
+}
+
 // addrLogPattern extracts the value of a slog key=value pair named addr. A bare host:port never
 // contains a space, so slog's TextHandler (which quotes only values that do) never quotes it.
 var addrLogPattern = regexp.MustCompile(`addr=(\S+)`)
