@@ -218,10 +218,15 @@ func AgreeWithReadBack(before, doc *Node, first, last int, halves bool) *Node {
 		return true
 	})
 	stale, known := staleSpreads(before)
-	settleSpreads(out, back, first, last, func(node *Node) bool {
+	spreadDifferences(out, back, first, last, func(node, read *Node) {
 		id := blockIDOf(node)
-		previous, ok := held[id]
-		return id == "" || !ok || !previous.Equal(node) || known && !stale[id]
+		if previous, ok := held[id]; id != "" && ok && previous.Equal(node) && (!known || stale[id]) {
+			return
+		}
+		if node.Attrs == nil {
+			node.Attrs = Attrs{}
+		}
+		node.Attrs["spread"] = read.Attrs["spread"]
 	})
 	return out
 }
@@ -234,22 +239,21 @@ func staleSpreads(before *Node) (map[string]bool, bool) {
 		return nil, false
 	}
 	stale := map[string]bool{}
-	settleSpreads(before, back, 0, len(before.Children)-1, func(node *Node) bool {
+	spreadDifferences(before, back, 0, len(before.Children)-1, func(node, _ *Node) {
 		stale[blockIDOf(node)] = true
-		return false
 	})
 	return stale, true
 }
 
-// settleSpreads pairs doc's document-level blocks first to last with back, doc's read-back, as
-// misreads does, and gives each list and list item under them whose spread back holds otherwise
-// that spread where take reports true.
-func settleSpreads(doc, back *Node, first, last int, take func(*Node) bool) {
+// spreadDifferences pairs doc's document-level blocks first to last with back, doc's read-back, as
+// misreads does, and calls visit with each list and list item under them and the block it pairs
+// with when the two hold different spreads.
+func spreadDifferences(doc, back *Node, first, last int, visit func(node, read *Node)) {
 	pairs, _ := pairChildren("doc", writtenChildren(StripAnchorMarks(doc)), back.Children, spreadAside)
 	writtenIndex := writtenIndexes(doc)
 	for _, pair := range pairs {
 		if index := writtenIndex[pair[0]]; index >= first && index <= last {
-			adoptSpread(doc.Children[index], back.Children[pair[1]], take)
+			blockSpreadDifferences(doc.Children[index], back.Children[pair[1]], visit)
 		}
 	}
 }
@@ -273,22 +277,19 @@ func dropUnwrittenHalves(node *Node) {
 	node.Children = kept
 }
 
-// adoptSpread gives node's lists and list items the spread their read-back holds where it differs
-// and take reports true, pairing their blocks as misreads does.
-func adoptSpread(node, back *Node, take func(*Node) bool) {
+// blockSpreadDifferences is spreadDifferences for node, which pairs with back, and the blocks it
+// holds, visiting node before them.
+func blockSpreadDifferences(node, back *Node, visit func(node, read *Node)) {
 	if node.Type != back.Type || isTextblock(node.Type) {
 		return
 	}
-	if (node.Type == "bullet_list" || node.Type == "ordered_list" || node.Type == "list_item") && node.Attrs["spread"] != back.Attrs["spread"] && take(node) {
-		if node.Attrs == nil {
-			node.Attrs = Attrs{}
-		}
-		node.Attrs["spread"] = back.Attrs["spread"]
+	if (node.Type == "bullet_list" || node.Type == "ordered_list" || node.Type == "list_item") && node.Attrs["spread"] != back.Attrs["spread"] {
+		visit(node, back)
 	}
 	written := writtenChildren(node)
 	pairs, _ := pairChildren(node.Type, written, back.Children, spreadAside)
 	for _, pair := range pairs {
-		adoptSpread(written[pair[0]], back.Children[pair[1]], take)
+		blockSpreadDifferences(written[pair[0]], back.Children[pair[1]], visit)
 	}
 }
 
