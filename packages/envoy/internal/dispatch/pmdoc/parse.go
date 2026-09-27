@@ -539,6 +539,14 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 			Children: fencedCodeText(current, source),
 		}, nil
 	case *ast.CodeBlock:
+		// An indented code block stands right after a list, outside it, only where the list's last
+		// item holds its content five or more columns in (a wide ordered marker, or tabs). The
+		// browser editor's parser keeps that list open across the code's first line, which the
+		// item does not continue, and a code line that list does not continue ends the code, so
+		// it reads every later line as a second code block.
+		if _, afterList := current.PreviousSibling().(*ast.List); afterList && current.Lines().Len() > 1 {
+			return nil, fmt.Errorf("%w: an indented code block right after a list, which the browser editor's parser splits after its first line", ErrSchema)
+		}
 		return &Node{
 			Type:     "code_block",
 			Attrs:    Attrs{"language": nil},

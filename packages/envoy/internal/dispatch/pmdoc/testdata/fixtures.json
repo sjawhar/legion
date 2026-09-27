@@ -2492,7 +2492,7 @@
   },
   {
     "name": "code",
-    "markdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n    indent\n",
+    "markdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n    indent\n\nText.\n\n100. An item holding its content five columns in.\n\n    one line of code after it\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -2534,11 +2534,70 @@
               "text": "indent"
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 100,
+            "spread": false,
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000006"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "An item holding its content five columns in."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "one line of code after it"
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AQ0BAAcBC3Byb3NlbWlycm9yAwpjb2RlX2Jsb2NrBwABAAYEAAEBEWZtdC5QcmludGxuKCJoaSIpKAABAAhsYW5ndWFnZQF3AmdvKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmNvZGVfYmxvY2sHAAEVBgQAARYFcGxhaW4oAAEVB2Jsb2NrSWQBdwhiLTAwMDAwMocBFQMKY29kZV9ibG9jawcAAR0GBAABHgZpbmRlbnQoAAEdB2Jsb2NrSWQBdwhiLTAwMDAwMwA=",
-    "rendered_by_milkdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n```\nindent\n```\n"
+    "yjs_update_v1_b64": "ASIBAAcBC3Byb3NlbWlycm9yAwpjb2RlX2Jsb2NrBwABAAYEAAEBEWZtdC5QcmludGxuKCJoaSIpKAABAAhsYW5ndWFnZQF3AmdvKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmNvZGVfYmxvY2sHAAEVBgQAARYFcGxhaW4oAAEVB2Jsb2NrSWQBdwhiLTAwMDAwMocBFQMKY29kZV9ibG9jawcAAR0GBAABHgZpbmRlbnQoAAEdB2Jsb2NrSWQBdwhiLTAwMDAwM4cBHQMJcGFyYWdyYXBoBwABJgYEAAEnBVRleHQuKAABJgdibG9ja0lkAXcIYi0wMDAwMDSHASYDDG9yZGVyZWRfbGlzdAcAAS4DCWxpc3RfaXRlbQcAAS8DCXBhcmFncmFwaAcAATAGBAABMSxBbiBpdGVtIGhvbGRpbmcgaXRzIGNvbnRlbnQgZml2ZSBjb2x1bW5zIGluLigAATAHYmxvY2tJZAF3CGItMDAwMDA3KAABLwVsYWJlbAF3A+KAoigAAS8IbGlzdFR5cGUBdwZidWxsZXQoAAEvBnNwcmVhZAF5KAABLwdibG9ja0lkAXcIYi0wMDAwMDYoAAEuBW9yZGVyAX2kASgAAS4Gc3ByZWFkAXkoAAEuB2Jsb2NrSWQBdwhiLTAwMDAwNYcBLgMKY29kZV9ibG9jawcAAWYGBAABZxlvbmUgbGluZSBvZiBjb2RlIGFmdGVyIGl0KAABZgdibG9ja0lkAXcIYi0wMDAwMDgA",
+    "rendered_by_milkdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n```\nindent\n```\n\nText.\n\n100. An item holding its content five columns in.\n\n```\none line of code after it\n```\n"
   },
   {
     "name": "directive-like-text",

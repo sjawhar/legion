@@ -397,6 +397,19 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     "a table a line continuing its container lazily would be a row of",
 		},
 		{
+			// The browser editor's parser keeps a list whose item holds its content five or more
+			// columns in open across the code's first line, and so reads the code's later lines as
+			// a second code block.
+			name:     "an indented code block after a list whose item's content stands past it",
+			markdown: "100. a\n\n    x\n    y\n",
+			want:     "an indented code block right after a list, which the browser editor's parser splits after its first line",
+		},
+		{
+			name:     "the same, with tabs widening the item",
+			markdown: ">\t* \t> a\n>\n>\t  ```\n>\t      x\n>\t  ```\n",
+			want:     "an indented code block right after a list, which the browser editor's parser splits after its first line",
+		},
+		{
 			name:     "Pandoc fenced div",
 			markdown: "::: {.callout}\nBody.\n:::\n",
 			want:     "Pandoc fenced divs and malformed directives are not supported",
