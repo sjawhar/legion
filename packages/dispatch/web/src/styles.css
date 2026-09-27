@@ -64,24 +64,15 @@ a {
 
   /* An anchor inside a sentence is part of the sentence. A 44px box there is blank space in
      the middle of a line - a reply's `view`, a `dispatch://` reference in a body - so an
-     inline link keeps its natural box and takes its touch area from an overlay that costs no
-     layout: centred on the link, the link's own size, never smaller than 44px. */
+     inline link keeps its line box and grows its hit box with vertical padding instead: about
+     24px, at no layout cost, because padding on an inline element does not move the line.
+     An overlay was tried and withdrawn: sized to the link it covered whatever sat within 44px
+     of it - the link above in a stacked list, the words beside a wrapped link, the ask card's
+     copy button, an option row - so a tap near a link opened the link instead. WCAG 2.5.8 is
+     met at 24px, and both 2.5.8 and 2.5.5 exempt a link inside a sentence anyway. */
   .prose a,
   .dispatch-inline-link {
-    position: relative;
-  }
-
-  .prose a::after,
-  .dispatch-inline-link::after {
-    content: "";
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    translate: -50% -50%;
-    width: 100%;
-    height: 100%;
-    min-width: 44px;
-    min-height: 44px;
+    padding-block: 6px;
   }
 
   label:has(input[type="checkbox"]),
