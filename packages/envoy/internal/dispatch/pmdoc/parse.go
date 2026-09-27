@@ -1,14 +1,11 @@
 package pmdoc
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"html"
-	"log/slog"
 	"reflect"
 	"regexp"
-	"runtime/debug"
 	"slices"
 	"strings"
 
@@ -17,7 +14,6 @@ import (
 	"github.com/yuin/goldmark/extension"
 	extensionast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/parser"
-	gmtext "github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 )
 
@@ -78,23 +74,6 @@ func blockParsers() []util.PrioritizedValue {
 		}
 	}
 	return parsers
-}
-
-// ErrPanic is a panic in this package's reader or renderer, recovered at the entry point that
-// caught it: a bug here, never a shape of the caller's markdown, so callers answer it as an internal
-// error. Its text begins with "panic: ".
-var ErrPanic = errors.New("panic")
-
-// recoverPanic, deferred around an entry point that reads or writes markdown, turns a panic in it
-// into an ErrPanic, so the bug fails that one call rather than the process, and logs the panic with
-// its stack.
-func recoverPanic[T any](result *T, err *error, reading string) {
-	if recovered := recover(); recovered != nil {
-		var zero T
-		*result = zero
-		*err = fmt.Errorf("%w: %s: %v", ErrPanic, reading, recovered)
-		slog.Error("pmdoc: "+reading+" panicked", "panic", recovered, "stack", string(debug.Stack()))
-	}
 }
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
@@ -199,6 +178,9 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
 	}
+	if err := refuseBlocks(root, source); err != nil {
+		return nil, err
+	}
 	doc, err = parseBlock(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
@@ -254,6 +236,9 @@ func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, erro
 	if !ok {
 		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
 	}
+	if err := refuseBlocks(first, source); err != nil {
+		return nil, err
+	}
 	paragraph, err := parseBlock(first, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
@@ -291,6 +276,9 @@ func ParseInline(markdown string) (nodes []*Node, err error) {
 	}
 	if dropped := textOutside(root.FirstChild(), source); dropped != "" {
 		return nil, fmt.Errorf("%w: inline markdown holds text outside its paragraph, %q, which would be lost", ErrSchema, dropped)
+	}
+	if err := refuseBlocks(root.FirstChild(), source); err != nil {
+		return nil, err
 	}
 	paragraph, err := parseBlock(root.FirstChild(), source, nil)
 	if err != nil {
@@ -493,18 +481,12 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		}
 		return &Node{Type: "doc", Children: children}, nil
 	case *ast.Paragraph:
-		if reason, ok := paragraphDirectiveReason(current.Lines(), source); ok {
-			return nil, fmt.Errorf("%w: %s", ErrSchema, reason)
-		}
 		children, err := parseInline(current, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
 		return &Node{Type: "paragraph", Children: children}, nil
 	case *ast.TextBlock:
-		if reason, ok := paragraphDirectiveReason(current.Lines(), source); ok {
-			return nil, fmt.Errorf("%w: %s", ErrSchema, reason)
-		}
 		children, err := parseInline(current, source, nil, footnotes)
 		if err != nil {
 			return nil, err
@@ -538,22 +520,6 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 			Children: fencedCodeText(current, source),
 		}, nil
 	case *ast.CodeBlock:
-		// An indented code block stands right after a list, outside it, only where the list's last
-		// item holds its content five or more columns in (a wide ordered marker, or tabs), and
-		// right after a quote on the line after the quote's last. The browser editor's parser
-		// keeps that list or quote open across the code's first line, which it does not continue,
-		// and a code line that list or quote does not continue ends the code, so it reads the
-		// later lines as a second code block. A blank line ends a quote.
-		if current.Lines().Len() > 1 {
-			switch current.PreviousSibling().(type) {
-			case *ast.List:
-				return nil, fmt.Errorf("%w: an indented code block right after a list, which the browser editor's parser splits after its first line", ErrSchema)
-			case *ast.Blockquote:
-				if !current.HasBlankPreviousLines() {
-					return nil, fmt.Errorf("%w: an indented code block right after a quote, which the browser editor's parser splits after its first line", ErrSchema)
-				}
-			}
-		}
 		return &Node{
 			Type:     "code_block",
 			Attrs:    Attrs{"language": nil},
@@ -561,19 +527,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		}, nil
 	case *ast.ThematicBreak:
 		return &Node{Type: "hr"}, nil
-	case *ast.HTMLBlock:
-		// Proof's doc accepts blocks only, while html is an inline atom.
-		return nil, ErrBlockHTML
 	case *extensionast.Footnote:
-		if _, nested := ancestor[*extensionast.Footnote](current); nested {
-			return nil, fmt.Errorf("%w: a footnote definition inside another footnote definition, where the browser editor reads a line of = or - continuing the inner one's paragraph as a heading's underline", ErrSchema)
-		}
-		if _, typed := ancestor[*typedDirective](current); typed {
-			return nil, fmt.Errorf("%w: a footnote definition inside a typed block, which the browser editor refers to only from inside a typed block or after it", ErrSchema)
-		}
-		if bytes.ContainsAny(current.Ref, " \t") {
-			return nil, fmt.Errorf("%w: a footnote definition whose label holds whitespace, which the browser editor's parser reads as a paragraph", ErrSchema)
-		}
 		children, err := parseBlocks(current, source, footnotes)
 		if err != nil {
 			return nil, err
@@ -581,8 +535,6 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": unescapeMarkdownText(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
 	case *typedDirective:
 		return parseTypedDirective(current, source, footnotes)
-	case *unsupportedDirective:
-		return nil, fmt.Errorf("%w: %s", ErrSchema, current.Reason)
 	case *extensionast.Table:
 		return parseTable(current, source, footnotes)
 	default:
@@ -608,36 +560,11 @@ func parseBlocks(parent ast.Node, source []byte, footnotes map[int]string) ([]*N
 	return children, nil
 }
 func parseTypedDirective(directive *typedDirective, source []byte, footnotes map[int]string) (*Node, error) {
-	if !directive.Closed && directive.Parent().Kind() == ast.KindDocument {
-		return nil, fmt.Errorf("%w: typed block %q is unclosed at document level", ErrSchema, directive.Name)
-	}
-	if _, lazy := directive.Attribute(lazyTypedParagraphAttr); lazy {
-		return nil, fmt.Errorf("%w: typed block %q holds a line continuing a paragraph in a typed block from outside the block's container, which the browser editor's parser reads as ending the typed block", ErrSchema, directive.Name)
-	}
-	typ, ok := typedBlock(directive.Name)
-	if !ok {
-		return nil, fmt.Errorf("%w: unknown typed block %q (known types: %s)", ErrSchema, directive.Name, strings.Join(typedBlockNames(), ", "))
-	}
-	if err := undeclaredAttributes(directive.Name, directive.Attrs, typ.Attributes); err != nil {
-		return nil, err
-	}
-	attrs := defaultAttributes(typ)
-	for name, raw := range directive.Attrs {
-		if name == BlockIDAttr {
-			attrs[name] = raw
-			continue
-		}
-		value, err := parseTypedAttributeValue(typ.Attributes[name], raw)
-		if err != nil {
-			return nil, fmt.Errorf("%w: typed block %q attribute %q: %v", ErrSchema, directive.Name, name, err)
-		}
-		attrs[name] = value
-	}
 	children, err := parseBlocks(directive, source, footnotes)
 	if err != nil {
 		return nil, err
 	}
-	return &Node{Type: directive.Name, Attrs: attrs, Children: emptyParagraphFirst(children, false)}, nil
+	return &Node{Type: directive.Name, Attrs: directive.values, Children: emptyParagraphFirst(children, false)}, nil
 }
 
 // parseList reads a list's and its items' spread as browserListSpacing recorded them, or, where it
@@ -701,84 +628,7 @@ func emptyParagraphFirst(children []*Node, firstParagraph bool) []*Node {
 	return children
 }
 
-// fencedCodeText is a fenced code block's lines as its text: every line it holds, blank ones
-// included, as the browser editor's parser reads them, without the last line's line feed. Of a
-// block no fence closed, that parser drops the last line where it is blank and the block ends in a
-// quote, or in a list item or footnote definition flow content follows: the blank line is the
-// container's there.
-func fencedCodeText(code *ast.FencedCodeBlock, source []byte) []*Node {
-	value := strings.TrimSuffix(segmentsText(code.Lines(), source), "\n")
-	if _, closed := code.Attribute(fenceClosedAttr); !closed && blankTaker(code, source) != nil {
-		value = strings.TrimSuffix(value, "\n")
-	}
-	if value == "" {
-		return nil
-	}
-	return []*Node{{Type: "text", Text: value}}
-}
-
-// blankTaker is the container that takes a blank line a fenced code block no fence closed ends in
-// from the block's text (fencedCodeText), or nil where the text keeps it: a list item and a
-// footnote definition that flow content follows - a paragraph, a heading, a rule, a fence, a typed
-// block, a table - on a line that parser reads as ending them take it, and so does a quote, unless
-// such a container opens on the line right after the quote's blank line. A line that opens a
-// container instead (startsContainer: a quote, a list item of any list, or a definition) leaves
-// the blank line the block's, as do a typed block's fence and, but for a quote's, the document's
-// end. A last item and a definition nothing follows in its container end with the container around
-// them.
-func blankTaker(code ast.Node, source []byte) ast.Node {
-	for container := code.Parent(); container != nil; container = container.Parent() {
-		switch container := container.(type) {
-		case *ast.Blockquote:
-			// The quote's blank lines are its own lines, so after one of them outside it, or at
-			// the end, the quote takes the code's last.
-			lines := code.Lines()
-			if next := nextBlock(container); next != nil && lines.Len() > 0 && startsContainer(next) &&
-				bytes.Count(source[lines.At(lines.Len()-1).Start:startOf(next)], []byte("\n")) == 1 {
-				return nil
-			}
-			return container
-		case *ast.ListItem:
-			if container.NextSibling() != nil {
-				return nil
-			}
-			if next := nextBlock(container.Parent()); next != nil {
-				if startsContainer(next) {
-					return nil
-				}
-				return container
-			}
-		case *extensionast.Footnote:
-			if next := container.NextSibling(); next != nil {
-				if startsContainer(next) {
-					return nil
-				}
-				return container
-			}
-		case *typedDirective:
-			return nil
-		}
-	}
-	return nil
-}
-
-// codeBlockText is an indented code block's lines as its text; its trailing blank lines are the
-// blank lines after it.
-func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
-	value := strings.TrimRight(segmentsText(lines, source), "\n")
-	if value == "" {
-		return nil
-	}
-	return []*Node{{Type: "text", Text: value}}
-}
-
 func parseTable(table *extensionast.Table, source []byte, footnotes map[int]string) (*Node, error) {
-	if _, lazy := table.Attribute(lazyRowAttr); lazy {
-		return nil, fmt.Errorf("%w: a table a line continuing its container lazily would be a row of, which the browser editor's parser reads as ending the table and the container", ErrSchema)
-	}
-	if _, block := table.Attribute(blockRowAttr); block {
-		return nil, fmt.Errorf("%w: a table a line opening another block would be a row of - a list item that cannot interrupt a paragraph, or indented code - which the browser editor's parser reads as that block after the table", ErrSchema)
-	}
 	children := make([]*Node, 0, table.ChildCount())
 	for child := table.FirstChild(); child != nil; child = child.NextSibling() {
 		switch row := child.(type) {
@@ -985,47 +835,6 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 		}
 	}
 	return children, nil
-}
-
-// lineSuffix is the spaces and tabs ending the line text's segment stands on, and where they start,
-// or whether a backslash ends the line instead, a hard break that keeps what stands before it.
-func lineSuffix(text *ast.Text, source []byte) (start int, run string, backslash bool) {
-	end := text.Segment.Stop
-	for end < len(source) && source[end] != '\n' {
-		end++
-	}
-	if end > 0 && source[end-1] == '\\' {
-		return end, "", true
-	}
-	start = end
-	for start > 0 && (source[start-1] == ' ' || source[start-1] == '\t') {
-		start--
-	}
-	return start, string(source[start:end]), false
-}
-
-// trimLineSuffixes takes the spaces and tabs a line of parent's text ends with, before a break no
-// backslash makes, off the text before it, as the browser editor's parser drops them. Goldmark
-// keeps all but the last in the text it ends a line's run of it with, and gives the break to an
-// empty text after them.
-func trimLineSuffixes(parent ast.Node, source []byte) {
-	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
-		text, ok := child.(*ast.Text)
-		if !ok || !text.SoftLineBreak() && !text.HardLineBreak() {
-			continue
-		}
-		start, _, backslash := lineSuffix(text, source)
-		if backslash {
-			continue
-		}
-		for node := ast.Node(text); node != nil; node = node.PreviousSibling() {
-			before, ok := node.(*ast.Text)
-			if !ok || before.Segment.Stop <= start {
-				break
-			}
-			before.Segment = before.Segment.WithStop(max(before.Segment.Start, start))
-		}
-	}
 }
 
 func unescapeMarkdownText(value []byte) string {

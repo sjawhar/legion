@@ -33,6 +33,9 @@ type typedDirective struct {
 	// block's lines, as off a fenced code block's, so a typed block nested inside it, and every
 	// other block, is read from there.
 	indent int
+	// values is the typed block's attributes, defaults included, as the schema reads them, once
+	// the block passes its refusals (typedDirectiveRefusal).
+	values Attrs
 }
 
 func (n *typedDirective) Dump(source []byte, level int) {
