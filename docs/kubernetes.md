@@ -362,7 +362,10 @@ directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's en
 missing, unreadable, blank, readable by others, or not an nkey user seed refuses boot, naming the
 key and the path. Its group may read the file: a daemon running as a non-root uid in a pod reads a
 mounted Secret only through the pod's `fsGroup` (the kubelet's file is root's), so mount it with
-`defaultMode: 0440`, never the kubelet's default `0644`, which others can read. With one, every pod's
+`defaultMode: 0440`, never the kubelet's default `0644`, which others can read. `legion start
+--check-config` reads the seed exactly as boot does and refuses with boot's words; its OK line then
+names the seed's user by public key (`Config OK: project=<project> nats-nkey-user=U…`), never the
+seed. With one, every pod's
 `NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the providers Secret's own
 `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`,
 whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same

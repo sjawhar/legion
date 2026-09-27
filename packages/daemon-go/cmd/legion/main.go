@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/registry"
 )
 
@@ -104,17 +105,30 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // boot makes, through the loader that runs neither GitHub App's private_key_command nor any
 // secretsd read, then the refusal of operator configuration colliding with Legion's own
 // (daemon.CheckOperatorConfig: a provider key naming a launch secret, and under runtime: kubernetes
-// the operator's pod, sandbox.CheckPod), and nothing else — no store, no team, no process.
+// the operator's pod, sandbox.CheckPod), then the NATS nkey seed read as boot reads it
+// (natsauth.Seed over the same environment), and nothing else — no store, no team, no process. The
+// OK line names the seed's public key when there is one, never the seed.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
 	if err == nil {
 		err = daemon.CheckOperatorConfig(cfg, os.LookupEnv)
 	}
+	natsUser := ""
+	if err == nil {
+		var seed string
+		if seed, err = natsauth.Seed(cfg.NatsNkeySeedFile, os.LookupEnv); err == nil && seed != "" {
+			natsUser, err = natsauth.PublicKey(seed)
+		}
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Config OK: project=%s\n", cfg.Project)
+	ok := "Config OK: project=" + cfg.Project
+	if natsUser != "" {
+		ok += " nats-nkey-user=" + natsUser
+	}
+	fmt.Fprintln(stdout, ok)
 	return 0
 }
 

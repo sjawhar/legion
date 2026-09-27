@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/registry"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
 // testMainEnv makes this package's test binary the real `legion`: with it set, TestMain is main()
@@ -410,6 +411,61 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("%+v: the private_key_command ran (marker stat: %v)", variant, err)
 		}
+	}
+}
+
+// --check-config reads the NATS nkey seed the way boot does (natsauth.Seed: the key's file over
+// both variables, a file others can read refused, a user's nkey seed or nothing): a file boot would
+// refuse fails the check with boot's refusal, and one it would take passes, the OK line naming the
+// seed's public key and never the seed.
+func TestStartCheckConfigReadsTheNATSSeedAsBootDoes(t *testing.T) {
+	legionState(t)
+	seed, public := testnats.User(t)
+	for _, tc := range []struct {
+		name     string
+		contents string
+		mode     os.FileMode
+		refusal  func(path string) string
+	}{
+		{"a missing file", "", 0, func(path string) string { return "nats_nkey_seed_file names " + path + ", which could not be read: " }},
+		{"a file others can read", seed + "\n", 0o644, func(path string) string {
+			return "nats_nkey_seed_file " + path + " is readable by others (mode 0644); chmod o-rwx it\n"
+		}},
+		{"a file holding no seed", "SUNOTASEED\n", 0o600, func(path string) string {
+			return "nats_nkey_seed_file (" + path + ") does not hold a valid nkey seed"
+		}},
+		{"a group-readable user seed", seed + "\n", 0o640, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config, marker := workflowConfig(t, 13370, "nats_nkey_seed_file: ./nats-seed\n")
+			path := filepath.Join(filepath.Dir(config), "nats-seed")
+			if tc.mode != 0 {
+				if err := os.WriteFile(path, []byte(tc.contents), tc.mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, tc.mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("NATS_NKEY_SEED", "hunter2") // the key's file outranks it, as at boot
+
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+
+			if strings.Contains(out.String()+errb.String(), seed) {
+				t.Fatalf("the check printed the seed: stdout %q stderr %q", out.String(), errb.String())
+			}
+			if tc.refusal == nil {
+				if want := "Config OK: project=DEMO nats-nkey-user=" + public + "\n"; code != 0 || out.String() != want || errb.Len() != 0 {
+					t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+				}
+			} else if want := "legion start: " + tc.refusal(path); code != 1 || out.Len() != 0 || !strings.HasPrefix(errb.String(), want) {
+				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1 and stderr starting %q", code, out.String(), errb.String(), want)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("the private_key_command ran (marker stat: %v)", err)
+			}
+		})
 	}
 }
 

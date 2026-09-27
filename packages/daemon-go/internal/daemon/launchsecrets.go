@@ -21,7 +21,7 @@ type launchSecret struct {
 // the daemon has one, and the NATS nkey seed, when the configuration or the daemon's environment
 // (lookup) names one (natsauth.Seed) — the seed the daemon's own NATS connection authenticates
 // with. Which of them there are is known from the configuration and the environment alone, so
-// `legion start --check-config` names them without reading a file.
+// CheckOperatorConfig names them without reading a file.
 func launchSecrets(cfg config.Config, lookup func(string) (string, bool)) []launchSecret {
 	var secrets []launchSecret
 	if cfg.EnvoyTokenFile != "" {
