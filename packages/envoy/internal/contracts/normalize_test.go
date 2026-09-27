@@ -2234,6 +2234,27 @@ func TestACheckRunNameIsCappedAtTheEnvelopeTextCap(t *testing.T) {
 	}
 }
 
+// A workflow's file name is whatever the repository named the file, and a published NATS subject
+// may hold no whitespace (nats.go refuses it) or wildcard, so its segment writes each as `_`, as it
+// writes a dot.
+func TestAWorkflowFileNameIsOneValidSubjectSegment(t *testing.T) {
+	for _, tc := range []struct{ file, want string }{
+		{"my ci.yml", "notifications.github.acme.widgets.workflow.my_ci_yml.completed"},
+		{"a\tb\nc*d>e.yml", "notifications.github.acme.widgets.workflow.a_b_c_d_e_yml.completed"},
+	} {
+		item := GithubEnvelope(GithubEnvelopeInput{Event: "workflow_run", Delivery: "d", EventID: "e", TraceID: "t", Body: map[string]any{
+			"action":     "completed",
+			"repository": map[string]any{"name": "widgets", "full_name": "acme/widgets", "owner": map[string]any{"login": "acme"}},
+			"workflow_run": map[string]any{
+				"name": "CI", "path": ".github/workflows/" + tc.file, "head_branch": "main", "id": float64(1),
+			},
+		}})
+		if item.Topic != tc.want {
+			t.Errorf("workflow file %q: topic = %q, want %q", tc.file, item.Topic, tc.want)
+		}
+	}
+}
+
 // numberedPathStrings returns src/f<from>.ts .. src/f<to-1>.ts.
 func numberedPathStrings(from, to int) []string {
 	paths := make([]string, 0, to-from)

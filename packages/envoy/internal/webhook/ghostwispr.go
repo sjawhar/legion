@@ -89,7 +89,7 @@ func GhostWisprHandler(secret string, publisher Publisher) http.HandlerFunc {
 			return
 		}
 		if err := publisher.Publish(item); err != nil {
-			publishFailed(w, "ghostwispr", err)
+			deliveryFailed(w, "ghostwispr publish", err)
 			return
 		}
 		writeOK(w)

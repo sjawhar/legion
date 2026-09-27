@@ -1524,6 +1524,41 @@ func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 	}
 }
 
+// A caller's message NATS cannot take whole is the caller's to fix, so both message routes answer
+// it 413 and say how large it was against the server's max payload, rather than a 500 that reads
+// as the listener's own failure.
+func TestMessageHandlersAnswerAMessageNATSCannotTakeWholeWith413(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, map[string][]string{}, map[string]int{"ses_target": 1})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	message := strings.Repeat("m", 2<<20)
+	for _, tc := range []struct {
+		path    string
+		handler http.Handler
+		body    map[string]string
+	}{
+		{"/v1/messages/publish", publishHandler(state), map[string]string{
+			"topic": "notifications.github.example-org.example-repo.pr.1", "message": message,
+		}},
+		{"/v1/messages/send", sendHandler(state), map[string]string{"target_session": "ses_target", "message": message}},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			body, err := json.Marshal(tc.body)
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			recorder := httptest.NewRecorder()
+			tc.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(string(body))))
+			if recorder.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want 413; body = %.300s", recorder.Code, recorder.Body.String())
+			}
+			if got := recorder.Body.String(); !strings.Contains(got, "max payload of 1048576 bytes") {
+				t.Fatalf("body = %.300s, want it to name the server's max payload", got)
+			}
+		})
+	}
+}
+
 func TestPublishHandler_DedupeKeySelection(t *testing.T) {
 	client := setupPublishTestClient(t)
 	state := &listenerDeps{client: client}

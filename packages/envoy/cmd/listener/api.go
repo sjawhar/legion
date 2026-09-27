@@ -209,6 +209,21 @@ func writeJSONError(w http.ResponseWriter, status int, message string, expected 
 	writeJSON(w, status, apiError{Error: message, Expected: expected})
 }
 
+// writePublishError answers a message the bus did not publish. One NATS cannot take whole is a
+// 413, and one whose subject NATS does not accept a 400, each naming why (bus.ErrTooLarge,
+// bus.ErrInvalidSubject), since the caller's own message is what it refuses; any other failure is
+// a 500.
+func writePublishError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, bus.ErrTooLarge):
+		writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, bus.ErrInvalidSubject):
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
 func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderResult) {
 	response := roleHolderError{
 		Reason: result.state,
@@ -467,7 +482,7 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
 		duplicate, err := d.client.PublishReportingDuplicate(item)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writePublishError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, sendResponse{
@@ -566,7 +581,7 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
 		if err := d.client.Publish(item); err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			writePublishError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, publishResponse{Envelope: item, Holder: result.holder})

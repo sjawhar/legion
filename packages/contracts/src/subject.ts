@@ -69,7 +69,7 @@ export type GithubSubject<
   Owner extends string = string,
   Repo extends string = string,
   Kind extends string = string,
-> = `notifications.github.${ReplaceDotsWithUnderscores<Owner>}.${ReplaceDotsWithUnderscores<Repo>}.${Kind}`;
+> = `notifications.github.${SanitizedSubjectSegment<Owner>}.${SanitizedSubjectSegment<Repo>}.${Kind}`;
 
 /**
  * Every GitHub subject begins with its repository's owner and name, each one segment: a name may
@@ -106,19 +106,23 @@ export function slackSubject(team: string, channel: string, kind: string) {
 }
 
 /**
- * Replaces dots in a NATS subject segment with underscores so the segment
- * stays a single token. Mirrored on the Go side as `SanitizeSubjectSegment`, and in the Go
- * coordinator's intake (`packages/daemon-go/internal/intake`), which filters on the GitHub subjects.
+ * Makes a value one NATS subject segment: a dot, which a subject splits on, and whitespace and the
+ * wildcards `*` and `>`, which a published subject may not hold, each become an underscore. A slash
+ * is kept. Mirrored on the Go side as `SanitizeSubjectSegment`, and in the Go coordinator's intake
+ * (`packages/daemon-go/internal/intake`), which filters on the GitHub subjects' owner and name,
+ * where only a dot can occur.
  *
  * Note: this is intentionally lossy; subscribers needing the exact identifier
  * should inspect the envelope payload.
  */
 export function sanitizeSubjectSegment(value: string): string {
-  return value.replaceAll(".", "_");
+  return value.replace(/[. \t\r\n*>]/g, "_");
 }
 
-type ReplaceDotsWithUnderscores<Value extends string> = Value extends `${infer Head}.${infer Tail}`
-  ? `${Head}_${ReplaceDotsWithUnderscores<Tail>}`
+type SubjectSegmentReplaced = "." | " " | "\t" | "\r" | "\n" | "*" | ">";
+
+type SanitizedSubjectSegment<Value extends string> = Value extends `${infer Head}${infer Tail}`
+  ? `${Head extends SubjectSegmentReplaced ? "_" : Head}${SanitizedSubjectSegment<Tail>}`
   : Value;
 
 export type SlackThreadSubject<
@@ -126,7 +130,7 @@ export type SlackThreadSubject<
   Channel extends string = string,
   ThreadTs extends string = string,
   Kind extends string = string,
-> = `notifications.slack.${Team}.${Channel}.thread.${ReplaceDotsWithUnderscores<ThreadTs>}.${Kind}`;
+> = `notifications.slack.${Team}.${Channel}.thread.${SanitizedSubjectSegment<ThreadTs>}.${Kind}`;
 
 export function slackThreadSubject<
   Team extends string,
@@ -148,7 +152,7 @@ export type GithubResourceSubject<
   Repo extends string = string,
   ResourceType extends string = string,
   ResourceNumber extends string | number = string | number,
-> = `notifications.github.${ReplaceDotsWithUnderscores<Owner>}.${ReplaceDotsWithUnderscores<Repo>}.${ResourceType}.${ResourceNumber}`;
+> = `notifications.github.${SanitizedSubjectSegment<Owner>}.${SanitizedSubjectSegment<Repo>}.${ResourceType}.${ResourceNumber}`;
 
 export function githubResourceSubject<
   Owner extends string,
@@ -177,7 +181,7 @@ export type GithubPushSubject<
   Repo extends string = string,
   RefType extends GithubPushRefType = GithubPushRefType,
   RefName extends string = string,
-> = `notifications.github.${ReplaceDotsWithUnderscores<Owner>}.${ReplaceDotsWithUnderscores<Repo>}.push.${RefType}.${ReplaceDotsWithUnderscores<RefName>}`;
+> = `notifications.github.${SanitizedSubjectSegment<Owner>}.${SanitizedSubjectSegment<Repo>}.push.${RefType}.${SanitizedSubjectSegment<RefName>}`;
 
 export function githubPushSubject<
   Owner extends string,
@@ -206,7 +210,7 @@ export type GithubWorkflowSubject<
   Repo extends string = string,
   Workflow extends string = string,
   Action extends GithubWorkflowAction = GithubWorkflowAction,
-> = `notifications.github.${ReplaceDotsWithUnderscores<Owner>}.${ReplaceDotsWithUnderscores<Repo>}.workflow.${ReplaceDotsWithUnderscores<Workflow>}.${Action}`;
+> = `notifications.github.${SanitizedSubjectSegment<Owner>}.${SanitizedSubjectSegment<Repo>}.workflow.${SanitizedSubjectSegment<Workflow>}.${Action}`;
 
 export function githubWorkflowSubject<
   Owner extends string,

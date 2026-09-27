@@ -8,7 +8,17 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/sjawhar/envoy/internal/bus"
 )
+
+// maxRecordBytes bounds a head's record. GitHub allows 50,000 check runs in one check suite, so the
+// number of check names a head collects has no bound of GitHub's own, and the record, like the
+// settlement published from it, goes to NATS whole. A settlement names each check at most three
+// times (its run, its status group, a failure's entry) at up to seven bytes a character, and the
+// record names it twice at up to six, so a record at this bound settles in under 700 KiB, inside
+// the server's 1 MiB default. About 1,300 checks of ordinary names fit.
+const maxRecordBytes = 384 << 10
 
 // write applies mutate to the current state of identity's record, a new one carrying only the
 // identity when there is none, and writes it with a compare-and-swap. A lost compare-and-swap or a
@@ -17,6 +27,10 @@ import (
 // server restart must not fail them all, and GitHub does not redeliver a delivery the listener
 // refused. A lasting error fails it at once. Each attempt takes the handle the latest Rewatch
 // installed, and each KV call is given up on if the store is rewatched before it is answered.
+//
+// A write that would take the record past maxRecordBytes is refused with bus.ErrTooLarge, which a
+// redelivery would meet again: the record is written as it was, marked Overflowed, so it never
+// settles on the checks it could not hold.
 func (s *Store) write(identity State, mutate func(*State) bool) error {
 	key := Key(identity.Owner, identity.Repo, identity.Number, identity.SHA)
 	deadline := time.Now().Add(recordBudget)
@@ -58,6 +72,25 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 		if err != nil {
 			return err
 		}
+		var refused error
+		if len(buf) > maxRecordBytes {
+			refused = fmt.Errorf("%w: head %s's record would be %d bytes, past its %d-byte bound",
+				bus.ErrTooLarge, key, len(buf), maxRecordBytes)
+			stored := identity
+			if rev != 0 {
+				if err := json.Unmarshal(entry.Value(), &stored); err != nil {
+					return err
+				}
+			}
+			if stored.Overflowed {
+				return refused
+			}
+			st = stored
+			st.Overflowed = true
+			if buf, err = json.Marshal(st); err != nil {
+				return err
+			}
+		}
 		_, err = kvCall(s.nextRewatch(), func() (uint64, error) {
 			if rev == 0 {
 				return kv.Create(key, buf)
@@ -66,7 +99,7 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 		})
 		switch {
 		case err == nil:
-			return nil
+			return refused
 		case kvErrorLasts(err):
 			return err
 		case isCASConflict(err):

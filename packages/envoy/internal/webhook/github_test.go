@@ -138,6 +138,7 @@ func TestGitHubHandler(t *testing.T) {
 		signature      string
 		mentionTrigger string
 		publishErr     error
+		recordErr      error
 		wantStatus     int
 		wantPublished  int
 		wantRecorded   int
@@ -273,6 +274,30 @@ func TestGitHubHandler(t *testing.T) {
 			wantPublished: 1,
 		},
 		{
+			name:          "a publish NATS refuses for its subject returns 422",
+			method:        "POST",
+			body:          pushEvent,
+			delivery:      "d-bad-subject",
+			event:         "push",
+			secret:        "s",
+			publishErr:    fmt.Errorf("publish: %w", bus.ErrInvalidSubject),
+			wantStatus:    422,
+			wantPublished: 1,
+		},
+		{
+			// The CI store refuses a check its head's record has no room left for, and a
+			// redelivery would find none either.
+			name:         "a check the CI store refuses as too large returns 422",
+			method:       "POST",
+			body:         checkRun,
+			delivery:     "d-ci-too-large",
+			event:        "check_run",
+			secret:       "s",
+			recordErr:    fmt.Errorf("record: %w", bus.ErrTooLarge),
+			wantStatus:   422,
+			wantRecorded: 1,
+		},
+		{
 			name:           "custom mention trigger fan-out",
 			method:         "POST",
 			body:           issueCommentCustomMention,
@@ -288,7 +313,7 @@ func TestGitHubHandler(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pub := &mockPublisher{err: tc.publishErr}
-			recorder := &mockRecorder{}
+			recorder := &mockRecorder{err: tc.recordErr}
 			trigger := tc.mentionTrigger
 			if trigger == "" {
 				trigger = "@legion"

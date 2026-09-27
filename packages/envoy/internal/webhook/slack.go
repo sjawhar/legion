@@ -54,7 +54,7 @@ func SlackHandler(secret string, publisher Publisher) http.HandlerFunc {
 					continue
 				}
 				if err := publisher.Publish(item); err != nil {
-					publishFailed(w, "slack", err)
+					deliveryFailed(w, "slack publish", err)
 					return
 				}
 			}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -504,12 +505,21 @@ func publishedDestinationSet(subjects []string) map[string]struct{} {
 	return delivered
 }
 
+// publishDestination publishes item to its topic once per event: a destination the event already
+// reached is skipped, and one it reaches is recorded. A destination NATS refuses (bus.ErrRefused:
+// the envelope is past the server's max payload, or its subject is past NATS's limit or holds
+// whitespace, as an unbounded document slug or a bearer's session id can make it) is refused the
+// same way however often it is retried, so it is logged, once, and recorded like a publication, and
+// the event goes on to its other destinations.
 func publishDestination(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, delivered map[string]struct{}) error {
 	if _, ok := delivered[item.Topic]; ok {
 		return nil
 	}
 	if err := deps.Publisher.Publish(item); err != nil {
-		return err
+		if !errors.Is(err, bus.ErrRefused) {
+			return err
+		}
+		slog.Error("dispatch outbox: destination refused", "event_id", eventID, "topic", item.Topic, "error", err)
 	}
 	if _, err := deps.Store.Pool.Exec(ctx, `
 		update events

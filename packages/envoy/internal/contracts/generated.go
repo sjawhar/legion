@@ -165,11 +165,14 @@ func SlackSubject(team string, channel string, kind string) string {
 	return "notifications.slack." + team + "." + channel + "." + kind
 }
 
-// SanitizeSubjectSegment replaces dots in a NATS subject segment with underscores so the segment
-// stays a single token. Mirrored on the TS side as `sanitizeSubjectSegment`.
+// SanitizeSubjectSegment makes a value one NATS subject segment: a dot, which a subject splits on,
+// and whitespace and the wildcards * and >, which a published subject may not hold, each become an
+// underscore. A slash is kept. Mirrored on the TS side as `sanitizeSubjectSegment`.
 func SanitizeSubjectSegment(value string) string {
-	return strings.ReplaceAll(value, ".", "_")
+	return subjectSegmentSanitizer.Replace(value)
 }
+
+var subjectSegmentSanitizer = strings.NewReplacer(".", "_", " ", "_", "\t", "_", "\r", "_", "\n", "_", "*", "_", ">", "_")
 
 func SlackThreadSubject(team, channel, threadTs, kind string) string {
 	return "notifications.slack." + team + "." + channel + ".thread." + SanitizeSubjectSegment(threadTs) + "." + kind

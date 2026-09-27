@@ -141,6 +141,9 @@ type State struct {
 	EmittedCount   uint64           `json:"emitted_count"`
 	SettledEmitted bool             `json:"settled_emitted"`
 	Claim          *SettlementClaim `json:"claim,omitempty"`
+	// Overflowed says a check was refused because the record had no room left for it
+	// (maxRecordBytes): the record no longer holds the whole head, so it never settles.
+	Overflowed bool `json:"overflowed,omitempty"`
 }
 
 // UnmarshalJSON maps the retired resettled marker to the durable fact that
@@ -816,8 +819,10 @@ func (s *Store) durableHeadMatches(state State) (bool, error) {
 	return head.SHA == state.SHA, nil
 }
 
+// settlementReady reports whether st can settle: every check and suite it holds is terminal, one
+// check has a run id, and the record holds the whole head, which an overflowed one does not.
 func settlementReady(st State) bool {
-	if !terminal(st) {
+	if st.Overflowed || !terminal(st) {
 		return false
 	}
 	hasCheckRunID := false

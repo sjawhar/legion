@@ -294,6 +294,12 @@ describe("sanitizeSubjectSegment", () => {
   test("preserves slashes", () => {
     expect(sanitizeSubjectSegment("feat/foo")).toBe("feat/foo");
   });
+
+  test("replaces whitespace and wildcards, which a published subject may not hold", () => {
+    expect(sanitizeSubjectSegment("my ci.yml")).toBe("my_ci_yml");
+    expect(sanitizeSubjectSegment("a\tb\rc\nd")).toBe("a_b_c_d");
+    expect(sanitizeSubjectSegment("feat/*>")).toBe("feat/__");
+  });
 });
 
 describe("slackThreadSubject", () => {
