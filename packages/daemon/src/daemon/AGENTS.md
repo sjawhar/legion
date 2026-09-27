@@ -503,11 +503,11 @@ its subscriptions or publishes (the durable consumers' JetStream API requests in
 `[legion] NATS refused the daemon's <subscription|publish> to <subject> (Permissions Violation): …`
 on stderr, since the server reports a refusal asynchronously and nothing else surfaces it.
 Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
-`legion-daemon` with the daemon's grants first; then the daemon gets its seed and restarts, and its
-boot line must name the daemon user, not the pane user; only then does the server stop granting the
-daemon's subjects (its JetStream consumers, the exceptions lane, role publishes) to `legion-pane`.
-Reversed, the daemon keeps connecting as `legion-pane` and each refused subject logs the error
-line above.
+`legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
+every daemon gets it and restarts, and each boot line must name the daemon user; only then is the
+`legion-pane` seed written. `legion-pane` is never granted the daemon's subjects (its JetStream
+consumers, the exceptions lane, role publishes). Reversed, a daemon holding only the `legion-pane`
+seed connects as `legion-pane` and each refused subject logs the error line above.
 `legion gh` refuses every merge-shaped command, while the repository's GitHub branch protection,
 CODEOWNERS requirements, and human merge enforce the merge fence.
 

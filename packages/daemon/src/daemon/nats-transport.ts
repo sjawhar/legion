@@ -265,7 +265,7 @@ const consoleLog: NatsTransportLog = {
 /** The seed the daemon's own connection authenticates with — `natsDaemonNkeySeed` when
  * configured, else the pane seed `natsNkeySeed`, else none — and the boot line naming that user
  * by public key and whether it is the pane user. Neither seed is in the line. */
-export function daemonNatsIdentity(config: DaemonConfig): { seed?: string; line: string } {
+function daemonNatsIdentity(config: DaemonConfig): { seed?: string; line: string } {
   const paneUser =
     config.natsNkeySeed === undefined ? undefined : natsUserPublicKey(config.natsNkeySeed);
   if (config.natsDaemonNkeySeed !== undefined) {

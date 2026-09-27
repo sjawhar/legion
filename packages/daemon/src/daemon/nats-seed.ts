@@ -8,7 +8,7 @@ const seedKeys: { fromSeed(seed: Uint8Array): { getPublicKey(): string } } = nke
 export function validateNatsUserSeed(seed: string, source: string): void {
   let publicKey: string;
   try {
-    publicKey = seedKeys.fromSeed(new TextEncoder().encode(seed)).getPublicKey();
+    publicKey = natsUserPublicKey(seed);
   } catch (error) {
     throw new Error(
       `${source} does not hold a valid nkey seed: ${error instanceof Error ? error.message : String(error)}`
