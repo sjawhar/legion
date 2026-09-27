@@ -710,8 +710,13 @@ func seedPhase(t *testing.T, pool *pgxpool.Pool, row record.PhaseRow) {
 	seedRecord(t, pool, func(tx pgx.Tx) error { return record.NewStore().PutPhase(t.Context(), tx, row) })
 }
 
+// seedPR records pr. A seeded verdict that names no checked head is its own head's, as every row
+// recorded before the checked head was (migration 0024).
 func seedPR(t *testing.T, pool *pgxpool.Pool, pr record.PullRequest) {
 	t.Helper()
+	if pr.CheckedHead == "" && pr.Verdict != "" {
+		pr.CheckedHead = pr.HeadSHA
+	}
 	seedRecord(t, pool, func(tx pgx.Tx) error { return record.NewStore().PutPullRequest(t.Context(), tx, pr) })
 }
 

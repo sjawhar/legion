@@ -10,12 +10,14 @@ import (
 // head. A red prior verdict counts once, unless the red was planned (PlannedRed: the review App's
 // red tests) or the head's own push was handoff-only or the review App's. A code-changing head
 // decides the planned mark (the review App's sets it, anyone else's clears it); a handoff-only
-// head, or one whose push has not arrived (ApplyPush settles it), carries it. All other
-// head-scoped state is reset regardless of its source. The pushes it keeps are keptPushes'.
+// head, or one whose push has not arrived (ApplyPush settles it), carries it. The recorded CI
+// settlement stays, as CheckedHead's: it is the new head's too once every push between them is
+// known to change only .legion/ (HeadVerdict), and a settlement for another head replaces it
+// (SettlementFor). The pushes it keeps are keptPushes'.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	pending := headPush(pr.Pushes, pr.HeadSHA, headSHA)
 	pr.Pushes = keptPushes(pr.Pushes, headSHA)
-	if pr.Verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)) {
+	if HeadVerdict(pr) == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)) {
 		pr.FixAttempts++
 		pr.HeadCounted = headSHA
 	} else {
@@ -25,6 +27,39 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 		pr.PlannedRed = pending.ByReviewApp
 	}
 	pr.HeadSHA = headSHA
+	return pr
+}
+
+// HeadVerdict is the CI verdict that stands for the pull request's current head: the recorded
+// settlement's, when it is the head's own or a head the current one replaced through pushes that
+// each changed only .legion/ and said which head they replaced (a handoff push can carry GitHub's
+// skip-checks trailer and start no CI of its own); otherwise none.
+func HeadVerdict(pr record.PullRequest) string {
+	if pr.CheckedHead == "" || (pr.CheckedHead != pr.HeadSHA && !carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead)) {
+		return ""
+	}
+	return pr.Verdict
+}
+
+// SettlementFor says whether a CI settlement of head may stand for the pull request's current
+// head, and returns the pull request ready to apply it. It may when head is the current head, or a
+// head the current one replaced through pushes that each changed only .legion/, unless a recorded
+// verdict already stands for the current head from a head nearer it on that path, which outranks
+// it.
+// Every other settlement - an earlier code head's, a head a force push left - stands for nothing.
+// A settlement of a head other than the recorded one starts that head's fence afresh, since
+// check runs, generations and snapshots are each head's own.
+func SettlementFor(pr record.PullRequest, head string) (record.PullRequest, bool) {
+	if head != pr.HeadSHA && !carriedBack(pr.Pushes, pr.HeadSHA, head) {
+		return pr, false
+	}
+	if head == pr.CheckedHead {
+		return pr, true
+	}
+	if head != pr.HeadSHA && HeadVerdict(pr) != "" && carriedBack(pr.Pushes, pr.CheckedHead, head) {
+		return pr, false
+	}
+	pr.CheckedHead = head
 	pr.Verdict = ""
 	pr.Failing = []string{}
 	pr.FailingStatuses = []string{}
@@ -32,7 +67,7 @@ func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRe
 	pr.Generation = 0
 	pr.Snapshot = ""
 	pr.Reconciled = false
-	return pr
+	return pr, true
 }
 
 // headPush is the push that left head: the one that replaced previous when the branch has one,
@@ -188,18 +223,26 @@ func ApprovalStands(pr record.PullRequest, reviewed string) bool {
 			return false
 		}
 	}
-	reached := map[string]bool{pr.HeadSHA: true}
-	for frontier := []string{pr.HeadSHA}; len(frontier) > 0; {
-		head := frontier[0]
+	return pr.HeadSHA == reviewed || carriedBack(pr.Pushes, pr.HeadSHA, reviewed)
+}
+
+// carriedBack is whether walking back from head through pushes that carry an approval across
+// (carriesApproval) reaches earlier: every push between them changed only .legion/, so the two
+// heads' code is the same.
+func carriedBack(pushes []record.ClassifiedPush, head, earlier string) bool {
+	reached := map[string]bool{head: true}
+	for frontier := []string{head}; len(frontier) > 0; {
+		current := frontier[0]
 		frontier = frontier[1:]
-		if head == reviewed {
-			return true
-		}
-		for _, p := range pr.Pushes {
-			if p.SHA == head && carriesApproval(p) && !reached[p.Before] {
-				reached[p.Before] = true
-				frontier = append(frontier, p.Before)
+		for _, p := range pushes {
+			if p.SHA != current || !carriesApproval(p) || reached[p.Before] {
+				continue
 			}
+			if p.Before == earlier {
+				return true
+			}
+			reached[p.Before] = true
+			frontier = append(frontier, p.Before)
 		}
 	}
 	return false

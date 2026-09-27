@@ -448,7 +448,14 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}
-	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
+	head := fact.HeadSHA
+	if head == "" {
+		head = pr.HeadSHA
+	}
+	// A handoff push can start no CI of its own (GitHub's skip-checks trailer), so the settlement
+	// that stands for the head can be of the code head it replaced, arriving after it.
+	var stands bool
+	if *pr, stands = classify.SettlementFor(*pr, head); !stands {
 		return intake.Result{}, nil
 	}
 	var applied bool
@@ -564,7 +571,7 @@ func (e *Engine) advanceReview(ctx context.Context, tx pgx.Tx, issue record.Issu
 		}
 		return e.transition(ctx, tx, issue, TriggerReviewRejected, "", row, pr, row.Decision.Body)
 	case "approved":
-		if pr == nil || pr.Verdict != "green" || !classify.ApprovalStands(*pr, row.Decision.Head) {
+		if pr == nil || classify.HeadVerdict(*pr) != "green" || !classify.ApprovalStands(*pr, row.Decision.Head) {
 			return nil
 		}
 		return e.transition(ctx, tx, issue, TriggerReviewApproved, "", row, pr, "")

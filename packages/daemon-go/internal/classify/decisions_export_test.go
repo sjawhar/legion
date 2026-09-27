@@ -8,7 +8,7 @@ import (
 
 func TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification(t *testing.T) {
 	prior := record.PullRequest{
-		HeadSHA: "old", Verdict: "red", FixAttempts: 2,
+		HeadSHA: "old", CheckedHead: "old", Verdict: "red", FixAttempts: 2,
 		Pushes: []record.ClassifiedPush{{SHA: "next", Before: "old", HandoffOnly: true}},
 	}
 	got := AdvancePullRequestHead(prior, "next")
@@ -16,8 +16,8 @@ func TestAdvancePullRequestHeadCountsRedFixAndConsumesHandoffClassification(t *t
 		t.Fatalf("handoff-only head = %#v, want unchanged count", got)
 	}
 
-	got = AdvancePullRequestHead(record.PullRequest{HeadSHA: "old", Verdict: "red", FixAttempts: 2}, "next")
-	if got.FixAttempts != 3 || got.HeadCounted != "next" || got.Verdict != "" {
+	got = AdvancePullRequestHead(record.PullRequest{HeadSHA: "old", CheckedHead: "old", Verdict: "red", FixAttempts: 2}, "next")
+	if got.FixAttempts != 3 || got.HeadCounted != "next" || HeadVerdict(got) != "" {
 		t.Fatalf("real fix head = %#v, want counted next head", got)
 	}
 }
@@ -102,7 +102,7 @@ func TestPlannedRedIsSetCarriedAndClearedAcrossATesterRound(t *testing.T) {
 			name = "push first"
 		}
 		t.Run(name, func(t *testing.T) {
-			pr := record.PullRequest{HeadSHA: "impl", Verdict: "green"}
+			pr := record.PullRequest{HeadSHA: "impl", CheckedHead: "impl", Verdict: "green"}
 			check := func(step, head string, plannedRed bool, fixAttempts int, headCounted string) {
 				t.Helper()
 				if pr.HeadSHA != head || pr.PlannedRed != plannedRed || pr.FixAttempts != fixAttempts || pr.HeadCounted != headCounted {
@@ -113,15 +113,15 @@ func TestPlannedRedIsSetCarriedAndClearedAcrossATesterRound(t *testing.T) {
 
 			pr = arrive(pr, "red-tests", "src/widget_test.go", true, pushFirst)
 			check("the review App's red tests", "red-tests", true, 0, "")
-			pr.Verdict = "red"
+			pr.Verdict, pr.CheckedHead = "red", pr.HeadSHA
 
 			pr = arrive(pr, "tester-handoff", ".legion/test.json", true, pushFirst)
 			check("the tester's handoff-only head", "tester-handoff", true, 0, "")
-			pr.Verdict = "red"
+			pr.Verdict, pr.CheckedHead = "red", pr.HeadSHA
 
 			pr = arrive(pr, "fix", "src/widget.go", false, pushFirst)
 			check("the implementer's fix", "fix", false, 0, "")
-			pr.Verdict = "red"
+			pr.Verdict, pr.CheckedHead = "red", pr.HeadSHA
 
 			pr = AdvancePullRequestHead(pr, "fix-2")
 			check("a later fix whose push webhook is lost", "fix-2", false, 1, "fix-2")
