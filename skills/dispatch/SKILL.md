@@ -286,13 +286,14 @@ distinction from the named issue, citing it (`dispatch://KEY`), for whoever read
 
 To see the shape of a project rather than find a phrase, list its issues:
 ```ts
-dispatch_issues({ project, status?, parent?, label?, priority?, updated_since?, limit? })
+dispatch_issues({ project, status?, parent?, label?, priority?, route_status?, updated_since?, limit? })
 ```
 Each row carries the issue key, title, status, priority, parent, labels, its open-ask count, and
 when it last changed — a roadmap or backlog pass without opening every issue. Filter with `status`
 (a lifecycle status), `parent` (one issue's children), `label`, `priority` (a list of `0`–`3`, with
-`null` for an issue with no priority: `[0, 1]` is every P0 and P1), or `updated_since` (an RFC3339
-timestamp, for "what moved this week"). `limit` caps the rows at 50 by default and 250 at most.
+`null` for an issue with no priority: `[0, 1]` is every P0 and P1), `route_status` (below), or
+`updated_since` (an RFC3339 timestamp, for "what moved this week"). `limit` caps the rows at 50 by
+default and 250 at most.
 
 This is not search: it matches no text. Use `dispatch_search` for a keyword or phrase, and
 `dispatch_issues` when you want every issue in a project and its current state.
@@ -311,7 +312,7 @@ and is not re-staffed. A todo with a finished spec reads as queued work that nob
 (LEGION-173 sat in todo for two weeks with a complete spec; AGENTC-1010's v4 plan sat in backlog
 with nobody building it).
 
-The audit finds three shapes:
+The audit finds four shapes:
 
 - **Unstaffed work.** A plan or measurement exists, and no one is building it.
 - **Unrecorded delivery.** An issue not yet in `testing` or `done`, claimed or not, has a merged PR
@@ -321,6 +322,17 @@ The audit finds three shapes:
   sits in backlog (OPS-132, done by hand on every migration merge). It leaves no plan and no PR to
   find; the tell is your own messages. Doing something by hand more than once means an issue is
   wearing the wrong status.
+- **Unreachable route.** An open issue whose route names a role nobody holds, or a session that is
+  gone, reads as routed and is unowned, whatever its priority: its messages reach nobody. The
+  priority filter above never finds it, so list it on its own:
+  ```ts
+  dispatch_issues({ project, route_status: "no_holder", limit: 250 })
+  ```
+  Each row reads `route role:sre (nobody holds it)` or `route session:<id> (that session is gone)`.
+  Staff the role, re-route the issue to a live holder, or clear the route and assign it
+  (AGENTC-1065, a P2 production listener 503, sat routed to an unheld `role:sre` with no
+  assignee). `route_status: "unknown"` means the listener did not answer, so a route could not be
+  judged; a `no_holder` filter refuses rather than answer an empty list then.
 
 Run the audit as a step of a coordinator's loop, at each checkpoint, not as a habit: these shapes
 are found by running the check, not by noticing them.
