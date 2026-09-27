@@ -38,14 +38,16 @@ The question for the path filter is not "does this file go into the image?" but 
 container run this code?"** The `legion` CLI compiled into the image is built from the whole
 daemon checkout, so any source it executes at pod runtime is image behaviour. For the init
 container that is `packages/daemon/src/cli/workspace-init.ts` and everything under
-`packages/workspace/**`; the filter now lists both. The cost is one image build on the rare PR
-that touches those paths; the Worker Image check is not a merge-queue check, so no merge waits on
-it.
+`packages/workspace/**`.
 
-Deliberately **not** widened to every path the CLI compiles in (`packages/daemon/src/**`): that
-would build an image on every daemon PR for a check outside the queue. Add a path when the code
-it names runs in a pod and a change to it needs proving there — the same judgement, applied
-per path, that led to this one.
+A hand-kept list of the code the container runs misses some: one covered the plugin
+(`packages/pi-envoy/**`) but not `packages/contracts/**` or `packages/envoy-client/**`, which the
+plugin bundles, and named three files of the daemon the CLI is compiled from. So the filter names
+every context source `worker.Dockerfile` copies, whole (`packages/daemon/**`, not chosen files
+under it), and `.github/scripts/check-image-trigger-paths.sh` parses the Dockerfile and fails the
+lint job when the filter misses a file the build reads. Building on every daemon pull request
+costs little: on 2026-09-26/27 the Worker Image check already ran on 76 pull request branches
+against the Tests workflow's 69, at a median of about 280 s.
 
 Every widening of `pull_request.paths` applies to the PR that makes it: GitHub runs the workflow
 file from the PR merge ref for `pull_request` events, so LEGION-178's own first push built its
@@ -54,10 +56,11 @@ not need to land on `main` first.
 
 ## Where the rule lives
 
-- `.github/workflows/worker-image.yaml` — the comment above `pull_request` says why the
-  provisioning paths are there.
-- `docs/kubernetes.md`, "How it is built — and the iteration rule", trigger (2) — the same list
-  in prose; change both together.
+- `.github/workflows/worker-image.yaml` — the comment above `pull_request` says what the paths
+  cover.
+- `docs/kubernetes.md`, "How it is built — and the iteration rule" — the same list in prose.
+- `.github/scripts/check-image-trigger-paths.sh` — fails the build when the list misses a file
+  the Dockerfile reads.
 
 ## Related
 

@@ -24,6 +24,9 @@ jobs:
       - name: Check frozen Bun installs copy every workspace manifest
         run: .github/scripts/check-bun-workspace-manifests.sh
 
+      - name: Check image triggers cover every image input
+        run: .github/scripts/check-image-trigger-paths.sh
+
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
 
@@ -98,6 +101,9 @@ jobs:
 
       - name: Test the frozen Bun workspace manifest check
         run: .github/scripts/check-bun-workspace-manifests.test.sh
+
+      - name: Test the image trigger path check
+        run: .github/scripts/check-image-trigger-paths.test.sh
 
       - name: Test the live proofs' GitHub ingress bridge
         run: bun test scripts/e2e/lib
