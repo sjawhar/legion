@@ -1,12 +1,17 @@
 package webhook
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -133,6 +138,7 @@ func TestGitHubHandler(t *testing.T) {
 		signature      string
 		mentionTrigger string
 		publishErr     error
+		recordErr      error
 		wantStatus     int
 		wantPublished  int
 		wantRecorded   int
@@ -255,6 +261,43 @@ func TestGitHubHandler(t *testing.T) {
 			wantPublished: 1,
 		},
 		{
+			// An envelope NATS cannot take whole is refused the same way on every redelivery, so it
+			// is answered 4xx, which a redelivery sweep takes as terminal.
+			name:          "a publish refused as too large returns 422",
+			method:        "POST",
+			body:          pushEvent,
+			delivery:      "d-too-large",
+			event:         "push",
+			secret:        "s",
+			publishErr:    fmt.Errorf("publish: %w", bus.ErrTooLarge),
+			wantStatus:    422,
+			wantPublished: 1,
+		},
+		{
+			name:          "a publish NATS refuses for its subject returns 422",
+			method:        "POST",
+			body:          pushEvent,
+			delivery:      "d-bad-subject",
+			event:         "push",
+			secret:        "s",
+			publishErr:    fmt.Errorf("publish: %w", bus.ErrInvalidSubject),
+			wantStatus:    422,
+			wantPublished: 1,
+		},
+		{
+			// The CI store refuses a check its head's record has no room left for, and a
+			// redelivery would find none either.
+			name:         "a check the CI store refuses as too large returns 422",
+			method:       "POST",
+			body:         checkRun,
+			delivery:     "d-ci-too-large",
+			event:        "check_run",
+			secret:       "s",
+			recordErr:    fmt.Errorf("record: %w", bus.ErrTooLarge),
+			wantStatus:   422,
+			wantRecorded: 1,
+		},
+		{
 			name:           "custom mention trigger fan-out",
 			method:         "POST",
 			body:           issueCommentCustomMention,
@@ -270,7 +313,7 @@ func TestGitHubHandler(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pub := &mockPublisher{err: tc.publishErr}
-			recorder := &mockRecorder{}
+			recorder := &mockRecorder{err: tc.recordErr}
 			trigger := tc.mentionTrigger
 			if trigger == "" {
 				trigger = "@legion"
@@ -314,6 +357,38 @@ func TestGitHubHandler(t *testing.T) {
 						t.Errorf("published[%d].Topic = %q, want %q", i, pub.published[i].Topic, wantTopic)
 					}
 				}
+			}
+		})
+	}
+}
+
+// An alert pages on the `<source> publish failed` line, which says a publish did not complete and
+// may on a redelivery. An envelope refused as too large never will, so it is logged as a refusal
+// and pages no one, while a publish that failed still logs the failure.
+func TestAPublishRefusedAsTooLargeIsNotLoggedAsAFailure(t *testing.T) {
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	push := []byte(`{"ref":"refs/heads/main","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`)
+	for _, tc := range []struct {
+		name      string
+		err       error
+		want, not string
+	}{
+		{"a refusal", fmt.Errorf("publish: %w", bus.ErrTooLarge), "github publish refused:", "github publish failed"},
+		{"a failure", errors.New("nats: no response from stream"), "github publish failed:", "github publish refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logged.Reset()
+			handler := GitHubHandler("s", "@legion", "", &mockPublisher{err: tc.err}, &mockRecorder{})
+			req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(push))
+			req.Header.Set("X-GitHub-Delivery", "d-log")
+			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("X-Hub-Signature-256", githubSign("s", push))
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+			if got := logged.String(); !strings.Contains(got, tc.want) || strings.Contains(got, tc.not) {
+				t.Fatalf("log = %q, want a %q line and no %q line", got, tc.want, tc.not)
 			}
 		})
 	}
@@ -800,4 +875,82 @@ func TestGitHubHandlerTreatsMalformedHeadFieldsAsCallerData(t *testing.T) {
 			t.Fatalf("published = %d, want 1", len(pub.published))
 		}
 	})
+}
+
+// largePushPayload is a push listing commits commits, each carrying the fields GitHub sends for
+// one and touching several files, the shape of a large branch push.
+func largePushPayload(t *testing.T, commits int) []byte {
+	t.Helper()
+	list := make([]map[string]any, commits)
+	for i := range list {
+		sha := fmt.Sprintf("%040x", i+1)
+		person := map[string]any{"name": "Example Author", "email": "author@example.com", "username": "example-author"}
+		paths := make([]string, 12)
+		for j := range paths {
+			paths[j] = fmt.Sprintf("services/component-%03d/internal/package-%02d/source_file_%02d.go", i%50, j, j)
+		}
+		list[i] = map[string]any{
+			"id":        sha,
+			"tree_id":   fmt.Sprintf("%040x", i+1_000_000),
+			"distinct":  true,
+			"message":   fmt.Sprintf("Change %d\n\n%s", i, strings.Repeat("A longer commit message body line. ", 68)),
+			"timestamp": "2026-09-24T01:29:00Z",
+			"url":       "https://example-host/acme/widgets/commit/" + sha,
+			"author":    person,
+			"committer": person,
+			"added":     paths[:4],
+			"removed":   paths[4:6],
+			"modified":  paths[6:],
+		}
+	}
+	body, err := json.Marshal(map[string]any{
+		"ref":         "refs/heads/main",
+		"before":      fmt.Sprintf("%040x", 0),
+		"after":       fmt.Sprintf("%040x", commits),
+		"compare":     "https://example-host/acme/widgets/compare",
+		"commits":     list,
+		"head_commit": list[len(list)-1],
+		"pusher":      map[string]any{"name": "example-author"},
+		"sender":      map[string]any{"login": "example-author", "type": "User"},
+		"repository":  map[string]any{"name": "widgets", "owner": map[string]any{"login": "acme"}, "full_name": "acme/widgets"},
+	})
+	if err != nil {
+		t.Fatalf("marshal push: %v", err)
+	}
+	return body
+}
+
+// A push of about a thousand commits is a delivery of several megabytes, well inside the 25 MB
+// GitHub delivers. The handler publishes it like any other push; refusing it loses the event for
+// good, since a redelivery is the same body.
+func TestGitHubHandlerPublishesAPushOfSeveralMegabytes(t *testing.T) {
+	const secret = "s"
+	body := largePushPayload(t, 1000)
+	if len(body) < 3_500_000 {
+		t.Fatalf("the push is %d bytes, want the ~3.6 MB of a thousand-commit push", len(body))
+	}
+	pub := &mockPublisher{}
+	handler := GitHubHandler(secret, "@legion", "", pub, &mockRecorder{})
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(body))
+	req.Header.Set("X-GitHub-Delivery", "delivery-large-push")
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", githubSign(secret, body))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
+	}
+	if len(pub.published) != 1 {
+		t.Fatalf("published = %d, want 1", len(pub.published))
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(pub.published[0].Payload), &payload); err != nil {
+		t.Fatalf("decode the push payload: %v", err)
+	}
+	if payload["commit_count"] != "1000" || payload["changed_paths_truncated"] != "true" {
+		t.Fatalf("push payload commit_count = %q, changed_paths_truncated = %q; want 1000 and true",
+			payload["commit_count"], payload["changed_paths_truncated"])
+	}
 }

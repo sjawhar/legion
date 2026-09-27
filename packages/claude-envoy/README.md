@@ -120,7 +120,7 @@ and `dist/open-asks-hook.js`, with every dependency inlined (`@legion/contracts`
 `@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod`, `ky`; the package version is
 inlined from `package.json`, so the MCP server, `plugin.json`, and `package.json` spell one version).
 
-- `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, whitespace + identifier minification only - syntax minification is off because Bun 1.3.14's constant folding sometimes truncates concatenated string literals in CI builds - no sourcemap).
+- `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, minification disabled: whitespace and identifiers stay readable so independent changes merge at line level; syntax stays off because Bun 1.3.14's constant folding can truncate concatenated string literals in CI builds; no sourcemap).
 - `bun run check-dist` rebuilds into a scratch directory and fails when it differs from the
   committed files. CI runs it on the Bun version pinned in the repo-root `.bun-version`, because
   bundler output differs across Bun releases; rebuild on that version before committing.
@@ -155,10 +155,11 @@ skipped: you asked for plugin:…@legion-plugins but the installed claude-envoy 
 …`).
 
 The plugin needs `ENVOY_NATS_URL` and reaches the listener at `ENVOY_URL`, which defaults to
-`http://127.0.0.1:9020`. Both are inherited from the environment that launched `claude` —
-`.mcp.json` passes through only `CLAUDE_PROJECT_DIR`, because an unset `${VAR}` in `.mcp.json` is
-substituted as the literal text, which used to register a session as the literal id
-`${ENVOY_SESSION_ID}`. Claude Code provides `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PLUGIN_DATA`; set
+`http://127.0.0.1:9020`. A NATS server that requires an nkey user takes the seed from
+`NATS_NKEY_SEED_FILE` (a file, which wins) or `NATS_NKEY_SEED`. All are inherited from the
+environment that launched `claude` — `.mcp.json` passes through only `CLAUDE_PROJECT_DIR`, because
+an unset `${VAR}` in `.mcp.json` is substituted as the literal text, which used to register a
+session as the literal id `${ENVOY_SESSION_ID}`. Claude Code provides `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PLUGIN_DATA`; set
 `ENVOY_SESSION_ID` only to use a controlled identity for QA (the smoke does). Dispatch tools and
 the open-asks hook read `DISPATCH_URL`/`DISPATCH_TOKEN` or `envoy.json` through
 `@legion/envoy-client/dispatch-config`.

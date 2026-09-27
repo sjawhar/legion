@@ -54,8 +54,8 @@ test("a human creates a project from Settings and immediately creates an issue u
     await expect(
       page.locator("main").getByRole("heading", { exact: true, name: "Projects" })
     ).toBeVisible();
-    await page.getByLabel("Key").fill("qa");
-    await page.getByLabel("Name").fill("Quality");
+    await page.getByLabel("Key", { exact: true }).fill("qa");
+    await page.getByLabel("Name", { exact: true }).fill("Quality");
     await page.getByRole("button", { name: "New project" }).click();
     await expect(page.getByRole("cell", { exact: true, name: "QA" })).toBeVisible();
     await expect(
@@ -192,5 +192,32 @@ test("Refresh imports the architecture model and a rejected model keeps the prev
     });
   } finally {
     await context.close();
+  }
+});
+
+// The Architecture sources table scrolls inside its own container, but its `sr-only` header
+// cell is absolutely positioned: without a positioned ancestor inside that container it sits
+// at the scrolled table's own x and widened the page to 417px at 390px.
+test("Settings stays inside the viewport", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const width = testInfo.project.name === "chromium" ? 1280 : 390;
+    if (testInfo.project.name === "chromium") {
+      await page.setViewportSize({ height: 900, width });
+    }
+    await page.goto("/settings");
+    await expect(page.getByRole("heading", { level: 1, name: "Settings" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Architecture sources" })).toBeVisible();
+
+    const measured = await page.evaluate(() => ({
+      client: document.documentElement.clientWidth,
+      scroll: document.documentElement.scrollWidth,
+    }));
+    expect(measured.scroll).toBeLessThanOrEqual(measured.client);
+  } finally {
+    await alice.close();
   }
 });

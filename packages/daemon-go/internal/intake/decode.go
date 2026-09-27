@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -20,6 +23,9 @@ type decodedMessage struct {
 	Source  string
 	EventID string
 	Fact    Fact
+	// Unread names each optional field the decoder could not read and took as absent. The consumer
+	// logs it; the message is not poison.
+	Unread []string
 }
 
 type envoyEnvelope struct {
@@ -36,7 +42,9 @@ type envoyEnvelope struct {
 
 // decodeMessage decodes the Envoy envelope first, then the subject's source-specific payload.
 // project is the daemon's Dispatch project: another project's issue event is a nil Fact.
-func decodeMessage(subject, project string, data []byte) (decodedMessage, error) {
+// repositories are its configured repositories: a GitHub event whose payload names another
+// repository is a nil Fact, whatever subject carried it.
+func decodeMessage(subject, project string, repositories []ghrepo.Repository, data []byte) (decodedMessage, error) {
 	var envelope envoyEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return decodedMessage{}, fmt.Errorf("decode Envoy envelope: %w", err)
@@ -46,6 +54,7 @@ func decodeMessage(subject, project string, data []byte) (decodedMessage, error)
 	}
 
 	var fact Fact
+	var unread []string
 	var err error
 	switch {
 	case strings.HasPrefix(subject, "notifications.dispatch.issue."):
@@ -57,14 +66,14 @@ func decodeMessage(subject, project string, data []byte) (decodedMessage, error)
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
 		}
-		fact, err = decodeGitHubFact(subject, envelope.Payload, envelope.IssuedAt)
+		fact, unread, err = decodeGitHubFact(subject, repositories, envelope.Payload, envelope.IssuedAt)
 	default:
 		return decodedMessage{}, fmt.Errorf("unsupported durable subject %q", subject)
 	}
 	if err != nil {
 		return decodedMessage{}, err
 	}
-	return decodedMessage{Source: envelope.Source, EventID: envelope.EventID, Fact: fact}, nil
+	return decodedMessage{Source: envelope.Source, EventID: envelope.EventID, Fact: fact, Unread: unread}, nil
 }
 
 func (e envoyEnvelope) valid() error {
@@ -129,11 +138,12 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 	switch event.Type {
 	case "issue.created", "issue.updated", "issue.closed":
 		var issue struct {
-			Key    string  `json:"key"`
-			Status string  `json:"status"`
-			Title  string  `json:"title"`
-			Parent *string `json:"parent"`
-			Rank   string  `json:"rank"`
+			Key    string   `json:"key"`
+			Status string   `json:"status"`
+			Title  string   `json:"title"`
+			Parent *string  `json:"parent"`
+			Rank   string   `json:"rank"`
+			Labels []string `json:"labels"`
 		}
 		if err := json.Unmarshal(event.Payload, &issue); err != nil {
 			return nil, fmt.Errorf("decode Dispatch issue payload: %w", err)
@@ -152,7 +162,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if event.Actor.Kind == "session" {
 			actorSession = event.Actor.ID
 		}
-		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank, ActorSession: actorSession}, nil
+		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank, HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -210,41 +220,51 @@ func isJSONObject(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &item) == nil && item != nil
 }
 
-func decodeGitHubFact(subject, payload string, issuedAt int64) (Fact, error) {
+func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload string, issuedAt int64) (Fact, []string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil || raw == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
+	// The payload names the event's repository; the subject's segments cannot, since a name may hold
+	// a dot. Only a configured repository's event is this daemon's, as in the shipped daemon, which
+	// registers a pull request only for its issue's repository (reducers.ts registerPrFenced).
+	repo, _ := rawString(raw, "repo")
+	at := slices.IndexFunc(repositories, func(configured ghrepo.Repository) bool { return configured.String() == repo })
+	if at < 0 {
+		return nil, nil, nil
+	}
+	repository := repositories[at]
 	kind, ok := rawString(raw, "kind")
 	if !ok {
-		return nil, nil
+		return nil, nil, nil
 	}
+	var fact Fact
+	var err error
 	switch kind {
 	case "pr":
-		return decodePullRequest(raw)
+		fact, err = decodePullRequest(repository, raw)
 	case "review":
-		return decodeReview(raw)
+		return decodeReview(repository, raw)
 	case "push":
-		return decodePush(raw)
+		fact, err = decodePush(repository, raw)
 	case "checks":
-		return decodeChecks(subject, raw, issuedAt)
-	case "comment":
-		// Comments route to the current role but do not change the durable workflow record.
-		return nil, nil
-	default:
-		return nil, nil
+		fact, err = decodeChecks(subject, repository, raw, issuedAt)
 	}
+	// Comments, and every other kind, route to the current role but do not change the durable
+	// workflow record.
+	return fact, nil, err
 }
 
-func decodePullRequest(raw map[string]json.RawMessage) (Fact, error) {
-	repo, number, action, ok := githubIdentity(raw)
+func decodePullRequest(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
+	number, action, ok := githubIdentity(raw)
 	if !ok {
 		return nil, nil
 	}
+	repo := repository.String()
 	branch, _ := rawString(raw, "head_ref")
 	sha, _ := rawString(raw, "head_sha")
 	body, _ := rawString(raw, "body")
-	updatedAt := rawTimestamp(raw, "updated_at")
+	updatedAt, _ := rawTimestamp(raw, "updated_at")
 	switch action {
 	case "opened", "reopened":
 		// A reopened pull request is open again, recorded as when it opened.
@@ -252,7 +272,7 @@ func decodePullRequest(raw map[string]json.RawMessage) (Fact, error) {
 			return nil, nil
 		}
 		url, _ := rawString(raw, "url")
-		return PullRequestOpened{Repo: repo, Number: number, Branch: branch, HeadSHA: sha, Body: body, URL: url, UpdatedAt: updatedAt}, nil
+		return PullRequestOpened{Repo: repo, Number: number, Branch: branch, HeadSHA: sha, Body: body, URL: url, UpdatedAt: updatedAt, Reopened: action == "reopened"}, nil
 	case "synchronize":
 		if sha == "" {
 			return nil, nil
@@ -264,30 +284,45 @@ func decodePullRequest(raw map[string]json.RawMessage) (Fact, error) {
 			mergeSHA, _ := rawString(raw, "merge_commit_sha")
 			return PullRequestMerged{Repo: repo, Number: number, MergeSHA: mergeSHA}, nil
 		}
-		return PullRequestClosed{Repo: repo, Number: number}, nil
+		return PullRequestClosed{Repo: repo, Number: number, HeadSHA: sha, UpdatedAt: updatedAt}, nil
 	default:
 		return nil, nil
 	}
 }
 
-func decodeReview(raw map[string]json.RawMessage) (Fact, error) {
-	repo, number, action, ok := githubIdentity(raw)
+func decodeReview(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, []string, error) {
+	number, action, ok := githubIdentity(raw)
 	if !ok || action != "submitted" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	state, _ := rawString(raw, "state")
 	commitID, _ := rawString(raw, "commit_id")
 	headSHA, _ := rawString(raw, "head_sha")
 	author, _ := rawString(raw, "author")
 	body, _ := rawString(raw, "body")
-	return PullRequestReview{Repo: repo, Number: number, State: strings.ToLower(state), CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, nil
+	// The listener carries GitHub's review id as a decimal string; one that predates it carries
+	// none, and the review is then ordered by when it is processed.
+	var id int64
+	if text, ok := rawString(raw, "review_id"); ok && text != "" {
+		parsed, err := strconv.ParseInt(text, 10, 64)
+		if err != nil || parsed <= 0 {
+			return nil, nil, fmt.Errorf("review_id %q is not a positive integer", text)
+		}
+		id = parsed
+	}
+	// submitted_at is GitHub's RFC 3339 time; a listener that predates it carries none. One that
+	// cannot be read is taken as none, and reported: a review without a time is ordered by its id,
+	// so it is recorded rather than lost as poison.
+	submittedAt, ok := rawTimestamp(raw, "submitted_at")
+	var unread []string
+	if !ok {
+		unread = append(unread, fmt.Sprintf("submitted_at %s is not an RFC 3339 time", raw["submitted_at"]))
+	}
+	return PullRequestReview{Repo: repository.String(), Number: number, ID: id, SubmittedAt: submittedAt, State: strings.ToLower(state),
+		CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, unread, nil
 }
 
-func decodePush(raw map[string]json.RawMessage) (Fact, error) {
-	repo, ok := rawString(raw, "repo")
-	if !ok {
-		return nil, nil
-	}
+func decodePush(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
 	ref, ok := rawString(raw, "ref")
 	if !ok || !strings.HasPrefix(ref, "refs/heads/") {
 		return nil, nil
@@ -299,16 +334,15 @@ func decodePush(raw map[string]json.RawMessage) (Fact, error) {
 	changedPaths := rawStringPointer(raw, "changed_paths")
 	truncated := rawStringPointer(raw, "changed_paths_truncated")
 	pusher, _ := rawString(raw, "pusher")
-	return Push{Repo: repo, Branch: strings.TrimPrefix(ref, "refs/heads/"), After: after, ChangedPaths: changedPaths, Truncated: truncated, Pusher: pusher}, nil
+	before, _ := rawString(raw, "before")
+	forced := rawStringPointer(raw, "forced")
+	return Push{Repo: repository.String(), Branch: strings.TrimPrefix(ref, "refs/heads/"), Before: before, After: after, ChangedPaths: changedPaths,
+		Truncated: truncated, Forced: forced, Pusher: pusher}, nil
 }
 
-func decodeChecks(subject string, raw map[string]json.RawMessage, issuedAt int64) (Fact, error) {
-	repo, repoOK := rawString(raw, "repo")
-	number, numberOK := rawNumber(raw, "number")
-	if !repoOK || !numberOK {
-		return nil, nil
-	}
-	if !checksSubjectMatches(subject, repo, number) {
+func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]json.RawMessage, issuedAt int64) (Fact, error) {
+	number, ok := rawNumber(raw, "number")
+	if !ok || subject != githubRepositoryPrefix(repository)+".pr."+strconv.Itoa(number)+".checks" {
 		return nil, nil
 	}
 	headSHA, ok := rawString(raw, "sha")
@@ -349,22 +383,13 @@ func decodeChecks(subject string, raw map[string]json.RawMessage, issuedAt int64
 	} else if len(cancelled) == 0 {
 		verdict = "green"
 	}
-	return PullRequestChecks{Repo: repo, Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Verdict: verdict, Failing: failed, SettledAt: settledAt}, nil
+	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Verdict: verdict, Failing: failed, SettledAt: settledAt}, nil
 }
 
-func githubIdentity(raw map[string]json.RawMessage) (string, int, string, bool) {
-	repo, repoOK := rawString(raw, "repo")
+func githubIdentity(raw map[string]json.RawMessage) (int, string, bool) {
 	number, numberOK := rawNumber(raw, "number")
 	action, actionOK := rawString(raw, "action")
-	return repo, number, action, repoOK && numberOK && actionOK
-}
-
-func checksSubjectMatches(subject, repo string, number int) bool {
-	segments := strings.Split(subject, ".")
-	if len(segments) != 7 || segments[0] != "notifications" || segments[1] != "github" || segments[4] != "pr" || segments[6] != "checks" {
-		return false
-	}
-	return segments[2]+"/"+segments[3] == repo && segments[5] == strconv.Itoa(number)
+	return number, action, numberOK && actionOK
 }
 
 func rawCheckRuns(value json.RawMessage) ([]record.AttemptRun, bool) {
@@ -468,14 +493,23 @@ func rawInt64Value(value json.RawMessage) (int64, bool) {
 	return integer, true
 }
 
-func rawTimestamp(raw map[string]json.RawMessage, key string) time.Time {
-	value, ok := rawString(raw, key)
-	if !ok || value == "" {
-		return time.Time{}
+// rawTimestamp reads an optional RFC 3339 time: an absent, null or empty field is the zero time,
+// and ok is false only when the field holds anything else, which is taken as the zero time too.
+func rawTimestamp(raw map[string]json.RawMessage, key string) (time.Time, bool) {
+	value, present := raw[key]
+	if !present || string(value) == "null" {
+		return time.Time{}, true
 	}
-	parsed, err := time.Parse(time.RFC3339, value)
+	var text string
+	if err := json.Unmarshal(value, &text); err != nil {
+		return time.Time{}, false
+	}
+	if text == "" {
+		return time.Time{}, true
+	}
+	parsed, err := time.Parse(time.RFC3339, text)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, false
 	}
-	return parsed.UTC()
+	return parsed.UTC(), true
 }

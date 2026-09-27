@@ -16,6 +16,8 @@ symptoms:
   - "A Dispatch API request on a document hangs until the client disconnects after the document's live room fails"
   - "pg_stat_activity shows a session waiting on pg_advisory_lock(hashtext(<artifact id>)) and no 40P01 deadlock is ever reported"
   - "The goroutine dump shows the request in awaitRoomRecovery and the room's eviction in Compact or AppendUpdate"
+  - "Every write to one Dispatch document answers 503 DOC_SERVICE_UNAVAILABLE until the server restarts, while other documents are fine"
+  - "The goroutine dump shows a room's eviction in CloseRoom on <-r.ready and that room's load in onLoadDocument"
 root_cause: concurrency
 resolution_type: code_fix
 severity: high
@@ -54,12 +56,15 @@ can see, so the rule has to cover any in-memory wait by any transaction.
 
 ## Fix
 
-`awaitRoomRecovery` is where a transaction waits for a failed room. It fails with `ErrServiceUnavailable`
+`awaitRoomRecovery` is where a transaction waits for a failed room; it is not the only wait a
+failed room has (see below). It fails with `ErrServiceUnavailable`
 (`503 DOC_SERVICE_UNAVAILABLE`) instead of waiting when the caller's ledger runs inside a
 transaction (`Ledger.inTransaction`): a handler's joined transaction, or settlement's own. The
 transaction rolls back, the eviction takes the lock, and the caller retries once the room has
 reloaded. Callers outside a transaction hold no lock the eviction needs, so they still wait:
-browser connections, reads, and a committed write's publish.
+browser connections, reads, and a committed write's publish. Each refusal logs a warning naming
+the room and the cause, because a 503 otherwise leaves the server no trace of a room that stays
+failed.
 
 A joined write adds one more check (`applyJoined`). A room can fail between the write's fork
 and its append, and the eviction can finish in that window, because the write does not hold
@@ -72,11 +77,23 @@ reload after it holds the write.
 
 ## It is not the only in-memory wait
 
-`awaitRoomRecovery` is the wait this fix removes, not the only one of its kind. ygo's ready
-barrier is another: a room's eviction waits in `CloseRoom` for a load already in progress, and two
-loaders start that load on `context.Background()` (`docs/service.go`, `docs/livewrite.go`), so a
-load that cannot finish holds the eviction with no deadline to end it. LEGION-282 tracks that one;
-it predates this fix and needs its own.
+`awaitRoomRecovery` is the wait the rule above removes, not the only one of its kind. ygo's
+ready barrier is another, and it wedged the whole recovery (LEGION-282): a failed room's
+eviction waits in `CloseRoom` for a load already in progress (reearth/ygo v1.49.5,
+`provider/websocket/inject.go:501-508`), the recovery's channel closes only once that returns
+(`failRoomLocked`), and the load itself waited for that channel in `onLoadDocument`. Both
+loaders that reach it carry `context.Background()` - settlement's warm-up (`docs/service.go`)
+and a committed write's publish (`docs/livewrite.go`) - so no deadline ended it. The room
+stayed failed and every later write to that document answered 503 until the server restarted.
+
+A load never waits for its own room's recovery now. `onLoadDocument` refuses instead
+(`Service.roomFailure`): ygo records the failure as the load's error, removes the room and
+closes the barrier, which lets the eviction finish, and the next access loads the replacement.
+The failure also leaves a mark (`settleAfterReload`) that the replacement's load consumes with
+one settlement, because the settlement the failure dropped is never rescheduled - its retry
+stops on the moved generation - and the reloaded room would otherwise arm one only on its next
+update, leaving the ask blocks that settlement indexes out of the open asks until someone
+edited the document.
 
 ## Rule
 
@@ -84,6 +101,10 @@ An in-memory wait inside a database transaction (a channel, a mutex, a condition
 if the thing waited on can never itself wait on a database lock. When it can, fail fast and let
 the transaction roll back. Compaction is not the only lock-taking step, so a fix that only skips
 compaction leaves the flush's appends in the cycle.
+
+The same shape holds with no database in it: never wait on work that is waiting for you. A room
+load is inside the eviction's own wait, so it refuses rather than waits, whatever context it
+carries.
 
 ## Tests
 
@@ -94,7 +115,13 @@ ten-second timer and checks for `ErrServiceUnavailable`:
 - a transaction holding none of the document's locks while another transaction holds the
   advisory lock;
 - a failure between two joined operations, and one inside a joined write;
-- a settlement that holds the lock.
+- a settlement that holds the lock;
+- `TestAWriteWhoseRoomReloadsBeforeItsFirstAppendFailsFast`, the one test that fails if the
+  append asks the room registered now instead of its slot's own state;
+- `TestARoomThatFailsWhileItIsLoadingRecovers`, which fails the room from inside its durable
+  load and then writes to it;
+- `TestAFailedRoomsReplacementSettlesWithoutAnotherEdit`, which reloads a failed room holding
+  an unindexed ask block.
 
 A writer waiting for another transaction's writer slot finishes when the room fails. The
 blocking tests hang on a head without the fix, which is what makes them red.

@@ -205,6 +205,26 @@ describe("githubResourceSubject", () => {
   });
 });
 
+// A GitHub repository's name may hold a dot, and a NATS subject splits on dots, so every GitHub
+// subject writes the owner and the name each as one segment, a dot as `_` (sanitizeSubjectSegment):
+// `sjawhar/.github` is otherwise an empty token no stream stores, and `acme/a.b` lands inside
+// `acme/a`'s `notifications.github.acme.a.>`. A name without a dot is written as it is.
+test("GitHub subjects write a dotted owner or name as one segment", () => {
+  expect(githubSubject("sjawhar", ".github", "mention")).toBe(
+    "notifications.github.sjawhar._github.mention"
+  );
+  expect(githubResourceSubject("acme", "a.b", "pr", 7)).toBe("notifications.github.acme.a_b.pr.7");
+  expect(githubPushSubject("my-org", "a_b.c", "branch", "legion/X-1")).toBe(
+    "notifications.github.my-org.a_b_c.push.branch.legion/X-1"
+  );
+  expect(githubWorkflowSubject("acme", "site.io", "ci.yml", "completed")).toBe(
+    "notifications.github.acme.site_io.workflow.ci_yml.completed"
+  );
+  expect(githubSubject("acme", "widgets", "pr.7.checks")).toBe(
+    "notifications.github.acme.widgets.pr.7.checks"
+  );
+});
+
 describe("ghostWisprSubject", () => {
   test("returns session.ended topic", () => {
     expect(ghostWisprSubject("20260326041405", "session.ended")).toBe(
@@ -274,6 +294,12 @@ describe("sanitizeSubjectSegment", () => {
   test("preserves slashes", () => {
     expect(sanitizeSubjectSegment("feat/foo")).toBe("feat/foo");
   });
+
+  test("replaces whitespace and wildcards, which a published subject may not hold", () => {
+    expect(sanitizeSubjectSegment("my ci.yml")).toBe("my_ci_yml");
+    expect(sanitizeSubjectSegment("a\tb\rc\nd")).toBe("a_b_c_d");
+    expect(sanitizeSubjectSegment("feat/*>")).toBe("feat/__");
+  });
 });
 
 describe("slackThreadSubject", () => {
@@ -297,6 +323,21 @@ describe("slackThreadSubject", () => {
 });
 
 describe("githubPushSubject", () => {
+  test("types a 600-character literal ref as its own subject", () => {
+    // The segment's type recurses once per character, which the compiler bounds unless the
+    // recursion is in tail position; a long literal must still type, and as the sanitized segment.
+    const subject: "notifications.github.acme.widgets.push.branch.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_c_deeeeee" =
+      githubPushSubject(
+        "acme",
+        "widgets",
+        "branch",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.c.deeeeee"
+      );
+    expect(subject).toBe(
+      "notifications.github.acme.widgets.push.branch.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb_c_deeeeee"
+    );
+  });
+
   test("returns branch push subject", () => {
     expect(githubPushSubject("acme", "widgets", "branch", "main")).toBe(
       "notifications.github.acme.widgets.push.branch.main"

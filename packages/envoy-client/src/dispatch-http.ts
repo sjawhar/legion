@@ -29,8 +29,10 @@ import type {
   GraphReferences,
   Issue,
   IssueDetails,
+  IssuePriority,
   IssueRead,
   IssueReferences,
+  IssueRouteStatus,
   IssueSummary,
   Message,
   MessageRead,
@@ -73,7 +75,11 @@ export interface ListIssuesOptions {
   readonly status?: string;
   readonly parent?: string;
   readonly label?: string;
+  /** Each value repeats as `priority=`; `"none"` matches an issue with no priority. */
+  readonly priority?: readonly (IssuePriority | "none")[];
   readonly updated_since?: string;
+  /** Only open issues whose route is in this state. */
+  readonly route_status?: IssueRouteStatus;
 }
 
 export interface SearchOptions {
@@ -98,7 +104,6 @@ function requestSignal(signal: AbortSignal | undefined): AbortSignal {
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
-  readonly #creatingIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
 
   constructor(
@@ -113,6 +118,11 @@ export class DispatchClient {
 
   async issue(input: CreateIssueInput): Promise<Advised<Issue>> {
     return this.#json("POST", ["api", "v1", "issues"], input);
+  }
+
+  /** Resolves an existing native key or external reference without creating an issue. */
+  async resolveIssue(issueReference: string): Promise<string> {
+    return this.#resolveIssue(issueReference);
   }
 
   async listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {
@@ -233,9 +243,23 @@ export class DispatchClient {
     return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
   }
 
-  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row. */
-  async getArchitectureSource(project: string): Promise<ArchitectureSource> {
-    return this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
+  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row, or `null`
+   *  when the project has none. Having none is an answer, not a failure: a current server says
+   *  `200 null`, an older one `404 SOURCE_NOT_FOUND`, and a client meets both while a rollout
+   *  mixes versions. Any other failure, a different 404 included, throws. */
+  async getArchitectureSource(project: string): Promise<ArchitectureSource | null> {
+    try {
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
+    } catch (error) {
+      if (
+        error instanceof DispatchServiceError &&
+        error.status === 404 &&
+        error.code === "SOURCE_NOT_FOUND"
+      ) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {
@@ -463,44 +487,6 @@ export class DispatchClient {
     });
   }
 
-  async ensureIssue(issueReference: string, actor: Actor): Promise<string> {
-    if (!issueReference.includes("#")) return issueReference;
-    try {
-      return await this.#resolveIssue(issueReference);
-    } catch (error) {
-      if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
-    }
-
-    let creating = this.#creatingIssues.get(issueReference);
-    if (!creating) {
-      creating = this.#createExternalIssue(issueReference, actor);
-      this.#creatingIssues.set(issueReference, creating);
-    }
-    try {
-      return await creating;
-    } finally {
-      if (this.#creatingIssues.get(issueReference) === creating) {
-        this.#creatingIssues.delete(issueReference);
-      }
-    }
-  }
-
-  async #createExternalIssue(issueReference: string, actor: Actor): Promise<string> {
-    try {
-      const created = await this.#json<Issue>("POST", ["api", "v1", "issues"], {
-        external: issueReference,
-        actor,
-      });
-      this.#resolvedIssues.set(issueReference, Promise.resolve(created.key));
-      return created.key;
-    } catch (error) {
-      if (error instanceof DispatchServiceError && (error.status === 409 || error.status === 500)) {
-        return this.#resolveIssue(issueReference);
-      }
-      throw error;
-    }
-  }
-
   async #resolveIssue(issueReference: string): Promise<string> {
     if (!issueReference.includes("#")) return issueReference;
     let resolved = this.#resolvedIssues.get(issueReference);
@@ -556,6 +542,8 @@ export class DispatchClient {
       for (const [name, value] of Object.entries(query)) {
         if (typeof value === "string" || typeof value === "number") {
           url.searchParams.set(name, String(value));
+        } else if (Array.isArray(value)) {
+          for (const item of value) url.searchParams.append(name, String(item));
         }
       }
     }

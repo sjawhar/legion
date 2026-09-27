@@ -12,7 +12,7 @@ import * as path from "node:path";
 // ships it (GITHUB_ACTIONS, not CI: agent harnesses on the devbox export CI=true).
 // It is also the only check that the run-end nudge's hidden self-check starts no run: the nudge
 // treats any `agent_start` after a settle as a newer run and withholds its steer, so a host that
-// counted `pi.askEphemeral` as a run would silence the nudge with every unit test still green.
+// counted the side turn as a run would silence the nudge with every unit test still green.
 // The WAITING self-check case below fails if that ever changes.
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
@@ -32,7 +32,7 @@ interface Pane {
   readonly requests: Request[];
   /** The Messages requests that were turns of the conversation, in order. */
   readonly turns: () => Request[];
-  /** The Messages requests that were `pi.askEphemeral` calls, in order. */
+  /** The Messages requests that were side turns (the self-check), in order. */
   readonly selfChecks: () => Request[];
   /** One line per invocation of the stand-in `legion`: its arguments, then the grant it read. */
   readonly legionLog: () => Promise<string[]>;
@@ -41,10 +41,11 @@ interface Pane {
 }
 
 /**
- * Whether a Messages request is a `pi.askEphemeral` call rather than a turn. The host sends one
- * as an ordinary Messages request over a snapshot of the conversation whose last message is the
- * `<btw>` block it wraps the question in — measured on the pin, which is the only thing that can
- * say — so the stand-in answers it distinctly and nothing about it reaches the transcript.
+ * Whether a Messages request is a side turn rather than a turn. The host sends one as an
+ * ordinary Messages request over a snapshot of the conversation whose last message is the `<btw>`
+ * block around the question — the host adds it for `pi.askEphemeral` on the pin (measured there,
+ * which is the only thing that can say), and pi-envoy adds it for `ctx.runEphemeralTurn` on 18.3 —
+ * so the stand-in answers it distinctly and nothing about it reaches the transcript.
  */
 function isSelfCheck(request: Request): boolean {
   const messages = Array.isArray(request.body.messages) ? request.body.messages : [];
@@ -147,6 +148,8 @@ interface PaneOptions {
   readonly legion?: boolean;
   /** Configures Dispatch against the stand-in, whose open-ask snapshot answers with this count. */
   readonly openAsks?: number;
+  /** The held ask questions the stand-in returns in the session's open-ask snapshot. */
+  readonly openAskQuestions?: readonly string[];
   /**
    * Settle when the gateway has answered nothing for this long, instead of at the host's
    * terminal `agent_end`. A `triggerTurn` steer sent from `agent_end` starts its continuation
@@ -227,14 +230,28 @@ async function runPane(
       }
       if (url.pathname.startsWith("/anthropic/")) return Response.json({ data: [] });
       if (url.pathname === "/api/v1/asks/open") {
+        const questions = options.openAskQuestions ?? [];
         return Response.json({
           session_id: "",
           as_of: new Date().toISOString(),
           opened_since: false,
-          count: options.openAsks ?? 0,
+          count: options.openAsks ?? questions.length,
           waiting_on_human: 0,
           waiting_on_agent: 0,
-          asks: [],
+          asks: questions.map((question, index) => ({
+            id: `ask-${index}`,
+            ref: `/issues/LEGION-${index}#ask-${index}`,
+            question,
+            kind: "question",
+            urgency: "normal",
+            created_at: "2026-09-13T00:00:00Z",
+            age_seconds: 0,
+            priority: null,
+            owner: { issue: { key: `LEGION-${index}`, title: "Test" } },
+            human_replied: false,
+            last_reply: null,
+            waiting_on: "human",
+          })),
         });
       }
       if (url.pathname === "/legion/v1/worker/started") {
@@ -343,7 +360,7 @@ async function runPane(
         HOME: home,
         PATH: `${bin}:/usr/local/bin:/usr/bin:/bin`,
         ENVOY_URL: base,
-        ...(options.openAsks === undefined
+        ...(options.openAsks === undefined && options.openAskQuestions === undefined
           ? {}
           : { DISPATCH_URL: base, DISPATCH_TOKEN: "stall-dispatch-token" }),
         ...(legionPane
@@ -536,7 +553,7 @@ test.skipIf(omp === undefined && !onActions)(
   120_000
 );
 
-// The run-end ask nudge (extensions/envoy.ts) is a hidden `pi.askEphemeral` self-check whose
+// The run-end ask nudge (extensions/envoy.ts) is a hidden side-turn self-check whose
 // WAITING verdict — and nothing else — buys one steered turn. Two host behaviours carry it, and
 // only the real binary can say either: an ephemeral call is served as a Messages request over a
 // snapshot of the conversation that the transcript never keeps, and a `triggerTurn` continuation
@@ -571,24 +588,34 @@ test.skipIf(omp === undefined && !onActions)(
 );
 
 test.skipIf(omp === undefined && !onActions)(
-  "a WAITING self-check runs exactly one extra turn, whose own stop asks nothing more",
+  "a WAITING self-check with a held ask runs exactly one nudge and lists the ask",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const heldQuestion = "Which deployment window should I use?";
     const pane = await runPane(
       omp,
       [[{ type: "text", text: "Done." }], [{ type: "text", text: "Understood." }]],
-      { legion: false, openAsks: 0, selfCheck: "WAITING", quietMs: 8_000 }
+      {
+        legion: false,
+        openAskQuestions: [heldQuestion],
+        selfCheck: "WAITING",
+        quietMs: 8_000,
+      }
     );
 
     const turns = pane.turns();
-    // Two, and the wait proves no third: the user's turn, and the nudge's continuation.
+    // Two, and the wait proves no third: the user's turn, and the one nudge continuation.
     expect(turns).toHaveLength(2);
     expect(userText(turns[0] as Request)).not.toContain("no open ask in Dispatch");
-    expect(userText(turns[1] as Request)).toContain("no open ask in Dispatch");
+    expect(userText(turns[1] as Request)).toContain(
+      "You just said you are waiting on a human for something no open ask in Dispatch covers."
+    );
     expect(userText(turns[1] as Request)).toContain("dispatch_ask");
+    const selfChecks = pane.selfChecks();
+    expect(selfChecks).toHaveLength(1);
+    expect(userText(selfChecks[0] as Request)).toContain(heldQuestion);
     // The continuation's own stop found the period already fired, so it ran no second
     // self-check and read no third open-ask snapshot: one nudge per period, and no loop.
-    expect(pane.selfChecks()).toHaveLength(1);
     const asks = pane.requests.filter((request) => request.path === "/api/v1/asks/open");
     expect(asks).toHaveLength(2);
   },

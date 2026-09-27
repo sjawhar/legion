@@ -12,6 +12,10 @@ on:
       - "packages/claude-envoy/**"
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
+      - "packages/proof-editor/**"
+      - "patches/**"
+      - "package.json"
+      - "bun.lock"
       - "packages/daemon-go/**"
       - "packages/daemon/docker/worker.Dockerfile"
       - ".github/actions/install-jj/**"
@@ -30,6 +34,10 @@ on:
       - "packages/claude-envoy/**"
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
+      - "packages/proof-editor/**"
+      - "patches/**"
+      - "package.json"
+      - "bun.lock"
       - "packages/daemon-go/**"
       - "packages/daemon/docker/worker.Dockerfile"
       - ".github/actions/install-jj/**"
@@ -49,6 +57,7 @@ jobs:
       contracts: ${{ steps.filter.outputs.contracts }}
       envoy_client: ${{ steps.filter.outputs.envoy_client }}
       envoy: ${{ steps.filter.outputs.envoy }}
+      envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
@@ -68,10 +77,22 @@ jobs:
               - 'packages/contracts/**'
             envoy:
               - 'packages/envoy/**'
+              - 'packages/proof-editor/**'
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
               - 'go.work'
               - 'go.work.sum'
+            # The local acceptance run drives the Go listener and renders every frame with the
+            # shared TypeScript renderer, so a change to either side, or to the contracts both
+            # read, must run it.
+            envoy_e2e_local:
+              - 'packages/envoy/**'
+              - 'packages/envoy-client/**'
+              - 'packages/contracts/**'
+              - 'go.work'
+              - 'go.work.sum'
+              - 'package.json'
+              - 'bun.lock'
             plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
@@ -92,9 +113,15 @@ jobs:
               - '.github/actions/install-jj/**'
             dispatch:
               - 'packages/dispatch/**'
+              - 'packages/proof-editor/**'
               - 'packages/contracts/**'
               - 'packages/envoy/internal/dispatch/**'
               - 'packages/envoy/cmd/dispatch/**'
+              # The editor's source pin and its remaining patches can change document rendering,
+              # including the Dark Reader inline-style guard.
+              - 'patches/**'
+              - 'package.json'
+              - 'bun.lock'
             daemon_go:
               - 'packages/daemon-go/**'
               - 'packages/envoy/go.mod'
@@ -180,9 +207,13 @@ jobs:
       - name: Typecheck Envoy client
         run: bun run typecheck
         working-directory: packages/envoy-client
+      - name: Pre-pull the NATS image the credential tests run
+        run: docker pull nats:2.10
       - name: Test Envoy client
         run: bun run test
         working-directory: packages/envoy-client
+        env:
+          LEGION_E2E: "1"
       - name: Build Envoy client
         run: bun run build
         working-directory: packages/envoy-client
@@ -241,6 +272,15 @@ jobs:
           go-version-file: packages/envoy/go.mod
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
+      - name: Lint proof editor
+        run: bun run lint
+        working-directory: packages/proof-editor
+      - name: Typecheck proof editor
+        run: bun run typecheck
+        working-directory: packages/proof-editor
+      - name: Test proof editor
+        run: bun run test
+        working-directory: packages/proof-editor
       - name: Lint dispatch dashboard
         run: bun run lint
         working-directory: packages/dispatch
@@ -256,14 +296,14 @@ jobs:
       - name: Check dispatch dashboard CSS classes
         run: bun run check:classes
         working-directory: packages/dispatch
-      - name: Install Playwright Chromium
+      - name: Install Playwright Chromium, WebKit and Firefox
         # The runner image preconfigures Google's chrome-stable apt source, whose
         # index intermittently fails `apt-get update` with a hash-sum mismatch and
         # takes `--with-deps` down with it. Chrome is already installed there; the
         # source only serves upgrades, so drop it before installing our deps.
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          bunx playwright install --with-deps chromium
+          bunx playwright install --with-deps chromium webkit firefox
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
         # `bun run e2e` builds the SPA itself, which would rebuild it a second time in this job.
@@ -324,6 +364,7 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image would be one more registry pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
@@ -346,9 +387,6 @@ jobs:
       - name: Generate Go contracts from shared schema
         run: bun run gen:go
         working-directory: packages/contracts
-      - name: Install pmdoc fixture generator dependencies
-        run: bun install --frozen-lockfile
-        working-directory: packages/envoy/internal/dispatch/pmdoc/gen
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
@@ -378,6 +416,9 @@ jobs:
       - name: Unit test envoy Go package
         run: go list ./... | grep -v /integration | xargs go test
         working-directory: packages/envoy
+      - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
+        run: bash scripts/dev-broker.test.sh
+        working-directory: packages/envoy
       - name: Integration test envoy (testcontainers + NATS)
         run: go test ./internal/integration/ -timeout 300s -count=1
         working-directory: packages/envoy
@@ -402,6 +443,45 @@ jobs:
           path: |
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
+
+  # packages/envoy/scripts/e2e-local.sh: signed GitHub fixtures and a direct message through a real
+  # listener and NATS, every frame rendered by both inbound renderers (renderInbound and Go's
+  # Deliverer.Text) and checked against the acceptance contract.
+  envoy-e2e-local:
+    needs: changes
+    if: needs.changes.outputs.envoy_e2e_local == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      E2E_NATS_CONTAINER: envoy-e2e-nats-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache-dependency-path: packages/envoy/go.sum
+      # The same bounded retry envoy-go gives its test images: a registry connection reset during
+      # the script's own implicit pull would fail the run for a reason outside it.
+      - name: Pull the NATS image the script starts
+        run: |
+          nats_image=$(sed -n 's/^docker run .* \(nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)
+          [ -n "$nats_image" ] || { echo "::error::no nats image on the docker run line of scripts/e2e-local.sh"; exit 1; }
+          for attempt in 1 2 3; do
+            docker pull "$nats_image" && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 10
+          done
+        working-directory: packages/envoy
+      - name: Local end-to-end acceptance
+        run: bash scripts/e2e-local.sh
+        working-directory: packages/envoy
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: envoy-e2e-local-evidence-${{ github.run_attempt }}
+          path: packages/envoy/out/e2e
 
   daemon-go:
     needs: changes

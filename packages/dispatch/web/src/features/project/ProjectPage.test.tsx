@@ -75,7 +75,8 @@ function renderPage(
   const listProjectArtifacts = spyOn(api, "listProjectArtifacts").mockResolvedValue([]);
   const getArchitectureSource = spyOn(api, "getArchitectureSource");
   if (source === undefined) {
-    getArchitectureSource.mockRejectedValue(new ApiError(404, { code: "SOURCE_NOT_FOUND" }));
+    // No source configured: the read answers null, not a refusal.
+    getArchitectureSource.mockResolvedValue(null);
   } else if (source === "pending") {
     getArchitectureSource.mockImplementation(() => Promise.withResolvers<never>().promise);
   } else if (source instanceof ApiError) {

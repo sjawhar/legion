@@ -1,5 +1,5 @@
 ---
-title: "bus.Connect's stream-ensure keeps other deployments' subjects; retiring one is an operator step"
+title: "bus.ConnectOwningStream's stream-ensure keeps other deployments' subjects; retiring one is an operator step"
 category: envoy
 tags:
   - envoy
@@ -19,19 +19,36 @@ applies_when:
   - Diagnosing why a subject that one service publishes to answers "nats: no response from stream"
 ---
 
-# `bus.Connect`'s Stream-Ensure Keeps Other Deployments' Subjects
+# `bus.ConnectOwningStream`'s Stream-Ensure Keeps Other Deployments' Subjects
 
 ## Context
 
-Every binary that calls `bus.Connect` ensures the shared `ENVOY_NOTIFICATIONS` stream when it
-starts, using its own compiled `streamSubjects` (`packages/envoy/internal/bus/stream.go`): the
-listener (`cmd/listener`), Dispatch (`cmd/dispatch`), `natstail` (`cmd/natstail`) and the MCP
-server (`cmd/mcp`). Several deployments of them write production's one stream and roll
-separately: the production listener (applied by the production chain), native Dispatch (applied
-by its own manual workflow), the on-prem Envoy fleet's listeners, which reach production's NATS
-over Tailscale on their own image tag, and any ad-hoc `natstail`, MCP server or Dispatch run
-pointed at production. A rollback, or a restart in the middle of a rollout, starts a binary
-compiled with a different subject list from the one another live deployment was compiled with.
+A binary that calls `bus.ConnectOwningStream` ensures the shared `ENVOY_NOTIFICATIONS` stream when
+it starts, using its own compiled `streamSubjects` (`packages/envoy/internal/bus/stream.go`): the
+listener (`cmd/listener`) and Dispatch's server (`cmd/dispatch`). Several deployments of those two
+write production's one stream and roll separately: the production listener (applied by the
+production chain), native Dispatch (applied by its own manual workflow), and the on-prem Envoy
+fleet's listeners, which reach production's NATS over Tailscale on their own image tag. A
+rollback, or a restart in the middle of a rollout, starts a binary compiled with a different
+subject list from the one another live deployment was compiled with.
+
+A caller that only publishes or only tails - `natstail` (`cmd/natstail`), the MCP server
+(`cmd/mcp`), `envoy-dispatch`'s operator commands - calls `bus.Connect` instead, which neither
+creates the stream nor updates it (LEGION-249). Until that split an ad-hoc run of any of them
+from a checkout reconfigured production's stream on the way in, because an agent machine's
+`~/.config/opencode/envoy.json` names production's NATS.
+
+Both connects refuse a NATS server that is not this machine's unless the run sets
+`ENVOY_ALLOW_REMOTE_NATS=1`, decided from the URL before anything dials. The owning connect
+carries the rule too because nothing distinguishes the deployed Dispatch from the same binary
+run out of a checkout - both read `natsUrls` from that same `envoy.json` - so a bare
+`envoy-dispatch` in a checkout would otherwise still reconcile production's stream, before its
+own database check even fails. Each deployment states its reach instead:
+`packages/envoy/deploy/compose/{listener,dispatch}.compose.yml`, agent-c's
+`components/envoy/listener.py` and `components/dispatch/service.py`, and the on-prem fleet's
+`~/.dotfiles/envoy/services.ts`. Each of those must carry the variable **before** an image whose
+binaries read it runs there: without it the start refuses the shared NATS the deployment names
+and exits. Setting it early is free, because a binary built before the variable ignores it.
 
 `ensureStreamWithConfig` therefore keeps the deployed subjects and appends each of the starting
 binary's subjects the stream lacks (`reconcileSubjects`). It removes a deployed subject in two
@@ -104,6 +121,8 @@ codebase ensures from more than one binary. It does not apply to consumer filter
 ## Related
 
 - `packages/envoy/internal/bus/stream_config_test.go`
-  `TestConnectKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds`: a real NATS, a second deployment
-  with a different subject list, both starting in turn.
+  `TestConnectOwningStreamKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds`: a real NATS, a second
+  deployment with a different subject list, both starting in turn.
+- `packages/envoy/internal/bus/publish_only_test.go`: the publish-only connect against a deployed
+  stream and against a server with none.
 - `sjawhar/legion#826`, which first named this risk when `notifications.dispatch.>` was added.

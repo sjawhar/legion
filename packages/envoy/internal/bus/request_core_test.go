@@ -18,7 +18,7 @@ import (
 // ErrReceiptTimeout; the listener maps that, and only that, to receipt_timeout.
 func TestRequestCoreToReportsNoReceiptAsErrReceiptTimeout(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestRequestCoreToReportsNoReceiptAsErrReceiptTimeout(t *testing.T) {
 // "the window elapsed".
 func TestRequestCoreToReturnsNilOnAnEmptyReceipt(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestRequestCoreToReturnsNilOnAnEmptyReceipt(t *testing.T) {
 // flush waits for a PONG that cannot come until the request window runs out.
 func TestRequestCoreToFlushTimeoutIsNotErrReceiptTimeout(t *testing.T) {
 	ctr, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

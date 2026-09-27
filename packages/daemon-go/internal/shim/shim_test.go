@@ -283,11 +283,11 @@ func (b *syncBuffer) awaitLine(t *testing.T, line string, n int) {
 
 // running is one shim.Run in a goroutine.
 type running struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	code   int
-	err    error
-	log    *syncBuffer
+	cancel  context.CancelFunc
+	done    chan struct{}
+	code    int
+	failure error
+	log     *syncBuffer
 }
 
 func run(t *testing.T, cfg shim.Config, clock *fakeClock) *running {
@@ -298,7 +298,7 @@ func run(t *testing.T, cfg shim.Config, clock *fakeClock) *running {
 	var ctx context.Context
 	ctx, r.cancel = context.WithCancel(context.Background())
 	go func() {
-		r.code, r.err = shim.Run(ctx, cfg)
+		r.code, r.failure = shim.Run(ctx, cfg)
 		close(r.done)
 	}()
 	t.Cleanup(func() {
@@ -313,6 +313,28 @@ func run(t *testing.T, cfg shim.Config, clock *fakeClock) *running {
 	return r
 }
 
+// stop ends the shim's own context and waits for it to exit, without wait's refusal of a
+// non-nil error: a shim ended by its own context — an identity or keygen failure, a signal —
+// reports the child's exit or its own failure, and that is not a test failure here.
+func (r *running) stop(t *testing.T) {
+	t.Helper()
+	r.cancel()
+	select {
+	case <-r.done:
+	case <-time.After(waitLimit):
+		t.Fatalf("the shim never exited; log:\n%s", r.log)
+	}
+}
+
+// err is r.failure's text once the shim has ended (r.done is closed by then), or "" when it
+// ended with no error.
+func (r *running) err() string {
+	if r.failure == nil {
+		return ""
+	}
+	return r.failure.Error()
+}
+
 func (r *running) wait(t *testing.T) int {
 	t.Helper()
 	select {
@@ -320,8 +342,8 @@ func (r *running) wait(t *testing.T) int {
 	case <-time.After(waitLimit):
 		t.Fatalf("the shim never exited; log:\n%s", r.log)
 	}
-	if r.err != nil {
-		t.Fatalf("shim.Run: %v; log:\n%s", r.err, r.log)
+	if r.failure != nil {
+		t.Fatalf("shim.Run: %v; log:\n%s", r.failure, r.log)
 	}
 	return r.code
 }
@@ -430,11 +452,15 @@ func (p *peer) sendLine(t *testing.T, line string) {
 	}
 }
 
-// expectHello reads the connection's first frame, which must be the hello carrying the pane's
-// boot token.
+// expectHello reads the connection's first frame, which must be a hello2 carrying the pane's
+// boot token: an enrolled shim's hello also carries an identity, which this checks nothing about.
 func (p *peer) expectHello(t *testing.T) {
 	t.Helper()
-	p.expect(t, shimwire.Hello{BootToken: bootToken})
+	frame := p.next(t)
+	hello, ok := frame.(shimwire.Hello2)
+	if !ok || hello.BootToken != bootToken {
+		t.Fatalf("the shim's first frame was %#v, want hello2 with boot token %q", frame, bootToken)
+	}
 }
 
 // open is the daemon's side of a successful connect: the hello read and acked, and the child's

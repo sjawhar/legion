@@ -297,7 +297,17 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 }
 
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
-	if err := s.awaitRoomRecovery(ctx, room); err != nil {
+	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
+	// CloseRoom for the ready barrier this load holds (reearth/ygo v1.49.5,
+	// provider/websocket/inject.go:501-508) and closes the channel awaitRoomRecovery waits on
+	// only once CloseRoom has returned (failRoomLocked), so a wait here is a cycle: the load
+	// holds the eviction, and the eviction holds the load. No deadline breaks it either -
+	// both loaders that reach this one carry context.Background(), the settlement warm-up
+	// (settleRoom) and a committed write's publish (publishLiveUpdate) - and the room stayed
+	// failed until the process restarted (LEGION-282). A failed room refuses the load
+	// instead: ygo fails the load, closes the barrier with this error and removes the room,
+	// which lets the eviction finish, and the next access loads the replacement.
+	if err := s.roomFailure(room); err != nil {
 		return err
 	}
 	// Everything this load needs comes from the pool that owns loads. A writer holding a
@@ -326,6 +336,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	state.mu.Lock()
 	state.closed = !open
 	state.contentMarkdown = &markdown
+	// A failure dropped this document's settlement (failRoomLocked). This state is the
+	// replacement it left the mark for, so it settles once rather than waiting for an edit to
+	// arm one. A room that failed again while this load ran leaves the mark for its own
+	// replacement, since failing a room always sets it.
+	if state.failed == nil {
+		if _, dropped := s.settleAfterReload.LoadAndDelete(room); dropped {
+			s.scheduleSettleLocked(room, state)
+		}
+	}
 	state.mu.Unlock()
 	doc.OnUpdate(func(update []byte, origin any) {
 		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {

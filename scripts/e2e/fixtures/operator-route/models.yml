@@ -8,9 +8,12 @@
 # The models are the gateway's `-legion` aliases (agent-c's LEGION_MODEL_ALIAS_NAMES), the only
 # names the gateway serves a legion-worker token. Oh My Pi finds no catalog entry for an aliased id,
 # so each carries its model's catalog metadata.
+#
+# baseUrl is the operator's gateway: a harness substitutes LEGION_E2E_MODEL_GATEWAY_URL, the
+# gateway's Anthropic endpoint, for the placeholder before it creates the ConfigMap from this file.
 providers:
   anthropic:
-    baseUrl: https://middleman.hawk.internal.trajectorylabs.com/anthropic
+    baseUrl: ${LEGION_E2E_MODEL_GATEWAY_URL}
     auth: apiKey
     api: anthropic-messages
     apiKey: "!cat /var/run/operator/token"

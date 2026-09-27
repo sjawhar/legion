@@ -1,6 +1,7 @@
+import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { inboxQuery } from "../../api/queries";
@@ -21,12 +22,18 @@ import { PinButton } from "../../components/PinButton";
 import {
   borderDefault,
   card,
+  checkboxAccent,
   connectionDotConnecting,
   dangerText,
   disclosureButtonText,
   inputClasses,
+  linkHoverText,
+  linkText,
   liveDotBg,
   offlineDotBg,
+  primaryButtonBg,
+  primaryButtonDisabled,
+  primaryButtonEnabledHoverBg,
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
@@ -39,11 +46,7 @@ import { resolveAuthor } from "../conversation/authors";
 import { MentionComposer, type ReplyTarget } from "../conversation/MentionComposer";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
-import {
-  capabilitiesForTarget,
-  type TargetedMessageAttempt,
-  TargetedMessageCard,
-} from "../conversation/TargetedMessageCard";
+import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { sessionLabel } from "../refs/actor";
@@ -53,27 +56,13 @@ import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 
+import { deliveryAttempts } from "./attempts";
+
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
 /** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
 function isInactive(agent: Agent, now: number): boolean {
   return now - agent.last_seen >= INACTIVE_AFTER_MS;
-}
-
-/** A message's delivery attempts as `TargetedMessageCard` shows them, all aimed at one session. */
-function deliveryAttempts(
-  deliveries: readonly MessageDelivery[],
-  targetName: string
-): TargetedMessageAttempt[] {
-  return deliveries.map((attempt) => ({
-    attempt: attempt.attempt,
-    createdAt: attempt.created_at,
-    delivery: attempt.delivery,
-    duplicate: attempt.duplicate,
-    error: attempt.error,
-    state: attempt.state,
-    targetName,
-  }));
 }
 
 /** Open asks from each session whose turn is the viewer's, keyed by session ID. */
@@ -618,13 +607,17 @@ function AgentRow({
   liveAgents,
   needsYou,
   onPin,
+  onSelect,
   pinned,
+  selected,
 }: {
   agent: Agent;
   liveAgents: readonly Agent[];
   needsYou: number;
   onPin: () => void;
+  onSelect: (selected: boolean) => void;
   pinned: boolean;
+  selected: boolean;
 }): ReactNode {
   const label = sessionLabel(agent.session_id, agent.title);
   const machineAndDir = `${agent.machine_id} · ${agent.dir}`;
@@ -639,6 +632,13 @@ function AgentRow({
     <article className={`rounded-xl border ${card} ${borderDefault}`}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5">
         <div className="flex min-w-0 flex-auto flex-wrap items-center gap-x-2 md:flex-nowrap">
+          <input
+            aria-label={`Select ${label} for broadcast`}
+            checked={selected}
+            className={`size-4 shrink-0 ${checkboxAccent}`}
+            onChange={(event) => onSelect(event.target.checked)}
+            type="checkbox"
+          />
           <FreshnessDot agent={agent} />
           <h2 className={`max-w-56 shrink-0 text-sm font-semibold ${textPrimaryOnCanvas}`}>
             <button
@@ -655,6 +655,13 @@ function AgentRow({
               </span>
             </button>
           </h2>
+          <Link
+            className={`min-h-11 rounded-lg border px-2 text-xs font-medium whitespace-nowrap md:min-h-7 md:leading-7 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+            title={`Watch ${label}'s conversation live`}
+            to={`/agents/${encodeURIComponent(agent.session_id)}/live`}
+          >
+            Open
+          </Link>
           <CopyButton value={agent.session_id} what="session ID">
             ID
           </CopyButton>
@@ -739,12 +746,16 @@ function AgentFold({
   liveAgents,
   needsYouBySession,
   onPin,
+  onSelect,
+  selected,
 }: {
   agents: readonly Agent[];
   label: string;
   liveAgents: readonly Agent[];
   needsYouBySession: NeedsYouBySession;
   onPin: (sessionID: string) => void;
+  onSelect: (sessionID: string, selected: boolean) => void;
+  selected: ReadonlySet<string>;
 }): ReactNode {
   const [expanded, setExpanded] = useState(false);
   if (agents.length === 0) return null;
@@ -766,12 +777,282 @@ function AgentFold({
               liveAgents={liveAgents}
               needsYou={needsYouBySession.get(agent.session_id) ?? 0}
               onPin={() => onPin(agent.session_id)}
+              onSelect={(next) => onSelect(agent.session_id, next)}
               pinned={false}
+              selected={selected.has(agent.session_id)}
             />
           ))}
         </section>
       ) : null}
     </div>
+  );
+}
+
+/**
+ * What narrows the agent list, mirroring the `envoy broadcast` script's own selectors: one
+ * machine, one role, and a directory substring. An empty field matches everything.
+ */
+export interface AgentFilters {
+  readonly dir: string;
+  readonly machine: string;
+  readonly role: string;
+}
+
+export const NO_AGENT_FILTERS: AgentFilters = { dir: "", machine: "", role: "" };
+
+export function filterAgents(agents: readonly Agent[], filters: AgentFilters): Agent[] {
+  const dir = filters.dir.trim().toLowerCase();
+  return agents.filter(
+    (agent) =>
+      (filters.machine === "" || agent.machine_id === filters.machine) &&
+      (filters.role === "" || agent.roles.includes(filters.role)) &&
+      (dir === "" || agent.dir.toLowerCase().includes(dir))
+  );
+}
+
+/** A session a broadcast would leave out, worded the way the server reports it, so the
+ *  composer and the create response say the same thing. */
+interface BroadcastExclusionPlan {
+  readonly reason: string;
+  readonly sessionID: string;
+  readonly title: string;
+}
+
+/**
+ * What sending the current selection would do: the sessions it reaches, and the selected
+ * sessions it leaves out. A session that does not advertise the chosen mode is excluded
+ * rather than switched to another one - the mode is part of what the sender said - and a
+ * selection kept across a session going away excludes it too, which is exactly the judgment
+ * the server repeats against its own registry read when the send arrives.
+ */
+export function broadcastPlan(
+  selected: ReadonlySet<string>,
+  agents: readonly Agent[],
+  delivery: MessageDeliveryMode
+): { excluded: BroadcastExclusionPlan[]; recipients: Agent[] } {
+  const live = new Map(agents.map((agent) => [agent.session_id, agent]));
+  const excluded: BroadcastExclusionPlan[] = [];
+  const recipients: Agent[] = [];
+  for (const sessionID of selected) {
+    const agent = live.get(sessionID);
+    if (agent === undefined) {
+      excluded.push({ reason: "no live session", sessionID, title: "" });
+      continue;
+    }
+    if (!agent.capabilities.includes(delivery)) {
+      excluded.push({ reason: `does not advertise ${delivery}`, sessionID, title: agent.title });
+      continue;
+    }
+    recipients.push(agent);
+  }
+  return { excluded, recipients };
+}
+
+/** The machines, roles and directories the live sessions actually occupy: a filter can only
+ *  offer what is there, so a stale option can never hide every agent. */
+function filterOptions(agents: readonly Agent[]): { machines: string[]; roles: string[] } {
+  const machines = new Set<string>();
+  const roles = new Set<string>();
+  for (const agent of agents) {
+    if (agent.machine_id !== "") machines.add(agent.machine_id);
+    for (const role of agent.roles) roles.add(role);
+  }
+  return { machines: [...machines].sort(), roles: [...roles].sort() };
+}
+
+function AgentFilterBar({
+  agents,
+  filters,
+  listed,
+  onClear,
+  onFilters,
+  onSelectAll,
+  selectedCount,
+}: {
+  agents: readonly Agent[];
+  filters: AgentFilters;
+  listed: readonly Agent[];
+  onClear: () => void;
+  onFilters: (filters: AgentFilters) => void;
+  onSelectAll: () => void;
+  selectedCount: number;
+}): ReactNode {
+  const { machines, roles } = filterOptions(agents);
+  const field = `min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`;
+  return (
+    <fieldset className="mb-3 flex flex-wrap items-center gap-2">
+      <legend className="sr-only">Agent filters</legend>
+      <select
+        aria-label="Machine"
+        className={field}
+        onChange={(event) => onFilters({ ...filters, machine: event.target.value })}
+        value={filters.machine}
+      >
+        <option value="">All machines</option>
+        {machines.map((machine) => (
+          <option key={machine} value={machine}>
+            {machine}
+          </option>
+        ))}
+      </select>
+      <select
+        aria-label="Role"
+        className={field}
+        onChange={(event) => onFilters({ ...filters, role: event.target.value })}
+        value={filters.role}
+      >
+        <option value="">All roles</option>
+        {roles.map((role) => (
+          <option key={role} value={role}>
+            {role}
+          </option>
+        ))}
+      </select>
+      <input
+        aria-label="Directory contains"
+        className={field}
+        onChange={(event) => onFilters({ ...filters, dir: event.target.value })}
+        placeholder="Directory contains"
+        type="search"
+        value={filters.dir}
+      />
+      <button
+        className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+        onClick={onSelectAll}
+        type="button"
+      >
+        Select all ({listed.length})
+      </button>
+      {selectedCount === 0 ? null : (
+        <button
+          className={`min-h-11 rounded-lg px-3 text-sm ${textMutedHoverToSecondary}`}
+          onClick={onClear}
+          type="button"
+        >
+          Clear selection
+        </button>
+      )}
+    </fieldset>
+  );
+}
+
+/**
+ * The broadcast a selection is waiting to become: one body, one mode, and one message per
+ * recipient. Selection is what the human ticked, so a recipient that a later filter hides is
+ * still listed here rather than silently dropped; every selected session is named, including
+ * the ones this mode leaves out.
+ */
+function BroadcastComposer({
+  agents,
+  onSent,
+  selected,
+  onDeselect,
+}: {
+  agents: readonly Agent[];
+  onDeselect: (sessionID: string) => void;
+  onSent: () => void;
+  selected: ReadonlySet<string>;
+}): ReactNode {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [body, setBody] = useState("");
+  const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
+  const { excluded, recipients } = broadcastPlan(selected, agents, delivery);
+  const send = useMutation({
+    mutationFn: () =>
+      api.createBroadcast({
+        body,
+        delivery,
+        session_ids: recipients.map((agent) => agent.session_id),
+      }),
+    onSuccess: (created) => {
+      setBody("");
+      onSent();
+      for (const recipient of created.recipients) {
+        void queryClient.invalidateQueries({
+          queryKey: ["agents", recipient.session_id, "messages"],
+        });
+      }
+      void queryClient.invalidateQueries({ queryKey: ["broadcast"] });
+      // The exclusions travel with the navigation: they are a fact about this send, not about
+      // the broadcast, so the server stores none and this is the only place they can be shown.
+      void navigate(`/agents/broadcasts/${created.id}`, { state: { excluded: created.excluded } });
+    },
+  });
+
+  return (
+    <section
+      aria-label="Broadcast"
+      className={`mb-4 rounded-xl border p-3 ${card} ${borderDefault}`}
+    >
+      <h2 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>
+        Broadcast to {recipients.length} of {selected.size} selected
+      </h2>
+      <ul aria-label="Selected agents" className="mt-2 flex flex-wrap gap-2">
+        {[...selected].map((sessionID) => {
+          const agent = agents.find((candidate) => candidate.session_id === sessionID);
+          const label = sessionLabel(sessionID, agent?.title ?? "");
+          const left = excluded.find((item) => item.sessionID === sessionID);
+          return (
+            <li key={sessionID}>
+              <button
+                className={`min-h-8 rounded-full border px-2 py-1 text-xs ${secondaryButtonBorder} ${left === undefined ? secondaryButtonText : dangerText} ${secondaryButtonHoverBorder}`}
+                onClick={() => onDeselect(sessionID)}
+                title={`Remove ${label} from this broadcast`}
+                type="button"
+              >
+                {label}
+                {left === undefined ? "" : ` · ${left.reason}`} ✕
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <select
+          aria-label="Delivery mode"
+          className={`min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`}
+          onChange={(event) => setDelivery(event.target.value as MessageDeliveryMode)}
+          value={delivery}
+        >
+          {DELIVERY_CAPABILITIES.map((mode) => (
+            <option key={mode} value={mode}>
+              {mode}
+            </option>
+          ))}
+        </select>
+      </div>
+      <textarea
+        aria-label="Broadcast message"
+        className={`mt-2 block w-full rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`}
+        onChange={(event) => setBody(event.target.value)}
+        placeholder="One message, sent to each selected agent"
+        rows={3}
+        value={body}
+      />
+      {excluded.length === 0 ? null : (
+        <p className={`mt-2 text-sm ${dangerText}`}>
+          Excluded:{" "}
+          {excluded
+            .map((item) => `${sessionLabel(item.sessionID, item.title)} (${item.reason})`)
+            .join(", ")}
+          . Nothing is sent to them, and no other mode is substituted.
+        </p>
+      )}
+      {send.isError ? (
+        <p className={`mt-2 text-sm ${dangerText}`}>
+          Could not send: {send.error instanceof Error ? send.error.message : "network error"}
+        </p>
+      ) : null}
+      <button
+        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+        disabled={recipients.length === 0 || body.trim() === "" || send.isPending}
+        onClick={() => send.mutate()}
+        type="button"
+      >
+        {send.isPending ? "Sending…" : `Send to ${recipients.length}`}
+      </button>
+    </section>
   );
 }
 
@@ -800,10 +1081,16 @@ export function AgentsPage(): ReactNode {
     }
     return counts;
   }, [inbox.data]);
+  const [filters, setFilters] = useState<AgentFilters>(NO_AGENT_FILTERS);
+  // Selection is what the human ticked, not what the filters currently show: narrowing the
+  // list after ticking a row must not quietly drop that row from the send. Every selected
+  // session is named in the composer, so nothing is hidden either way.
+  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
+  const listed = filterAgents(agents, filters);
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
   // and is recomputed on every render of this page.
   const { active, quiet, inactive } = partitionAgents(
-    agents,
+    listed,
     pinned,
     needsYouBySession,
     Date.now()
@@ -813,6 +1100,14 @@ export function AgentsPage(): ReactNode {
       ? pinned.filter((candidate) => candidate !== sessionID)
       : [...pinned, sessionID];
     setPinned(next);
+  };
+  const select = (sessionID: string, next: boolean) => {
+    setSelected((current) => {
+      const updated = new Set(current);
+      if (next) updated.add(sessionID);
+      else updated.delete(sessionID);
+      return updated;
+    });
   };
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
@@ -824,39 +1119,78 @@ export function AgentsPage(): ReactNode {
         <h1 className={`text-[22px] font-semibold tracking-tight ${textPrimaryOnCanvas}`}>
           Agents
         </h1>
-        <p className={`mt-1 text-sm ${textMutedOnCanvas}`}>
-          Live Envoy sessions and their Dispatch activity.
+        <p className={`mt-1 flex flex-wrap items-center gap-2 text-sm ${textMutedOnCanvas}`}>
+          <span>Live Envoy sessions and their Dispatch activity.</span>
+          <Link className={`${linkText} ${linkHoverText}`} to="/agents/broadcasts">
+            Broadcasts
+          </Link>
         </p>
       </header>
       {agents.length === 0 ? (
         <EmptyState label="Agents empty state" message="No agents are connected." />
       ) : (
-        <div className="space-y-3">
-          {active.map((agent) => (
-            <AgentRow
-              agent={agent}
-              key={agent.session_id}
-              liveAgents={agents}
-              needsYou={needsYouBySession.get(agent.session_id) ?? 0}
-              onPin={() => togglePin(agent.session_id)}
-              pinned={pinned.includes(agent.session_id)}
+        <>
+          <AgentFilterBar
+            agents={agents}
+            filters={filters}
+            listed={listed}
+            onClear={() => setSelected(new Set())}
+            onFilters={setFilters}
+            onSelectAll={() =>
+              setSelected(
+                (current) => new Set([...current, ...listed.map((agent) => agent.session_id)])
+              )
+            }
+            selectedCount={selected.size}
+          />
+          {selected.size === 0 ? null : (
+            <BroadcastComposer
+              agents={agents}
+              onDeselect={(sessionID) => select(sessionID, false)}
+              onSent={() => setSelected(new Set())}
+              selected={selected}
             />
-          ))}
-          <AgentFold
-            agents={quiet}
-            label="No Dispatch activity"
-            liveAgents={agents}
-            needsYouBySession={needsYouBySession}
-            onPin={togglePin}
-          />
-          <AgentFold
-            agents={inactive}
-            label="Inactive"
-            liveAgents={agents}
-            needsYouBySession={needsYouBySession}
-            onPin={togglePin}
-          />
-        </div>
+          )}
+          {listed.length === 0 ? (
+            <EmptyState
+              label="Agents filtered empty state"
+              message="No agent matches these filters."
+            />
+          ) : (
+            <div className="space-y-3">
+              {active.map((agent) => (
+                <AgentRow
+                  agent={agent}
+                  key={agent.session_id}
+                  liveAgents={agents}
+                  needsYou={needsYouBySession.get(agent.session_id) ?? 0}
+                  onPin={() => togglePin(agent.session_id)}
+                  onSelect={(next) => select(agent.session_id, next)}
+                  pinned={pinned.includes(agent.session_id)}
+                  selected={selected.has(agent.session_id)}
+                />
+              ))}
+              <AgentFold
+                agents={quiet}
+                label="No Dispatch activity"
+                liveAgents={agents}
+                needsYouBySession={needsYouBySession}
+                onPin={togglePin}
+                onSelect={select}
+                selected={selected}
+              />
+              <AgentFold
+                agents={inactive}
+                label="Inactive"
+                liveAgents={agents}
+                needsYouBySession={needsYouBySession}
+                onPin={togglePin}
+                onSelect={select}
+                selected={selected}
+              />
+            </div>
+          )}
+        </>
       )}
     </section>
   );

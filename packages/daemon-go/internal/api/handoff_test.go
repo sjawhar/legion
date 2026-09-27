@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,6 +169,77 @@ func TestHandoffCompleteAppliesTheMergersCorrectedReadyAtTheSameCommit(t *testin
 	}
 }
 
+// The daemon posts the READY packet as one Dispatch message with the outbox's marker, so a packet
+// over record.MessagePostLimit would be refused by Dispatch on every attempt. The route refuses it
+// before the fact is applied, naming how far over it is, and records nothing: the merger's
+// shortened packet at the same commit, the call the refusal asks for, is applied. The limit counts
+// UTF-16 units, as Dispatch does, so a character outside the Basic Multilingual Plane counts twice.
+func TestHandoffCompleteRefusesAREADYPacketTheDaemonCannotPostAndAppliesTheShortenedRetry(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Merging)
+	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
+	const emoji = "\U0001F600"
+	over := emoji + strings.Repeat("x", record.MessagePostLimit-1)
+	recorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", HandoffCompleteRequest{
+		GrantID: merger.grant(t), Summary: over, Ready: true, Commit: "facade",
+	}, nil)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("READY one unit over the limit = %d, want 400; body %s", recorder.Code, recorder.Body)
+	}
+	var failure Failure
+	decodeInto(t, recorder, &failure)
+	if want := fmt.Sprintf("1 characters over the %d the daemon can post as one Dispatch message (%d/%d)", record.MessagePostLimit, record.MessagePostLimit+1, record.MessagePostLimit); failure.Code != "READY_PACKET_TOO_LONG" || !strings.Contains(failure.Error, want) {
+		t.Fatalf("refusal = %+v, want READY_PACKET_TOO_LONG naming %q", failure, want)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts after the refusal = %#v, want none recorded", got)
+	}
+
+	shortened := emoji + strings.Repeat("x", record.MessagePostLimit-2)
+	if recorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", HandoffCompleteRequest{
+		GrantID: merger.grant(t), Summary: shortened, Ready: true, Commit: "facade",
+	}, nil); recorder.Code != http.StatusOK {
+		t.Fatalf("shortened READY at the same commit = %d: %s", recorder.Code, recorder.Body)
+	}
+	got := facts.recorded()
+	if len(got) != 1 {
+		t.Fatalf("handoff facts = %#v, want the shortened READY", got)
+	}
+	if fact, ok := got[0].(intake.HandoffComplete); !ok || !fact.Ready || fact.Commit != "facade" || fact.Summary != shortened {
+		t.Fatalf("applied fact = %#v, want the shortened READY at facade", got[0])
+	}
+}
+
+// A completion the workflow refused while the child's tree lingered is recorded as processed under
+// its key. Re-admission starts a new generation of the tree, bumping only the root's generation,
+// and restarts the child's worker in the phase it stood in; the same completion there belongs to
+// the new generation, so the key names the tree's generation and the completion is applied rather
+// than answered already received.
+func TestHandoffCompleteAppliesAfterReadmissionTheCompletionALingeringTreeRefused(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, &intake.Refusal{Status: http.StatusConflict, Code: "TREE_LINGERING", Message: "the tree LEGION-208 is lingering after it left the workflow"})
+	seedTree(t, h, "LEGION-208", "LEGION-209")
+	// A worker's task carries its issue's run, and a claim serving no run is refused before the
+	// workflow sees the completion, so the tree is at a run of its own.
+	for _, key := range []string{"LEGION-208", "LEGION-209"} {
+		setIssue(t, h, key, func(issue *record.Issue) { issue.Generation = 1 })
+	}
+	planner := newLiveClaim(t, h, "LEGION-209", claim.RolePlanner)
+	request := HandoffCompleteRequest{GrantID: planner.grant(t), Summary: "planned", Commit: "facade"}
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/handoff/complete", request, nil), http.StatusConflict, "TREE_LINGERING")
+
+	facts.mu.Lock()
+	facts.refusal = nil
+	facts.mu.Unlock()
+	setIssue(t, h, "LEGION-208", func(issue *record.Issue) { issue.Generation++ })
+	request.GrantID = planner.grant(t)
+	if recorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", request, nil); recorder.Code != http.StatusOK {
+		t.Fatalf("the same completion after re-admission = %d: %s", recorder.Code, recorder.Body)
+	}
+	if got := facts.recorded(); len(got) != 2 {
+		t.Fatalf("handoff facts = %#v, want the refused completion and the new generation's", got)
+	}
+}
+
 // A worker told to wait replies WAITING and its turn ends, which retires the delivery. A notice
 // then wakes it — Envoy starts that turn itself — and the completion it reports there is still the
 // run's whose task it took: a tester waiting on CI, an implementer waiting on a review, a merger
@@ -210,9 +283,12 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine, facts}, Dispatch: &statusRecorder{},
 	}).Handler
+	// The tester takes run 1's task, and the child is then re-entered at run 2 while it works.
+	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+		Phase: phase.Testing, Generation: 1, Status: "in_progress"})
+	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
-	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	machine, ok := h.supervisor.Machine(tester.token)
 	if !ok {
 		t.Fatal("no machine for the tester")
@@ -463,8 +539,9 @@ func TestAnOperatorsTaskLeavesTheRunTheClaimIsServing(t *testing.T) {
 // task nobody has read.
 func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) {
 	h, facts, _ := newArchitectHarness(t, nil, nil)
+	// The tester served run 1, and the child is re-entered at run 2 once that turn ends.
 	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
-		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
+		Phase: phase.Testing, Generation: 1, Status: "in_progress"})
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	machine, ok := h.supervisor.Machine(tester.token)
 	if !ok {
@@ -474,6 +551,8 @@ func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) 
 	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: tester.token}); err != nil {
 		t.Fatalf("end the first run's turn: %v", err)
 	}
+	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 	// The next run's task is sent, a foreign turn confirms it, and the agent refuses it as busy.
 	id := "outbox:99"
 	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: tester.token, Task: "the next run's task", ID: id, Generation: 2}); err != nil {

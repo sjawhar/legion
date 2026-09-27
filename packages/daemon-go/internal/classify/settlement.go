@@ -13,7 +13,10 @@ const (
 	SettlementRefresh   SettlementClassification = "refresh"
 )
 
-// GitHubFenceEffect states what a complete GitHub rollup can do to a stored CI fence.
+// GitHubFenceEffect states what a complete GitHub rollup can do to a stored CI fence. The Go
+// daemon reads no rollup, so nothing on its path produces one: AcceptGitHubFence, and the
+// Reconciled branch of ClassifySettlement, replay the shipped daemon's recorded classification
+// fixtures (packages/contracts/fixtures/classification) until LEGION-208 Stage 7 deletes them.
 type GitHubFenceEffect string
 
 const (
@@ -24,7 +27,15 @@ const (
 	GitHubFenceConflict GitHubFenceEffect = "conflict"
 )
 
-// SettlementCandidate is the listener's proposed CI outcome and its ordering identity.
+// SettlementCandidate is the listener's proposed CI outcome and its ordering identity. Envoy
+// listener settlements are the Go daemon's only CI input: it never reads GitHub's checks, and a new
+// head resets the fence and failures (AdvancePullRequestHead). A check_run delivery the listener
+// lost is recovered only by Dispatch's webhook redelivery sweep (packages/envoy/internal/dispatch/
+// redeliver: it runs only where Dispatch has the App key and NATS, every two minutes, and resends
+// only deliveries GitHub recorded as failed within the last hour) or by the check's next run.
+// Nothing on the Go path corrects the rest: a check_run with no pull_requests yields no
+// observation, a deleted check's failure stands for the life of the head, and a rerun whose
+// completion is never observed holds the last verdict until the check runs again.
 type SettlementCandidate struct {
 	CheckRuns  []record.AttemptRun `json:"checkRuns"`
 	Generation int64               `json:"generation"`
@@ -68,6 +79,8 @@ func ClassifySettlement(pr record.PullRequest, in SettlementCandidate) Settlemen
 		}
 		return SettlementConflict
 	}
+	// Reconciled is never true on the Go path: a refresh only keeps it, and only a GitHub read,
+	// which the Go daemon does not make, could set it (see GitHubFenceEffect).
 	if !pr.Reconciled {
 		return SettlementNewer
 	}

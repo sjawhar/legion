@@ -792,7 +792,34 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		"version":       version,
 		"changed":       edit.Changed,
 		"unchanged_ops": unchanged,
+		// Which operations the live document did not hold once this write reached it: a
+		// concurrent change that landed after the version was rendered and before the publish is
+		// past undoing, so the edit reports it rather than refusing (LEGION-269). null means the
+		// check reached no verdict - the publish failed and the room is reloading - which is not
+		// the same statement as the empty list.
+		"lost_ops": lostOps(ledger, artifact.ID),
+		"token":    edit.Token,
 	}, advice))
+}
+
+// lostOps is the edit response's lost_ops: the operations the live document did not hold after
+// the write was published, or null when the write reached no verdict.
+func lostOps(ledger *docs.Ledger, artifactID string) []int {
+	lost, known := ledger.LostOps(artifactID)
+	if !known {
+		return nil
+	}
+	if lost == nil {
+		return []int{}
+	}
+	return lost
+}
+
+func participantsOrEmpty(participants []model.Actor) []model.Actor {
+	if participants == nil {
+		return []model.Actor{}
+	}
+	return participants
 }
 
 func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {
@@ -1114,4 +1141,19 @@ func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifac
 			return candidate, nil
 		}
 	}
+}
+
+// quiesceDocuments closes every live document, flushing each through the store, and waits for
+// the settlements in flight. Test-only: mounted by routes() only when Deps.TestHooksEnabled is
+// set, so a browser-test harness can reset its database between scenarios without its TRUNCATE
+// crossing lock order with a settlement's transaction.
+func (s *server) quiesceDocuments(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	if err := s.deps.Docs.Quiesce(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

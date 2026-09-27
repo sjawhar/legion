@@ -273,6 +273,34 @@ describe("EnvoyClient", () => {
     });
   });
 
+  test("omits an empty source session from a send and a publish", async () => {
+    // A caller with no session of its own (a task subagent in a host that never registered
+    // one) must send no `source_session` at all: the listener's own JSON drops an empty one on
+    // the way out, leaving the recipient a message with no sender and no reply hint.
+    const envelope = {
+      event_id: "event-sourceless",
+      source: "agent",
+      source_event_id: "agent.event-sourceless",
+      topic: "notifications.agent.ses_target",
+      dedupe_key: "agent.ses_target.event-sourceless",
+      issued_at: 1,
+      payload_summary: "hello",
+      trace_id: "trace-sourceless",
+    };
+    const recorded = recordFetch([jsonResponse(envelope), jsonResponse(envelope)]);
+    const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
+
+    await client.send({ sourceSessionID: "", targetSessionID: "ses_target", message: "hello" });
+    await client.publish({
+      sourceSessionID: "",
+      topic: "notifications.role.controller",
+      message: "broadcast",
+    });
+
+    expect(await recorded.requests[0]?.json()).not.toHaveProperty("source_session");
+    expect(await recorded.requests[1]?.json()).not.toHaveProperty("source_session");
+  });
+
   test("publishes a broadcast using the listener request shape", async () => {
     const recorded = recordFetch([
       jsonResponse({

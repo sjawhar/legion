@@ -97,7 +97,12 @@ const legionGoPhaseView = z.strictObject({
   rounds: z.number().int().nonnegative(),
 });
 
-/** `api.PullRequestView` — the pull request as the daemon observes it from GitHub. */
+/** `api.PullRequestView` — the pull request as the daemon observes it from GitHub.
+ * `reviewDecision` is the latest review round's decision, the one the workflow ends the round on
+ * when the reviewer completes. It shows from the review that decided it until the next round
+ * opens or a new generation clears it, so a request for changes stays through implementing and
+ * testing, and an approval through retro and every phase after it; absent until a review in a
+ * round decides. */
 const legionGoPullRequestView = z.strictObject({
   number: z.number().int().positive(),
   head: nonEmptyString,
@@ -141,6 +146,9 @@ const legionGoIssue = z.strictObject({
   generation: z.number().int().nonnegative(),
   phase: z.enum(LEGION_GO_PHASES),
   status: nonEmptyString,
+  /** Why a held issue is held, when its hold has one: `escalated` once its architect sent it to
+   * the controller. Absent while the issue's tree lingers or is closed, until it is re-admitted. */
+  holdReason: z.literal("escalated").optional(),
   architect: legionGoClaimView.optional(),
   workers: z.partialRecord(z.enum(LEGION_ROLES), legionGoPhaseView),
   pullRequest: legionGoPullRequestView.optional(),
@@ -176,14 +184,25 @@ const legionGoControllerLocator = z.strictObject({
   registeredAt: timestamp,
 });
 
+/** `api.AgentSecretsLoginView` — the daemon's own agent-secrets machine login's current status
+ * (runtime.kubernetes.agent_secrets, AGENTC-393 Plan C): `state` is one of "none" (no login has
+ * ever been started), "pending", "issued", "denied", or "expired"; `code` is the confirmation
+ * code shown on the Dispatch credential page for a pending login, "" otherwise. */
+const legionGoAgentSecretsLoginView = z.strictObject({
+  state: z.string(),
+  code: z.string(),
+});
+
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
- * registers with the capability `legion controller start` fetched. */
+ * registers with the capability `legion controller start` fetched; `agentSecretsLogin` is absent
+ * when the deployment configures no broker (contract 9). */
 export const LegionGoStateResponse = z.strictObject({
   daemon: goDaemonInfo,
   admission: legionGoAdmission,
   issues: z.record(z.string(), legionGoIssue),
   pendingStatusWrites: z.array(legionGoPendingStatusWrite),
   controllerLocator: legionGoControllerLocator.optional(),
+  agentSecretsLogin: legionGoAgentSecretsLoginView.optional(),
 });
 
 export type LegionGoState = z.output<typeof LegionGoStateResponse>;
@@ -227,17 +246,20 @@ export const LegionGoErrorResponse = z.union([
   z.strictObject({ code: nonEmptyString, error: nonEmptyString }),
 ]);
 
-/** `api.DeliveryView` — the claim's pending task; `deliveredAt` is the latest send's
- * acknowledgement and `confirmedAt` the turn it started, each absent until it happens. `phase` is
- * the issue phase the task was queued for, which is what says whether it is still the work to do;
- * a task of no phase — an operator's own, an architect's — carries none. */
+/** `api.DeliveryView` — the claim's pending task; `deliveredAt` is the latest acknowledgement of
+ * this task's prompt, and with it whether the agent may have read the task (a refusal of that
+ * prompt clears it, since an agent that refused it never read it), and `confirmedAt` the turn a
+ * send started, each absent until it happens. `phase` is the issue phase the task was queued for, which is what
+ * says whether it is still the work to do; a task of no phase — an operator's own, an
+ * architect's — carries none. */
 const legionGoDeliveryView = z.strictObject({
   id: nonEmptyString,
   task: nonEmptyString,
-  phase: z.enum(LEGION_GO_PHASES).optional(),
+  phase: z.enum(LEGION_GO_WORKFLOW_PHASES).optional(),
   queuedAt: timestamp,
   deliveredAt: timestamp.optional(),
   confirmedAt: timestamp.optional(),
+  interrupted: z.literal(true).optional(),
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
@@ -255,6 +277,7 @@ export const LegionGoOperatorClaimResponse = z.strictObject({
   locator: legionGoLocator.optional(),
   budgets: z.strictObject({
     launchFailures: z.number().int().nonnegative(),
+    deaths: z.number().int().nonnegative(),
     promptFailures: z.number().int().nonnegative(),
     promptRetires: z.number().int().nonnegative(),
   }),
@@ -356,6 +379,12 @@ export const LegionGoPhaseRetryRequest = z.strictObject({
 
 /** `api.SignOffRequest`, the owning architect's post-production-check sign-off. */
 export const LegionGoSignOffRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
+});
+
+/** `api.ChildRequest`, the architect's park_child or rerun_child of one child of its tree. */
+export const LegionGoChildRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,
 });

@@ -144,6 +144,10 @@ func (s *Service) applyJoined(ctx context.Context, artifactID string, actor mode
 	// the failed room: the write cannot reach it coherently, so it fails - before it records the
 	// rendering below, which a refused write must not leave behind.
 	if err := write.state.failure(); err != nil {
+		// The 503 this becomes is the only other trace of a room that stays failed, so the
+		// refusal names the room and the cause here too (see awaitRoomRecovery).
+		slog.Warn("dispatch: refuse a joined write on a failed document room",
+			"room", artifactID, "error", err)
 		return err
 	}
 	// The rendering this operation produced is the document as the transaction now sees it, so
@@ -184,13 +188,12 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if !joined {
 		return "", errUnjoined
 	}
-	// The seeding actor is the caller's own first version author (written directly by the
-	// caller, never through writeVersionTx), so it must not join `pending` - only the
-	// settlement that indexes the seeded ask blocks needs to know who wrote them.
-	s.recordLastActor(artifactID, actor)
 	tree, err := parseInput(markdown)
 	if err != nil {
 		return "", err
+	}
+	if err := pmdoc.AskContentError(tree); err != nil {
+		return "", &ErrInvalidAskBlock{Reason: err}
 	}
 	canonical, err := renderTree(tree)
 	if err != nil {
@@ -207,6 +210,12 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true); err != nil {
 		return "", fmt.Errorf("seed live document: %w", err)
 	}
+	// The seeding actor is the caller's own first version author (written directly by the
+	// caller, never through writeVersionTx), so it must not join `pending` - only the
+	// settlement that indexes the seeded ask blocks needs to know who wrote them. Recording it
+	// makes the document's room, so it waits for the seed to be written: a room leaves only when
+	// it is evicted, and a refused seed would hold one of the live-room slots for good.
+	s.recordLastActor(artifactID, actor)
 	return canonical, nil
 }
 
@@ -225,9 +234,12 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if err != nil {
 			return err
 		}
-		target, err := parseInput(markdown)
+		target, err := parseReplacing(current, markdown)
 		if err != nil {
 			return err
+		}
+		if err := refuseChangedAsks(current, target, pmdoc.AskContentError, askMarkdown); err != nil {
+			return &ErrInvalidAskBlock{Reason: err}
 		}
 		currentMarkdown, err := renderTree(current)
 		if err != nil {
@@ -437,7 +449,7 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 }
 
 // commitVersion clears authors consumed by a version only after its enclosing transaction has
-// committed (Ledger.Commit, or NamedVersion's own transaction).
+// committed (Ledger.Commit).
 func (s *Service) commitVersion(artifactID string, version model.Version) {
 	state := s.room(artifactID)
 	state.mu.Lock()
@@ -634,6 +646,26 @@ func (s *Service) warmLiveDocument(ctx context.Context, artifactID string) error
 	return nil
 }
 
+// currentToken is the whole-document token of the document the caller sees, for an edit that
+// applies no operation and so writes no tree of its own to take one from.
+func (s *Service) currentToken(ctx context.Context, artifactID string) (string, error) {
+	var (
+		token   string
+		readErr error
+	)
+	if err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
+		tree, err := treeOf(doc)
+		if err != nil {
+			readErr = err
+			return
+		}
+		token, readErr = nodeToken(tree)
+	}); err != nil {
+		return "", err
+	}
+	return token, readErr
+}
+
 // ApplyOps resolves every requested operation against the document's one Yjs
 // transaction. A conditional edit checks its precondition, resolves the batch,
 // and writes the plan inside that transaction, so no live writer can enter the
@@ -659,14 +691,22 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return EditOutcome{}, err
 	}
 	if len(ops) == 0 {
-		var checkErr error
+		// No operation to apply, so the document this check read is the document the caller's
+		// next edit meets: its token is that edit's precondition.
+		var (
+			checkErr error
+			token    string
+		)
 		err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 			tree, err := treeOf(doc)
 			if err != nil {
 				checkErr = err
 				return
 			}
-			checkErr = checkEditPrecondition(tree, *precondition)
+			if checkErr = checkEditPrecondition(tree, *precondition); checkErr != nil {
+				return
+			}
+			token, checkErr = nodeToken(tree)
 		})
 		if checkErr != nil {
 			return EditOutcome{}, checkErr
@@ -674,7 +714,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if err != nil {
 			return EditOutcome{}, fmt.Errorf("check empty document edit precondition: %w", err)
 		}
-		return EditOutcome{}, nil
+		return EditOutcome{Token: token}, nil
 	}
 	var (
 		err       error
@@ -692,6 +732,8 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	}
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
+		// Read before the Yjs transaction opens: the state vector takes the document lock.
+		since := authoredClock(ctx, artifactID, doc)
 		var mutationErr error
 		transact(func(transaction *crdt.Transaction) {
 			tree, err := treeOfTransaction(transaction, fragment)
@@ -724,14 +766,16 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			}
 			next := batch.tree
 			pmdoc.EnsureBlockIDs(next)
-			if err := validateAskBlocks(next); err != nil {
+			if err := validateEditedAskBlocks(tree, next); err != nil {
 				mutationErr = &ErrInvalidAskBlock{Reason: err}
 				return
 			}
 			if outcome, mutationErr = batch.outcome(len(ops)); mutationErr != nil {
 				return
 			}
-			mutationErr = pmdoc.Update(transaction, fragment, next)
+			mutationErr = recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
+				return pmdoc.Update(transaction, fragment, next)
+			})
 		})
 		if mutationErr != nil {
 			return mutationErr
@@ -756,11 +800,18 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 // validation and live-mutation behavior.
 func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (EditOutcome, error) {
 	if len(ops) == 0 {
-		return EditOutcome{}, nil
+		// Nothing to apply: the caller still gets the token of the document as it stands, the
+		// precondition its next edit passes.
+		token, err := s.currentToken(ctx, artifactID)
+		if err != nil {
+			return EditOutcome{}, err
+		}
+		return EditOutcome{Token: token}, nil
 	}
 	var outcome EditOutcome
 	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
+		since := authoredClock(ctx, artifactID, doc)
 		tree, err := treeOf(doc)
 		if err != nil {
 			return err
@@ -772,20 +823,19 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		}
 		next := batch.tree
 		pmdoc.EnsureBlockIDs(next)
-		if err := validateAskBlocks(next); err != nil {
+		if err := validateEditedAskBlocks(tree, next); err != nil {
 			return &ErrInvalidAskBlock{Reason: err}
 		}
 		if outcome, err = batch.outcome(len(ops)); err != nil {
 			return err
 		}
-		var updateErr error
-		transact(func(transaction *crdt.Transaction) {
-			updateErr = pmdoc.Update(transaction, fragment, next)
-		})
-		if updateErr != nil {
+		return recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
+			var updateErr error
+			transact(func(transaction *crdt.Transaction) {
+				updateErr = pmdoc.Update(transaction, fragment, next)
+			})
 			return updateErr
-		}
-		return nil
+		})
 	})
 	if err != nil {
 		if errors.Is(err, websocket.ErrNoChanges) {
@@ -813,7 +863,7 @@ func (s *Service) SetBlockAttributes(
 		if err != nil {
 			return err
 		}
-		next, err := pmdoc.SetBlockAttributes(tree, blockID, pmdoc.Attrs(attributes))
+		next, err := pmdoc.SetBlockAttributes(tree, blockID, pmdoc.Attrs(pmdoc.LineFeedAttrs(attributes)))
 		if err != nil {
 			return err
 		}
@@ -837,45 +887,35 @@ func (s *Service) SetBlockAttributes(
 	return nil
 }
 
-// NamedVersion records the live document as a deliberately named immutable version.
+// NamedVersion records the live document as a deliberately named immutable version. Like
+// SeedText and SnapshotVersion it runs inside the caller's joined transaction, which credits
+// its authors and publishes its events when it commits (Ledger.Commit).
 func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error) {
-	if ledgerFrom(ctx) == nil {
-		ctx = withLedger(ctx, &Ledger{service: s})
+	tx, joined := txFromContext(ctx)
+	if !joined {
+		return VersionResult{}, errUnjoined
 	}
 	tree, markdown, capture, authors, err := s.captureLiveTextAndAuthors(ctx, artifactID, &actor)
 	if err != nil {
 		return VersionResult{}, err
 	}
-	_, joinedTransaction := txFromContext(ctx)
-	written := VersionResult{Wrote: true}
-	err = s.withTx(ctx, func(tx pgx.Tx) error {
-		_, open, err := lockArtifactOwner(ctx, tx, artifactID)
-		if err != nil {
-			return err
-		}
-		if !open {
-			return ErrIssueClosed
-		}
-
-		result, writeErr := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, &versionWrite{
-			named:   true,
-			summary: new(summary),
-			authors: authors,
-			capture: &capture,
-		})
-		written.Version = result.version
-		written.Changes = result.changes
-		return writeErr
-	})
+	_, open, err := lockArtifactOwner(ctx, tx, artifactID)
 	if err != nil {
-		s.discardPendingVersion(artifactID, written.Version)
 		return VersionResult{}, err
 	}
-	if !joinedTransaction {
-		s.commitVersion(artifactID, written.Version)
-		ledgerFrom(ctx).publishEvents()
+	if !open {
+		return VersionResult{}, ErrIssueClosed
 	}
-	return written, nil
+	result, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, &versionWrite{
+		named:   true,
+		summary: new(summary),
+		authors: authors,
+		capture: &capture,
+	})
+	if err != nil {
+		return VersionResult{}, err
+	}
+	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
 }
 
 // serviceTransact wraps Server.Apply's transact so the room's update observer can tell the
@@ -909,9 +949,16 @@ func (s *Service) recordLastActor(room string, actor model.Actor) {
 	state.mu.Unlock()
 }
 
+// captureLiveTextAndAuthors is the tree a version records and whom it credits. joinRead brings
+// the calling transaction's fork up to date with the room, which is where a browser change made
+// while the transaction's write was in flight merges with it - and where a write whose text that
+// merge annihilated is refused rather than versioned as applied (refuseLostWrite, LEGION-269).
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (*pmdoc.Node, string, versionPending, []model.Actor, error) {
 	fork, err := s.joinRead(ctx, room)
 	if err != nil {
+		return nil, "", versionPending{}, nil, err
+	}
+	if err := s.refuseLostWrite(ctx, room, fork, actor); err != nil {
 		return nil, "", versionPending{}, nil, err
 	}
 	if write := joinedLiveWrite(ctx, room); fork != nil && write != nil && write.tree != nil && write.fork == fork {
@@ -1088,22 +1135,4 @@ func actorSlice(actors map[string]model.Actor) []model.Actor {
 		result = append(result, actors[key])
 	}
 	return result
-}
-
-func (s *Service) withTx(ctx context.Context, fn func(pgx.Tx) error) error {
-	if tx, ok := txFromContext(ctx); ok {
-		return fn(tx)
-	}
-	tx, err := s.store.Pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin document transaction: %w", err)
-	}
-	defer tx.Rollback(ctx)
-	if err := fn(tx); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit document transaction: %w", err)
-	}
-	return nil
 }

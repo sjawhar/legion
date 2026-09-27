@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -99,15 +98,41 @@ func githubPullRequestHead(event string, payload map[string]any) (owner, repo, n
 	return owner, repo, number, sha, updatedAt, owner != "" && repo != "" && number != "" && sha != ""
 }
 
+// githubMaxBody is the largest webhook body the handler reads: GitHub's documented payload cap,
+// 25 MB, read as MiB so no delivery GitHub sends is refused. A push of a thousand commits is
+// several megabytes, and a refused delivery is lost for good, since a redelivery is the same body.
+const githubMaxBody = 25 << 20
+
+// githubBodyBudget bounds the webhook body bytes the handler holds at once, across all requests
+// (bodyBudget). The body is buffered whole before its signature can be checked, so without it
+// anyone who can reach the route could make the listener hold 25 MiB per connection. A request
+// charges its buffer as its body arrives and holds it until the handler returns; one whose next
+// piece does not fit waits, except the one request at a time allowed past the limit. A signed body
+// decodes to about two and a half times its size again. It is at least githubMaxBody, so any body
+// GitHub sends fits.
+const githubBodyBudget = 64 << 20
+
 // GitHubHandler returns the HTTP handler for GitHub webhook events.
 func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder) http.HandlerFunc {
+	return githubHandler(secret, mentionTrigger, reviewerAppID, publisher, ci, newBodyBudget(githubBodyBudget))
+}
+
+// githubHandler is GitHubHandler reading bodies against the given budget.
+func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder, bodies *bodyBudget) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		read := bodies.begin()
+		defer read.release()
+		body, err := read.readAll(r.Context(), r.Body, r.ContentLength, githubMaxBody)
 		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
@@ -143,8 +168,7 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				if errors.Is(err, cistore.ErrInvalidHeadSHA) {
 					log.Printf("github ci head skipped: invalid sha=%q pr=%s", sha, number)
 				} else {
-					log.Printf("github ci head record failed: %v", err)
-					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					deliveryFailed(w, "github ci head record", err)
 					return
 				}
 			}
@@ -155,8 +179,7 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			for _, o := range obs {
 				if o.CheckName == "" {
 					if err := ci.RecordSuite(o); err != nil {
-						log.Printf("github ci suite record failed: %v", err)
-						http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+						deliveryFailed(w, "github ci suite record", err)
 						return
 					}
 					continue
@@ -172,8 +195,7 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 					}
 				}
 				if err := ci.Record(o); err != nil {
-					log.Printf("github ci record failed: %v", err)
-					http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+					deliveryFailed(w, "github ci record", err)
 					return
 				}
 			}
@@ -198,8 +220,7 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				return
 			}
 			if err := publisher.Publish(item); err != nil {
-				log.Printf("github publish failed: %v", err)
-				http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+				deliveryFailed(w, "github publish", err)
 				return
 			}
 		}

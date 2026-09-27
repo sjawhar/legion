@@ -263,8 +263,10 @@ export function ApprovalChip({
       {variant === "header" && showActions ? (
         <>
           {approval.state === "approved" ? null : (
+            // One filled button per surface: approving is the action the header wants, and
+            // two outline buttons made a reader choose before reading either.
             <button
-              className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+              className={`min-h-11 rounded-lg px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
               disabled={review.isPending}
               onClick={() => submitGuard.guard(() => review.mutate({ state: "approved" }))}
               type="button"

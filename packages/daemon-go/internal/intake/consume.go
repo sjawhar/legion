@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,7 +27,7 @@ const (
 // and configured repositories; intake owns only the fixed stream and consumer identities.
 type ConsumerSpec struct {
 	Project      string
-	Repositories []string
+	Repositories []ghrepo.Repository
 	AckWait      time.Duration
 	NakDelay     time.Duration
 	Logger       *slog.Logger
@@ -36,6 +37,7 @@ type ConsumerSpec struct {
 // daemon whose stream is missing refuses to boot instead of booting with no intake.
 type Consumers struct {
 	spec     ConsumerSpec
+	stream   jetstream.Stream
 	dispatch jetstream.Consumer
 	github   jetstream.Consumer
 }
@@ -74,7 +76,7 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
-	return &Consumers{spec: spec, dispatch: dispatch, github: github}, nil
+	return &Consumers{spec: spec, stream: stream, dispatch: dispatch, github: github}, nil
 }
 
 // openConsumer updates the durable consumer config names, keeping the start position it was created
@@ -93,13 +95,49 @@ func openConsumer(ctx context.Context, stream jetstream.Stream, config jetstream
 	return stream.UpdateConsumer(ctx, config)
 }
 
+// DispatchTarget is the notification stream's own current last sequence, read fresh from
+// JetStream. Boot reads it after Reconcile's own Dispatch listing (not before: a message
+// published between an earlier read and the listing would be in the listing but not counted),
+// so any record the listing shows behind Dispatch's log is caught up only once the Dispatch
+// consumer's ack floor reaches this position — a stream position, not a per-issue or per-message
+// count, so it needs no correction for redelivery, a nak, or messages the consumer's filter never
+// matches.
+func (c *Consumers) DispatchTarget(ctx context.Context) (int64, error) {
+	info, err := c.stream.Info(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read notification stream info: %w", err)
+	}
+	return int64(info.State.LastSeq), nil
+}
+
+// DispatchPosition is the Dispatch consumer's own current position, read fresh from JetStream:
+// the measurement Reconcile holds against DispatchTarget (DispatchConsumerPosition.Reached).
+func (c *Consumers) DispatchPosition(ctx context.Context) (DispatchConsumerPosition, error) {
+	info, err := c.dispatch.Info(ctx)
+	if err != nil {
+		return DispatchConsumerPosition{}, fmt.Errorf("read Dispatch consumer info: %w", err)
+	}
+	return positionOf(info), nil
+}
+
+func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
+	return DispatchConsumerPosition{
+		AckFloorStream: int64(info.AckFloor.Stream),
+		Idle:           info.NumPending == 0 && info.NumAckPending == 0,
+	}
+}
+
 // Run consumes both durable consumers until ctx ends, and returns the error of either one that
 // stops first. Every decoded fact enters ApplyFact; a committed transaction is acknowledged, a
 // rolled-back transaction is nacked with a delay, poison is terminated, and a committed refusal is
-// logged then acknowledged.
+// logged then acknowledged. The Dispatch consumer's own position, and admission's hold on it, are
+// the daemon's boot-owned concern (workflowRuntime.pollHoldRelease), not intake's: this loop knows
+// nothing about either.
 func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, handlers ...Handler) error {
 	group, consumeContext := errgroup.WithContext(ctx)
-	group.Go(func() error { return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, handlers) })
+	group.Go(func() error {
+		return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, handlers)
+	})
 	group.Go(func() error { return consumeConsumer(consumeContext, c.github, c.spec, pool, handlers) })
 	return group.Wait()
 }
@@ -125,13 +163,16 @@ func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec Cons
 }
 
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, handlers []Handler) {
-	decoded, err := decodeMessage(message.Subject(), spec.Project, message.Data())
+	decoded, err := decodeMessage(message.Subject(), spec.Project, spec.Repositories, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
 			logMessage(spec.Logger, slog.LevelError, "term poison JetStream message", message, "error", termErr)
 		}
 		return
+	}
+	for _, field := range decoded.Unread {
+		logMessage(spec.Logger, slog.LevelWarn, "unreadable field taken as absent", message, "event_id", decoded.EventID, "field", field)
 	}
 	if decoded.Fact == nil {
 		ackMessage(spec.Logger, message)
@@ -184,10 +225,8 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	if len(spec.Repositories) == 0 {
 		return ConsumerSpec{}, fmt.Errorf("intake consumer repositories are required")
 	}
-	for _, repo := range spec.Repositories {
-		if _, _, err := ghrepo.Split("intake consumer repository", repo); err != nil {
-			return ConsumerSpec{}, err
-		}
+	if slices.ContainsFunc(spec.Repositories, ghrepo.Repository.IsZero) {
+		return ConsumerSpec{}, fmt.Errorf("intake consumer repository is required")
 	}
 	if spec.AckWait <= 0 {
 		spec.AckWait = defaultAckWait
@@ -201,13 +240,22 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	return spec, nil
 }
 
-func githubFilters(repositories []string) []string {
+func githubFilters(repositories []ghrepo.Repository) []string {
 	filters := make([]string, 0, len(repositories))
 	for _, repo := range repositories {
-		owner, name, _ := strings.Cut(repo, "/")
-		filters = append(filters, "notifications.github."+owner+"."+name+".>")
+		filters = append(filters, githubRepositoryPrefix(repo)+".>")
 	}
 	return filters
+}
+
+// githubRepositoryPrefix is what every GitHub subject Envoy publishes for repo begins with: the
+// owner and the name each one segment, every dot written `_`, since a repository name may hold a
+// dot and a subject splits on dots. It is this module's copy of the contracts' githubRepositoryPrefix
+// (packages/contracts/src/subject.ts), which the Go coordinator cannot import from Envoy; the golden
+// tests hold the two to Envoy's published subjects. The spelling is lossy, `a.b` and `a_b` alike, so
+// the payload's repository, not the subject, says whose event it is.
+func githubRepositoryPrefix(repo ghrepo.Repository) string {
+	return "notifications.github." + strings.ReplaceAll(repo.Owner(), ".", "_") + "." + strings.ReplaceAll(repo.Name(), ".", "_")
 }
 
 func dispatchConsumerName(project string) string {

@@ -1,6 +1,7 @@
 import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { ThreadCard } from "./ThreadCard";
+import type { CommentActionFailure } from "./useCommentActionQueue";
 import {
   type MarginItemAction,
   type MarginOwner,
@@ -10,7 +11,7 @@ import {
 } from "./useMarginItems";
 
 interface ThreadListProps {
-  actionErrorId: string | undefined;
+  actionFailure: CommentActionFailure | undefined;
   artifactSlug: string;
   expandedThreadKey: string | undefined;
   editingCommentId: string | undefined;
@@ -94,7 +95,7 @@ function regionOrigin(region: HTMLElement): number {
 }
 
 export function ThreadList({
-  actionErrorId,
+  actionFailure,
   artifactSlug,
   expandedThreadKey,
   editingCommentId,
@@ -182,7 +183,7 @@ export function ThreadList({
 
   const card = (thread: Thread, composerClassName?: string) => (
     <ThreadCard
-      actionError={actionErrorId === thread.key}
+      actionFailure={actionFailure?.id === thread.key ? actionFailure : undefined}
       artifactSlug={artifactSlug}
       composerClassName={composerClassName}
       expanded={expandedThreadKey === thread.key}

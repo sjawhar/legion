@@ -112,9 +112,9 @@ func TableDescendantIDs(doc *Node) (map[string][]string, error) {
 }
 
 // DeleteBlock returns a copy of doc without the block carrying blockID. A list,
-// list item, or blockquote the removal empties goes with it and an emptied
-// document keeps one empty paragraph; any other container the removal leaves
-// outside its content rule rejects the delete with that rule.
+// list item, or blockquote the removal empties goes with it, and an emptied
+// document or footnote definition keeps one empty paragraph; any other container
+// the removal leaves outside its content rule rejects the delete with that rule.
 func DeleteBlock(doc *Node, blockID string) (*Node, error) {
 	if err := wantDocument(doc, "DeleteBlock"); err != nil {
 		return nil, err
@@ -279,6 +279,87 @@ func marksInNodes(nodes []*Node) []MarkRef {
 	return marks
 }
 
+// PadTables is doc with each table in its document-level blocks first to last given a full width
+// of cells in every row, as the browser editor's table plugin pads a table after any change
+// (prosemirror-tables' fixTables): a Splice, like ProseMirror's own replace, can leave a row short,
+// which would be written narrower than the table and read back so. The rows that need cells get
+// empty ones of their row's kind, a header row header cells; the last such row takes them at its
+// start when it is the table's first row, or follows the first such row, and every other row takes
+// them at its end, as fixTables places them. A new cell takes its column's alignment from the
+// widest row, where fixTables gives it left: the renderer writes one alignment per column, so the
+// column reads back as it was.
+func PadTables(doc *Node, first, last int) *Node {
+	out := &Node{Type: doc.Type, Attrs: doc.Attrs, Children: append([]*Node(nil), doc.Children...)}
+	for index := first; index <= last && index < len(out.Children); index++ {
+		block := cloneNode(out.Children[index])
+		Walk(block, func(node *Node) bool {
+			if node.Type == "table" {
+				padTable(node)
+				return false
+			}
+			return true
+		})
+		out.Children[index] = block
+	}
+	return out
+}
+
+func padTable(table *Node) {
+	widths := make([]int, len(table.Children))
+	width := 0
+	var widest *Node
+	for index, row := range table.Children {
+		widths[index] = len(row.Children)
+		if widest == nil || widths[index] > width {
+			widest = row
+		}
+		width = max(width, widths[index])
+	}
+	firstShort, lastShort := -1, -1
+	for index := range table.Children {
+		if widths[index] < width {
+			if firstShort < 0 {
+				firstShort = index
+			}
+			lastShort = index
+		}
+	}
+	for index, row := range table.Children {
+		if widths[index] == width {
+			continue
+		}
+		kind := "table_cell"
+		if row.Type == "table_header_row" {
+			kind = "table_header"
+		}
+		atStart := (index == 0 || firstShort == index-1) && lastShort == index
+		column := len(row.Children)
+		if atStart {
+			column = 0
+		}
+		cells := make([]*Node, 0, width-widths[index])
+		for range width - widths[index] {
+			alignment := any("left")
+			if column < len(widest.Children) {
+				if value, ok := widest.Children[column].Attrs["alignment"]; ok {
+					alignment = value
+				}
+			}
+			cells = append(cells, &Node{
+				Type:     kind,
+				Attrs:    Attrs{"alignment": alignment, "colspan": 1, "colwidth": nil, "rowspan": 1},
+				Children: []*Node{{Type: "paragraph"}},
+			})
+			column++
+		}
+		if atStart {
+			row.Children = append(cells, row.Children...)
+		} else {
+			row.Children = append(row.Children, cells...)
+		}
+	}
+}
+
 // DeleteTableRow returns a copy of doc with the zero-based row removed from
 // the table carrying blockID. Row zero is the header; deleting it promotes the
 // first body row to the header so the table remains valid. A table's last body
@@ -363,6 +444,11 @@ func removeAtPath(root *Node, path []int) {
 		switch parent.Type {
 		case "bullet_list", "ordered_list", "list_item", "blockquote":
 			path = path[:len(path)-1]
+		case "footnote_definition":
+			// Both parsers read `[^1]: ` as a definition holding one empty paragraph, so an
+			// emptied definition keeps one, and its reference stays a footnote reference.
+			parent.Children = []*Node{{Type: "paragraph"}}
+			return
 		default:
 			return
 		}

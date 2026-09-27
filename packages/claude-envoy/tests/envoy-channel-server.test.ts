@@ -28,6 +28,9 @@ import {
   sessionHandoffFile,
   writeSessionHandoff,
 } from "../src/session-identity"
+import { isolatePaneEnvironment } from "./pane-environment"
+
+isolatePaneEnvironment()
 
 interface Queue {
   readonly subject: string
@@ -1151,6 +1154,54 @@ test("a registration in flight when Dispatch removes a subscription cannot write
     await following
     await waitFor(async () => !entry.has(removed), `${removed} to stay out of the entry`)
     expect([...entry].sort()).toEqual([directSubject, kept])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a registry removal that fails is retried on the next heartbeat", async () => {
+  const stateDirectory = await scratchState()
+  const nats = new FakeNats()
+  let attempts = 0
+  const client = recordingClient([], {
+    unsubscribe: async () => {
+      attempts++
+      if (attempts === 1) throw new Error("registry unavailable")
+    },
+  })
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      client,
+      heartbeatMs: 20,
+    }),
+  )
+  const removed = "notifications.dispatch.issue.DSP-3"
+
+  try {
+    await session.follow([removed])
+    // The first attempt, fired from `deliver` itself, fails; nobody awaits it.
+    nats.emit(
+      directSubject,
+      JSON.stringify({
+        event_id: "remove-retry",
+        source: "dispatch",
+        payload: JSON.stringify({
+          issue_key: "DSP-3",
+          type: "subscription.removed",
+          actor: { kind: "user", id: "alice" },
+          payload: {
+            session_id: "ses_claude",
+            by: { kind: "user", id: "alice" },
+            topics: [removed],
+          },
+        }),
+      }),
+    )
+    await waitFor(async () => attempts >= 1, "the failing registry removal attempt")
+    // A later heartbeat retries it, and this attempt succeeds.
+    await waitFor(async () => attempts >= 2, "the heartbeat's retry")
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

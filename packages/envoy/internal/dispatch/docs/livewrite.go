@@ -66,10 +66,20 @@ type liveWrite struct {
 	// version write does not refresh the same tree's anchors a second time.
 	anchorsTree *pmdoc.Node
 	// credits are the authors of the transaction's content changes; actor made the latest.
-	credits  map[string]model.Actor
-	actor    *model.Actor
-	done     chan struct{}
-	finished bool
+	credits map[string]model.Actor
+	actor   *model.Actor
+	// loss records what this write's latest batch of operations inserted, so a merge with the
+	// room's concurrent changes can be told from a clean one (see lossCheck). A later operation
+	// of the same transaction that inserts nothing an operation claims - an accept's margin
+	// projection, an anchor refresh - leaves the earlier batch's record in place.
+	loss *lossCheck
+	// lost names the operations whose text the room did not hold once this write was published,
+	// and lostVerdict says the check ran at all: a publish that failed reaches no verdict, which
+	// is reported as undetermined rather than as survival.
+	lost        []int
+	lostVerdict bool
+	done        chan struct{}
+	finished    bool
 }
 
 // liveWriteOrigin tags the room transaction that applies a committed live write, so the room's
@@ -313,15 +323,58 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 // they were made, as a room transaction and a broadcast each. A browser editor then receives
 // them as it would have received the operations themselves: an accepted suggestion's text
 // change before the margin projection that closes it, never both in one update.
+//
+// A room that cannot take an update is failed - but not one that refused the publish because it
+// had already failed (ErrServiceUnavailable). By the time such a refusal is handled the recovery
+// may have finished and registered a replacement room, which holds this write: its append
+// committed. Failing that room by name would fail a healthy replacement for the predecessor's
+// error, and every write to the document until it recovered again would be refused.
 func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
 	for _, update := range write.updates {
-		if err := s.publishLiveUpdate(write.artifactID, update); err != nil {
-			slog.Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
-			s.failRoom(write.artifactID, err)
-			return
+		err := s.publishLiveUpdate(write.artifactID, update)
+		if err == nil {
+			continue
 		}
+		slog.Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
+		if s.afterPublishRefused != nil {
+			s.afterPublishRefused(write.artifactID)
+		}
+		if !errors.Is(err, ErrServiceUnavailable) {
+			s.failRoom(write.artifactID, err)
+		}
+		return
 	}
+	s.recordPublishedLoss(write)
+}
+
+// recordPublishedLoss reads the room the write has just reached and records which of the write's
+// operations it does not hold: LEGION-269's second window, a concurrent change that landed
+// between the version render and this publish. Nothing can be rolled back here - the update is
+// durable and the version written - so the verdict rides the caller's response instead
+// (Ledger.LostOps).
+//
+// A write that inserted no text reaches the verdict too, an empty one: a delete, a replace that
+// only shortens, a retype, an operation that changed nothing - none of them wrote anything a
+// concurrent change could remove, so "nothing was lost" is a statement this can make without
+// reading the room, and it is the one those edits deserve. Only a publish that failed leaves no
+// verdict, which the caller reports as undetermined.
+//
+// The read is a point-in-time statement, as the spec says it must be: srv.Apply holds no room
+// lock across its callback, so a deletion landing after it is not reported, and a deletion
+// landing before it is. It is deliberately taken without a Yjs transaction of its own: an empty
+// transaction still fires the room's update observers, so it would put an empty update through
+// ygo's persistence worker - a durable doc_updates row - on every edit.
+func (s *Service) recordPublishedLoss(write *liveWrite) {
+	if write.loss == nil {
+		write.lost, write.lostVerdict = nil, true
+		return
+	}
+	doc := s.srv.GetDoc(write.artifactID)
+	if doc == nil {
+		return
+	}
+	write.lost, write.lostVerdict = write.loss.lost(doc), true
 }
 
 // publishLiveUpdate applies one committed update to the room and broadcasts it. It reads nothing

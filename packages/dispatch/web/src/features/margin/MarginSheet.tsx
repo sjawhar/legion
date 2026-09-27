@@ -22,6 +22,7 @@ import {
 import { CommentsTab, type MarginComposer } from "./CommentsTab";
 import { PinnedTab } from "./PinnedTab";
 import { ThreadCard } from "./ThreadCard";
+import type { CommentActionFailure } from "./useCommentActionQueue";
 import type {
   MarginItemAction,
   MarginOwner,
@@ -47,7 +48,7 @@ export interface MarginSheetModel {
   };
   composer: MarginComposer | undefined;
   items: {
-    actionErrorId: string | undefined;
+    actionFailure: CommentActionFailure | undefined;
     answeredAsksPending: boolean;
     asksPending: boolean;
     commentsError: boolean;
@@ -110,7 +111,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
     actions,
     composer,
     items: {
-      actionErrorId,
+      actionFailure,
       answeredAsksPending,
       asksPending,
       commentsError,
@@ -289,7 +290,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
             )}
             {tab.value === "comments" && owner !== undefined && visibleArtifact !== undefined ? (
               <CommentsTab
-                actionErrorId={actionErrorId}
+                actionFailure={actionFailure}
                 answeredAsksPending={answeredAsksPending}
                 artifactSlug={visibleArtifact.slug}
                 asksPending={asksPending}
@@ -351,7 +352,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
             </header>
             <div className="min-h-0 flex-1 overflow-y-auto px-4">
               <ThreadCard
-                actionError={actionErrorId === phoneThread.key}
+                actionFailure={actionFailure?.id === phoneThread.key ? actionFailure : undefined}
                 artifactSlug={visibleArtifact.slug}
                 className="min-h-full pb-32"
                 composerClassName={`fixed inset-x-0 bottom-0 z-10 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}

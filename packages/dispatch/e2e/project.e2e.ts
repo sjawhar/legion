@@ -219,7 +219,7 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
     await expect(references).toContainText("depth 2");
     const tabs = page.getByRole("main").getByRole("tab");
     await expect(tabs).toHaveCount(4);
-    for (const [index, name] of ["Spec", "Conversation", "Children", "Artifacts (1)"].entries()) {
+    for (const [index, name] of ["Spec", "Conversation", "Children", "Artifacts (2)"].entries()) {
       await expect(tabs.nth(index)).toHaveAccessibleName(name);
     }
     await expect(page.getByRole("button", { name: /make primary/i })).toHaveCount(0);
@@ -239,5 +239,133 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
     });
   } finally {
     await context.close();
+  }
+});
+
+// The status bands are collapsible and the header is one strip. Both regressed once while this
+// surface was being polished: a `flex` summary loses the native disclosure marker, and a title
+// allowed to grow pushed the project key hundreds of pixels from a short name.
+test("status bands stay expandable and the project key sits beside its name", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const open = await createIssue({ project: "CORE", title: "Still open" });
+  await patchIssue(open.key, { status: "in_progress" });
+  const shipped = await createIssue({ project: "CORE", title: "Already shipped" });
+  await patchIssue(shipped.key, { status: "done" });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  const width = testInfo.project.name === "chromium" ? 1280 : 390;
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ height: 900, width });
+  }
+
+  try {
+    await page.goto("/projects/CORE/issues");
+
+    // Done is collapsed, announced as expandable, and opens.
+    const done = page.locator("details").filter({ hasText: "Done (1)" }).first();
+    await expect(done).toBeVisible();
+    expect(await done.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(false);
+    const summary = done.locator("summary");
+    // `display: flex` on a summary removes the marker; a list-item box is what draws it.
+    const display = await summary.evaluate((node) => getComputedStyle(node).display);
+    expect(display).toBe("list-item");
+    await expect(page.getByRole("link", { name: /Already shipped/ })).toHaveCount(0);
+    await summary.click();
+    expect(await done.evaluate((node) => (node as HTMLDetailsElement).open)).toBe(true);
+    await expect(page.getByRole("link", { name: /Already shipped/ })).toHaveCount(1);
+
+    // The key pill sits beside the name, not across the row from it.
+    const heading = page.getByRole("heading", { level: 1, name: "Core" });
+    const pill = page.getByRole("link", { exact: true, name: "CORE" });
+    // The rendered text's own right edge, not the heading's box: a heading allowed to grow
+    // keeps its text at the left and stretches the box, so the box edge stays beside the pill
+    // while the name sits hundreds of pixels away from it.
+    const textRight = await heading.evaluate((node) => {
+      const range = node.ownerDocument.createRange();
+      range.selectNodeContents(node);
+      return range.getBoundingClientRect().right;
+    });
+    const pillBox = await pill.boundingBox();
+    if (pillBox === null) {
+      throw new Error("project header is not visible");
+    }
+    const gap = pillBox.x - textRight;
+    expect(gap).toBeGreaterThanOrEqual(0);
+    // Below `md` the name, key and blocker pill share the first row by design, the name taking
+    // the space the other two leave; the key beside the name is the one-strip desktop layout.
+    if (testInfo.project.name === "chromium") {
+      expect(gap).toBeLessThanOrEqual(24);
+    }
+    // The full name is available even when the heading truncates.
+    await expect(heading).toHaveAttribute("title", "Core");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A row's key and title are one reference. Below 1280 px every link is an inline-flex box, which
+// made the key and the title two flex columns: the key broke mid-key (`CORE-` over `1`) and a
+// long title wrapped in whatever the key and the timestamp left, about 130 px on a phone.
+test("a list row keeps its key whole and gives the title the row's width", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    title:
+      "Smoke rig checkpoints 5 and 7 assert the retired commit-identity and handoff-cleanup design: implementer+ses_identity, Legion-Session trailer, and the reviewer App authoring the .legion/ deletion",
+  });
+  await patchIssue(issue.key, { labels: ["smoke"], priority: 2, status: "todo" });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ height: 900, width: 1280 });
+  }
+
+  try {
+    await page.goto("/projects/CORE/issues");
+    const row = page.getByRole("listitem", { name: new RegExp(`^${issue.key} `) });
+    await expect(row).toBeVisible();
+    const layout = await row.evaluate((node) => {
+      const link = node.querySelector("a");
+      const key = link?.querySelector(".font-semibold");
+      const title = key?.nextElementSibling;
+      const time = node.querySelector("time");
+      if (!link || !key || !title || !time) {
+        throw new Error("the row has no key, title or timestamp");
+      }
+      const rects = (element: Element) => {
+        const range = node.ownerDocument.createRange();
+        range.selectNodeContents(element);
+        return [...range.getClientRects()];
+      };
+      const titleRects = rects(title);
+      const timeBox = time.getBoundingClientRect();
+      return {
+        keyLines: new Set(rects(key).map((rect) => Math.round(rect.top))).size,
+        rowWidth: node.getBoundingClientRect().width,
+        titleOverlapsTime: titleRects.some(
+          (rect) =>
+            rect.right > timeBox.left &&
+            rect.left < timeBox.right &&
+            rect.bottom > timeBox.top &&
+            rect.top < timeBox.bottom
+        ),
+        titleWidth:
+          Math.max(...titleRects.map((rect) => rect.right)) -
+          Math.min(...titleRects.map((rect) => rect.left)),
+      };
+    });
+    expect(layout.keyLines).toBe(1);
+    expect(layout.titleOverlapsTime).toBe(false);
+    // The title wraps across the row, not in a column beside the key and the timestamp.
+    expect(layout.titleWidth).toBeGreaterThanOrEqual(layout.rowWidth * 0.8);
+    await expectNoHorizontalOverflow(page);
+  } finally {
+    await alice.close();
   }
 });

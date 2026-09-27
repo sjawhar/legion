@@ -26,37 +26,45 @@ on:
         type: string
         required: false
         default: ""
-  # Pre-merge iteration: a pull request against main that touches the image files builds its head and
+  # Pre-merge iteration: a pull request against main that touches an image input builds its head and
   # publishes :sha-<short> only. `pull_request` (not `push`) because GitHub evaluates these paths against
   # the whole PR diff, so the check attaches to every head of such a PR — a handoff-only commit on top
   # of a Dockerfile change still gets it. A `push` trigger filters on the pushed commits alone and left
-  # a PR head with no image check (LEGION-23 tester round 1). The provisioning code the init container
-  # runs (`legion workspace-init`, `@legion/workspace`) is part of the image's behaviour, so a change to
-  # it builds the image it is proven on (LEGION-178). So is the whole Go module the image compiles the
-  # Go `legion` from — the command a Sandbox pod runs, the probes `legion probe-image` runs in the final
-  # step and in the Go daemon's probe Sandbox, and every package they import — named whole, because a
-  # hand-kept list of those packages already missed one; and so are the Go build inputs, since the
-  # image compiles at go.work's Go version — a PR that raises it past the build stage's image must fail
-  # here, not in the next image build. And so is the plugin the image installs, skills and agent
-  # definitions included: the final step's `legion probe-image` is the one pre-merge check that
-  # resolves every task agent and skill Legion's prompts name against what the plugin ships, so a PR
-  # that names one nothing ships fails here instead of merging and publishing the plugin.
+  # a PR head with no image check (LEGION-23 tester round 1). The paths are every file worker.Dockerfile
+  # builds from: the root manifest, lockfile, patches and every root workspace's package.json (the cli
+  # stage's frozen install); the packages it copies whole — the compiled CLI (packages/daemon, with the
+  # Dockerfile), the plugin (packages/pi-envoy, packages/envoy-client, packages/contracts), the
+  # provisioning code (packages/workspace), the skills, the Go module and its build inputs
+  # (packages/daemon-go, go.work, go.work.sum), and packages/envoy (copied whole for its
+  # agent-secrets binary, AGENTC-393); the context's .dockerignore; and this workflow. The final
+  # `legion probe-image` runs the image's own CLI and plugin, so a PR that breaks either fails here
+  # instead of merging and publishing nothing.
+  # .github/scripts/check-image-trigger-paths.sh fails the build when this list misses a file the
+  # image build reads.
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
     paths:
-      - packages/daemon/docker/**
-      - packages/daemon/src/daemon/omp-pin.ts
-      - packages/daemon/src/cli/workspace-init.ts
-      - packages/workspace/**
-      - .github/workflows/worker-image.yaml
+      - package.json
+      - bun.lock
+      - patches/**
+      - packages/envoy-plugin/package.json
+      - packages/claude-envoy/package.json
+      - packages/proof-editor/package.json
+      - packages/dispatch/package.json
+      - packages/envoy/internal/dispatch/pmdoc/gen/package.json
+      - packages/daemon/**
       - packages/pi-envoy/**
+      - packages/envoy-client/**
+      - packages/contracts/**
+      - packages/workspace/**
       - skills/**
       - packages/daemon-go/**
       - go.work
       - go.work.sum
-      - packages/envoy/go.mod
-      - packages/envoy/go.sum
+      - packages/envoy/**
+      - .dockerignore
+      - .github/workflows/worker-image.yaml
 
 # Same-repo `pull_request` runs get these too (a fork PR would get a read-only token, and this repo
 # takes no fork PRs).

@@ -3,8 +3,27 @@ package dispatch
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"strings"
 	"time"
+	"unicode/utf16"
 )
+
+// MessageBodyLimit is the longest message body Dispatch accepts, in UTF-16 code units: the server
+// refuses a longer one with CAP_EXCEEDED on every attempt (packages/envoy/internal/dispatch/api/
+// messages.go maxMessageBody16, counted by server.go len16).
+const MessageBodyLimit = 2000
+
+// MessageBodyLength is body's length as Dispatch counts it against MessageBodyLimit: UTF-16 code
+// units, so a character outside the Basic Multilingual Plane counts twice.
+func MessageBodyLength(body string) int {
+	length := 0
+	for _, r := range body {
+		length += utf16.RuneLen(r)
+	}
+	return length
+}
 
 // Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
 // writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
@@ -17,14 +36,34 @@ type Client interface {
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 }
 
+// LegionLabel is the Dispatch label that hands an issue to Legion. A human sets it from the issue
+// header in the Dispatch dashboard, an agent with Dispatch's issue tools. A label is the mark, and
+// not the issue's route, because a route has Dispatch publish every event of the issue to the
+// route's topic, while a label only marks it.
+const LegionLabel = "legion"
+
+// CarriesLegionLabel says whether labels include LegionLabel. Dispatch keeps a label's case as it
+// was typed and holds labels differing only in case as one label, so the match ignores case.
+func CarriesLegionLabel(labels []string) bool {
+	for _, label := range labels {
+		if strings.EqualFold(label, LegionLabel) {
+			return true
+		}
+	}
+	return false
+}
+
 // IssueSummary is one issue from Dispatch's project list. Rank is Dispatch's fractional key;
-// callers preserve the list's order when filtering.
+// callers preserve the list's order when filtering. HandedOver is resolved once here, at the
+// client boundary, from the raw labels Dispatch's list route answers: every other reader of an
+// IssueSummary acts on this bool, never on a label list of its own.
 type IssueSummary struct {
-	Key    string
-	Title  string
-	Status string
-	Parent *string
-	Rank   string
+	Key        string
+	Title      string
+	Status     string
+	Parent     *string
+	Rank       string
+	HandedOver bool
 	// LastSeq is how far Dispatch's own event log for the issue has run. A record whose applied
 	// sequence is behind it has events still to come on the stream, which carry the actor this
 	// snapshot does not.
@@ -58,6 +97,39 @@ type Error struct {
 	Status  int
 	Code    string
 	Message string
+}
+
+// Missing says whether a Dispatch call failed because what it asked for is not there, as against
+// a call that failed: the one answer a handler turns into its own 404 rather than a 502.
+func Missing(err error) bool {
+	var refusal *Error
+	return errors.As(err, &refusal) && refusal.Status == http.StatusNotFound
+}
+
+// PermanentRefusal is a write Dispatch will refuse the same way however many times it is made:
+// the issue is gone, or what it carries is something Dispatch will not take. Only a refusal
+// Dispatch itself made counts, which is a 4xx carrying one of its error codes.
+//
+// Everything else is an outage a caller rides out: every 5xx, every transport failure, "come back
+// later" (408, 429), a codeless 4xx from whatever sits in front of Dispatch, and a credential
+// answer (401, 403). A revoked or expired token says nothing about the write — an operator
+// restores it and the same body is taken — so reading one as permanent would drop the write for
+// good.
+func PermanentRefusal(err error) (*Error, bool) {
+	var refusal *Error
+	if !errors.As(err, &refusal) {
+		return nil, false
+	}
+	switch {
+	case refusal.Code == "",
+		refusal.Status < 400 || refusal.Status >= 500,
+		refusal.Status == http.StatusRequestTimeout,
+		refusal.Status == http.StatusTooManyRequests,
+		refusal.Status == http.StatusUnauthorized,
+		refusal.Status == http.StatusForbidden:
+		return nil, false
+	}
+	return refusal, true
 }
 
 func (e *Error) Error() string {

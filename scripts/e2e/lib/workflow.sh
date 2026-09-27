@@ -5,14 +5,23 @@
 # negative controls. A stage proof sources lib/rig.sh first.
 #
 # Sourced, never run. The caller sets
-#   work           the run's scratch directory, holding the two files the lib reads: dispatch-token,
-#                  the Dispatch bearer, and legion, the Go daemon binary it asks for state
+#   work           the run's scratch directory, holding the files the lib reads: legion, the Go
+#                  daemon binary it asks for state; legion.yaml, the daemon's configuration, which
+#                  says where the daemon answers; dispatch-auth-header, the curl header line
+#                  (`Authorization: Bearer …`) the agents' Dispatch bearer is sent as; and
+#                  dispatch-human-header, the one the proof human's writes are sent with. Headers
+#                  go by file, so no bearer is ever in a process's argv
 #   evidence       the evidence directory
 #   project        the Dispatch project the run's issues live in; the daemon writes as
 #                  legion-daemon:<project>
 #   repo           the smoke repository, owner/name
-#   port_dispatch  the Dispatch server's port on 127.0.0.1
-#   port_daemon    the daemon's port on 127.0.0.1
+#   dispatch_base  the Dispatch server's base URL (a scratch server's http://127.0.0.1:<port>, or
+#                  production's)
+#   dispatch_actor the session every proof-human write names as its actor, or empty. A bearer caller
+#                  must name one (production Dispatch refuses the write otherwise, ACTOR_KIND); it
+#                  holds no claim, so the workflow reads its status writes as a human's. Empty, the
+#                  writes carry none and the human header alone says who wrote (a scratch
+#                  Dispatch's X-Dispatch-User)
 #   pg_container   the container holding the daemon's Postgres database
 #   pr_number      the issue's pull request, once it exists
 #   smoke_file     the one product file that pull request's first implementation changed: the
@@ -27,20 +36,22 @@
 
 # ---- Dispatch -------------------------------------------------------------------------------------
 
-dispatch_url() { printf 'http://127.0.0.1:%s' "$port_dispatch"; }
+dispatch_url() { printf '%s' "$dispatch_base"; }
 dispatch_get() {
-  curl -fsS --max-time 20 -H "Authorization: Bearer $(cat "$work/dispatch-token")" "$(dispatch_url)/api/v1/$1"
+  curl -sS --fail-with-body --max-time 20 -H "@$work/dispatch-auth-header" "$(dispatch_url)/api/v1/$1"
 }
-# dispatch_events ISSUE prints the issue's whole event log, paging past Dispatch's 200-event limit.
+# dispatch_events ISSUE prints the issue's whole event log, paging past Dispatch's 200-event limit,
+# or prints nothing and fails when a page cannot be read. The pages travel through a variable and a
+# pipe: one page of an issue carrying documents can pass the 128 KiB a single argv string may hold.
 dispatch_events() {
-  local issue=$1 after=0 page all='[]'
-  while :; do
-    page=$(dispatch_get "issues/$issue/events?after=$after&limit=200")
-    all=$(jq -c --argjson page "$page" '. + $page' <<<"$all")
+  local issue=$1 after=0 page pages
+  pages=$(while :; do
+    page=$(dispatch_get "issues/$issue/events?after=$after&limit=200") || exit 1
+    printf '%s\n' "$page"
     [ "$(jq length <<<"$page")" -eq 200 ] || break
     after=$(jq '.[-1].seq' <<<"$page")
-  done
-  printf '%s\n' "$all"
+  done) || return 1
+  jq -s -c 'add' <<<"$pages"
 }
 dispatch_status_is() { dispatch_get "issues/$1" | jq -e --arg status "$2" '.status == $status'; }
 review_cap_posted() {
@@ -48,24 +59,39 @@ review_cap_posted() {
 }
 dispatch_human() {
   local method=$1 path=$2 body=${3:-}
+  if [ -n "$body" ] && [ -n "$dispatch_actor" ]; then
+    body=$(jq -c --arg id "$dispatch_actor" '. + {actor: {kind: "session", id: $id}}' <<<"$body")
+  fi
   if [ -n "$body" ]; then
-    curl -fsS --max-time 20 -X "$method" -H 'X-Dispatch-User: smoke' -H 'content-type: application/json' \
+    curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" -H 'content-type: application/json' \
       --data "$body" "$(dispatch_url)/api/v1/$path"
   else
-    curl -fsS --max-time 20 -X "$method" -H 'X-Dispatch-User: smoke' "$(dispatch_url)/api/v1/$path"
+    curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
   fi
 }
+# new_issue TITLE [PARENT] creates an issue in the run's project and prints its key. A root carries
+# the `legion` label, which hands it to the Go daemon (it admits no unlabeled root), and smoke_spec
+# as its primary document: the proof gives its architect no instruction, so what the tree is for
+# comes from the issue itself. A child carries neither, since it runs under its root's tree.
 new_issue() {
   local title=$1 parent=${2:-} payload
-  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" \
-    'if $parent == "" then {project:$project,title:$title} else {project:$project,title:$title,parent:$parent} end')
+  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" --arg spec "$(smoke_spec)" \
+    'if $parent == "" then {project:$project,title:$title,labels:["legion"],spec:$spec,force:true} else {project:$project,title:$title,parent:$parent,force:true} end')
   dispatch_human POST issues "$payload" | jq -er .key
+}
+# smoke_spec is every root's starting document: one tiny one-file change, and the one extra line a
+# scripted review round may ask for, which is in scope.
+smoke_spec() {
+  printf '%s\n' "## Summary" "" \
+    "A Legion smoke proof. Make one tiny, concrete one-file change in \`$repo\`: add one new Markdown file under \`smoke/\` holding a single line that names this issue." "" \
+    "## Scope" "" \
+    "A review of the pull request may ask for one more line appended to that same file; that is in scope. Nothing else changes."
 }
 set_status() { dispatch_human PATCH "issues/$1" "$(jq -cn --arg status "$2" '{status:$status}')" >/dev/null; }
 
 # ---- the daemon's state ---------------------------------------------------------------------------
 
-daemon_state() { "$work/legion" state --json --port "$port_daemon"; }
+daemon_state() { "$work/legion" state --json --config "$work/legion.yaml"; }
 state_file() { daemon_state >"$evidence/$1.json"; }
 issue_phase() { daemon_state | jq -e --arg issue "$1" --arg phase "$2" '.issues[$issue].phase == $phase'; }
 issue_phase_in() {
@@ -135,15 +161,27 @@ session_contains() {
   grep -Fq -- "$3" <<<"$text"
 }
 
-# The architect owns spec editing and gate registration; the proof names the one primary artifact
-# Dispatch created so a real agent cannot register an unrelated document.
-drive_gate() {
+gate_registered() {
+  daemon_state | jq -e --arg issue "$1" --arg artifact "$2" \
+    '.issues[$issue].designGate.artifactId == $artifact and .issues[$issue].designGate.currentVersion > 0'
+}
+# architect_registers_gate ISSUE LABEL waits for a root's architect to register its gate on its
+# own. Nobody prompts it: its first turn is the daemon's catch-up notice, from which it writes the
+# spec (requesting approval when the design gate is armed) and registers the gate. The registration
+# must name the one primary artifact Dispatch created, so a real agent cannot register an unrelated
+# document.
+architect_registers_gate() {
   local issue=$1 label=$2 artifact
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
-  send_agent "$issue" architect "$label: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo, and say in it that a review of the pull request may ask for one more line appended to that same file, which is in scope. Request approval for primary artifact $artifact. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at the version returned by that approval request. Wait after registering."
-  until_true 300 "$label architect to register primary artifact $artifact" sh -c \
-    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$issue' --arg artifact '$artifact' '.issues[\$issue].designGate.artifactId == \$artifact and .issues[\$issue].designGate.currentVersion > 0'"
+  until_true 300 "$label architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
+  until_true 900 "$label architect to register primary artifact $artifact on its own" gate_registered "$issue" "$artifact"
+}
+# drive_gate ISSUE LABEL: the architect registers the gate on its own, then the proof's human
+# approves the registered version and the daemon moves the issue to planning.
+drive_gate() {
+  local issue=$1 label=$2
+  architect_registers_gate "$issue" "$label"
   gate_artifact=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.artifactId')
   gate_version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
   dispatch_human POST "artifacts/$gate_artifact/reviews" '{"state":"approved"}' >/dev/null
@@ -157,11 +195,23 @@ drive_gate() {
 pull_request_product_files() {
   gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq '.[] | select(.filename | startswith(".legion/") | not) | .filename'
 }
-# A direct review is deliberately the devbox's ordinary gh acting as the proof human. It is never
-# `legion gh`, and the bridge is the only path that carries the event to the daemon.
-request_changes() {
-  local body=$1
-  gh -R "$repo" pr review "$pr_number" --request-changes --body "$body"
+# request_changes_as_reviewer ISSUE ROUND BODY has the reviewer pane post a round's
+# changes-requested review and complete its phase. A review ends when its reviewer completes it —
+# the reviewer's handoff is part of the phase — so the round is driven through the reviewer worker,
+# as the final approval is, rather than posted from the proof's own gh.
+request_changes_as_reviewer() {
+  local issue=$1 round=$2 body=$3
+  send_agent "$issue" reviewer "Stage 3 proof review round $round: use the bash tool to submit REQUEST_CHANGES on pull request #$pr_number in $repo at its current head as legion-reviewer[bot], with exactly this body: $body Then write and commit the reviewer handoff and complete it. This exact smoke instruction takes precedence over your own review."
+  until_true 300 "legion-reviewer[bot]'s round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
+}
+# reviewer_requested_changes ROUND: the review App has posted at least ROUND changes-requested
+# reviews on the proof's pull request.
+reviewer_requested_changes() {
+  local reviews
+  # --paginate applies --jq to each page, so one line per matching review, counted after.
+  reviews=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
+    --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "CHANGES_REQUESTED") | .id') || return 1
+  [ "$(grep -c . <<<"$reviews")" -ge "$1" ]
 }
 # round_line ROUND is the line a scripted review round asks for: distinct per round and run, and
 # within the spec, whose architect was told a review may ask for one more line in the smoke file.
@@ -181,8 +231,8 @@ round_correction_pushed() {
 # drops the suffix, and a user could hold the bare name. The approval must be of the current head.
 reviewer_approved_head() {
   local head approved
-  head=$(gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
-  approved=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
+  head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
+  approved=$(timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
     --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id') || return 1
   grep -qx -- "$head" <<<"$approved"
 }
@@ -341,6 +391,30 @@ notice_deliveries() {
   { claim_session_text "$1" "$2" || true; } | grep -F '"customType":"envoy-message"' | grep -cF -- "$3" || true
 }
 notice_delivered() { [ "$(notice_deliveries "$@")" -ge 1 ]; }
+# worker_sessions SESSIONS prints each phase-worker session file under SESSIONS and the role it
+# claims, tab-separated. A session's role is its newest Envoy role claim; an architect or controller
+# session is not a phase worker's.
+worker_sessions() {
+  local f role
+  while IFS= read -r f; do
+    role=$(jq -R -r 'fromjson? | select(.customType == "envoy-role-claim") | .data.role' "$f" | tail -1)
+    case "$role" in *-planner | *-implementer | *-tester | *-reviewer | *-merger) printf '%s\t%s\n' "$f" "$role" ;; esac
+  done < <(find "$1" -type f -name '*.jsonl' | sort)
+}
+# worker_notices SESSIONS prints one line for each workflow notice delivered into a phase-worker
+# session under SESSIONS: the session file, the role it claims, and the delivery's summary. Every
+# notice kind is for the architect that owns its issue, published on that architect's role topic, so
+# a phase worker's session holds none.
+worker_notices() {
+  local f role
+  while IFS=$'\t' read -r f role; do
+    jq -R -r --arg file "${f##*/}" --arg role "$role" '
+      fromjson? | select(.customType == "envoy-message") | (.content | tostring)
+      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up) on [^\\n]*)")
+      | "\($file) \($role) \(.summary)"' "$f"
+  done < <(worker_sessions "$1")
+}
+assert_no_worker_notices() { [ -z "$(worker_notices "$1")" ]; }
 
 # ---- negative controls ----------------------------------------------------------------------------
 

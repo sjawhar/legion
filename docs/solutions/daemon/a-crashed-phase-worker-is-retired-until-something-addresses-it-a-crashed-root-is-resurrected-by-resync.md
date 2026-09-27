@@ -24,6 +24,8 @@ related_issues:
 
 # A crashed phase worker is retired until something addresses it
 
+> `scripts/kind-smoke/` and the in-cluster manifests under `deploy/kubernetes/daemon/` were removed with the TypeScript daemon's Kubernetes mode (LEGION-286); the paths below are as they stood at `4fdd9646`.
+
 The kind smoke's resume checkpoint was first planned to kill "a pod" and wait for the daemon to
 bring it back. Which pod matters, because the daemon recovers the two kinds of process by
 different rules — as of the LEGION-26 branch, before LEGION-179 lands.

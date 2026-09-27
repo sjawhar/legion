@@ -23,6 +23,7 @@ import {
 } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
+import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -404,6 +405,16 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     return result
   }
 
+  /**
+   * Topics whose registry-side removal (the `deliver` handler's Dispatch-driven
+   * path, below) failed and must be retried, keyed by the session id the
+   * removal targeted since a handoff can move the identity on before a retry
+   * runs. The heartbeat's serialized block re-issues every entry and drops it
+   * once the listener accepts; `adoptHandoff` drops an id's entry outright once
+   * that id's whole registry entry is gone.
+   */
+  const pendingRegistryRemovals = new Map<string, Set<string>>()
+
   const forwarder: ChannelForwarder = createChannelForwarder(options.connection, {
     deliver: async (message) => {
       const removedTopics = subscriptionRemovedTopics(message.raw, identity.id)
@@ -417,12 +428,16 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         })
         // Dispatch has already removed them from the entry, but a registration in
         // flight at that moment adds them back; removing them again behind it undoes that.
+        const removalSessionID = identity.id
         void serialized(() =>
-          options.client.unsubscribe({ sessionID: identity.id, topics: removedTopics }),
+          options.client.unsubscribe({ sessionID: removalSessionID, topics: removedTopics }),
         ).catch((error: unknown) => {
           process.stderr.write(
-            `envoy-channel: could not drop a removed subscription from the registry — ${messageFor(error)}\n`,
+            `envoy-channel: could not drop a removed subscription from the registry — ${messageFor(error)}; retrying every heartbeat\n`,
           )
+          const pending = pendingRegistryRemovals.get(removalSessionID) ?? new Set<string>()
+          for (const topic of removedTopics) pending.add(topic)
+          pendingRegistryRemovals.set(removalSessionID, pending)
         })
       }
       await enqueueChannelMessage(delivery, options.connection, directSubject, message)
@@ -522,6 +537,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     }
     identity.set(next)
     directSubject = nextSubject
+    // The old id's whole registry entry is gone: any removal still pending
+    // against it can never succeed and would otherwise retry forever.
+    pendingRegistryRemovals.delete(previous)
     // `unfollow` removes the subject from the topic list before it first awaits.
     // What it then awaits is the drain of deliveries already in flight, and the
     // handoff does not wait for it: a stuck notification would otherwise hold
@@ -544,6 +562,24 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     roleTransferFrom = undefined
   }
 
+  /**
+   * Re-issues a registry-side removal the `deliver` handler could not make
+   * stick the first time. Runs only inside `serialized`, so it never races the
+   * removal it retries; a topic drops out once the listener accepts it, and a
+   * session id whose whole entry is already gone (a handoff moved past it) is
+   * never queued here again after `adoptHandoff` clears it.
+   */
+  const retryPendingRegistryRemovals = async (): Promise<void> => {
+    for (const [sessionID, topics] of pendingRegistryRemovals) {
+      if (topics.size === 0) {
+        pendingRegistryRemovals.delete(sessionID)
+        continue
+      }
+      await options.client.unsubscribe({ sessionID, topics: [...topics] })
+      pendingRegistryRemovals.delete(sessionID)
+    }
+  }
+
   // One tick at a time: a tick that outlives the interval (a slow listener, a
   // handoff mid-flight) would otherwise be overlapped by the next, interleaving
   // its register/unregister/setRole calls with the ones still in progress. A
@@ -561,6 +597,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         outageReported = false
         await reassertRole()
         await transferRole()
+        await retryPendingRegistryRemovals()
       })
     } catch (error) {
       if (outageReported) return
@@ -854,6 +891,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
     connection = await connect({
       servers: [...defaults.natsUrls],
       name: `claude-envoy-channel-${identity.id}`,
+      ...natsAuthOptions(process.env),
       reconnect: true,
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,

@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -48,6 +49,20 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "READY_ROLE_FORBIDDEN", "only a merger may report ready")
 		return
 	}
+	// The daemon posts the READY packet as one Dispatch message, the outbox's marker appended, and
+	// Dispatch refuses a longer body on every attempt, so a packet over record.MessagePostLimit
+	// would never reach the human. It is refused here, before the fact is applied: a refusal the
+	// workflow committed is recorded as processed under this completion's key, which leaves the
+	// summary out, so the shortened packet at the same commit would be answered
+	// HANDOFF_ALREADY_RECORDED and the issue would stay in merging.
+	if req.Ready {
+		if length := dispatch.MessageBodyLength(req.Summary); length > record.MessagePostLimit {
+			writeFailure(w, http.StatusBadRequest, "READY_PACKET_TOO_LONG", fmt.Sprintf(
+				"the READY packet is %d characters over the %d the daemon can post as one Dispatch message (%d/%d): link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
+				length-record.MessagePostLimit, record.MessagePostLimit, length, record.MessagePostLimit))
+			return
+		}
+	}
 	if s.pool == nil || s.records == nil {
 		writeFailure(w, http.StatusInternalServerError, "FACTS_UNAVAILABLE", "fact intake is unavailable")
 		return
@@ -57,37 +72,15 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusConflict, "HANDOFF_NO_CLAIM", "the daemon supervises no claim for this grant")
 		return
 	}
-	// The run this completion belongs to is the run of the task the worker took: the delivery
-	// whose turn is running, or — after that turn ends, which retires the delivery — the run the
-	// claim is left serving. The pending delivery alone would not do: a worker told to wait is
-	// woken by a notice, whose turn no delivery backs, and its completion still belongs to the run
-	// whose task it took. The claim's field alone would not do either: an operator's task carries
-	// no run, and a confirmation a busy refusal took back never ran. The pane's own environment
-	// cannot say it at all — LEGION_GENERATION is the claim's launch counter, and a live worker is
-	// handed the next run's task without being relaunched.
-	held := machine.Claim()
-	serving := held.ServingGeneration
-	if p := held.Pending; p != nil && p.Generation != 0 {
-		// A task whose turn is running is the run being worked. A task the agent may have read —
-		// delivered, and its turn never seen to start — is one too, when the claim has retired no
-		// confirmed task of a run: Oh My Pi's own agent_start names no prompt, so a turn starting
-		// after the five-second bound is indistinguishable from a foreign one and confirms
-		// nothing, and the worker of a first task would otherwise have its completion refused.
-		// A claim serving no run is not a session that has done no work — it may have worked
-		// tasks whose turns were never confirmed — but it is one this daemon has seen take no
-		// other run's task, so there is no other run this could belong to. A task refused in a
-		// turn of the agent's own is not read at all: that take-back drops the delivered mark,
-		// and a completion from that foreign turn falls through to the run the claim serves.
-		if !p.ConfirmedAt.IsZero() || (serving == 0 && !p.DeliveredAt.IsZero()) {
-			serving = p.Generation
-		}
-	}
+	// The run this completion belongs to is the run of the task the worker took, which the claim
+	// answers (supervise.Claim.ServingRun) and nothing on the request says.
+	serving := machine.Claim().ServingRun()
 	if serving == 0 {
 		writeFailure(w, http.StatusConflict, "HANDOFF_NO_RUN",
 			"this completion belongs to no task: this claim has taken none, so the run it reports cannot be told")
 		return
 	}
-	issue, round, err := s.handoffPosition(r.Context(), grant.Issue)
+	issue, treeGeneration, round, err := s.handoffPosition(r.Context(), grant.Issue)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read the issue record")
 		return
@@ -108,8 +101,12 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// The run the completion is attributed to is part of the key, because a refusal is recorded
 	// under it: a stale completion of the run that is over would otherwise take the key of the new
 	// run's completion of the same phase at the same commit, and the real one would be answered
-	// ALREADY_RECORDED and never reach the workflow.
-	eventID := fmt.Sprintf("handoff:%s:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, issue.Generation, serving, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
+	// ALREADY_RECORDED and never reach the workflow. The tree's generation is part of it for the
+	// same reason: re-admission starts a new generation of the tree by bumping only the root's, and
+	// restarts a child's worker in the phase it stood in, so a child's completion refused before
+	// (while the tree lingered, or while the old gate was closed) would otherwise take the new
+	// generation's key.
+	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim, Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit}, s.handlers...)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply handoff fact")
@@ -128,21 +125,31 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, HandoffCompleteResponse{})
 }
 
-// handoffPosition reads the issue record and its review round: the implementer's count of returns
-// to implementing, which tells each implementing, testing, and reviewing pass from the last.
-func (s *server) handoffPosition(ctx context.Context, key string) (*record.Issue, int, error) {
+// handoffPosition reads the issue record, its tree's generation (the root's), and its review round:
+// the implementer's count of returns to implementing, which tells each implementing, testing, and
+// reviewing pass from the last.
+func (s *server) handoffPosition(ctx context.Context, key string) (*record.Issue, uint64, int, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly, IsoLevel: pgx.RepeatableRead})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	issue, err := s.records.Issue(ctx, tx, key)
 	if err != nil || issue == nil {
-		return nil, 0, err
+		return nil, 0, 0, err
+	}
+	root := issue
+	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
+		if root, err = s.records.Issue(ctx, tx, issue.Tree); err != nil {
+			return nil, 0, 0, err
+		}
+		if root == nil {
+			return nil, 0, 0, fmt.Errorf("the tree root %s of %s is not recorded", issue.Tree, issue.Key)
+		}
 	}
 	rows, err := s.records.Phases(ctx, tx, key)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	round := 0
 	for _, row := range rows {
@@ -150,5 +157,5 @@ func (s *server) handoffPosition(ctx context.Context, key string) (*record.Issue
 			round = row.Rounds
 		}
 	}
-	return issue, round, tx.Commit(ctx)
+	return issue, root.Generation, round, tx.Commit(ctx)
 }

@@ -259,7 +259,7 @@ func TestClosedIssueRejectsLiveEditsAndNamedVersions(t *testing.T) {
 	if !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("edit closed document error = %v, want ErrIssueClosed", err)
 	}
-	if _, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", actor); !errors.Is(err, ErrIssueClosed) {
+	if _, err := namedVersion(t, service, artifactID, "checkpoint", actor); !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("version closed document error = %v, want ErrIssueClosed", err)
 	}
 	waitForDocumentText(t, service, artifactID, "before\n")
@@ -271,7 +271,7 @@ func TestNamedVersionIncludesTrackedActorsAndResetsRoom(t *testing.T) {
 	connected := model.Actor{Kind: "user", ID: "alice"}
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	service.recordActor(artifactID, connected)
-	namedResult, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", actor)
+	namedResult, err := namedVersion(t, service, artifactID, "checkpoint", actor)
 	version := namedResult.Version
 	if err != nil {
 		t.Fatalf("name document version: %v", err)
@@ -570,7 +570,7 @@ func TestNamedVersionIndexesDocumentReferences(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "See dispatch://DOC-1/artifact/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace document text: %v", err)
 	}
-	if _, err := service.NamedVersion(context.Background(), artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := namedVersion(t, service, artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write named version: %v", err)
 	}
 	var references int
@@ -592,7 +592,7 @@ func TestNamedVersionIndexesServerURLDocumentReferences(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "See https://dispatch.example/issues/DOC-1/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace document text: %v", err)
 	}
-	if _, err := service.NamedVersion(context.Background(), artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := namedVersion(t, service, artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write named version: %v", err)
 	}
 	var references int
@@ -650,9 +650,14 @@ func TestSettledVersionNamesChangedReferenceTargets(t *testing.T) {
 
 // SnapshotVersion and NamedVersion are the two version writers the API's document handlers call,
 // and each reports what its markdown moved in the reference graph: the caller names those targets
-// on the artifact event it appends, so a batched backlink count refreshes without a reload.
+// on the artifact event it appends, so a batched backlink count refreshes without a reload. Each
+// edit also arms the room's settlement, which writes the same version itself once its delay
+// passes, and then the writer under test reports no change: SnapshotVersion writes nothing, and
+// NamedVersion writes a copy whose references settlement already indexed. So settlement waits an
+// hour here, as in every test of a version writer's own write.
 func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 	service, artifactID := newTestService(t)
+	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "# First\n\nPending.")
 	actor := model.Actor{Kind: "user", ID: "alice"}
 	issueKey := "DOC-1"
@@ -697,7 +702,7 @@ func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 	}, actor, nil); err != nil {
 		t.Fatalf("apply the second citing edit: %v", err)
 	}
-	named, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", actor)
+	named, err := namedVersion(t, service, artifactID, "checkpoint", actor)
 	if err != nil {
 		t.Fatalf("name version: %v", err)
 	}

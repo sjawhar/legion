@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -21,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	recordpkg "github.com/sjawhar/legion/daemon/internal/record"
@@ -30,6 +32,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 func architect() api.SpawnRequest {
@@ -51,6 +55,47 @@ func TestRunRefusesAConfigurationItCannotSuperviseUnder(t *testing.T) {
 		{"an Envoy token file that is not there", func(c *config.Config, _ *overrides) {
 			c.EnvoyTokenFile = filepath.Join(c.StateDir, "absent")
 		}, "envoy_token_file names"},
+		{"a NATS nkey seed file that is not there", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = filepath.Join(c.StateDir, "absent")
+		}, "nats_nkey_seed_file names " + "{state}/absent, which could not be read"},
+		{"a blank NATS nkey seed file", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = testnats.SeedFile(t, " \n")
+		}, "nats_nkey_seed_file names {seed}, which is empty"},
+		{"a NATS nkey seed file holding no seed", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = testnats.SeedFile(t, "SUNOTASEED")
+		}, "nats_nkey_seed_file ({seed}) does not hold a valid nkey seed"},
+		{"a NATS nkey seed file holding an account's seed", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = testnats.SeedFile(t, testnats.Account(t))
+		}, "nats_nkey_seed_file ({seed}) holds an nkey seed that is not a user's"},
+		{"NATS_NKEY_SEED_FILE set but empty", func(_ *config.Config, o *overrides) {
+			o.environ = []string{"NATS_NKEY_SEED_FILE=", "NATS_NKEY_SEED=" + testnats.UserSeed(t)}
+		}, "NATS_NKEY_SEED_FILE is set but empty"},
+		{"NATS_NKEY_SEED_FILE naming a missing file", func(c *config.Config, o *overrides) {
+			o.environ = []string{"NATS_NKEY_SEED_FILE=" + filepath.Join(c.StateDir, "absent")}
+		}, "NATS_NKEY_SEED_FILE names {state}/absent, which could not be read"},
+		{"a provider key naming the NATS nkey seed beside the daemon's", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
+			c.ProviderKeys = []config.ProviderKey{{Env: "NATS_NKEY_SEED", Secret: "NATS_NKEY_SEED_TESTS"}}
+		}, "provider_keys names NATS_NKEY_SEED, the launch secret every launch carries behind its NATS_NKEY_SEED_FILE pointer: a provider key may not name a launch secret"},
+		{"NATS_NKEY_SEED holding no seed", func(_ *config.Config, o *overrides) {
+			o.environ = []string{"NATS_NKEY_SEED=hunter2"}
+		}, "NATS_NKEY_SEED does not hold a valid nkey seed"},
+		{"a daemon NATS nkey seed file that is not there, beside a usable pane seed", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
+			c.NatsDaemonNkeySeedFile = filepath.Join(c.StateDir, "absent")
+		}, "nats_daemon_nkey_seed_file names {state}/absent, which could not be read"},
+		{"a daemon NATS nkey seed file holding an account's seed", func(c *config.Config, _ *overrides) {
+			c.NatsDaemonNkeySeedFile = filepath.Join(c.StateDir, "daemon.seed")
+			if err := os.WriteFile(c.NatsDaemonNkeySeedFile, []byte(testnats.Account(t)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "nats_daemon_nkey_seed_file ({state}/daemon.seed) holds an nkey seed that is not a user's"},
+		{"NATS_DAEMON_NKEY_SEED_FILE set but empty", func(_ *config.Config, o *overrides) {
+			o.environ = []string{"NATS_DAEMON_NKEY_SEED_FILE=", "NATS_DAEMON_NKEY_SEED=" + testnats.UserSeed(t)}
+		}, "NATS_DAEMON_NKEY_SEED_FILE is set but empty"},
+		{"NATS_DAEMON_NKEY_SEED holding no seed", func(_ *config.Config, o *overrides) {
+			o.environ = []string{"NATS_DAEMON_NKEY_SEED=hunter2"}
+		}, "NATS_DAEMON_NKEY_SEED does not hold a valid nkey seed"},
 		{"no omp_invocation and no LEGION_OMP_PATH", func(c *config.Config, o *overrides) {
 			c.OmpInvocation = ""
 			o.runtime = nil
@@ -65,11 +110,12 @@ func TestRunRefusesAConfigurationItCannotSuperviseUnder(t *testing.T) {
 			cfg := testConfig(t)
 			o := fakeRuntime(fake.NewRuntime(), &built{})
 			testCase.change(&cfg, &o)
+			want := strings.NewReplacer("{state}", cfg.StateDir, "{seed}", cfg.NatsNkeySeedFile).Replace(testCase.want)
 
 			err := run(context.Background(), cfg, quietLogger(), o)
 
-			if err == nil || !strings.Contains(err.Error(), testCase.want) {
-				t.Fatalf("run = %v, want a refusal naming %q", err, testCase.want)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("run = %v, want a refusal naming %q", err, want)
 			}
 			if count, _ := boots(t, cfg); count != 0 {
 				t.Fatalf("boots after a refused start = %d, want 0", count)
@@ -147,7 +193,7 @@ func TestRunLaunchesWithThePromptInstructionsAndSecretsItWasGiven(t *testing.T) 
 	if !reflect.DeepEqual(spec.Secrets, map[string]string{"ENVOY_TOKEN": "envoy-bearer"}) {
 		t.Errorf("the launch's secrets = %v, want the Envoy bearer", spec.Secrets)
 	}
-	if spec.Repository != "" {
+	if spec.Repository != (ghrepo.Repository{}) {
 		t.Errorf("the launch names repository %q, want none: the configuration names no project repository", spec.Repository)
 	}
 	if spec.Project != project || spec.Tree != "LEGION-1" || spec.Issue != "LEGION-1" || spec.Role != claim.RoleArchitect {
@@ -155,9 +201,46 @@ func TestRunLaunchesWithThePromptInstructionsAndSecretsItWasGiven(t *testing.T) 
 	}
 }
 
+// Every launch, a root's and a worker's alike, carries the NATS nkey seed the daemon resolved as the
+// NATS_NKEY_SEED secret — from nats_nkey_seed_file, else NATS_NKEY_SEED_FILE, else NATS_NKEY_SEED —
+// which each runtime hands the agent behind a NATS_NKEY_SEED_FILE pointer, never as a value; and a
+// daemon with none hands none.
+func TestEveryLaunchCarriesTheNatsSeedTheDaemonResolved(t *testing.T) {
+	keySeed, envSeed := testnats.UserSeed(t), testnats.UserSeed(t)
+	for _, tc := range []struct {
+		name    string
+		key     string
+		environ []string
+		want    string
+	}{
+		{"nats_nkey_seed_file, over the environment", testnats.SeedFile(t, "\n"+keySeed+"\n"), []string{"NATS_NKEY_SEED=hunter2"}, keySeed},
+		{"NATS_NKEY_SEED_FILE, over NATS_NKEY_SEED", "", []string{"NATS_NKEY_SEED_FILE=" + testnats.SeedFile(t, envSeed), "NATS_NKEY_SEED=hunter2"}, envSeed},
+		{"NATS_NKEY_SEED", "", []string{"NATS_NKEY_SEED=" + envSeed}, envSeed},
+		{"no seed", "", []string{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.NatsNkeySeedFile = tc.key
+			rt := fake.NewRuntime()
+			o := fakeRuntime(rt, &built{})
+			o.environ = tc.environ
+			d := startDaemon(t, cfg, o)
+
+			root := lastLaunch(t, rt, d.spawn(architect()))
+			worker := lastLaunch(t, rt, d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Wait."}))
+			for kind, spec := range map[string]runtime.SpawnSpec{"root": root, "worker": worker} {
+				got, carried := spec.Secrets["NATS_NKEY_SEED"]
+				if carried != (tc.want != "") || got != tc.want {
+					t.Errorf("the %s launch's NATS_NKEY_SEED secret is %q (carried: %t), want %q", kind, got, carried, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // A default operator claim has no arbitrary prompt file. It must receive the shared role prompt
-// followed by the Go daemon part, so tmux can concatenate both before addressing and deployment
-// instructions into its single OMP flag.
+// followed by the Go daemon parts, the role's own and the one every architect shares, so tmux can
+// concatenate them before addressing and deployment instructions into its single OMP flag.
 func TestRunLaunchesTheComposedGoRolePromptWhenSpawnHasNoPromptFile(t *testing.T) {
 	cfg := testConfig(t)
 	rt := fake.NewRuntime()
@@ -172,6 +255,7 @@ func TestRunLaunchesTheComposedGoRolePromptWhenSpawnHasNoPromptFile(t *testing.T
 	want := []string{
 		filepath.Join(rolesDir, "architect-root.md"),
 		filepath.Join(cfg.StateDir, "prompts", "go", "architect-root.md"),
+		filepath.Join(cfg.StateDir, "prompts", "go", "architect-common.md"),
 	}
 	if !reflect.DeepEqual(spec.Prompt.RolePromptPaths, want) {
 		t.Fatalf("RolePromptPaths = %q, want %q", spec.Prompt.RolePromptPaths, want)
@@ -215,7 +299,7 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	}
 
 	sh := dialShim(t, record.address, launch.BootToken)
-	eventually(t, "the hello to reach the machine", func() bool {
+	testwait.Eventually(t, "the hello to reach the machine", func() bool {
 		return d.claim(token).State == string(supervise.StateShimConnected)
 	})
 
@@ -243,9 +327,9 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	}
 	sh.send(shimwire.Response{ID: prompt.ID, Command: shimwire.TypePrompt, Success: true})
 	sh.send(shimwire.AgentStart{})
-	eventually(t, "the turn to start", func() bool { return d.claim(token).State == string(supervise.StateWorking) })
+	testwait.Eventually(t, "the turn to start", func() bool { return d.claim(token).State == string(supervise.StateWorking) })
 	sh.send(shimwire.AgentEnd{})
-	eventually(t, "the turn to end", func() bool {
+	testwait.Eventually(t, "the turn to end", func() bool {
 		c := d.claim(token)
 		return c.State == string(supervise.StateIdle) && c.Pending == nil
 	})
@@ -264,13 +348,13 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	}
 	second := sh.prompt()
 	sh.send(shimwire.Response{ID: second.ID, Command: shimwire.TypePrompt, Success: true})
-	eventually(t, "the acknowledgement to be recorded", func() bool {
+	testwait.Eventually(t, "the acknowledgement to be recorded", func() bool {
 		c := d.claim(token)
 		return c.Pending != nil && c.Pending.DeliveredAt != nil
 	})
 	acknowledged := d.claim(token).Pending.ID
 	sh.send(shimwire.Response{ID: second.ID, Command: shimwire.TypePrompt, Success: false, Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."})
-	eventually(t, "the refused task to return to waiting", func() bool {
+	testwait.Eventually(t, "the refused task to return to waiting", func() bool {
 		c := d.claim(token)
 		return c.Pending != nil && c.Pending.ID != acknowledged && c.Budgets.PromptFailures == 0
 	})
@@ -278,7 +362,7 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	// The sweep finding the process gone relaunches the recorded session.
 	loc := d.claim(token).Locator
 	rt.Emit(runtime.Observation{Locator: *loc, Kind: runtime.Gone, Detail: "pane gone"})
-	eventually(t, "the relaunch", func() bool {
+	testwait.Eventually(t, "the relaunch", func() bool {
 		c := d.claim(token)
 		return c.Generation == 2 && c.State == string(supervise.StateLaunching) && len(rt.CallsOf("Resume")) == 1
 	})
@@ -365,7 +449,7 @@ func TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish(t *testing.T) {
 
 	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
 
-	eventually(t, "the unfinished launch to be launched again", func() bool {
+	testwait.Eventually(t, "the unfinished launch to be launched again", func() bool {
 		c := d.claim(token)
 		return c.State == string(supervise.StateLaunching) && c.Locator != nil
 	})
@@ -397,7 +481,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	o.orphanSweep = 20 * time.Millisecond
 	d := startDaemon(t, cfg, o)
 
-	eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
+	testwait.Eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
 	if spawns := rt.CallsOf("Spawn"); len(spawns) != 0 {
 		t.Fatalf("spawns after a failed boot reconciliation = %+v, want none while the old pane is unknown", spawns)
 	}
@@ -421,7 +505,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 		t.Fatalf("old shim hello, register, and ready produced %+v, want no live state without a locator", c)
 	}
 	_ = oldShim.conn.Close()
-	eventually(t, "the old shim's disconnect to leave the claim locator-less", func() bool {
+	testwait.Eventually(t, "the old shim's disconnect to leave the claim locator-less", func() bool {
 		c := d.claim(token)
 		return c.State == "launch_uncertain" && c.Locator == nil
 	})
@@ -441,7 +525,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	secondOverrides := fakeRuntime(second, &built{})
 	secondOverrides.orphanSweep = 20 * time.Millisecond
 	restarted := startDaemon(t, cfg, secondOverrides)
-	eventually(t, "the second boot's failed reconciliation", func() bool { return len(second.CallsOf("ReconcileOrphans")) >= 1 })
+	testwait.Eventually(t, "the second boot's failed reconciliation", func() bool { return len(second.CallsOf("ReconcileOrphans")) >= 1 })
 	if c := restarted.claim(token); c.State != "launch_uncertain" || c.Locator != nil {
 		t.Fatalf("claim after a second failed boot reconciliation = %+v, want persisted launch_uncertain with no locator", c)
 	}
@@ -460,7 +544,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	thirdOverrides := fakeRuntime(third, &built{})
 	thirdOverrides.orphanSweep = 20 * time.Millisecond
 	final := startDaemon(t, cfg, thirdOverrides)
-	eventually(t, "the third boot to launch after reconciliation succeeds", func() bool { return len(third.CallsOf("Spawn")) == 1 })
+	testwait.Eventually(t, "the third boot to launch after reconciliation succeeds", func() bool { return len(third.CallsOf("Spawn")) == 1 })
 	if spawned := third.CallsOf("Spawn")[0]; spawned.Spec.Generation != 2 {
 		t.Fatalf("the third boot spawned generation %d, want 2", spawned.Spec.Generation)
 	}
@@ -487,7 +571,7 @@ func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) 
 	o := fakeRuntime(rt, &built{})
 	o.orphanSweep = 20 * time.Millisecond
 	d := startDaemon(t, cfg, o)
-	eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
+	testwait.Eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
 
 	worker := architect()
 	worker.Issue, worker.Role = "LEGION-2", claim.RoleImplementer
@@ -502,7 +586,7 @@ func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) 
 	cleared := len(rt.CallsOf("ReconcileOrphans"))
 	rt.FailReconcileOrphans(nil)
 
-	eventually(t, "the unfinished launch to be released by a successful retry", func() bool { return len(rt.CallsOf("Spawn")) == 2 })
+	testwait.Eventually(t, "the unfinished launch to be released by a successful retry", func() bool { return len(rt.CallsOf("Spawn")) == 2 })
 	var retry *fake.Call
 	for _, call := range rt.CallsOf("ReconcileOrphans")[cleared:] {
 		if call.Grace == 0 {
@@ -541,14 +625,14 @@ func TestRunPrunesTheSecretFilesOfClaimsWithNoProcess(t *testing.T) {
 		State: supervise.StateSuspended, Session: "ses_suspended", SessionFile: "/sessions/suspended.jsonl",
 	})
 	secrets := filepath.Join(cfg.StateDir, "secrets")
-	for _, name := range []string{string(live), string(live) + "-envoy_token", string(suspended), string(suspended) + "-envoy_token", "left-by-a-crash"} {
+	for _, name := range []string{string(live), string(live) + "-envoy_token", string(live) + "-nats_nkey_seed", string(suspended), string(suspended) + "-envoy_token", string(suspended) + "-nats_nkey_seed", "left-by-a-crash"} {
 		writeFile(t, filepath.Join(secrets, name))
 	}
 	rt := fake.NewRuntime()
 
 	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
 
-	if got := secretFiles(t, secrets); !slices.Equal(got, []string{string(live), string(live) + "-envoy_token"}) {
+	if got := secretFiles(t, secrets); !slices.Equal(got, []string{string(live), string(live) + "-envoy_token", string(live) + "-nats_nkey_seed"}) {
 		t.Fatalf("after boot the secrets are %v, want only the live claim's", got)
 	}
 	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(live)+"/suspend", nil, true); status != http.StatusOK {
@@ -626,7 +710,7 @@ func TestRunReconcilesOrphansWhileItRuns(t *testing.T) {
 	token := d.spawn(architect())
 	loc := d.claim(token).Locator
 
-	eventually(t, "a reconciliation that knows the claim's process", func() bool {
+	testwait.Eventually(t, "a reconciliation that knows the claim's process", func() bool {
 		for _, call := range rt.CallsOf("ReconcileOrphans") {
 			if call.Grace == orphanGrace && slices.ContainsFunc(call.Known, func(known runtime.Known) bool {
 				return known.Claim == token && known.Locator != nil && reflect.DeepEqual(*known.Locator, *loc)
@@ -691,7 +775,7 @@ func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 	}
 	sweeps := len(rt.CallsOf("ReconcileOrphans"))
 
-	eventually(t, "a sweep that knows the suspended and failed claims and not the retired one", func() bool {
+	testwait.Eventually(t, "a sweep that knows the suspended and failed claims and not the retired one", func() bool {
 		for _, call := range rt.CallsOf("ReconcileOrphans")[sweeps:] {
 			locators := map[claim.Token]*runtime.Locator{}
 			for _, known := range call.Known {
@@ -769,16 +853,20 @@ func TestEveryStreamEventMapsToItsSuperviseEvent(t *testing.T) {
 		{stream.TurnEnd{Claim: token}, supervise.StreamTurnEnd{Claim: token}},
 		{stream.LateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."},
 			supervise.StreamLateRefusal{Claim: token, DeliveryID: "d1", Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."}},
+		{stream.LateRefusal{Claim: token, DeliveryID: "d2", Error: "Agent is already processing.", Replayed: true, ConnSequence: 3},
+			supervise.StreamLateRefusal{Claim: token, DeliveryID: "d2", Error: "Agent is already processing.", Replayed: true, ConnSequence: 3}},
 		{stream.Closed{Claim: token}, supervise.StreamClosed{Claim: token}},
 	}
+	mapped := map[string]bool{}
 	for _, testCase := range cases {
+		mapped[fmt.Sprintf("%T", testCase.in)] = true
 		got, err := superviseEvent(testCase.in)
 		if err != nil || !reflect.DeepEqual(got, testCase.want) {
 			t.Errorf("superviseEvent(%#v) = %#v, %v; want %#v", testCase.in, got, err, testCase.want)
 		}
 	}
-	if sealed := streamEventTypes(t); len(sealed) != len(cases) {
-		t.Fatalf("internal/stream seals %d event types %v; this test maps %d — map the new one", len(sealed), sealed, len(cases))
+	if sealed := streamEventTypes(t); len(sealed) != len(mapped) {
+		t.Fatalf("internal/stream seals %d event types %v; this test maps %d — map the new one", len(sealed), sealed, len(mapped))
 	}
 }
 
@@ -889,7 +977,7 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 		WorkspaceLost: true,
 		Detail:        "the tree volume was lost: pod legion-legion-1-architect Failed: init container workspace-init terminated (Error, exit code 3)"})
 
-	eventually(t, "the root's fresh relaunch and the worker's dropped session", func() bool {
+	testwait.Eventually(t, "the root's fresh relaunch and the worker's dropped session", func() bool {
 		r, w := d.claim(root), d.claim(worker)
 		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Session == "" && w.Session == ""
 	})

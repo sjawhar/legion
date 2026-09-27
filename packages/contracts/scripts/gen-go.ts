@@ -1,7 +1,9 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
+import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "../src/dispatch-api";
+import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
 
@@ -29,7 +31,6 @@ const map = {
   integer: "int64",
   boolean: "bool",
 } satisfies Record<ScalarKind, string>;
-
 
 const keep = `func ValidateWire(raw []byte) error {
 	var fields map[string]json.RawMessage
@@ -88,40 +89,67 @@ func AgentSubject(session string) string {
 	return AgentTopicPrefix + session
 }
 
+// githubRepositoryPrefix begins every GitHub subject with its repository's owner and name, each one
+// segment: a name may hold a dot, which a NATS subject splits on. Mirrored on the TS side as
+// \`githubRepositoryPrefix\`.
+func githubRepositoryPrefix(owner, repo string) string {
+	return "notifications.github." + SanitizeSubjectSegment(owner) + "." + SanitizeSubjectSegment(repo)
+}
+
 func GithubSubject(owner string, repo string, kind string) string {
-	return "notifications.github." + owner + "." + repo + "." + kind
+	return githubRepositoryPrefix(owner, repo) + "." + kind
 }
 
 func SlackSubject(team string, channel string, kind string) string {
 	return "notifications.slack." + team + "." + channel + "." + kind
 }
 
-// SanitizeSubjectSegment replaces dots in a NATS subject segment with underscores so the segment
-// stays a single token. Mirrored on the TS side as \`sanitizeSubjectSegment\`.
+// SanitizeSubjectSegment makes a value one NATS subject segment: a dot, which a subject splits on,
+// and whitespace and the wildcards * and >, which a published subject may not hold, each become an
+// underscore. A slash is kept. Generated from SUBJECT_SEGMENT_REPLACED in packages/contracts, which
+// \`sanitizeSubjectSegment\` reads too, so what the listener publishes and what a consumer expects
+// cannot drift apart.
 func SanitizeSubjectSegment(value string) string {
-	return strings.ReplaceAll(value, ".", "_")
+	return subjectSegmentSanitizer.Replace(value)
 }
+
+var subjectSegmentSanitizer = strings.NewReplacer(${SUBJECT_SEGMENT_REPLACED.flatMap((char) => [JSON.stringify(char), '"_"']).join(", ")})
 
 func SlackThreadSubject(team, channel, threadTs, kind string) string {
 	return "notifications.slack." + team + "." + channel + ".thread." + SanitizeSubjectSegment(threadTs) + "." + kind
 }
 
 func GithubPushSubject(owner, repo, refType, refName string) string {
-	return "notifications.github." + owner + "." + repo + ".push." + refType + "." + SanitizeSubjectSegment(refName)
+	return githubRepositoryPrefix(owner, repo) + ".push." + refType + "." + SanitizeSubjectSegment(refName)
 }
 
 func GithubWorkflowSubject(owner, repo, workflowFilename, action string) string {
-	return "notifications.github." + owner + "." + repo + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
+	return githubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
 }
 
 func GithubResourceSubject(owner string, repo string, resourceType string, resourceNumber string) string {
-	return "notifications.github." + owner + "." + repo + "." + resourceType + "." + resourceNumber
+	return githubRepositoryPrefix(owner, repo) + "." + resourceType + "." + resourceNumber
 }
 
 const GhostWisprTopicPrefix = "notifications.ghostwispr."
 
 func GhostWisprSubject(sessionId string, kind string) string {
 	return GhostWisprTopicPrefix + sessionId + "." + kind
+}
+
+// AgentStreamSubjectPrefix roots the live agent conversation stream. Generated from
+// AGENT_STREAM_SUBJECT_PREFIX in packages/contracts so the session that publishes its own turns
+// and the Dispatch relay that forwards them to a browser cannot drift apart. It sits outside
+// "notifications." deliberately: that family is what the notification stream captures, so every
+// frame travels over core NATS and the bus retains none of it.
+const AgentStreamSubjectPrefix = ${JSON.stringify(AGENT_STREAM_SUBJECT_PREFIX)}
+
+func AgentStreamFramesSubject(sessionID string) string {
+	return AgentStreamSubjectPrefix + sessionID + ".frames"
+}
+
+func AgentStreamControlSubject(sessionID string) string {
+	return AgentStreamSubjectPrefix + sessionID + ".control"
 }
 
 func WhatsappSubject(phone, jid, kind string) string {
@@ -186,7 +214,6 @@ function enums(key: string, prop: Prop, optional: boolean) {
   if (!optional) return body;
   return `\tif e.${n} != "" {\n${body}\n\t}`;
 }
-
 
 function objectChecks(key: string, prop: Prop) {
   if (prop.type !== "object" || !prop.properties) {
@@ -275,7 +302,6 @@ func (e Envelope) Validate() error {
 ${validate}
 }`;
 }
-
 
 function renderContracts(envelope: Schema) {
   return `package contracts
