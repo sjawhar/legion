@@ -217,6 +217,24 @@ func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer
 	return started, nil
 }
 
+// StartNkeyAuthorized runs a NATS container of its own, with JetStream, that accepts only clients
+// authenticating as the nkey user whose public key is user, removed when t ends, and returns its
+// client URL.
+func StartNkeyAuthorized(t testing.TB, user string) string {
+	t.Helper()
+	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ { nkey: %q } ]\n}\n", user)
+	container, err := start(tcnats.WithConfigFile(strings.NewReader(config)))
+	if err != nil {
+		t.Fatalf("start nkey-authorized NATS: %v", err)
+	}
+	testcontainers.CleanupContainer(t, container)
+	url, err := container.ConnectionString(context.Background())
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	return url
+}
+
 // connect returns a connection to the server once its JetStream API answers.
 func connect(t testing.TB) (*nats.Conn, jetstream.JetStream) {
 	t.Helper()
