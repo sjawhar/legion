@@ -46,6 +46,17 @@ var (
 	startErr   error
 )
 
+// init runs in every test binary that imports this package, whichever helper its tests use. Every
+// server these helpers start has no users unless a test configures some, and nats.go refuses an
+// nkey when the server sends no nonce ("nats: nkeys not supported by the server"), so an
+// operator's NATS_NKEY_SEED, NATS_DAEMON_NKEY_SEED, or either's _FILE pointer never reaches the
+// tests' clients. A test that means to pass a seed sets it itself.
+func init() {
+	for _, name := range []string{"NATS_NKEY_SEED", "NATS_NKEY_SEED_FILE", "NATS_DAEMON_NKEY_SEED", "NATS_DAEMON_NKEY_SEED_FILE"} {
+		os.Unsetenv(name)
+	}
+}
+
 // Main runs the package's tests, then removes the NATS container if a test started one, and
 // returns the exit code. A package whose tests use URL or JetStream calls it from TestMain:
 // os.Exit(testnats.Main(m)).
@@ -215,6 +226,74 @@ func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer
 		return started, errors.Join(err, testcontainers.TerminateContainer(started))
 	}
 	return started, nil
+}
+
+// StartNkeyAuthorized runs a NATS container of its own, with JetStream, that accepts only clients
+// authenticating as the nkey user whose public key is user, removed when t ends, and returns its
+// client URL once the server answers there (answering).
+func StartNkeyAuthorized(t testing.TB, user string) string {
+	t.Helper()
+	return StartNkeyAuthorizedUsers(t, NkeyUser{Public: user})
+}
+
+// NkeyUser is one nkey user a server admits: its public key, and the server's permissions block for
+// it in the configuration's syntax (`{ subscribe: { deny: ["x.>"] } }`), "" granting everything.
+type NkeyUser struct {
+	Public      string
+	Permissions string
+}
+
+// StartNkeyAuthorizedUsers is StartNkeyAuthorized for a server admitting users alone, each with its
+// permissions.
+func StartNkeyAuthorizedUsers(t testing.TB, users ...NkeyUser) string {
+	t.Helper()
+	entries := make([]string, 0, len(users))
+	for _, user := range users {
+		entry := fmt.Sprintf("{ nkey: %q", user.Public)
+		if user.Permissions != "" {
+			entry += ", permissions: " + user.Permissions
+		}
+		entries = append(entries, entry+" }")
+	}
+	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", strings.Join(entries, ", "))
+	container, err := start(tcnats.WithConfigFile(strings.NewReader(config)))
+	if err != nil {
+		t.Fatalf("start nkey-authorized NATS: %v", err)
+	}
+	testcontainers.CleanupContainer(t, container)
+	url, err := container.ConnectionString(context.Background())
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	answering(t, url)
+	return url
+}
+
+// answering returns once the server at url refuses a connection with no credential with its own
+// authorization violation: the proof it speaks the client protocol and enforces its nkey users. The
+// log line the container's start waits for can come before a connection there is served, and until
+// then a dial ends in EOF or a refusal that says nothing about the server's users. A server that
+// admits the connection enforces no users, and every refusal a test expects of it would pass for
+// the wrong reason, so that fails the test.
+func answering(t testing.TB, url string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), readinessTimeout)
+	defer cancel()
+	for {
+		conn, err := nats.Connect(url, nats.Timeout(time.Second), nats.NoReconnect())
+		if err == nil {
+			conn.Close()
+			t.Fatalf("NATS at %s admitted a client with no credential: it enforces no nkey users", url)
+		}
+		if errors.Is(err, nats.ErrAuthorization) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("wait for NATS at %s to answer within %s: %v", url, readinessTimeout, err)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // connect returns a connection to the server once its JetStream API answers.

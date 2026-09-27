@@ -10,9 +10,9 @@ events plus GitHub PR/CI artifacts, records root-process session locators, and p
 verdict changes each role needs. Root processes run in tmux; phase workers are headless
 `omp --mode rpc` processes the daemon spawns directly, one tmux pane per worker, bridged through
 `legion worker-shim`. The TypeScript daemon refuses `runtime: kubernetes`; the Go coordinator
-(`packages/daemon-go`) runs each of those processes as one pod of the published worker image in a
-cluster (`docs/kubernetes.md`), and `scripts/e2e/stage4a-sandbox-runtime.sh` is that runtime's live
-proof.
+(`packages/daemon-go`) runs each of those processes as one Agent Sandbox of the published worker
+image in a cluster (`docs/kubernetes.md`), and `scripts/e2e/stage4b-sandbox-tree.sh` on the
+production cluster is that runtime's live proof.
 
 - **TypeScript daemon** — webhook intake, reducers, durable `LegionState`, root-process lifecycle,
   credential grants, resync, and recovery.
@@ -67,6 +67,7 @@ bash scripts/e2e/stage1-skeleton.sh    # Stage 1's live proof: the Go daemon boo
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage2-tmux-supervision.sh   # Stage 2's live proof, devbox only: real Oh My Pi panes with the branch plugin under the Go daemon's private tmux server, against a real Envoy listener and NATS — register, role claim, delivery once, resume, suspend, the registration deadline, re-adoption across a restart, the orphan sweep (scripts/e2e/README.md)
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 bash scripts/e2e/stage3-devbox-workflow.sh      # Stage 3's devbox-only live proof: real OMP panes drive a scratch Dispatch issue through the Go workflow, the design gate, review rounds, ordinary human merge, production check, restart, held worker, pending status write, and pane credentials against sjawhar/legion-smoke (scripts/e2e/README.md)
 LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage4a-sandbox-runtime.sh   # Stage 4a's live proof, devbox only: the Go Agent Sandbox runtime on the production cluster (namespace legion) through the Legion daemon's restricted identity, on the operator fixture's pod and a providers Secret of its own — install check, the image probe with the daemon's own command (and its refusal once the operator's overlay drops a role an agent names), gVisor, the operator's ServiceAccount and token, the pod baseline, the provider key reaching the agent alone, affinity, suspend/resume, same-agent refusal, kill, relaunch before registration, concurrent provisioning, re-adoption, the orphan sweep, release, and a namespace left as it was (scripts/e2e/README.md)
+LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_DISPATCH_URL=<dispatch> LEGION_E2E_ENVOY_URL=<listener> LEGION_E2E_NATS_URL=nats://<nats>:4222 bash scripts/e2e/stage4b-sandbox-tree.sh   # Stage 4b's live proof, devbox only: the Go daemon drives three real issue trees on the Agent Sandbox runtime in the production cluster (namespace legion), against production Dispatch (project LEGSMOKE), Envoy and NATS, with real agents — admission under the cap, specs, tree separation across nodes, the repository-configuration fixture, the whole workflow to done with the review pair, token rotation, suspend, kill and fence, a daemon restart mid-tree, the operator's controller, a worker that dies with its task outstanding, node release, linger close, re-admission, every pod's shape, the pod watch, and an audit that the run wrote nothing outside LEGSMOKE; one run at a time, STAGE4B_UNTIL=<checkpoint> for a development run (scripts/e2e/README.md)
 ```
 
 ## Configuration
@@ -102,10 +103,11 @@ projects:
 | Envoy OMP adapter      | `packages/pi-envoy/`                          | See @packages/pi-envoy/AGENTS.md          |
 | Worker image (Kubernetes) | `packages/daemon/docker/worker.Dockerfile`, `.github/workflows/worker-image.yaml` | See `docs/kubernetes.md` |
 | Operator controller configuration (Kubernetes) | `deploy/kubernetes/daemon/controller.yaml.example` | The operator-side file `legion controller start` reads. See `docs/kubernetes.md` "Operator-launched controller" |
-| Prove the Kubernetes runtime live | `scripts/e2e/stage4a-sandbox-runtime.sh` | The Go Agent Sandbox runtime on the production cluster; `scripts/e2e/README.md` |
+| Prove the Kubernetes runtime live | `scripts/e2e/stage4b-sandbox-tree.sh` (a full tree), `scripts/e2e/stage4a-sandbox-runtime.sh` (the runtime alone) | The Go daemon on Agent Sandbox in the production cluster; `scripts/e2e/README.md` |
 | Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
 | Dispatch's document editor | `packages/proof-editor/` | The editor entry, typed blocks and block ids, source-only. Copied from the `sjawhar/proof-sdk` fork at the commit a git dependency pins; the upstream editor modules stay there. See @packages/proof-editor/AGENTS.md |
 | Go coordinator (in progress) | `packages/daemon-go/` | LEGION-208's Go rewrite: a separate module bound by the root `go.work`, sharing no file with `packages/daemon`, which stays the shipped daemon until Stage 7. `cmd/legion` is its CLI, `internal/api/state.go` owns its wire shape, `packages/contracts/src/legion-go-api.ts` mirrors it, `scripts/e2e/` holds each stage's live proof |
+| Secrets broker | `packages/envoy/cmd/broker`, `packages/envoy/internal/broker` | See @packages/envoy/AGENTS.md |
 
 ## Conventions
 
@@ -138,6 +140,19 @@ Statuses above are native Dispatch issue statuses, not GitHub labels — the dae
 runs, and a human may set any lifecycle status from the Dispatch dashboard. `legion status <issue>
 <status>` remains the controller path for `triage`/`icebox`/`backlog`/`todo`. A human can also
 close an issue into `done` and reopen it into `backlog` from the Dispatch dashboard.
+
+**Handover:** the Go coordinator (`packages/daemon-go`) works only the issues handed to it with the
+Dispatch label `legion` (in any case), so it can share a Dispatch project with humans and other
+agents; a dedicated project hands its issues over the same way. A human sets the label from the
+issue header in the Dispatch dashboard, an agent with `dispatch_issue` or `dispatch_issue_update`.
+A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes
+the controller. A child needs none: it runs under its tree's architect once its root is admitted. A
+child whose tree is not live is an orphan, admitted as a root of its own, so it needs the label as
+any root does. Taking the label off a waiting root drops it from the waiting line, as a status that
+leaves `todo` does; taking it off a root already admitted does not stop its tree. The mark is a
+label rather than the issue's `route` because Dispatch publishes every event of a routed issue to
+the route's topic, where a label only marks the issue; it carries no workflow state, and the
+TypeScript daemon does not read it.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: the architect

@@ -209,7 +209,8 @@ test("an uploaded document is linked from the Conversation and counted on its ta
   await createProject({ key: "OPS", name: "Ops" });
   const issue = await createIssue({ project: "OPS", title: "Customer update" });
   await page.goto(`/issues/${issue.key}/conversation`);
-  await expect(page.getByRole("tab", { exact: true, name: "Artifacts" })).toBeVisible();
+  // Every issue has its own document, so the tab opens counting one.
+  await expect(page.getByRole("tab", { exact: true, name: "Artifacts (1)" })).toBeVisible();
 
   const name = "cu-update-2026-09-15.md";
   const upload = await createIssueArtifact(issue.key, {
@@ -218,7 +219,7 @@ test("an uploaded document is linked from the Conversation and counted on its ta
   });
 
   // The live event stream refreshes the issue and its Conversation: no reload.
-  await expect(page.getByRole("tab", { exact: true, name: "Artifacts (1)" })).toBeVisible();
+  await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
   // The counted label stays on one line, and all four tabs fit the tablist without scrolling at
   // the iPhone width (the tablist clips what it scrolls, so its own edge is the bound).
   const tablist = page.getByRole("tablist", { name: "Issue detail" });
@@ -243,7 +244,7 @@ test("an uploaded document is linked from the Conversation and counted on its ta
   await page.setViewportSize({ height: viewport?.height ?? 800, width: 360 });
   await page.getByRole("tab", { name: "Conversation" }).focus();
   await page.keyboard.press("End");
-  const artifactsTab = page.getByRole("tab", { exact: true, name: "Artifacts (1)" });
+  const artifactsTab = page.getByRole("tab", { exact: true, name: "Artifacts (2)" });
   await expect(artifactsTab).toBeFocused();
   await insideTablist(artifactsTab);
   await page.keyboard.press("Home");
@@ -259,7 +260,7 @@ test("an uploaded document is linked from the Conversation and counted on its ta
   await createIssueArtifact(issue.key, { content: "# Draft\n\nRevised.\n", name });
   const saved = page.locator('[data-kind="activity"]', { hasText: `saved ${name} v2` });
   await expect(saved).toBeVisible();
-  await expect(page.getByRole("tab", { exact: true, name: "Artifacts (1)" })).toBeVisible();
+  await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
   await expect(saved.getByRole("link", { name })).toHaveAttribute(
     "href",
     `/issues/${issue.key}/artifacts/${upload.artifact.slug}?v=2`
@@ -268,4 +269,31 @@ test("an uploaded document is linked from the Conversation and counted on its ta
   await added.getByRole("link", { name }).click();
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
   await expect(page.getByTestId("artifact-header")).toContainText(name);
+});
+
+test("the Artifacts badge counts the rows the tab lists, and a row's details are not truncated", async ({
+  page,
+}) => {
+  await createProject({ key: "OPS", name: "Ops" });
+  const issue = await createIssue({
+    project: "OPS",
+    spec: "# Spec\n\nThe issue's own document.\n",
+    title: "Counted tab",
+  });
+  await createIssueArtifact(issue.key, { content: "# Audit\n\nOne more.\n", name: "audit.md" });
+
+  await page.goto(`/issues/${issue.key}/artifacts`);
+  const rows = page.locator("[data-testid^='artifact-']");
+  await expect(rows).toHaveCount(2);
+  await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
+
+  // Every row shows its whole detail line: it wraps where it must rather than truncating on a
+  // row with room beside it.
+  for (const row of await rows.all()) {
+    const details = row.locator("p").first();
+    await expect(details).toContainText("Updated");
+    expect(await details.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+      true
+    );
+  }
 });

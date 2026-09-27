@@ -1,11 +1,13 @@
 package cistore
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -696,6 +698,65 @@ func TestALostCompareAndSwapRetriesTheWholeBatch(t *testing.T) {
 		if _, ok := checks[name]; !ok {
 			t.Fatalf("record lacks %s after the batch's retried write: %v", name, checks)
 		}
+	}
+}
+
+// A batch whose write loses its compare-and-swap until its budget runs out fails every caller in
+// it, and the store logs one JSON line for that write naming the head, the checks the record would
+// have held, the attempts the write made and the observations it carried, each of which the
+// webhook answers 503. Here check-0's write is held until check-1..3 queue behind it, and every
+// write after it loses.
+func TestAWriteThatRunsOutOfItsBudgetLogsTheHeadAndItsAttempts(t *testing.T) {
+	h := failureHead
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	s, kv := wrapStore(t, conn, 0)
+	var logs bytes.Buffer
+	s.logger = logging.NewWithWriter("test", &logs)
+	entered, release := make(chan struct{}), make(chan struct{})
+	kv.onWrite(func(call int) error {
+		if call == 1 {
+			close(entered)
+			<-release
+			return nil
+		}
+		return errors.New("nats: wrong last sequence: 1")
+	})
+	batch := newCalls(t, s, h.key(), 4, checkCall(s, h, 500))
+	batch.behind(entered, 4)
+	close(release)
+	errs := batch.wait("a write that runs out of its budget")
+	if errs[0] != nil {
+		t.Fatalf("check-0's write failed: %v", errs[0])
+	}
+	for i, err := range errs[1:] {
+		if err == nil || !strings.Contains(err.Error(), "exceeded CAS budget") {
+			t.Fatalf("check-%d: %v, want the batch's CAS budget error", i+1, err)
+		}
+	}
+	var lines []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var entry map[string]any
+		if json.Unmarshal([]byte(line), &entry) == nil && entry["msg"] == "ci record exceeded its retry budget" {
+			lines = append(lines, entry)
+		}
+	}
+	if len(lines) != 1 {
+		t.Fatalf("%d budget lines, want one for the batch's write:\n%s", len(lines), logs.String())
+	}
+	attempts := kv.writeCalls() - 1
+	want := map[string]any{
+		"level": "ERROR", "owner": h.owner, "repo": h.repo, "number": h.number, "sha": h.sha,
+		"checks": 4.0, "attempts": float64(attempts), "observations": 3.0,
+		"error": "cistore: record exceeded CAS budget",
+	}
+	for field, value := range want {
+		if lines[0][field] != value {
+			t.Fatalf("the budget line's %s is %v, want %v:\n%s", field, lines[0][field], value, logs.String())
+		}
+	}
+	if attempts < 2 {
+		t.Fatalf("the batch's write made %d attempts, want it to have retried", attempts)
 	}
 }
 

@@ -390,15 +390,23 @@ func TestSuggestionAcceptRewritesOnlyTheTypedBlockUnderItsOwnID(t *testing.T) {
 	for _, test := range []struct{ name, spec, quote, replaceWith, want string }{
 		{name: "a callout under no id", spec: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\nA note.\n:::\n",
 			quote: "A note.", replaceWith: ":::callout{kind=\"note\"}\nReworded.\n:::\n",
-			want: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n:::callout{#<minted> kind=\"note\" title=\"\"}\nReworded.\n:::\n:::\n"},
+			want: "Intro.\n\n::::callout{#c1 kind=\"note\" title=\"\"}\n:::callout{#<minted> kind=\"note\" title=\"\"}\nReworded.\n:::\n::::\n"},
+		{name: "a callout under no id, in a list item inside a callout",
+			spec:  ":::callout{#outer kind=\"note\" title=\"\"}\n- Lead.\n\n  :::callout{#c1 kind=\"note\" title=\"\"}\n  A note.\n  :::\n:::\n",
+			quote: "A note.", replaceWith: ":::callout{kind=\"note\"}\nReworded.\n:::\n",
+			want: ":::::callout{#outer kind=\"note\" title=\"\"}\n- Lead.\n\n  ::::callout{#c1 kind=\"note\" title=\"\"}\n  :::callout{#<minted> kind=\"note\" title=\"\"}\n  Reworded.\n  :::\n  ::::\n:::::\n"},
+		{name: "a callout under no id, in a blockquote inside a callout",
+			spec:  ":::callout{#outer kind=\"note\" title=\"\"}\n> :::callout{#c1 kind=\"note\" title=\"\"}\n> A note.\n> :::\n:::\n",
+			quote: "A note.", replaceWith: ":::callout{kind=\"note\"}\nReworded.\n:::\n",
+			want: ":::callout{#outer kind=\"note\" title=\"\"}\n> ::::callout{#c1 kind=\"note\" title=\"\"}\n> :::callout{#<minted> kind=\"note\" title=\"\"}\n> Reworded.\n> :::\n> ::::\n:::\n"},
 		{name: "the inner of two callouts under its own id",
 			spec:  ":::callout{#outer kind=\"note\" title=\"\"}\nOuter.\n\n:::callout{#inner kind=\"note\" title=\"\"}\nWhich one?\n:::\n",
 			quote: "Which one?", replaceWith: ":::callout{#inner kind=\"warning\" title=\"\"}\nReworded.\n:::\n",
-			want: ":::callout{#outer kind=\"note\" title=\"\"}\nOuter.\n\n:::callout{#inner kind=\"warning\" title=\"\"}\nReworded.\n:::\n:::\n"},
+			want: "::::callout{#outer kind=\"note\" title=\"\"}\nOuter.\n\n:::callout{#inner kind=\"warning\" title=\"\"}\nReworded.\n:::\n::::\n"},
 		{name: "the inner of two callouts under its own id, and a paragraph after it",
 			spec:  ":::callout{#outer kind=\"note\" title=\"\"}\nOuter.\n\n:::callout{#inner kind=\"note\" title=\"\"}\nWhich one?\n:::\n",
 			quote: "Which one?", replaceWith: ":::callout{#inner kind=\"warning\" title=\"\"}\nReworded.\n:::\n\nTail.\n",
-			want: ":::callout{#outer kind=\"note\" title=\"\"}\nOuter.\n\n:::callout{#inner kind=\"warning\" title=\"\"}\nReworded.\n:::\n\nTail.\n:::\n"},
+			want: "::::callout{#outer kind=\"note\" title=\"\"}\nOuter.\n\n:::callout{#inner kind=\"warning\" title=\"\"}\nReworded.\n:::\n\nTail.\n::::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var documentService *docs.Service
@@ -471,7 +479,7 @@ func TestSuggestionAcceptRewritesATypedBlockInPlaceBesideOtherBlocks(t *testing.
 		{name: "an ask rewritten inside a list item", spec: "Intro.\n\n" + ask,
 			replaceWith: "- item\n\n  " + strings.ReplaceAll(strings.TrimSuffix(newAsk, "\n"), "\n", "\n  ") + "\n", want: "Intro.\n\n- item\n\n  :::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n  Reworded?\n  :::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 		{name: "an ask rewritten inside a callout under another id", spec: "Intro.\n\n" + ask,
-			replaceWith: ":::callout{#c9 kind=\"note\" title=\"\"}\n" + newAsk, want: "Intro.\n\n:::callout{#c9 kind=\"note\" title=\"\"}\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nReworded?\n:::\n:::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
+			replaceWith: ":::callout{#c9 kind=\"note\" title=\"\"}\n" + newAsk, want: "Intro.\n\n::::callout{#c9 kind=\"note\" title=\"\"}\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nReworded?\n:::\n::::\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			handler, _ := blockAskHandler(t)

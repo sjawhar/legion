@@ -486,7 +486,7 @@ func TestListIssuesQueryUsesAsksOpenIndex(t *testing.T) {
 	}
 
 	var planJSON []byte
-	if err := tx.QueryRow(ctx, "explain (format json) "+listIssuesQuery, "", "", "", nil, []string{}, false).Scan(&planJSON); err != nil {
+	if err := tx.QueryRow(ctx, "explain (format json) "+listIssuesQuery, "", "", "", nil, []string{}, false, []int16{}, false).Scan(&planJSON); err != nil {
 		t.Fatalf("explain list query: %v", err)
 	}
 

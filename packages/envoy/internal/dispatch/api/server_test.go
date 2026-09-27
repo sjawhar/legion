@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/persistence"
 
+	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -57,6 +58,9 @@ type testServerOptions struct {
 	// envoyTimeout shortens that client's window, so a test can exercise a receipt timeout
 	// without holding a stand-in listener for the production five seconds.
 	envoyTimeout time.Duration
+	// agentStream is the live agent conversation relay; nil is the deployment with no NATS,
+	// where the viewer route answers 503.
+	agentStream agentstream.Source
 }
 
 func newTestHandler(t *testing.T) http.Handler {
@@ -118,6 +122,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		EnvoyURL:         options.envoyURL,
 		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,
+		AgentStream:      options.agentStream,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1922,6 +1927,14 @@ func TestDisconnectAllStreamsHookIsGatedByTestHooksEnabled(t *testing.T) {
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/events/_test/disconnect", nil, "alice")
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("disconnect hook without TestHooksEnabled: status=%d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
+func TestQuiesceDocumentsHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/_test/quiesce", nil, "alice")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("quiesce hook without TestHooksEnabled: status=%d, want %d", response.Code, http.StatusNotFound)
 	}
 }
 

@@ -22,6 +22,7 @@ import {
 } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
+import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -745,6 +746,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
     connection = await connect({
       servers: [...defaults.natsUrls],
       name: `claude-envoy-channel-${identity.id}`,
+      ...natsAuthOptions(process.env),
       reconnect: true,
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,

@@ -20,9 +20,14 @@
 # (agent tier: no YubiKey touch), which the daemon itself resolves at boot and hands every pane's
 # shim as a daemon-held file (`provider_keys`); the run never reads it.
 set -euo pipefail
+# This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
+# no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
+# pane seed (NATS_NKEY_SEED, NATS_NKEY_SEED_FILE) or daemon seed (NATS_DAEMON_NKEY_SEED,
+# NATS_DAEMON_NKEY_SEED_FILE).
+unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE NATS_DAEMON_NKEY_SEED NATS_DAEMON_NKEY_SEED_FILE
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d /tmp/legion-e2e2.XXXXXXXX)
+work=$(mktemp -d "/tmp/legion-e2e2.$$.XXXXXXXX")
 ok=
 daemon_pid=
 deadline_pid=
@@ -240,16 +245,14 @@ deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no f
 envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
-# The binary under proof, checkable after the run: the source it was built from and its hash.
-# shellcheck source-path=SCRIPTDIR source=lib/built-revision.sh
-. "$root/scripts/e2e/lib/built-revision.sh"
-source_revision=$(built_revision "$root")
-note "built legion from $source_revision; sha256 $(sha256sum "$work/legion" | cut -d' ' -f1)"
-# What a changed working copy holds, so a run on one (a negative control) says what it ran.
-if [ "${source_revision#*working copy has changes}" != "$source_revision" ]; then
-  note "the working copy's changes (jj diff --stat; sha256 of jj diff --git $(jj -R "$root" diff --git | sha256sum | cut -d' ' -f1)):"
-  jj -R "$root" diff --stat | sed 's/^/     /'
-fi
+# The binary under proof, checkable after the run: the source it was built from, what a changed
+# working copy held (a negative control's), and its hash (lib/built-from.sh).
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion") || fail "lib/built-from.sh could not say what the run built"
+while IFS= read -r line; do note "$line"; done <<<"$built"
+
+# shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
+. "$root/scripts/e2e/lib/leftovers.sh"
+refuse_leftovers legion-e2e2
 
 if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   docker ps >/dev/null # a broken docker is a failure of this run, not of the daemon
@@ -686,18 +689,19 @@ pass
 
 begin stop
 # The tree's root claim ends only when its tree closes: the operator's stop of it is refused, names
-# suspend, and changes nothing — not its state, its generation, or its pane. Suspending it stops its
-# process. A worker's claim is the operator's to stop: a second worker of S2-1 is stopped, retired
-# with its pane gone. No workflow issue backs S2-1, so the operator then closes it while its first
-# worker still runs: the close ends the root claim and then every other claim of the tree, so that
-# worker's claim is retired and its pane is gone too.
+# suspend, and changes nothing — not its state, its generation, or its pane. No workflow issue backs
+# S2-1, so the refusal also names the operator's close, which ends its tree. Suspending the root
+# stops its process. A worker's claim is the operator's to stop: a second worker of S2-1 is stopped,
+# retired with its pane gone. The operator then closes S2-1 while its first worker still runs: the
+# close ends the root claim and then every other claim of the tree, so that worker's claim is
+# retired and its pane is gone too.
 root_before=$(claim_json "$c1" | jq -c '{generation, pane: .locator.tmux.pane}')
 if refusal=$(claims stop --claim "$c1" 2>&1 >/dev/null); then
   fail "the operator's stop of the root claim $c1 was accepted"
 fi
 case "$refusal" in
-  *"409 Conflict: stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process"*) ;;
-  *) fail "the root's stop was refused with '$refusal', not the root rule naming suspend" ;;
+  *"409 Conflict: stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process; no workflow issue backs its tree, so legion claims close ends it"*) ;;
+  *) fail "the root's stop was refused with '$refusal', not the root rule naming suspend and the close" ;;
 esac
 claim_is "$c1" '.state == "ready" or .state == "idle"' ||
   fail "the refused stop moved $c1: $(claim_json "$c1" | jq -c '{state, generation}')"

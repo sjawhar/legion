@@ -20,6 +20,7 @@
   "types": "src/lib.ts",
   "scripts": {
     "typecheck": "bunx tsc --noEmit -p tsconfig.check.json",
+    "upstream-declarations": "bun scripts/upstream-declarations.ts",
     "test": "bun test src/tests tests",
     "lint": "bunx biome check ."
   },
@@ -40,7 +41,7 @@
     "mdast-util-directive": "^3.1.0",
     "micromark-extension-directive": "^4.0.0",
     "micromark-util-types": "^2.0.2",
-    "proof-sdk-upstream": "github:sjawhar/proof-sdk#24a5fc94915cda5704897c497af6312c140db40d",
+    "proof-sdk-upstream": "github:sjawhar/proof-sdk#06fc1977f1fee637d92c6393965555e88ab9adcb",
     "remark-frontmatter": "^5.0.0",
     "remark-gfm": "^4.0.1",
     "remark-parse": "^11.0.0",
@@ -53,6 +54,7 @@
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
     "@types/bun": "latest",
+    "happy-dom": "^20.14.0",
     "typescript": "^5.3.0"
   }
 }

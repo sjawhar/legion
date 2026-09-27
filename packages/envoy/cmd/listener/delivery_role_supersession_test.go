@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -46,7 +47,7 @@ func registryRoleKV(t *testing.T, registry *store.Registry) natsgo.KeyValue {
 func setRegistryRoleKV(t *testing.T, registry *store.Registry, kv natsgo.KeyValue) {
 	t.Helper()
 	field := reflect.ValueOf(registry).Elem().FieldByName("roleKV")
-	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(kv))
+	reflect.NewAt(field.Type(), unsafe.Pointer(field.UnsafeAddr())).Elem().Set(reflect.ValueOf(bus.KeyValue{KeyValue: kv}))
 }
 
 // TestCoreRoleDeliveryReresolvesSupersededLapsedHolder is the regression test

@@ -79,7 +79,7 @@ function renderLine(components: IssueComponents, architecture: ArchitectureTree 
   const getArchitectureSource = spyOn(api, "getArchitectureSource");
   const getArchitecture = spyOn(api, "getArchitecture");
   if (architecture === undefined) {
-    getArchitectureSource.mockRejectedValue(new ApiError(404, { code: "SOURCE_NOT_FOUND" }));
+    getArchitectureSource.mockResolvedValue(null);
     getArchitecture.mockRejectedValue(new ApiError(404, { code: "SOURCE_NOT_FOUND" }));
   } else {
     getArchitectureSource.mockResolvedValue(source);

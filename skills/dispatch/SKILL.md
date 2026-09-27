@@ -106,7 +106,10 @@ A spec has two readers: the human who decides reads the **Summary** and **New si
   between two lanes or a halt condition, a question for the platform PO (see
   [Before you ask](#before-you-ask) under Asking).
 - Keep each section to one screen; work that exceeds one screen per section is two specs.
-- Update the spec as decisions land: the spec is the record, comments are the discussion.
+- Update the spec as decisions land: the spec is the record, comments are the discussion. It
+  records decisions and requirements, never progress: no status, timestamps, "Update HH:MMZ"
+  section, PR list, or handoff notes. Progress is not a Dispatch object at all; it lives in your
+  transcript and your pull request (see [Messages](#messages)).
 - Before sending it: no sections conflict, every requirement has exactly one reading, and the
   Summary and every ask block pass the phone test above.
 
@@ -224,10 +227,18 @@ status is." Waiting for the deploy lane is not a status and is never announced.
 ```ts
 // PATCH /api/v1/issues/{key} — status, title, labels, priority, external_links (merged by URL), route, parent
 dispatch_issue_update({ issue: "AGENTC-175", status: "testing" })
+dispatch_issue_update({ issue: "AGENTC-175", status: "done", reason: "Shipped in owner/repo#7; verified on the production dashboard." })
 dispatch_issue_update({ issue: "AGENTC-175", priority: 1 }) // 0–3; see Priority is yours to set
 dispatch_issue_update({ issue: "AGENTC-175", external_links: ["https://github.com/owner/repo/pull/7"] })
 dispatch_issue_update({ issue: "AGENTC-175", parent: "AGENTC-170" }) // same-project key; "" clears the parent
 ```
+
+Closing takes a `reason`, and the tool refuses `status: "done"` without one: it posts the reason on
+the issue as a message, then closes it, because a closed issue refuses messages, comments, and
+artifacts, so a reason left for later has nowhere to go. When the close fails after the post, the
+error names the posted message; after a timeout or a server error it also says the close may have
+landed, so read the issue's status first. A retry points its reason at the posted message rather
+than repeating it.
 
 The two clears differ: `priority` clears with `null`, while `parent` and `route` clear with `""`.
 Guessing the other one is a refusal either way.
@@ -266,20 +277,62 @@ start with the issue key; standalone project-document hit lines start with
 
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
+The check compares title words only (shared stemmed terms), never meaning: "four tests that fail a
+merge" pairs with "four CI gates that cannot fail a merge". So when you force past a candidate, give
+the new issue a title that names what differs where you can, and open its spec's Summary with the
+distinction from the named issue, citing it (`dispatch://KEY`), for whoever reads the next pairing.
 
 ## Reading a project's backlog
 
 To see the shape of a project rather than find a phrase, list its issues:
 ```ts
-dispatch_issues({ project, status?, parent?, label?, updated_since?, limit? })
+dispatch_issues({ project, status?, parent?, label?, priority?, updated_since?, limit? })
 ```
 Each row carries the issue key, title, status, priority, parent, labels, its open-ask count, and
 when it last changed — a roadmap or backlog pass without opening every issue. Filter with `status`
-(a lifecycle status), `parent` (one issue's children), `label`, or `updated_since` (an RFC3339
+(a lifecycle status), `parent` (one issue's children), `label`, `priority` (a list of `0`–`3`, with
+`null` for an issue with no priority: `[0, 1]` is every P0 and P1), or `updated_since` (an RFC3339
 timestamp, for "what moved this week"). `limit` caps the rows at 50 by default and 250 at most.
 
 This is not search: it matches no text. Use `dispatch_search` for a keyword or phrase, and
 `dispatch_issues` when you want every issue in a project and its current state.
+
+### The owner audit
+
+As the owner of a surface, list your area's P0 and P1 issues and staff or close each one nobody
+has started:
+```ts
+dispatch_issues({ project, priority: [0, 1], limit: 250 })
+```
+Every unclaimed row in `triage`, `icebox`, `backlog` or `todo` is a decision: someone takes it and
+builds it, or it closes. A row in `in_progress`, `testing`, `needs_review` or `retro`, or one that
+carries a claim, is work under way ([Issue status is yours to move](#issue-status-is-yours-to-move))
+and is not re-staffed. A todo with a finished spec reads as queued work that nobody is doing
+(LEGION-173 sat in todo for two weeks with a complete spec; AGENTC-1010's v4 plan sat in backlog
+with nobody building it).
+
+The audit finds three shapes:
+
+- **Unstaffed work.** A plan or measurement exists, and no one is building it.
+- **Unrecorded delivery.** An issue not yet in `testing` or `done`, claimed or not, has a merged PR
+  naming it. Check the change live, then move the issue (AGENTC-1033 sat at `triage` after its fix,
+  agent-c #20367, merged).
+- **Unrecorded practice.** Someone does the issue's work by hand, more than once, while the issue
+  sits in backlog (OPS-132, done by hand on every migration merge). It leaves no plan and no PR to
+  find; the tell is your own messages. Doing something by hand more than once means an issue is
+  wearing the wrong status.
+
+Run the audit as a step of a coordinator's loop, at each checkpoint, not as a habit: these shapes
+are found by running the check, not by noticing them.
+
+### Symptom versus cause
+
+When a symptom and its cause sit on different issues, the work accrues to the cause's issue, and
+the symptom's issue carries a pointer to it. Before posting a measurement or finding, search
+Dispatch for the failing identity's or component's name, and post on the issue whose title names
+the fix, not the one naming the symptom. A symptom issue gathering messages with no human response
+is the tell. (The production freeze was iterated on AGENTC-546, the failing gate, while its cause
+and answer sat on AGENTC-1010.)
 
 ## Asking
 
@@ -540,9 +593,8 @@ the document's approval state; `stale` means it was approved and then edited - r
 ## The Spec
 
 The spec holds requirements, design, acceptance, decisions, and rejected alternatives, structured per [Writing a spec](#writing-a-spec).
-It changes only when a decision or requirement changes, and every version that records one is named with `summary`. Never write
-progress, status, timestamps, an "Update HH:MMZ" section, a PR list, or handoff notes into the spec. Progress is not a
-Dispatch object at all: it lives in your transcript and your pull request (see [Messages](#messages)).
+It changes only when a decision or requirement changes, and every version that records one is named with `summary`. What it
+never carries is in [Rules](#rules) under Writing a spec.
 
 Read the current document before changing it:
 
@@ -571,11 +623,17 @@ nothing and the document is intact. Nothing retries it for you: the Dispatch cli
 Wait a few seconds and make the same call again. A second refusal in a row is worth telling your human about,
 with the document's reference.
 
+`dispatch_doc_read` can answer it too, though it writes nothing: a read never opens a live room, and waits out
+a room that is reloading, so it is refused only when the document's durable copy cannot be read or decoded.
+Retry it the same way.
+
 ## Typed blocks
 
 The server declares typed document blocks at `GET /api/v1/schema/blocks`. Write one only with the
 container-directive form `:::name{#block-id key="value"}` on its own line, ordinary block children,
-and a closing `:::` at the same nesting. An unclosed typed block at document level is rejected. For
+and a closing line of as many colons at the same nesting. A typed block directly inside another needs the outer
+one's fence a colon longer (`::::callout{…}` around a `:::callout{…}`), and so does one whose code holds a `:::` line;
+Dispatch writes its fences that way. An unclosed typed block at document level is rejected. For
 a new typed block, omit `#block-id`; Dispatch mints it. When editing an existing typed block, retain
 its id and every rendered attribute. Never copy an existing block's id into new markdown: an id
 names one block, so an insert, upload or suggestion whose markdown names an id the document holds
@@ -827,7 +885,9 @@ message ref, it returns that message and its reply chain. Reads do not subscribe
 Every read ends with two sections from the reference graph. `Referenced by:` lists what points at the node — every document, ask,
 comment, or message that cites it, plus its structure: child issues, attached documents, anchored and owned asks and comments, replies,
 followers — and `Links:` lists what it cites. Each row is `- <edge kind> <node kind> dispatch://… (<excerpt> · <when>)`; for a
-document source the excerpt is the block containing the mention. Cross-project, always: a message on another project's issue that
+document source the excerpt is the start of the block holding the mention, and a whole list is one block, so every issue named in
+one list previews the list's first item. When a document references many issues and each backlink should read right, give each
+issue its own paragraph (or block), not an item of one list. Cross-project, always: a message on another project's issue that
 cites an ask shows up under that ask. So "what led to this decision" is one `dispatch_read` on the ask, and "who relies on this
 document" one read on the document. Cite with `dispatch://` references (below) whenever you name a node in a body — a bare id or
 title is invisible to the graph.

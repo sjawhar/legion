@@ -3,7 +3,8 @@ import { EditorState, TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { Schema } from "prosemirror-model";
 
-import { askBlockEditingPlugin, editingAskBlockPos } from "./ask-block";
+import type { BlockTypeSchema } from "../../api/types";
+import { askBlockEditingPlugin, editingAskBlockPos, renderTypedBlock } from "./ask-block";
 
 const schema = new Schema({
   nodes: {
@@ -102,4 +103,67 @@ test("the editing plugin marks exactly the block the caret is inside, and clears
   expect(storage.dataset.dispatchAskEditing).toBe("true");
   pluginView.destroy?.();
   expect(storage.dataset.dispatchAskEditing).toBeUndefined();
+});
+
+// The header shows what the document's author wrote and nothing else. Which attributes are the
+// server's is the block type's own schema, not a list kept here: a hand-written copy of that
+// flag goes stale the moment a type gains a server-owned attribute, and the new one leaks into
+// every reader's view of the block.
+const calloutSchema = new Schema({
+  nodes: {
+    doc: { content: "block+" },
+    paragraph: { content: "inline*", group: "block" },
+    text: { group: "inline" },
+    callout: {
+      attrs: {
+        blockId: { default: null },
+        kind: { default: "note" },
+        // A server-owned attribute this file has never heard of.
+        resolved_by: { default: null },
+        title: { default: null },
+      },
+      content: "paragraph+",
+      group: "block",
+    },
+  },
+});
+
+const calloutType: BlockTypeSchema = {
+  attributes: {
+    kind: { kind: "enum", choices: ["note", "warning"] },
+    resolved_by: { kind: "string", server: true },
+    title: { kind: "string" },
+  },
+  content: "paragraph+",
+  name: "callout",
+  render: "host",
+};
+
+/** Every string the drawing puts on the page, in order. */
+function renderedText(spec: unknown): string[] {
+  if (typeof spec === "string") return [spec];
+  if (!Array.isArray(spec)) return [];
+  return spec.flatMap((child, index) =>
+    index === 1 && !Array.isArray(child) && typeof child === "object" ? [] : renderedText(child)
+  );
+}
+
+test("a typed block's header shows the author's attributes and hides the schema's server ones", () => {
+  const node = calloutSchema.node(
+    "callout",
+    { blockId: "callout-1", kind: "warning", resolved_by: "alice", title: "Read this" },
+    [calloutSchema.node("paragraph", undefined, [calloutSchema.text("Body text.")])]
+  );
+
+  const text = renderedText(renderTypedBlock(node, calloutType));
+
+  expect(text).toContain("callout");
+  expect(text).toContain("warning");
+  expect(text).toContain("Read this");
+  // The block's identity and the schema's server-owned attribute, neither of them written by
+  // the author, appear nowhere - not as a value and not as a name.
+  expect(text).not.toContain("callout-1");
+  expect(text).not.toContain("blockId");
+  expect(text).not.toContain("alice");
+  expect(text).not.toContain("resolved_by");
 });

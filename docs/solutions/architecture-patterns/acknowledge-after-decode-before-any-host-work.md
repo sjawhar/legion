@@ -27,7 +27,7 @@ The Envoy listener forwards a role-lane message to the holder's agent subject as
 request and waits two seconds for a receipt; a miss is a `delivery_failed` exception, which the
 Legion daemon answers by re-sending. The pi-envoy plugin's pump published that receipt as the
 **last** statement of `deliver()` — after the inbox update, after any Dispatch round trip
-(`postDispatchReply`, `askEphemeral`), after `pi.sendMessage`. Under load a busy session's turn
+(`postDispatchReply`, the host's side turn), after `pi.sendMessage`. Under load a busy session's turn
 outlasted the window on every message, so every role message to a busy holder was redelivered
 every few seconds (LEGION-101). The receipt was measuring the host's turn, not delivery.
 

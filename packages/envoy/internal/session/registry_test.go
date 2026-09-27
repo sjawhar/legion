@@ -69,7 +69,7 @@ func clearSessionBucket(t *testing.T, conn *natsgo.Conn) {
 
 func setupNATS(t *testing.T) *bus.Client {
 	t.Helper()
-	client, err := bus.Connect([]string{sharedTestNATSURI(t)}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{sharedTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
@@ -389,7 +389,7 @@ func TestSessionRegistryDeleteHistoryFailureSuppressesStaleWatcherUpdate(t *test
 func useKV(t *testing.T, r *SessionRegistry, kv natsgo.KeyValue) {
 	t.Helper()
 	r.watcher.Stop()
-	r.watcher = kvwatch.New("session registry", kv, r.applyWatched, r.resetCache)
+	r.watcher = kvwatch.New("session registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
 	r.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -11,9 +11,10 @@ application state in Postgres.
 | `DATABASE_URL` | Postgres connection string. Dispatch applies embedded migrations before serving. The pool size is fixed in code (`store.sharedPoolSize`), so a connection string carrying `pool_max_conns` is refused at startup; remove the parameter. |
 | `DISPATCH_SERVER_URL` | Public browser origin. When set, overrides `dispatch.serverUrl` from merged `envoy.json`. |
 | `NATS_URLS` | Comma-separated NATS URLs. When set, overrides `natsUrls` from merged `envoy.json`. |
+| `NATS_NKEY_SEED_FILE`, `NATS_NKEY_SEED` | The NATS nkey user Dispatch connects as: a file holding the seed (trimmed; wins), or the seed. A set but unusable value refuses startup naming the variable and path; neither set connects without a credential. |
 | `DISPATCH_AGENT_TOKEN` | Shared bearer fallback for devbox agents. Personal tokens minted in Settings are the normal agent credential. |
 | `DISPATCH_ALLOWED_LOGINS` | Comma-separated GitHub login allowlist. Required for cookie identity mode and enforced during OAuth sign-in. |
-| `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection. Test/e2e only — leave unset in every real deployment. |
+| `DISPATCH_TEST_HOOKS` | Set to `1` to mount `POST /api/v1/events/_test/disconnect`, which closes every open SSE connection, and `POST /api/v1/artifacts/_test/quiesce`, which closes every live document and waits for the settlements in flight. Test/e2e only — leave unset in every real deployment. |
 | `ENVOY_URL` | Base URL of the Envoy listener (`GET /v1/sessions`) behind `GET /api/v1/agents`; defaults to `http://127.0.0.1:9020`. |
 | `DISPATCH_OIDC_ISSUER` | OIDC issuer whose projected service-account tokens authenticate as agents. Set with `DISPATCH_OIDC_AUDIENCE` or not at all. |
 | `DISPATCH_OIDC_AUDIENCE` | Audience those tokens must carry (`dispatch`). Set with `DISPATCH_OIDC_ISSUER` or not at all. |
@@ -98,7 +99,14 @@ reach the stream adds nothing to the stream.
   for it was recorded as refused (an accepted request whose answer was lost).
 - Giving up logs `level=ERROR msg="webhook redelivery exhausted"`. A 4xx logs
   `level=ERROR msg="webhook delivery refused terminally"`. Each is logged once per delivery.
-  Every sweep logs an INFO `msg="webhook redelivery sweep"` line with its counts.
+  Every sweep logs an INFO `msg="webhook redelivery sweep"` line: `failed_attempts` (the failed
+  attempts listed), `deliveries` (the deliveries the sweep decided: the GUIDs of the listed failed
+  attempts, plus refused deliveries the listing no longer returns), and one count per outcome,
+  which add up to `deliveries`. `closed` is a delivery an earlier sweep settled (GitHub recorded it
+  `OK`, it was refused terminally, or it was given up on): its failed attempt stays listed until it
+  is older than the sweep's hour, so after a burst of failures is redelivered, the next hour's
+  sweeps count the burst as `closed`.
+  `pending` is a redelivery GitHub accepted and has not made yet.
 - A sweep looks back one hour. After a gap in sweeping (Dispatch down), it resumes from its
   cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
 
@@ -116,7 +124,11 @@ envoy-dispatch redeliver-webhooks --since 72h --dry-run   # list what would be r
 envoy-dispatch redeliver-webhooks --since 72h             # redeliver under the sweep's rules
 ```
 
-It reads the same App credentials and NATS configuration as the server.
+It reads the same App credentials and NATS configuration as the server, but owns nothing on the
+bus: unlike the server it neither creates nor updates `ENVOY_NOTIFICATIONS`, and it refuses a
+NATS server that is not the machine it runs on, naming the URL. Run inside the Dispatch
+container it reaches that deployment's NATS with `ENVOY_ALLOW_REMOTE_NATS=1
+envoy-dispatch redeliver-webhooks …`.
 
 ## Identity
 
@@ -158,7 +170,14 @@ docker exec dispatch-pg psql -U postgres -d dispatch \
   -c "insert into projects (key, name) values ('LOCAL', 'Local project')"
 ```
 
-Then run (or re-run) the server:
+Then run (or re-run) the server. `DISPATCH_NATS_DISABLED=1` keeps this run off
+the bus entirely; drop it and set `NATS_URLS` to a NATS of your own to exercise
+the publish path. Neither line is optional decoration: without one of them the
+server reads `natsUrls` from your `~/.config/opencode/envoy.json`, which on an
+agent machine names the shared production server, and it would reconcile that
+server's `ENVOY_NOTIFICATIONS` stream on the way in. It refuses to start against
+a NATS that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1` says the
+run means it.
 
 ```sh
 cd packages/envoy
@@ -168,6 +187,7 @@ DISPATCH_IDENTITY='header:X-Dispatch-User' \
 DISPATCH_ALLOWED_LOGINS=sjawhar \
 DISPATCH_INSECURE_COOKIE=1 \
 DISPATCH_DEFAULT_PROJECT=LOCAL \
+DISPATCH_NATS_DISABLED=1 \
 go run ./cmd/dispatch
 ```
 
@@ -249,8 +269,9 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/auth/whoami` | GET | cookie or trusted header | Return the resolved GitHub login. |
 | `/api/github/rest/...` | any | cookie or trusted header | Proxy a GitHub REST request using the caller's stored token. |
 | `/api/github/graphql` | POST | cookie or trusted header | Proxy GitHub GraphQL using the caller's stored token. |
-| `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — and NATS is connected where configured. A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. |
+| `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — and NATS is connected where configured. A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
+| `/api/v1/artifacts/_test/quiesce` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every live document and wait for the settlements in flight; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/events/_test/disconnect` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every open SSE connection; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/inbox?project=&assignee=` | GET | cookie or trusted header (human only) | List open asks newest-first, including their issue key, title, and assignee. `assignee=me\|unassigned\|<login>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that login; an unlisted login is `400 ASSIGNEE_NOT_ALLOWED`. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached. |
@@ -262,7 +283,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/me/agent-tokens/{id}` | DELETE | cookie or trusted header (human only) | Revoke a personal agent token. |
 | `/api/v1/users` | GET | cookie or trusted header (human only) | The sign-in allowlist as `{users: [{login}]}`, sorted lowercase — the assignee picker's options. |
 | `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a human, `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's lowercase login, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
-| `/api/v1/issues?project=&status=&parent=&updated_since=` | GET | cookie, trusted header, or bearer | List issue summaries. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. Summaries contain `key`, `title`, `status`, `parent`, `assignee`, `updated_at`, `last_seq`, and `open_asks`. |
+| `/api/v1/issues?project=&status=&parent=&priority=&updated_since=` | GET | cookie, trusted header, or bearer | List issue summaries. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `updated_at`, `last_seq`, and `open_asks`. |
 | `/api/v1/search?q=&project=&limit=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results with `<mark>` snippets and SPA `href`s; `limit` 1–50 (default 20). `400 INVALID_QUERY` under 2 characters or stop words only; `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
@@ -279,7 +300,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/comments/{id}` | PATCH | cookie or trusted header | Edit a comment body. Human authors only. |
 | `/api/v1/comments/{id}/resolve` | POST | cookie, trusted header, or bearer | Resolve a comment. |
 | `/api/v1/comments/{id}/reopen` | POST | cookie or trusted header | Reopen a resolved thread-root comment. |
-| `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. |
+| `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and leaves the suggestion open; one removed after it answers `200` with `lost: true`. |
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
 | `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
@@ -288,7 +309,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/artifacts/{id}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{id}` must be a UUID. |
-| `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. |
+| `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | cookie, trusted header, or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | cookie, trusted header, or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | cookie, trusted header, or bearer | Read an unlinked document's events. |
@@ -297,12 +318,12 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/issues/{key}/artifacts/{slug}/text` | GET | cookie, trusted header, or bearer | Read an issue artifact's live document markdown. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions/{n}` | GET | cookie, trusted header, or bearer | Read an issue artifact version or download its blob. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions` | POST | cookie, trusted header, or bearer | Create a named issue-document version. |
-| `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | cookie, trusted header, or bearer | Apply issue-document edit operations. |
+| `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | cookie, trusted header, or bearer | Apply issue-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/projects/{key}/artifacts/{slug}` | GET | cookie, trusted header, or bearer | Read an unlinked project artifact and its incoming references. `{slug}` is resolved within `{key}`. |
 | `/api/v1/projects/{key}/artifacts/{slug}/text` | GET | cookie, trusted header, or bearer | Read an unlinked project document's live markdown. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions/{n}` | GET | cookie, trusted header, or bearer | Read an unlinked project document version or download its blob. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions` | POST | cookie, trusted header, or bearer | Create a named project-document version. |
-| `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | cookie, trusted header, or bearer | Apply project-document edit operations. |
+| `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | cookie, trusted header, or bearer | Apply project-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/...` | GET | none | Serve the dashboard static files. |
 
 ## Dispatch topics
@@ -311,6 +332,10 @@ Document events publish retained envelopes on
 `notifications.dispatch.document.<PROJECT>.<slug>.<type>`. Use
 `go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1`
 to print one matching envelope from the `natsUrls` configured in `envoy.json`.
+`natstail` owns nothing on the bus - it neither creates nor updates
+`ENVOY_NOTIFICATIONS` - and refuses a NATS server that is not this machine's:
+prefix the command with `ENVOY_ALLOW_REMOTE_NATS=1` where `envoy.json` names a
+shared server, as an agent devbox's does.
 
 A caller resolved by header identity without a stored GitHub token receives
 `503` with code `GITHUB_TOKEN_UNAVAILABLE` from GitHub proxy routes.

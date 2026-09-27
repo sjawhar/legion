@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -41,6 +42,12 @@ const (
 	idleTimeout       = 2 * time.Minute
 )
 
+// buildCommit is the legion commit this binary was built from. Only the image build stamps it
+// (packages/envoy/docker/Dockerfile passes its LEGION_COMMIT build argument through -ldflags -X,
+// and refuses anything but a full commit sha); every other build leaves it empty, and /healthz
+// then reports the commit as null rather than naming one it cannot vouch for.
+var buildCommit string
+
 type bootConfig struct {
 	DatabaseURL      string
 	AgentToken       string
@@ -56,6 +63,11 @@ type bootConfig struct {
 	// service-account tokens. Both set or neither; empty means no verifier.
 	OIDCIssuer   string
 	OIDCAudience string
+	// AgentSecretsURL is DISPATCH_AGENT_SECRETS_URL, the secrets broker's UI-bearer API; empty
+	// means the credential-request feature is off. AgentSecretsToken is the resolved UI bearer
+	// (required when AgentSecretsURL is set).
+	AgentSecretsURL   string
+	AgentSecretsToken string
 }
 
 func main() {
@@ -95,12 +107,34 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.Connect(envoyConfig.NatsURLs)
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.NatsURLs)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
 		}
 		defer natsClient.Close()
+	}
+
+	// The live agent conversation relay takes a connection of its own: a viewer's core
+	// subscription must not be lost to the publisher client replacing a shared one, and this
+	// connection never touches JetStream. With test hooks and no NATS it is an in-process
+	// source the e2e harness publishes into instead.
+	var agentStream agentstream.Source
+	if natsClient == nil {
+		if boot.TestHooksEnabled {
+			agentStream = agentstream.NewMemory()
+			slog.Info("dispatch: agent conversation relay served from the test hook")
+		} else {
+			slog.Info("dispatch: agent conversation relay off: it needs NATS")
+		}
+	} else {
+		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.NatsURLs)
+		if err != nil {
+			slog.Error("dispatch: connect the agent conversation relay", "error", err)
+			os.Exit(1)
+		}
+		defer streamConn.Close()
+		agentStream = agentstream.NewNATS(streamConn)
 	}
 
 	database, err := store.Open(ctx, boot.DatabaseURL)
@@ -207,6 +241,11 @@ func main() {
 		AppSource:      appSource,
 		GitHubAPIBase:  boot.GitHubAPIBase,
 		OIDC:           serviceTokens,
+		AgentStream:    agentStream,
+		Lifetime:       ctx,
+
+		AgentSecretsURL:   boot.AgentSecretsURL,
+		AgentSecretsToken: boot.AgentSecretsToken,
 
 		TestHooksEnabled: boot.TestHooksEnabled,
 	})
@@ -239,7 +278,7 @@ func main() {
 
 	go architecture.Run(ctx, appCtx.Architecture())
 
-	handler := dispatchHandler(routes.New(appCtx), database, natsClient)
+	handler := dispatchHandler(routes.New(appCtx), database, natsClient, buildCommit)
 	listenAddr, err := listenAddress()
 	if err != nil {
 		slog.Error("dispatch: resolve listen address", "error", err)
@@ -397,7 +436,42 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 
+	agentSecretsURL := strings.TrimSuffix(strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_URL")), "/")
+	if agentSecretsURL != "" {
+		parsed, err := url.Parse(agentSecretsURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
+			return bootConfig{}, fmt.Errorf("DISPATCH_AGENT_SECRETS_URL=%q (expected an absolute http(s) URL with no path)", agentSecretsURL)
+		}
+		boot.AgentSecretsURL = agentSecretsURL
+		boot.AgentSecretsToken, err = agentSecretsToken(getenv)
+		if err != nil {
+			return bootConfig{}, err
+		}
+		if boot.AgentSecretsToken == "" {
+			return bootConfig{}, errors.New("DISPATCH_AGENT_SECRETS_TOKEN_FILE or DISPATCH_AGENT_SECRETS_TOKEN is required when DISPATCH_AGENT_SECRETS_URL is set")
+		}
+	}
+
 	return boot, nil
+}
+
+// agentSecretsToken resolves the secrets broker's UI bearer, reading
+// DISPATCH_AGENT_SECRETS_TOKEN_FILE (trimmed contents) ahead of
+// DISPATCH_AGENT_SECRETS_TOKEN; a set-but-unreadable or blank file is an error naming both,
+// never a silent fallback to the bare variable.
+func agentSecretsToken(getenv func(string) string) (string, error) {
+	if path := strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_TOKEN_FILE")); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which could not be read: %w", path, err)
+		}
+		value := strings.TrimSpace(string(data))
+		if value == "" {
+			return "", fmt.Errorf("DISPATCH_AGENT_SECRETS_TOKEN_FILE names %s, which is empty", path)
+		}
+		return value, nil
+	}
+	return strings.TrimSpace(getenv("DISPATCH_AGENT_SECRETS_TOKEN")), nil
 }
 
 // validateDefaultProject confirms DISPATCH_DEFAULT_PROJECT names a project
@@ -467,9 +541,9 @@ func parsePositiveInt(raw string) (int, error) {
 // dispatchHandler mounts the one /healthz the process serves above every dashboard and API
 // route, so the probe is answered whatever the router is doing. Go's ServeMux prefers the
 // longer pattern, so "GET /healthz" wins over the router's "/".
-func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client) http.Handler {
+func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bus.Client, commit string) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", healthzHandler(database, natsClient))
+	mux.Handle("GET /healthz", healthzHandler(database, natsClient, commit))
 	mux.Handle("/", handler)
 	return mux
 }
@@ -478,17 +552,31 @@ func dispatchHandler(handler http.Handler, database *store.Store, natsClient *bu
 // health pool's own connection, and NATS is connected where it is configured. Nothing here
 // waits on the shared pool, and Healthy bounds its own wait at store.healthProbeTimeout, which
 // records why a probe that answers late is as bad as one that never answers.
-func healthzHandler(database *store.Store, natsClient *bus.Client) http.HandlerFunc {
+//
+// Beside those it reports what is deployed: `commit`, the legion commit the binary was built
+// from (null when the build did not stamp one), and `schema_version`, the highest migration
+// the database has applied, read by the same probe (null when the database did not answer).
+// A deploy check compares the two with the commit its image pin names and that commit's
+// migrations, so neither is ever filled with a guess.
+func healthzHandler(database *store.Store, natsClient *bus.Client, commit string) http.HandlerFunc {
+	var reportedCommit *string
+	if commit != "" {
+		reportedCommit = &commit
+	}
 	return func(w http.ResponseWriter, req *http.Request) {
 		databaseOK := database != nil && database.Pool != nil
+		var schemaVersion *int
 		if databaseOK {
 			// A 503 that records no reason works against the point of the probe: a closed
 			// pool, a deadline on a stalled link, an authentication failure and a refused
 			// dial are four incidents with four next steps, and the body distinguishes
 			// none of them. One line per failed poll, for as long as the outage lasts.
-			if err := database.Pool.Healthy(req.Context()); err != nil {
+			version, err := database.Pool.Healthy(req.Context())
+			if err != nil {
 				slog.Warn("dispatch: health probe failed", "error", err)
 				databaseOK = false
+			} else {
+				schemaVersion = &version
 			}
 		}
 		var natsOK *bool
@@ -504,10 +592,12 @@ func healthzHandler(database *store.Store, natsClient *bus.Client) http.HandlerF
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(struct {
-			OK   bool  `json:"ok"`
-			DB   bool  `json:"db"`
-			NATS *bool `json:"nats"`
-		}{OK: ok, DB: databaseOK, NATS: natsOK})
+			OK            bool    `json:"ok"`
+			DB            bool    `json:"db"`
+			NATS          *bool   `json:"nats"`
+			Commit        *string `json:"commit"`
+			SchemaVersion *int    `json:"schema_version"`
+		}{OK: ok, DB: databaseOK, NATS: natsOK, Commit: reportedCommit, SchemaVersion: schemaVersion})
 	}
 }
 

@@ -48,6 +48,11 @@
       "bun": "./src/machine.ts",
       "default": "./dist/machine.js"
     },
+    "./nats-auth": {
+      "types": "./src/nats-auth.ts",
+      "bun": "./src/nats-auth.ts",
+      "default": "./dist/nats-auth.js"
+    },
     "./secret-file": {
       "types": "./src/secret-file.ts",
       "bun": "./src/secret-file.ts",
@@ -65,7 +70,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-http.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/secret-file.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-http.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/nats-auth.ts src/secret-file.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/"
@@ -73,6 +78,7 @@
   "dependencies": {
     "@legion/contracts": "workspace:*",
     "@toon-format/toon": "^4.1.1",
+    "nats": "^2.29.2",
     "zod": "^4.1.8"
   },
   "devDependencies": {

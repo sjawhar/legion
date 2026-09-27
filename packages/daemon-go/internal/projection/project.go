@@ -28,7 +28,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	lingering := make(map[string]bool)
 	for _, issue := range issues {
 		knownIssues[issue.Key] = struct{}{}
-		if issue.LingerUntil != nil {
+		if issue.Lingers() {
 			lingering[issue.Key] = true
 		}
 	}

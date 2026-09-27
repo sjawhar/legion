@@ -27,12 +27,12 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 	ctx := context.Background()
 	_, uri := testnats.Start(t)
 
-	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("bus connect: %v", err)
 	}
 	defer client.Close()
-	store, err := cistore.Open(client.Conn, cistore.WithReplicas(1), cistore.WithTTL(time.Hour))
+	store, err := cistore.Open(client.Conn, logging.New("test"), cistore.WithReplicas(1), cistore.WithTTL(time.Hour))
 	if err != nil {
 		t.Fatalf("open cistore: %v", err)
 	}

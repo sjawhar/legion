@@ -104,6 +104,7 @@ func (s *server) recordPendingMessageDelivery(
 	actor model.Actor,
 	resolved ResolvedMention,
 	replyThread *messageReplyThread,
+	resumeAttempt int,
 ) (pendingMessageDelivery, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -123,6 +124,41 @@ func (s *server) recordPendingMessageDelivery(
 		return pendingMessageDelivery{}, err
 	}
 	pending := pendingMessageDelivery{resolved: resolved}
+	if resumeAttempt > 0 {
+		// A bound sender takes its own attempt or nothing. The row must still be pending, still
+		// in the mode this send resolved for, still pointed at the session the resolution was
+		// taken for, and free (nobody else inside the claim lease) - anything else means this
+		// send is not the one that owes the frame.
+		var bound model.MessageDelivery
+		var free bool
+		err = tx.QueryRow(ctx, `
+			select attempt, delivery, session_id, `+claimLapsed+`
+			from message_deliveries
+			where message_id = $1 and attempt = $2 and state = 'pending'
+			for update
+		`, message.ID, resumeAttempt).Scan(&bound.Attempt, &bound.Delivery, &bound.SessionID, &free)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return pendingMessageDelivery{}, errAttemptNotPending
+		}
+		if err != nil {
+			return pendingMessageDelivery{}, err
+		}
+		if !free || bound.Delivery != resolved.Delivery || "session:"+bound.SessionID != resolved.Target {
+			return pendingMessageDelivery{}, errAttemptNotPending
+		}
+		pending.attempt = bound.Attempt
+		if err := tx.QueryRow(ctx, `
+			update message_deliveries set claimed_at = now()
+			where message_id = $1 and attempt = $2 and state = 'pending'
+			returning claimed_at, session_id
+		`, message.ID, pending.attempt).Scan(&pending.claimedAt, &pending.resolved.attemptSessionID); err != nil {
+			return pendingMessageDelivery{}, err
+		}
+		if err := finishPendingMessageDelivery(ctx, tx, s, message, replyThread, &pending); err != nil {
+			return pendingMessageDelivery{}, err
+		}
+		return pending, nil
+	}
 	var stranded model.MessageDelivery
 	var lapsed bool
 	err = tx.QueryRow(ctx, `
@@ -205,15 +241,35 @@ func (s *server) recordPendingMessageDelivery(
 			return pendingMessageDelivery{}, err
 		}
 	}
+	if err := finishPendingMessageDelivery(ctx, tx, s, message, replyThread, &pending); err != nil {
+		return pendingMessageDelivery{}, err
+	}
+	if superseded != nil {
+		s.publish(*superseded)
+	}
+	return pending, nil
+}
+
+// finishPendingMessageDelivery builds the frame this claimed attempt will be sent with and
+// commits the claim transaction. Both claim paths end here, so a bound sender's frame says
+// exactly what an ordinary one's does.
+func finishPendingMessageDelivery(
+	ctx context.Context,
+	tx pgx.Tx,
+	s *server,
+	message model.Message,
+	replyThread *messageReplyThread,
+	pending *pendingMessageDelivery,
+) error {
 	thread := replyThread
 	if thread == nil {
 		derived, err := loadMessageReplyThread(ctx, tx, message)
 		if err != nil {
-			return pendingMessageDelivery{}, err
+			return err
 		}
 		thread = &derived
 	}
-	pending.frame, err = json.Marshal(struct {
+	frame, err := json.Marshal(struct {
 		Event    model.Event `json:"event"`
 		Delivery any         `json:"delivery"`
 	}{
@@ -222,18 +278,13 @@ func (s *server) recordPendingMessageDelivery(
 		Event: messageEvent(
 			message, "message.created", message.Author, thread.payload(message, model.ReferenceChanges{}),
 		),
-		Delivery: map[string]any{"attempt": pending.attempt, "mode": resolved.Delivery},
+		Delivery: map[string]any{"attempt": pending.attempt, "mode": pending.resolved.Delivery},
 	})
 	if err != nil {
-		return pendingMessageDelivery{}, fmt.Errorf("encode target delivery frame: %w", err)
+		return fmt.Errorf("encode target delivery frame: %w", err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return pendingMessageDelivery{}, err
-	}
-	if superseded != nil {
-		s.publish(*superseded)
-	}
-	return pending, nil
+	pending.frame = frame
+	return tx.Commit(ctx)
 }
 
 // supersededByModeChangeText is what a stranded attempt records when a retry in another mode
@@ -329,6 +380,30 @@ func (s *server) deliverMessage(
 	actor model.Actor,
 	replyThread *messageReplyThread,
 ) (model.MessageDelivery, error) {
+	return s.deliverMessageResuming(ctx, message, delivery, urgency, actor, replyThread, 0)
+}
+
+// errAttemptNotPending reports that the attempt a bound sender owns is no longer its to send:
+// something else settled it, superseded it, or is sending it right now. Only a bound sender
+// (resumeAttempt > 0) can see it, and its caller drops the send rather than opening another
+// attempt - a second attempt here is a second frame on the wire.
+var errAttemptNotPending = errors.New("delivery attempt is no longer pending")
+
+// deliverMessageResuming is deliverMessage bound to one attempt. resumeAttempt > 0 sends that
+// attempt and nothing else: it never opens a second attempt beside it and never supersedes it,
+// answering errAttemptNotPending instead. A broadcast's workers send that way, because their
+// attempts exist before they start: a human who changes the mode from the agent card in the
+// meantime settles attempt 1 and sends their own, and a worker that then opened an attempt of
+// its own would put a second frame on the session's subject.
+func (s *server) deliverMessageResuming(
+	ctx context.Context,
+	message model.Message,
+	delivery string,
+	urgency *string,
+	actor model.Actor,
+	replyThread *messageReplyThread,
+	resumeAttempt int,
+) (model.MessageDelivery, error) {
 	pending, err := resolveThenLock(ctx,
 		func(ctx context.Context) (ResolvedMention, error) {
 			route, err := s.messageDeliveryRoute(ctx, message)
@@ -338,7 +413,7 @@ func (s *server) deliverMessage(
 			return s.resolveMentionTargets(ctx, []string{route}, delivery)[0], nil
 		},
 		func(ctx context.Context, resolved ResolvedMention) (pendingMessageDelivery, error) {
-			return s.recordPendingMessageDelivery(ctx, message, actor, resolved, replyThread)
+			return s.recordPendingMessageDelivery(ctx, message, actor, resolved, replyThread, resumeAttempt)
 		},
 		errorf(http.StatusConflict, "MESSAGE_TARGET_CHANGED",
 			"the message's target changed while this delivery was being recorded"),

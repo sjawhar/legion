@@ -1030,7 +1030,7 @@ export function classifyPush(payload: JsonRecord): PushClassification {
     truncated === undefined
       ? { handoffOnly: false, unknown: "changed_paths absent (listener predates LEGION-33)" }
       : truncated === "true"
-        ? { handoffOnly: false, unknown: "changed_paths truncated at 100" }
+        ? { handoffOnly: false, unknown: "changed_paths truncated" }
         : truncated !== "false"
           ? { handoffOnly: false, unknown: `changed_paths_truncated=${truncated} unrecognised` }
           : !changedPaths
