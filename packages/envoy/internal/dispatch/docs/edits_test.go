@@ -1797,6 +1797,7 @@ func TestApplyOperationReplaceRefusalQuotesTheBlocksRealMarker(t *testing.T) {
 	for _, test := range []struct{ markdown, find, with, want string }{
 		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Launcher contract", with: "9. Launcher contract", want: `"7. "`},
 		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Acceptance", with: "9. Acceptance", want: `"8. "`},
+		{markdown: "0. Launcher contract\n1. Acceptance\n", find: "Launcher contract", with: "9. Launcher contract", want: `"0. "`},
 		{markdown: "- a\n\n* b\n", find: "b", with: "* c", want: `"* "`},
 		{markdown: "1. a\n\n1) b\n2) c\n", find: "c", with: "2) d", want: `"2) "`},
 		{markdown: "- outer\n  - x\n  * y\n", find: "y", with: "- z", want: `"* "`},

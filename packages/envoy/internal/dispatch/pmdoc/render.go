@@ -130,12 +130,12 @@ func definedFootnoteLabels(doc *Node) map[string]bool {
 }
 
 func (r *renderer) blocks(nodes []*Node, prefix string) {
-	markers := otherListMarkers(nodes)
+	otherMarkers := otherListMarkers(nodes)
 	for i, n := range nodes {
 		if i > 0 {
 			r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n")
 		}
-		r.otherListMarker = markers[i]
+		r.otherListMarker = otherMarkers[i]
 		r.block(n, prefix)
 	}
 	if len(nodes) > 0 {
@@ -144,12 +144,12 @@ func (r *renderer) blocks(nodes []*Node, prefix string) {
 }
 
 func (r *renderer) blocksNoTrailing(nodes []*Node, prefix string) {
-	markers := otherListMarkers(nodes)
+	otherMarkers := otherListMarkers(nodes)
 	for i, n := range nodes {
 		if i > 0 {
 			r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + prefix)
 		}
-		r.otherListMarker = markers[i]
+		r.otherListMarker = otherMarkers[i]
 		r.block(n, prefix)
 	}
 }
@@ -284,7 +284,6 @@ func typedFence(n *Node, column int) int {
 
 func (r *renderer) list(n *Node, prefix string) {
 	other := r.otherListMarker
-	r.otherListMarker = false
 	start := 1
 	if n.Type == "ordered_list" {
 		start = int(num(n.Attrs["order"], 1))
@@ -326,7 +325,7 @@ func (r *renderer) list(n *Node, prefix string) {
 			}
 			children = children[1:]
 		}
-		markers := otherListMarkers(children)
+		otherMarkers := otherListMarkers(children)
 		for childIndex, child := range children {
 			// A tight item writes its blocks on consecutive lines, where a paragraph would run on
 			// into a paragraph after it and underline itself with a rule's `---`. The browser
@@ -341,7 +340,7 @@ func (r *renderer) list(n *Node, prefix string) {
 				}
 			}
 			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0 && marker != "* ")
-			r.otherListMarker = markers[childIndex]
+			r.otherListMarker = otherMarkers[childIndex]
 			r.block(child, indent)
 		}
 	}

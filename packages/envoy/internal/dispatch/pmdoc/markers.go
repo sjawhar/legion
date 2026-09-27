@@ -34,7 +34,7 @@ func (m BlockMarker) Markdown() string {
 	case MarkerHeading:
 		return strings.Repeat("#", max(m.Level, 1)) + " "
 	case MarkerOrdered:
-		return listItemMarker(true, max(m.Number, 1), m.Other)
+		return listItemMarker(true, m.Number, m.Other)
 	case MarkerBullet:
 		return listItemMarker(false, 0, m.Other)
 	default:
