@@ -180,16 +180,16 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		setSpread(list, spread, func(item ast.Node) bool {
 			// Blank lines after a list are that list's.
 			if next := item.NextSibling(); next != nil {
-				return blankBetweenBlocksPastLists(item) || blankBefore(next) && !endsWithList(item)
+				return blankBetweenBlocksBut(item, anyBlock) || blankBefore(next) && !endsWithList(item)
 			}
-			return blankBetweenBlocksPastLists(item) || lastSpread
+			return blankBetweenBlocksBut(item, anyBlock) || lastSpread
 		})
 	case quoted:
 		spread, reason := quotedListSpread(list, quote, directive, typed && isAncestor(quote, directive), lines)
 		if reason != "" {
 			return reason
 		}
-		setSpread(list, spread, blankBetweenBlocksPastLists)
+		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, anyBlock) })
 	case footnoted && typed:
 		// Blank lines past the typed block's closing fence stand outside it.
 		last := len(lines.starts)
@@ -204,14 +204,14 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		setSpread(list, false, spreadsNothing)
 	case footnoted:
 		setSpread(list, false, func(item ast.Node) bool {
-			return blankBetweenBlocksPastListsBeforeContainers(item) || blankAfterItem(item, definition)
+			return blankBetweenBlocksBut(item, startsContainer) || blankAfterItem(item, definition)
 		})
 	default:
 		spread := false
 		for item := list.FirstChild().NextSibling(); item != nil; item = item.NextSibling() {
 			spread = spread || blankBefore(item)
 		}
-		setSpread(list, spread, blankBetweenBlocks)
+		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, spreadsNothing) })
 	}
 	return ""
 }
@@ -332,13 +332,6 @@ func endsWithList(item ast.Node) bool {
 	return list
 }
 
-// blankBetweenBlocksPastListsBeforeContainers is blankBetweenBlocks in a footnote definition, where
-// the blank lines after a list an item holds, before a quote, a list or a footnote definition, are
-// that list's.
-func blankBetweenBlocksPastListsBeforeContainers(item ast.Node) bool {
-	return blankBetweenBlocksBut(item, startsContainer)
-}
-
 func setSpread(list *ast.List, spread bool, itemSpread func(ast.Node) bool) {
 	list.SetAttribute(browserSpreadAttr, spread)
 	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
@@ -348,27 +341,20 @@ func setSpread(list *ast.List, spread bool, itemSpread func(ast.Node) bool) {
 
 func spreadsNothing(ast.Node) bool { return false }
 
-// blankBetweenBlocks reports whether a blank line separates two of item's blocks, or two blocks of
-// a footnote definition it holds, which the browser editor's parser reads as the item's lines.
-func blankBetweenBlocks(item ast.Node) bool {
-	return blankBetweenBlocksBut(item, nil)
-}
+func anyBlock(ast.Node) bool { return true }
 
-// blankBetweenBlocksPastLists is blankBetweenBlocks in a quote, where the blank lines after a list
-// an item holds are that list's.
-func blankBetweenBlocksPastLists(item ast.Node) bool {
-	return blankBetweenBlocksBut(item, func(ast.Node) bool { return true })
-}
-
-// blankBetweenBlocksBut is blankBetweenBlocks leaving to a list the blank lines after it before a
-// block listHolds accepts, or before none when listHolds is nil.
+// blankBetweenBlocksBut reports whether a blank line separates two of item's blocks, or two blocks
+// of a footnote definition it holds, which the browser editor's parser reads as the item's lines -
+// but for the blank lines after a list the item holds, before a block listHolds accepts, which are
+// that list's: in a quote, before any block (anyBlock); in a footnote definition, before a quote,
+// a list or a footnote definition (startsContainer); elsewhere, before none (spreadsNothing).
 func blankBetweenBlocksBut(item ast.Node, listHolds func(ast.Node) bool) bool {
 	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
 		_, afterList := child.PreviousSibling().(*ast.List)
-		if child != item.FirstChild() && blankBefore(child) && !(afterList && listHolds != nil && listHolds(child)) {
+		if child != item.FirstChild() && blankBefore(child) && !(afterList && listHolds(child)) {
 			return true
 		}
-		if _, definition := child.(*extensionast.Footnote); definition && blankBetweenBlocks(child) {
+		if _, definition := child.(*extensionast.Footnote); definition && blankBetweenBlocksBut(child, spreadsNothing) {
 			return true
 		}
 	}
