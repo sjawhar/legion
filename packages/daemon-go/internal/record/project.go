@@ -1,7 +1,11 @@
 package record
 
 import (
+	"context"
+	"slices"
 	"sort"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
@@ -27,7 +31,8 @@ func OutOfWorkflow(status string) bool {
 	}
 }
 
-// Waiting returns slotless todo roots and orphans, in Dispatch rank order.
+// Waiting returns the slotless todo roots and orphans handed to Legion, in Dispatch rank order. A
+// root without the label waits for nothing; a child's tree holds its place, so a child needs none.
 func Waiting(issues []Issue, slots []Slot) []Issue {
 	slotted := make(map[string]struct{}, len(slots))
 	for _, slot := range slots {
@@ -35,7 +40,7 @@ func Waiting(issues []Issue, slots []Slot) []Issue {
 	}
 	waiting := make([]Issue, 0, len(issues))
 	for _, issue := range issues {
-		if issue.Status == "todo" && claim.IsTreeRoot(issue.Key, issue.Tree) {
+		if issue.Status == "todo" && issue.HandedOver && claim.IsTreeRoot(issue.Key, issue.Tree) {
 			if _, ok := slotted[issue.Key]; !ok {
 				waiting = append(waiting, issue)
 			}
@@ -43,4 +48,24 @@ func Waiting(issues []Issue, slots []Slot) []Issue {
 	}
 	sort.Slice(waiting, func(i, j int) bool { return RankLess(waiting[i], waiting[j]) })
 	return waiting
+}
+
+// TreeLive says whether root's tree is live: the root holds a slot or waits for one, and does not
+// linger after its close. A todo child under a live tree runs in it; under any other it is an orphan.
+func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, error) {
+	if root.Lingers() {
+		return false, nil
+	}
+	slots, err := store.Slots(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	if slices.ContainsFunc(slots, func(slot Slot) bool { return slot.Issue == root.Key }) {
+		return true, nil
+	}
+	issues, err := store.Issues(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(Waiting(issues, slots), func(waiting Issue) bool { return waiting.Key == root.Key }), nil
 }

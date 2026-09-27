@@ -160,7 +160,13 @@ Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOpera
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
 (`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
 breaks at the end of the code's text and a line holding only whitespace in a list item's code read
-back without them. A line of colons in code inside a typed block is kept: the browser editor's
+back without them, and an accepted suggestion writes its code as it reads back (`acceptedCode`):
+in a list item's code, a line it leaves holding only spaces and tabs, CommonMark's blank line, is
+written empty, the spaces and tabs that line keeps around it included, while any other character,
+a no-break space or a form feed among them, is kept, as both readers keep it; then, where only
+line breaks follow it, its text loses the line breaks that end it. A suggestion that runs past the
+code into the next block is written as sent, the rest of that block joining it. Code on other
+lines stays as it was. A line of colons in code inside a typed block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
 them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -
@@ -172,7 +178,50 @@ fixture generator writes for a callout at the top and inside a blockquote, list 
 definition and another callout. Text a `replace` writes that would read as block syntax at a line
 start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::` over a
 paragraph is stored `\---` and so on (the renderer's line-start escapes). Beside an emptied
-paragraph it is written the same way, since an empty paragraph is not written. Everywhere else `replace` is
+paragraph it is written the same way, since an empty paragraph is not written. Accepting a
+suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`, its checks in
+`docs/accept.go`) writes blocks, so it stores what reads back as the live document, and refuses
+what cannot, naming `replace_with`. It first settles the blocks it changed (`settleAccepted`,
+`pmdoc.AgreeWithReadBack`): the empty halves a block replacement leaves of the textblock it lands
+in, which carry no block id, go where the renderer does not write them, and each list and list
+item takes the spread its markdown reads back with, paired as far down as the read-back check
+pairs blocks, so two paragraphs in a tight list item leave the item spread, in a list that already
+reads back otherwise too, a block over an item's text leaves no empty line before its nested list,
+and an item beside them in a list they make loose is spread as its markdown now reads. One the
+accept left unchanged whose spread already read back otherwise before it, such as a spread its
+markdown never carried, keeps that spread. Every other block, mark and node stays as it was. An empty replacement keeps the paragraph it empties, which is not written beside other
+blocks. Outside an ask it then runs, over every document-level block it changed,
+`refuseUnreadableReplacement`'s check (`refuseUnreadableAccept`) and the shape comparison
+(`refuseReshapedAccept`: `pmdoc.BlockShapeError`). A non-empty replacement inside a typed block is
+checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
+`paragraph+ bullet_list?` rule. Last, the whole document is read back (`refuseMisreadAccept`:
+`pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes
+and text, a column without alignment expected back left as the renderer writes it: an accept is
+refused where a block now reads back otherwise that did not before, such as a task item emptied to
+`- [ ]`, which reads back as a plain item. Each block that reads back otherwise is found as far
+down as its markdown still pairs, and one that already read back otherwise the same way before,
+under the same block id (a paragraph's text differing in the same characters, an attribute with
+the same values, a block pairing with nothing), is not the accept's, even inside the block it
+changes: text beside a task item already read back as plain, or in a paragraph ending in a hard
+break that reads back with a literal backslash, is stored, while a second task item emptied there
+is refused. Nothing else in the document switches the check off, except a document the parser
+already refuses, where the block checks alone judge the accept. That refusal names what reads
+back and advises rejecting. A
+list an accept writes beside a list of its kind is written with the other marker (below), so the
+two read back as the two lists it made. An accept parses its text as blocks
+written into the document (`pmdoc.ParseFragment`: a leading `---` is a rule, as `***` is, except
+that a closed front-matter block is front matter where the text lands at the document's start,
+at the start of a top-level first block's text), so a rule or a list over a whole paragraph is
+written as that block and kept, while one that leaves a block the document cannot read back,
+such as an empty callout in a list item, is refused: the document
+stays as it was and the suggestion stays open. The person accepting cannot change the text, so
+the refusal (`acceptRefusal`) says what the text writes where it lands - for a same-id rewrite of
+a typed block, in the block that typed block stands in - and names what they can
+do (reject the suggestion, or reply asking for text the block can hold), never an edit-route
+operation; it says the text empties a paragraph only when the text renders no content, and then
+offers deleting the paragraph only where the rest of its block stands without it, and the whole
+block only where the paragraph is all it holds. A reject is not checked, since it gives back the
+text the insert started from. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
@@ -214,7 +263,11 @@ reports any emptied container's content rule as `INVALID_OP`; both leave an empt
 definition holding one empty paragraph, which both parsers read back as the definition, so its
 reference stays a reference). `move` relocates the block with
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
-anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
+anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`. An insert's `markdown` is
+read as text written into the document (`pmdoc.ParseFragment`), so a leading `---` line is a rule,
+as `***` is, except that a closed front-matter block is front matter where the insert lands at the
+document's start (`start`, or before the first block); the accept and the insert decide that with
+one rule (`docs.opensDocument`).
 
 A write runs on its transaction's fork of the room, so a browser change made while it is in flight
 merges with it rather than blocking it, and the merge can annihilate the write: `pmdoc.Update`
@@ -249,16 +302,16 @@ found it.
 
 Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
 splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range
-fitting (`pmdoc.Splice`). A replacement fitted into a typed block stays inside it, and a fit never
-replaces the typed block it lands in: a callout takes what its content rule allows, a code block
-included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any block at this
-step, since `Validate` lets an ask hold other blocks while a browser edit passes through. The one
-exception is a replacement holding exactly one block of the typed block's own type under its id,
-at any depth, which is that block rewritten: it replaces the block in place rather than nesting
-inside it, and the replacement's other blocks, and any it sits inside (a blockquote, a list item,
-a typed block under another id), go in the same parent, where they stand in the replacement.
-The same type under another id, or under none, is a new block and lands inside like
-any other. The accept
+fitting (`pmdoc.Splice`). A non-empty replacement fitted into a typed block stays inside it, and a
+fit never replaces the typed block it lands in: a callout takes what its content rule allows, a
+code block included (the engine oracle's `callout-paragraph-and-code` case), and an ask takes any
+block at this step, since `Validate` lets an ask hold other blocks while a browser edit passes
+through. The one exception is a replacement holding exactly one block of the typed block's own
+type under its id, at any depth, which is that block rewritten: it replaces the block in place
+rather than nesting inside it, and the replacement's other blocks, and any it sits inside (a
+blockquote, a list item, a typed block under another id), go in the same parent, where they stand
+in the replacement. The same type under another id, or under none, is a new block and lands inside
+like any other. Either way the accept keeps only what reads back as it wrote it (above). The accept
 then reads each ask by its id before and after the splice (`docs/ask_blocks.go` `askReadability`,
 `docs/marks.go` `refuseBrokenAsks`): an ask is unreadable when settlement's parse fails, when its
 children break the content rule `paragraph+ bullet_list?` (`pmdoc.AskContentError`: a paragraph

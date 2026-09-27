@@ -73,7 +73,7 @@ func TestApplyFactDeduplicatesBeforeHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("duplicate ApplyFact: %v", err)
 	}
-	if result != (Result{Duplicate: true}) {
+	if result.Duplicate != true || result.Refusal != nil || len(result.AfterCommit) != 0 {
 		t.Fatalf("duplicate result = %#v, want a duplicate with no refusal", result)
 	}
 	if got := writeCount(t, pool); got != 1 {
@@ -220,6 +220,21 @@ func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	data := capturedIssueUpdatedEnvelope(t)
 	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, data); err != nil {
 		t.Fatalf("decode captured issue.updated envelope: %v", err)
+	}
+}
+
+// An issue event's labels say whether it is handed to Legion; decodeDispatchFact resolves that
+// once, into HandedOver, matching the label in any case among any others, never carrying the raw
+// list itself.
+func TestADispatchIssueEventResolvesHandedOverFromItsLabels(t *testing.T) {
+	data := strings.Replace(string(capturedIssueUpdatedEnvelope(t)), `\"labels\":[]`, `\"labels\":[\"frontend\",\"Legion\"]`, 1)
+	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(data))
+	if err != nil {
+		t.Fatalf("decode labeled issue.updated envelope: %v", err)
+	}
+	issue, ok := got.Fact.(DispatchIssue)
+	if !ok || !issue.HandedOver {
+		t.Fatalf("fact = %#v, want a Dispatch issue with HandedOver true (labels included Legion)", got.Fact)
 	}
 }
 

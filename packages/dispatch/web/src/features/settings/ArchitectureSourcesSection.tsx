@@ -71,7 +71,7 @@ export function ArchitectureSourcesSection(): ReactNode {
   };
 
   return (
-    <section aria-labelledby="architecture-sources-heading" className="mt-10">
+    <section aria-labelledby="architecture-sources-heading">
       <h2
         className={`text-xl font-semibold ${textPrimaryOnCanvas}`}
         id="architecture-sources-heading"

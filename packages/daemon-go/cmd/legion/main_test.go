@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/registry"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
 // testMainEnv makes this package's test binary the real `legion`: with it set, TestMain is main()
@@ -328,9 +329,15 @@ func TestStateInAPaneReadsTheDaemonItNamesAndPrintsTheIssueRecord(t *testing.T) 
 
 // workflowConfig writes a Stage 3 configuration whose two GitHub Apps read their keys through a
 // private_key_command that leaves marker behind and fails: a command that ran it is seen twice
-// over, in the marker and in the refusal.
+// over, in the marker and in the refusal. The operator and Dispatch bearer files it names exist, and
+// LEGION_OMP_PATH names an executable, so the OMP invocation resolves without mise.
 func workflowConfig(t *testing.T, port int, extra string) (path, marker string) {
 	t.Helper()
+	omp, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGION_OMP_PATH", omp)
 	dir := t.TempDir()
 	marker = filepath.Join(dir, "private-key-command-ran")
 	command := "touch " + marker + "; exit 1"
@@ -338,6 +345,7 @@ func workflowConfig(t *testing.T, port int, extra string) (path, marker string) 
 port: %d
 postgres_dsn: postgres://legion:legion@127.0.0.1:1/legion
 state_dir: %s
+operator_token_file: ./operator-token
 dispatch_url: https://dispatch.test
 dispatch_token_file: ./dispatch-token
 nats_urls: [nats://127.0.0.1:4222]
@@ -348,8 +356,10 @@ github_apps:
   review: { app_id: "2", private_key_command: %q }
 %s`, port, filepath.Join(dir, "state"), command, command, extra)
 	path = filepath.Join(dir, "legion.yaml")
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatalf("write the config: %v", err)
+	for name, contents := range map[string]string{path: body, filepath.Join(dir, "operator-token"): "operator-token\n", filepath.Join(dir, "dispatch-token"): "dispatch-token\n"} {
+		if err := os.WriteFile(name, []byte(contents), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
 	}
 	return path, marker
 }
@@ -413,15 +423,179 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 	}
 }
 
-// Under runtime: kubernetes, --check-config also makes the boot's refusal of an operator pod that
-// collides with Legion's own (daemon.CheckOperatorConfig): a mount at Legion's boot projection is
-// refused naming both paths, with no App key command run.
-func TestStartCheckConfigRefusesAnOperatorPodCollidingWithLegions(t *testing.T) {
+// --check-config makes every refusal boot makes from the configuration, the environment and the
+// files they name before boot writes anything (daemon.CheckStart, which boot's prepare shares): the
+// operator bearer's file, the Dispatch bearer's file, the instructions file, the OMP invocation,
+// and the host's gh, git and jj. Each is refused in boot's words, no App key command runs, and no
+// state directory is made.
+func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 	legionState(t)
-	dir := t.TempDir()
-	marker := filepath.Join(dir, "private-key-command-ran")
-	command := "touch " + marker + "; exit 1"
-	body := fmt.Sprintf(`project: DEMO
+	for _, tc := range []struct {
+		name   string
+		extra  string
+		change func(t *testing.T, dir string)
+		says   func(dir string) string
+	}{
+		{"a missing operator token file", "", func(t *testing.T, dir string) { remove(t, filepath.Join(dir, "operator-token")) },
+			func(dir string) string {
+				return "legion start: operator_token_file names " + filepath.Join(dir, "operator-token") + ", which could not be read: "
+			}},
+		{"no operator token file", "", func(t *testing.T, dir string) {
+			rewrite(t, filepath.Join(dir, "legion.yaml"), "operator_token_file: ./operator-token\n", "")
+		},
+			func(string) string {
+				return "legion start: operator_token_file is required: the operator routes that spawn and drive claims authenticate against the bearer it names\n"
+			}},
+		{"a missing Dispatch token file", "", func(t *testing.T, dir string) { remove(t, filepath.Join(dir, "dispatch-token")) },
+			func(dir string) string {
+				return "legion start: dispatch_token_file names " + filepath.Join(dir, "dispatch-token") + ", which could not be read: "
+			}},
+		{"a missing instructions file", "instructions: ./instructions.md\n", func(*testing.T, string) {},
+			func(dir string) string {
+				return "legion start: instructions file " + filepath.Join(dir, "instructions.md") + " could not be read: "
+			}},
+		{"no OMP invocation", "", func(t *testing.T, _ string) { t.Setenv("LEGION_OMP_PATH", "") },
+			func(string) string {
+				return "legion start: omp_invocation is not set: set it to 'mise x <tool> -- omp', or set LEGION_OMP_PATH to an absolute executable path\n"
+			}},
+		{"a relative LEGION_GIT_PATH", "", func(t *testing.T, _ string) { t.Setenv("LEGION_GIT_PATH", "bin/git") },
+			func(string) string {
+				return `legion start: LEGION_GIT_PATH is not an absolute executable path: "bin/git"` + "\n"
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config, marker := workflowConfig(t, 13370, tc.extra)
+			dir := filepath.Dir(config)
+			tc.change(t, dir)
+
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+
+			if want := tc.says(dir); code != 1 || out.Len() != 0 || !strings.HasPrefix(errb.String(), want) {
+				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1 and stderr starting %q", code, out.String(), errb.String(), want)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("the private_key_command ran (marker stat: %v)", err)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "state")); !os.IsNotExist(err) {
+				t.Fatalf("the check created the state directory (stat: %v)", err)
+			}
+		})
+	}
+}
+
+func remove(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func rewrite(t *testing.T, path, old, replacement string) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(body), old) {
+		t.Fatalf("%s does not hold %q (%v)", path, old, err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(body), old, replacement, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// --check-config reads every launch secret the way boot does (daemon.CheckStart): the Envoy
+// bearer's file, and the NATS nkey seed (natsauth.Seed: the key's file over both variables, a file
+// the daemon owns held to 0600, a user's nkey seed or nothing). A file boot
+// would refuse fails the check with boot's refusal, and one it would take passes, the OK line
+// naming the seed's public key and never the seed.
+func TestStartCheckConfigReadsTheLaunchSecretsAsBootDoes(t *testing.T) {
+	legionState(t)
+	seed, public := testnats.User(t)
+	const seedKey, envoyKey = "nats_nkey_seed_file", "envoy_token_file"
+	for _, tc := range []struct {
+		name     string
+		key      string
+		contents string
+		mode     os.FileMode
+		refusal  func(path string) string
+	}{
+		{"a missing Envoy token file", envoyKey, "", 0, func(path string) string { return "envoy_token_file names " + path + ", which could not be read: " }},
+		{"a blank Envoy token file", envoyKey, " \n", 0o600, func(path string) string { return "envoy_token_file names " + path + ", which is empty\n" }},
+		{"an Envoy token file", envoyKey, "envoy-token\n", 0o600, nil},
+		{"a missing seed file", seedKey, "", 0, func(path string) string { return "nats_nkey_seed_file names " + path + ", which could not be read: " }},
+		{"a seed file others can read", seedKey, seed + "\n", 0o644, func(path string) string {
+			return "nats_nkey_seed_file " + path + " is readable by its group or others (mode 0644); chmod 0600 it\n"
+		}},
+		{"a group-readable seed file the daemon owns", seedKey, seed + "\n", 0o640, func(path string) string {
+			return "nats_nkey_seed_file " + path + " is readable by its group or others (mode 0640); chmod 0600 it\n"
+		}},
+		{"a seed file holding no seed", seedKey, "SUNOTASEED\n", 0o600, func(path string) string {
+			return "nats_nkey_seed_file (" + path + ") does not hold a valid nkey seed"
+		}},
+		{"a user seed", seedKey, seed + "\n", 0o600, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config, marker := workflowConfig(t, 13370, tc.key+": ./secret\n")
+			path := filepath.Join(filepath.Dir(config), "secret")
+			if tc.mode != 0 {
+				if err := os.WriteFile(path, []byte(tc.contents), tc.mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, tc.mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.key == seedKey {
+				t.Setenv("NATS_NKEY_SEED", "hunter2") // the key's file outranks it, as at boot
+			}
+
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+
+			if strings.Contains(out.String()+errb.String(), seed) {
+				t.Fatalf("the check printed the seed: stdout %q stderr %q", out.String(), errb.String())
+			}
+			want := "Config OK: project=DEMO\n"
+			if tc.key == seedKey {
+				want = "Config OK: project=DEMO nats-nkey-user=" + public + "\n"
+			}
+			if tc.refusal == nil {
+				if code != 0 || out.String() != want || errb.Len() != 0 {
+					t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+				}
+			} else if want := "legion start: " + tc.refusal(path); code != 1 || out.Len() != 0 || !strings.HasPrefix(errb.String(), want) {
+				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1 and stderr starting %q", code, out.String(), errb.String(), want)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("the private_key_command ran (marker stat: %v)", err)
+			}
+		})
+	}
+}
+
+// Under runtime: kubernetes, --check-config also makes boot's refusals of the runtime: an operator
+// pod that collides with Legion's own (a mount at Legion's boot projection, refused naming both
+// paths), and a kubeconfig that cannot be read — with no App key command run.
+func TestStartCheckConfigRefusesWhatTheSandboxRuntimeRefuses(t *testing.T) {
+	legionState(t)
+	for _, tc := range []struct {
+		name, runtime string
+		says          func(dir string) string
+	}{
+		{"an operator pod colliding with Legion's", `    pod:
+      volumes: [{name: creds, secret: {name: legion-creds}}]
+      volume_mounts: [{volume: creds, mount_path: /var/run/legion/boot}]
+`, func(string) string {
+			return "legion start: runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/boot overlaps /var/run/legion/boot, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's\n"
+		}},
+		{"a kubeconfig that cannot be read", "    kubeconfig: ./kubeconfig\n", func(dir string) string {
+			return "legion start: read runtime.kubernetes.kubeconfig " + filepath.Join(dir, "kubeconfig") + ": "
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "private-key-command-ran")
+			command := "touch " + marker + "; exit 1"
+			body := fmt.Sprintf(`project: DEMO
 postgres_dsn: postgres://legion:legion@127.0.0.1:1/legion
 state_dir: %s
 bind: 10.0.0.5
@@ -442,22 +616,27 @@ runtime:
     namespace: legion
     image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     storage_class: gp2
-    pod:
-      volumes: [{name: creds, secret: {name: legion-creds}}]
-      volume_mounts: [{volume: creds, mount_path: /var/run/legion/boot}]
-`, filepath.Join(dir, "state"), command, command)
-	config := filepath.Join(dir, "legion.yaml")
-	if err := os.WriteFile(config, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var out, errb bytes.Buffer
-	code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-	want := "legion start: runtime.kubernetes.pod.volume_mounts[0].mount_path /var/run/legion/boot overlaps /var/run/legion/boot, which Legion mounts in every pod: a mount may be neither at, under, nor above one of Legion's\n"
-	if code != 1 || errb.String() != want || out.Len() != 0 {
-		t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1 and %q", code, out.String(), errb.String(), want)
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("the private_key_command ran (marker stat: %v)", err)
+%s`, filepath.Join(dir, "state"), command, command, tc.runtime)
+			config := filepath.Join(dir, "legion.yaml")
+			for name, contents := range map[string]string{config: body, "envoy-token": "envoy\n", "operator-token": "operator\n", "dispatch-token": "dispatch\n"} {
+				if !filepath.IsAbs(name) {
+					name = filepath.Join(dir, name)
+				}
+				if err := os.WriteFile(name, []byte(contents), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+
+			if want := tc.says(dir); code != 1 || out.Len() != 0 || !strings.HasPrefix(errb.String(), want) {
+				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1 and stderr starting %q", code, out.String(), errb.String(), want)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("the private_key_command ran (marker stat: %v)", err)
+			}
+		})
 	}
 }
 

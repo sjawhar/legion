@@ -30,7 +30,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
-	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -345,46 +344,26 @@ type plan struct {
 // workflow's App tokens, nil without a workflow.
 type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens) (runtime.Runtime, error)
 
-// prepare is every refusal that needs nothing but the configuration and the machine: the operator
-// bearer the spawn surface authenticates against, the Envoy bearer and the NATS nkey seed every
-// agent is handed, the operator's deployment instructions, and then what the runtime needs — all
-// before the plugin gate runs and before any agent can launch.
+// prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
+// then what writes or runs something: the state directory, the instructions copy, and what the
+// runtime needs) — all before the plugin gate runs and before any agent can launch.
 func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
-	project, err := claim.ProjectToken(cfg.Project)
+	getenv := o.getenv
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	// A test that replaced the runtime runs no host Oh My Pi, so boot resolves no OMP invocation.
+	hostOMP := o.runtime == nil
+	reads, err := readBoot(cfg, environLookup(o.environment()), getenv, hostOMP, log)
 	if err != nil {
 		return plan{}, err
-	}
-	if cfg.OperatorTokenFile == "" {
-		return plan{}, errors.New("operator_token_file is required: the operator routes that spawn and drive claims authenticate against the bearer it names")
-	}
-	operatorToken, err := config.ReadSecretPointer("operator_token_file", cfg.OperatorTokenFile)
-	if err != nil {
-		return plan{}, err
-	}
-	lookup := environLookup(o.environment())
-	if err := CheckOperatorConfig(cfg, lookup); err != nil {
-		return plan{}, err
-	}
-	secrets := map[string]string{}
-	for _, secret := range launchSecrets(cfg, lookup) {
-		value, err := secret.read()
-		if err != nil {
-			return plan{}, err
-		}
-		secrets[secret.name] = value
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
 	}
 	instructions := ""
-	if cfg.InstructionsPath != "" {
-		if instructions, err = config.MaterializeDeploymentInstructions(cfg.InstructionsPath, cfg.StateDir, cfg.Project); err != nil {
-			return plan{}, err
-		}
-	}
-	dispatchToken := ""
-	if cfg.DispatchURL != "" {
-		if dispatchToken, err = config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile); err != nil {
+	if reads.instructions != nil {
+		if instructions, err = config.WriteDeploymentInstructions(reads.instructions, cfg.StateDir, cfg.Project); err != nil {
 			return plan{}, err
 		}
 	}
@@ -397,25 +376,15 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if orphanSweep == 0 {
 		orphanSweep = orphanSweepInterval
 	}
-	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
-	if err != nil {
-		return plan{}, fmt.Errorf("resolve role prompts: %w", err)
-	}
-	roleReferences, err := promptrefs.Roles(rolesDir)
-	if err != nil {
-		return plan{}, err
-	}
 	p := plan{
-		project: project, operatorToken: operatorToken, secrets: secrets, instructions: instructions,
-		dispatchToken: dispatchToken, rolesDir: rolesDir, roleReferences: roleReferences, clock: clock, orphanSweep: orphanSweep,
+		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, instructions: instructions,
+		dispatchToken: reads.dispatchToken, rolesDir: reads.rolesDir, roleReferences: reads.roleReferences,
+		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
 	}
-	switch cfg.Runtime.Name {
-	case "tmux":
-		err = prepareTmux(cfg, log, o, dispatchToken, &p)
-	case "kubernetes":
-		err = prepareSandbox(cfg, log, o, dispatchToken, &p)
-	default:
-		err = fmt.Errorf("runtime %q is neither tmux nor kubernetes", cfg.Runtime.Name)
+	if cfg.Runtime.Name == "kubernetes" {
+		err = prepareSandbox(cfg, o, reads.sandbox, &p)
+	} else {
+		err = prepareTmux(cfg, log, o, reads.dispatchToken, reads.tmux.invocation, &p)
 	}
 	if err != nil {
 		return plan{}, err
@@ -423,23 +392,14 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	return p, nil
 }
 
-// prepareTmux is what panes on this host need: the OMP invocation every pane runs and the plugin
-// gate on it, the Dispatch bearer written where every pane reads it, the provider keys resolved
-// from secretsd into the files every pane's shim reads, and the host's gh, git, and jj. The worker
-// stream is a unix socket under the state directory (decision 2 — no configuration key).
-func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, p *plan) error {
+// prepareTmux is what panes on this host need beyond readBoot's: the plugin gate on the OMP
+// invocation readBoot resolved, the Dispatch bearer written where every pane reads it, and the
+// provider keys resolved from secretsd into the files every pane's shim reads. The worker stream is
+// a unix socket under the state directory (decision 2 — no configuration key).
+func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken, invocation string, p *plan) error {
 	p.newRuntime, p.gate = o.runtime, o.gate
 	p.stream = "unix://" + filepath.Join(cfg.StateDir, streamSocket)
-	invocation := ""
 	if p.newRuntime == nil {
-		getenv := o.getenv
-		if getenv == nil {
-			getenv = os.Getenv
-		}
-		var err error
-		if invocation, err = omplaunch.ResolveInvocation(cfg.OmpInvocation, getenv); err != nil {
-			return err
-		}
 		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)
 	}
 	dispatchTokenFile := ""
@@ -451,16 +411,9 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 	}
 	// Last of the refusals: resolving a human-tier key may cost a YubiKey tap, which a
 	// configuration refused a line earlier should never have asked for.
-	environ := o.environment()
-	providerEnvDir, err := config.MaterializeProviderKeys(cfg.ProviderKeys, cfg.StateDir, environ, log)
+	providerEnvDir, err := config.MaterializeProviderKeys(cfg.ProviderKeys, cfg.StateDir, o.environment(), log)
 	if err != nil {
 		return err
-	}
-	// Only a configuration with a repository runs Legion's own gh, git, and jj.
-	if _, ok := cfg.Projects[cfg.Project]; ok {
-		if p.tools, err = resolveTools(func(name string) (string, bool) { return envValue(environ, name) }); err != nil {
-			return err
-		}
 	}
 	if p.newRuntime == nil {
 		env, err := gateEnvironment(os.Environ(), cfg.StateDir, providerEnvDir)
@@ -789,8 +742,10 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var client dispatch.Client
 	var tokens appauth.Tokens
 	var grants *credential.Grants
+	var claimReady func(supervise.Claim)
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
+		claimReady = workflow.claimReady
 	}
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
@@ -817,6 +772,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Tokens:            tokens,
 		GitHubOwner:       githubOwner(cfg),
 		Grants:            grants,
+		ClaimReady:        claimReady,
 	})
 
 	group, serving := errgroup.WithContext(ctx)
