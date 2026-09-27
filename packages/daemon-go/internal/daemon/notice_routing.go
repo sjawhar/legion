@@ -178,7 +178,7 @@ func (r *outbox) claimState(token claim.Token) supervise.ClaimState {
 // architect is suspended until re-admission, which starts it with the tree's record rather than the
 // notices of its close.
 func architectEnded(tree treeSnapshot, state supervise.ClaimState) string {
-	if tree.root.LingerUntil != nil {
+	if tree.root.Lingers() {
 		return "its tree lingers or has closed"
 	}
 	if claimEnded(state) {
