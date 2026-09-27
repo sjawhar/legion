@@ -95,3 +95,68 @@ func TestMigrationFiveShapesTheRecordTables(t *testing.T) {
 		}
 	}()
 }
+
+func TestMigrationFiveHandlesPreexistingLauncherCredentialsRow(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, testDatabaseURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Pool.Close()
+
+	// Migration 0005 adds NOT NULL columns to launcher_credentials, a table migration 0001
+	// created, not 0005 itself. Postgres refuses ALTER TABLE ... ADD COLUMN ... NOT NULL with no
+	// DEFAULT the instant the table holds even one row - exactly the state every deployed v8
+	// launcher credential leaves behind. This applies 0001-0004 by hand inside an isolated
+	// schema (dropped on rollback, so it can never collide with the shared long-lived database's
+	// own already-migrated public schema), inserts a v8-shaped row against that schema, then
+	// runs 0005 and confirms it both succeeds and clears the table - the exact scenario every
+	// other test misses, since Migrate always starts from an empty database.
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `create schema migration_five_fix`); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `set local search_path to migration_five_fix`); err != nil {
+		t.Fatalf("set search_path: %v", err)
+	}
+
+	for _, version := range []string{
+		"0001_init.up.sql",
+		"0002_launcher_request_service.up.sql",
+		"0003_enrollment_subject.up.sql",
+		"0004_ask_retraction.up.sql",
+	} {
+		sql, err := migrationFiles.ReadFile("migrations/" + version)
+		if err != nil {
+			t.Fatalf("read %s: %v", version, err)
+		}
+		if _, err := tx.Exec(ctx, string(sql)); err != nil {
+			t.Fatalf("apply %s: %v", version, err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `insert into launcher_credentials (id, host, token_hash) values (gen_random_uuid(), 'launcher.example.com', 'x')`); err != nil {
+		t.Fatalf("insert v8-shaped launcher_credentials row: %v", err)
+	}
+
+	sql, err := migrationFiles.ReadFile("migrations/0005_credential_requests.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, string(sql)); err != nil {
+		t.Fatalf("migration 0005 should succeed against a pre-existing launcher_credentials row: %v", err)
+	}
+
+	var n int
+	if err := tx.QueryRow(ctx, `select count(*) from launcher_credentials`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expected migration 0005 to delete the pre-existing row, got %d remaining", n)
+	}
+}

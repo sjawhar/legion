@@ -133,9 +133,11 @@ approvers:
 		Approvers: approversSvc, MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
+	reqMachine.Chain = requests.NewChainVerifier(st, approversSvc, srv.URL, time.Minute)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Approvers: approversSvc, Rules: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
+		Replay: enr.Replay,
 	}
 	api.Register(mux, api.Deps{
 		PublicURL: srv.URL, UIOrigin: testOrigin, UIToken: testUIToken,

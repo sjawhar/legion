@@ -80,6 +80,7 @@ func newFixture(t *testing.T) (*Service, *webauthntest.Authenticator) {
 	svc := &Service{
 		Store: st, Enroll: enr, Approvers: approversSvc, Rules: cur,
 		Audience: testAudience, Skew: time.Minute, PendingTTL: 10 * time.Minute, CredentialLifetime: 24 * time.Hour,
+		Replay: enr.Replay,
 	}
 	return svc, auth
 }
@@ -212,6 +213,25 @@ func TestApproveWithWrongCodeRefuses(t *testing.T) {
 
 	if _, _, err := svc.ApplyDecision(ctx, view.RecordID, true, assertion, "WRONG-CODE"); !errors.Is(err, ErrCodeMismatch) {
 		t.Fatalf("ApplyDecision(wrong code) = %v, want ErrCodeMismatch", err)
+	}
+}
+
+// TestLoginRefusesAReplayedRequestObject pins that a captured signed machine-login request
+// object cannot be resubmitted: Login checks the object's own jti through the same Replay seam
+// requests.Machine.Create uses (proof_jtis), so a second submission of the identical request
+// object within its freshness window is refused rather than minting a second pending record and
+// confirmation code each time — a confirmation-fatigue/notification-spam vector against the
+// named operator, since the record's code differs every call even with a byte-identical request.
+func TestLoginRefusesAReplayedRequestObject(t *testing.T) {
+	svc, _ := newFixture(t)
+	ctx := context.Background()
+
+	compact := signMachineLogin(t, "sjawhar", "sami-agents", "")
+	if _, _, err := svc.Login(ctx, compact); err != nil {
+		t.Fatalf("first Login: %v", err)
+	}
+	if _, _, err := svc.Login(ctx, compact); !errors.Is(err, record.ErrRequestInvalid) {
+		t.Fatalf("second Login with the same request object = %v, want record.ErrRequestInvalid (replayed jti)", err)
 	}
 }
 

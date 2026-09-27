@@ -207,6 +207,7 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 		Skew:       time.Minute,
 		Replay:     replayer(st),
 	}
+	m.Chain = NewChainVerifier(st, approversSvc, testAudience, time.Minute)
 	return m, enrollmentID, requesterKey, auth
 }
 
@@ -744,6 +745,7 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 		Skew:       time.Minute,
 		Replay:     replayer(st),
 	}
+	m.Chain = NewChainVerifier(st, approversSvc, testAudience, time.Minute)
 
 	// The operator's own key may revoke an automatic grant it never personally approved; mallory,
 	// neither its approver nor its operator, may not.

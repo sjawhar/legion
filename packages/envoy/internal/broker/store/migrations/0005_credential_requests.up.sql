@@ -63,6 +63,11 @@ create table if not exists webauthn_ceremonies (
   expires_at timestamptz not null
 );
 
+-- Every v8 launcher credential is authentication-dead under the new key-bound scheme (there is
+-- no way to derive key_thumbprint/public_jwk from an old bearer-token row), so clear the table
+-- before adding NOT NULL columns: Postgres refuses ALTER TABLE ... ADD COLUMN ... NOT NULL with
+-- no DEFAULT the instant the table holds even one existing row.
+delete from launcher_credentials;
 alter table launcher_credentials drop column token_hash;
 alter table launcher_credentials add column key_thumbprint text not null;
 alter table launcher_credentials add column public_jwk jsonb not null;

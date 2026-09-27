@@ -52,7 +52,19 @@ type Service struct {
 	Skew               time.Duration
 	PendingTTL         time.Duration
 	CredentialLifetime time.Duration
+
+	// Replay records a request object's jti (the proof_jtis table), answering false when it was
+	// already seen. Wired to enroll.Service.Replay in production, exactly like
+	// requests.Machine.Replay: without it a captured signed machine-login request object could be
+	// resubmitted repeatedly within its freshness window, each call minting a fresh pending record
+	// and confirmation code — a confirmation-fatigue/notification-spam vector against the named
+	// operator.
+	Replay func(ctx context.Context, jti string, expires time.Time) (fresh bool, err error)
 }
+
+// jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
+// proof.Verifier's and requests.Machine's own retention margin.
+const jtiRetentionMargin = time.Minute
 
 // confirmationAlphabet has 32 symbols, none easily confused with another (no 0/O, no 1/I), so a
 // random byte maps onto it without bias. Moved here verbatim from the deleted launcher package.
@@ -125,6 +137,13 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 	}
 	if len(obj.Details) != 1 || obj.Details[0].Type != "launcher_credential" {
 		return "", "", fmt.Errorf("%w: exactly one launcher_credential detail is required", record.ErrRequestInvalid)
+	}
+	fresh, err := s.Replay(ctx, obj.JTI, obj.Expires.Add(s.Skew+jtiRetentionMargin))
+	if err != nil {
+		return "", "", err
+	}
+	if !fresh {
+		return "", "", fmt.Errorf("%w: replayed jti", record.ErrRequestInvalid)
 	}
 
 	code, err = confirmationCode()

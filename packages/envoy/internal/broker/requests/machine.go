@@ -89,6 +89,57 @@ type Machine struct {
 	// Replay records a request object's jti (the proof_jtis table), answering false when it was
 	// already seen. Wired to enroll.Service.Replay in production.
 	Replay func(ctx context.Context, jti string, expires time.Time) (fresh bool, err error)
+	// Chain re-verifies a grant's whole approval chain on every release (VerifyChain): the same
+	// record.ChainVerifier machinery enroll.Service.AuthenticateLauncher uses for launcher
+	// credentials, built by NewChainVerifier against agent_secret records instead.
+	Chain *record.ChainVerifier
+}
+
+// NewChainVerifier builds the record.ChainVerifier VerifyChain uses, scoped to agent_secret
+// records, mirroring enroll.NewChainVerifier's own construction against launcher_credential
+// records: FetchRecord and FetchApproval read straight from Postgres, and VerifyAssertion
+// re-runs the approver's real WebAuthn signature check inside a transaction it always rolls
+// back, treating only approvers.ErrCounterReplay as success (the original decision already
+// advanced that same authenticator's counter for real; see record.ChainVerifier's own doc).
+func NewChainVerifier(st *store.Store, approversSvc *approvers.Service, audience string, skew time.Duration) *record.ChainVerifier {
+	return &record.ChainVerifier{
+		Audience: audience,
+		Skew:     skew,
+		FetchRecord: func(ctx context.Context, recordID string) (string, time.Time, bool, error) {
+			var body string
+			var createdAt time.Time
+			err := st.Pool.QueryRow(ctx, `select body, created_at from credential_requests where id=$1 and kind='agent_secret'`, recordID).Scan(&body, &createdAt)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return "", time.Time{}, false, nil
+			}
+			if err != nil {
+				return "", time.Time{}, false, err
+			}
+			return body, createdAt, true, nil
+		},
+		FetchApproval: func(ctx context.Context, recordID string) (json.RawMessage, bool, error) {
+			var assertion json.RawMessage
+			err := st.Pool.QueryRow(ctx, `select assertion from credential_request_events where record_id=$1 and event='approved'`, recordID).Scan(&assertion)
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, false, nil
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			return assertion, true, nil
+		},
+		VerifyAssertion: func(ctx context.Context, login string, challenge [32]byte, assertion json.RawMessage) error {
+			tx, err := st.Pool.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(ctx)
+			if _, err := approversSvc.VerifyAssertion(ctx, tx, login, challenge, assertion); err != nil && !errors.Is(err, approvers.ErrCounterReplay) {
+				return err
+			}
+			return nil
+		},
+	}
 }
 
 type enrollmentRow struct {
@@ -494,7 +545,9 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 
 // verifyRecordBody re-parses a credential_requests row's stored body and confirms it still hashes
 // to its own id. The append-only trigger should make a mismatch unreachable outside a direct
-// database tamper; every reader checks it rather than trusting the row blindly.
+// database tamper; ApplyDecision checks it before deciding a record rather than trusting the row
+// blindly. VerifyChain's own re-verification goes through the shared record.ChainVerifier instead
+// (m.Chain), which reproduces this same check as part of its larger chain.
 func verifyRecordBody(recordID, body string) (record.Body, error) {
 	parsed, err := record.ParseBody(body)
 	if err != nil || parsed.ID() != recordID {
@@ -504,11 +557,15 @@ func verifyRecordBody(recordID, body string) (record.Body, error) {
 }
 
 // VerifyChain re-verifies a grant's whole approval chain against whatever is true right now, not
-// just what was true when the grant was minted: the record's stored body still hashes to its own
-// id, its embedded request object still verifies, and its single approval event's stored assertion
-// still verifies against the pinned key material for its approver — a tampered row, a forged grant
-// with no approval event, or a since-revoked approving key all fail here. An automatic grant (no
-// record_id) needs none of this and always passes. Called by Values and reuseLiveGrant.
+// just what was true when the grant was minted, through the shared record.ChainVerifier
+// machinery (m.Chain, built by NewChainVerifier): the record's stored body still hashes to its
+// own id, its embedded request object still verifies, and its single approval event's stored
+// assertion still verifies against the pinned key material for its approver — a tampered row, a
+// forged grant with no approval event, or a since-revoked approving key all fail here. An
+// automatic grant (no record_id) needs none of this and always passes. Called by Values and
+// reuseLiveGrant. A genuine dependency failure inside m.Chain.Verify (a Postgres error from
+// FetchRecord or FetchApproval) is returned as-is rather than folded into ErrGrantChainInvalid;
+// only record.ErrChainBroken — every reason the chain itself does not verify — is wrapped.
 func (m *Machine) VerifyChain(ctx context.Context, grantID string) error {
 	var recordID *string
 	if err := m.Store.Pool.QueryRow(ctx, `select r.record_id from grants g join requests r on r.id=g.request_id where g.id=$1`, grantID).Scan(&recordID); err != nil {
@@ -517,35 +574,11 @@ func (m *Machine) VerifyChain(ctx context.Context, grantID string) error {
 	if recordID == nil {
 		return nil
 	}
-	var body, approver string
-	var createdAt time.Time
-	if err := m.Store.Pool.QueryRow(ctx, `select body, approver, created_at from credential_requests where id=$1`, *recordID).Scan(&body, &approver, &createdAt); err != nil {
+	if _, err := m.Chain.Verify(ctx, *recordID); err != nil {
+		if errors.Is(err, record.ErrChainBroken) {
+			return fmt.Errorf("%w: %s", ErrGrantChainInvalid, err)
+		}
 		return err
-	}
-	parsed, err := verifyRecordBody(*recordID, body)
-	if err != nil {
-		return err
-	}
-	if _, err := record.VerifyRequestObject(parsed.Request, m.Audience, m.Skew, createdAt); err != nil {
-		return fmt.Errorf("%w: request object no longer verifies: %s", ErrGrantChainInvalid, err)
-	}
-	var assertion json.RawMessage
-	err = m.Store.Pool.QueryRow(ctx, `select assertion from credential_request_events where record_id=$1 and event='approved'`, *recordID).Scan(&assertion)
-	if errors.Is(err, pgx.ErrNoRows) || len(assertion) == 0 {
-		return fmt.Errorf("%w: no approval event on this record", ErrGrantChainInvalid)
-	}
-	if err != nil {
-		return err
-	}
-	tx, err := m.Store.Pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) // read-only re-verification; never commits a sign_count bump
-	if _, err := m.Approvers.VerifyAssertion(ctx, tx, approver, record.ApproveChallenge(*recordID), assertion); err != nil && !errors.Is(err, approvers.ErrCounterReplay) {
-		// ErrCounterReplay is expected and harmless here: we are re-checking the exact historical
-		// assertion the deciding transaction already consumed, not authorizing a new action.
-		return fmt.Errorf("%w: approver assertion no longer verifies: %s", ErrGrantChainInvalid, err)
 	}
 	return nil
 }

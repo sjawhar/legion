@@ -113,16 +113,17 @@ func newE2EServer(t *testing.T, ca *webauthntest.CA, seedKey approvers.KeyEntry)
 	enr := &enroll.Service{Store: st, Lease: time.Hour}
 	enr.Chain = enroll.NewChainVerifier(st, approversSvc, srv.URL, time.Minute)
 
-	// onReload mirrors main.go's own hook precisely: reconcile the freshly parsed approvers
-	// section against the persisted key set before adopting it, then refuse the reload (keeping
-	// the previous rules) if the file's declared origin no longer matches this broker's
-	// configured UI origin.
+	// onReload mirrors main.go's own hook precisely: check the file's declared origin against
+	// this broker's configured UI origin first, and only reconcile the freshly parsed approvers
+	// section against the persisted key set once that passes. approversSvc.Reconcile commits its
+	// own transaction unconditionally on success, so reconciling before the origin check would
+	// permanently persist key-set changes from a rules file this reload is about to refuse.
 	onReload := func(set *rules.Set) error {
-		if err := approversSvc.Reconcile(context.Background(), set.Approvers.Logins); err != nil {
-			return err
-		}
 		if set.Approvers.Origin != testOrigin {
 			return fmt.Errorf("rules approvers.origin %q does not match configured origin %q", set.Approvers.Origin, testOrigin)
+		}
+		if err := approversSvc.Reconcile(context.Background(), set.Approvers.Logins); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -138,9 +139,11 @@ func newE2EServer(t *testing.T, ca *webauthntest.CA, seedKey approvers.KeyEntry)
 		Approvers: approversSvc, MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
+	reqMachine.Chain = requests.NewChainVerifier(st, approversSvc, srv.URL, time.Minute)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Approvers: approversSvc, Rules: current,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
+		Replay: enr.Replay,
 	}
 
 	api.Register(mux, api.Deps{

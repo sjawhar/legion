@@ -134,12 +134,19 @@ func main() {
 	// keeps the previous rules — when the file's own declared origin no longer matches the
 	// deployed BROKER_UI_ORIGIN, since every registration and assertion this broker verifies is
 	// checked against that one origin.
+	// Order matters: a refused reload must leave every persisted key-set change undone too, not
+	// just the in-memory *rules.Set. approversSvc.Reconcile commits its own transaction
+	// unconditionally on success, so the origin check — the thing that decides whether this
+	// reload is refused at all — must run first. Reconciling before checking the origin would
+	// permanently persist endorsement/seed/tombstone changes from a rules file whose origin
+	// doesn't match BROKER_UI_ORIGIN, even though rules.NewCurrent's caller is told "reload
+	// refused, previous rules kept."
 	onReload := func(set *rules.Set) error {
-		if err := approversSvc.Reconcile(ctx, set.Approvers.Logins); err != nil {
-			return err
-		}
 		if set.Approvers.Origin != cfg.UIOrigin {
 			return fmt.Errorf("rules approvers.origin %q does not match BROKER_UI_ORIGIN %q", set.Approvers.Origin, cfg.UIOrigin)
+		}
+		if err := approversSvc.Reconcile(ctx, set.Approvers.Logins); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -152,10 +159,12 @@ func main() {
 		MaxGrant: time.Duration(cfg.MaxGrantSeconds) * time.Second, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: enr.Replay,
 	}
+	reqMachine.Chain = requests.NewChainVerifier(st, approversSvc, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Approvers: approversSvc, Rules: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
 		PendingTTL: machineLoginPendingTTL, CredentialLifetime: time.Duration(cfg.LauncherCredentialSeconds) * time.Second,
+		Replay: enr.Replay,
 	}
 
 	var waker func(context.Context, string, string, string)
