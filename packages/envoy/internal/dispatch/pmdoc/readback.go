@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"slices"
@@ -44,22 +45,32 @@ func ReadBack(doc *Node) (*Node, error) {
 // another value anywhere (a table cell's alignment) is not compared. A before whose markdown the
 // parser refuses (a browser edit can leave one) gives nothing to judge against, and is "" whether
 // or not after parses: the checks that read each changed block alone still refuse one the write
-// leaves unreadable.
-func NewMisread(before, after *Node) string {
+// leaves unreadable. A panic reading either back (ErrPanic) is this package's bug, not a misread,
+// and is the error.
+func NewMisread(before, after *Node) (string, error) {
 	backAfter, err := ReadBack(after)
+	if errors.Is(err, ErrPanic) {
+		return "", err
+	}
 	if err != nil {
 		if _, beforeErr := ReadBack(before); beforeErr != nil {
-			return ""
+			if errors.Is(beforeErr, ErrPanic) {
+				return "", beforeErr
+			}
+			return "", nil
 		}
-		return err.Error()
+		return err.Error(), nil
 	}
 	written := StripAnchorMarks(after)
 	if readDifference(written, backAfter, skip{}) == "" {
-		return ""
+		return "", nil
 	}
 	backBefore, err := ReadBack(before)
+	if errors.Is(err, ErrPanic) {
+		return "", err
+	}
 	if err != nil {
-		return ""
+		return "", nil
 	}
 	previous := StripAnchorMarks(before)
 	drift := skip{names: attributeDrift(previous, backBefore)}
@@ -70,10 +81,10 @@ func NewMisread(before, after *Node) string {
 	}
 	for _, found := range misreads(written, backAfter, drift) {
 		if found.id == "" || !known[sameMisread{found.id, found.differs}] {
-			return found.reason
+			return found.reason, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // misread is a block that reads back otherwise: its id, what differs (the same for the same

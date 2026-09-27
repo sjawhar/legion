@@ -95,9 +95,13 @@ func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textb
 // emptied to `- [ ]`, which reads back as a plain item. A block that already read back otherwise
 // the same way before the accept, the one it changed included, is not the accept's. The checks
 // before it read one block at a time; this one reads the blocks beside each other. The refusal
-// names what reads back and advises rejecting.
+// names what reads back and advises rejecting. A panic reading the document back (pmdoc.ErrPanic)
+// is pmdoc's bug, and is its error.
 func refuseMisreadAccept(before, after *pmdoc.Node, with string) error {
-	misread := pmdoc.NewMisread(before, after)
+	misread, err := pmdoc.NewMisread(before, after)
+	if err != nil {
+		return err
+	}
 	if misread == "" {
 		return nil
 	}

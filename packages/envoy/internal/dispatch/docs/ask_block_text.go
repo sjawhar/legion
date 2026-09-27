@@ -178,6 +178,9 @@ func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error
 
 	if edit.Question != nil {
 		rebuilt, err := parsedBlockBody(questionParagraphs(normalizeAskQuestion(*edit.Question)))
+		if errors.Is(err, pmdoc.ErrPanic) {
+			return nil, err
+		}
 		if err != nil {
 			return nil, &ErrAskBlockUnrepresentable{Field: "question", Reason: err.Error()}
 		}
@@ -200,6 +203,9 @@ func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error
 		list = nil
 		if len(options) > 0 {
 			rebuilt, err := parsedBlockBody([]*pmdoc.Node{optionList(options)})
+			if errors.Is(err, pmdoc.ErrPanic) {
+				return nil, err
+			}
 			if err != nil {
 				return nil, &ErrAskBlockUnrepresentable{Field: "options", Reason: err.Error()}
 			}
@@ -222,13 +228,20 @@ func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error
 
 // parsedBlockBody is what the document's own markdown pipeline makes of nodes: rendering escapes
 // the text so it reads back literally, and parsing supplies the attributes and block ids a
-// hand-built node has no business inventing.
+// hand-built node has no business inventing. A panic doing either (pmdoc.ErrPanic) is returned as
+// it is, since it is pmdoc's bug rather than a reason the text cannot be held.
 func parsedBlockBody(nodes []*pmdoc.Node) ([]*pmdoc.Node, error) {
 	markdown, err := renderTree(&pmdoc.Node{Type: "doc", Children: nodes})
+	if errors.Is(err, pmdoc.ErrPanic) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, fmt.Errorf("the text cannot be written as document markdown: %w", err)
 	}
 	parsed, err := pmdoc.Parse(markdown)
+	if errors.Is(err, pmdoc.ErrPanic) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, errors.New("the text would leave the document's markdown unreadable")
 	}
@@ -237,7 +250,8 @@ func parsedBlockBody(nodes []*pmdoc.Node) ([]*pmdoc.Node, error) {
 
 // verifyAskBlockRoundTrip reads the written block back the ways the rest of Dispatch reads it -
 // settlement's own parser, and, when this edit rewrote text, the canonical markdown a version
-// records and an upload re-parses - and reports the first that does not return want.
+// records and an upload re-parses - and reports the first that does not return want. A panic
+// writing or reading it (pmdoc.ErrPanic) is pmdoc's bug, and is returned as it is.
 func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText, wroteBody bool) error {
 	block, err := askBlockOf(next, blockID)
 	if err != nil {
@@ -250,10 +264,16 @@ func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText
 		return nil
 	}
 	markdown, err := renderTree(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{block.node}})
+	if errors.Is(err, pmdoc.ErrPanic) {
+		return err
+	}
 	if err != nil {
 		return &ErrAskBlockUnrepresentable{Field: "block", Reason: "the text cannot be written as document markdown"}
 	}
 	rendered, err := pmdoc.Parse(markdown)
+	if errors.Is(err, pmdoc.ErrPanic) {
+		return err
+	}
 	if err != nil {
 		return &ErrAskBlockUnrepresentable{
 			Field:  "block",
