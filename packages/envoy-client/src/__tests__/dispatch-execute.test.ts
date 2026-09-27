@@ -3071,6 +3071,26 @@ describe("executeDispatchTool", () => {
       }
       throw new Error(`unexpected request: ${request.pathname}`);
     }) as typeof fetch;
+  /** Dispatch's issue route for DSP-42, whose primary document is `spec` and which carries
+   * `artifacts` besides, and the text and comment reads a document read makes. */
+  const issueDispatch = (artifacts: readonly Pick<Artifact, "id" | "slug" | "name" | "kind">[]) =>
+    (async (url: RequestInfo | URL): Promise<Response> => {
+      const request = new URL(String(url));
+      if (request.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-spec",
+          artifacts: [
+            { id: "artifact-spec", slug: "spec", name: "spec.md", kind: "doc", primary: true },
+            ...artifacts.map((artifact) => ({ ...artifact, primary: false })),
+          ],
+        });
+      }
+      const text = request.pathname.match(/^\/api\/v1\/artifacts\/([^/]+)\/text$/);
+      if (text?.[1] !== undefined) return response({ markdown: `# ${text[1]}`, version: 1 });
+      if (request.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+      throw new Error(`unexpected request: ${request.pathname}`);
+    }) as typeof fetch;
   const readDocument = (args: Record<string, unknown>, fetchImpl: typeof fetch) =>
     executeDispatchTool({
       tool: "dispatch_doc_read",
@@ -3146,38 +3166,13 @@ describe("executeDispatchTool", () => {
     );
     expect(project.text).toBe("# artifact-doc");
 
-    const issue = await readDocument({ issue: "DSP-42", artifact: "diagram" }, (async (
-      url: RequestInfo | URL
-    ): Promise<Response> => {
-      const request = new URL(String(url));
-      if (request.pathname === "/api/v1/issues/DSP-42") {
-        return response({
-          key: "DSP-42",
-          primary_artifact_id: "artifact-spec",
-          artifacts: [
-            { id: "artifact-spec", slug: "spec", name: "spec.md", kind: "doc", primary: true },
-            {
-              id: "artifact-doc",
-              slug: "diagram",
-              name: "Diagram notes",
-              kind: "doc",
-              primary: false,
-            },
-            {
-              id: "artifact-image",
-              slug: "diagram-2",
-              name: "diagram",
-              kind: "image",
-              primary: false,
-            },
-          ],
-        });
-      }
-      const text = request.pathname.match(/^\/api\/v1\/artifacts\/([^/]+)\/text$/);
-      if (text?.[1] !== undefined) return response({ markdown: `# ${text[1]}`, version: 1 });
-      if (request.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
-      throw new Error(`unexpected request: ${request.pathname}`);
-    }) as typeof fetch);
+    const issue = await readDocument(
+      { issue: "DSP-42", artifact: "diagram" },
+      issueDispatch([
+        { id: "artifact-doc", slug: "diagram", name: "Diagram notes", kind: "doc" },
+        { id: "artifact-image", slug: "diagram-2", name: "diagram", kind: "image" },
+      ])
+    );
     expect(issue.text).toBe("# artifact-doc");
   });
 
@@ -3219,40 +3214,20 @@ describe("executeDispatchTool", () => {
     expect(project.text).toBe("# artifact-v2");
     expect(requests).not.toContain("GET /api/v1/projects/GREF/artifacts?unlinked=true");
 
-    const issueDispatch = (async (url: RequestInfo | URL): Promise<Response> => {
-      const request = new URL(String(url));
-      if (request.pathname === "/api/v1/issues/DSP-42") {
-        return response({
-          key: "DSP-42",
-          primary_artifact_id: "artifact-spec",
-          artifacts: [
-            { id: "artifact-spec", slug: "spec", name: "spec.md", primary: true },
-            { id: "artifact-v2", slug: "spec-v2", name: "spec v2", kind: "doc", primary: false },
-            {
-              id: "artifact-v2-2",
-              slug: "spec-v2-2",
-              name: "spec-v2",
-              kind: "doc",
-              primary: false,
-            },
-          ],
-        });
-      }
-      const text = request.pathname.match(/^\/api\/v1\/artifacts\/([^/]+)\/text$/);
-      if (text?.[1] !== undefined) return response({ markdown: `# ${text[1]}`, version: 1 });
-      if (request.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
-      throw new Error(`unexpected request: ${request.pathname}`);
-    }) as typeof fetch;
+    const clashing = issueDispatch([
+      { id: "artifact-v2", slug: "spec-v2", name: "spec v2", kind: "doc" },
+      { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", kind: "doc" },
+    ]);
     for (const ref of [
       "dispatch://DSP-42/artifact/spec-v2",
       "http://dispatch.test/issues/DSP-42/artifacts/spec-v2",
     ]) {
-      const issue = await readDocument({ ref }, issueDispatch);
+      const issue = await readDocument({ ref }, clashing);
       expect(issue.text).toBe("# artifact-v2");
     }
-    await expect(
-      readDocument({ issue: "DSP-42", artifact: "spec-v2" }, issueDispatch)
-    ).rejects.toThrow('"spec-v2" names 2 documents on this issue; use the id');
+    await expect(readDocument({ issue: "DSP-42", artifact: "spec-v2" }, clashing)).rejects.toThrow(
+      '"spec-v2" names 2 documents on this issue; use the id'
+    );
   });
 
   test("renders a no-new-version document edit and forwards its summary and precondition", async () => {
