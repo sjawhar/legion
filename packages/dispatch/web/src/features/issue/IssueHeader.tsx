@@ -254,7 +254,7 @@ export function IssueHeader({
               <input
                 aria-describedby={drafts.titleError === null ? undefined : "issue-title-help"}
                 aria-label="Issue title"
-                className={`min-w-0 flex-1 rounded-lg border px-2 py-1 text-xl font-semibold outline-none md:py-0 ${borderTransparent} ${bgTransparent} ${textPrimaryOnSurface} ${borderStrongHover} ${focusBorder}`}
+                className={`min-w-0 flex-1 rounded-lg border px-2 py-1 text-[22px] leading-7 font-semibold tracking-tight outline-none md:py-0 ${borderTransparent} ${bgTransparent} ${textPrimaryOnSurface} ${borderStrongHover} ${focusBorder}`}
                 disabled={isClosed}
                 onBlur={() => {
                   drafts.requestTitleSubmit();
@@ -274,7 +274,7 @@ export function IssueHeader({
               />
             ) : (
               <h1
-                className={`min-w-0 flex-1 break-words rounded-lg border px-2 py-1 text-xl font-semibold md:py-0 ${borderTransparent} ${textPrimaryOnSurface} line-clamp-2 ${
+                className={`min-w-0 flex-1 break-words rounded-lg border px-2 py-1 text-[22px] leading-7 font-semibold tracking-tight md:py-0 ${borderTransparent} ${textPrimaryOnSurface} line-clamp-2 ${
                   isClosed ? "" : `cursor-text ${borderStrongHover}`
                 }`}
                 onClick={() => {
