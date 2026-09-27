@@ -39,18 +39,18 @@ export function SpecToolbar({
   const [copyFeedback, setCopyFeedback] = useState<"copied" | "failed" | undefined>(undefined);
   return (
     <div className="flex w-full min-w-0 flex-wrap items-center gap-2 md:ml-auto md:w-auto">
-      {/* No visible "Version" word: the select's own accessible name carries it, and the row
-          has to share the tab strip rather than take a chrome row of its own above the
-          document. */}
+      {/* The control names itself rather than carrying a separate label element: every option
+          says "version", so the closed select reads as a version picker and the strip still
+          shares the tab row instead of taking a chrome row above the document. */}
       <select
         aria-label="Version"
-        className={`min-h-11 min-w-0 max-w-40 truncate rounded border px-2 py-2 text-sm md:min-h-8 md:py-1 ${inputClasses(false)}`}
+        className={`min-h-11 min-w-0 max-w-48 truncate rounded border px-2 py-2 text-sm md:min-h-8 md:py-1 ${inputClasses(false)}`}
         onChange={(event) =>
           onVersionChange(event.target.value === "" ? null : Number(event.target.value))
         }
         value={version ?? ""}
       >
-        <option value="">Current</option>
+        <option value="">Current version</option>
         {toolbar.versions.map((item) => (
           <option key={item.number} value={item.number}>
             Version {item.number}
