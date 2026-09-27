@@ -6,6 +6,7 @@ import {
 import { type ReactNode, useMemo } from "react";
 
 import type { MessageRead } from "../../api/types";
+import { actorName } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
 import { type AgentConversation, isRunning, toThreadMessages } from "./conversation";
 
@@ -26,6 +27,7 @@ export function AgentRuntimeThread({
   resetKey,
   sessionId,
   stored,
+  viewer,
 }: {
   conversation: AgentConversation;
   empty: string;
@@ -34,37 +36,53 @@ export function AgentRuntimeThread({
   resetKey: string;
   sessionId: string;
   stored: readonly MessageRead[];
+  /** The signed-in human's login: their own messages read as theirs, every other one names its
+   *  author. */
+  viewer: string | undefined;
 }): ReactNode {
   const messages = useMemo(() => {
     const streamed = toThreadMessages(conversation);
     // Dispatch's side of the conversation, interleaved with the stream by time: what the session
-    // wrote is its reply, everything else was said to it.
+    // wrote is its reply, what the viewer wrote is theirs, and anything anyone else sent the
+    // session (another human's direct message, an issue message, another agent) says who.
     const dispatch: ThreadMessageLike[] = stored
       .flatMap((read) => [read.message, ...read.replies])
       .map((message) => {
-        // AgentThread renders a message carrying this marker as Dispatch's, not the stream's.
-        const custom = { dispatch: true };
-        return message.author.kind === "session" && message.author.id === sessionId
-          ? {
-              content: [{ text: message.body, type: "text" as const }],
-              createdAt: new Date(message.created_at),
-              id: `dispatch:${message.id}`,
-              metadata: { custom },
-              role: "assistant" as const,
-              status: { reason: "stop", type: "complete" } as const,
-            }
-          : {
-              content: [{ text: message.body, type: "text" as const }],
-              createdAt: new Date(message.created_at),
-              id: `dispatch:${message.id}`,
-              metadata: { custom },
-              role: "user" as const,
-            };
+        const content = [{ text: message.body, type: "text" as const }];
+        const createdAt = new Date(message.created_at);
+        const id = `dispatch:${message.id}`;
+        if (message.author.kind === "session" && message.author.id === sessionId) {
+          return {
+            content,
+            createdAt,
+            id,
+            // AgentThread renders a message carrying this marker as Dispatch's, not the stream's.
+            metadata: { custom: { dispatch: true } },
+            role: "assistant" as const,
+            status: { reason: "stop", type: "complete" } as const,
+          };
+        }
+        const own =
+          message.author.kind === "user" &&
+          viewer !== undefined &&
+          message.author.id.toLowerCase() === viewer.toLowerCase();
+        const author = own
+          ? undefined
+          : [actorName(message.author), message.issue_key].filter(Boolean).join(" · ");
+        return {
+          content,
+          createdAt,
+          id,
+          metadata: {
+            custom: author === undefined ? { dispatch: true } : { author, dispatch: true },
+          },
+          role: "user" as const,
+        };
       });
     return [...streamed, ...dispatch].sort(
       (left, right) => (left.createdAt?.getTime() ?? 0) - (right.createdAt?.getTime() ?? 0)
     );
-  }, [conversation, sessionId, stored]);
+  }, [conversation, sessionId, stored, viewer]);
 
   const runtime = useExternalStoreRuntime({
     // The frames already arrive in assistant-ui's own message shape, so the store's converter

@@ -4,6 +4,7 @@ import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { whoAmIQuery } from "../../api/queries";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -77,6 +78,7 @@ export function AgentConversationPage(): ReactNode {
     queryKey: ["agents", sessionId, "messages"],
   });
   useMarkRepliesRead(sessionId, stored.data);
+  const viewer = useQuery(whoAmIQuery()).data;
 
   // Talking to the agent is Dispatch's existing targeted delivery, unchanged: the stream itself
   // stays read-only and this adds no write path of its own.
@@ -141,7 +143,7 @@ export function AgentConversationPage(): ReactNode {
       </header>
       <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
         Live from the session: its turns are relayed while this page is open and are not stored.
-        Your messages and its Dispatch replies are kept.
+        Messages sent to it through Dispatch, and its Dispatch replies, are kept.
       </p>
       {stored.isError ? (
         <p className={`mt-2 text-sm ${dangerText}`}>
@@ -174,6 +176,7 @@ export function AgentConversationPage(): ReactNode {
           resetKey={sessionId}
           sessionId={sessionId}
           stored={stored.data ?? []}
+          viewer={viewer?.kind === "user" ? viewer.login : undefined}
         />
       </ErrorBoundary>
     </div>

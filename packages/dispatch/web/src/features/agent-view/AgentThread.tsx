@@ -84,6 +84,21 @@ const Reasoning: ReasoningMessagePartComponent = ({ text }) => (
 );
 
 function UserMessage(): ReactNode {
+  // A stored message someone other than the viewer sent the session (AgentRuntimeThread names
+  // them): it sits on the session's side of the thread with its author, never styled as the
+  // viewer's own.
+  const author = useAuiState((state) => state.message.metadata.custom.author);
+  if (typeof author === "string") {
+    return (
+      <div
+        className={`mt-4 max-w-[80%] rounded-xl border px-3 py-2 text-sm whitespace-pre-wrap ${borderDefault} ${textPrimaryOnCanvas}`}
+        data-testid="agent-message-other"
+      >
+        <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>{author}</p>
+        <MessagePrimitive.Parts />
+      </div>
+    );
+  }
   return (
     <div className="mt-4 flex justify-end" data-testid="agent-message-user">
       <div

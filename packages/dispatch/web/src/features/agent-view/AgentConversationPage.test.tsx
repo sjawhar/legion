@@ -67,6 +67,7 @@ afterEach(() => {
 // and seeing them there is reading them.
 test("the live view shows the session's Dispatch replies to direct messages and marks them read", async () => {
   spies.push(
+    spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "sami" }),
     spyOn(api, "listAgents").mockResolvedValue([agent]),
     // The stream never opens: the replies come from Dispatch, whatever the relay does.
     spyOn(live, "readEventStream").mockReturnValue(new Promise<void>(() => undefined)),
@@ -101,4 +102,57 @@ test("the live view shows the session's Dispatch replies to direct messages and 
   await waitFor(() =>
     expect(putAgentState).toHaveBeenCalledWith(SESSION, { read_through: "2026-09-27T21:20:28Z" })
   );
+});
+
+// A session's stored conversation holds every message sent to it: the viewer's direct messages,
+// other humans' direct messages, and issue messages targeted at it. Only the viewer's own read as
+// "you"; every other one names who wrote it, and an issue message names its issue.
+test("the live view attributes other people's messages to the session to their authors", async () => {
+  spies.push(
+    spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "sami" }),
+    spyOn(api, "listAgents").mockResolvedValue([agent]),
+    spyOn(live, "readEventStream").mockReturnValue(new Promise<void>(() => undefined)),
+    spyOn(api, "listAgentMessages").mockResolvedValue([
+      { message: message("m1", "Mine: where is the dashboard?"), replies: [] },
+      {
+        message: message("m2", "Alice here: status?", {
+          author: { id: "alice", kind: "user" },
+          created_at: "2026-09-27T21:18:00Z",
+        }),
+        replies: [],
+      },
+      {
+        message: message("m3", "Bob on the issue: ship it?", {
+          author: { id: "bob", kind: "user" },
+          created_at: "2026-09-27T21:19:00Z",
+          issue_key: "CORE-1",
+        }),
+        replies: [],
+      },
+    ]),
+    spyOn(api, "getMyAgentState").mockResolvedValue({}),
+    spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 })
+  );
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { gcTime: 0, retry: false, staleTime: 0 } },
+  });
+  render(
+    <MemoryRouter initialEntries={[`/agents/${SESSION}/live`]}>
+      <QueryClientProvider client={queryClient}>
+        <Routes>
+          <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
+        </Routes>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  const thread = await screen.findByTestId("agent-thread");
+  await expect(within(thread).findByText("Alice here: status?")).resolves.toBeTruthy();
+  const own = within(thread).getAllByTestId("agent-message-user");
+  expect(own.map((node) => node.textContent)).toEqual(["Mine: where is the dashboard?"]);
+  const others = within(thread).getAllByTestId("agent-message-other");
+  expect(others.map((node) => node.textContent)).toEqual([
+    "aliceAlice here: status?",
+    "bob · CORE-1Bob on the issue: ship it?",
+  ]);
 });
