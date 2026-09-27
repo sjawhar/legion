@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -15,17 +14,16 @@ import (
 )
 
 // A gate's registration and each artifact event that opens or closes it write one Info line
-// naming the tree, the issue, the document and the version, so the journal says what the design
-// gate did without a read of the daemon's state.
+// naming the issue, the document and the version, so the journal says what the design gate did
+// without a read of the daemon's state. A changes request on a gate already closed changes nothing
+// and has a line of its own. Each line is written once the fact's transaction commits, so a fact
+// retried after a failed commit writes it once.
 func TestTheDesignGateLogsItsRegistrationAndEachOpenOrClose(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted,
 		Generation: 1, Status: "in_progress", Rank: "U"})
 	var logged bytes.Buffer
-	engine := New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour,
-		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
-	}, slog.New(slog.NewTextHandler(&logged, nil)))
+	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil)))
 	apply := func(id string, fact intake.Fact) []string {
 		t.Helper()
 		logged.Reset()
@@ -48,16 +46,38 @@ func TestTheDesignGateLogsItsRegistrationAndEachOpenOrClose(t *testing.T) {
 		{"registration", intake.GateRegistered{Issue: "LEGION-1", ArtifactID: "art-1", Version: 2},
 			[]string{`msg="workflow: design gate registered" tree=LEGION-1 issue=LEGION-1 artifact=art-1 version=2 open=false policy=root-issues`}},
 		{"changes requested on the closed gate", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "art-1", Kind: intake.DispatchArtifactChangesRequested, Version: 2, Reason: "tighten it"},
-			[]string{`msg="workflow: design gate closed" tree=LEGION-1 issue=LEGION-1 artifact=art-1 event=changes_requested version=2`}},
+			[]string{`msg="workflow: design gate changes requested" issue=LEGION-1 artifact=art-1 version=2`}},
 		{"a new version", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "art-1", Kind: intake.DispatchArtifactVersion, Version: 3},
 			nil},
 		{"the approval", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "art-1", Kind: intake.DispatchArtifactApproved, Version: 3},
-			[]string{`msg="workflow: design gate opened" tree=LEGION-1 issue=LEGION-1 artifact=art-1 event=approved version=3`}},
+			[]string{`msg="workflow: design gate opened" issue=LEGION-1 artifact=art-1 event=approved version=3`}},
 		{"a version after the approval", intake.DispatchArtifact{Key: "LEGION-1", ArtifactID: "art-1", Kind: intake.DispatchArtifactVersion, Version: 4},
-			[]string{`msg="workflow: design gate closed" tree=LEGION-1 issue=LEGION-1 artifact=art-1 event=version version=4`}},
+			[]string{`msg="workflow: design gate closed" issue=LEGION-1 artifact=art-1 event=version version=4`}},
 	} {
 		if got := apply(step.name, step.fact); strings.Join(got, "\n") != strings.Join(step.want, "\n") {
 			t.Fatalf("%s logged %q; want %q", step.name, got, step.want)
 		}
+	}
+}
+
+// A gate fact whose transaction does not commit writes no line: its retry writes it.
+func TestAGateFactThatDoesNotCommitLogsNothing(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted,
+		Generation: 1, Status: "in_progress", Rank: "U"})
+	var logged bytes.Buffer
+	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil)))
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := engine.Apply(context.Background(), tx, intake.GateRegistered{Issue: "LEGION-1", ArtifactID: "art-1", Version: 2}); err != nil {
+		t.Fatalf("apply the registration: %v", err)
+	}
+	if err := tx.Rollback(context.Background()); err != nil {
+		t.Fatalf("roll back: %v", err)
+	}
+	if strings.Contains(logged.String(), "design gate") {
+		t.Fatalf("logged %q for a registration that never committed", logged.String())
 	}
 }

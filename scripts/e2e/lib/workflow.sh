@@ -165,16 +165,23 @@ gate_registered() {
   daemon_state | jq -e --arg issue "$1" --arg artifact "$2" \
     '.issues[$issue].designGate.artifactId == $artifact and .issues[$issue].designGate.currentVersion > 0'
 }
-# The architect owns spec editing and gate registration, and nobody prompts it: its first turn is
-# the daemon's catch-up notice, from which it writes the spec, requests approval and registers the
-# gate on its own. The proof requires that registration to name the one primary artifact Dispatch
-# created, so a real agent cannot register an unrelated document.
-drive_gate() {
+# architect_registers_gate ISSUE LABEL waits for a root's architect to register its gate on its
+# own. Nobody prompts it: its first turn is the daemon's catch-up notice, from which it writes the
+# spec (requesting approval when the design gate is armed) and registers the gate. The registration
+# must name the one primary artifact Dispatch created, so a real agent cannot register an unrelated
+# document.
+architect_registers_gate() {
   local issue=$1 label=$2 artifact
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
-  until_true 120 "$label architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
+  until_true 300 "$label architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
   until_true 900 "$label architect to register primary artifact $artifact on its own" gate_registered "$issue" "$artifact"
+}
+# drive_gate ISSUE LABEL: the architect registers the gate on its own, then the proof's human
+# approves the registered version and the daemon moves the issue to planning.
+drive_gate() {
+  local issue=$1 label=$2
+  architect_registers_gate "$issue" "$label"
   gate_artifact=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.artifactId')
   gate_version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
   dispatch_human POST "artifacts/$gate_artifact/reviews" '{"state":"approved"}' >/dev/null
@@ -403,7 +410,7 @@ worker_notices() {
   while IFS=$'\t' read -r f role; do
     jq -R -r --arg file "${f##*/}" --arg role "$role" '
       fromjson? | select(.customType == "envoy-message") | (.content | tostring)
-      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status) on [^\\n]*)")
+      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up) on [^\\n]*)")
       | "\($file) \($role) \(.summary)"' "$f"
   done < <(worker_sessions "$1")
 }

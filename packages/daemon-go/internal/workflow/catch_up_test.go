@@ -3,9 +3,11 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -20,8 +22,9 @@ import (
 // Each launch's ready tells it again, as the TypeScript daemon sends the catch-up at every ready of
 // an active root: a relaunch in the same generation may be an architect that died during its first
 // turn, or a fresh agent whose workspace was lost, and neither was woken. A ready is one fact per
-// launch, so the boot's replay of one already applied tells nothing more. The notice states the
-// design gate policy, so the architect knows whether to ask for approval.
+// launch, so the boot's replay of one already applied tells nothing more. A catch-up the launch
+// before never had delivered is dropped, so the new agent is given one catch-up, the current one.
+// The notice states the design gate policy, so the architect knows whether to ask for approval.
 func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -33,9 +36,12 @@ func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			seedAdmittedTree(t, pool, 1)
-			engine := catchUpEngine(tc.policy)
+			engine := testEngine(tc.policy, nil)
+			// The reason is worded for a relaunch mid-tree as much as for the first launch: an
+			// architect told to start over would edit its spec, and a new version closes its gate.
 			told := func(generation int) string {
-				return fmt.Sprintf("LEGION-1 gen=%d policy=%s issues=LEGION-1,LEGION-2", generation, tc.policy)
+				return fmt.Sprintf("gen=%d policy=%s issues=LEGION-1,LEGION-2 reason=the tree of LEGION-1 at generation %d as the daemon records it at this launch; start or resume it as your role says",
+					generation, tc.policy, generation)
 			}
 
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 1)
@@ -43,19 +49,25 @@ func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 				t.Fatalf("after the root architect's first ready, catch-ups %v; want %v", got, want)
 			}
 
+			// The first launch dies before its catch-up is delivered; the relaunch's replaces it.
+			first := catchUpRows(t, pool)
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 2)
-			if got, want := catchUps(t, pool), []string{told(1), told(1)}; fmt.Sprint(got) != fmt.Sprint(want) {
-				t.Fatalf("after a relaunch in the same generation, catch-ups %v; want %v", got, want)
+			if got, want := catchUps(t, pool), []string{told(1)}; fmt.Sprint(got) != fmt.Sprint(want) || fmt.Sprint(catchUpRows(t, pool)) == fmt.Sprint(first) {
+				t.Fatalf("after a relaunch in the same generation, catch-ups %v in rows %v (before, %v); want the relaunch's own, alone", got, catchUpRows(t, pool), first)
 			}
 
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 2)
-			if got := catchUps(t, pool); len(got) != 2 {
-				t.Fatalf("after the boot's replay of that ready, catch-ups %v; want still two", got)
+			if got := catchUps(t, pool); len(got) != 1 {
+				t.Fatalf("after the boot's replay of that ready, catch-ups %v; want still the one", got)
 			}
 
+			// That catch-up is delivered, and the tree is re-admitted.
+			if _, err := pool.Exec(t.Context(), "delete from outbox"); err != nil {
+				t.Fatalf("deliver the queued notices: %v", err)
+			}
 			seedAdmittedTree(t, pool, 2)
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 3)
-			if got, want := catchUps(t, pool), []string{told(1), told(1), told(2)}; fmt.Sprint(got) != fmt.Sprint(want) {
+			if got, want := catchUps(t, pool), []string{told(2)}; fmt.Sprint(got) != fmt.Sprint(want) {
 				t.Fatalf("after the re-admitted tree's ready, catch-ups %v; want %v", got, want)
 			}
 		})
@@ -87,7 +99,7 @@ func TestOnlyALiveTreesRootArchitectIsToldItsTree(t *testing.T) {
 			root := seedAdmittedTree(t, pool, 1)
 			tc.root(&root)
 			seedIssue(t, pool, root)
-			claimReady(t, pool, catchUpEngine(config.DesignGateRootIssues), tc.issue, tc.role, 1)
+			claimReady(t, pool, testEngine(config.DesignGateRootIssues, nil), tc.issue, tc.role, 1)
 			if got := catchUps(t, pool); len(got) != 0 {
 				t.Fatalf("catch-ups %v; want none", got)
 			}
@@ -108,13 +120,6 @@ func seedAdmittedTree(t *testing.T, pool *pgxpool.Pool, generation uint64) recor
 	return root
 }
 
-func catchUpEngine(policy config.DesignGate) *Engine {
-	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour,
-		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
-	}, nil)
-}
-
 // claimReady applies the supervision observation the workflow runtime sends when a claim is ready
 // (workflowRuntime.applyTerminal), under the event id it uses: one per launch of the claim.
 func claimReady(t *testing.T, pool *pgxpool.Pool, engine *Engine, issue string, role claim.Role, launch int) {
@@ -129,27 +134,35 @@ func claimReady(t *testing.T, pool *pgxpool.Pool, engine *Engine, issue string, 
 	}
 }
 
-// catchUps is every catch-up notice the outbox holds, in order: the issue it is queued for, the
-// generation it names, the gate policy it states, and the tree's issue keys it lists.
+// catchUps is every catch-up notice the outbox holds, in order: the generation it names, the gate
+// policy it states, the tree's issue keys it lists, and its reason.
 func catchUps(t *testing.T, pool *pgxpool.Pool) []string {
 	t.Helper()
-	rows, err := pool.Query(t.Context(), `select issue, coalesce(payload->'catch_up'->>'generation', ''), coalesce(payload->'catch_up'->'gate'->>'policy', ''),
-		coalesce((select string_agg(value->>'key', ',') from jsonb_array_elements(payload->'catch_up'->'issues')), '')
-		from outbox where kind = 'notice' and payload->>'kind' = 'catch-up' order by id`)
-	if err != nil {
-		t.Fatalf("read catch-up notices: %v", err)
-	}
-	defer rows.Close()
 	got := []string{}
-	for rows.Next() {
-		var issue, generation, policy, keys string
-		if err := rows.Scan(&issue, &generation, &policy, &keys); err != nil {
-			t.Fatalf("scan catch-up notice: %v", err)
+	for _, payload := range noticeRows(t, pool) {
+		notice, ok := payload.(record.Notice)
+		if !ok || notice.Kind != "catch-up" {
+			continue
 		}
-		got = append(got, fmt.Sprintf("%s gen=%s policy=%s issues=%s", issue, generation, policy, keys))
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate catch-up notices: %v", err)
+		keys := []string{}
+		for _, issue := range notice.CatchUp.Issues {
+			keys = append(keys, issue.Key)
+		}
+		got = append(got, fmt.Sprintf("gen=%d policy=%s issues=%s reason=%s", notice.CatchUp.Generation, notice.CatchUp.Gate.Policy, strings.Join(keys, ","), notice.Reason))
 	}
 	return got
+}
+
+// catchUpRows is the outbox row id of every catch-up notice the outbox holds, in order.
+func catchUpRows(t *testing.T, pool *pgxpool.Pool) []int64 {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), "select id from outbox where kind = 'notice' and payload->>'kind' = 'catch-up' order by id")
+	if err != nil {
+		t.Fatalf("read the catch-up rows: %v", err)
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		t.Fatalf("scan the catch-up rows: %v", err)
+	}
+	return ids
 }

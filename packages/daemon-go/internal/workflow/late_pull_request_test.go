@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -43,7 +44,7 @@ func appliedEvents(t *testing.T, state record.PullRequestState, facts ...intake.
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer,
 		Decision: &record.ReviewDecision{State: "approved", Head: "head-c"}})
 	for i, fact := range facts {
-		if _, err := intake.ApplyFact(context.Background(), pool, "github", fmt.Sprintf("step-%d", i), fact, testEngine(), admissionStub{}); err != nil {
+		if _, err := intake.ApplyFact(context.Background(), pool, "github", fmt.Sprintf("step-%d", i), fact, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 			t.Fatalf("step %d: %v", i, err)
 		}
 	}

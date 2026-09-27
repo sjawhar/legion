@@ -1401,15 +1401,12 @@ pod_shape_watcher 9>&- 7>&- &
 shape_pid=$!
 pass
 
-# drive_spec ISSUE: nobody prompts the architect. Its first turn is the daemon's catch-up notice,
-# from which it writes its spec and registers the gate on its own; with gates.design off the
-# daemon approves the registered version itself and the issue moves to planning.
+# drive_spec ISSUE: the architect registers the gate on its own (architect_registers_gate); with
+# gates.design off the daemon approves the registered version itself and the issue moves to
+# planning.
 drive_spec() {
-  local issue=$1 artifact
-  artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
-  wait_for_worker "$issue" architect
-  until_true 300 "the $issue architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
-  until_true 900 "the $issue architect to register primary artifact $artifact on its own" gate_registered "$issue" "$artifact"
+  local issue=$1
+  architect_registers_gate "$issue" "the $issue"
   wait_for_phase "$issue" planning
 }
 

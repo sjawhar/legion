@@ -123,16 +123,10 @@ func addressingFragment(project string, c supervise.Claim) (string, error) {
 		roleTopicPrefix, c.Token, roleTopicPrefix, architect, roleTopicPrefix, claim.ControllerToken(project)), nil
 }
 
-// designGateFragment is the sentence a tree's root architect is told after its addressing: whether
-// this project arms the design gate, the "Design gate policy" line the shared role prompt reads
-// (designGateFragment, packages/daemon/src/daemon/processes.ts). It is worded for this daemon,
-// which starts the tree's work only once the architect registers its spec with register_gate,
-// whatever the policy: with the gate off, the registration opens it at once.
+// designGateFragment is the sentence a tree's root architect is told after its addressing: this
+// project's design gate policy, the "Design gate policy" line the shared role prompt reads
+// (designGateFragment, packages/daemon/src/daemon/processes.ts). What each policy asks of the
+// architect under this daemon is in its Go role part (prompts/go/architect-root.md).
 func designGateFragment(policy config.DesignGate) string {
-	if policy == config.DesignGateOff {
-		return "Design gate policy: `gates.design: off` — this project does not arm the design gate: request no approval and wait for no `design-approved`; " +
-			"register your spec document with `register_gate` at its current version, which opens the gate at once and starts the tree's work."
-	}
-	return "Design gate policy: `gates.design: root-issues` — this project arms the root design gate: request your spec's approval with `dispatch_request_approval`, " +
-		"then register the document with `register_gate` at the version that request returned; the tree's work starts once a human approves that version."
+	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
 }

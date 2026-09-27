@@ -239,6 +239,9 @@ type Store interface {
 	WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error)
 	// ExpediteOutbox makes row id due at now if it was due later.
 	ExpediteOutbox(ctx context.Context, tx pgx.Tx, id int64, now time.Time) error
+	// DropCatchUps deletes every catch-up notice row of issue the outbox still holds, a re-held copy
+	// included: none of them has been delivered, since the runner deletes a row it finishes.
+	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error
 	// TreeIssues is every issue of tree, the root included, by key.
 	TreeIssues(ctx context.Context, tx pgx.Tx, tree string) ([]Issue, error)
 	// EarlierNotices is every unfinished notice row of tree's issues written before row id, oldest

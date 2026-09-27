@@ -1593,3 +1593,83 @@ func workspaceRemovals(t *testing.T, pool *pgxpool.Pool) int {
 	}
 	return count
 }
+
+// A re-admission starts the root's architect again, but a linger leaves that claim running, so the
+// start finds it working and only records itself: no ready follows, and without a catch-up the
+// architect would sit through the new generation untold. The start tells it, as a ready would. A
+// start that launches the claim tells nothing: its ready will.
+func TestAStartThatFindsTheRootArchitectRunningTellsItItsTree(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 5}
+	putOutboxIssue(t, pool, records, root)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	admission := admit.New(records, engine, 2, "legion", quietLogger())
+	runner := &outbox{
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		handlers: []intake.Handler{engine, admission}, now: time.Now, log: quietLogger(),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+		},
+	}
+	if err := runner.execute(ctx, mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: 1}, time.Now())); err != nil {
+		t.Fatalf("start the architect: %v", err)
+	}
+	catchUpReasons := func() []string {
+		t.Helper()
+		rows, err := pool.Query(ctx, "select payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = 'catch-up' order by id")
+		if err != nil {
+			t.Fatalf("read the catch-ups: %v", err)
+		}
+		told, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatalf("scan the catch-ups: %v", err)
+		}
+		return told
+	}
+	if told := catchUpReasons(); len(told) != 0 {
+		t.Fatalf("the start that launched the architect queued catch-ups %q; want none before its ready", told)
+	}
+	token, err := claim.NewToken("legion", root.Key, claim.RoleArchitect)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _ := sup.Machine(token)
+	launch := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: token, Generation: launch},
+		supervise.RequestRegister{Claim: token, Generation: launch, Session: "ses-architect", SessionFile: "/tmp/architect.jsonl"},
+		supervise.RequestReady{Claim: token, Generation: launch, Session: "ses-architect"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+
+	// The tree is re-admitted at generation 2 while that architect still runs.
+	root.Generation = 2
+	putOutboxIssue(t, pool, records, root)
+	start := mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: 2}, time.Now())
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("start the running architect for generation 2: %v", err)
+	}
+	told := catchUpReasons()
+	want := "the tree of LEGION-208 at generation 2 as the daemon records it at this launch; start or resume it as your role says"
+	if len(told) != 1 || told[0] != want || machine.Claim().State != supervise.StateReady {
+		t.Fatalf("after the generation 2 start, catch-ups %q with the architect %s; want one, %q, and the architect left running", told, machine.Claim().State, want)
+	}
+
+	// That catch-up is delivered, and the same start row runs again (a retry after a lost finish).
+	if _, err := pool.Exec(ctx, "delete from outbox"); err != nil {
+		t.Fatalf("deliver the queued notices: %v", err)
+	}
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("retry the generation 2 start: %v", err)
+	}
+	if told := catchUpReasons(); len(told) != 0 {
+		t.Fatalf("the retried start queued catch-ups %q; want none, the row having told the architect already", told)
+	}
+}
