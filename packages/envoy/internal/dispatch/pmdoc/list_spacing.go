@@ -193,13 +193,7 @@ func browserOnlyShape(root ast.Node) string {
 				shape = "an empty typed block"
 			}
 		case *extensionast.Footnote:
-			// Goldmark appends a backlink after a referenced definition's last block when that
-			// block is not a paragraph.
-			last := node.LastChild()
-			if _, backlink := last.(*extensionast.FootnoteBacklink); backlink {
-				last = last.PreviousSibling()
-			}
-			if last != nil && !isParagraph(last) {
+			if last := lastBlock(node); last != nil && !isParagraph(last) {
 				shape = "a footnote definition that ends in a block other than a paragraph"
 			}
 		case *extensionast.Table:
@@ -523,11 +517,22 @@ func blankBefore(block ast.Node) bool {
 	return block.HasBlankPreviousLines()
 }
 
-// keepsBlankLinesAfter reports whether node ends in a fenced code block no fence closed, which
-// takes the blank lines after node as its own lines, where its container does not
-// (unclosedFenceDropsBlank).
+// keepsBlankLinesAfter reports whether node ends in a fenced code block no fence closed that takes
+// the blank lines after node as its own lines, so that they spread nothing: every container
+// between the block and node, node included, continues across a blank line, and the browser
+// editor's parser reads such a line as the code's, even where the code's text drops it
+// (blankTaker). A quote between ends at a blank line without its marker, so the line is not its
+// code's.
 func keepsBlankLinesAfter(node ast.Node) bool {
-	return endsInOpenFence(node) && !unclosedFenceDropsBlank(lastFencedCode(node))
+	if !endsInOpenFence(node) {
+		return false
+	}
+	for container := lastFencedCode(node).Parent(); container != node.Parent(); container = container.Parent() {
+		if _, quote := container.(*ast.Blockquote); quote {
+			return false
+		}
+	}
+	return true
 }
 
 // endsInOpenFence reports whether node ends in a fenced code block no fence closed.
@@ -547,9 +552,19 @@ func lastFencedCode(node ast.Node) *ast.FencedCodeBlock {
 		if code, ok := node.(*ast.FencedCodeBlock); ok {
 			return code
 		}
-		node = node.LastChild()
+		node = lastBlock(node)
 	}
 	return nil
+}
+
+// lastBlock is node's last child, past the backlink goldmark appends, an inline node, after a
+// referenced footnote definition's last block when that block is not a paragraph.
+func lastBlock(node ast.Node) ast.Node {
+	last := node.LastChild()
+	if _, backlink := last.(*extensionast.FootnoteBacklink); backlink {
+		return last.PreviousSibling()
+	}
+	return last
 }
 
 // startsContainer reports whether block opens a container the browser editor's parser keeps open

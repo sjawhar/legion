@@ -693,7 +693,7 @@ func emptyParagraphFirst(children []*Node, firstParagraph bool) []*Node {
 // line is the container's there.
 func fencedCodeText(code *ast.FencedCodeBlock, source []byte) []*Node {
 	value := strings.TrimSuffix(segmentsText(code.Lines(), source), "\n")
-	if _, closed := code.Attribute(fenceClosedAttr); !closed && unclosedFenceDropsBlank(code) {
+	if _, closed := code.Attribute(fenceClosedAttr); !closed && blankTaker(code) != nil {
 		value = strings.TrimSuffix(value, "\n")
 	}
 	if value == "" {
@@ -702,32 +702,33 @@ func fencedCodeText(code *ast.FencedCodeBlock, source []byte) []*Node {
 	return []*Node{{Type: "text", Text: value}}
 }
 
-// unclosedFenceDropsBlank reports whether the container a fenced code block no fence closed ends
-// with takes a blank line the block ends in (fencedCodeText): a quote does, and so does a list
-// item or footnote definition that more of the document follows, where the next item keeps it the
-// block's, and a typed block's fence or the document's end does not. A last item and a definition
-// nothing follows end with the container around them.
-func unclosedFenceDropsBlank(code ast.Node) bool {
+// blankTaker is the container that takes a blank line a fenced code block no fence closed ends in
+// from the block's text (fencedCodeText), or nil where the text keeps it: a quote takes it, and so
+// does a list item that more of the document follows, where the next item keeps it the block's,
+// and a footnote definition a block of its own container follows, and a typed block's fence or the
+// document's end does not. A last item and a definition nothing follows in its container end with
+// the container around them.
+func blankTaker(code ast.Node) ast.Node {
 	for container := code.Parent(); container != nil; container = container.Parent() {
 		switch container := container.(type) {
 		case *ast.Blockquote:
-			return true
+			return container
 		case *ast.ListItem:
 			if container.NextSibling() != nil {
-				return false
+				return nil
 			}
 			if nextBlock(container.Parent()) != nil {
-				return true
+				return container
 			}
 		case *extensionast.Footnote:
-			if nextBlock(container) != nil {
-				return true
+			if container.NextSibling() != nil {
+				return container
 			}
 		case *typedDirective:
-			return false
+			return nil
 		}
 	}
-	return false
+	return nil
 }
 
 // codeBlockText is an indented code block's lines as its text; its trailing blank lines are the

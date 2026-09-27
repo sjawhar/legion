@@ -49,3 +49,18 @@ Text.
 >   open
 >
 >
+
+Text.
+
+- An item holding a list whose fence nothing closes:
+  - ```
+    open
+
+  tail
+
+Text.
+
+- - ```
+    open
+
+  tail

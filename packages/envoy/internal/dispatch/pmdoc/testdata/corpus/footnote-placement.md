@@ -49,3 +49,38 @@ In a quote, an item holding a definition[^lq] whose list a paragraph follows:
 > - [^lq]: - a
 >
 >       tail
+
+An item holding a definition[^uf] that ends in a fence nothing closes, and a paragraph after it:
+
+* [^uf]: ```
+      x
+
+  tail
+
+One whose list goes on[^ug]:
+
+* [^ug]: ```
+      x
+
+* b
+
+And one in a quote[^uh]:
+
+> - [^uh]: ```
+>       x
+>
+>   tail
+
+And one whose fence is in a list in the definition[^ui]:
+
+* [^ui]: - ```
+        x
+
+  tail
+
+One whose fence is in a quote in the definition[^uj], which ends at the blank line:
+
+* [^uj]: > ```
+      > x
+
+  tail
