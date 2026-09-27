@@ -746,11 +746,23 @@ primary_issue() {
       pass
       break
     fi
-    send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round."
+    bot_note=""
+    if [ "$round" = 1 ]; then
+      # A CI bot's review thread: the proof human is a GitHub App, a bot account, and posts with no
+      # Legion footer. The implementer answers it with a disposition, and its legion threads
+      # resolve closes it, as no Accepted: from a bot ever would.
+      bot_thread=$(post_bot_thread) || fail "the proof human could not open a bot review thread on pull request #$pr_number"
+      bot_note=" A bot also left one review thread on the pull request asking whether the file change is needed: answer it as your role says for a bot's thread (it is needed: the spec asks for it), before the push that answers this review."
+    fi
+    send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round.$bot_note"
     # A correction round runs the implementer's whole loop (the edit, the push, the handoff commit,
     # the completion) as the retro does, and took past 600 s in acceptance runs: 1200 s.
     wait_for_phase "$root_issue" testing 1200
     until_true 120 "round $round's correction on pull request #$pr_number" round_correction_pushed "$round"
+    if [ "$round" = 1 ]; then
+      until_true 120 "the bot's review thread to be resolved by the implementer's legion threads resolve" bot_thread_resolved "$bot_thread"
+      note "the bot's review thread $bot_thread is resolved: the implementer answered it with a disposition"
+    fi
     assert_round_handoff "$root_issue" "$round"
     assert_handoff_committer "$root_issue" implementer implementing "$round"
     wait_for_worker "$root_issue" tester

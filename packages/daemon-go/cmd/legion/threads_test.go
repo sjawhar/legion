@@ -180,3 +180,46 @@ func TestThreadsResolveRejectsInvalidArgumentsBeforeGrantRedemption(t *testing.T
 		}
 	}
 }
+
+// The shared vector with review-threads.test.ts for a bot's threads. A bot never posts Accepted:,
+// so a thread a bot opened closes when the pull request's author answers it, in its newest
+// submitted comment, with a disposition: `Fixed in <commit>: …` or `Declined: …`. A Legion
+// reviewer is an App too, but its review carries the Legion footer, and its threads close only on
+// its own Accepted:; a human's thread is unchanged.
+func TestThreadsResolveClosesABotsThreadOnTheAuthorsDisposition(t *testing.T) {
+	quote := func(value string) string {
+		encoded, _ := json.Marshal(value)
+		return string(encoded)
+	}
+	thread := func(id, openerType, opener, reviewBody, newest, body, state string) string {
+		return `{"id":"` + id + `","isResolved":false,"opener":{"nodes":[{"author":{"__typename":"` + openerType + `","login":"` + opener + `"},"url":"https://github.test/thread/` + id + `","body":"raise","pullRequestReview":{"body":` + quote(reviewBody) + `}}]},"newest":{"nodes":[{"author":{"login":"` + newest + `"},"url":"https://github.test/thread/` + id + `","body":` + quote(body) + `,"state":"` + state + `"}]}}`
+	}
+	nodes := strings.Join([]string{
+		thread("fixed", "Bot", "claude[bot]", "Automated review", "legion-implementer[bot]", "Fixed in 1a2b3c4: moved the guard", "SUBMITTED"),
+		thread("declined", "Bot", "claude[bot]", "Automated review", "legion-implementer[bot]", " \t\r\nDeclined: the loop is bounded", "SUBMITTED"),
+		thread("vague", "Bot", "claude[bot]", "Automated review", "legion-implementer[bot]", "Addressed it", "SUBMITTED"),
+		thread("not-author", "Bot", "claude[bot]", "Automated review", "legion-reviewer[bot]", "Declined: not ours", "SUBMITTED"),
+		thread("draft", "Bot", "claude[bot]", "Automated review", "legion-implementer[bot]", "Fixed in 1a2b3c4: drafted", "PENDING"),
+		thread("reviewer", "Bot", "legion-reviewer[bot]", "Round 2\n\n<!-- legion: {\"phase\":\"review\"} -->", "legion-implementer[bot]", "Fixed in 1a2b3c4: moved the guard", "SUBMITTED"),
+		thread("human", "User", "octocat", "Please check", "legion-implementer[bot]", "Fixed in 1a2b3c4: moved the guard", "SUBMITTED"),
+	}, ",")
+	github, resolved := fakeThreadsGitHub(t, `{"data":{"repository":{"pullRequest":{"author":{"login":"legion-implementer[bot]"},"reviewThreads":{"nodes":[`+nodes+`],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}`)
+	code, stdout, stderr := runThreadsResolve(t, github)
+	if code != 0 {
+		t.Fatalf("threads resolve = %d: %s", code, stderr)
+	}
+	bot := "not the opener's acceptance or the pull request author's disposition (Fixed in <commit>: … or Declined: …)"
+	want := "resolved https://github.test/thread/fixed\n" +
+		"resolved https://github.test/thread/declined\n" +
+		"left open https://github.test/thread/vague — newest reply by legion-implementer[bot] is " + bot + "\n" +
+		"left open https://github.test/thread/not-author — newest reply by legion-reviewer[bot] is " + bot + "\n" +
+		"left open https://github.test/thread/draft — newest reply by legion-implementer[bot] is an unsubmitted draft in a pending review\n" +
+		"left open https://github.test/thread/reviewer — newest reply by legion-implementer[bot] is not an acceptance\n" +
+		"left open https://github.test/thread/human — newest reply by legion-implementer[bot] is not an acceptance\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q\nwant     %q", stdout, want)
+	}
+	if got := strings.Join(resolved(), ","); got != "fixed,declined" {
+		t.Fatalf("resolved = %s, want fixed,declined", got)
+	}
+}

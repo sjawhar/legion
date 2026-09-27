@@ -26,21 +26,36 @@ interface UnresolvedThread {
   newestLogin: string | null;
   newestBody: string;
   newestPending: boolean;
+  /** A thread a bot account opened that is not a Legion role's: neither its opening comment nor
+   * its review carries the Legion footer. A Legion reviewer's thread closes only on its own
+   * `Accepted:`; a bot never posts one. */
+  botOpened: boolean;
+  /** The pull request's author, who answers a bot's thread with a disposition. */
+  author: string | null;
 }
 
 interface Actor {
   login: string;
+  __typename?: string;
 }
 
 interface ThreadsPage {
   repository: {
     pullRequest: {
+      author: Actor | null;
       reviewThreads: {
         pageInfo: { hasNextPage: boolean; endCursor: string | null };
         nodes: Array<{
           id: string;
           isResolved: boolean;
-          opener: { nodes: Array<{ url: string; author: Actor | null }> };
+          opener: {
+            nodes: Array<{
+              url: string;
+              body: string;
+              author: Actor | null;
+              pullRequestReview: { body: string } | null;
+            }>;
+          };
           newest: {
             // `state` is absent only when the query stops selecting it; listUnresolvedThreads refuses that.
             nodes: Array<{ author: Actor | null; body: string; state?: "PENDING" | "SUBMITTED" }>;
@@ -54,12 +69,13 @@ interface ThreadsPage {
 const THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
+      author { login }
       reviewThreads(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id
           isResolved
-          opener: comments(first: 1) { nodes { url author { login } } }
+          opener: comments(first: 1) { nodes { url body author { __typename login } pullRequestReview { body } } }
           newest: comments(last: 1) { nodes { author { login } body state } }
         }
       }
@@ -158,6 +174,30 @@ function acceptedByOpener(thread: UnresolvedThread): boolean {
   );
 }
 
+/** What a Legion role posts on GitHub carries this marker (the listener reads the same one). */
+const LEGION_FOOTER = "<!-- legion:";
+
+/** The pull request author's answer to a bot's thread: `Fixed in <commit>: <what changed>` or
+ * `Declined: <reason>`, the implementer's reply grammar for every review thread, after the same
+ * leading space, tab, CR or LF `Accepted:` may follow. */
+function isDisposition(body: string): boolean {
+  return /^(?:Fixed in [0-9a-f]{7,40}|Declined): \S/.test(body.replace(/^[ \t\r\n]+/, ""));
+}
+
+/** True when a bot's thread was answered, in its newest submitted comment, by the pull request's
+ * author with a disposition. A bot never posts `Accepted:`, so without this a thread a CI bot
+ * opens could never close. The Go CLI applies the same rule (`threads.go` disposedByAuthor). */
+function disposedByAuthor(thread: UnresolvedThread): boolean {
+  return (
+    !thread.newestPending &&
+    thread.botOpened &&
+    thread.author !== null &&
+    thread.newestLogin === thread.author &&
+    thread.newestLogin !== thread.openerLogin &&
+    isDisposition(thread.newestBody)
+  );
+}
+
 /** Every unresolved review thread on the pull request, across every page of `reviewThreads`. */
 async function listUnresolvedThreads(
   graphql: GraphqlCall,
@@ -196,6 +236,11 @@ async function listUnresolvedThreads(
         newestLogin: newest.author?.login ?? null,
         newestBody: newest.body,
         newestPending: newest.state === "PENDING",
+        botOpened:
+          opener.author?.__typename === "Bot" &&
+          !opener.body.includes(LEGION_FOOTER) &&
+          !(opener.pullRequestReview?.body ?? "").includes(LEGION_FOOTER),
+        author: pullRequest.author?.login ?? null,
       });
     }
     const { pageInfo } = pullRequest.reviewThreads;
@@ -225,8 +270,8 @@ export function parsePullNumber(value: string): number {
 }
 
 /** The policy `legion threads resolve` applies, as whichever identity `graphql` carries: every
- * unresolved review thread whose newest comment is its opener's own submitted `Accepted:` reply is
- * resolved (one `resolveReviewThread` per thread, in GitHub's order) and every other unresolved
+ * unresolved review thread whose newest comment is its opener's own submitted `Accepted:` reply,
+ * or, on a thread a bot opened, the pull request author's submitted disposition, is resolved (one `resolveReviewThread` per thread, in GitHub's order) and every other unresolved
  * thread is named as left open; no unresolved thread at all prints exactly `no unresolved
  * threads`. A thread GitHub refuses rejects with a CliError naming the thread's URL and GitHub's
  * message, and nothing after it is attempted. */
@@ -242,11 +287,13 @@ export async function resolveAcceptedThreads(
     return;
   }
   for (const thread of threads) {
-    if (!acceptedByOpener(thread)) {
+    if (!acceptedByOpener(thread) && !disposedByAuthor(thread)) {
       const by = thread.newestLogin ?? "an unknown account";
       const reason = thread.newestPending
         ? "an unsubmitted draft in a pending review"
-        : "not an acceptance";
+        : thread.botOpened
+          ? "not the opener's acceptance or the pull request author's disposition (Fixed in <commit>: … or Declined: …)"
+          : "not an acceptance";
       log(`left open ${thread.url} — newest reply by ${by} is ${reason}`);
       continue;
     }

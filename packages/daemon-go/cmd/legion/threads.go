@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -17,8 +18,9 @@ import (
 const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
+      author { login }
       reviewThreads(first: 100, after: $after) {
-        nodes { id isResolved opener: comments(first: 1) { nodes { author { login } url body } } newest: comments(last: 1) { nodes { author { login } url body state } } }
+        nodes { id isResolved opener: comments(first: 1) { nodes { author { __typename login } url body pullRequestReview { body } } } newest: comments(last: 1) { nodes { author { login } url body state } } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -72,17 +74,22 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		// A draft in a pending review never counts: GitHub shows it only to its author, so a caller
 		// posting as the opener's account would otherwise resolve on an unsubmitted acceptance. For
 		// every caller a thread is resolved only when its newest submitted comment is the opener's
-		// Accepted:; a caller's own newer draft can only make it leave the thread open. Only space,
-		// tab, CR and LF may precede Accepted:. This is the TypeScript CLI's rule (review-threads.ts
-		// acceptedByOpener and isAcceptance); threads_test.go and review-threads.test.ts share vectors.
-		if thread.newestPending || thread.openerLogin == "" || thread.openerLogin != thread.newestLogin || !strings.HasPrefix(strings.TrimLeft(thread.newestBody, " \t\r\n"), "Accepted:") {
+		// Accepted:, or, on a thread a bot opened, the pull request author's disposition; a caller's
+		// own newer draft can only make it leave the thread open. Only space, tab, CR and LF may
+		// precede either form. This is the TypeScript CLI's rule (review-threads.ts
+		// acceptedByOpener and disposedByAuthor); threads_test.go and review-threads.test.ts share
+		// vectors.
+		if thread.newestPending || !(acceptedByOpener(thread) || disposedByAuthor(thread)) {
 			by := thread.newestLogin
 			if by == "" {
 				by = "an unknown account"
 			}
 			reason := "not an acceptance"
-			if thread.newestPending {
+			switch {
+			case thread.newestPending:
 				reason = "an unsubmitted draft in a pending review"
+			case thread.botOpened:
+				reason = "not the opener's acceptance or the pull request author's disposition (Fixed in <commit>: … or Declined: …)"
 			}
 			fmt.Fprintf(stdout, "left open %s — newest reply by %s is %s\n", thread.url, by, reason)
 			continue
@@ -104,6 +111,32 @@ type reviewThread struct {
 	id, url, openerLogin, newestLogin, newestBody string
 	// newestPending marks a newest comment that is a draft in a pending, unsubmitted review.
 	newestPending bool
+	// botOpened marks a thread a bot account opened that is not a Legion role's: its opening
+	// comment and its review carry no Legion footer (<!-- legion: ... -->). A Legion reviewer's
+	// thread closes only on the reviewer's own Accepted:, a bot never posts one.
+	botOpened bool
+	// author is the pull request's author, who answers a bot's thread with a disposition.
+	author string
+}
+
+// legionFooter marks what a Legion role posts on GitHub (the listener reads the same marker).
+const legionFooter = "<!-- legion:"
+
+// disposition is the pull request author's answer to a bot's thread: `Fixed in <commit>: <what
+// changed>` or `Declined: <reason>`, the implementer's reply grammar for every review thread.
+var disposition = regexp.MustCompile(`^(?:Fixed in [0-9a-f]{7,40}|Declined): \S`)
+
+// acceptedByOpener is whether the thread's newest submitted comment is its opener's Accepted:.
+func acceptedByOpener(thread reviewThread) bool {
+	return thread.openerLogin != "" && thread.openerLogin == thread.newestLogin && strings.HasPrefix(strings.TrimLeft(thread.newestBody, " \t\r\n"), "Accepted:")
+}
+
+// disposedByAuthor is whether a bot's thread was answered, in its newest submitted comment, by the
+// pull request's author with a disposition. A bot never posts Accepted:, so without this a thread
+// a CI bot opens could never close.
+func disposedByAuthor(thread reviewThread) bool {
+	return thread.botOpened && thread.author != "" && thread.newestLogin == thread.author && thread.newestLogin != thread.openerLogin &&
+		disposition.MatchString(strings.TrimLeft(thread.newestBody, " \t\r\n"))
 }
 
 func unresolvedReviewThreads(ctx context.Context, token string, repository ghrepo.Repository, number int) ([]reviewThread, error) {
@@ -130,7 +163,10 @@ func unresolvedReviewThreads(ctx context.Context, token string, repository ghrep
 			if newest.State != "PENDING" && newest.State != "SUBMITTED" {
 				return nil, fmt.Errorf("review thread %s: its newest comment carried state %q, not \"PENDING\" or \"SUBMITTED\"", node.ID, newest.State)
 			}
-			all = append(all, reviewThread{id: node.ID, url: opening.URL, openerLogin: opening.Author.Login, newestLogin: newest.Author.Login, newestBody: newest.Body, newestPending: newest.State == "PENDING"})
+			botOpened := opening.Author.Typename == "Bot" && !strings.Contains(opening.Body, legionFooter) &&
+				(opening.PullRequestReview == nil || !strings.Contains(opening.PullRequestReview.Body, legionFooter))
+			all = append(all, reviewThread{id: node.ID, url: opening.URL, openerLogin: opening.Author.Login, newestLogin: newest.Author.Login, newestBody: newest.Body,
+				newestPending: newest.State == "PENDING", botOpened: botOpened, author: page.Data.Repository.PullRequest.Author.Login})
 		}
 		info := page.Data.Repository.PullRequest.ReviewThreads.PageInfo
 		if !info.HasNextPage {
@@ -144,6 +180,9 @@ type reviewThreadsPage struct {
 	Data struct {
 		Repository struct {
 			PullRequest *struct {
+				Author struct {
+					Login string `json:"login"`
+				} `json:"author"`
 				ReviewThreads struct {
 					Nodes []struct {
 						ID         string `json:"id"`
@@ -171,8 +210,13 @@ type reviewComment struct {
 	// State is GitHub's PullRequestReviewCommentState (PENDING or SUBMITTED), selected on newest.
 	State  string `json:"state"`
 	Author struct {
-		Login string `json:"login"`
+		Typename string `json:"__typename"`
+		Login    string `json:"login"`
 	} `json:"author"`
+	// PullRequestReview is the review the comment belongs to, selected on the opener.
+	PullRequestReview *struct {
+		Body string `json:"body"`
+	} `json:"pullRequestReview"`
 }
 
 func graphql(ctx context.Context, token, query string, variables map[string]any, into any) error {

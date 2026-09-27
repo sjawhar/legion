@@ -364,6 +364,26 @@ assert_handoff_committer() {
   [ "$identity" = "$want" ] || fail "$1's $2 $3 round $4 handoff commit $commit is authored|committed by $identity, want $want"
   note "$2 $3 round $4 handoff $commit authored and committed by $identity"
 }
+# post_bot_thread opens one file-level review thread on the proof's pull request as the proof human,
+# a GitHub App and so a bot account, as a CI bot is, with no Legion footer; it prints the thread's
+# first comment's node id.
+post_bot_thread() {
+  local head
+  head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
+  jq -cn --arg head "$head" --arg path "$smoke_file" \
+    '{commit_id:$head, path:$path, subject_type:"file", body:"Stage 3 proof bot: is this file change needed?"}' |
+    timeout 60 gh api --method POST "repos/$repo/pulls/$pr_number/comments" --input - --jq .node_id
+}
+# bot_thread_resolved COMMENT: the review thread whose first comment is COMMENT is resolved on GitHub.
+bot_thread_resolved() {
+  local resolved
+  resolved=$(timeout 60 gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$pr_number" -f query='
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+        reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { id } } } } } } }' \
+    --jq ".data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].id == \"$1\") | .isResolved") || return 1
+  [ "$resolved" = true ]
+}
 # retro_reported ISSUE: the daemon applied the implementer's retro completion, the one way out of
 # retro.
 retro_reported() { [ -n "$(role_handoff "$1" implementer merging awaiting_merge)" ]; }

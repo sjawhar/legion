@@ -10,11 +10,33 @@ interface Comment {
   state?: "PENDING" | "SUBMITTED";
 }
 
-function thread(id: string, n: number, opener: string, newest: Comment, isResolved = false) {
+/** How a thread's opener posted: a person, or a bot account whose review body is `review`. */
+interface Opener {
+  type: "User" | "Bot";
+  review: string;
+}
+
+function thread(
+  id: string,
+  n: number,
+  opener: string,
+  newest: Comment,
+  isResolved = false,
+  by: Opener = { type: "User", review: "" }
+) {
   return {
     id,
     isResolved,
-    opener: { nodes: [{ url: `${PR}${n}`, author: { login: opener } }] },
+    opener: {
+      nodes: [
+        {
+          url: `${PR}${n}`,
+          body: "raise",
+          author: { __typename: by.type, login: opener },
+          pullRequestReview: { body: by.review },
+        },
+      ],
+    },
     newest: {
       nodes: [
         { author: { login: newest.login }, body: newest.body, state: newest.state ?? "SUBMITTED" },
@@ -28,6 +50,7 @@ function page(nodes: unknown[], endCursor: string | null) {
     data: {
       repository: {
         pullRequest: {
+          author: { login: "legion-implementer[bot]" },
           reviewThreads: { pageInfo: { hasNextPage: endCursor !== null, endCursor }, nodes },
         },
       },
@@ -466,6 +489,96 @@ describe("legion threads resolve", () => {
     expect(lines).toEqual([
       `resolved ${PR}1`,
       `left open ${PR}2 — newest reply by legion-reviewer is not an acceptance`,
+    ]);
+  });
+
+  it("closes a bot's thread on the pull request author's disposition, as the Go CLI does", async () => {
+    // The shared vector with threads_test.go: a bot never posts Accepted:, so its thread closes when
+    // the pull request's author answers with `Fixed in <commit>: …` or `Declined: …`; a Legion
+    // reviewer's thread (its review carries the Legion footer) and a person's are unchanged.
+    const author = "legion-implementer[bot]";
+    const bot: Opener = { type: "Bot", review: "Automated review" };
+    const github = fakeGitHub(
+      {
+        null: page(
+          [
+            thread(
+              "fixed",
+              1,
+              "claude[bot]",
+              { login: author, body: "Fixed in 1a2b3c4: moved the guard" },
+              false,
+              bot
+            ),
+            thread(
+              "declined",
+              2,
+              "claude[bot]",
+              { login: author, body: " \t\r\nDeclined: the loop is bounded" },
+              false,
+              bot
+            ),
+            thread("vague", 3, "claude[bot]", { login: author, body: "Addressed it" }, false, bot),
+            thread(
+              "not-author",
+              4,
+              "claude[bot]",
+              { login: "legion-reviewer[bot]", body: "Declined: not ours" },
+              false,
+              bot
+            ),
+            thread(
+              "draft",
+              5,
+              "claude[bot]",
+              { login: author, body: "Fixed in 1a2b3c4: drafted", state: "PENDING" },
+              false,
+              bot
+            ),
+            thread(
+              "reviewer",
+              6,
+              "legion-reviewer[bot]",
+              { login: author, body: "Fixed in 1a2b3c4: moved the guard" },
+              false,
+              {
+                type: "Bot",
+                review: 'Round 2\n\n<!-- legion: {"phase":"review"} -->',
+              }
+            ),
+            thread("human", 7, "octocat", {
+              login: author,
+              body: "Fixed in 1a2b3c4: moved the guard",
+            }),
+          ],
+          null
+        ),
+      },
+      resolvedOk
+    );
+    const lines: string[] = [];
+
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993" },
+      {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: github.fetch,
+        ...noGh,
+        log: (line) => lines.push(line),
+      }
+    );
+
+    const botReason =
+      "not the opener's acceptance or the pull request author's disposition (Fixed in <commit>: … or Declined: …)";
+    expect(github.resolved).toEqual(["fixed", "declined"]);
+    expect(lines).toEqual([
+      `resolved ${PR}1`,
+      `resolved ${PR}2`,
+      `left open ${PR}3 — newest reply by ${author} is ${botReason}`,
+      `left open ${PR}4 — newest reply by legion-reviewer[bot] is ${botReason}`,
+      `left open ${PR}5 — newest reply by ${author} is an unsubmitted draft in a pending review`,
+      `left open ${PR}6 — newest reply by ${author} is not an acceptance`,
+      `left open ${PR}7 — newest reply by ${author} is not an acceptance`,
     ]);
   });
 
