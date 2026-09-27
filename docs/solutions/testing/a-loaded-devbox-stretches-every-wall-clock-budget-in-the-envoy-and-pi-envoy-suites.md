@@ -13,7 +13,7 @@ status: active
 module: packages/envoy/internal/dispatch/store/storetest
 symptoms:
   - "`panic: test timed out after 10m0s` in `internal/dispatch/api` on a devbox, green on CI and on a rerun"
-  - "`timed out waiting for mark updates persisted` in a docs compaction test"
+  - "`timed out waiting for mark updates persisted` in a docs compaction test, or `timed out waiting for delayed durable append commit` in a docs shutdown test (on CI too)"
   - "`durable document = \"…HUMAN WRITE\\n\", want \"keep\"` in `…TableAnchorCheck/unconditional_baseline`"
   - "`start NATS: … create container: … context deadline exceeded` at 30 s in natstail, or `start NATS JetStream: …` in daemon-go's intake, admit or workflow"
   - "pi-envoy `this test timed out after 5000ms` in a test that runs jj, then `# Unhandled error between tests` from a jj helper with an empty stderr (`jj config list failed: `)"
@@ -26,7 +26,8 @@ symptoms:
 The devbox runs many agents at once. At 1-minute load 120-210 on 32 cores, CPU pressure `some` was
 about 64% and IO pressure about 45%. A `jj git init` then took 1.0-1.6 s of wall time for 10 ms of
 CPU, `docker create` took 1-6 s, and about 500 serial durable appends took up to 37 s. CI's 4-vCPU
-runner sees none of this, so every failure below is green on CI and on a rerun.
+runner rarely sees this: every failure below but the shutdown tests' was green on CI, and all of
+them were green on a rerun.
 
 Most failures were a budget that covered more than the thing it was meant to bound, and the fix
 took that extra work out of the budget. The lock probe was different: it was missing a filter.
@@ -48,11 +49,17 @@ default.
   227.6 s and docs from 214.5 s to 109.7 s. The admin pool that carries the drops is capped at
   4 connections: its default is the CPU count, and the seven packages that call `storetest.Main`
   at 32 connections each exceed the server's `max_connections` of 100.
-- **A 5 s wait covered about 500 durable appends.** The docs compaction tests append each browser
-  mark in its own commit behind the room lock. A fixed 5 s for all of them is a throughput budget.
-  `waitForPersistedUpdates` waits for the service's durable-append queue to drain, bounded by a
-  minute, then checks the count. The minute is still a budget, about 8 appends a second for 500
-  marks, but it is twelve times the old 5 s and above the 37 s the slowest loaded run took.
+- **A wait on the durable-append count covered Postgres commits.** The docs compaction tests
+  append each browser mark in its own commit behind the room lock, and gave all ~500 of them a
+  fixed 5 s: a throughput budget. The shutdown tests that hold a document's advisory lock gave the
+  one delayed append 1 s after the lock's release, but that append's commit waits on a WAL flush
+  sharing the disk with every other test database's clone and drop; with the server's disk
+  throttled, one commit took 2.6 s. Both now use `waitForPersistedUpdates`, which waits for
+  the service's durable-append queue to drain, bounded by a minute, then checks the count. The
+  minute is still a budget, about 8 appends a second for 500 marks, but it is twelve times the old
+  5 s and above the 37 s the slowest loaded run took. A wait for the count to rise after
+  `ReplaceText` covers nothing at all: the room's update observer counts the append before
+  `ReplaceText` returns, so the test asserts the count instead of polling for it.
 - **A lock probe counted another database's sessions.** `pg_stat_activity` is server-wide. A
   probe for "my edit is now waiting on the lock" must filter on `datname = current_database()`.
   Otherwise another test process's waiting session answers it early, and the race the test sets up
@@ -83,6 +90,10 @@ and run the same forcing against the tree before and after the fix:
   an hour once the count reaches a threshold);
 - a decoy session in another database: `begin; lock table asks in access exclusive mode;
   select pg_sleep(600)` in one session and `select id from asks` in another;
+- the Postgres container's disk throttled through its cgroup, which stretches every commit behind
+  the suite's own clones and drops and reproduces the shutdown tests' CI failure:
+  `echo "259:0 wbps=3145728 wiops=150" | sudo tee /sys/fs/cgroup/system.slice/docker-<id>.scope/io.max`
+  (the device is the disk's `MAJ:MIN` from `lsblk`; write `wbps=max wiops=max` to lift it);
 - a unix-socket proxy in front of `/var/run/docker.sock` that holds `POST …/containers/create` for
   31 s, used through `DOCKER_HOST`;
 - a `jj` earlier on `PATH` that runs `sleep 1` and then execs the real one;
