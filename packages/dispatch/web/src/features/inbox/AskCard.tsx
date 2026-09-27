@@ -13,6 +13,7 @@ import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
+import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import {
   askUrgencyAccent,
@@ -443,9 +444,9 @@ export function AskCard({
                 onClick={() => setHandlesOpen((open) => !open)}
                 type="button"
               >
-                <span className="min-w-0 truncate">
+                <TruncatedText className="min-w-0">
                   {authorLabel === "" ? "asked" : authorLabel}
-                </span>
+                </TruncatedText>
                 <ChevronIcon expanded={handlesOpen} />
               </button>
             )}

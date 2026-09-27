@@ -22,6 +22,7 @@ import type {
 } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
+import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -1008,9 +1009,9 @@ export function MentionComposer({
               type="button"
             >
               <span className={`block font-medium ${textPrimaryOnSurface}`}>{option.title}</span>
-              <span className={`block truncate text-xs ${textMutedOnSurface}`}>
+              <TruncatedText className={`block text-xs ${textMutedOnSurface}`}>
                 {option.detail}
-              </span>
+              </TruncatedText>
             </button>
           ))}
           {filteredOptions.length === 0 ? (
