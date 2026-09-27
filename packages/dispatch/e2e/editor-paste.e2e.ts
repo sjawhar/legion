@@ -374,6 +374,61 @@ for (const [name, clipboard, target, stored] of [
   });
 }
 
+// A copied table's row with no cells (an empty <tr>) carries nothing to paste, so the grid paste
+// leaves it out. It once reached prosemirror-tables' insert as a row of no cells, which threw, and the
+// paste stored nothing.
+const emptyFirstRow = {
+  html: "<table><tr></tr><tr><td>a</td><td>b</td></tr></table>",
+  text: "a\tb",
+};
+const emptyLastRow = {
+  html: "<table><tr><td>a</td><td>b</td></tr><tr></tr></table>",
+  text: "a\tb",
+};
+for (const [clipboard, target, stored] of [
+  [
+    emptyFirstRow,
+    "delta",
+    "| alpha one | beta two |  |\n| :--- | :--- | :--- |\n| gamma three | a | b |\n",
+  ],
+  [emptyFirstRow, "alpha", "| a | b |\n| :--- | :--- |\n| gamma three | delta four |\n"],
+  [
+    emptyFirstRow,
+    ["gamma three", "delta four"],
+    "| alpha one | beta two |\n| :--- | :--- |\n| a | b |\n",
+  ],
+  [emptyLastRow, ["alpha one", "delta four"], "| a | b |\n| :--- | :--- |\n| a | b |\n"],
+] as const) {
+  const where =
+    typeof target === "string"
+      ? `at the caret after "${target}"`
+      : `onto ${target[0]} to ${target[1]}`;
+  const row = clipboard === emptyFirstRow ? "first" : "last";
+  test(`cells whose ${row} row is empty, pasted ${where}, paste the other row`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } =
+      typeof target === "string"
+        ? await openWithCaret(browser, "Empty row paste", table, target, "end")
+        : await openIssue(browser, "Empty row paste", table);
+    try {
+      if (typeof target !== "string") {
+        await expect(documentEditor(page)).toContainText(target[1]);
+        await selectCells(page, target[0], target[1], "shift-click");
+        await expect(page.locator(".selectedCell")).not.toHaveCount(0);
+      }
+
+      await paste(page, clipboard);
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toBe(stored);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
 // Cells copied inside the editor paste back as the same cells, at a caret in another row's cell
 // and onto a selection of that row's cells. The copy is ProseMirror's own clipboard HTML, a table
 // marked with data-pm-slice. Parsed at the caret, that gained an empty leading row, and the paste
