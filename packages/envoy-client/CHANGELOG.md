@@ -14,6 +14,14 @@
 
 ### Fixed
 
+- `getArchitectureSource` reads both answers a server gives for a project with no architecture
+  source as `null`: a current server's `200 null` and an older server's `404 SOURCE_NOT_FOUND`.
+  A client meets both while a rollout mixes versions. Before, only `200 null` read as none, so
+  against an older server every `dispatch_issue` create in a project without a source ended with
+  "Could not check whether project … has an architecture model" and the advice to link components.
+  Any other failure, a 404 with another code included, is still reported as a source the client
+  could not check.
+
 - A bare document reference (an `artifact` argument that is not a `dispatch://` reference's own
   document) that is one document's slug and another's filename on the same issue or project
   (Dispatch suffixes a slug two documents would share, so `spec-v2` can be both) is refused as

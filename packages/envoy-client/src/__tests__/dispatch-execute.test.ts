@@ -69,9 +69,28 @@ const createdIssueLine =
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
-/** A project with no architecture source: the read answers null, never a refusal. */
-function sourceNotFound(): Response {
+/** A project with no architecture source, as a current server answers it: `200 null`. */
+function sourceNull(): Response {
   return new Response("null", { headers: { "Content-Type": "application/json" } });
+}
+
+/** The same project as an older server answers it, which a client still meets mid-rollout. */
+function sourceNotFound(): Response {
+  return new Response(
+    JSON.stringify({
+      code: "SOURCE_NOT_FOUND",
+      error: "no architecture source configured for LEGION",
+    }),
+    { status: 404, headers: { "Content-Type": "application/json" } }
+  );
+}
+
+/** A 404 that is not the no-source answer: a project the server does not know. */
+function projectNotFound(): Response {
+  return new Response(JSON.stringify({ code: "NOT_FOUND", error: "project LEGION not found" }), {
+    status: 404,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 function architectureSource(project: string) {
@@ -97,7 +116,12 @@ function issueComponents(
   return { mode, ids, unknown, reason, inherited_from: inheritedFrom };
 }
 
-type ArchitectureSourceState = "exists" | "absent" | "fails";
+type ArchitectureSourceState =
+  | "exists"
+  | "null"
+  | "source-not-found"
+  | "project-not-found"
+  | "fails";
 
 async function createIssueWithComponents(
   components: IssueComponents,
@@ -119,7 +143,9 @@ async function createIssueWithComponents(
       if (source === "exists") {
         return response(architectureSource("LEGION"));
       }
-      if (source === "absent") return sourceNotFound();
+      if (source === "null") return sourceNull();
+      if (source === "source-not-found") return sourceNotFound();
+      if (source === "project-not-found") return projectNotFound();
       throw new Error("architecture source network error");
     }
     throw new Error(`unexpected request: ${target.pathname}`);
@@ -1587,7 +1613,7 @@ describe("executeDispatchTool", () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNotFound();
+        return sourceNull();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -1706,10 +1732,15 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
-  test("does not guide an unassigned new issue when its project has no architecture source", async () => {
+  // A rollout mixes servers and clients, so both answers a server gives for a project with no
+  // source mean no source: a current server's 200 null and an older one's 404 SOURCE_NOT_FOUND.
+  test.each([
+    ["200 null", "null"],
+    ["404 SOURCE_NOT_FOUND", "source-not-found"],
+  ] as const)("does not guide an unassigned new issue when the source read answers %s", async (_answer, source) => {
     const { result, requests } = await createIssueWithComponents(
       issueComponents("inherit", []),
-      "absent"
+      source
     );
 
     expect(result.text).toBe(createdIssueLine);
@@ -1717,6 +1748,20 @@ describe("executeDispatchTool", () => {
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-source",
     ]);
+  });
+
+  test("reports a 404 other than SOURCE_NOT_FOUND as a source it could not check", async () => {
+    const { result } = await createIssueWithComponents(
+      issueComponents("inherit", []),
+      "project-not-found"
+    );
+
+    expect(result.text).toBe(
+      [
+        createdIssueLine,
+        'Could not check whether project LEGION has an architecture model: project LEGION not found. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.',
+      ].join("\n")
+    );
   });
 
   test("does not guide a child whose live component attachment comes from its parent", async () => {
@@ -1775,7 +1820,7 @@ describe("executeDispatchTool", () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNotFound();
+        return sourceNull();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -1806,7 +1851,7 @@ describe("executeDispatchTool", () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNotFound();
+        return sourceNull();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -1835,7 +1880,7 @@ describe("executeDispatchTool", () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNotFound();
+        return sourceNull();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -4009,7 +4054,7 @@ describe("executeDispatchTool", () => {
         });
       }
       if (target.pathname === "/api/v1/projects/TEST/architecture-source") {
-        return sourceNotFound();
+        return sourceNull();
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
