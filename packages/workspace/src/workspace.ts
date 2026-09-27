@@ -122,7 +122,7 @@ interface ProvisioningCredential {
 /** Runs `jj <args>` as a credentialed command: with the credential's environment and jj's pinned
  * git, the two together, so no command carries the token without the pins. */
 function runCredentialedJj(
-  deps: ProvisionIssueWorkspaceDeps,
+  deps: CommandDeps,
   credential: ProvisioningCredential,
   args: readonly string[]
 ): Promise<RunResult> {
@@ -143,22 +143,27 @@ function runCredentialedJj(
  * those pairs after every file, so they win, and the persisted config is untouched.
  *
  * The shared clone's working copy and configuration are the tree's to write. Against that, the two
- * commands pin:
+ * commands pin a closed set, not an enumerated subset:
  * - the credential: the helper answers for https://github.com alone; there is no askpass
  *   (`GIT_ASKPASS` is empty, which git reads as none, `core.askPass` and `SSH_ASKPASS` included)
  *   and no terminal prompt;
+ * - every other source of git configuration a tree, an operator's shell, or an inherited process
+ *   could reach: the global and system config files (`GIT_CONFIG_GLOBAL=/dev/null`,
+ *   `GIT_CONFIG_NOSYSTEM=1`, the Go twin's `isolatedGitConfig`) and `GIT_CONFIG_PARAMETERS`, which
+ *   git reads *after* the numbered `GIT_CONFIG_COUNT` pairs and so survives their reset on its own
+ *   (`GIT_CONFIG_PARAMETERS: ""`, which git parses as zero pairs, whatever the ambient value was);
  * - git's hooks: none run (`core.hooksPath=/dev/null`);
  * - git's transport: https alone (`GIT_ALLOW_PROTOCOL=https`), all https://github.com needs;
  * - jj's git: the one on PATH (`PINNED_GIT_EXECUTABLE`);
  * - the fetch takes no snapshot of the clone's working copy (`--ignore-working-copy`).
  *
- * That is defence, not a boundary. Both commands still read the rest of the configuration the tree
- * wrote, so two classes remain: a program that tree-written jj or git configuration names, running
- * inside one of them, and tree-written http or TLS configuration that changes where the session to
- * github.com ends or what it trusts. On the tmux runtime a pane shares the daemon's uid and can
- * read provisioning's environment anyway, and this daemon refuses the pod runtime (LEGION-286).
- * The Go daemon keeps the token from a pod's tree with a container boundary (docs/kubernetes.md,
- * "Trust model: the provisioning token"). */
+ * That is defence, not a boundary. Both commands still read the shared clone's own repo-scoped
+ * configuration, so two classes remain: a program that tree-written jj or git configuration names,
+ * running inside one of them, and tree-written http or TLS configuration that changes where the
+ * session to github.com ends or what it trusts. On the tmux runtime a pane shares the daemon's uid
+ * and can read provisioning's environment anyway, and this daemon refuses the pod runtime
+ * (LEGION-286). The Go daemon keeps the token from a pod's tree with a container boundary
+ * (docs/kubernetes.md, "Trust model: the provisioning token"). */
 async function createProvisioningCredential(
   stateDir: string,
   token: string
@@ -174,6 +179,9 @@ async function createProvisioningCredential(
       GIT_ASKPASS: "",
       GIT_TERMINAL_PROMPT: "0",
       GIT_ALLOW_PROTOCOL: "https",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_PARAMETERS: "",
       [PROVISIONING_TOKEN_ENV]: token,
       GIT_CONFIG_COUNT: "3",
       GIT_CONFIG_KEY_0: "credential.helper",

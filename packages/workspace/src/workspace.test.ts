@@ -54,7 +54,8 @@ function whenPathExists(watchedDir: string, target: string): Promise<void> {
   return promise;
 }
 /** The environment provisioning hands its clone and fetch on the tmux runtime, exactly: the token
- * the one-shot helper answers with, no askpass and no terminal prompt, and the pairs that reset the
+ * the one-shot helper answers with, no askpass and no terminal prompt, no reachable global or
+ * system git configuration and no ambient GIT_CONFIG_PARAMETERS, and the pairs that reset the
  * clone's credential-helper chain (LEGION-178) and then name that helper for https://github.com
  * alone. The exact key set is the contract: the token travels only through
  * `LEGION_PROVISIONING_TOKEN`, never as inline config. */
@@ -65,6 +66,9 @@ function provisioningEnv(call: RunCall): Readonly<Record<string, string>> {
     GIT_ASKPASS: "",
     GIT_TERMINAL_PROMPT: "0",
     GIT_ALLOW_PROTOCOL: "https",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_PARAMETERS: "",
     LEGION_PROVISIONING_TOKEN: "installation-token",
     GIT_CONFIG_COUNT: "3",
     GIT_CONFIG_KEY_0: "credential.helper",
@@ -76,9 +80,13 @@ function provisioningEnv(call: RunCall): Readonly<Record<string, string>> {
   });
   return env;
 }
-/** The one-shot helper's path, out of the `!'<path>'` the environment names it by. */
+/** The one-shot helper's path, reversed out of the `!'<path>'` the environment names it by
+ * (`createProvisioningCredential`'s own escaping: every `'` in the path becomes `'\''`). */
 function provisioningHelper(env: Readonly<Record<string, string>>): string {
-  return (env.GIT_CONFIG_VALUE_1 ?? "").slice(2, -1);
+  const value = env.GIT_CONFIG_VALUE_1 ?? "";
+  const match = /^!'(.*)'$/.exec(value);
+  if (!match) throw new Error(`not a one-shot helper value: ${JSON.stringify(value)}`);
+  return match[1].replaceAll("'\\''", "'");
 }
 
 const temporaryDirectories: string[] = [];
@@ -418,10 +426,14 @@ async function realJjRig(
     commandTimeoutMs,
     run: (cmd: string[], opts?: RunCall["opts"]) => {
       calls.push(cmd);
-      const allowed = opts?.env?.GIT_ALLOW_PROTOCOL;
+      // Widen the transport for the credentialed clone and fetch alone — identified by the
+      // provisioning token in their environment, not by GIT_ALLOW_PROTOCOL's mere presence, so a
+      // dropped pin fails this assertion instead of silently passing the env through untouched.
+      const isCredentialed = opts?.env?.LEGION_PROVISIONING_TOKEN !== undefined;
+      if (isCredentialed) expect(opts?.env?.GIT_ALLOW_PROTOCOL).toBe("https");
       const transported =
-        allowFile && allowed !== undefined
-          ? { ...opts, env: { ...opts?.env, GIT_ALLOW_PROTOCOL: `${allowed}:file` } }
+        allowFile && isCredentialed
+          ? { ...opts, env: { ...opts?.env, GIT_ALLOW_PROTOCOL: "https:file" } }
           : opts;
       return cmd[0] === "jj"
         ? runCommand([...command, ...cmd.slice(1)], withIdentity(transported))
@@ -1022,46 +1034,181 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     provisioningEnv(fetch);
   }, 60_000);
 
-  // A URL rewrite a tree agent wrote sends provisioning's credentialed fetch to a host of its own.
-  // The one-shot credential answers https://github.com alone, so that host receives no credential,
-  // whether the rewrite sits in the shared clone's own configuration, which every agent of the tree
-  // can write, or, on the tmux runtime, in the global configuration of the daemon's user, which
-  // every pane shares.
-  for (const { where, inGlobal } of [
-    { where: "the shared clone's configuration", inGlobal: false },
-    { where: "the daemon user's global configuration on the tmux runtime", inGlobal: true },
-  ]) {
-    test(`a remote a rewrite in ${where} sends elsewhere gets that host no credential`, async () => {
-      for (const { name, command } of JJ_BINARIES) {
-        const host = await plantedHost();
-        try {
-          const rig = await realJjRig(command, path.join(await temporaryDirectory(), "state"));
-          const global = path.join(await temporaryDirectory(), "gitconfig");
-          await writeFile(global, "");
-          const target = inGlobal
-            ? [`--file=${global}`]
-            : [`--file=${path.join(rig.repoCloneDir, ".git", "config")}`];
-          for (const [key, value] of [
-            [`url.${host.url}/acme/widgets.insteadOf`, rig.remoteDir],
-            ["http.sslVerify", "false"],
-          ] as const) {
-            const set = await runCommand([SYSTEM_GIT, "config", ...target, key, value]);
-            expect(set.exitCode, set.stderr).toBe(0);
-          }
-          await withGlobalGitConfig(global, async () => {
-            await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).rejects.toThrow(
-              "jj git fetch"
-            );
-          });
-          // The rewrite took the fetch to the planted host, which then got no credential.
-          expect(host.requests.length, name).toBeGreaterThan(0);
-          expect(host.authorizations, name).toEqual([]);
-        } finally {
-          host.stop();
+  /** Runs a full `provisionIssueWorkspace` against a fresh, already-`.jj`'d clone with every
+   * command stubbed to succeed, and returns exactly the environment its credentialed fetch
+   * received: the production environment `createProvisioningCredential` builds, not a test rig's
+   * approximation of it. */
+  async function capturedFetchEnv(): Promise<Readonly<Record<string, string>>> {
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const issue = "WIDGETS-42";
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+    let fetchEnv: Readonly<Record<string, string>> | undefined;
+    await provisionIssueWorkspace(issue, {
+      repo: "acme/widgets" as const,
+      stateDir,
+      provisioningToken: async () => "installation-token",
+      credentialHelper,
+      commandTimeoutMs,
+      run: async (cmd: string[], opts?: RunCall["opts"]) => {
+        if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch") fetchEnv = opts?.env;
+        if (cmd[0] === "jj" && cmd[1] === "workspace" && cmd[2] === "add") {
+          await mkdir(workspaceDir, { recursive: true });
         }
-      }
-    }, 60_000);
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    });
+    if (!fetchEnv) throw new Error("provisioning did not fetch");
+    return fetchEnv;
   }
+
+  test("core.askPass never answers the credentialed fetch's fill, and the pin is what stops it", async () => {
+    // A dedicated bare repository with NO persisted configuration at all — not even
+    // credential.interactive — so GIT_ASKPASS is the only variable in play. That absence is
+    // load-bearing, not an oversight: a repository provisioning has actually touched carries
+    // credential.interactive=false, persisted by credentialConfigCommands above, and on git >=
+    // 2.44 that setting alone blocks the askpass fallback — indistinguishable, by any text or
+    // behavior a fill can observe, from GIT_ASKPASS doing the same job (confirmed against real
+    // git: 2.43 ignores credential.interactive for this and answers regardless; 2.47, the worker
+    // image's, does not). Giving this fixture a persisted clone's configuration to look more
+    // "realistic" is exactly the change that would make the witness blind again.
+    const fetchEnv = await capturedFetchEnv();
+    const askpassGitDir = path.join(await temporaryDirectory(), "askpass-repo.git");
+    expect((await runCommand([SYSTEM_GIT, "init", "--bare", askpassGitDir])).exitCode).toBe(0);
+    const sink = path.join(await temporaryDirectory(), "askpass.log");
+    const askpassStub = path.join(await temporaryDirectory(), "askpass");
+    await writeFile(
+      askpassStub,
+      `#!/bin/sh\nprintf 'askpass token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\nprintf 'leaked\\n'\n`,
+      { mode: 0o700 }
+    );
+    expect(
+      (
+        await runCommand([
+          SYSTEM_GIT,
+          `--git-dir=${askpassGitDir}`,
+          "config",
+          "core.askPass",
+          askpassStub,
+        ])
+      ).exitCode
+    ).toBe(0);
+
+    const pinned = await fillCredential(askpassGitDir, fetchEnv, "http://github.com/acme/widgets");
+    expect(pinned.exitCode).not.toBe(0);
+    expect(pinned.stdout).not.toContain("password=");
+    expect(existsSync(sink) ? await readFile(sink, "utf8") : "").toBe("");
+
+    // Positive control: the identical route with GIT_ASKPASS omitted must run the program — proof
+    // that the fixture can detect the leak at all, and that removing the pin is what changes the
+    // outcome, not some other difference between this fill and the pinned one above.
+    const { GIT_ASKPASS: _pinned, ...withoutAskpass } = fetchEnv;
+    const unpinned = await fillCredential(
+      askpassGitDir,
+      withoutAskpass,
+      "http://github.com/acme/widgets"
+    );
+    expect(unpinned.stdout).toContain("password=leaked");
+    expect(await readFile(sink, "utf8")).toContain("askpass token=set");
+  }, 60_000);
+
+  test("closes an ambient GIT_CONFIG_PARAMETERS that would otherwise reach a credential helper the numbered reset does not see", async () => {
+    // git reads GIT_CONFIG_PARAMETERS after the GIT_CONFIG_COUNT/_KEY_n/_VALUE_n pairs, so a
+    // tree, an operator's shell, or an inherited process could set it to reach a credential.helper
+    // the reset above never touches. GIT_CONFIG_PARAMETERS: "" closes it: git parses the empty
+    // string as zero pairs, so it cannot add one, whatever the ambient value already was, because
+    // the production environment is spread last over anything already in the process's own.
+    const fetchEnv = await capturedFetchEnv();
+    const evilGitDir = path.join(await temporaryDirectory(), "evil-repo.git");
+    expect((await runCommand([SYSTEM_GIT, "init", "--bare", evilGitDir])).exitCode).toBe(0);
+    const sink = path.join(await temporaryDirectory(), "evil.log");
+    const evilHelper = path.join(await temporaryDirectory(), "evil");
+    await writeFile(
+      evilHelper,
+      `#!/bin/sh\n[ "$1" = get ] || exit 0\nprintf 'EVIL-HELPER-RAN token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\nprintf 'username=x-access-token\\npassword=leaked\\n'\n`,
+      { mode: 0o700 }
+    );
+    const ambientBypass = `'credential.helper'='!${evilHelper}'`;
+
+    const pinned = await fillCredential(
+      evilGitDir,
+      { GIT_CONFIG_PARAMETERS: ambientBypass, ...fetchEnv },
+      "https://evil.example/acme/widgets"
+    );
+    expect(pinned.stdout).not.toContain("password=leaked");
+    expect(existsSync(sink) ? await readFile(sink, "utf8") : "").not.toContain("EVIL-HELPER-RAN");
+
+    // Positive control: the identical ambient bypass, without the production override, does reach
+    // the helper — proof the scenario is real and the pin is what closes it.
+    const { GIT_CONFIG_PARAMETERS: _pinned, ...withoutPin } = fetchEnv;
+    const unpinned = await fillCredential(
+      evilGitDir,
+      { GIT_CONFIG_PARAMETERS: ambientBypass, ...withoutPin },
+      "https://evil.example/acme/widgets"
+    );
+    expect(unpinned.stdout).toContain("password=leaked");
+    expect(await readFile(sink, "utf8")).toContain("EVIL-HELPER-RAN token=set");
+  }, 60_000);
+
+  // A URL rewrite a tree agent wrote sends provisioning's credentialed fetch to a host of its own.
+  // The one-shot credential answers https://github.com alone, so a rewrite in the shared clone's
+  // own configuration, which every agent of the tree can write, gets that host no credential.
+  test("a remote a rewrite in the shared clone's configuration sends elsewhere gets that host no credential", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const host = await plantedHost();
+      try {
+        const rig = await realJjRig(command, path.join(await temporaryDirectory(), "state"));
+        const target = [`--file=${path.join(rig.repoCloneDir, ".git", "config")}`];
+        for (const [key, value] of [
+          [`url.${host.url}/acme/widgets.insteadOf`, rig.remoteDir],
+          ["http.sslVerify", "false"],
+        ] as const) {
+          const set = await runCommand([SYSTEM_GIT, "config", ...target, key, value]);
+          expect(set.exitCode, set.stderr).toBe(0);
+        }
+        await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).rejects.toThrow(
+          "jj git fetch"
+        );
+        // The rewrite took the fetch to the planted host, which then got no credential.
+        expect(host.requests.length, name).toBeGreaterThan(0);
+        expect(host.authorizations, name).toEqual([]);
+      } finally {
+        host.stop();
+      }
+    }
+  }, 60_000);
+
+  // On the tmux runtime, a rewrite in the daemon user's global configuration, which every pane
+  // shares, does not even reach the credentialed fetch: GIT_CONFIG_GLOBAL=/dev/null and
+  // GIT_CONFIG_NOSYSTEM=1 make that file invisible to it, whatever it contains.
+  test("a remote a rewrite in the daemon user's global configuration on the tmux runtime never reaches the credentialed fetch at all", async () => {
+    for (const { name, command } of JJ_BINARIES) {
+      const host = await plantedHost();
+      try {
+        const rig = await realJjRig(command, path.join(await temporaryDirectory(), "state"));
+        const global = path.join(await temporaryDirectory(), "gitconfig");
+        await writeFile(global, "");
+        for (const [key, value] of [
+          [`url.${host.url}/acme/widgets.insteadOf`, rig.remoteDir],
+          ["http.sslVerify", "false"],
+        ] as const) {
+          const set = await runCommand([SYSTEM_GIT, "config", `--file=${global}`, key, value]);
+          expect(set.exitCode, set.stderr).toBe(0);
+        }
+        await withGlobalGitConfig(global, async () => {
+          await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).resolves.toEqual({
+            repoCloneDir: rig.repoCloneDir,
+            workspaceDir: rig.workspaceDir,
+            bookmark: "legion/WIDGETS-42",
+          });
+        });
+        expect(host.requests.length, name).toBe(0);
+      } finally {
+        host.stop();
+      }
+    }
+  }, 60_000);
 
   test("does not add a second workspace or run a bookmark command when an issue is reactivated", async () => {
     const stateDir = await temporaryDirectory();
@@ -1546,20 +1693,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         ]);
       },
     },
-    {
-      // The other three routes run over the local-path stand-in transport, which never asks for a
-      // credential, so they cannot witness this route: askpass runs only when git actually
-      // negotiates one, over https. A planted TLS host that answers every request 401 (in the
-      // shape of the url.insteadOf rewrite test above) forces that negotiation for real.
-      route: "an askpass program behind core.askPass, on a planted https host",
-      plant: async (rig: RealJjRig, witness: string) => {
-        const host = await plantedHost();
-        await gitConfig(rig.repoCloneDir, `url.${host.url}/acme/widgets.insteadOf`, rig.remoteDir);
-        await gitConfig(rig.repoCloneDir, "http.sslVerify", "false");
-        await gitConfig(rig.repoCloneDir, "core.askPass", witness);
-        return host;
-      },
-    },
   ]) {
     test(`the credentialed fetch does not run ${route}`, async () => {
       for (const { name, command } of JJ_BINARIES) {
@@ -1573,17 +1706,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           `#!/bin/sh\nprintf 'witness token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\nexit 1\n`,
           { mode: 0o700 }
         );
-        const planted = await plant(rig, witness);
-        try {
-          await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).rejects.toThrow(
-            "jj git fetch"
-          );
-          if (planted) expect(planted.requests.length, `${name}, ${route}`).toBeGreaterThan(0);
-          const recorded = existsSync(sink) ? await readFile(sink, "utf8") : "";
-          expect(recorded, `${name}, ${route}`).not.toContain("token=set");
-        } finally {
-          await planted?.stop();
-        }
+        await plant(rig, witness);
+        await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).rejects.toThrow(
+          "jj git fetch"
+        );
+        const recorded = existsSync(sink) ? await readFile(sink, "utf8") : "";
+        expect(recorded, `${name}, ${route}`).not.toContain("token=set");
       }
     }, 60_000);
   }
