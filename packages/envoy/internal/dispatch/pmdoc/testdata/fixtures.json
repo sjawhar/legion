@@ -5438,7 +5438,7 @@
   },
   {
     "name": "footnote",
-    "markdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n\nA reference written in another case[^Case].\n\n[^case]: Its definition.\n\nA sharp s[^ß] and a dotted capital[^İ] match by full case mapping.\n\n[^SS]: Its definition.\n\n[^i̇]: Its definition.\n",
+    "markdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n\nA reference written in another case[^Case].\n\n[^case]: Its definition.\n\nA sharp s[^ß] and a dotted capital[^İ] match by full case mapping.\n\n[^SS]: Its definition.\n\n[^i̇]: Its definition.\n\nCode in a definition[^cb] ending in a blank line.\n\n[^cb]: ```\n    code\n\n    ```\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -5597,11 +5597,55 @@
               ]
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Code in a definition"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "cb"
+              }
+            },
+            {
+              "type": "text",
+              "text": " ending in a blank line."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "cb",
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "code\n"
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "ATYBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEVQSBmb290bm90ZSByZWZlcmVuY2UuhwEBAxJmb290bm90ZV9yZWZlcmVuY2UoAAEXBWxhYmVsAXcHZml4dHVyZSgAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAxNmb290bm90ZV9kZWZpbml0aW9uBwABGgMJcGFyYWdyYXBoBwABGwYEAAEcFEZvb3Rub3RlIGRlZmluaXRpb24uKAABGwdibG9ja0lkAXcIYi0wMDAwMDMoAAEaBWxhYmVsAXcHZml4dHVyZSgAARoHYmxvY2tJZAF3CGItMDAwMDAyhwEaAwlwYXJhZ3JhcGgHAAE0BgQAATUjQSByZWZlcmVuY2Ugd3JpdHRlbiBpbiBhbm90aGVyIGNhc2WHATUDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAVkFbGFiZWwBdwRDYXNlhwFZBgQAAVsBLigAATQHYmxvY2tJZAF3CGItMDAwMDA0hwE0AxNmb290bm90ZV9kZWZpbml0aW9uBwABXgMJcGFyYWdyYXBoBwABXwYEAAFgD0l0cyBkZWZpbml0aW9uLigAAV8HYmxvY2tJZAF3CGItMDAwMDA2KAABXgVsYWJlbAF3BGNhc2UoAAFeB2Jsb2NrSWQBdwhiLTAwMDAwNYcBXgMJcGFyYWdyYXBoBwABcwYEAAF0CUEgc2hhcnAgc4cBdAMSZm9vdG5vdGVfcmVmZXJlbmNlKAABfgVsYWJlbAF3AsOfhwF+BgQAAYABFSBhbmQgYSBkb3R0ZWQgY2FwaXRhbIcBgAEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAZYBBWxhYmVsAXcCxLCHAZYBBgQAAZgBHCBtYXRjaCBieSBmdWxsIGNhc2UgbWFwcGluZy4oAAFzB2Jsb2NrSWQBdwhiLTAwMDAwN4cBcwMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAbYBAwlwYXJhZ3JhcGgHAAG3AQYEAAG4AQ9JdHMgZGVmaW5pdGlvbi4oAAG3AQdibG9ja0lkAXcIYi0wMDAwMDkoAAG2AQVsYWJlbAF3AlNTKAABtgEHYmxvY2tJZAF3CGItMDAwMDA4hwG2AQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAcsBAwlwYXJhZ3JhcGgHAAHMAQYEAAHNAQ9JdHMgZGVmaW5pdGlvbi4oAAHMAQdibG9ja0lkAXcIYi0wMDAwMTEoAAHLAQVsYWJlbAF3A2nMhygAAcsBB2Jsb2NrSWQBdwhiLTAwMDAxMAA=",
-    "rendered_by_milkdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n\nA reference written in another case[^Case].\n\n[^case]: Its definition.\n\nA sharp s[^ß] and a dotted capital[^İ] match by full case mapping.\n\n[^SS]: Its definition.\n\n[^i̇]: Its definition.\n"
+    "yjs_update_v1_b64": "AUUBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEVQSBmb290bm90ZSByZWZlcmVuY2UuhwEBAxJmb290bm90ZV9yZWZlcmVuY2UoAAEXBWxhYmVsAXcHZml4dHVyZSgAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAxNmb290bm90ZV9kZWZpbml0aW9uBwABGgMJcGFyYWdyYXBoBwABGwYEAAEcFEZvb3Rub3RlIGRlZmluaXRpb24uKAABGwdibG9ja0lkAXcIYi0wMDAwMDMoAAEaBWxhYmVsAXcHZml4dHVyZSgAARoHYmxvY2tJZAF3CGItMDAwMDAyhwEaAwlwYXJhZ3JhcGgHAAE0BgQAATUjQSByZWZlcmVuY2Ugd3JpdHRlbiBpbiBhbm90aGVyIGNhc2WHATUDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAVkFbGFiZWwBdwRDYXNlhwFZBgQAAVsBLigAATQHYmxvY2tJZAF3CGItMDAwMDA0hwE0AxNmb290bm90ZV9kZWZpbml0aW9uBwABXgMJcGFyYWdyYXBoBwABXwYEAAFgD0l0cyBkZWZpbml0aW9uLigAAV8HYmxvY2tJZAF3CGItMDAwMDA2KAABXgVsYWJlbAF3BGNhc2UoAAFeB2Jsb2NrSWQBdwhiLTAwMDAwNYcBXgMJcGFyYWdyYXBoBwABcwYEAAF0CUEgc2hhcnAgc4cBdAMSZm9vdG5vdGVfcmVmZXJlbmNlKAABfgVsYWJlbAF3AsOfhwF+BgQAAYABFSBhbmQgYSBkb3R0ZWQgY2FwaXRhbIcBgAEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAZYBBWxhYmVsAXcCxLCHAZYBBgQAAZgBHCBtYXRjaCBieSBmdWxsIGNhc2UgbWFwcGluZy4oAAFzB2Jsb2NrSWQBdwhiLTAwMDAwN4cBcwMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAbYBAwlwYXJhZ3JhcGgHAAG3AQYEAAG4AQ9JdHMgZGVmaW5pdGlvbi4oAAG3AQdibG9ja0lkAXcIYi0wMDAwMDkoAAG2AQVsYWJlbAF3AlNTKAABtgEHYmxvY2tJZAF3CGItMDAwMDA4hwG2AQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAcsBAwlwYXJhZ3JhcGgHAAHMAQYEAAHNAQ9JdHMgZGVmaW5pdGlvbi4oAAHMAQdibG9ja0lkAXcIYi0wMDAwMTEoAAHLAQVsYWJlbAF3A2nMhygAAcsBB2Jsb2NrSWQBdwhiLTAwMDAxMIcBywEDCXBhcmFncmFwaAcAAeABBgQAAeEBFENvZGUgaW4gYSBkZWZpbml0aW9uhwHhAQMSZm9vdG5vdGVfcmVmZXJlbmNlKAAB9gEFbGFiZWwBdwJjYocB9gEGBAAB+AEYIGVuZGluZyBpbiBhIGJsYW5rIGxpbmUuKAAB4AEHYmxvY2tJZAF3CGItMDAwMDEyhwHgAQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAZICAwpjb2RlX2Jsb2NrBwABkwIGBAABlAIFY29kZQooAAGTAgdibG9ja0lkAXcIYi0wMDAwMTQoAAGSAgVsYWJlbAF3AmNiKAABkgIHYmxvY2tJZAF3CGItMDAwMDEzAA==",
+    "rendered_by_milkdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n\nA reference written in another case[^Case].\n\n[^case]: Its definition.\n\nA sharp s[^ß] and a dotted capital[^İ] match by full case mapping.\n\n[^SS]: Its definition.\n\n[^i̇]: Its definition.\n\nCode in a definition[^cb] ending in a blank line.\n\n[^cb]: ```\n    code\n\n    ```\n"
   },
   {
     "name": "frontmatter-empty",
@@ -10009,7 +10053,7 @@
   },
   {
     "name": "nested-code",
-    "markdown": "> - item\n>\n>       code\n",
+    "markdown": "> - item\n>\n>       code\n\nFenced code ending in a blank line:\n\n```\nfirst\n\n```\n\n- In an item:\n\n  ```\n  code\n\n\n  ```\n\n> An unclosed fence in a quote:\n>\n> ```\n> x\n>\n>\n\nText.\n\n- An unclosed fence in an item:\n\n  ```\n  y\n\n\nText after the list.\n\nAn unclosed fence takes the blank line before the next item:\n\n- ```\n  open\n\n- Next.\n\nText.\n\n> - An item in a quote:\n>\n>   ```\n>   open\n>\n>\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -10066,11 +10110,327 @@
               ]
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Fenced code ending in a blank line:"
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "first\n"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000009"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000010"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "In an item:"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000011"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "code\n\n"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000013"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "An unclosed fence in a quote:"
+                }
+              ]
+            },
+            {
+              "type": "code_block",
+              "attrs": {
+                "language": null,
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "x\n"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000015"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000016"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000017"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000018"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "An unclosed fence in an item:"
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000019"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "y\n"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000020"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text after the list."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000021"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "An unclosed fence takes the blank line before the next item:"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000023"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000024"
+                  }
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000025"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "open\n"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000026"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000027"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Next."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000028"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Text."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000029"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000030"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": true,
+                    "checked": null,
+                    "blockId": "b-000031"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000032"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "An item in a quote:"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "code_block",
+                      "attrs": {
+                        "language": null,
+                        "blockId": "b-000033"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "open\n"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "ARIBAAcBC3Byb3NlbWlycm9yAwpibG9ja3F1b3RlBwABAAMLYnVsbGV0X2xpc3QHAAEBAwlsaXN0X2l0ZW0HAAECAwlwYXJhZ3JhcGgHAAEDBgQAAQQEaXRlbSgAAQMHYmxvY2tJZAF3CGItMDAwMDA0hwEDAwpjb2RlX2Jsb2NrBwABCgYEAAELBGNvZGUoAAEKB2Jsb2NrSWQBdwhiLTAwMDAwNSgAAQIFbGFiZWwBdwPigKIoAAECCGxpc3RUeXBlAXcGYnVsbGV0KAABAgZzcHJlYWQBeCgAAQIHYmxvY2tJZAF3CGItMDAwMDAzKAABAQZzcHJlYWQBeSgAAQEHYmxvY2tJZAF3CGItMDAwMDAyKAABAAdibG9ja0lkAXcIYi0wMDAwMDEA",
-    "rendered_by_milkdown": "> * item\n>\n>   ```\n>   code\n>   ```\n"
+    "yjs_update_v1_b64": "AX0BAAcBC3Byb3NlbWlycm9yAwpibG9ja3F1b3RlBwABAAMLYnVsbGV0X2xpc3QHAAEBAwlsaXN0X2l0ZW0HAAECAwlwYXJhZ3JhcGgHAAEDBgQAAQQEaXRlbSgAAQMHYmxvY2tJZAF3CGItMDAwMDA0hwEDAwpjb2RlX2Jsb2NrBwABCgYEAAELBGNvZGUoAAEKB2Jsb2NrSWQBdwhiLTAwMDAwNSgAAQIFbGFiZWwBdwPigKIoAAECCGxpc3RUeXBlAXcGYnVsbGV0KAABAgZzcHJlYWQBeCgAAQIHYmxvY2tJZAF3CGItMDAwMDAzKAABAQZzcHJlYWQBeSgAAQEHYmxvY2tJZAF3CGItMDAwMDAyKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAARgGBAABGSNGZW5jZWQgY29kZSBlbmRpbmcgaW4gYSBibGFuayBsaW5lOigAARgHYmxvY2tJZAF3CGItMDAwMDA2hwEYAwpjb2RlX2Jsb2NrBwABPgYEAAE/BmZpcnN0CigAAT4HYmxvY2tJZAF3CGItMDAwMDA3hwE+AwtidWxsZXRfbGlzdAcAAUcDCWxpc3RfaXRlbQcAAUgDCXBhcmFncmFwaAcAAUkGBAABSgtJbiBhbiBpdGVtOigAAUkHYmxvY2tJZAF3CGItMDAwMDEwhwFJAwpjb2RlX2Jsb2NrBwABVwYEAAFYBmNvZGUKCigAAVcHYmxvY2tJZAF3CGItMDAwMDExKAABSAVsYWJlbAF3A+KAoigAAUgIbGlzdFR5cGUBdwZidWxsZXQoAAFIBnNwcmVhZAF4KAABSAdibG9ja0lkAXcIYi0wMDAwMDkoAAFHBnNwcmVhZAF5KAABRwdibG9ja0lkAXcIYi0wMDAwMDiHAUcDCmJsb2NrcXVvdGUHAAFmAwlwYXJhZ3JhcGgHAAFnBgQAAWgdQW4gdW5jbG9zZWQgZmVuY2UgaW4gYSBxdW90ZTooAAFnB2Jsb2NrSWQBdwhiLTAwMDAxM4cBZwMKY29kZV9ibG9jawcAAYcBBgQAAYgBAngKKAABhwEHYmxvY2tJZAF3CGItMDAwMDE0KAABZgdibG9ja0lkAXcIYi0wMDAwMTKHAWYDCXBhcmFncmFwaAcAAY0BBgQAAY4BBVRleHQuKAABjQEHYmxvY2tJZAF3CGItMDAwMDE1hwGNAQMLYnVsbGV0X2xpc3QHAAGVAQMJbGlzdF9pdGVtBwABlgEDCXBhcmFncmFwaAcAAZcBBgQAAZgBHUFuIHVuY2xvc2VkIGZlbmNlIGluIGFuIGl0ZW06KAABlwEHYmxvY2tJZAF3CGItMDAwMDE4hwGXAQMKY29kZV9ibG9jawcAAbcBBgQAAbgBAnkKKAABtwEHYmxvY2tJZAF3CGItMDAwMDE5KAABlgEFbGFiZWwBdwPigKIoAAGWAQhsaXN0VHlwZQF3BmJ1bGxldCgAAZYBBnNwcmVhZAF4KAABlgEHYmxvY2tJZAF3CGItMDAwMDE3KAABlQEGc3ByZWFkAXkoAAGVAQdibG9ja0lkAXcIYi0wMDAwMTaHAZUBAwlwYXJhZ3JhcGgHAAHCAQYEAAHDARRUZXh0IGFmdGVyIHRoZSBsaXN0LigAAcIBB2Jsb2NrSWQBdwhiLTAwMDAyMIcBwgEDCXBhcmFncmFwaAcAAdkBBgQAAdoBPEFuIHVuY2xvc2VkIGZlbmNlIHRha2VzIHRoZSBibGFuayBsaW5lIGJlZm9yZSB0aGUgbmV4dCBpdGVtOigAAdkBB2Jsb2NrSWQBdwhiLTAwMDAyMYcB2QEDC2J1bGxldF9saXN0BwABmAIDCWxpc3RfaXRlbQcAAZkCAwlwYXJhZ3JhcGgoAAGaAgdibG9ja0lkAXcIYi0wMDAwMjSHAZoCAwpjb2RlX2Jsb2NrBwABnAIGBAABnQIFb3BlbgooAAGcAgdibG9ja0lkAXcIYi0wMDAwMjUoAAGZAgVsYWJlbAF3A+KAoigAAZkCCGxpc3RUeXBlAXcGYnVsbGV0KAABmQIGc3ByZWFkAXkoAAGZAgdibG9ja0lkAXcIYi0wMDAwMjOHAZkCAwlsaXN0X2l0ZW0HAAGoAgMJcGFyYWdyYXBoBwABqQIGBAABqgIFTmV4dC4oAAGpAgdibG9ja0lkAXcIYi0wMDAwMjcoAAGoAgVsYWJlbAF3A+KAoigAAagCCGxpc3RUeXBlAXcGYnVsbGV0KAABqAIGc3ByZWFkAXkoAAGoAgdibG9ja0lkAXcIYi0wMDAwMjYoAAGYAgZzcHJlYWQBeSgAAZgCB2Jsb2NrSWQBdwhiLTAwMDAyMocBmAIDCXBhcmFncmFwaAcAAbcCBgQAAbgCBVRleHQuKAABtwIHYmxvY2tJZAF3CGItMDAwMDI4hwG3AgMKYmxvY2txdW90ZQcAAb8CAwtidWxsZXRfbGlzdAcAAcACAwlsaXN0X2l0ZW0HAAHBAgMJcGFyYWdyYXBoBwABwgIGBAABwwITQW4gaXRlbSBpbiBhIHF1b3RlOigAAcICB2Jsb2NrSWQBdwhiLTAwMDAzMocBwgIDCmNvZGVfYmxvY2sHAAHYAgYEAAHZAgVvcGVuCigAAdgCB2Jsb2NrSWQBdwhiLTAwMDAzMygAAcECBWxhYmVsAXcD4oCiKAABwQIIbGlzdFR5cGUBdwZidWxsZXQoAAHBAgZzcHJlYWQBeCgAAcECB2Jsb2NrSWQBdwhiLTAwMDAzMSgAAcACBnNwcmVhZAF5KAABwAIHYmxvY2tJZAF3CGItMDAwMDMwKAABvwIHYmxvY2tJZAF3CGItMDAwMDI5AA==",
+    "rendered_by_milkdown": "> * item\n>\n>   ```\n>   code\n>   ```\n\nFenced code ending in a blank line:\n\n```\nfirst\n\n```\n\n* In an item:\n\n  ```\n  code\n\n\n  ```\n\n> An unclosed fence in a quote:\n>\n> ```\n> x\n>\n> ```\n\nText.\n\n* An unclosed fence in an item:\n\n  ```\n  y\n\n  ```\n\nText after the list.\n\nAn unclosed fence takes the blank line before the next item:\n\n*\n  ```\n  open\n\n  ```\n* Next.\n\nText.\n\n> * An item in a quote:\n>\n>   ```\n>   open\n>\n>   ```\n"
   },
   {
     "name": "nested-empty-items",

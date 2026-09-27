@@ -240,6 +240,21 @@ func (p listItemColumns) Open(parent ast.Node, reader gmtext.Reader, pc parser.C
 	return node, state
 }
 
+// fenceClosure is goldmark's fenced code parser recording on a block whether a closing fence closed
+// it (fenceClosedAttr), which the browser editor's parser reads its trailing blank line by
+// (fencedCodeText).
+type fenceClosure struct{ parser.BlockParser }
+
+var fenceClosedAttr = []byte("pmdoc-fence-closed")
+
+func (p fenceClosure) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	state := p.BlockParser.Continue(node, reader, pc)
+	if state == parser.Close {
+		node.SetAttribute(fenceClosedAttr, true)
+	}
+	return state
+}
+
 // setPadding sets reader's padding and drops the line it has peeked, which goldmark's
 // SetPadding keeps: a zero advance drops it.
 func setPadding(reader gmtext.Reader, padding int) {

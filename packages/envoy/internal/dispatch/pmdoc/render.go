@@ -568,11 +568,13 @@ func (r *renderer) writeCodeText(node *Node, prefix string) {
 	}
 }
 
-// blankLineAhead reports whether text's first line holds only spaces and tabs before its line
-// ending.
+// blankLineAhead reports whether text's first line, its last included, holds only spaces and tabs.
 func blankLineAhead(text string) bool {
 	end := strings.IndexByte(text, '\n')
-	return end >= 0 && strings.Trim(text[:end], " \t") == ""
+	if end < 0 {
+		end = len(text)
+	}
+	return strings.Trim(text[:end], " \t") == ""
 }
 
 // emptyCode reports whether code block node holds no text.

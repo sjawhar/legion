@@ -65,7 +65,7 @@ func blockParsers() []util.PrioritizedValue {
 		case setextParser:
 			parsers[index].Value = tabIndented{block, setextUnderline}
 		case fenceParser:
-			parsers[index].Value = tabIndented{block, fenceStart}
+			parsers[index].Value = tabIndented{fenceClosure{block}, fenceStart}
 		default:
 			parsers[index].Value = tabIndented{block, nil}
 		}
@@ -535,7 +535,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		return &Node{
 			Type:     "code_block",
 			Attrs:    Attrs{"language": value},
-			Children: codeBlockText(current.Lines(), source),
+			Children: fencedCodeText(current, source),
 		}, nil
 	case *ast.CodeBlock:
 		return &Node{
@@ -679,6 +679,52 @@ func emptyParagraphFirst(children []*Node, firstParagraph bool) []*Node {
 	return children
 }
 
+// fencedCodeText is a fenced code block's lines as its text: every line it holds, blank ones
+// included, as the browser editor's parser reads them, without the last line's line feed. Of a
+// block no fence closed, that parser drops the last line where it is blank and the block ends in a
+// quote, or in a list item or footnote definition that more of the document follows: the blank
+// line is the container's there.
+func fencedCodeText(code *ast.FencedCodeBlock, source []byte) []*Node {
+	value := strings.TrimSuffix(segmentsText(code.Lines(), source), "\n")
+	if _, closed := code.Attribute(fenceClosedAttr); !closed && unclosedFenceDropsBlank(code) {
+		value = strings.TrimSuffix(value, "\n")
+	}
+	if value == "" {
+		return nil
+	}
+	return []*Node{{Type: "text", Text: value}}
+}
+
+// unclosedFenceDropsBlank reports whether the container a fenced code block no fence closed ends
+// with takes a blank line the block ends in (fencedCodeText): a quote does, and so does a list
+// item or footnote definition that more of the document follows, where the next item keeps it the
+// block's, and a typed block's fence or the document's end does not. A last item and a definition
+// nothing follows end with the container around them.
+func unclosedFenceDropsBlank(code ast.Node) bool {
+	for container := code.Parent(); container != nil; container = container.Parent() {
+		switch container := container.(type) {
+		case *ast.Blockquote:
+			return true
+		case *ast.ListItem:
+			if container.NextSibling() != nil {
+				return false
+			}
+			if nextBlock(container.Parent()) != nil {
+				return true
+			}
+		case *extensionast.Footnote:
+			if nextBlock(container) != nil {
+				return true
+			}
+		case *typedDirective:
+			return false
+		}
+	}
+	return false
+}
+
+// codeBlockText is an indented code block's lines as its text; its trailing blank lines are the
+// blank lines after it.
 func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
 	value := strings.TrimRight(segmentsText(lines, source), "\n")
 	if value == "" {

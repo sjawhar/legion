@@ -251,7 +251,9 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 		}
 	}
 	last := list.LastChild()
-	if endsWithList(last) {
+	// The blank lines after a list ending in a fenced code block no fence closed are that block's,
+	// or its quote's, and space no list.
+	if endsWithList(last) || endsInOpenFence(list) {
 		return false, ""
 	}
 	threshold := 2
@@ -415,7 +417,39 @@ func blankBefore(block ast.Node) bool {
 	if blank, ok := block.Attribute(blankAfterAttr); ok {
 		return blank.(bool)
 	}
+	if keepsBlankLinesAfter(block.PreviousSibling()) {
+		return false
+	}
 	return block.HasBlankPreviousLines()
+}
+
+// keepsBlankLinesAfter reports whether node ends in a fenced code block no fence closed, which
+// takes the blank lines after node as its own lines, where its container does not
+// (unclosedFenceDropsBlank).
+func keepsBlankLinesAfter(node ast.Node) bool {
+	return endsInOpenFence(node) && !unclosedFenceDropsBlank(lastFencedCode(node))
+}
+
+// endsInOpenFence reports whether node ends in a fenced code block no fence closed.
+func endsInOpenFence(node ast.Node) bool {
+	code := lastFencedCode(node)
+	if code == nil {
+		return false
+	}
+	_, closed := code.Attribute(fenceClosedAttr)
+	return !closed
+}
+
+// lastFencedCode is the fenced code block node ends in, through the last block of each container
+// it ends in, or nil when it ends in no fenced code block.
+func lastFencedCode(node ast.Node) *ast.FencedCodeBlock {
+	for node != nil && node.Type() == ast.TypeBlock {
+		if code, ok := node.(*ast.FencedCodeBlock); ok {
+			return code
+		}
+		node = node.LastChild()
+	}
+	return nil
 }
 
 // startsContainer reports whether block opens a container the browser editor's parser keeps open
