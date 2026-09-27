@@ -18,3 +18,9 @@ export function validateNatsUserSeed(seed: string, source: string): void {
     throw new Error(`${source} holds an nkey seed that is not a user's (public key ${publicKey})`);
   }
 }
+
+/** The public key of the nkey user `seed` (a seed `validateNatsUserSeed` accepted) is the seed
+ * of: what the daemon may say about a seed it holds without the seed leaving it. */
+export function natsUserPublicKey(seed: string): string {
+  return seedKeys.fromSeed(new TextEncoder().encode(seed)).getPublicKey();
+}

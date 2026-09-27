@@ -202,6 +202,9 @@ describe("resolveDaemonEnvironment", () => {
           SSH_AUTH_SOCK: "/tmp/ssh-x/agent.1",
           MNEMOPI_VEC_WEIGHT: "0.5",
           ENVOY_TOKEN_FILE: "/leaked/legion-omp-legion-6-implementer-envoy_token",
+          // the daemon's own NATS seed (LEGION-279), which no pane may hold
+          NATS_DAEMON_NKEY_SEED: "leaked-daemon-seed",
+          NATS_DAEMON_NKEY_SEED_FILE: "/leaked/nats-daemon.seed",
         },
         run: async (command) => {
           if (command.join(" ") === "/tools/mise env --json") {
@@ -210,6 +213,7 @@ describe("resolveDaemonEnvironment", () => {
                 PATH: "/full/bin:/usr/bin",
                 CARGO_HOME: "/home/legion/.cargo",
                 ENVOY_TOKEN: "leaked-from-mise",
+                NATS_DAEMON_NKEY_SEED_FILE: "/leaked/from-mise/nats-daemon.seed",
               }),
               stderr: "",
               exitCode: 0,
@@ -622,6 +626,8 @@ describe("isSecretLikeName", () => {
       "GOOGLE_APPLICATION_CREDENTIALS_FILE",
       "NATS_NKEY_SEED",
       "NATS_NKEY_SEED_FILE",
+      "NATS_DAEMON_NKEY_SEED",
+      "NATS_DAEMON_NKEY_SEED_FILE",
       "nats_nkey_seed",
       "npm_config_token",
       "my_api_key",

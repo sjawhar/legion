@@ -7,14 +7,17 @@ import {
   consumerOpts,
   DeliverPolicy,
   ErrorCode,
+  Events,
   type NatsConnection,
   NatsError,
   nanos,
   nkeyAuthenticator,
+  type Status,
   StringCodec,
 } from "nats";
 import { createCancellableSleep } from "./cancellable-sleep";
 import type { DaemonConfig } from "./config";
+import { natsUserPublicKey } from "./nats-seed";
 
 /**
  * The delivery outcomes a durable JetStream message can resolve to. Exactly
@@ -242,24 +245,83 @@ export interface JetStreamConnection {
   ): Promise<{ data: Uint8Array }>;
   flush(): Promise<void>;
   drain(): Promise<void>;
+  /** The client's asynchronous notices. A server's `-ERR 'Permissions Violation …'` arrives here
+   * with the operation and subject; a refused publish surfaces nowhere else, and a refused
+   * subscription's iterator merely ends with the error. */
+  status(): AsyncIterable<Status>;
 }
 
-/** Connects as the NATS nkey user `config.natsNkeySeed` names (resolved and validated at load),
- * and without a credential when the daemon has none. */
+/** Where the transport reports the user it connects as and the server's refusals. */
+export interface NatsTransportLog {
+  info(line: string): void;
+  error(line: string): void;
+}
+
+const consoleLog: NatsTransportLog = {
+  info: (line) => console.log(line),
+  error: (line) => console.error(line),
+};
+
+/** The seed the daemon's own connection authenticates with — `natsDaemonNkeySeed` when
+ * configured, else the pane seed `natsNkeySeed`, else none — and the boot line naming that user
+ * by public key and whether it is the pane user. Neither seed is in the line. */
+export function daemonNatsIdentity(config: DaemonConfig): { seed?: string; line: string } {
+  const paneUser =
+    config.natsNkeySeed === undefined ? undefined : natsUserPublicKey(config.natsNkeySeed);
+  if (config.natsDaemonNkeySeed !== undefined) {
+    const user = natsUserPublicKey(config.natsDaemonNkeySeed);
+    const relation =
+      user === paneUser
+        ? "the pane user: the daemon seed is the pane seed"
+        : `its own daemon user, not the pane user (${paneUser ?? "panes carry no NATS credential"})`;
+    return {
+      seed: config.natsDaemonNkeySeed,
+      line: `[legion] daemon NATS connects as nkey user ${user}, ${relation}`,
+    };
+  }
+  if (config.natsNkeySeed !== undefined) {
+    return {
+      seed: config.natsNkeySeed,
+      line: `[legion] daemon NATS connects as nkey user ${paneUser}, the pane user: no daemon seed is configured`,
+    };
+  }
+  return {
+    line: "[legion] daemon NATS connects with no credential: neither a daemon nor a pane seed is configured",
+  };
+}
+
+/** Connects as `daemonNatsIdentity`'s user (seeds resolved and validated at load), logging that
+ * user once, and reports every permission the server refuses the connection — a subscription or
+ * a publish, the durable consumers' JetStream API requests included — at error, naming the
+ * subject, since the server answers a refusal asynchronously and nothing else surfaces it. */
 export async function createNatsTransport(
   config: DaemonConfig,
-  connectFn: (opts: ConnectionOptions) => Promise<JetStreamConnection> = connect
+  connectFn: (opts: ConnectionOptions) => Promise<JetStreamConnection> = connect,
+  log: NatsTransportLog = consoleLog
 ): Promise<NatsTransport> {
+  const identity = daemonNatsIdentity(config);
+  log.info(identity.line);
   const connection = await connectFn({
     servers: config.natsUrls,
     name: `legion-daemon-${config.project}`,
-    ...(config.natsNkeySeed === undefined
+    ...(identity.seed === undefined
       ? {}
-      : { authenticator: nkeyAuthenticator(new TextEncoder().encode(config.natsNkeySeed)) }),
+      : { authenticator: nkeyAuthenticator(new TextEncoder().encode(identity.seed)) }),
     reconnect: true,
     maxReconnectAttempts: -1,
     reconnectTimeWait: 2_000,
   });
+  void (async () => {
+    for await (const status of connection.status()) {
+      if (status.type !== Events.Error || status.data !== ErrorCode.PermissionsViolation) continue;
+      const refused = status.permissionContext;
+      log.error(
+        refused === undefined
+          ? "[legion] NATS refused the daemon a permission (Permissions Violation) on a subject the server did not name"
+          : `[legion] NATS refused the daemon's ${refused.operation} to ${refused.subject} (Permissions Violation): the daemon's NATS user lacks that grant`
+      );
+    }
+  })();
   const codec = StringCodec();
   const subscriptions = new Set<MinimalCoreSubscription>();
   const durableStops = new Set<() => void>();
@@ -270,8 +332,14 @@ export async function createNatsTransport(
       const subscription = connection.subscribe(subject);
       subscriptions.add(subscription);
       void (async () => {
-        for await (const message of subscription) {
-          callback(message.subject, codec.decode(message.data));
+        try {
+          for await (const message of subscription) {
+            callback(message.subject, codec.decode(message.data));
+          }
+        } catch (error) {
+          // A refused subscription ends here too; the status loop above reports it.
+          if (error instanceof NatsError && error.code === ErrorCode.PermissionsViolation) return;
+          log.error(`[legion] NATS subscription to ${subject} ended: ${error}`);
         }
       })();
       return () => {

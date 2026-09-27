@@ -1,14 +1,19 @@
 import { describe, expect, it } from "bun:test";
 import {
   AckPolicy,
+  type Authenticator,
+  type ConnectionOptions,
   type ConsumerConfig,
   type ConsumerInfo,
   DeliverPolicy,
   ErrorCode,
   NatsError,
+  type NKeyAuth,
   nanos,
+  nkeys,
   ReplayPolicy,
 } from "nats";
+import type { DaemonConfig } from "../config";
 import {
   createNatsTransport,
   durableConsumerPolicyDrifted,
@@ -132,6 +137,7 @@ interface FakeConnection {
   request(): Promise<{ data: Uint8Array }>;
   flush(): Promise<void>;
   drain(): Promise<void>;
+  status(): AsyncIterable<never>;
 }
 
 function fakeConnection(jsm: FakeJsm, pullSubscription: FakePullSubscription): FakeConnection {
@@ -146,6 +152,7 @@ function fakeConnection(jsm: FakeJsm, pullSubscription: FakePullSubscription): F
     request: async () => ({ data: new Uint8Array() }),
     flush: async () => {},
     drain: async () => {},
+    status: async function* () {},
   };
 }
 
@@ -486,5 +493,64 @@ describe("createNatsTransport consumeDurable", () => {
     expect(pullSub.unsubscribeCalls).toBe(1);
 
     await transport.close();
+  });
+});
+
+describe("the user createNatsTransport connects as", () => {
+  const newUser = () => {
+    const pair: { getSeed(): Uint8Array; getPublicKey(): string } = nkeys.createUser();
+    return { seed: new TextDecoder().decode(pair.getSeed()), publicKey: pair.getPublicKey() };
+  };
+  const pane = newUser();
+  const daemon = newUser();
+
+  /** The nkey the connection would present, and the transport's info lines. */
+  async function connectsAs(seeds: Pick<DaemonConfig, "natsNkeySeed" | "natsDaemonNkeySeed">) {
+    let options: ConnectionOptions | undefined;
+    const info: string[] = [];
+    await createNatsTransport(
+      { ...config(), ...seeds },
+      async (opts) => {
+        options = opts;
+        return fakeConnection(new FakeJsm(), new FakePullSubscription());
+      },
+      { info: (line) => info.push(line), error: () => {} }
+    );
+    const authenticator = options?.authenticator as Authenticator | undefined;
+    const auth = authenticator?.("nonce") as NKeyAuth | undefined;
+    return { nkey: auth?.nkey, info };
+  }
+
+  it("is the daemon seed's user, else the pane seed's, else none, and the one boot line says which", async () => {
+    expect(await connectsAs({ natsNkeySeed: pane.seed, natsDaemonNkeySeed: daemon.seed })).toEqual({
+      nkey: daemon.publicKey,
+      info: [
+        `[legion] daemon NATS connects as nkey user ${daemon.publicKey}, its own daemon user, not the pane user (${pane.publicKey})`,
+      ],
+    });
+    expect(await connectsAs({ natsDaemonNkeySeed: daemon.seed })).toEqual({
+      nkey: daemon.publicKey,
+      info: [
+        `[legion] daemon NATS connects as nkey user ${daemon.publicKey}, its own daemon user, not the pane user (panes carry no NATS credential)`,
+      ],
+    });
+    expect(await connectsAs({ natsNkeySeed: pane.seed, natsDaemonNkeySeed: pane.seed })).toEqual({
+      nkey: pane.publicKey,
+      info: [
+        `[legion] daemon NATS connects as nkey user ${pane.publicKey}, the pane user: the daemon seed is the pane seed`,
+      ],
+    });
+    expect(await connectsAs({ natsNkeySeed: pane.seed })).toEqual({
+      nkey: pane.publicKey,
+      info: [
+        `[legion] daemon NATS connects as nkey user ${pane.publicKey}, the pane user: no daemon seed is configured`,
+      ],
+    });
+    expect(await connectsAs({})).toEqual({
+      nkey: undefined,
+      info: [
+        "[legion] daemon NATS connects with no credential: neither a daemon nor a pane seed is configured",
+      ],
+    });
   });
 });
