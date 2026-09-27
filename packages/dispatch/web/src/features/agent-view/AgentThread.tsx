@@ -24,6 +24,7 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
+import { ErrorBoundary } from "../shell/ErrorBoundary";
 
 /**
  * The session's conversation, rendered with assistant-ui's primitives (MIT) over Dispatch's own
@@ -104,21 +105,38 @@ function AssistantMessage(): ReactNode {
   );
 }
 
-export function AgentThread({ placeholder }: { placeholder: string }): ReactNode {
+/**
+ * `resetKey` clears a caught error when the viewer moves to another session.
+ *
+ * The boundary is around the transcript alone, and deliberately not around the composer. A frame
+ * this build renders wrongly throws inside assistant-ui's own conversion, and a boundary that
+ * enclosed both would take the composer with it — leaving a viewer looking at an error with no
+ * way to talk to the session, which is worse than the bad frame. The session's ring re-serves
+ * that frame on every visit, so "worse" here means permanently.
+ */
+export function AgentThread({
+  placeholder,
+  resetKey,
+}: {
+  placeholder: string;
+  resetKey: string;
+}): ReactNode {
   return (
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
-      <ThreadPrimitive.Viewport
-        autoScroll
-        className="min-h-0 flex-1 overflow-y-auto pr-1"
-        data-testid="agent-thread"
-      >
-        <ThreadPrimitive.Empty>
-          <p className={`mt-6 text-sm ${textMutedOnCanvas}`}>
-            Nothing yet. This session's next turn appears here as it happens.
-          </p>
-        </ThreadPrimitive.Empty>
-        <ThreadPrimitive.Messages components={{ AssistantMessage, UserMessage }} />
-      </ThreadPrimitive.Viewport>
+      <ErrorBoundary region="this conversation" resetKey={resetKey}>
+        <ThreadPrimitive.Viewport
+          autoScroll
+          className="min-h-0 flex-1 overflow-y-auto pr-1"
+          data-testid="agent-thread"
+        >
+          <ThreadPrimitive.Empty>
+            <p className={`mt-6 text-sm ${textMutedOnCanvas}`}>
+              Nothing yet. This session's next turn appears here as it happens.
+            </p>
+          </ThreadPrimitive.Empty>
+          <ThreadPrimitive.Messages components={{ AssistantMessage, UserMessage }} />
+        </ThreadPrimitive.Viewport>
+      </ErrorBoundary>
       <ComposerPrimitive.Root
         className={`mt-3 flex items-end gap-2 border-t pt-3 ${borderDefault}`}
         data-testid="agent-composer"

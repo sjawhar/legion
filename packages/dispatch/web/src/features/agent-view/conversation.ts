@@ -54,9 +54,14 @@ export function isRenderableFrame(frame: AgentStreamFrame): boolean {
   if (message.role !== "user" && message.role !== "assistant") return false;
   if (!Array.isArray(message.parts)) return false;
   return message.parts.every((part) => {
-    if (part.type === "text" || part.type === "reasoning") return typeof part.text === "string";
+    if (part.type === "text") return typeof part.text === "string";
+    // Text is the only part a user message may carry. assistant-ui throws
+    // "Unsupported user message part type: reasoning" on the others, exactly as it does for a
+    // tool call, and the throw takes the thread down with it.
+    if (part.type === "reasoning") {
+      return message.role === "assistant" && typeof part.text === "string";
+    }
     if (part.type !== "tool-call") return false;
-    // assistant-ui accepts a tool call on an assistant message only.
     return (
       message.role === "assistant" &&
       typeof part.toolCallId === "string" &&
@@ -107,21 +112,36 @@ export function applyFrames(
   return frames.reduce(applyFrame, state);
 }
 
-/** The conversation as assistant-ui renders it: a tool call carries its own result. */
+/** One content part of a message assistant-ui renders. */
+type ThreadPart = Exclude<ThreadMessageLike["content"], string>[number];
+
+/**
+ * The conversation as assistant-ui renders it: a tool call carries its own result.
+ *
+ * A user message emits text and nothing else. assistant-ui throws on any other part type there
+ * ("Unsupported user message part type: reasoning"), and that throw happens where the runtime is
+ * built — above the thread, so no boundary around the thread can catch it and the composer goes
+ * with the transcript. `isRenderableFrame` already drops such a frame; this is the second guard,
+ * because a part type a future publisher adds would otherwise reach the library through a frame
+ * this build did not know to refuse.
+ */
 export function toThreadMessages(state: AgentConversation): ThreadMessageLike[] {
   return state.messages.map((message) => ({
-    content: message.parts.map((part) => {
-      if (part.type === "text") return { text: part.text, type: "text" as const };
-      if (part.type === "reasoning") return { text: part.text, type: "reasoning" as const };
+    content: message.parts.flatMap<ThreadPart>((part) => {
+      if (part.type === "text") return [{ text: part.text, type: "text" as const }];
+      if (message.role !== "assistant") return [];
+      if (part.type === "reasoning") return [{ text: part.text, type: "reasoning" as const }];
       const result = state.results[part.toolCallId];
-      return {
-        argsText: part.argsText,
-        isError: result?.isError ?? false,
-        result: result?.output,
-        toolCallId: part.toolCallId,
-        toolName: part.toolName,
-        type: "tool-call" as const,
-      };
+      return [
+        {
+          argsText: part.argsText,
+          isError: result?.isError ?? false,
+          result: result?.output,
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          type: "tool-call" as const,
+        },
+      ];
     }),
     createdAt: new Date(message.at),
     id: message.id,

@@ -155,12 +155,18 @@ export function AgentConversationPage(): ReactNode {
           Could not send: {sendError}
         </p>
       )}
-      {/* A frame this build renders wrongly must cost the thread, not the page: without this the
-          route's boundary replaces the whole view, including the header that says which session
-          it is and the composer that could still reach it. */}
+      {/* The outer boundary is the catch-all: building the runtime is where assistant-ui
+          converts every message, so a throw there happens above the thread and takes the
+          composer with it whatever the thread does. Both guards against that are in
+          `conversation.ts`; this keeps the header and the delivery controls if one ever fails.
+          The transcript has a boundary of its own inside `AgentThread`, which is what keeps the
+          composer alive when the thread's own rendering is what failed. */}
       <ErrorBoundary region="this conversation" resetKey={sessionId}>
         <AssistantRuntimeProvider runtime={runtime}>
-          <AgentThread placeholder={`Message ${label} — delivered as ${mode}…`} />
+          <AgentThread
+            placeholder={`Message ${label} — delivered as ${mode}…`}
+            resetKey={sessionId}
+          />
         </AssistantRuntimeProvider>
       </ErrorBoundary>
     </div>
