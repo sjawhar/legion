@@ -36,16 +36,17 @@ const (
 	pluginHeartbeat    = 2 * time.Minute
 )
 
-// noticeReholdDelays is how long each copy of a notice whose forward failed waits while its
-// architect's agent has not taken its role (rehold): the nth copy waits the nth delay after the
-// report of the one before it. The first catches a quick relaunch, the second one heartbeat later,
-// and the last is sent after any registration a stopped session left behind must have lapsed, past
-// both windows with a minute to spare. That copy then either reaches the relaunched session or is
-// refused (notify.ErrNoHolder) and held by the executor until a session holds the role again, so
-// nothing is dropped while the architect's claim lives. There are three, as the TypeScript daemon
-// re-sends one at most three times (processes.ts, resendToRootArchitect): a holder that keeps its
-// registration alive but never confirms a delivery would otherwise be sent copies without end, and
-// the report of its last copy is logged and queues nothing.
+// noticeReholdDelays is how long each copy of a notice whose forward failed waits: the nth copy
+// waits the nth delay after the report of the one before it, except that the first goes at once
+// when the architect's agent has taken its role (rehold). The first catches a quick relaunch, the
+// second one heartbeat later, and the last is sent after any registration a stopped session left
+// behind must have lapsed, past both windows with a minute to spare. That copy then either reaches
+// the relaunched session or is refused (notify.ErrNoHolder) and held by the executor until a
+// session holds the role again, so nothing is dropped while the architect's claim lives. There are
+// three, as the TypeScript daemon re-sends one at most three times (processes.ts,
+// resendToRootArchitect): a holder that keeps its registration alive but never confirms a delivery
+// would otherwise be sent copies without end, and the report of its last copy is logged and queues
+// nothing.
 var noticeReholdDelays = [...]time.Duration{30 * time.Second, pluginHeartbeat, max(listenerSessionTTL, listenerClaimStale) + time.Minute}
 
 // errNoticeException is a report the listener sent that cannot be read as the failed forward of
@@ -88,10 +89,13 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // The notice goes back through the executor as a new row of its issue, counted in its Resends,
 // so it is routed, fenced and held as any notice is, and it is published under the dedupe key of
 // the row it copies (Notice.Published), so a session that did get the forward recognises the copy.
-// It is due at once when the architect's agent has taken its role and said it is ready
-// (claimTookRole): its ready has passed, so no release (releaseWaiting) would make the copy due,
-// and every later notice to the architect would wait behind it. Otherwise it is due after the next
-// of noticeReholdDelays. It is queued again once per delay; the report of its last copy is logged
+// The first copy is due at once when the architect's agent has taken its role and said it is
+// ready (claimTookRole): that is a relaunch that took its role inside the receipt window, whose
+// ready has passed, so no release (releaseWaiting) would make the copy due, and every later notice
+// to the architect would wait behind it. Every other copy is due after the next of
+// noticeReholdDelays, so a claim that reads live while its session hears nothing (a reconnecting
+// connection, a death the supervisor has not seen) keeps the notice for the whole schedule instead
+// of spending its copies in seconds. It is queued again once per delay; the report of its last copy is logged
 // and queues nothing. A report about another daemon's publish, another project, a role that is not
 // an architect, or anything but a notice changes nothing. The exception lane has no redelivery, so
 // a report that cannot be read is logged here and dropped. Each published copy of a row is queued
@@ -121,10 +125,11 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if err := json.Unmarshal([]byte(envelope.Payload), &exception); err != nil {
 		return fmt.Errorf("%w: decode exception %s: %w", errNoticeException, envelope.EventID, err)
 	}
-	issue, notice, original, ok := r.exceptionNotice(exception)
+	reported, ok := r.exceptionNotice(exception)
 	if !ok {
 		return nil
 	}
+	issue, notice := reported.issue, reported.notice
 	switch exception.Reason {
 	case "delivery_failed", "no_holder", "receipt_timeout":
 	default:
@@ -136,12 +141,12 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 		return nil
 	}
 	due := r.now().Add(noticeReholdDelays[notice.Resends])
-	if claimTookRole(r.claimState(claim.Token(strings.TrimPrefix(exception.OriginalTopic, roleTopicPrefix)))) {
+	if notice.Resends == 0 && claimTookRole(r.claimState(reported.architect)) {
 		due = r.now()
 	}
 	mark := fmt.Sprintf("%s#%d", exception.DedupeKey, notice.Resends)
 	notice.Resends++
-	notice.ResendOf = original
+	notice.ResendOf = reported.row
 	row, err := record.NewOutboxRow(issue, notice, due)
 	if err != nil {
 		return fmt.Errorf("%w: exception %s carries a notice the outbox refuses: %w", errNoticeException, envelope.EventID, err)
@@ -164,30 +169,40 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	return nil
 }
 
+// reportedNotice is the notice a report is about, as exceptionNotice reads it: its issue, the
+// notice as it was published, the outbox row the report's dedupe key names, and the architect whose
+// role topic the notice went to.
+type reportedNotice struct {
+	issue     string
+	notice    record.Notice
+	row       int64
+	architect claim.Token
+}
+
 // exceptionNotice reads the notice a report is about: a publish of this daemon's outbox (its
 // dedupe key names a row) to the role topic of an architect of this project, whose summary is the
 // executor's own "<kind> on <issue>" for an issue of this project and whose payload is that
 // notice. ok is false for a report about anything else.
-func (r *outbox) exceptionNotice(exception roleLaneException) (string, record.Notice, int64, bool) {
-	original, ok := record.ParseOutboxKey(exception.DedupeKey)
+func (r *outbox) exceptionNotice(exception roleLaneException) (reportedNotice, bool) {
+	row, ok := record.ParseOutboxKey(exception.DedupeKey)
 	if !ok {
-		return "", record.Notice{}, 0, false
+		return reportedNotice{}, false
 	}
 	token, isRole := strings.CutPrefix(exception.OriginalTopic, roleTopicPrefix)
 	if !isRole || !strings.HasPrefix(token, "legion-"+r.project+"-") || !strings.HasSuffix(token, "-"+string(claim.RoleArchitect)) {
-		return "", record.Notice{}, 0, false
+		return reportedNotice{}, false
 	}
 	var notice record.Notice
 	decoder := json.NewDecoder(strings.NewReader(exception.Payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&notice); err != nil {
-		return "", record.Notice{}, 0, false
+		return reportedNotice{}, false
 	}
 	kind, issue, found := parseNoticeSummary(exception.PayloadSummary)
 	if !found || kind != notice.Kind || !claim.IsIssueKey(issue) || !strings.HasPrefix(issue, r.dispatchProject+"-") {
-		return "", record.Notice{}, 0, false
+		return reportedNotice{}, false
 	}
-	return issue, notice, original, true
+	return reportedNotice{issue: issue, notice: notice, row: row, architect: claim.Token(token)}, true
 }
 
 // releaseWaiting makes due at once every notice waiting for a later attempt that one of architects

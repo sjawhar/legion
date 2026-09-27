@@ -80,9 +80,9 @@ func queuedNotices(t *testing.T, pool *pgxpool.Pool) []string {
 // again, counted as one re-send and published under the key of the row it copies, so a session that
 // did get the forward recognises the copy. Every report is queued, a late receipt from the claim's
 // own session too: a Go relaunch resumes the session id, so that report may come from the stopped
-// process. The copy is due at once when the architect's agent has taken its role, whichever session
-// the forward went to, since that ready will not come again to release it; otherwise it waits the
-// first re-send delay.
+// process. The first copy is due at once when the architect's agent has taken its role, whichever
+// session the forward went to, since that ready will not come again to release it; otherwise it
+// waits the first re-send delay.
 func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 	for _, tc := range []struct {
 		name, reason       string
@@ -531,5 +531,49 @@ func TestAReadyArchitectsNoticesAreReleasedOffTheReadyRoute(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("the release loop left the ready architect's notice waiting")
 		}
+	}
+}
+
+// A claim can read live while its session hears nothing: a pane's NATS connection is reconnecting,
+// or the process died and the supervisor has not seen it yet. Every forward then comes back a late
+// receipt. Only the first copy goes at once, for a relaunch that took its role inside the receipt
+// window; the rest keep the re-send spacing, so the notice stays queued for the whole schedule, not
+// a few seconds, before the cap drops it. The run ticks every 5 seconds, so a copy due at once goes
+// on the next tick.
+func TestANoticeToALiveClaimThatHearsNothingKeepsItsSchedule(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaimOn(t, sup, "LEGION-1", supervise.StateWorking, "ses_live")
+	start := time.Now()
+	clock := start
+	var logged bytes.Buffer
+	publisher := &holderPublisher{}
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion",
+		now: func() time.Time { return clock }}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, start))
+
+	taken, sent, dropped := 0, []string{}, time.Duration(0)
+	for clock.Before(start.Add(15*time.Minute)) && dropped == 0 {
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("run at %s: %v", clock.Sub(start), err)
+		}
+		_, delivered := publisher.snapshot()
+		for _, copy := range delivered[taken:] {
+			sent = append(sent, clock.Sub(start).String())
+			report := laneReport{fmt.Sprintf("evt-%d", len(sent)), "receipt_timeout", copy.topic, copy.message, copy.payload, copy.key, "ses_live"}
+			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+				t.Fatalf("rehold at %s: %v", clock.Sub(start), err)
+			}
+		}
+		taken = len(delivered)
+		if strings.Contains(logged.String(), `msg="outbox notice not re-held again`) {
+			dropped = clock.Sub(start)
+		}
+		clock = clock.Add(5 * time.Second)
+	}
+	if fmt.Sprint(sent) != "[0s 5s 2m5s 8m5s]" || dropped != 8*time.Minute+5*time.Second {
+		t.Fatalf("forwards at %v, dropped at %s; want the original, one copy at once, then copies 2 and 6 minutes apart, dropped only at the cap after them", sent, dropped)
 	}
 }
