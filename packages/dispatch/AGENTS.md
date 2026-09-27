@@ -19,7 +19,7 @@ production build from `web/dist`.
 - `web/src/features/search/` owns the global palette and the rail `Search` control; the `Ctrl/Cmd+K` open is a global keymap binding in `app.tsx`, and the palette registers its own `Ctrl/Cmd+K` close in the `dialog` scope while open. It groups hits by their issue or standalone project-document owner; document-owned hits use the document name and `/projects/:key/documents/:slug` route, adding an ask or comment query parameter for discussion hits. It renders server snippets exclusively through `snippetSegments`, never `innerHTML`; document routes pass `?q=` through the document surface to mark and scroll to its first matching rendered text node.
 - `web/src/features/shell/keymap.ts` is the one keyboard registry. A component registers bindings with `useKeymap(scope, [{ id, keys, label, run, when?, inEditable? }])` (`scope` is a `KeymapScope` — `global`, `dialog`, `inbox`, `project`, `architecture`, `board` today; add a member when a page grows bindings, and list it in `ShortcutHelp.tsx`'s `SCOPE_LABELS` (typed) and `SCOPE_ORDER` (a plain array — a scope missing there is silently dropped from `?`) — and `keys` is tinykeys syntax: `"g i"` chord, `"$mod+k"` for Meta or Control, `"Shift+P"`, `"?"`; an array lists alternatives), and a page or dialog pushes its scope with `useKeymapScope(scope)`; `useDialog` pushes `dialog` and registers its Escape there. `KeymapProvider` (mounted once around `AppShell`) owns the single `window` keydown dispatcher and the bottom-right chord indicator (`data-testid="chord-indicator"`): a key resolves top-down through `["global", …pages]`, the first scope with a match wins, and while any `dialog` scope is on the stack it is the only scope consulted, whatever mounted after it; a `when()` of `false` neither fires nor shadows. Chords wait 1000 ms for their next key. While an `INPUT`, `TEXTAREA`, `SELECT`, or contentEditable has focus only `inEditable` bindings run (`$mod+k`, `Escape`), so single letters and digits never eat typing; a keydown something else already `preventDefault`ed, or one mid-IME composition, is left alone. Registering a strict prefix of another sequence (`g` beside `g i`) throws in development. Global bindings live in `app.tsx`: `$mod+k` search, `?`, `c`, and `g i`/`g a`/`g s`. `c` mounts `features/issue/CreateIssueDialog.tsx` — project (preselecting the route's project), title, optional first spec line — which `POST`s through `api.createIssue`, shows a `POSSIBLE_DUPLICATE` answer with its candidate and offers **Create anyway** (`force`), and opens the created issue; Escape closes it and returns focus to the caller. The Inbox registers `j`/`k` (and arrows from a focused row) roving real focus over its `tabIndex={-1}` rows, `Enter` for the row's answer textarea, `1`–`9` for its fixed options, `o` for the owning issue or document, `y` to copy the focused ask's `dispatch://` reference (it clicks the card's own `CopyRefButton`, `COPY_REF_SELECTOR`, so the card confirms), and `Escape` back to the row and then out. `ProjectPage` pushes `project` and registers `v` (List ⇄ Board; inert on the Architecture and Documents tabs). The Architecture tab pushes `architecture` and registers `j`/`k` (and arrows from a focused row) roving real focus over its `tabIndex={-1}` component rows, `Enter`/`o` to open the focused component (into its children when it has any, exactly like `l`, else its details), `l`/`ArrowRight` into its children and `h`/`ArrowLeft` up one level (focus follows: the first row of the new level, or the row just left), and `Escape` back to the row and then out. The Board pushes `board` and registers `j`/`k` (and arrows from a focused card, column or rail) roving real focus over its `tabIndex={-1}` cards, `h`/`l` to the previous / next column at the same index clamped (an empty column or a collapsed rail takes focus itself), `Shift+J`/`Shift+K` to move the focused card down / up one, `Shift+H`/`Shift+L` to move it to the top of the previous / next status (into Done closes, out of Done reopens - the drag rule), `o` and `Enter` (on the card itself) to open the issue, `p` to focus the card's priority select, `y` / `Shift+Y` to copy the focused card's `dispatch://CORE-12` reference / bare key, and `Escape` back to the card and then out; every move goes through `moveCard` and is read out by the board's `sr-only` `role=status` live region (`Board announcements`: `CORE-12 → Todo, position 2 of 5`, `CORE-12 → Done, closed`, `Copied dispatch://CORE-12`). `?` opens `ShortcutHelp`, a `useDialog` overlay rendered from the registry as described the moment `?` fired (grouped by scope, live-filtered, `when()===false` rows greyed, closed by a route change) — adding a binding is the whole change; the help has no list of its own.
 
-The primary document's `Version`, `Name version`, connection dot, and block-link controls live at the end of the active Spec tab row; on phones they wrap below the tabs. `Conversation`, `Children`, and the artifact list do not render those primary-Spec controls.
+The primary document's `Version`, `Name version`, connection dot, and block-link controls live at the end of the active Spec tab row; on phones they wrap below the tabs. `Conversation`, `Children`, and the artifact list do not render those primary-Spec controls. Every other document page (a project document, an issue's other documents) carries them in `ArtifactHeader`, where `Name version`, `Diff vs current` and the connection dot are one group that wraps as a unit: at 390 px the picker, `Name version` and the dot are wider than the header card, and the dot alone would otherwise wrap onto a line of its own.
 
 A Conversation activity line reads who, when, then what: the author and the time are one `whitespace-nowrap` group, so the time never wraps alone to the start of the next row, and inside it the author takes the width it needs until the row runs out, then truncates with the full label as its `title` - a live session title can be a whole sentence, and an author allowed to set its own width pushed the line, the turns list and the document past the viewport. The description keeps a `min-w-48` floor beside it, so it wraps as prose rather than one word per line.
 
@@ -28,6 +28,8 @@ The `Children` tab (`features/issue/ChildrenTab.tsx`) lists the issue's direct c
 The `Artifacts` tab carries the number of rows it lists as a `Pill` after the label (accessible name `Artifacts (2)`; plain `Artifacts` at zero), computed in `IssuePage.tsx` from the issue's `artifacts` - all of them, the issue's own primary document included, since that document is one of the rows. Counting only the uploads beside it put `1` above a list of two. `components/Tabs.tsx` owns the shape: a `TabDefinition.count` renders the pill; every label stays on one line (`whitespace-nowrap`); compact tabs sit tighter on phones (`px-1.5`, no gap) so the four issue tabs fit a 390 px viewport; a narrower tablist (360 px Android) scrolls sideways, and a tab focused from the keyboard or selected is `scrollIntoView`ed so it is never left clipped. In the Conversation, an upload is an activity line (`<author> added <name>` for `artifact.created`, `<author> saved <name> vN` for `artifact.version`, text from `conversation-model.ts`'s `activityDescription`) whose artifact name `features/issue/ActivityLine.tsx` renders as a link to the artifact (the saved version's link pins `?v=N`; the `artifact.version` payload has no slug, so the line resolves it from the issue query and stays plain text until that loads). Activity lines are hidden with the rest of the activity when the reader has turned `Show activity` off (default on), so the linked upload is hidden with them. `features/issue/event-description.ts` names the artifact the same way (`Added <name>`, `Saved <name> vN`) for the `EventBody` fallback.
 
 Project pages keep their name, linked project key, project tabs, and, on issue routes, the keyboard-reachable List/Board control in a dense responsive header. At `md` and above these controls form one strip; on smaller screens the name, key, and blocker pill form the first row, with tabs and the view control below. When an open ask waits on the viewer, the header's `Blocked on you · N` pill links to the Inbox; it is absent when no asks are waiting.
+
+A List row (`IssueList.tsx`) is one grid. Its key and title are one run of text inside the row's link, wrapped in a single span because below 1280 px every link is an inline-flex box (`styles.css`) whose children would otherwise be two flex columns, and the key is `whitespace-nowrap`, so it never breaks at its hyphen. From `sm` the timestamp shares the first line with the reference and the metadata runs below; on a phone the reference takes the whole first line and the timestamp sits at the right of the metadata line, since beside the title it would leave the title a column about 130 px wide.
 
 A project's routes are `/projects/:key/architecture`, `/projects/:key/issues` (the List and the Board; every `?label=`/`?status=`/`?q=` filter URL lives here), and `/projects/:key/documents`; the bare `/projects/:key` (the sidebar's link) is the open-on rule in `ProjectPage.tsx`: it renders nothing while `["architecture-source", key]` is pending, then `<Navigate replace>` to `/architecture` when the read names a source or to `/issues` — the search forwarded — when it answers `null`, which is what a project with no source reads as; any failure renders `QueryError`, never a quiet fall back to Issues. (`isSourceNotFound` in `api/client.ts` remains for the architecture TREE read, which is still `404 SOURCE_NOT_FOUND` without a source, and stops the shared retry policy retrying it.) The Architecture tab exists only when the project has a source (a direct `/architecture` link without one is `NotFoundPage`).
 
@@ -253,15 +255,60 @@ A paste whose clipboard holds only `text/plain` goes through Milkdown's clipboar
 parses the text as markdown and pastes the result as an open slice.
 `patches/@milkdown%2Fplugin-clipboard@7.22.1.patch` opens that slice only as far as the first
 isolating node (`Slice.maxOpen(content, false)` in place of `parseSlice`'s default), and a typed
-block is isolating. It does so only when each block left closed fits between the caret and its
-innermost isolating ancestor: some container on that path has content that allows the block's
-type. A doc, a blockquote, a list item and a callout (`block+`) can hold one. An ask's question
-(`paragraph+ bullet_list?`) and a table cell (`paragraph`) can't, and there the paste stays open
-as before, because a closed block would have to leave that ancestor and split it. So a lone typed
-block pasted beside a paragraph's text stays a block, while the first and last paragraphs or list
-items of other pasted text still join the text on either side of the caret. The patch applies to
-that one version: raising `@milkdown/plugin-clipboard` means carrying the patch to the new
-version, and `ask-blocks.e2e.ts`'s lone-block rows fail without it.
+block is isolating. It keeps that closed slice unless pasting it would split the caret's innermost
+isolating ancestor (`splitsIsolatingAncestor`). The patch pastes the slice into a copy of the
+document first, and the paste splits the ancestor when the ancestor's type then occurs more often
+than before plus the pasted ones. That happens when the ancestor can't hold what is pasted, because
+ProseMirror closes the ancestor and opens a copy after the pasted block: a callout, a table or a
+second options list pasted into an ask's question (`paragraph+ bullet_list?`). There the paste is
+flattened instead: the textblocks' inline content in order, joined by a space, with each line break
+a space too. The flattened text takes the caret's marks, or those of the text it replaces, only when
+the paste is one unmarked line, as a paste that isn't flattened does (`pasteFlattened`). A lone ask
+or a list pasted into a question adds its text to that question. HTML pasted outside a table follows
+the same rule. So a lone typed block pasted beside a paragraph's text stays a block, while the first
+and last paragraphs or list items of other pasted text still join the text on either side of the
+caret. The patch also makes each soft line break the markdown parse produces a hard break
+(`withHardBreaks`). Milkdown keeps a soft break as `hardbreak{isInline: true}` and draws it as a
+space, although the stored markdown has a line break there. So a pasted "alpha\nbeta" keeps its line
+break, as the editor shows, and only markdown import turns soft breaks into spaces
+(`packages/proof-editor/src/lib.ts`).
+
+Tables are handled before any plugin sees the paste, by a `handlePaste` the patch adds to the
+editor's own view props (`pasteIntoTable`), since prosemirror-tables' plugin handler would otherwise
+overwrite the caret's cell and spread the pasted lines into new cells of the row. A paste with the
+caret in a cell's text, plain text or HTML, is flattened the same way, marks and links kept, since a
+GFM cell holds one line, unless everything in the clipboard HTML sits in a table (as in a copy of
+cells, the editor's own included; a spreadsheet's `<style>` block and head elements such as `<meta>`
+don't count). Those, and any paste onto a selection of whole cells (a `CellSelection`), are
+prosemirror-tables' grid paste (`__pastedCells`, `__clipCells`, `__insertCells`): from the caret's
+cell on, growing the table as needed, or clipped to the selection. That grid paste differs from
+prosemirror-tables' own paste handler in three ways. Copied cells are read from the clipboard HTML's
+own rows and cells (`htmlTableCells`), because ProseMirror's parse at the caret gives body rows an
+empty leading header row, which Milkdown's table requires; a table nested in a copied cell is that
+cell's content. Tab-separated text pasted onto selected cells fills them one value each, and other
+HTML one line each (`htmlLineCells`), so a list fills them item by item, as paragraphs do, and
+repeats from its first item across a wider selection. Every cell is retyped for the row it lands in
+and kept to one line (`fitCells`). The retyping is because Milkdown's header row holds only
+`table_header` cells and a body row only `table_cell` ones, and prosemirror-tables' own insert threw
+on a paste that put header cells in a body row or reached the header row. A cell holding more than
+one block or a line break (a `<br>`, a code block's newline) is flattened as the caret path
+flattens, because a hard break stored in a table ends its row. A line, in both, is a textblock or a
+run of inline content that parsed HTML leaves beside blocks (`textLines`), such as a Gmail copy's
+first line before its `<div>`s or text before a list in a cell, so that text is kept. Two other
+patches keep a pasted table's rows.
+`patches/prosemirror-tables@1.8.5.patch` makes `fixTables` fill a row with no cells with the cell
+type that row holds, since the default body cell doesn't fit Milkdown's header row and the fix
+repeated forever. A hunk in `patches/@milkdown%2Fpreset-gfm@7.22.1.patch` makes preset-gfm's table
+paste rule count a pasted table's columns in its widest row, where it counted the last row and
+dropped a table whose last row was empty. `e2e/read-back.ts` reads a stored document back through Go
+and through the headless engine (`e2e/engine-tables.ts`, run with bun). Each patch applies to one
+installed version, and bun ignores a `patchedDependencies` entry for a version that isn't installed
+without a word. So raising `@milkdown/plugin-clipboard` or `@milkdown/preset-gfm` means carrying its
+patch to the new version, and so does a lockfile change that moves prosemirror-tables, a transitive
+dependency that `@milkdown/prose` asks for as `^1.8.1`. The rows catch each one: the paste rows in
+`ask-blocks.e2e.ts` and `editor-paste.e2e.ts` fail without the clipboard patch, the four
+`editor-paste.e2e.ts` rows for a table whose first row is empty time out without the
+prosemirror-tables patch, and the four for an empty last row fail without the preset-gfm hunk.
 
 `ask` is the host-rendered decision type. A live document's open block decisions appear in one compact, cycling `#b-<blockId>` navigation link beneath the tab row. There is one ask component on every surface: a decision block *hosts* the Inbox's `AskCard` (compact variant, thread collapsed, `frame="block"`) for its indexed ask row, so answering, **Ask back** (a clarification posted as a reply on the ask — `createComment` on an issue document's ask, `createArtifactComment` on a project document's — which leaves the decision open), the folded reply-count disclosure over the exchange, the question-shaped-answer prompt, the `ASK_EDITED` reload, the answered and resolved records (`AskCompletionCard`), and the retryable save error all behave exactly as they do in the Inbox, and a reply or answer made in either place shows in the other. An ask block marked `invalid`, or one with a missing question or option label, renders its raw content as a malformed decision without a card until the block text is repaired. The editor library supplies its schema-aware Insert and Turn into block-menu entries; Dispatch passes the server schema rather than duplicating those commands.
 

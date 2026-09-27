@@ -19,6 +19,8 @@ import { MarginProvider } from "../margin/margin-context";
 import { IssuePage } from "./IssuePage";
 
 const issue: IssueDetails = {
+  route_status: null,
+  route_holder: null,
   artifacts: [
     {
       created_at: "2026-09-09T00:00:00Z",
@@ -255,6 +257,53 @@ test("IssuePage omits creator metadata for historical issues", async () => {
   } finally {
     view.unmount();
     restore();
+  }
+});
+
+test("IssuePage's header warns when nobody holds the route, and adds nothing when it is live", async () => {
+  // The warning sits in the wrapping state row, not the metadata rail, which clips at every width.
+  const stateRow = async () => {
+    const rail = await screen.findByTestId("issue-metadata-rail");
+    await within(rail).findByRole("button", { name: "Messages default to role:sre" });
+    return screen.getByTestId("issue-state-actions");
+  };
+
+  const unheld = stubIssuePage({ ...issue, route: "role:sre", route_status: "no_holder" });
+  const unheldView = renderIssuePage();
+  try {
+    const marker = within(await stateRow()).getByTestId("issue-route-unreachable");
+    expect(marker.textContent).toContain("role:sre:");
+    expect(marker.textContent).toContain("Nobody holds it right now");
+  } finally {
+    unheldView.unmount();
+    unheld();
+  }
+
+  const live = stubIssuePage({
+    ...issue,
+    route: "role:sre",
+    route_status: "live",
+    route_holder: "ses-sre",
+  });
+  const liveView = renderIssuePage();
+  try {
+    const row = await stateRow();
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+    expect(within(row).queryByTestId("issue-route-unknown")).toBeNull();
+  } finally {
+    liveView.unmount();
+    live();
+  }
+
+  const unjudged = stubIssuePage({ ...issue, route: "role:sre", route_status: "unknown" });
+  const unjudgedView = renderIssuePage();
+  try {
+    const row = await stateRow();
+    expect(within(row).getByTestId("issue-route-unknown").textContent).toBe("Route reach unknown");
+    expect(within(row).queryByTestId("issue-route-unreachable")).toBeNull();
+  } finally {
+    unjudgedView.unmount();
+    unjudged();
   }
 });
 

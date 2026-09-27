@@ -252,6 +252,21 @@ type GateRegistered struct {
 
 func (GateRegistered) isFact() {}
 
+// CloseRoot is a tree root's architect ending its tree before the tree's first phase starts, with
+// the reason it gives: a human decided no change at the design gate, or the issue is moot.
+type CloseRoot struct {
+	Issue  string
+	Reason string
+}
+
+func (CloseRoot) isFact() {}
+
+// Message is what the close posts on the issue: that its architect closed it before its first
+// phase, and the reason it gave.
+func (f CloseRoot) Message() string {
+	return "Closed by its architect before its first phase: " + f.Reason
+}
+
 // ClaimFailed is the supervision terminal failure observation.
 type ClaimFailed struct {
 	Issue string
@@ -288,14 +303,38 @@ type Handler interface {
 
 // Result carries a refusal that is durable: handlers finish and the transaction commits. Duplicate
 // reports that the event id was already processed, so no handler ran and nothing changed.
-// AfterCommit runs, in order, only once ApplyFact's own transaction has actually committed: a
-// handler whose in-memory state must never claim more than what committed returns a closure here
-// instead of mutating that state inside its own Apply, where a later handler's failure would still
-// roll the transaction back but leave the in-memory mutation behind.
 type Result struct {
-	Refusal     *Refusal
-	Duplicate   bool
-	AfterCommit []func()
+	Refusal   *Refusal
+	Duplicate bool
+}
+
+type commitHooksKey struct{}
+
+// WithCommitHooks scopes OnCommit to one transaction: the returned function runs, in order, every
+// hook registered on the returned context, and the transaction's owner calls it once the
+// transaction has committed, never when it rolls back. ApplyFact is that owner for every fact.
+// The hook list is not goroutine-safe: a transaction's handlers run one after another on one
+// goroutine, and OnCommit must only be called on that goroutine.
+func WithCommitHooks(ctx context.Context) (context.Context, func()) {
+	hooks := &[]func(){}
+	return context.WithValue(ctx, commitHooksKey{}, hooks), func() {
+		for _, hook := range *hooks {
+			hook()
+		}
+	}
+}
+
+// OnCommit runs fn once the transaction ctx scopes has committed. Handler state kept in memory,
+// and the journal line saying what a fact did, must never claim more than what committed: a later
+// handler's failure rolls the transaction back, and a fact retried after a failed commit would say
+// it twice. OnCommit panics on a context no WithCommitHooks scopes, since a handler run outside
+// ApplyFact has no commit to wait for.
+func OnCommit(ctx context.Context, fn func()) {
+	hooks, ok := ctx.Value(commitHooksKey{}).(*[]func())
+	if !ok {
+		panic("intake.OnCommit outside a transaction's commit scope (intake.WithCommitHooks)")
+	}
+	*hooks = append(*hooks, fn)
 }
 
 // Refusal is a committed API response or JetStream log record, never a transaction failure.
@@ -348,6 +387,7 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 		return Result{Duplicate: true}, nil
 	}
 
+	ctx, committedHooks := WithCommitHooks(ctx)
 	var result Result
 	for _, handler := range handlers {
 		candidate, err := handler.Apply(ctx, tx, fact)
@@ -357,14 +397,11 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 		if result.Refusal == nil && candidate.Refusal != nil {
 			result.Refusal = candidate.Refusal
 		}
-		result.AfterCommit = append(result.AfterCommit, candidate.AfterCommit...)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Result{}, err
 	}
 	committed = true
-	for _, after := range result.AfterCommit {
-		after()
-	}
+	committedHooks()
 	return result, nil
 }

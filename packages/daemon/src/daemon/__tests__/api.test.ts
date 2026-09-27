@@ -34,6 +34,8 @@ function issueWithDocument(
 ): IssueDetails {
   const actor = { kind: "user", id: "sjawhar" } as const;
   return {
+    route_status: null,
+    route_holder: null,
     key,
     project: "WIDGETS",
     number: 1,

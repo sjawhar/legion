@@ -656,6 +656,9 @@ test("Agents keeps selected-issue sends on the issue message route", async () =>
   const page = renderAgents({
     issues: [
       {
+        route: null,
+        route_status: null,
+        route_holder: null,
         key: "CORE-1",
         last_seq: 0,
         open_asks: 0,

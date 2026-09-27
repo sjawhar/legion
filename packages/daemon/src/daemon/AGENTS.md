@@ -112,11 +112,20 @@ the same token handed to the architect capability), the CI reads (`createCiStatu
 the first of the two boot leases above. Every role pushes the commits it makes — the planner its
 plan handoff, the implementer its implementation, the tester its red tests and handoff, the
 reviewer its handoff — with its own App's credential; the merger makes no commit. The review App
-can: its installation holds `contents: write`, `pull_requests: write`, and `checks`, `actions` and
-`issues: write` on both of its installations (App 3202653, `legion-reviewer`, sjawhar with all
-repositories and trajectory-labs-pbc with selected ones, read from `GET /app/installations` with
-the App's own JWT on 2026-09-25). This paragraph is the one place Legion states an App's
-permissions; everything else points here.
+(`legion-reviewer`) holds `contents: write`, `pull_requests: write`, `checks: write`,
+`actions: write` and `issues: write`, with `metadata` and `packages` read. The implement App
+(`legion-implementer`) holds `contents`, `pull_requests`, `issues`, `actions`, `statuses`,
+`workflows`, `repository_projects` and `organization_projects` write, with `checks`, `metadata`
+and `packages` read, so it cannot create a check run. Read an App's permissions with
+`gh api /apps/<slug> --jq .permissions` (2026-09-27 for both lists here); an installation holds
+what its owner accepted of them, and both of the review App's installations (sjawhar, all
+repositories; trajectory-labs-pbc, selected ones) held its whole list on 2026-09-25
+(`GET /app/installations` with the App's own JWT). This paragraph is the one place Legion states
+an App's permissions; everything else points here. Two rules that look
+like permissions are GitHub's author rule instead, below: only the pull request's author's App
+resolves its review threads, and so the implementer, which opens every Legion pull request,
+pushes the `.legion/` deletion, since that push answers the review and resolves the accepted
+threads first. The review App could push the deletion; it could not resolve the threads.
 
 A phase worker's commit identity is its pane environment, never a config write. `launchWorker`
 (`processes.ts`) resolves the role's App identity from the token lease

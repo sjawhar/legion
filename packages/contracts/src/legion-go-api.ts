@@ -388,6 +388,14 @@ export const LegionGoSignOffRequest = z.strictObject({
   issue: nonEmptyString,
 });
 
+/** `api.RootCloseRequest`, a root architect's close of its tree before the tree's first phase starts,
+ * with the reason the daemon posts on the issue. */
+export const LegionGoRootCloseRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
+  reason: nonEmptyString,
+});
+
 /** `api.ChildRequest`, the architect's park_child or rerun_child of one child of its tree. */
 export const LegionGoChildRequest = z.strictObject({
   grantId: nonEmptyString,

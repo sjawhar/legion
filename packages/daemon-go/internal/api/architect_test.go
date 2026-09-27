@@ -169,10 +169,16 @@ type liveClaim struct {
 
 func newLiveClaim(t *testing.T, h *harness, issue string, role claim.Role) liveClaim {
 	t.Helper()
-	token, boot := h.launch(issue, role)
+	return newLiveClaimIn(t, h, issue, issue, role)
+}
+
+// newLiveClaimIn is newLiveClaim for an issue of tree: a sub-architect or a worker on a child.
+func newLiveClaimIn(t *testing.T, h *harness, tree, issue string, role claim.Role) liveClaim {
+	t.Helper()
+	token, boot := h.launchIn(tree, issue, role)
 	session := "ses_" + string(role) + "_" + issue
 	registration := h.registered(boot, session)
-	c := liveClaim{h: h, token: token, session: session, secret: registration.Secret, tree: issue, issue: issue}
+	c := liveClaim{h: h, token: token, session: session, secret: registration.Secret, tree: tree, issue: issue}
 	// A worker reports a completion inside the turn of the task it was given, and the daemon
 	// attributes the completion to that delivery, so a live claim in these tests holds one.
 	working(t, h, token, issue)
@@ -363,6 +369,98 @@ func TestArchitectRoutesRefuseWrongRoleAndForeignTree(t *testing.T) {
 	}, nil), http.StatusForbidden, "PHASE_WORKER_REQUIRED")
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("refused calls applied facts %#v", got)
+	}
+}
+
+// sign_off and retry_or_escalate are the owning architect's: its own issue or one under it. A
+// sub-architect holds a grant for the whole tree and can name any issue of it, but signing off the
+// root ends the tree, and a sibling is another architect's; both are refused, and nothing applies.
+// The root's architect owns every issue of its tree, and a sub-architect its own.
+func TestSignOffAndRetryAreTheOwningArchitects(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209", "LEGION-210")
+	root := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	subArchitect := newLiveClaimIn(t, h, "LEGION-208", "LEGION-209", claim.RoleArchitect)
+	for n, route := range []struct {
+		path, op string
+		extra    map[string]any
+	}{{"/legion/v1/signoff", "sign_off", nil}, {"/legion/v1/phase/retry", "retry_or_escalate", map[string]any{"decision": "retry"}}} {
+		body := func(grant, issue string) map[string]any {
+			request := map[string]any{"grantId": grant, "issue": issue}
+			for key, value := range route.extra {
+				request[key] = value
+			}
+			return request
+		}
+		for _, issue := range []string{"LEGION-208", "LEGION-210"} {
+			refusal := h.request(http.MethodPost, route.path, body(subArchitect.grant(t), issue), nil)
+			if want := route.op + " of " + issue; !strings.Contains(refusal.Body.String(), want) {
+				t.Fatalf("%s refusal %s does not name %q", route.path, refusal.Body, want)
+			}
+			assertFailure(t, refusal, http.StatusForbidden, "ISSUE_NOT_OWNED")
+		}
+		if got := len(facts.recorded()); got != 3*n {
+			t.Fatalf("%s: refused calls applied facts %#v", route.path, facts.recorded()[3*n:])
+		}
+		for _, allowed := range []struct {
+			grant liveClaim
+			issue string
+		}{{subArchitect, "LEGION-209"}, {root, "LEGION-208"}, {root, "LEGION-210"}} {
+			if got := h.request(http.MethodPost, route.path, body(allowed.grant.grant(t), allowed.issue), nil); got.Code != http.StatusOK {
+				t.Fatalf("%s by the architect of %s on %s = %d: %s", route.path, allowed.grant.issue, allowed.issue, got.Code, got.Body)
+			}
+		}
+		if got := len(facts.recorded()); got != 3*(n+1) {
+			t.Fatalf("%s: %d facts applied, want one per owning architect's call", route.path, got-3*n)
+		}
+	}
+}
+
+// A child whose parent chain leaves the tree before reaching an architect's issue - no parent, or a
+// parent not recorded, as one human re-parent in Dispatch leaves it - is the tree root's, as the
+// notice router decides (owningArchitect): the root architect the production_check notice reaches
+// may sign it off and retry it, and a sub-architect still may not.
+func TestABrokenParentChainIsTheTreeRootArchitects(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209")
+	unrecorded := "LEGION-999"
+	records := record.NewStore()
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		for _, child := range []record.Issue{
+			{Key: "LEGION-211", Tree: "LEGION-208", Project: testProject, Title: "no parent", Phase: phase.ProductionCheck, Status: "in_progress"},
+			{Key: "LEGION-212", Tree: "LEGION-208", Project: testProject, Title: "unrecorded parent", Parent: &unrecorded, Phase: phase.ProductionCheck, Status: "in_progress"},
+		} {
+			if err := records.PutIssue(context.Background(), tx, child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	root := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	subArchitect := newLiveClaimIn(t, h, "LEGION-208", "LEGION-209", claim.RoleArchitect)
+	for _, issue := range []string{"LEGION-211", "LEGION-212"} {
+		for _, route := range []struct {
+			path  string
+			extra map[string]any
+		}{{"/legion/v1/signoff", nil}, {"/legion/v1/phase/retry", map[string]any{"decision": "retry"}}} {
+			request := func(grant string) map[string]any {
+				body := map[string]any{"grantId": grant, "issue": issue}
+				for key, value := range route.extra {
+					body[key] = value
+				}
+				return body
+			}
+			before := len(facts.recorded())
+			assertFailure(t, h.request(http.MethodPost, route.path, request(subArchitect.grant(t)), nil), http.StatusForbidden, "ISSUE_NOT_OWNED")
+			if got := h.request(http.MethodPost, route.path, request(root.grant(t)), nil); got.Code != http.StatusOK {
+				t.Fatalf("%s on %s by the root architect = %d: %s", route.path, issue, got.Code, got.Body)
+			}
+			if got := len(facts.recorded()) - before; got != 1 {
+				t.Fatalf("%s on %s applied %d facts, want the root architect's one", route.path, issue, got)
+			}
+		}
 	}
 }
 
@@ -602,6 +700,17 @@ func TestGateRegistrationRefusesAnotherIssuesDocumentAndAChildIssue(t *testing.T
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
 		"grantId": architect.grant(t), "issue": "LEGION-209", "artifactId": "5c3d9e1f-7a2b-4e6c-8d40-1f9b3a7e2c65", "version": 1,
 	}, nil), http.StatusForbidden, "GATE_ROOT_ONLY")
+	// The root's gate is its own architect's to register: a sub-architect of the tree holding the
+	// root document's id is refused too.
+	statuses.documents["7d1e4f2a-3b5c-4d6e-8f70-9a1b2c3d4e5f"] = "LEGION-208"
+	subArchitect := newLiveClaimIn(t, h, "LEGION-208", "LEGION-209", claim.RoleArchitect)
+	refusal := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+		"grantId": subArchitect.grant(t), "issue": "LEGION-208", "artifactId": "7d1e4f2a-3b5c-4d6e-8f70-9a1b2c3d4e5f", "version": 1,
+	}, nil)
+	if body := refusal.Body.String(); !strings.Contains(body, "its root architect registers it") {
+		t.Fatalf("sub-architect refusal %s does not say the root architect registers the gate", body)
+	}
+	assertFailure(t, refusal, http.StatusForbidden, "GATE_ROOT_ONLY")
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("facts = %#v, want no gate registered", got)
 	}
@@ -640,5 +749,45 @@ func TestGateRegistrationIsItsOwnFactInEachGeneration(t *testing.T) {
 	register()
 	if got := facts.recorded(); len(got) != 2 {
 		t.Fatalf("gate facts = %#v, want one registration per generation", got)
+	}
+}
+
+// A root architect ends its own tree before its first phase starts: a human decided no change at
+// the design gate, or the issue is moot. The route takes the reason; nothing else ends an admitted
+// root from the architect's side, since sign_off needs the production check and a backward move
+// needs a phase worker.
+func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	closed := h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": "The human decided no change is needed.",
+	}, nil)
+	if closed.Code != http.StatusOK {
+		t.Fatalf("close = %d: %s", closed.Code, closed.Body)
+	}
+	if got := facts.recorded(); len(got) != 1 || got[0] != (intake.CloseRoot{Issue: "LEGION-208", Reason: "The human decided no change is needed."}) {
+		t.Fatalf("close facts = %#v", got)
+	}
+
+	// A child is not the root, a sub-architect of the tree is not the root's architect though it
+	// names the root, a phase worker is not the architect, and a reason too long for one message
+	// would never post.
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-209", "reason": "moot",
+	}, nil), http.StatusForbidden, "ROOT_REQUIRED")
+	subArchitect := newLiveClaimIn(t, h, "LEGION-208", "LEGION-209", claim.RoleArchitect)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": subArchitect.grant(t), "issue": "LEGION-208", "reason": "a sub-architect closing the root",
+	}, nil), http.StatusForbidden, "ROOT_REQUIRED")
+	worker := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": worker.grant(t), "issue": "LEGION-208", "reason": "moot",
+	}, nil), http.StatusForbidden, "ARCHITECT_REQUIRED")
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "reason": strings.Repeat("x", record.MessagePostLimit),
+	}, nil), http.StatusBadRequest, "CLOSE_REASON_TOO_LONG")
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("refused closes applied facts %#v", got[1:])
 	}
 }

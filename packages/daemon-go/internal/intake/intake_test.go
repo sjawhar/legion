@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
@@ -73,7 +74,7 @@ func TestApplyFactDeduplicatesBeforeHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("duplicate ApplyFact: %v", err)
 	}
-	if result.Duplicate != true || result.Refusal != nil || len(result.AfterCommit) != 0 {
+	if result.Duplicate != true || result.Refusal != nil {
 		t.Fatalf("duplicate result = %#v, want a duplicate with no refusal", result)
 	}
 	if got := writeCount(t, pool); got != 1 {
@@ -102,6 +103,44 @@ func TestApplyFactRollsBackHandlerAndDeduplicationOnError(t *testing.T) {
 	}
 	if got := writeCount(t, pool); got != 1 {
 		t.Fatalf("writes after retry = %d, want 1", got)
+	}
+}
+
+// A handler's OnCommit hook runs once ApplyFact's transaction has committed, in the order handlers
+// registered them, and sees what the fact wrote; a fact whose later handler fails rolls back and
+// runs none. A duplicate runs no handler, so it registers none.
+func TestOnCommitRunsOnlyAfterTheFactCommits(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	ctx := context.Background()
+	var ran []string
+	hooked := func(name string) Handler {
+		return handlerFunc(func(ctx context.Context, tx pgx.Tx, fact Fact) (Result, error) {
+			if _, err := writeHandler(name, nil).Apply(ctx, tx, fact); err != nil {
+				return Result{}, err
+			}
+			OnCommit(ctx, func() { ran = append(ran, fmt.Sprintf("%s saw %d", name, writeCount(t, pool))) })
+			return Result{}, nil
+		})
+	}
+
+	if _, err := ApplyFact(ctx, pool, "dispatch", "event-hooks-rolled-back", DispatchIssue{Key: "LEGION-208"},
+		hooked("first"),
+		handlerFunc(func(context.Context, pgx.Tx, Fact) (Result, error) { return Result{}, errors.New("handler failed") }),
+	); err == nil {
+		t.Fatal("ApplyFact with a failing handler succeeded")
+	}
+	if len(ran) != 0 {
+		t.Fatalf("hooks %v ran for a fact that rolled back", ran)
+	}
+
+	for range 2 {
+		if _, err := ApplyFact(ctx, pool, "dispatch", "event-hooks", DispatchIssue{Key: "LEGION-208"}, hooked("first"), hooked("second")); err != nil {
+			t.Fatalf("ApplyFact: %v", err)
+		}
+	}
+	if fmt.Sprint(ran) != "[first saw 2 second saw 2]" {
+		t.Fatalf("hooks ran %v; want both once, in order, each seeing both committed writes", ran)
 	}
 }
 

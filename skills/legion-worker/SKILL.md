@@ -11,6 +11,9 @@ phase gets its own long-lived process against the same jj workspace, run in turn
 the phase assigned to you, report its completion to the architect, and leave the durable
 copy the next phase can trust.
 
+Every path this skill cites (`packages/...`, `docs/...`, `AGENTS.md`) is in sjawhar/legion, the
+Legion repository, which need not be the repository you are working in.
+
 ## Identity, scope, and role
 
 The daemon spawns you as a separate `omp --mode rpc` process (behind `legion worker-shim`,
@@ -102,8 +105,9 @@ committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legio
 5. `review.json`
 
 Read only files that precede the assigned phase. Every handoff is validated when it is read:
-`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the file, and the
-ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that fails validation as missing.
+`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the
+file, and the ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that
+fails validation as missing.
 Undeclared fields pass validation untouched and reach the next worker; a declared field of the
 wrong type fails the whole file, so the `legion` tool's `handoff_read` returns null for that phase.
 Write the phase-specific fields the next phase and the architect need, consistent with what
@@ -161,14 +165,19 @@ assignment, since `jj split`/`jj describe` keep its author). Never set or overri
 `user.name`/`user.email` in any jj or Git scope — not `jj config set`, not `--config`, not
 `git config`: `--config` outranks the pane environment and would put the wrong App back on your
 commits, and the repository-scoped jj config is one file shared by every issue workspace of the
-clone. Before a push, check
+clone. Legion has two GitHub Apps, not one per role: your role's App is the **implement** App
+if you are the implementer or the merger, and the **review** App if you are the planner, tester,
+reviewer, or an architect (in Legion's own deployment, `legion-implementer[bot]` and
+`legion-reviewer[bot]`). A planner's commits authored by the review App are right. Before a push,
+check
 `jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'`
 shows your role's App in both columns **on every commit you made** — not on the whole list:
 earlier phases' commits are legitimately authored by their own role's App, and a conflict-forced
 rebase legitimately sets the committer of every rebased commit, other roles' included, to the
-rebaser. A wrong identity on your own commit is a pane-environment problem to report to the
-architect, not something to pin (`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`,
-Hazard 1). Your session receives the credential capability it needs; invoke GitHub through the
+rebaser. A wrong identity on your own commit, the other App or none, is a pane-environment
+problem to report to the architect, not something to pin
+(`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`, Hazard 1).
+Your session receives the credential capability it needs; invoke GitHub through the
 credential helper:
 
 ```bash
@@ -225,8 +234,8 @@ legion gh -- pr comment <pr-number> \
 
 The plan lives in `.legion/plan.json` and the Dispatch issue document; never commit a plan or spec file to the repository.
 No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
-and spec content goes into the issue, never into a PR (the root `AGENTS.md`'s `docs/plans/` row
-is human-authored design history, not a Legion artifact). A skill step that says "save the plan
+and spec content goes into the issue, never into a PR (the root `AGENTS.md`
+calls its own `docs/plans/` human-authored design history, not a Legion artifact). A skill step that says "save the plan
 to a file" is satisfied by the handoff write in the completion gate below; the planner's only
 commit is `plan: record handoff`.
 
@@ -665,9 +674,16 @@ This publishes your phase's completion to the architect's role and clears the da
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
 invent a different completion protocol — this is the whole contract.
 
-A reviewer's phase ends with its completion, not with its review: submit the review on GitHub
-first, then commit the handoff and complete. The daemon moves the issue once both are in — the
-decision GitHub reports and your completion, in either order — so a review posted without a
+A reviewer's phase ends with its completion, not with its review. A round that writes a handoff
+takes this order: write, commit and push the handoff; submit the review of the head that push
+made, by its SHA; then complete. An approval waits for the CI verdict to settle green at that head
+before you submit it, since an approval stands only on green checks and GitHub can dismiss one
+once the head moves, and a verdict that settles red there makes the round's decision a request for
+changes naming the failing checks; a request for changes does not wait, since it stands whatever CI says and the
+issue leaves reviewing with it. A review of a head the handoff push then replaces names a head
+the pull request no longer has. A round that writes none (the final approval of the `.legion/`
+deletion head) reviews the head as it is. The daemon moves the issue once both are in —
+the decision GitHub reports and your completion, in either order — so a review posted without a
 completion leaves the issue in reviewing until you finish.
 
 **A refused completion is information, not a retry loop.** The daemon attributes your report to

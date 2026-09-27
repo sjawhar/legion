@@ -8,6 +8,8 @@ import type { Issue, IssueDetails } from "../../api/types";
 import { IssuePage } from "./IssuePage";
 
 const issue: IssueDetails = {
+  route_status: null,
+  route_holder: null,
   artifacts: [
     {
       created_at: "2026-09-09T00:00:00Z",

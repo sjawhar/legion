@@ -1,5 +1,15 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import type { IssueKey } from "@legion/contracts";
 
@@ -244,16 +254,16 @@ async function ensureRepoClone(
  *     on it, and none of a deleted branch comes back (LEGION-28, LEGION-84).
  *
  * A failed read, a row the template cannot have printed, or a refusal throws, naming the bookmark,
- * before anything is pruned, added, or registered: a `jj workspace add --revision` jj cannot
- * resolve still registers the workspace, parented on the root commit, before reporting the error,
- * and the next resume would adopt that empty workspace silently. The add takes the commit id,
- * never the name, for the same reason.
+ * before any git worktree entry is deleted and before anything is added or registered: a
+ * `jj workspace add --revision` jj cannot resolve still registers the workspace, parented on the
+ * root commit, before reporting the error, and the next resume would adopt that empty workspace
+ * silently. The add takes the commit id, never the name, for the same reason.
  *
  * A brand-new workspace and one jj still registers but whose directory is gone start from the same
- * resolution: on `already registered|exists` the registration is forgotten, the colocated worktree
- * pruned, and the add repeated at the same revision. Only when nothing resolved does the add end
- * with `jj bookmark set legion/<KEY> -r @` in the new workspace, and only when the registration had
- * to be forgotten is one line logged — a brand-new issue has no bookmark to miss. */
+ * resolution: on `already registered|exists` the registration is forgotten and the add repeated at
+ * the same revision. Only when nothing resolved does the add end with `jj bookmark set
+ * legion/<KEY> -r @` in the new workspace, and only when the registration had to be forgotten is
+ * one line logged — a brand-new issue has no bookmark to miss. */
 async function createWorkspace(
   deps: ProvisionIssueWorkspaceDeps,
   repoCloneDir: string,
@@ -312,8 +322,6 @@ async function createWorkspace(
   }
 
   await mkdir(path.dirname(workspaceDir), { recursive: true });
-  const gitDir = path.join(repoCloneDir, ".git");
-  const pruneArgs = ["git", `--git-dir=${gitDir}`, "worktree", "prune"];
   const addArgs = [
     "jj",
     "workspace",
@@ -327,9 +335,13 @@ async function createWorkspace(
     repoCloneDir,
   ];
 
-  try {
-    await run(deps, pruneArgs);
-  } catch {}
+  // Provisioning adds a workspace only when it finds no directory, so an entry git still registers
+  // for this one is stale: the directory went while jj still registered the workspace (a crash
+  // inside removal), or jj forgot the workspace after its directory went, which leaves the
+  // colocated worktree, and `jj workspace add` would stop at git's `missing but already registered
+  // worktree`. Only that entry goes: a bare `git worktree prune` also deletes the entry of every
+  // other workspace whose directory this process cannot see.
+  await removeGitWorktree(repoCloneDir, workspaceDir);
 
   const result = await run(deps, addArgs);
   const forgotten = result.exitCode !== 0;
@@ -337,12 +349,8 @@ async function createWorkspace(
     if (!/already (?:registered|exists)/.test(result.stderr)) {
       throw commandFailure(result, addArgs);
     }
-    // `jj workspace forget` takes only workspace names (jj 0.44 and 0.45); the `git worktree prune`
-    // that follows is what cleans the colocated worktree.
+    // The add failed before creating a git worktree, and the stale entry went above.
     await runChecked(deps, ["jj", "workspace", "forget", workspaceName, "-R", repoCloneDir]);
-    try {
-      await run(deps, pruneArgs);
-    } catch {}
     await runChecked(deps, addArgs);
   }
 
@@ -354,6 +362,10 @@ async function createWorkspace(
   }
   await runChecked(deps, ["jj", "bookmark", "set", bookmark, "-r", "@"], { cwd: workspaceDir });
 }
+
+/** A commit id as jj prints it: 40 lowercase hex characters. Shared by `readBookmark`'s row check
+ * and `restoreGitWorktree`'s parent-commit check, the Go twin's (`commitID`). */
+const COMMIT_ID = /^[0-9a-f]{40}$/;
 
 /** The `jj bookmark list -T` template of `createWorkspace`'s one read, the Go twin's
  * (`bookmarkRowTemplate`): one line per row, its fields separated by `|` — where it is (`local`,
@@ -420,7 +432,7 @@ async function readBookmark(
     if (
       fields.length !== 6 ||
       ![present, conflict, tracked].every((flag) => flag === "0" || flag === "1") ||
-      ![...row.added, ...row.removed].every((commit) => /^[0-9a-f]{40}$/.test(commit)) ||
+      ![...row.added, ...row.removed].every((commit) => COMMIT_ID.test(commit)) ||
       (row.conflict && row.added.length === 0) ||
       (row.present && !row.conflict && (row.added.length !== 1 || row.removed.length !== 0)) ||
       rows[where] !== undefined
@@ -619,9 +631,14 @@ export async function provisionIssueWorkspace(
     await rm(credential.directory, { force: true, recursive: true });
   }
 
-  if (!workspaceExists) {
+  if (workspaceExists) {
+    await restoreGitWorktree(deps, repoCloneDir, workspaceDir);
+  } else {
     await createWorkspace(deps, repoCloneDir, workspaceDir, workspaceName, bookmark);
   }
+  // Every workspace provisioning touches has its git worktree entry locked, one added before
+  // provisioning locked any included, so a bare `git worktree prune` that cannot see it skips it.
+  await lockGitWorktree(repoCloneDir, workspaceDir);
 
   await runChecked(deps, [
     "git",
@@ -697,18 +714,20 @@ export function ownCommitsRevset(workspaceName: string): string {
  * this when the tree that owns the issue closes — `ProcessManager.removeTreeWorkspaces`): lists
  * the issue's own commits (`ownCommitsRevset`), deletes the directory, abandons those commits
  * (the working-copy commit among them; jj gives the workspace a new empty one), forgets the
- * workspace (which hides that empty commit), and prunes the colocated git worktree. Every jj
+ * workspace (which hides that empty commit), and deletes its colocated git worktree entry, which
+ * jj's forget leaves once the directory is gone (`removeGitWorktree`). Every jj
  * command targets the clone with `--ignore-working-copy`, so no other workspace's working copy is
  * snapshotted or touched.
  *
  * The directory goes first: a crash between the deletion and the forget leaves a registered
  * workspace whose directory is gone, exactly the shape `createWorkspace` repairs on the next
- * provisioning (`jj workspace add` answers `already exists`, so it forgets, prunes, and adds
- * again). The reverse order would leave a directory jj no longer knows, and every later
+ * provisioning (`jj workspace add` answers `already exists`, so it forgets and adds again). The
+ * reverse order would leave a directory jj no longer knows, and every later
  * provisioning would fail at `jj workspace update-stale` (`Nothing checked out in this
  * workspace`). Idempotent: a workspace jj does not register runs no jj command past the list, a
  * missing directory is a no-op `rm`, an empty set skips the abandon; a second call returns
- * `removed: false` having run only the list. No fetch: the bookmarks are as the last provisioning
+ * `removed: false` having run only the list, and still deletes a git worktree entry of its own
+ * that a crash after the forget left. No fetch: the bookmarks are as the last provisioning
  * left them. A failing command throws `commandFailure` and leaves the remaining steps undone
  * (the caller logs once; the next provisioning repairs whichever half state it finds). */
 export async function removeIssueWorkspace(
@@ -720,7 +739,7 @@ export async function removeIssueWorkspace(
   const workspaceDir = issueWorkspaceDir(deps.stateDir, deps.repo, issue);
   const repoArgs = ["--ignore-working-copy", "-R", cloneDir];
 
-  // No clone, nothing registered: jj cannot be asked and there is nothing to forget or prune.
+  // No clone, nothing registered: jj cannot be asked and there is nothing to forget or delete.
   const cloneExists = existsSync(path.join(cloneDir, ".jj"));
   let registered = false;
   if (cloneExists) {
@@ -748,10 +767,7 @@ export async function removeIssueWorkspace(
     ]);
     abandoned = own.stdout.split("\n").filter((line) => line.trim() !== "");
   }
-  if (!registered && !existsSync(workspaceDir)) {
-    return { workspaceDir, removed: false, abandoned: [] };
-  }
-
+  const removed = registered || existsSync(workspaceDir);
   await rm(workspaceDir, { recursive: true, force: true });
   if (registered) {
     if (abandoned.length > 0) {
@@ -759,13 +775,207 @@ export async function removeIssueWorkspace(
     }
     await runChecked(deps, ["jj", "workspace", "forget", workspaceName, ...repoArgs]);
   }
-  if (cloneExists) {
-    await runChecked(deps, [
-      "git",
-      `--git-dir=${path.join(cloneDir, ".git")}`,
-      "worktree",
-      "prune",
-    ]);
+  if (cloneExists) await removeGitWorktree(cloneDir, workspaceDir);
+  return { workspaceDir, removed, abandoned };
+}
+
+/** The reason each workspace's git worktree is locked with, the Go twin's
+ * (`gitWorktreeLockReason`): `git worktree prune` skips a locked entry, and whoever runs one on
+ * the shared clone may not see this workspace's directory (an isolated session on the same host
+ * that mounts only its own checkout), or may run one without asking (stock jj 0.45.1's `jj
+ * workspace forget` prunes the whole clone). */
+const GIT_WORKTREE_LOCK_REASON =
+  "legion workspace: its directory may be invisible to other processes sharing this clone";
+
+/** The admin directories of the shared clone's git worktrees registered at `dir`, the Go twin's
+ * (`gitWorktreeEntries`): each `<clone>/.git/worktrees/<id>` whose `gitdir` file names `dir`'s
+ * `.git`, `dir` as given or with its symlinks resolved, as jj records it. git names an entry after
+ * the directory's base name, with a number on a collision, so the id is read, never derived. A
+ * clone with no linked worktree, or a jj that colocates no workspace (0.44), has none. */
+async function gitWorktreeEntries(cloneDir: string, dir: string): Promise<string[]> {
+  const listed = path.join(cloneDir, ".git", "worktrees");
+  const entries = await readdir(listed, { withFileTypes: true }).catch(missingAsUndefined);
+  if (entries === undefined) return [];
+  // git writes a relative gitdir (jj asks for relative worktree paths; git 2.48 and later honour
+  // it) between real paths, so it is resolved from the entry's real directory.
+  const admin = await realpath(listed);
+  const want = [path.join(path.resolve(dir), ".git"), path.join(await resolvedPath(dir), ".git")];
+  const own: string[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const entryDir = path.join(admin, entry.name);
+    const gitdir = await readFile(path.join(entryDir, "gitdir"), "utf8").catch(missingAsUndefined);
+    // No worktree git could name: nobody's to claim.
+    if (gitdir === undefined) continue;
+    if (want.includes(path.resolve(entryDir, gitdir.replace(/\n$/, "")))) own.push(entryDir);
   }
-  return { workspaceDir, removed: true, abandoned };
+  return own;
+}
+
+/** `target`, made absolute, with the symlinks of its longest existing prefix resolved. */
+async function resolvedPath(target: string): Promise<string> {
+  let existing = path.resolve(target);
+  const missing: string[] = [];
+  for (;;) {
+    const resolved = await realpath(existing).catch(missingAsUndefined);
+    if (resolved !== undefined) return path.join(resolved, ...missing);
+    missing.unshift(path.basename(existing));
+    existing = path.dirname(existing);
+  }
+}
+
+/** A filesystem call's rejection handler: `undefined` for a path that does not exist, any other
+ * failure rethrown. */
+function missingAsUndefined(error: unknown): undefined {
+  if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+  throw error;
+}
+
+/** Deletes the shared clone's git worktree entry for `dir`, whose directory is gone: what `git
+ * worktree prune` does to that one entry, locked or not, and nothing to any other. */
+async function removeGitWorktree(cloneDir: string, dir: string): Promise<void> {
+  for (const entry of await gitWorktreeEntries(cloneDir, dir)) {
+    await rm(entry, { recursive: true, force: true });
+  }
+}
+
+/** Locks the shared clone's git worktree entry for `dir`, as `git worktree lock` does, so a bare
+ * `git worktree prune` from a process that cannot see `dir` skips it. An entry already locked
+ * keeps its lock and reason. */
+async function lockGitWorktree(cloneDir: string, dir: string): Promise<void> {
+  for (const entry of await gitWorktreeEntries(cloneDir, dir)) {
+    try {
+      await writeFile(path.join(entry, "locked"), GIT_WORKTREE_LOCK_REASON, { flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+}
+
+/** jj's sentinel commit id for the root commit, the Go twin's (`rootCommitID`): every workspace's
+ * history ends there, and it has no git tree because it isn't a real git commit (`git cat-file`
+ * reports no such object). A workspace whose working copy has no real parent yet -- its `@-` is the
+ * root -- prints this as `restoreGitWorktree`'s `head`, and `git read-tree` on it fails ("failed to
+ * unpack tree object HEAD"); jj's own colocated `workspace add` writes HEAD as the unborn ref below
+ * and an empty index for exactly this case, which `restoreGitWorktree` matches instead of failing
+ * to restore a workspace that has never had a git-visible commit. */
+const ROOT_COMMIT_ID = "0000000000000000000000000000000000000000";
+
+/** The unborn ref jj's own colocated `workspace add` writes to HEAD when a workspace's working
+ * copy has no real parent yet (verified against jj 0.45.1-sami), the Go twin's (`rootHeadRef`). */
+const ROOT_HEAD_REF = "ref: refs/jj/root";
+
+/** Re-creates the shared clone's git worktree entry for the workspace at `dir` when the entry its
+ * `.git` names is gone, the Go twin's (`restoreGitWorktree`): a bare `git worktree prune` from a
+ * process that could not see `dir` leaves git failing there while jj keeps working, and `git
+ * worktree repair` cannot rebuild a missing entry. It writes what `git worktree add` would --
+ * `gitdir`, `commondir`, and `HEAD` at the working-copy commit's first parent, as jj keeps it, then
+ * the index from HEAD with `git read-tree`, which writes no working-tree file -- into a temporary
+ * sibling directory, and renames it onto `target` only once every step succeeds, so `target` is
+ * either the complete entry or still absent even across a kill (a SIGKILL, an OOM, a pod eviction,
+ * a daemon restart) that runs no `finally`. A workspace with no `.git` (jj 0.44), or whose entry
+ * exists, is left alone; a pointer outside the clone's git worktrees is refused, since a tree agent
+ * can write the workspace's `.git`. */
+async function restoreGitWorktree(
+  deps: CommandDeps,
+  cloneDir: string,
+  workspaceDir: string
+): Promise<void> {
+  const pointer = await readFile(path.join(workspaceDir, ".git"), "utf8").catch(missingAsUndefined);
+  if (pointer === undefined) return;
+  const trimmed = pointer.trim();
+  if (!trimmed.startsWith("gitdir: ")) {
+    throw new Error(`${workspaceDir}/.git names no git worktree: ${JSON.stringify(pointer)}`);
+  }
+  const dir = await realpath(workspaceDir);
+  const target = await resolvedPath(path.resolve(dir, trimmed.slice("gitdir: ".length)));
+  if (existsSync(target)) return;
+  // target is resolved through every symlink on its path (resolvedPath, above), so a symlinked
+  // worktrees component inside it is already followed there. worktrees, in contrast, is resolved
+  // only as far as .git: "worktrees" is joined on as a literal, unresolved path segment. A tree
+  // agent that can write the shared clone's .git can replace .git/worktrees with a symlink to any
+  // directory, and resolving that symlink here too would make both sides of this comparison agree
+  // wherever it points -- git never creates .git/worktrees as a symlink, so resolving one is never
+  // a legitimate case, only ever that replacement.
+  const worktrees = path.join(await realpath(path.join(cloneDir, ".git")), "worktrees");
+  if (path.dirname(target) !== worktrees) {
+    throw new Error(
+      `Workspace ${workspaceDir}'s .git, which a tree agent can write, names ${target} outside the shared clone's ${worktrees}; provisioning refuses to create or write it. Remove the workspace so the next provisioning adds it again`
+    );
+  }
+  const parents = await runChecked(
+    deps,
+    [
+      "jj",
+      "log",
+      "-r",
+      "@",
+      "--no-graph",
+      "--ignore-working-copy",
+      "-T",
+      'parents.map(|c| c.commit_id()).join("\\n")',
+    ],
+    { cwd: workspaceDir }
+  );
+  const head = parents.stdout.trim().split("\n")[0] ?? "";
+  if (!COMMIT_ID.test(head)) {
+    throw new Error(
+      `Workspace ${workspaceDir}: jj printed no parent commit for its working copy: ${JSON.stringify(parents.stdout)}`
+    );
+  }
+  // git removes .git/worktrees along with its last entry, so the directory may be absent when the
+  // temporary entry is built; it is (re)created first. A random suffix under a leading dot: git
+  // assigns a worktree id from its directory's own base name, and never assigns one beginning with
+  // a dot (verified: a directory named ".x" gets the id "-x"), so no real worktree can ever collide
+  // with this temporary one. The random suffix also keeps two concurrent restores of the same
+  // workspace from writing into, and renaming, the same temporary directory.
+  await mkdir(worktrees, { recursive: true });
+  // Two locks, not one, cover every caller of this function: TmuxRuntime.provisionQueue
+  // (runtime-tmux.ts), an async mutex keyed by repository, for the tmux runtime's own call; and
+  // withWorkspaceInitLock (cli/workspace-init.ts), a per-repository flock held for the whole
+  // provisionIssueWorkspace call, for the Kubernetes init container's CLI call. Between them, two
+  // concurrent restores of the same workspace are impossible: nothing else can be using a
+  // temporary entry naming this workspace while either lock is held, so any left over from an
+  // earlier kill is swept before this restore creates its own.
+  const restorePrefix = `.${path.basename(target)}.restore-`;
+  const siblings = await readdir(worktrees).catch((error) => {
+    console.error(
+      `[legion] workspace ${workspaceDir}: could not list stale restore entries under ${worktrees}: ${error}`
+    );
+    return [];
+  });
+  for (const entry of siblings) {
+    if (!entry.startsWith(restorePrefix)) continue;
+    await rm(path.join(worktrees, entry), { recursive: true, force: true }).catch((error) => {
+      console.error(
+        `[legion] workspace ${workspaceDir}: could not remove the stale restore entry ${entry}: ${error}`
+      );
+    });
+  }
+  const tmp = await mkdtemp(path.join(worktrees, restorePrefix));
+  // mkdtemp creates tmp at 0o700; git's own worktree entries land at 0o755 (a plain mkdir under the
+  // ordinary 022 umask), and this restore's doc comment says it writes what `git worktree add`
+  // would, so the mode matches too.
+  await chmod(tmp, 0o755);
+  let headContent = head;
+  let readTreeArg = "HEAD";
+  let where = `at ${head}`;
+  if (head === ROOT_COMMIT_ID) {
+    headContent = ROOT_HEAD_REF;
+    readTreeArg = "--empty";
+    where = "fresh, with no real commit yet";
+  }
+  const readTree = ["git", `--git-dir=${tmp}`, `--work-tree=${dir}`, "read-tree", readTreeArg];
+  try {
+    await writeFile(path.join(tmp, "gitdir"), `${path.join(dir, ".git")}\n`);
+    await writeFile(path.join(tmp, "commondir"), `${path.join("..", "..")}\n`);
+    await writeFile(path.join(tmp, "HEAD"), `${headContent}\n`);
+    await runChecked(deps, readTree, { cwd: cloneDir });
+    await rename(tmp, target);
+  } finally {
+    await rm(tmp, { recursive: true, force: true });
+  }
+  console.error(
+    `[legion] workspace ${workspaceDir} had lost its git worktree entry ${target} (a git worktree prune that could not see the workspace deletes it): restored it ${where}, the working copy untouched`
+  );
 }

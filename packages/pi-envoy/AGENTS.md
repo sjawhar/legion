@@ -55,7 +55,7 @@ environment variable the TypeScript daemon sets on a pane that this extension re
 `LEGION_CONTROL_SUBJECT`, `LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`,
 `ENVOY_NATS_URL`, `ENVOY_URL`, `ENVOY_TOKEN_FILE` (the listener bearer, read by
 `@legion/envoy-client` ahead of `ENVOY_TOKEN`; contract 3, LEGION-25), `NATS_NKEY_SEED_FILE` (the
-`legion-pane` NATS nkey seed; contract 9, LEGION-279), and the `LEGION_*` identity
+`legion-pane` NATS nkey seed; contract 8, LEGION-279), and the `LEGION_*` identity
 variables `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_GENERATION`/`LEGION_WORKSPACE`/
 `LEGION_STATE_DIR`/`LEGION_CONTROLLER` (read by `src/legion/classify.ts` and
 `extensions/legion.ts`; the Dispatch and Envoy variables by `@legion/envoy-client`; the grant
@@ -91,7 +91,7 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 10) is the contract with `packages/daemon-go`: the claim,
+`legion.goDaemonApiVersion` (currently 11) is the contract with `packages/daemon-go`: the claim,
 credential, workflow, controller, and state shapes `src/legion/go-daemon-client.ts` parses strictly
 through `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
@@ -137,6 +137,12 @@ the Go `legion controller start` sets it to the operator file's `nats_nkey_seed_
 extension's Envoy connections read the seed from it (`@legion/envoy-client`'s `nats-auth.ts`), so
 they authenticate as that nkey user once production NATS stops admitting credential-less clients.
 With no seed there is no pointer, and the connections carry no credential, as before.
+Contract 9 adds the daemon's own agent-secrets machine login state (`agentSecretsLogin`) to
+`GET /legion/v1/state` (AGENTC-393). Contract 10 adds `POST /legion/v1/roots/close`
+(`LegionGoRootCloseRequest`: `grantId`, `issue`, `reason`), the Go `legion` tool's `close_root`: a
+root architect ends its tree while the root is admitted and no phase has started, and the daemon
+posts the reason on the issue before it writes `done`. A plugin at 9 offers no `close_root`, and
+one at 10 against a daemon at 9 would call a route that daemon does not have.
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My
@@ -162,7 +168,8 @@ so no phase worker is woken by an architect's notice); and `claims/ready`,
 retried three times a second apart on a 5xx or transport failure only. The tool-call hook mints a
 fresh grant into the pane's `LEGION_GRANT_FILE` before every call that redeems one (see the grant
 file row below). It also registers the Go `legion` tool: architects register gates, release
-children, request a backward move, choose retry or escalation, sign off, and read records; phase
+children, request a backward move, choose retry or escalation, sign off, close an admitted root
+tree (a root architect only), and read records; phase
 workers request a backward move and read records.
 Control directives remain out because the Go daemon does not set `LEGION_CONTROL_SUBJECT`, as
 does a `claims/exit` report at shutdown because a daemon-requested suspend ends the session but
