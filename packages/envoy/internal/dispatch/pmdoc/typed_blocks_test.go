@@ -440,6 +440,24 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     "an indented code block right after a list, which the browser editor's parser splits after its first line",
 		},
 		{
+			// A quote the next line does not continue stays open across the code's first line in
+			// the browser editor's parser, as a list does, so it reads each later line as a code
+			// block of its own.
+			name:     "an indented code block right after an empty quote",
+			markdown: ">\n    a\n    b\n",
+			want:     "an indented code block right after a quote, which the browser editor's parser splits after its first line",
+		},
+		{
+			name:     "the same after a quote holding a heading, a blank line in the code",
+			markdown: "> # h\n    a\n\n    b\n",
+			want:     "an indented code block right after a quote, which the browser editor's parser splits after its first line",
+		},
+		{
+			name:     "the same in a list item",
+			markdown: "- >\n      a\n\n      b\n",
+			want:     "an indented code block right after a quote, which the browser editor's parser splits after its first line",
+		},
+		{
 			name:     "Pandoc fenced div",
 			markdown: "::: {.callout}\nBody.\n:::\n",
 			want:     "Pandoc fenced divs and malformed directives are not supported",

@@ -539,12 +539,20 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		}, nil
 	case *ast.CodeBlock:
 		// An indented code block stands right after a list, outside it, only where the list's last
-		// item holds its content five or more columns in (a wide ordered marker, or tabs). The
-		// browser editor's parser keeps that list open across the code's first line, which the
-		// item does not continue, and a code line that list does not continue ends the code, so
-		// it reads every later line as a second code block.
-		if _, afterList := current.PreviousSibling().(*ast.List); afterList && current.Lines().Len() > 1 {
-			return nil, fmt.Errorf("%w: an indented code block right after a list, which the browser editor's parser splits after its first line", ErrSchema)
+		// item holds its content five or more columns in (a wide ordered marker, or tabs), and
+		// right after a quote on the line after the quote's last. The browser editor's parser
+		// keeps that list or quote open across the code's first line, which it does not continue,
+		// and a code line that list or quote does not continue ends the code, so it reads the
+		// later lines as a second code block. A blank line ends a quote.
+		if current.Lines().Len() > 1 {
+			switch current.PreviousSibling().(type) {
+			case *ast.List:
+				return nil, fmt.Errorf("%w: an indented code block right after a list, which the browser editor's parser splits after its first line", ErrSchema)
+			case *ast.Blockquote:
+				if !current.HasBlankPreviousLines() {
+					return nil, fmt.Errorf("%w: an indented code block right after a quote, which the browser editor's parser splits after its first line", ErrSchema)
+				}
+			}
 		}
 		return &Node{
 			Type:     "code_block",

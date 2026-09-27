@@ -734,9 +734,11 @@ opens a list, `> \t| a |` over `> \t| - |` is a table, and `> a` over `> \t===` 
 (`tabIndented`, `tabExpandedLines`). Goldmark measured such indentation as if it began the line, or
 took a list marker or an underline only after spaces, and read each as paragraph text.
 An indented code block right after a list, outside it - which only a last item holding its content
-five or more columns in allows, by a wide ordered marker, spaces or tabs - is refused when it holds
-more than one line: the browser editor's parser keeps the list open across the code's first line,
-which the item does not continue, and reads the code's later lines as a second code block.
+five or more columns in allows, by a wide ordered marker, spaces or tabs - or right after a quote,
+on the line after the quote's last, is refused when it holds more than one line: the browser
+editor's parser keeps the list or quote open across the code's first line, which it does not
+continue, and reads the code's later lines as a second code block. A blank line before the code
+ends a quote, so there the code is read whole.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character

@@ -2571,7 +2571,7 @@
   },
   {
     "name": "code",
-    "markdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n    indent\n\nText.\n\n100. An item holding its content five columns in.\n\n    one line of code after it\n",
+    "markdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n    indent\n\nText.\n\n100. An item holding its content five columns in.\n\n    one line of code after it\n\nIndented code after a quote, a blank line between or one line long:\n\n> # h\n\n    a\n    b\n\n- >\n      one line\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -2672,11 +2672,112 @@
               "text": "one line of code after it"
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Indented code after a quote, a blank line between or one line long:"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "heading",
+              "attrs": {
+                "id": "",
+                "level": 1,
+                "blockId": "b-000011"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "h"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "code_block",
+          "attrs": {
+            "language": null,
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "a\nb"
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000015"
+                  }
+                },
+                {
+                  "type": "blockquote",
+                  "attrs": {
+                    "blockId": "b-000016"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000017"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000018"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "one line"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "ASIBAAcBC3Byb3NlbWlycm9yAwpjb2RlX2Jsb2NrBwABAAYEAAEBEWZtdC5QcmludGxuKCJoaSIpKAABAAhsYW5ndWFnZQF3AmdvKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmNvZGVfYmxvY2sHAAEVBgQAARYFcGxhaW4oAAEVB2Jsb2NrSWQBdwhiLTAwMDAwMocBFQMKY29kZV9ibG9jawcAAR0GBAABHgZpbmRlbnQoAAEdB2Jsb2NrSWQBdwhiLTAwMDAwM4cBHQMJcGFyYWdyYXBoBwABJgYEAAEnBVRleHQuKAABJgdibG9ja0lkAXcIYi0wMDAwMDSHASYDDG9yZGVyZWRfbGlzdAcAAS4DCWxpc3RfaXRlbQcAAS8DCXBhcmFncmFwaAcAATAGBAABMSxBbiBpdGVtIGhvbGRpbmcgaXRzIGNvbnRlbnQgZml2ZSBjb2x1bW5zIGluLigAATAHYmxvY2tJZAF3CGItMDAwMDA3KAABLwVsYWJlbAF3A+KAoigAAS8IbGlzdFR5cGUBdwZidWxsZXQoAAEvBnNwcmVhZAF5KAABLwdibG9ja0lkAXcIYi0wMDAwMDYoAAEuBW9yZGVyAX2kASgAAS4Gc3ByZWFkAXkoAAEuB2Jsb2NrSWQBdwhiLTAwMDAwNYcBLgMKY29kZV9ibG9jawcAAWYGBAABZxlvbmUgbGluZSBvZiBjb2RlIGFmdGVyIGl0KAABZgdibG9ja0lkAXcIYi0wMDAwMDgA",
-    "rendered_by_milkdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n```\nindent\n```\n\nText.\n\n100. An item holding its content five columns in.\n\n```\none line of code after it\n```\n"
+    "yjs_update_v1_b64": "AUQBAAcBC3Byb3NlbWlycm9yAwpjb2RlX2Jsb2NrBwABAAYEAAEBEWZtdC5QcmludGxuKCJoaSIpKAABAAhsYW5ndWFnZQF3AmdvKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCmNvZGVfYmxvY2sHAAEVBgQAARYFcGxhaW4oAAEVB2Jsb2NrSWQBdwhiLTAwMDAwMocBFQMKY29kZV9ibG9jawcAAR0GBAABHgZpbmRlbnQoAAEdB2Jsb2NrSWQBdwhiLTAwMDAwM4cBHQMJcGFyYWdyYXBoBwABJgYEAAEnBVRleHQuKAABJgdibG9ja0lkAXcIYi0wMDAwMDSHASYDDG9yZGVyZWRfbGlzdAcAAS4DCWxpc3RfaXRlbQcAAS8DCXBhcmFncmFwaAcAATAGBAABMSxBbiBpdGVtIGhvbGRpbmcgaXRzIGNvbnRlbnQgZml2ZSBjb2x1bW5zIGluLigAATAHYmxvY2tJZAF3CGItMDAwMDA3KAABLwVsYWJlbAF3A+KAoigAAS8IbGlzdFR5cGUBdwZidWxsZXQoAAEvBnNwcmVhZAF5KAABLwdibG9ja0lkAXcIYi0wMDAwMDYoAAEuBW9yZGVyAX2kASgAAS4Gc3ByZWFkAXkoAAEuB2Jsb2NrSWQBdwhiLTAwMDAwNYcBLgMKY29kZV9ibG9jawcAAWYGBAABZxlvbmUgbGluZSBvZiBjb2RlIGFmdGVyIGl0KAABZgdibG9ja0lkAXcIYi0wMDAwMDiHAWYDCXBhcmFncmFwaAcAAYIBBgQAAYMBQ0luZGVudGVkIGNvZGUgYWZ0ZXIgYSBxdW90ZSwgYSBibGFuayBsaW5lIGJldHdlZW4gb3Igb25lIGxpbmUgbG9uZzooAAGCAQdibG9ja0lkAXcIYi0wMDAwMDmHAYIBAwpibG9ja3F1b3RlBwAByAEDB2hlYWRpbmcHAAHJAQYEAAHKAQFoKAAByQECaWQBdwAoAAHJAQVsZXZlbAF9ASgAAckBB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAcgBB2Jsb2NrSWQBdwhiLTAwMDAxMIcByAEDCmNvZGVfYmxvY2sHAAHQAQYEAAHRAQNhCmIoAAHQAQdibG9ja0lkAXcIYi0wMDAwMTKHAdABAwtidWxsZXRfbGlzdAcAAdYBAwlsaXN0X2l0ZW0HAAHXAQMJcGFyYWdyYXBoKAAB2AEHYmxvY2tJZAF3CGItMDAwMDE1hwHYAQMKYmxvY2txdW90ZQcAAdoBAwlwYXJhZ3JhcGgoAAHbAQdibG9ja0lkAXcIYi0wMDAwMTcoAAHaAQdibG9ja0lkAXcIYi0wMDAwMTaHAdoBAwpjb2RlX2Jsb2NrBwAB3gEGBAAB3wEIb25lIGxpbmUoAAHeAQdibG9ja0lkAXcIYi0wMDAwMTgoAAHXAQVsYWJlbAF3A+KAoigAAdcBCGxpc3RUeXBlAXcGYnVsbGV0KAAB1wEGc3ByZWFkAXkoAAHXAQdibG9ja0lkAXcIYi0wMDAwMTQoAAHWAQZzcHJlYWQBeSgAAdYBB2Jsb2NrSWQBdwhiLTAwMDAxMwA=",
+    "rendered_by_milkdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n```\nindent\n```\n\nText.\n\n100. An item holding its content five columns in.\n\n```\none line of code after it\n```\n\nIndented code after a quote, a blank line between or one line long:\n\n> # h\n\n```\na\nb\n```\n\n*\n  >\n  ```\n  one line\n  ```\n"
   },
   {
     "name": "directive-like-text",
