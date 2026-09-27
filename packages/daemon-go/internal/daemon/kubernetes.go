@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"maps"
 	"net"
 	"slices"
 	"strconv"
@@ -20,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 )
@@ -57,10 +57,11 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchTo
 		return err
 	}
 	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
-	if err := CheckOperatorPod(cfg); err != nil {
+	lookup := environLookup(o.environment())
+	if err := CheckOperatorPod(cfg, lookup); err != nil {
 		return err
 	}
-	opts, err := sandboxOptions(cfg, k, p.project, p.stream, dispatchToken, log)
+	opts, err := sandboxOptions(cfg, k, p.project, p.stream, dispatchToken, lookup, log)
 	if err != nil {
 		return err
 	}
@@ -115,8 +116,9 @@ func kubeClient(k config.Kubernetes) (*rest.Config, error) {
 
 // sandboxOptions translates the configuration into the runtime's Options, all but the connection
 // directory and the token source, which boot hands the factory. It refuses what the cluster would
-// refuse only at the first pod: a role's request above its limit.
-func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dispatchToken string, log *slog.Logger) (sandbox.Options, error) {
+// refuse only at the first pod: a role's request above its limit. lookup is the daemon's
+// environment, which can name the NATS nkey seed (launchSecrets).
+func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dispatchToken string, lookup func(string) (string, bool), log *slog.Logger) (sandbox.Options, error) {
 	treeVolume, err := resource.ParseQuantity(k.TreeVolume)
 	if err != nil {
 		return sandbox.Options{}, fmt.Errorf("runtime.kubernetes.tree_volume: %w", err)
@@ -148,7 +150,8 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		Tools:            workerImageTools,
 		Pod:              sandbox.Pod(k.Pod),
 		ProviderKeys:     providerSecretKeys(cfg.ProviderKeys),
-		LaunchSecrets:    launchSecretNames(cfg),
+		LaunchSecrets:    launchSecretNames(cfg, lookup),
+		ProvidersSecrets: providersSecrets(cfg, lookup),
 		BootTimeout:      cfg.WorkerBootTimeout,
 		BootIntervals:    cfg.WorkerBootRegistrationDeadlineIntervals,
 		TerminationGrace: cfg.WorkerStopTimeout,
@@ -159,20 +162,36 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 }
 
 // CheckOperatorPod is the Sandbox runtime's refusal of an operator pod or provider key that
-// collides with Legion's own (sandbox.CheckPod) over the configuration, run before anything is
-// opened: boot runs it, and so does `legion start --check-config`, which starts no runtime.
-func CheckOperatorPod(cfg config.Config) error {
+// collides with Legion's own (sandbox.CheckPod) over the configuration and the daemon's
+// environment (lookup), run before anything is opened: boot runs it, and so does `legion start
+// --check-config`, which starts no runtime.
+func CheckOperatorPod(cfg config.Config, lookup func(string) (string, bool)) error {
 	if cfg.Runtime.Kubernetes == nil {
 		return nil
 	}
 	return sandbox.CheckPod(sandbox.Pod(cfg.Runtime.Kubernetes.Pod), providerSecretKeys(cfg.ProviderKeys),
-		workerImageTools, launchSecretNames(cfg))
+		workerImageTools, launchSecretNames(cfg, lookup))
 }
 
 // launchSecretNames are the names of the secrets every launch's spec carries (launchSecrets), which
 // the runtime refuses the operator's pod and a provider key for.
-func launchSecretNames(cfg config.Config) []string {
-	return slices.Sorted(maps.Keys(launchSecrets(cfg)))
+func launchSecretNames(cfg config.Config, lookup func(string) (string, bool)) []string {
+	var names []string
+	for _, secret := range launchSecrets(cfg, lookup) {
+		names = append(names, secret.name)
+	}
+	return names
+}
+
+// providersSecrets are the launch secrets a pod reads from the providers Secret's key of the same
+// name, never from a copy in its own Secret: the NATS nkey seed, when the daemon has one. The one
+// copy the cluster holds is the deployment's, in the Secret every pod already mounts; the daemon's
+// own file (or variable) is where the daemon reads it, and the two must hold the same seed.
+func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []string {
+	if slices.Contains(launchSecretNames(cfg, lookup), natsauth.SeedVariable) {
+		return []string{natsauth.SeedVariable}
+	}
+	return nil
 }
 
 // providerSecretKeys are provider_keys as the runtime takes them: each variable Oh My Pi reads,

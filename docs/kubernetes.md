@@ -356,6 +356,19 @@ Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_ur
 nor the unspecified address. `legion start --check-config` runs all of it without starting the
 daemon or running a key command.
 
+The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
+directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
+`legion-pane` user the daemon's own NATS connection authenticates as. A set source that is empty,
+missing, unreadable, blank, or not an nkey user seed refuses boot, naming the key and the path.
+With one, every pod's `NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the
+providers Secret's own `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the
+`provider_keys`: the daemon never copies the seed into a claim's Secret. Put the same seed in the
+providers Secret under that key; a key the kubelet cannot mount fails the image probe at boot. The
+shim skips the file, since the pointer names it, so the seed is never a variable of Oh My Pi or
+the tools it runs. With none, a pod carries no pointer and mounts no such key. `provider_keys`
+may not name `NATS_NKEY_SEED`, and `pod.env` may not set `NATS_NKEY_SEED_FILE`, while the daemon
+has a seed.
+
 ### Anatomy of a Sandbox pod
 
 Each object of a claim carries `legion.dev/project`, `legion.dev/tree`, `legion.dev/issue` and
@@ -374,7 +387,8 @@ references that claim by name. The main container mounts it at `/legion`, and ag
 sessions directory through a `subPath`, so a session survives its pod. The claim's Secret is
 projected twice: its boot half into the worker, read-only, and its provisioning half into
 `workspace-fetch` alone. The operator's volumes and mounts join the worker's, and the providers
-Secret's configured keys when there are any. State, `/tmp` and the XDG config home are in-memory.
+Secret's configured keys when there are any, with its `NATS_NKEY_SEED` key when the daemon has a
+NATS nkey seed. State, `/tmp` and the XDG config home are in-memory.
 
 Every pod runs:
 - with `runtimeClassName: gvisor`;
@@ -686,7 +700,10 @@ claim's pod and the image probe's.
 - **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of the providers
   Secret, `legion-<project>-providers`, which the operator creates. Every pod mounts the keys
   `provider_keys` names and no other key of the Secret, each at a file named for its variable, and
-  the shim exports each into Oh My Pi's environment, never its own. (The TypeScript daemon's
+  the shim exports each into Oh My Pi's environment, never its own. The one other key a pod mounts
+  is `NATS_NKEY_SEED`, when the daemon has a NATS nkey seed: the operator puts the `legion-pane`
+  seed there, and every pod reads it through `NATS_NKEY_SEED_FILE`, which the shim does not export
+  ([Configuration](#configuration)). (The TypeScript daemon's
   [providers Secret](#the-providers-secret) mounts every key; the Go runtime does not.) A Secret or key the kubelet cannot mount is refused at boot by the image probe,
   naming the Secret and keys. A `provider_keys` variable that anything else in the pod sets is
   refused at load.
@@ -1026,10 +1043,10 @@ flag.
 **The operator-side file.** `legion controller start` reads a small file of its own, never the
 daemon's `legion.yaml`, whose loader would run both GitHub Apps' `private_key_command` on your
 machine and demand keys the controller never uses. `deploy/kubernetes/daemon/controller.yaml.example`
-is the complete shape: the same key names as `legion.yaml`, only the twelve the controller needs
+is the complete shape: the same key names as `legion.yaml`, only the thirteen the controller needs
 (`project`, `daemon_url`, `operator_token_file`, `envoy_url`, `envoy_token_file`, `nats_urls`,
-`dispatch_url`, `dispatch_token_file`, `instructions`, `omp_invocation`, `omp_launch_prefix`,
-`state_dir`). Any other key is refused naming it and the example (`unknown key "runtime" in the
+`nats_nkey_seed_file`, `dispatch_url`, `dispatch_token_file`, `instructions`, `omp_invocation`,
+`omp_launch_prefix`, `state_dir`; `nats_nkey_seed_file` is the Go CLI's alone, which the TypeScript CLI refuses as unknown). Any other key is refused naming it and the example (`unknown key "runtime" in the
 controller configuration; legion controller start reads only … — see
 deploy/kubernetes/daemon/controller.yaml.example`); `nats_urls` is required; `dispatch_url` and
 `dispatch_token_file` go together; and relative paths resolve against the file's own directory, with
@@ -1041,7 +1058,8 @@ refused naming the path and mode (`… is readable by its group or others (mode 
 keeping nothing until the daemon has answered, the command:
 
 1. reads the file and refuses as above, and refuses a blank or unreadable Envoy or Dispatch token
-   file, a role-prompt directory missing a file (`LEGION_ROLE_PROMPTS_DIR`, or the checkout's
+   file, a `nats_nkey_seed_file` that is blank, unreadable, or holds no nkey user seed, a
+   role-prompt directory missing a file (`LEGION_ROLE_PROMPTS_DIR`, or the checkout's
    `packages/pi-envoy/roles`), a missing or blank instructions file, and an Oh My Pi invocation that
    does not resolve;
 2. probes that Oh My Pi as the controller will run it, with `omp models`, which starts no session, and
@@ -1055,8 +1073,9 @@ keeping nothing until the daemon has answered, the command:
 5. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt`, no `--resume`, no `--mode rpc`) with the controller's environment
    (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_API=go`, `LEGION_DAEMON_URL`,
-   `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, and the Envoy and Dispatch
-   endpoints), and exits with Oh My Pi's exit code.
+   `LEGION_PROJECT`, `LEGION_STATE_DIR`, its grant and secret files, the Envoy and Dispatch
+   endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it), and
+   exits with Oh My Pi's exit code.
 
 A refusal before the secret is written removes the directories made for the probe, so the state
 directory is as it was.

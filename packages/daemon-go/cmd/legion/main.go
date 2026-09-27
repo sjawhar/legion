@@ -108,7 +108,7 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
 	if err == nil {
-		err = daemon.CheckOperatorPod(cfg)
+		err = daemon.CheckOperatorPod(cfg, os.LookupEnv)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)

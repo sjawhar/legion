@@ -54,6 +54,27 @@ func TestRunRefusesAConfigurationItCannotSuperviseUnder(t *testing.T) {
 		{"an Envoy token file that is not there", func(c *config.Config, _ *overrides) {
 			c.EnvoyTokenFile = filepath.Join(c.StateDir, "absent")
 		}, "envoy_token_file names"},
+		{"a NATS nkey seed file that is not there", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = filepath.Join(c.StateDir, "absent")
+		}, "nats_nkey_seed_file names " + "{state}/absent, which could not be read"},
+		{"a blank NATS nkey seed file", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = writeSeed(t, " \n")
+		}, "nats_nkey_seed_file names {seed}, which is empty"},
+		{"a NATS nkey seed file holding no seed", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = writeSeed(t, "SUNOTASEED")
+		}, "nats_nkey_seed_file ({seed}) does not hold a valid nkey seed"},
+		{"a NATS nkey seed file holding an account's seed", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = writeSeed(t, accountSeed(t))
+		}, "nats_nkey_seed_file ({seed}) holds an nkey seed that is not a user's"},
+		{"NATS_NKEY_SEED_FILE set but empty", func(_ *config.Config, o *overrides) {
+			o.environ = []string{"NATS_NKEY_SEED_FILE=", "NATS_NKEY_SEED=" + userSeed(t)}
+		}, "NATS_NKEY_SEED_FILE is set but empty"},
+		{"NATS_NKEY_SEED_FILE naming a missing file", func(c *config.Config, o *overrides) {
+			o.environ = []string{"NATS_NKEY_SEED_FILE=" + filepath.Join(c.StateDir, "absent")}
+		}, "NATS_NKEY_SEED_FILE names {state}/absent, which could not be read"},
+		{"NATS_NKEY_SEED holding no seed", func(_ *config.Config, o *overrides) {
+			o.environ = []string{"NATS_NKEY_SEED=hunter2"}
+		}, "NATS_NKEY_SEED does not hold a valid nkey seed"},
 		{"no omp_invocation and no LEGION_OMP_PATH", func(c *config.Config, o *overrides) {
 			c.OmpInvocation = ""
 			o.runtime = nil
@@ -68,11 +89,12 @@ func TestRunRefusesAConfigurationItCannotSuperviseUnder(t *testing.T) {
 			cfg := testConfig(t)
 			o := fakeRuntime(fake.NewRuntime(), &built{})
 			testCase.change(&cfg, &o)
+			want := strings.NewReplacer("{state}", cfg.StateDir, "{seed}", cfg.NatsNkeySeedFile).Replace(testCase.want)
 
 			err := run(context.Background(), cfg, quietLogger(), o)
 
-			if err == nil || !strings.Contains(err.Error(), testCase.want) {
-				t.Fatalf("run = %v, want a refusal naming %q", err, testCase.want)
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("run = %v, want a refusal naming %q", err, want)
 			}
 			if count, _ := boots(t, cfg); count != 0 {
 				t.Fatalf("boots after a refused start = %d, want 0", count)
@@ -155,6 +177,43 @@ func TestRunLaunchesWithThePromptInstructionsAndSecretsItWasGiven(t *testing.T) 
 	}
 	if spec.Project != project || spec.Tree != "LEGION-1" || spec.Issue != "LEGION-1" || spec.Role != claim.RoleArchitect {
 		t.Errorf("the launch is for %s/%s/%s/%s, want the spawned claim", spec.Project, spec.Tree, spec.Issue, spec.Role)
+	}
+}
+
+// Every launch, a root's and a worker's alike, carries the NATS nkey seed the daemon resolved as the
+// NATS_NKEY_SEED secret — from nats_nkey_seed_file, else NATS_NKEY_SEED_FILE, else NATS_NKEY_SEED —
+// which each runtime hands the agent behind a NATS_NKEY_SEED_FILE pointer, never as a value; and a
+// daemon with none hands none.
+func TestEveryLaunchCarriesTheNatsSeedTheDaemonResolved(t *testing.T) {
+	keySeed, envSeed := userSeed(t), userSeed(t)
+	for _, tc := range []struct {
+		name    string
+		key     string
+		environ []string
+		want    string
+	}{
+		{"nats_nkey_seed_file, over the environment", writeSeed(t, "\n"+keySeed+"\n"), []string{"NATS_NKEY_SEED=hunter2"}, keySeed},
+		{"NATS_NKEY_SEED_FILE, over NATS_NKEY_SEED", "", []string{"NATS_NKEY_SEED_FILE=" + writeSeed(t, envSeed), "NATS_NKEY_SEED=hunter2"}, envSeed},
+		{"NATS_NKEY_SEED", "", []string{"NATS_NKEY_SEED=" + envSeed}, envSeed},
+		{"no seed", "", []string{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.NatsNkeySeedFile = tc.key
+			rt := fake.NewRuntime()
+			o := fakeRuntime(rt, &built{})
+			o.environ = tc.environ
+			d := startDaemon(t, cfg, o)
+
+			root := lastLaunch(t, rt, d.spawn(architect()))
+			worker := lastLaunch(t, rt, d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Wait."}))
+			for kind, spec := range map[string]runtime.SpawnSpec{"root": root, "worker": worker} {
+				got, carried := spec.Secrets["NATS_NKEY_SEED"]
+				if carried != (tc.want != "") || got != tc.want {
+					t.Errorf("the %s launch's NATS_NKEY_SEED secret is %q (carried: %t), want %q", kind, got, carried, tc.want)
+				}
+			}
+		})
 	}
 }
 
@@ -545,14 +604,14 @@ func TestRunPrunesTheSecretFilesOfClaimsWithNoProcess(t *testing.T) {
 		State: supervise.StateSuspended, Session: "ses_suspended", SessionFile: "/sessions/suspended.jsonl",
 	})
 	secrets := filepath.Join(cfg.StateDir, "secrets")
-	for _, name := range []string{string(live), string(live) + "-envoy_token", string(suspended), string(suspended) + "-envoy_token", "left-by-a-crash"} {
+	for _, name := range []string{string(live), string(live) + "-envoy_token", string(live) + "-nats_nkey_seed", string(suspended), string(suspended) + "-envoy_token", string(suspended) + "-nats_nkey_seed", "left-by-a-crash"} {
 		writeFile(t, filepath.Join(secrets, name))
 	}
 	rt := fake.NewRuntime()
 
 	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
 
-	if got := secretFiles(t, secrets); !slices.Equal(got, []string{string(live), string(live) + "-envoy_token"}) {
+	if got := secretFiles(t, secrets); !slices.Equal(got, []string{string(live), string(live) + "-envoy_token", string(live) + "-nats_nkey_seed"}) {
 		t.Fatalf("after boot the secrets are %v, want only the live claim's", got)
 	}
 	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(live)+"/suspend", nil, true); status != http.StatusOK {

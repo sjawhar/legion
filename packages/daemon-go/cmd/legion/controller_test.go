@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nkeys"
+
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -175,6 +177,7 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 	c.write("instructions.md", "Always be kind.\n", 0o600)
 	c.write("envoy-token", "envoy-bearer\n", 0o600)
 	c.write("dispatch-token", "dispatch-bearer\n", 0o600)
+	c.write("nats-seed", testUserSeed(t)+"\n", 0o600)
 	lines := opts.lines
 	if lines == nil {
 		lines = []string{
@@ -184,6 +187,7 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 			"envoy_url: http://envoy.test:9020",
 			"envoy_token_file: envoy-token",
 			"nats_urls: [nats://a:4222, nats://b:4222]",
+			"nats_nkey_seed_file: ./nats-seed",
 			"dispatch_url: https://dispatch.test",
 			"dispatch_token_file: ./dispatch-token",
 			"instructions: ./instructions.md",
@@ -497,6 +501,7 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		"DISPATCH_TOKEN_FILE":           filepath.Join(c.dir, "dispatch-token"),
 		"LEGION_CONTROLLER_SECRET_FILE": filepath.Join(secrets, "legion-demo-controller"),
 		"ENVOY_TOKEN_FILE":              filepath.Join(c.dir, "envoy-token"),
+		"NATS_NKEY_SEED_FILE":           filepath.Join(c.dir, "nats-seed"),
 	}
 	for name := range want {
 		if old, ok := baseline[name]; ok && old == want[name] {
@@ -521,7 +526,7 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 			t.Errorf("%s carries the controller secret's value", name)
 		}
 	}
-	for _, name := range []string{"LEGION_CONTROLLER_SECRET", "ENVOY_TOKEN", "DISPATCH_TOKEN"} {
+	for _, name := range []string{"LEGION_CONTROLLER_SECRET", "ENVOY_TOKEN", "DISPATCH_TOKEN", "NATS_NKEY_SEED"} {
 		if _, set := env[name]; set {
 			t.Errorf("%s is set; only its _FILE pointer may be", name)
 		}
@@ -542,14 +547,14 @@ func TestControllerStartOmitsTheOptionalPointersTheFileDoesNotSet(t *testing.T) 
 		"project: demo", "daemon_url: " + d.url, "operator_token_file: ./operator-token",
 		"envoy_url: http://envoy.test:9020", "nats_urls: [nats://a:4222]",
 	}})
-	for _, name := range []string{"DISPATCH_URL", "DISPATCH_TOKEN_FILE", "ENVOY_TOKEN_FILE"} {
+	for _, name := range []string{"DISPATCH_URL", "DISPATCH_TOKEN_FILE", "ENVOY_TOKEN_FILE", "NATS_NKEY_SEED_FILE"} {
 		os.Unsetenv(name)
 	}
 	if code, _, errb := c.run(); code != 0 {
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	env := c.env()
-	for _, name := range []string{"DISPATCH_URL", "DISPATCH_TOKEN_FILE", "ENVOY_TOKEN_FILE"} {
+	for _, name := range []string{"DISPATCH_URL", "DISPATCH_TOKEN_FILE", "ENVOY_TOKEN_FILE", "NATS_NKEY_SEED_FILE"} {
 		if _, set := env[name]; set {
 			t.Errorf("%s is set with no key naming it", name)
 		}
@@ -640,6 +645,39 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		c := newControllerStart(t, d, controllerOptions{})
 		c.write("envoy-token", "\n", 0o600)
 		c.refused(fmt.Sprintf("envoy_token_file names %s, which is empty", filepath.Join(c.dir, "envoy-token")))
+		c.wantNoSecretRequest()
+	})
+	t.Run("a blank NATS nkey seed file", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		c.write("nats-seed", " \n", 0o600)
+		c.refused(fmt.Sprintf("nats_nkey_seed_file names %s, which is empty", filepath.Join(c.dir, "nats-seed")))
+		c.wantNoSecretRequest()
+		c.wantNothingLaunchedOrWritten(c.defaultDir)
+	})
+	t.Run("a missing NATS nkey seed file", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		os.Remove(filepath.Join(c.dir, "nats-seed"))
+		c.refused(fmt.Sprintf("nats_nkey_seed_file names %s, which could not be read: ", filepath.Join(c.dir, "nats-seed")))
+		c.wantNoSecretRequest()
+	})
+	t.Run("a NATS nkey seed file holding no user seed", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		account, err := nkeys.CreateAccount()
+		if err != nil {
+			t.Fatal(err)
+		}
+		seed, err := account.Seed()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.write("nats-seed", string(seed)+"\n", 0o600)
+		want := fmt.Sprintf("nats_nkey_seed_file (%s) holds an nkey seed that is not a user's", filepath.Join(c.dir, "nats-seed"))
+		if code, _, errb := c.run(); code != 1 || !strings.Contains(errb, want) || strings.Contains(errb, string(seed)) {
+			t.Fatalf("legion controller start = %d, stderr %q; want 1 and %q, without the seed", code, errb, want)
+		}
 		c.wantNoSecretRequest()
 	})
 	t.Run("a missing Dispatch token file", func(t *testing.T) {
@@ -874,4 +912,18 @@ func TestControllerStartUsage(t *testing.T) {
 			t.Errorf("%v = %d, stderr %q; want the usage and exit 2", argv, code, errb.String())
 		}
 	}
+}
+
+// testUserSeed is a fresh nkey user's seed.
+func testUserSeed(t *testing.T) string {
+	t.Helper()
+	user, err := nkeys.CreateUser()
+	if err != nil {
+		t.Fatalf("create nkey user: %v", err)
+	}
+	seed, err := user.Seed()
+	if err != nil {
+		t.Fatalf("user seed: %v", err)
+	}
+	return string(seed)
 }

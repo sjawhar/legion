@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -65,6 +66,7 @@ type Runtime struct {
 	tools                                   Tools
 	pod                                     Pod
 	providerKeys                            map[string]string
+	providersSecrets                        []string
 	agent                                   []string
 	bootTimeout                             time.Duration
 	bootIntervals                           int
@@ -172,12 +174,17 @@ func configure(opts Options) (*Runtime, error) {
 	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets); err != nil {
 		return refuse("%v", err)
 	}
+	for _, name := range opts.ProvidersSecrets {
+		if !slices.Contains(opts.LaunchSecrets, name) {
+			return refuse("providers secret %s is not a launch secret (%s)", name, strings.Join(opts.LaunchSecrets, ", "))
+		}
+	}
 	r := &Runtime{
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
 		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools,
-		pod: opts.Pod, providerKeys: opts.ProviderKeys,
+		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)),
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,

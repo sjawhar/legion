@@ -335,7 +335,7 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 		unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, reason)
 		return &unusable
 	}
-	if len(r.providerKeys) == 0 || pod.Status.Phase != corev1.PodPending || r.now().Sub(*mountRead) < providersMountRecheck {
+	if (len(r.providerKeys) == 0 && len(r.providersSecrets) == 0) || pod.Status.Phase != corev1.PodPending || r.now().Sub(*mountRead) < providersMountRecheck {
 		return nil
 	}
 	*mountRead = r.now()
@@ -343,8 +343,10 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 	if failure == "" {
 		return nil
 	}
-	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, which provider_keys names (%s): %s",
-		name, ProvidersSecretName(r.project), strings.Join(slices.Sorted(maps.Values(r.providerKeys)), ", "), failure)}
+	keys := slices.Concat(slices.Collect(maps.Values(r.providerKeys)), r.providersSecrets)
+	slices.Sort(keys)
+	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, whose keys every pod mounts (%s): %s",
+		name, ProvidersSecretName(r.project), strings.Join(slices.Compact(keys), ", "), failure)}
 	return &refused
 }
 
@@ -503,10 +505,11 @@ type probeSpec struct {
 // Secret's configured keys), and a single container running the image's Go `legion probe-image`
 // against p's contract as a worker runs: on the pod's baseline (--pod-safety), loading the plugin
 // from the root a pod loads it from (--plugin-root), with the providers Secret's keys exported as
-// the worker's shim exports them (--provider-env-dir) when any are configured, and resolving the
-// daemon's own role prompts' references (--role-references), which ProbeImage requires. Its
-// command and env are escaped against the kubelet's expansion as every worker container's are
-// (kubeletLiteral).
+// the worker's shim exports them (--provider-env-dir) when any are configured, each providers
+// secret's `<NAME>_FILE` pointing at its file there as a worker's does (so neither exports it),
+// and resolving the daemon's own role prompts' references (--role-references), which ProbeImage
+// requires. Its command and env are escaped against the kubelet's expansion as every worker
+// container's are (kubeletLiteral).
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
@@ -519,7 +522,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 		Name:            probeContainer,
 		Image:           r.image,
 		Command:         command,
-		Env:             r.operatorEnv(),
+		Env:             slices.Concat(r.operatorEnv(), r.providersPointers()),
 		VolumeMounts:    slices.Concat(providersMounts, r.pod.VolumeMounts),
 		Resources:       p.Resources,
 		SecurityContext: restrictedContainer(),
@@ -553,6 +556,16 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 			},
 		},
 	}
+}
+
+// providersPointers are the image probe's `<NAME>_FILE` pointer for each providers secret, to the
+// providers mount's file a worker's own pointer names (mainEnvironment).
+func (r *Runtime) providersPointers() []corev1.EnvVar {
+	var env []corev1.EnvVar
+	for _, name := range r.providersSecrets {
+		env = append(env, corev1.EnvVar{Name: name + "_FILE", Value: ProvidersDir + "/" + name})
+	}
+	return env
 }
 
 func encodeProbe(s probeSandbox) (*unstructured.Unstructured, error) {

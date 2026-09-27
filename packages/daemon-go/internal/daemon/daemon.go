@@ -29,6 +29,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
@@ -78,8 +79,8 @@ type overrides struct {
 	clock supervise.Clock
 	// getenv is the environment the OMP invocation is resolved against; nil is the process's.
 	getenv func(string) string
-	// environ is the environment provider keys are resolved under (`secrets get`); nil is the
-	// process's.
+	// environ is the environment provider keys are resolved under (`secrets get`) and the NATS
+	// nkey seed is read from when the configuration names no file; nil is the process's.
 	environ []string
 	// orphanSweep is how often orphans are reconciled; zero is orphanSweepInterval.
 	orphanSweep time.Duration
@@ -240,7 +241,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		// The durable consumers exist before the listing is read: a consumer created now delivers
 		// only what is published after it, so everything earlier is the listing's, and what the
 		// listing misses (a move published while it is read) the consumer delivers.
-		if err := workflow.connect(boot, cfg); err != nil {
+		if err := workflow.connect(boot, cfg, plan.secrets[natsauth.SeedVariable]); err != nil {
 			s.stop()
 			listener.Close()
 			workflow.stop()
@@ -345,9 +346,9 @@ type plan struct {
 type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine: the operator
-// bearer the spawn surface authenticates against, the Envoy bearer every agent is handed, the
-// operator's deployment instructions, and then what the runtime needs — all before the plugin gate
-// runs and before any agent can launch.
+// bearer the spawn surface authenticates against, the Envoy bearer and the NATS nkey seed every
+// agent is handed, the operator's deployment instructions, and then what the runtime needs — all
+// before the plugin gate runs and before any agent can launch.
 func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	project, err := claim.ProjectToken(cfg.Project)
 	if err != nil {
@@ -361,12 +362,12 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		return plan{}, err
 	}
 	secrets := map[string]string{}
-	for name, pointer := range launchSecrets(cfg) {
-		value, err := config.ReadSecretPointer(pointer.key, pointer.file)
+	for _, secret := range launchSecrets(cfg, environLookup(o.environment())) {
+		value, err := secret.read()
 		if err != nil {
 			return plan{}, err
 		}
-		secrets[name] = value
+		secrets[secret.name] = value
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
@@ -418,16 +419,44 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	return p, nil
 }
 
-// secretPointer is a configuration key naming a secret's file, and the file.
-type secretPointer struct{ key, file string }
+// launchSecret is one secret every launch's spec carries (specs.SpawnSpec), by its name, and how
+// the daemon reads it.
+type launchSecret struct {
+	name string
+	read func() (string, error)
+}
 
-// launchSecrets are the secrets every launch's spec carries (specs.SpawnSpec), each by its name and
-// the key and file the configuration reads it from: the Envoy bearer, when the daemon has one.
-func launchSecrets(cfg config.Config) map[string]secretPointer {
-	if cfg.EnvoyTokenFile == "" {
-		return nil
+// launchSecrets are the secrets every launch's spec carries, in name order: the Envoy bearer, when
+// the daemon has one, and the NATS nkey seed, when the configuration or the daemon's environment
+// (lookup) names one (natsauth.Seed) — the seed the daemon's own NATS connection authenticates
+// with. Which of them there are is known from the configuration and the environment alone, so
+// `legion start --check-config` names them without reading a file.
+func launchSecrets(cfg config.Config, lookup func(string) (string, bool)) []launchSecret {
+	var secrets []launchSecret
+	if cfg.EnvoyTokenFile != "" {
+		secrets = append(secrets, launchSecret{"ENVOY_TOKEN", func() (string, error) {
+			return config.ReadSecretPointer("envoy_token_file", cfg.EnvoyTokenFile)
+		}})
 	}
-	return map[string]secretPointer{"ENVOY_TOKEN": {"envoy_token_file", cfg.EnvoyTokenFile}}
+	if natsauth.Configured(cfg.NatsNkeySeedFile, lookup) {
+		secrets = append(secrets, launchSecret{natsauth.SeedVariable, func() (string, error) {
+			return natsauth.Seed(cfg.NatsNkeySeedFile, lookup)
+		}})
+	}
+	return secrets
+}
+
+// environLookup is os.LookupEnv over environ, the daemon's environment or a test's.
+func environLookup(environ []string) func(string) (string, bool) {
+	return func(name string) (string, bool) { return envValue(environ, name) }
+}
+
+// environment is o.environ, or the process's when a test replaced none.
+func (o overrides) environment() []string {
+	if o.environ == nil {
+		return os.Environ()
+	}
+	return o.environ
 }
 
 // prepareTmux is what panes on this host need: the OMP invocation every pane runs and the plugin
@@ -458,10 +487,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 	}
 	// Last of the refusals: resolving a human-tier key may cost a YubiKey tap, which a
 	// configuration refused a line earlier should never have asked for.
-	environ := o.environ
-	if environ == nil {
-		environ = os.Environ()
-	}
+	environ := o.environment()
 	providerEnvDir, err := config.MaterializeProviderKeys(cfg.ProviderKeys, cfg.StateDir, environ, log)
 	if err != nil {
 		return err

@@ -19,6 +19,7 @@ import (
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/registry"
@@ -61,8 +62,9 @@ func runController(ctx context.Context, args []string, stdout, stderr io.Writer)
 // cannot launch itself (LEGION-206 Requirement 11; the shipped cmdControllerStart,
 // packages/daemon/src/cli/controller-start.ts). In order, and nothing is kept, and nothing
 // but the probe is launched, until the daemon has answered: read the strict operator-side file;
-// refuse an operator token file others can read, and a blank or unreadable Envoy or Dispatch token
-// file, a role-prompt bundle missing a file, an instructions file that is missing or blank, and an
+// refuse an operator token file others can read, a blank or unreadable Envoy or Dispatch token
+// file, a NATS nkey seed file that is blank, unreadable, or holds no nkey user seed, a role-prompt
+// bundle missing a file, an instructions file that is missing or blank, and an
 // Oh My Pi invocation that does not resolve; then probe that Oh My Pi as the controller will run it
 // — the launch prefix, the invocation, the controller's whole environment, in
 // `<state_dir>/controller`, created for it, at the operator's terminal — and refuse a
@@ -98,6 +100,11 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// a failure found here never cuts the running controller off for nothing.
 	if cfg.EnvoyTokenFile != "" {
 		if _, err := config.ReadSecretPointer("envoy_token_file", cfg.EnvoyTokenFile); err != nil {
+			return 0, err
+		}
+	}
+	if cfg.NatsNkeySeedFile != "" {
+		if _, err := natsauth.Seed(cfg.NatsNkeySeedFile, os.LookupEnv); err != nil {
 			return 0, err
 		}
 	}
@@ -227,6 +234,9 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 	env = append(env, [2]string{controllerSecretVariable + "_FILE", secretFile})
 	if cfg.EnvoyTokenFile != "" {
 		env = append(env, [2]string{"ENVOY_TOKEN_FILE", cfg.EnvoyTokenFile})
+	}
+	if cfg.NatsNkeySeedFile != "" {
+		env = append(env, [2]string{natsauth.SeedFileVariable, cfg.NatsNkeySeedFile})
 	}
 	return env
 }

@@ -746,6 +746,101 @@ func TestProviderKeysReachEveryPodAsTheProvidersSecretsFiles(t *testing.T) {
 	}
 }
 
+// The NATS nkey seed is the providers Secret's, never a claim's: with NATS_NKEY_SEED among the
+// providers secrets, a worker's container and the image probe's each mount the providers Secret's
+// NATS_NKEY_SEED key beside the provider keys, and name it in NATS_NKEY_SEED_FILE, so the shim
+// exports it to no one; the claim's Secret holds no copy of it, and no variable holds its value.
+// With a seed and no provider key, the Secret is mounted for the seed alone. With no seed there is
+// no pointer and no key.
+func TestTheNatsSeedReachesEveryPodAsTheProvidersSecretsOwnFile(t *testing.T) {
+	const providersSecret = "legion-" + testProject + "-providers"
+	const seed = "SUAIBDPBAUTWCWBKIO6XHQNINK5FWJW4OHLXC3HQ2KFE4PEJUA44CNHTC4"
+	for _, tc := range []struct {
+		name      string
+		keys      map[string]string
+		providers []string
+		items     []corev1.KeyToPath
+	}{
+		{"with provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"NATS_NKEY_SEED"},
+			[]corev1.KeyToPath{{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}, {Key: "NATS_NKEY_SEED", Path: "NATS_NKEY_SEED"}}},
+		{"alone", nil, []string{"NATS_NKEY_SEED"}, []corev1.KeyToPath{{Key: "NATS_NKEY_SEED", Path: "NATS_NKEY_SEED"}}},
+		{"no seed", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, nil, []corev1.KeyToPath{{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := testOptions()
+			opts.ProviderKeys, opts.ProvidersSecrets = tc.keys, tc.providers
+			opts.LaunchSecrets = []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}
+			r, err := configure(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := workerSpec(t)
+			spec.Secrets = map[string]string{"ENVOY_TOKEN": "envoy-bearer"}
+			if tc.providers != nil {
+				spec.Secrets["NATS_NKEY_SEED"] = seed
+			}
+			l, err := r.prepare(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, copied := l.secrets["NATS_NKEY_SEED"]; copied {
+				t.Errorf("the claim's Secret carries NATS_NKEY_SEED: %v", slices.Sorted(maps.Keys(l.secrets)))
+			}
+			worker := r.podTemplate(l, false).Spec
+			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
+			for _, pod := range []struct {
+				spec      corev1.PodSpec
+				container string
+			}{{worker, mainContainer}, {probe, probeContainer}} {
+				var items []corev1.KeyToPath
+				for _, volume := range pod.spec.Volumes {
+					if volume.Secret != nil && volume.Secret.SecretName == providersSecret {
+						items = volume.Secret.Items
+					}
+					if volume.Name == bootVolume {
+						for _, item := range volume.Secret.Items {
+							if item.Key == "NATS_NKEY_SEED" {
+								t.Errorf("%s's boot projection carries NATS_NKEY_SEED", pod.container)
+							}
+						}
+					}
+				}
+				if !reflect.DeepEqual(items, tc.items) {
+					t.Errorf("%s's pod mounts the providers Secret's %+v, want %+v", pod.container, items, tc.items)
+				}
+				env := envOf(containerNamed(t, pod.spec, pod.container))
+				pointer, pointed := env["NATS_NKEY_SEED_FILE"]
+				if want := tc.providers != nil; pointed != want || (want && pointer != ProvidersDir+"/NATS_NKEY_SEED") {
+					t.Errorf("%s's NATS_NKEY_SEED_FILE = %q (set: %t), want %s/NATS_NKEY_SEED set %t", pod.container, pointer, pointed, ProvidersDir, want)
+				}
+				for name, value := range env {
+					if strings.Contains(value, seed) {
+						t.Errorf("%s's %s carries the seed", pod.container, name)
+					}
+				}
+				if _, set := env["NATS_NKEY_SEED"]; set {
+					t.Errorf("%s sets NATS_NKEY_SEED", pod.container)
+				}
+			}
+			main := containerNamed(t, worker, mainContainer)
+			if shim := main.Command[:slices.Index(main.Command, "--")]; !slices.Contains(shim, "--provider-env-dir") {
+				t.Errorf("the shim runs as %v, want --provider-env-dir %s", shim, ProvidersDir)
+			}
+		})
+	}
+}
+
+// A providers secret must be a launch secret: CheckPod refuses a provider key or operator variable
+// colliding with a launch secret's pointer, which is what keeps a providers secret's file and
+// pointer the runtime's alone.
+func TestNewRefusesAProvidersSecretThatIsNoLaunchSecret(t *testing.T) {
+	opts := testOptions()
+	opts.LaunchSecrets, opts.ProvidersSecrets = []string{"ENVOY_TOKEN"}, []string{"NATS_NKEY_SEED"}
+	if _, err := configure(opts); err == nil || err.Error() != "sandbox runtime: providers secret NATS_NKEY_SEED is not a launch secret (ENVOY_TOKEN)" {
+		t.Fatalf("configure = %v, want the refusal naming NATS_NKEY_SEED", err)
+	}
+}
+
 // legionVolumeNames, legionMountPaths, and runtimeOwned — what CheckPod refuses in the operator's
 // pod — are exactly what Legion's own pods carry: every volume of every pod a launch or
 // the image probe runs, and every mount and variable of the containers the operator's pieces join
