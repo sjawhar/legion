@@ -51,14 +51,16 @@ type emptyItemGuard struct{ parser.BlockParser }
 
 func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	line, segment := reader.PeekLine()
-	bare := bareMarkerLine.Match(bytes.TrimRight(line, "\n"))
-	if (bare || orderedFromOtherThanOne(line)) && parent.ChildCount() == 0 && interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
+	if !bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && !orderedFromOtherThanOne(line) {
+		return p.BlockParser.Open(parent, reader, pc)
+	}
+	// The line opens a list whose first item could not interrupt a paragraph: an empty one, or an
+	// ordered one numbered from other than one. The browser editor's parser opens none on a line
+	// that interrupts a paragraph, nor after an indented code block, blank lines between or not.
+	if parent.ChildCount() == 0 && interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
 		return nil, parser.NoChildren
 	}
-	// After an indented code block, blank lines between or not, the browser editor's parser opens
-	// no list whose first item could not interrupt a paragraph: an empty one, or an ordered one
-	// numbered from other than one.
-	if _, code := parent.LastChild().(*ast.CodeBlock); code && (bare || orderedFromOtherThanOne(line)) {
+	if _, code := parent.LastChild().(*ast.CodeBlock); code {
 		return nil, parser.NoChildren
 	}
 	return p.BlockParser.Open(parent, reader, pc)
@@ -162,14 +164,11 @@ func lazyTypedParagraph(paragraph, ended ast.Node) {
 	if ended == nil {
 		return
 	}
-	var typed *typedDirective
 	for parent := paragraph.Parent(); parent != ended; parent = parent.Parent() {
-		if directive, ok := parent.(*typedDirective); ok && typed == nil {
-			typed = directive
+		if typed, ok := parent.(*typedDirective); ok {
+			typed.SetAttribute(lazyTypedParagraphAttr, true)
+			return
 		}
-	}
-	if typed != nil {
-		typed.SetAttribute(lazyTypedParagraphAttr, true)
 	}
 }
 
@@ -544,15 +543,17 @@ func definitionsInPlace(root ast.Node, context parser.Context) {
 	}
 }
 
-// Open reads the definition's opener without the padding a tab split by the containers' prefix
-// leaves ahead of it: goldmark's parser measures where the definition's text starts from the line
-// without that padding, so it took the label's first characters as the text (`]: def`).
+// Continue records the definition as the container whose lines last ended, where a line that is
+// not blank ends them (recordEndedContainer).
 func (p footnoteDefinitionParser) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
 	state := p.BlockParser.Continue(node, reader, pc)
 	recordEndedContainer(node, state, reader, pc)
 	return state
 }
 
+// Open reads the definition's opener without the padding a tab split by the containers' prefix
+// leaves ahead of it: goldmark's parser measures where the definition's text starts from the line
+// without that padding, so it took the label's first characters as the text (`]: def`).
 func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	_, segment := reader.PeekLine()
 	offset := pc.BlockOffset()

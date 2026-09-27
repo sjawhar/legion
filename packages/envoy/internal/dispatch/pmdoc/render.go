@@ -16,9 +16,9 @@ type renderer struct {
 	// sibling node of the same link.
 	labelBrackets labelBrackets
 	// typed is the innermost typed block the blocks being written stand in, or nil outside one
-	// (typedScope). A lone `:::` closes a three-colon block
-	// as a line less than four columns past that prefix (typedFenceReach), which a paragraph written
-	// there can produce.
+	// (typedScope). A lone `:::` closes a three-colon block as a line less than four columns past
+	// the prefix its lines are written at (typedFenceReach), which a paragraph written there can
+	// produce.
 	typed *typedScope
 	// heldLineStart is the current line's first text character, held until the line is written.
 	heldLineStart *lineCandidate
@@ -447,7 +447,7 @@ func (r *renderer) list(n *Node, prefix string) {
 		if index > 0 {
 			r.writeSyntax("\n" + prefix)
 			blanks := 0
-			if previous := n.Children[index-1]; r.quoteDepth > 0 && !r.inFootnote && previous.Children[len(previous.Children)-1].Type == "footnote_definition" {
+			if previous := n.Children[index-1]; r.definitionEndsItem(previous) {
 				blanks = r.blanksAfterDefinitionItem(previous, item)
 			} else if r.writesBlankAfterItem(n, previous) {
 				blanks = 1

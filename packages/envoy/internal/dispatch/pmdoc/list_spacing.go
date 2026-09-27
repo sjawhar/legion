@@ -63,7 +63,6 @@ func browserListSpacing(root ast.Node, source []byte) error {
 			if emptyItemEndsOuterItem(node, lines) {
 				reason = "an empty list item followed by a blank line inside another list item, where goldmark ends the outer item and the browser editor does not"
 			}
-
 		case *ast.List:
 			reason = readListSpacing(node, lines)
 		}
@@ -300,8 +299,9 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		if reason != "" {
 			return reason
 		}
+		definitionHolds := definitionBlanksInQuote(list, lines)
 		setSpread(list, spread, func(item ast.Node) bool {
-			return blankBetweenBlocksBut(item, anyBlock, definitionBlanksInQuote(list, lines)) || definitionEndSpreadsItem(item, list, quote, lines)
+			return blankBetweenBlocksBut(item, anyBlock, definitionHolds) || definitionEndSpreadsItem(item, list, quote, lines)
 		})
 	case footnoted:
 		setSpread(list, false, func(item ast.Node) bool {
@@ -345,9 +345,7 @@ func definitionEndSpreadsItem(item ast.Node, list *ast.List, quote ast.Node, lin
 	}
 	next := nextBlock(list)
 	if next == nil || !isAncestor(quote, next) {
-		return lines.blanksEnding(next, func(line []byte) bool {
-			return whitespaceLine(line) || quoteBlankLine(line) && bytes.Count(line, []byte(">")) < depth
-		}, blank) >= 2
+		return lines.blanksEnding(next, outerBlankLineAt(depth), blank) >= 2
 	}
 	blanks := lines.blanksBefore(startOf(next), blank)
 	switch next.(type) {
@@ -427,9 +425,7 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 	}
 	if next == nil || !isAncestor(within, next) {
 		// At the end of the quote, or of a typed block inside it before its closing fence.
-		blanks := lines.blanksEnding(next, func(line []byte) bool {
-			return whitespaceLine(line) || quoteBlankLine(line) && bytes.Count(line, []byte(">")) < depth
-		}, blank)
+		blanks := lines.blanksEnding(next, outerBlankLineAt(depth), blank)
 		if typed, ok := within.(*typedDirective); ok && typed.Closed {
 			blanks = lines.blanksBefore(typed.closer, blank)
 		} else if typed, ok := ancestor[*typedDirective](within); ok && typed.Closed && (next == nil || !isAncestor(typed, next)) {
@@ -812,6 +808,14 @@ func whitespaceLine(line []byte) bool {
 func quoteBlankLineAt(depth int) func([]byte) bool {
 	return func(line []byte) bool {
 		return bytes.Count(line, []byte(">")) == depth && quoteBlankLine(line)
+	}
+}
+
+// outerBlankLineAt reports whether a line stands blank outside depth quotes: whitespace alone, or a
+// blank line of a quote around them, with fewer markers.
+func outerBlankLineAt(depth int) func([]byte) bool {
+	return func(line []byte) bool {
+		return whitespaceLine(line) || quoteBlankLine(line) && bytes.Count(line, []byte(">")) < depth
 	}
 }
 

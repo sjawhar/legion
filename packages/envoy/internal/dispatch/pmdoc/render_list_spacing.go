@@ -16,8 +16,8 @@ import "strings"
 // exact reports whether the count is one of those two; the one blank line everywhere else spaces
 // nothing, so a list item may write none instead.
 func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
-	if r.quoteDepth > 0 && !r.inFootnote && endsInDefinition(list) {
-		return r.blanksAfterDefinitionItem(list.Children[len(list.Children)-1], next), true
+	if last := list.Children[len(list.Children)-1]; r.definitionEndsItem(last) {
+		return r.blanksAfterDefinitionItem(last, next), true
 	}
 	spaced, spacing := r.spacingAfterList(list, next)
 	typedInFootnote := r.inFootnote && r.typed != nil && r.quoteDepth == 0
@@ -40,7 +40,7 @@ func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
 // except after a definition ending in a list no line continues (endsInClosedList), where it takes
 // none.
 func (r *renderer) blanksAfterDefinitionItem(item, next *Node) int {
-	container := next != nil && (next.Type == "blockquote" || next.Type == "footnote_definition" || isList(next)) && next.Type != "list_item"
+	container := next != nil && quoteListOrDefinition(next)
 	if item.Attrs["spread"] == true && !spreadByItsOwnLines(item, true, r.itemDepth > 0) {
 		if container {
 			return 1
@@ -53,11 +53,16 @@ func (r *renderer) blanksAfterDefinitionItem(item, next *Node) int {
 	return 1
 }
 
-// endsInDefinition reports whether list's last item ends in a footnote definition, whose blank lines
-// after it, in a quote, are the definition's (blanksAfterDefinitionItem).
-func endsInDefinition(list *Node) bool {
-	last := list.Children[len(list.Children)-1]
-	return last.Children[len(last.Children)-1].Type == "footnote_definition"
+// definitionEndsItem reports whether item ends in a footnote definition whose blank lines after it
+// are the definition's: in a quote, outside a footnote definition (blanksAfterDefinitionItem).
+func (r *renderer) definitionEndsItem(item *Node) bool {
+	return r.quoteDepth > 0 && !r.inFootnote && item.Children[len(item.Children)-1].Type == "footnote_definition"
+}
+
+// quoteListOrDefinition reports whether block is a quote, a list or a footnote definition, which
+// the browser editor's parser keeps open across lines by their prefix.
+func quoteListOrDefinition(block *Node) bool {
+	return block.Type == "blockquote" || block.Type == "footnote_definition" || isList(block)
 }
 
 // endsInClosedList reports whether block's last block is a list, directly or at the end of a quote
@@ -86,7 +91,7 @@ func endsInClosedList(block *Node) bool {
 // the list instead.
 func (r *renderer) spacingAfterList(list, next *Node) (*Node, int) {
 	quotes := r.quoteDepth
-	container := next.Type == "blockquote" || next.Type == "footnote_definition" || isList(next)
+	container := quoteListOrDefinition(next)
 	inTyped := r.inQuotedTypedBlock()
 	var spaced *Node
 	blanks := 1
