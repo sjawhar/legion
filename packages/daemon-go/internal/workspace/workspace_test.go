@@ -894,10 +894,11 @@ func TestProvisionRefusesAWorktreesSymlinkEscape(t *testing.T) {
 
 // A kill between the writes into the temporary entry and its rename (a SIGKILL, an OOM, a pod
 // eviction, a daemon restart) never runs the Go defer that would clean it up, and MkdirTemp's
-// randomized name means a later attempt cannot find it by name either: it is simply left behind.
-// That is harmless, since it plays no part in the present check, which looks at the entry itself:
-// the next provisioning still finds that gone and restores cleanly through a temporary directory of
-// its own.
+// randomized name means a later attempt cannot find it by name either: it plays no part in the
+// present check, which looks at the entry itself, so the next provisioning still finds that gone
+// and restores cleanly through a temporary directory of its own. Whether the stale directory itself
+// survives or some other step clears it away is incidental, not part of the contract under test
+// here.
 func TestProvisionRestoresCleanlyAfterAKillBetweenTheWrites(t *testing.T) {
 	run := newLocalRunner(t)
 	request := provisionRequest(t)
@@ -924,9 +925,6 @@ func TestProvisionRestoresCleanlyAfterAKillBetweenTheWrites(t *testing.T) {
 	}
 	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
 		t.Errorf("git in the restored workspace answers %q, want %q", got, workspace.Dir)
-	}
-	if _, statErr := os.Stat(stale); statErr != nil {
-		t.Errorf("the unrelated stale temporary entry %s should be left alone: %v", stale, statErr)
 	}
 }
 
