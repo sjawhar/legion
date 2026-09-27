@@ -225,41 +225,22 @@ func padCutTables(before, after *pmdoc.Node, r pmdoc.Range) (*pmdoc.Node, error)
 // another, is never padded: the browser can join the two tables or rows, which Splice does not. An
 // inline replacement (text that stays in the textblock, or code's literal text) replaces the
 // matched range there as here; an empty one follows this accept's own rule, deleting the matched
-// text, where the browser's accept of an empty suggestion only clears its mark.
-// Block content the browser takes across two textblocks only when the range is aligned with them
-// (pmdoc.MultiblockAligned), and then replaces both whole. Splice replaces what the browser does
-// only when the range covers them exactly, from the start of the textblock it starts in, at, to the
-// end of the one it ends in, and at is a document-level block, not one inside a callout, a quote,
-// a list item or a table cell. Other block content over a table, such as a list over one cell's
-// whole text, is not padded either. An accept that is not padded is judged as the splice left it,
-// which refuses one that cut a table.
+// text, where the browser's accept of an empty suggestion only clears its mark. Block content the
+// browser takes across two textblocks, which it replaces whole (pmdoc.MultiblockRange). Splice
+// replaces what the browser does only when the match is exactly those textblocks' content and the
+// first, at, is a document-level block, not one inside a callout, a quote, a list item or a table
+// cell. Other block content over a table, such as a list over one cell's whole text, is not padded
+// either. An accept that is not padded is judged as the splice left it, which refuses one that cut
+// a table.
 func padsLikeTheBrowser(tree *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, inline bool) bool {
-	if joinsTwoTables(tree, match) || joinsTwoBodyRows(tree, match) {
+	if joinsTwo(tree, match, "table") || joinsTwo(tree, match, "table_row") {
 		return false
 	}
 	if inline {
 		return true
 	}
-	last, _ := pmdoc.ContainingTextblock(tree, match.To)
-	return len(at.Ancestors) == 1 && match.From == at.Content.From && match.To == last.Content.To &&
-		pmdoc.MultiblockAligned(tree, match)
-}
-
-// joinsTwoBodyRows reports whether match runs from a cell of one table's body row into a cell of
-// another body row. A header row cannot join a body row, so a range from the header into the first
-// body row is not one.
-func joinsTwoBodyRows(tree *pmdoc.Node, match pmdoc.Range) bool {
-	row := func(position int) *pmdoc.Node {
-		at, _ := pmdoc.ContainingTextblock(tree, position)
-		for _, ancestor := range at.Ancestors {
-			if ancestor.Type == "table_row" {
-				return ancestor
-			}
-		}
-		return nil
-	}
-	from, to := row(match.From), row(match.To)
-	return from != nil && to != nil && from != to
+	blocks, ok := pmdoc.MultiblockRange(tree, match)
+	return ok && blocks == match && len(at.Ancestors) == 1
 }
 
 // acceptSpliceRefusal words the refusal of an accept whose replacement Splice cannot fit, naming

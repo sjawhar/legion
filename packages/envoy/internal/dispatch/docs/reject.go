@@ -26,7 +26,7 @@ func rejectedInsert(tree *pmdoc.Node, id string) (*pmdoc.Node, error) {
 	next := tree
 	for index := len(spans) - 1; index >= 0; index-- {
 		span := spans[index]
-		if joinsTwoTables(next, span) {
+		if joinsTwo(next, span, "table") {
 			return nil, rejectSpliceRefusal(errJoinsTwoTables)
 		}
 		spliced, err := pmdoc.Splice(next, span, nothing)
@@ -46,18 +46,20 @@ func rejectedInsert(tree *pmdoc.Node, id string) (*pmdoc.Node, error) {
 	return next, nil
 }
 
-// joinsTwoTables reports whether span runs from a cell of one table into a cell of another.
-func joinsTwoTables(tree *pmdoc.Node, span pmdoc.Range) bool {
-	table := func(position int) *pmdoc.Node {
+// joinsTwo reports whether span runs from inside one node of nodeType into another: from one
+// table into the next, or, for "table_row", from one body row into another (a header row is a
+// table_header_row, so a range from it into the first body row is not one).
+func joinsTwo(tree *pmdoc.Node, span pmdoc.Range, nodeType string) bool {
+	holder := func(position int) *pmdoc.Node {
 		at, _ := pmdoc.ContainingTextblock(tree, position)
 		for _, ancestor := range at.Ancestors {
-			if ancestor.Type == "table" {
+			if ancestor.Type == nodeType {
 				return ancestor
 			}
 		}
 		return nil
 	}
-	from, to := table(span.From), table(span.To)
+	from, to := holder(span.From), holder(span.To)
 	return from != nil && to != nil && from != to
 }
 
