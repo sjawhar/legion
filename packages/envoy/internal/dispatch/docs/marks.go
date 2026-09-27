@@ -501,15 +501,20 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 		if refreshed == mark.anchor {
 			continue
 		}
-		encoded, err := json.Marshal(refreshed)
-		if err != nil {
-			return fmt.Errorf("encode anchor: %w", err)
-		}
 		table := "asks"
 		if mark.markType == string(MarkComment) || mark.markType == string(MarkSuggestion) {
 			table = "comments"
 		}
-		if _, err := tx.Exec(ctx, fmt.Sprintf(`update %s set anchor = $2 where id = $1`, table), mark.id, encoded); err != nil {
+		// Only the two fields this refresh owns are written. The row was read before the
+		// events and lookups below, so writing the whole anchor column back would erase what
+		// another writer - the one-time block-id backfill - put in it in between (LEGION-149).
+		if _, err := tx.Exec(ctx, fmt.Sprintf(`
+			update %s
+			set anchor = jsonb_set(
+				jsonb_set(anchor, '{quote}', to_jsonb($2::text)),
+				'{orphaned}', to_jsonb($3::boolean))
+			where id = $1
+		`, table), mark.id, refreshed.Quote, refreshed.Orphaned); err != nil {
 			return fmt.Errorf("update %s anchor: %w", table, err)
 		}
 		event, err := s.anchorRefreshEvent(ctx, tx, mark, actor)
