@@ -46,6 +46,8 @@ test("Unfurl reads the immutable document version named by a reference", async (
     versions: [],
   };
   const issue: IssueDetails = {
+    route_status: null,
+    route_holder: null,
     artifacts: [artifact],
     children: [],
     closed_at: null,
@@ -157,6 +159,8 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
 
 test("Unfurl unfurls a dispatch ask reference with the question, not the issue title", async () => {
   const issue: IssueDetails = {
+    route_status: null,
+    route_holder: null,
     artifacts: [],
     children: [],
     closed_at: null,
@@ -228,6 +232,8 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
 
 test("Unfurl unfurls a dispatch comment reference with its first line, not the issue title", async () => {
   const issue: IssueDetails = {
+    route_status: null,
+    route_holder: null,
     artifacts: [],
     children: [],
     closed_at: null,

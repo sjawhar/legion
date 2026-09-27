@@ -9,6 +9,9 @@ import { IssueList } from "./IssueList";
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
+    route: null,
+    route_status: null,
+    route_holder: null,
     key: "CORE-1",
     labels: [],
     last_seq: 0,
@@ -102,6 +105,42 @@ test("a child row shows its parent chip", async () => {
     expect(screen.getByRole("link", { name: "CORE-1" }).getAttribute("href")).toBe(
       "/issues/CORE-1"
     );
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+  }
+});
+
+test("marks only the rows whose route reaches nobody", async () => {
+  const { getMyState, listIssues, view } = renderList([
+    issue({ key: "CORE-1", title: "Unheld role", route: "role:sre", route_status: "no_holder" }),
+    issue({
+      key: "CORE-2",
+      title: "Gone session",
+      route: "session:ses-gone",
+      route_status: "no_holder",
+    }),
+    issue({
+      key: "CORE-3",
+      title: "Held role",
+      route: "role:platform-po",
+      route_status: "live",
+      route_holder: "ses-po",
+    }),
+    issue({ key: "CORE-4", title: "Unjudged route", route: "role:sre", route_status: "unknown" }),
+    issue({ key: "CORE-5", title: "Unrouted" }),
+  ]);
+
+  try {
+    await screen.findByRole("link", { name: /CORE-1.*Unheld role/ });
+    const marked = screen
+      .getAllByTestId("issue-route-unreachable")
+      .map((marker) => [marker.closest("li")?.getAttribute("aria-label"), marker.textContent]);
+    expect(marked).toEqual([
+      ["CORE-1 Unheld role", expect.stringContaining("Nobody holds it")],
+      ["CORE-2 Gone session", expect.stringContaining("Session gone")],
+    ]);
   } finally {
     view.unmount();
     getMyState.mockRestore();

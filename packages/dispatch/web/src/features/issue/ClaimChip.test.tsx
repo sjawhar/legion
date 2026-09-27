@@ -40,6 +40,8 @@ const base: Issue = {
 
 function header(issue: Issue): { unmount: () => void } {
   const details: IssueDetails = {
+    route_status: null,
+    route_holder: null,
     ...issue,
     artifacts: [],
     children: [],
