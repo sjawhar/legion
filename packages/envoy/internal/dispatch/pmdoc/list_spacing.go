@@ -269,6 +269,9 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 		}, blank)
 		if typed, ok := within.(*typedDirective); ok && typed.Closed {
 			blanks = lines.blanksBefore(typed.closer, blank)
+		} else if typed, ok := ancestor[*typedDirective](within); ok && typed.Closed && (next == nil || !isAncestor(typed, next)) {
+			// A quote in a typed block that nothing after the list goes on with ends at its fence.
+			blanks = lines.blanksBefore(typed.closer, blank)
 		}
 		return blanks >= 2, ""
 	}

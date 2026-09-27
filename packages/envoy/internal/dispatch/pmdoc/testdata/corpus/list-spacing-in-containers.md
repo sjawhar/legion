@@ -186,3 +186,12 @@ The inner quote's own blank lines, then the outer's:
 > >
 >
 > tail
+
+A list at the end of a quote in a callout:
+
+:::callout{#qe kind="note" title="T"}
+> - a
+> - c
+>
+>
+:::
