@@ -22,8 +22,8 @@ import (
 
 // escapeContext is what one character's escape depends on beyond the text itself.
 type escapeContext struct {
-	// footnoteLabels is every footnote label the document defines, lowercased.
-	footnoteLabels map[string]bool
+	// footnoteLabels is every footnote label the document defines (footnoteLabelSet).
+	footnoteLabels footnoteLabelSet
 	// textLineStart is where the character's line of text begins inside this node, or -1 when it
 	// began in an earlier one: the writer's long-standing list, heading, quote and ordered-list
 	// escapes are judged here, in headings, cells and inside marks as well, so that the markdown
@@ -542,14 +542,14 @@ func emphasisDelimiter(value string, offset int, delimiter byte) bool {
 	return (delimiter != '_' || !before || !after) && (before || after)
 }
 
-// footnoteReferenceText reports whether the text at offset, a `[`, reads as a reference to one of
-// labels, the document's defined footnote labels as footnoteLabelKey compares them: `[^label]`.
-func footnoteReferenceText(value string, offset int, labels map[string]bool) bool {
+// footnoteReferenceText reports whether the text at offset, a `[`, is shaped like a reference to
+// one of labels, the document's defined footnote labels (footnoteLabelSet.refersTo): `[^label]`.
+func footnoteReferenceText(value string, offset int, labels footnoteLabelSet) bool {
 	if offset+1 >= len(value) || value[offset+1] != '^' {
 		return false
 	}
 	closing := strings.IndexByte(value[offset+2:], ']')
-	return closing > 0 && labels[footnoteLabelKey(value[offset+2:offset+2+closing])]
+	return closing > 0 && labels.refersTo(value[offset+2:offset+2+closing])
 }
 
 func linkOpener(value string, offset int) bool {

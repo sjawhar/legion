@@ -40,10 +40,8 @@ type renderer struct {
 	asteriskRule bool
 	// otherListMarker makes the next list written with its kind's other marker (otherListMarkers).
 	otherListMarker bool
-	// footnoteLabels is every footnote label the document defines, as the browser editor's parser
-	// compares labels (footnoteLabelKey): text shaped like a reference to one would read as that
-	// reference.
-	footnoteLabels map[string]bool
+	// footnoteLabels is every footnote label the document defines (footnoteLabelSet).
+	footnoteLabels footnoteLabelSet
 	err            error
 	blockOffsets   []BlockOffset
 }
@@ -127,16 +125,27 @@ func holdsAContainerTheBrowserDrops(doc *Node) bool {
 	return false
 }
 
-// definedFootnoteLabels is every label doc's footnote definitions carry, wherever they stand, as
-// the browser editor's parser compares them (footnoteLabelKey), since it matches a reference to
-// its definition whatever the case.
-func definedFootnoteLabels(doc *Node) map[string]bool {
-	labels := make(map[string]bool)
+// footnoteLabelSet is every label a document's footnote definitions carry, wherever they stand,
+// kept two ways: as the browser editor's parser compares labels (footnoteLabelKey), since it
+// matches a reference to its definition whatever the case, and lowercased, as this renderer
+// compared them before it did, since text escaped then must be escaped still.
+type footnoteLabelSet struct{ keys, lowered map[string]bool }
+
+// refersTo reports whether text shaped like a reference with label is escaped: it would read as a
+// reference to a defined label, or this renderer escaped it when it lowercased labels. An escape
+// the parser does not need reads back as the same text.
+func (labels footnoteLabelSet) refersTo(label string) bool {
+	return labels.keys[footnoteLabelKey(label)] || labels.lowered[strings.ToLower(label)]
+}
+
+func definedFootnoteLabels(doc *Node) footnoteLabelSet {
+	labels := footnoteLabelSet{keys: make(map[string]bool), lowered: make(map[string]bool)}
 	var walk func(*Node)
 	walk = func(node *Node) {
 		if node.Type == "footnote_definition" {
 			if label, ok := node.Attrs["label"].(string); ok {
-				labels[footnoteLabelKey(label)] = true
+				labels.keys[footnoteLabelKey(label)] = true
+				labels.lowered[strings.ToLower(label)] = true
 			}
 		}
 		for _, child := range node.Children {

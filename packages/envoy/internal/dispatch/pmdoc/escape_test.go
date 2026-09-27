@@ -903,6 +903,9 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		// A blank line after a list in a typed block in a footnote definition, where it spreads a last
 		// item that is spread already.
 		"ref[^n] here.\n\n[^n]: :::callout{#c kind=\"note\" title=\"\"}\n    - a\n\n      > q\n\n    > q\n    :::\n\n    tail\n",
+		// Reference-shaped text whose label lowercases to a defined label's, which main escaped: the
+		// engine keeps `İ` apart from `i`, and the escaped text reads back as the same text.
+		"Ref[^i] and \\[^İ] text.\n\n[^i]: Def.\n",
 	} {
 		t.Run(markdown, func(t *testing.T) {
 			tree, err := Parse(markdown)
