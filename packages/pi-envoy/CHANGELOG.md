@@ -4,6 +4,14 @@
 
 ### Added
 
+- The session publishes its own conversation for Dispatch's agent conversation view (LEGION-232):
+  every turn, tool call and streamed update becomes a frame on `agentstream.<session id>.frames`
+  over core NATS, a subject family the notification stream does not capture, so the bus retains
+  none of it. It publishes only while a viewer is attached — the Dispatch relay asks on
+  `agentstream.<session id>.control`, and a session that hears nothing for thirty seconds goes
+  quiet — and a viewer's replay is answered from a bounded in-memory ring (200 messages, 512 KiB)
+  that never leaves the process. Nothing about it is written to Dispatch's database.
+
 - The run-end silent self-check now runs on every normal settle of an eligible session, including
   sessions that already hold open asks. Its one prompt names the first line of up to five open ask
   questions (or says there are none), truncates each at about 120 characters, and normalizes

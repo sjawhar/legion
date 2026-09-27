@@ -13954,6 +13954,14 @@ function actorLabel(actor, titles) {
   }
   return `${name} (as ${serviceSubjectLabel(service)})`;
 }
+// ../contracts/src/agent-stream.ts
+var AGENT_STREAM_LIMITS = {
+  partChars: 16000,
+  toolChars: 8000,
+  historyMessages: 200,
+  historyBytes: 512 * 1024,
+  snapshotIntervalMs: 100
+};
 // ../contracts/src/dispatch-href.ts
 function itemFromSearch(search) {
   const params = new URLSearchParams(search);

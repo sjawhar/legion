@@ -591,3 +591,25 @@ export function retryCommentDelivery(
     options
   );
 }
+
+/**
+ * Test-only endpoint (mounted when DISPATCH_TEST_HOOKS=1, see run-server.sh): publishes one
+ * frame to whoever is watching a session's conversation, or, with `as: "replay"`, sets what
+ * that session answers a viewer's replay request with. The harness runs Dispatch with NATS
+ * disabled, so there is no bus and no live session for a browser test of the conversation view
+ * to take frames from.
+ */
+export function publishAgentStreamFrame(
+  sessionID: string,
+  frame: object,
+  as: "frame" | "replay" = "frame",
+  options: ApiOptions = {}
+): Promise<{ ok: boolean }> {
+  const query = as === "replay" ? "?as=replay" : "";
+  return request<{ ok: boolean }>(
+    `/api/v1/agents/${encodeURIComponent(sessionID)}/stream/_test/publish${query}`,
+    "POST",
+    frame,
+    options
+  );
+}

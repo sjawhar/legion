@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -78,6 +79,7 @@ type AppContextOptions struct {
 	AppSource        string
 	GitHubAPIBase    string
 	OIDC             *oidc.Verifier
+	AgentStream      agentstream.Source
 	TestHooksEnabled bool
 }
 
@@ -106,6 +108,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		App:              opts.App,
 		GitHubAPIBase:    opts.GitHubAPIBase,
 		OIDC:             opts.OIDC,
+		AgentStream:      opts.AgentStream,
 		TestHooksEnabled: opts.TestHooksEnabled,
 	})
 	if err != nil {

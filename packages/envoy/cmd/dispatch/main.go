@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -101,6 +102,28 @@ func main() {
 			os.Exit(1)
 		}
 		defer natsClient.Close()
+	}
+
+	// The live agent conversation relay takes a connection of its own: a viewer's core
+	// subscription must not be lost to the publisher client replacing a shared one, and this
+	// connection never touches JetStream. With test hooks and no NATS it is an in-process
+	// source the e2e harness publishes into instead.
+	var agentStream agentstream.Source
+	if natsClient == nil {
+		if boot.TestHooksEnabled {
+			agentStream = agentstream.NewMemory()
+			slog.Info("dispatch: agent conversation relay served from the test hook")
+		} else {
+			slog.Info("dispatch: agent conversation relay off: it needs NATS")
+		}
+	} else {
+		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.NatsURLs)
+		if err != nil {
+			slog.Error("dispatch: connect the agent conversation relay", "error", err)
+			os.Exit(1)
+		}
+		defer streamConn.Close()
+		agentStream = agentstream.NewNATS(streamConn)
 	}
 
 	database, err := store.Open(ctx, boot.DatabaseURL)
@@ -207,6 +230,7 @@ func main() {
 		AppSource:      appSource,
 		GitHubAPIBase:  boot.GitHubAPIBase,
 		OIDC:           serviceTokens,
+		AgentStream:    agentStream,
 
 		TestHooksEnabled: boot.TestHooksEnabled,
 	})
