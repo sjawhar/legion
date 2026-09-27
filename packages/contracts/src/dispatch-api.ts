@@ -916,6 +916,22 @@ export interface DuplicateCandidate {
   readonly href: string;
 }
 
+/**
+ * Human-authored content in an ask's project that may already answer an agent's question:
+ * an answered ask, a human comment or issue message, or an issue filed in the last day whose
+ * title or spec matches. `POST .../asks` refuses the question with `409 POSSIBLE_PRIOR_ANSWER`
+ * and up to five of these, best first, unless `force` is true.
+ */
+export interface PriorAnswerCandidate {
+  readonly kind: "ask" | "comment" | "message" | "issue";
+  readonly ref: string;
+  readonly snippet: string;
+  readonly author: Actor;
+  readonly at: string;
+  readonly shared_terms: number;
+  readonly score: number;
+}
+
 export interface Agent {
   readonly session_id: string;
   readonly title: string;
@@ -1435,6 +1451,8 @@ export interface CreateAskInput {
   readonly urgency?: AskUrgency;
   readonly anchor?: AnchorInput;
   readonly actor?: Actor;
+  /** Create the ask even though `POSSIBLE_PRIOR_ANSWER` listed content that may answer it. */
+  readonly force?: boolean;
 }
 
 export interface EditAskInput {
@@ -1680,7 +1698,7 @@ export interface TargetCandidate {
 export interface DispatchServiceErrorShape {
   readonly error?: string;
   readonly code?: string;
-  readonly candidates?: TargetCandidate[] | DuplicateCandidate[];
+  readonly candidates?: TargetCandidate[] | DuplicateCandidate[] | PriorAnswerCandidate[];
   readonly current?: EditPreconditionCurrent;
   readonly mismatches?: EditPreconditionMismatch[];
 }

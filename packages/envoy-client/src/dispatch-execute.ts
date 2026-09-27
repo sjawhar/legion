@@ -27,6 +27,7 @@ import type {
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
+  PriorAnswerCandidate,
   SearchResult,
   WriteAdvice,
 } from "@legion/contracts";
@@ -435,6 +436,37 @@ function isDuplicateCandidate(value: unknown): value is DuplicateCandidate {
 function duplicateCandidates(error: DispatchServiceError): DuplicateCandidate[] {
   if (error.candidates === undefined || !error.candidates.every(isDuplicateCandidate)) throw error;
   return error.candidates;
+}
+
+const PRIOR_ANSWER_KINDS: readonly string[] = ["ask", "comment", "message", "issue"];
+
+function isPriorAnswerCandidate(value: unknown): value is PriorAnswerCandidate {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<Record<keyof PriorAnswerCandidate, unknown>>;
+  const author = candidate.author as Partial<Record<keyof Actor, unknown>> | null | undefined;
+  return (
+    typeof candidate.kind === "string" &&
+    PRIOR_ANSWER_KINDS.includes(candidate.kind) &&
+    typeof candidate.ref === "string" &&
+    typeof candidate.snippet === "string" &&
+    typeof candidate.at === "string" &&
+    typeof author === "object" &&
+    author !== null &&
+    typeof author.kind === "string" &&
+    typeof author.id === "string"
+  );
+}
+
+function priorAnswerCandidates(error: DispatchServiceError): PriorAnswerCandidate[] {
+  const { candidates } = error;
+  if (
+    candidates === undefined ||
+    candidates.length === 0 ||
+    !candidates.every(isPriorAnswerCandidate)
+  ) {
+    throw error;
+  }
+  return candidates;
 }
 
 function searchResultLine(result: SearchResult, baseUrl: string): string {
@@ -1968,6 +2000,7 @@ export async function executeDispatchTool(
           : await resolveArtifact(client, owner, artifactReference);
       const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
+      const force = optionalBoolean(args, "force");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
       const askInput = {
@@ -1979,11 +2012,31 @@ export async function executeDispatchTool(
         ...(urgency === undefined ? {} : { urgency }),
         ...(anchored === undefined ? {} : { anchor: anchored }),
         actor,
+        ...(force === undefined ? {} : { force }),
       };
-      const ask =
-        resolved?.owner.kind === "project"
-          ? await client.artifactAsk(resolved.artifact.id, askInput)
-          : await client.ask(issue(), askInput);
+      let ask: Advised<Ask>;
+      try {
+        ask =
+          resolved?.owner.kind === "project"
+            ? await client.artifactAsk(resolved.artifact.id, askInput)
+            : await client.ask(issue(), askInput);
+      } catch (error) {
+        if (!(error instanceof DispatchServiceError) || error.code !== "POSSIBLE_PRIOR_ANSWER") {
+          throw error;
+        }
+        const candidates = priorAnswerCandidates(error);
+        return {
+          text: [
+            "Not asked: a human may already have answered this.",
+            ...candidates.map(
+              (candidate) =>
+                `${candidate.ref} [${candidate.kind} by ${actorLabel(candidate.author)}, ${candidate.at.slice(0, 16).replace("T", " ")}Z] ${snippetText(candidate.snippet)}`
+            ),
+            "Read them with dispatch_read. If one answers your question, cite it and act on it instead of asking; if none does, call dispatch_ask again with force: true.",
+          ].join("\n"),
+          details: { prior_answers: candidates },
+        };
+      }
       const askOwner =
         ask.issue_key !== null
           ? issueTopic(ask.issue_key)

@@ -43,6 +43,9 @@ and returns typed tool-result details. No result carries a subscription topic:
 write's text names the `envoy_subscribe notifications.dispatch.issue.<KEY>.>`
 line an agent passes to subscribe to the whole issue itself.
 `dispatch-subscribe.ts` turns `details.follows` into the one-time host notice.
+Two refusals come back as results rather than errors, so the model reads them: `dispatch_issue`'s
+`POSSIBLE_DUPLICATE` (`details.duplicates`) and `dispatch_ask`'s `POSSIBLE_PRIOR_ANSWER`
+(`details.prior_answers`), each listing the candidates and the `force: true` escape.
 Successful write responses may include `advice`. The executor preserves that object as
 `details.advice` and appends short pointers after the subscription/follow suffix: a primary spec
 with no decision blocks, three or more session writes without a human response (with stronger

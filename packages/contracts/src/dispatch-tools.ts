@@ -359,7 +359,9 @@ export const dispatchToolSpecs = [
       "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " +
       "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` +
-      `characters and has at most 8 options. ${OWNER_REFERENCE}`,
+      "characters and has at most 8 options. A question a human may already have answered in this project (an answered ask, a human comment or message, " +
+      "or an issue filed in the last day) is not asked: the result lists those candidates. Read them and cite the answer, or call again with force: true " +
+      `when none answers this question. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -395,6 +397,12 @@ export const dispatchToolSpecs = [
             .optional(),
         })
         .describe("Optional document location for the question.")
+        .optional(),
+      force: z
+        .boolean()
+        .describe(
+          "Ask even though a prior-answer check listed candidates; pass it only after reading them and finding none answers this question."
+        )
         .optional(),
     }),
     validation: documentOwnerValidation(true),

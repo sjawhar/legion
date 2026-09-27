@@ -350,7 +350,7 @@ describe("executeDispatchTool", () => {
     expect(failure.problems).toEqual([
       "options.0 must be an object {label, description?}, not a string",
       "options.1 must be an object {label, description?}, not a string",
-      'unknown field "custom"; allowed: issue, project, artifact, ref, question, options, multiple, urgency, anchor',
+      'unknown field "custom"; allowed: issue, project, artifact, ref, question, options, multiple, urgency, anchor, force',
     ]);
   });
 
@@ -436,6 +436,7 @@ describe("executeDispatchTool", () => {
       "multiple",
       "urgency",
       "anchor",
+      "force",
     ] as const;
     type Field = (typeof fields)[number];
     interface ArgumentCase {
@@ -498,6 +499,10 @@ describe("executeDispatchTool", () => {
             occurrence: 1,
             quote: "The passage",
           }),
+      },
+      force: {
+        args: { issue: "DSP-41", question: "Choose", force: true },
+        assert: ({ body }) => expect(body.force).toBe(true),
       },
     };
     const askSpec = dispatchToolSpecs.find((spec) => spec.name === "dispatch_ask");
@@ -1525,6 +1530,59 @@ describe("executeDispatchTool", () => {
 
     expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({ project: "AGENTC" });
     expect(result.details.issues).toHaveLength(2);
+  });
+
+  test("dispatch_ask returns prior-answer candidates instead of asking", async () => {
+    const candidates = [
+      {
+        kind: "comment",
+        ref: "dispatch://AGENTC-546/comment/c08bd059-a891-4bef-8f70-97ce30a011f6",
+        snippet: "Why not? They don&#39;t have access to <mark>hawk</mark> directly",
+        author: { kind: "user", id: "sjawhar" },
+        at: "2026-09-27T01:07:37.347408Z",
+        shared_terms: 8,
+        score: 0.3,
+      },
+      {
+        kind: "issue",
+        ref: "dispatch://AGENTC-1010",
+        snippet:
+          "A <mark>candidate</mark>&#39;s own platform login carries their <mark>trial</mark> <mark>run</mark>",
+        author: { kind: "session", id: "01a0bf90", origin: { session_title: "platform po" } },
+        at: "2026-09-27T01:13:59.651887Z",
+        shared_terms: 22,
+        score: 0.245,
+      },
+    ];
+    const fetchImpl = async (_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
+      new Response(
+        JSON.stringify({
+          error: "a human may already have answered this",
+          code: "POSSIBLE_PRIOR_ANSWER",
+          candidates,
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } }
+      );
+
+    const refused = await executeDispatchTool({
+      tool: "dispatch_ask",
+      args: { issue: "AGENTC-546", question: "Which way out?" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    expect(refused).toEqual({
+      text: [
+        "Not asked: a human may already have answered this.",
+        "dispatch://AGENTC-546/comment/c08bd059-a891-4bef-8f70-97ce30a011f6 [comment by sjawhar, 2026-09-27 01:07Z] Why not? They don't have access to **hawk** directly",
+        "dispatch://AGENTC-1010 [issue by platform po, 2026-09-27 01:13Z] A **candidate**'s own platform login carries their **trial** **run**",
+        "Read them with dispatch_read. If one answers your question, cite it and act on it instead of asking; if none does, call dispatch_ask again with force: true.",
+      ].join("\n"),
+      details: { prior_answers: candidates },
+    });
   });
 
   test("dispatch_issue returns duplicate candidates instead of throwing", async () => {

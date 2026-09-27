@@ -35,7 +35,7 @@ describe("ToolInputError", () => {
         "dispatch_ask was not called: 2 problems",
         "- a",
         "- b",
-        "- Allowed keys: issue, project, artifact, ref, question, options, multiple, urgency, anchor",
+        "- Allowed keys: issue, project, artifact, ref, question, options, multiple, urgency, anchor, force",
         '- Example: dispatch_ask({"issue":"DSP-1","question":"Ship this?"})',
       ].join("\n")
     );

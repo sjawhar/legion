@@ -245,6 +245,22 @@ type DuplicateCandidate struct {
 	Href        string `json:"href"`
 }
 
+// PriorAnswerCandidate is human-authored content in an ask's project that may already answer
+// the question an agent is asking: an answered ask (its answer and the question it answered), a
+// human comment or issue message, or an issue filed in the last day whose title or spec matches.
+// Author is who wrote the answer: the human who answered an ask, a comment's or message's
+// author, an issue's creator. Snippet is the content with each term it shares with the question
+// in <mark>.
+type PriorAnswerCandidate struct {
+	Kind        string    `json:"kind"`
+	Ref         string    `json:"ref"`
+	Snippet     string    `json:"snippet"`
+	Author      Actor     `json:"author"`
+	At          time.Time `json:"at"`
+	SharedTerms int       `json:"shared_terms"`
+	Score       float64   `json:"score"`
+}
+
 // IssueChild is a child item embedded in an issue detail response. The subtree counts
 // include the child itself, every status (icebox included); done is `status = 'done'`.
 // ActiveAt is the newest updated_at anywhere in the child's subtree.

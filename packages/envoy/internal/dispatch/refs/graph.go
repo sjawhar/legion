@@ -318,7 +318,7 @@ func loadItemNodes(ctx context.Context, q Queryer, kind string, ids []string, no
 			return fmt.Errorf("scan %s node: %w", kind, err)
 		}
 		nodes[[2]string{kind, id}] = resolvedNode{
-			GraphNode: model.GraphNode{Kind: kind, ID: id, IssueKey: issueKey, Project: project, Ref: itemRef(kind, issueKey, project, slug, id)},
+			GraphNode: model.GraphNode{Kind: kind, ID: id, IssueKey: issueKey, Project: project, Ref: ItemRef(kind, issueKey, project, slug, id)},
 			text:      body,
 		}
 	}
@@ -342,7 +342,7 @@ func loadMessageNodes(ctx context.Context, q Queryer, ids []string, nodes map[[2
 			return fmt.Errorf("scan message node: %w", err)
 		}
 		nodes[[2]string{"message", id}] = resolvedNode{
-			GraphNode: model.GraphNode{Kind: "message", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("message", issueKey, project, "", id)},
+			GraphNode: model.GraphNode{Kind: "message", ID: id, IssueKey: issueKey, Project: project, Ref: ItemRef("message", issueKey, project, "", id)},
 			text:      body,
 		}
 	}
@@ -387,9 +387,9 @@ func artifactRef(issueKey *string, project, slug, kind string, primary bool) str
 	return "dispatch://" + *issueKey + "/artifact/" + slug
 }
 
-// itemRef addresses an ask, comment, or message: under its issue, or under the project document
+// ItemRef addresses an ask, comment, or message: under its issue, or under the project document
 // that owns it. An issue-less message has no address.
-func itemRef(kind string, issueKey *string, project, slug, id string) string {
+func ItemRef(kind string, issueKey *string, project, slug, id string) string {
 	if issueKey != nil {
 		return "dispatch://" + *issueKey + "/" + kind + "/" + id
 	}

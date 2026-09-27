@@ -330,6 +330,8 @@ production import). Every `dispatch_ask` passes four gates first:
    control that shares the query's blind spot proves neither. Before you say you are waiting on
    him, run `dispatch_open_asks` (below) — and the test for a new ask is not whether you asked on
    this issue before, but whether it asks him to re-report something he has already answered.
+   `dispatch_ask` refuses a question a human may already have answered and lists the candidates:
+   read them and cite the answer, or pass `force: true` only when none of them answers this question.
 3. **Can someone who has not read the code answer it on a phone?** Write it as
    [Writing for the human](#writing-for-the-human) says — who can do what today and what changes
    for them, then two options with what each costs and your recommendation — and no slice or
@@ -363,9 +365,10 @@ dispatch_ask({
   multiple?,
   urgency?,
   anchor?: { artifact, quote, occurrence? },
+  force?,
 })
 ```
-It returns `details` `{ issue, ask, follows: { ask } }` for an issue or `{ project, artifact, document, ask, follows: { ask } }` for a project document: you follow the ask you opened (see [Following](#following)).
+It returns `details` `{ issue, ask, follows: { ask } }` for an issue or `{ project, artifact, document, ask, follows: { ask } }` for a project document: you follow the ask you opened (see [Following](#following)). A question refused as already answered returns `details.prior_answers` instead and opens nothing.
 
 References belong in the question text; `ref` is sugar that appends its `dispatch://` value to the question as a rendered link.
 

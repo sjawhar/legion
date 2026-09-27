@@ -127,6 +127,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		Urgency  string             `json:"urgency"`
 		Anchor   *model.AnchorInput `json:"anchor"`
 		Actor    *model.Actor       `json:"actor"`
+		Force    bool               `json:"force"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -160,6 +161,26 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	// A session's question is checked for a human's prior answer before anything is written;
+	// force skips the check once the asker has read the candidates. A human asking is never
+	// refused. The check runs on the pool, outside the transaction below.
+	if actor.Kind != "user" && !input.Force {
+		candidates, err := s.priorAnswerCandidates(
+			r.Context(), s.deps.Store.Pool, owner, priorAnswerText(input.Question, input.Options), time.Now(),
+		)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if len(candidates) > 0 {
+			WriteJSON(w, http.StatusConflict, map[string]any{
+				"error":      priorAnswerRefusal(candidates),
+				"code":       "POSSIBLE_PRIOR_ANSWER",
+				"candidates": candidates,
+			})
+			return
+		}
 	}
 
 	tx, err := s.begin(r.Context())
