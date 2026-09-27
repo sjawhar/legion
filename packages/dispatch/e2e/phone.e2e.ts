@@ -453,15 +453,39 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     "Which checkpoint gates the sandbox tree before the daemon restarts mid-tree: the fence, the node release, or the linger close that follows both of them?";
   const longUrl = `https://docs.example.com/runbooks/legion/go-coordinator/stage-4b/${"sandbox-tree-".repeat(4)}checkpoints`;
   const longRoute = "role:merge-queue-controller-for-legion";
+  // A label's 40-character cap is still wider than the label picker's 256 px popover.
+  const longLabel = "sandbox-tree-checkpoint-evidence-runbook";
+  const longTitle =
+    "LEGION-67 implementer: long names end in an ellipsis wherever a link or a control truncates them, on a 390 px phone and in a 280 px margin as much as on a 1280 px desktop";
+  const longTitledSession = {
+    actor: {
+      kind: "session" as const,
+      id: "e2e-long-title",
+      origin: { session_title: longTitle, tmux: "legion:1.2" },
+    },
+    as: "agent" as const,
+  };
+  await setLiveSessions([
+    {
+      capabilities: ["aside", "btw"],
+      dir: "/w/legion",
+      last_seen: Date.now(),
+      roles: ["legion-implementer"],
+      session_id: "e2e-long-title",
+      title: longTitle,
+    },
+  ]);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Stage 4b runbook" });
   await patchIssue(issue.key, { route: longRoute });
+  const labelled = await createIssue({ project: "CORE", title: "Labelled" });
+  await patchIssue(labelled.key, { labels: [longLabel] });
   await createIssueArtifact(issue.key, { content: "# Runbook\n", name: longName });
   const document = await createProjectDocument("CORE", { content: "# Runbook\n", name: longName });
   await createArtifactAsk(
     document.artifact.id,
     { question: "Does this runbook cover it?" },
-    session
+    longTitledSession
   );
   await insertExternalLink(issue.key, longUrl);
   await editArtifact(
@@ -513,6 +537,13 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     const inboxOwner = page.locator("[data-inbox-owner]", { hasText: longName });
     await expectEllipsis(inboxOwner);
     await expect(inboxOwner.locator("[title]")).toHaveAttribute("title", `CORE · ${longName}`);
+    // The ask's author chip is a flex button that opens the session's handles.
+    const authorChip = page.getByRole("button", { exact: true, name: longTitle });
+    await expectEllipsis(authorChip);
+    await expect(authorChip.getByText(longTitle, { exact: true })).toHaveAttribute(
+      "title",
+      longTitle
+    );
 
     await page.goto(`/issues/${issue.key}`);
     await expectEllipsis(page.getByRole("link", { name: longUrl }));
@@ -523,7 +554,35 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     );
     // A button that is inline-flex by its own classes is the same case as a link below 1280 px.
     await expectEllipsis(page.locator(`button[title="${longRoute}"]`));
+
+    // The @ picker's detail line: a role's detail names the live session that holds it.
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const composer = page.getByRole("form", { name: "Comment composer" });
+    await composer.getByLabel("Comment").fill("@");
+    const roleOption = composer
+      .getByRole("listbox", { name: "Mention suggestions" })
+      .getByRole("option", { exact: true, name: "legion-implementer" });
+    await expectEllipsis(roleOption);
+    const detail = roleOption.getByText(new RegExp(`^${longTitle} · /w/legion · `));
+    await expect(detail).toHaveAttribute("title", (await detail.textContent()) ?? "");
+
+    // A label picker row.
+    await page.goto(`/issues/${labelled.key}`);
+    await page.getByRole("button", { name: "Edit labels" }).click();
+    const labelOption = page.getByRole("option", { exact: true, name: longLabel });
+    await expectEllipsis(labelOption);
+    await expect(labelOption.getByText(longLabel, { exact: true })).toHaveAttribute(
+      "title",
+      longLabel
+    );
+
+    // An agent row's name, which opens the row. The button carries the full name itself.
+    await page.goto("/agents");
+    const agentName = page.getByRole("heading", { name: longTitle }).getByRole("button");
+    await expectEllipsis(agentName);
+    await expect(agentName).toHaveAttribute("title", longTitle);
   } finally {
     await context.close();
+    await setLiveSessions([]);
   }
 });
