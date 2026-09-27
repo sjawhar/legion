@@ -189,7 +189,13 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 			return blankBetweenBlocksBut(item, anyBlock) || lastSpread
 		})
 	case quoted:
-		spread, reason := quotedListSpread(list, quote, directive, typed && isAncestor(quote, directive), lines)
+		// The browser editor spaces a list in a typed block inside a quote by one blank line,
+		// whether the list's own quote holds the typed block or stands inside it.
+		directiveQuoted := false
+		if typed {
+			_, directiveQuoted = ancestor[*ast.Blockquote](directive)
+		}
+		spread, reason := quotedListSpread(list, quote, directive, directiveQuoted, lines)
 		if reason != "" {
 			return reason
 		}

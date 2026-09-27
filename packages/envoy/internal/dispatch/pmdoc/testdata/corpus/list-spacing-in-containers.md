@@ -195,3 +195,12 @@ A list at the end of a quote in a callout:
 >
 >
 :::
+
+A list in a quote in a callout in a quote:
+
+> :::callout{#qq kind="note" title="T"}
+> > - a
+> > - c
+> >
+> p
+> :::

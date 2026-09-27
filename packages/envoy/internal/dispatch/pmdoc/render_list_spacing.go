@@ -64,11 +64,10 @@ func (r *renderer) spacingAfterList(list, next *Node, prefix string) (*Node, int
 	return spaced, blanks
 }
 
-// inQuotedTypedBlock reports whether lines with prefix stand in a typed block inside a quote, with
-// no quote opened inside the typed block.
+// inQuotedTypedBlock reports whether lines with prefix stand in a quote and in a typed block that
+// stands inside a quote, whether their own quote holds the typed block or stands inside it.
 func (r *renderer) inQuotedTypedBlock(prefix string) bool {
-	quotes := strings.Count(prefix, ">")
-	return quotes > 0 && r.typedPrefix != nil && strings.Count(*r.typedPrefix, ">") == quotes
+	return strings.Contains(prefix, ">") && r.typedPrefix != nil && strings.Contains(*r.typedPrefix, ">")
 }
 
 // spreadByItsOwnLines reports whether a spread list or list item is written spread without a blank
