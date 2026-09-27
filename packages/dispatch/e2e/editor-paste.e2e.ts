@@ -289,6 +289,91 @@ for (const how of ["drag", "shift-click"] as const) {
   });
 }
 
+// A line break pasted into a table as cells, from HTML or a code block, is a space in its cell, as in
+// text pasted at a caret, since a GFM cell holds one line and a hard break stored in a table ends the
+// row. These pastes once kept the break in the cell, and the stored table read back broken, or
+// they threw and stored nothing.
+const lineBreakHtml = { html: "<p>one<br>two</p>", text: "one\ntwo" };
+const lineBreakCells = {
+  html: "<table><tr><td>b1<br>b2</td><td>c</td></tr></table>",
+  text: "b1\nb2\tc",
+};
+for (const [name, clipboard, target, stored] of [
+  [
+    "HTML with a line break",
+    lineBreakHtml,
+    ["alpha one", "gamma three"],
+    "| one two | beta two |\n| :--- | :--- |\n| one two | delta four |\n",
+  ],
+  [
+    "HTML with a line break",
+    lineBreakHtml,
+    ["alpha one", "delta four"],
+    "| one two | one two |\n| :--- | :--- |\n| one two | one two |\n",
+  ],
+  [
+    "a code block's HTML",
+    { html: "<pre><code>line1\nline2</code></pre>", text: "line1\nline2" },
+    ["alpha one", "delta four"],
+    "| line1 line2 | line1 line2 |\n| :--- | :--- |\n| line1 line2 | line1 line2 |\n",
+  ],
+  [
+    "cells holding a line break",
+    lineBreakCells,
+    "delta",
+    "| alpha one | beta two |  |\n| :--- | :--- | :--- |\n| gamma three | b1 b2 | c |\n",
+  ],
+  [
+    "cells holding a line break",
+    lineBreakCells,
+    "alpha",
+    "| b1 b2 | c |\n| :--- | :--- |\n| gamma three | delta four |\n",
+  ],
+  [
+    "cells holding a line break",
+    lineBreakCells,
+    ["gamma three", "delta four"],
+    "| alpha one | beta two |\n| :--- | :--- |\n| b1 b2 | c |\n",
+  ],
+  [
+    "cells holding a line break",
+    lineBreakCells,
+    ["alpha one", "delta four"],
+    "| b1 b2 | c |\n| :--- | :--- |\n| b1 b2 | c |\n",
+  ],
+] as const) {
+  const where =
+    typeof target === "string"
+      ? `at the caret after "${target}"`
+      : `onto ${target[0]} to ${target[1]}`;
+  test(`${name} pasted ${where} keeps each cell on one line`, async ({ browser }) => {
+    const { alice, issue, page } =
+      typeof target === "string"
+        ? await openWithCaret(browser, "Line break paste", table, target, "end")
+        : await openIssue(browser, "Line break paste", table);
+    try {
+      if (typeof target !== "string") {
+        await expect(documentEditor(page)).toContainText(target[1]);
+        await selectCells(page, target[0], target[1], "shift-click");
+        await expect(page.locator(".selectedCell")).not.toHaveCount(0);
+      }
+
+      await paste(page, clipboard);
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toBe(stored);
+      await expect(
+        documentEditor(page).locator(
+          "table br:not(.ProseMirror-trailingBreak), table [data-type='hardbreak']"
+        )
+      ).toHaveCount(0);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
 // Cells copied inside the editor paste back as the same cells, at a caret in another row's cell
 // and onto a selection of that row's cells. The copy is ProseMirror's own clipboard HTML, a table
 // marked with data-pm-slice. Parsed at the caret, that gained an empty leading row, and the paste
