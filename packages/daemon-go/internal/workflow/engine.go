@@ -91,6 +91,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.merged(ctx, tx, fact)
 	case intake.PullRequestClosed:
 		return e.closed(ctx, tx, fact)
+	case intake.ClaimReady:
+		return e.claimReady(ctx, tx, fact)
 	case intake.ClaimFailed:
 		return e.claimFailed(ctx, tx, fact)
 	case intake.RetryOrEscalate:
@@ -251,6 +253,8 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err := e.store.PutGate(ctx, tx, gate); err != nil {
 		return intake.Result{}, err
 	}
+	e.log.Info("workflow: design gate registered", "tree", issue.Tree, "issue", issue.Key, "artifact", fact.ArtifactID,
+		"version", fact.Version, "open", classify.DesignGateOpen(gate), "policy", e.cfg.DesignGate)
 	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: fact.Version, Generation: issue.Generation}); err != nil {
 		return intake.Result{}, err
 	}
@@ -275,6 +279,13 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 		return intake.Result{}, err
 	}
 	isOpen := classify.DesignGateOpen(updated)
+	// Only a root's issue has a gate (register_gate refuses a child), so the gate's issue is its
+	// tree.
+	if isOpen && !wasOpen {
+		e.log.Info("workflow: design gate opened", "tree", fact.Key, "issue", fact.Key, "artifact", fact.ArtifactID, "event", fact.Kind, "version", fact.Version)
+	} else if !isOpen && (wasOpen || fact.Kind == intake.DispatchArtifactChangesRequested) {
+		e.log.Info("workflow: design gate closed", "tree", fact.Key, "issue", fact.Key, "artifact", fact.ArtifactID, "event", fact.Kind, "version", fact.Version)
+	}
 	if fact.Kind == intake.DispatchArtifactChangesRequested {
 		if err := e.notice(ctx, tx, fact.Key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason}); err != nil {
 			return intake.Result{}, err

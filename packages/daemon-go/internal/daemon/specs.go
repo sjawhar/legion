@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -33,6 +34,9 @@ type specs struct {
 	secrets      map[string]string
 	repo         ghrepo.Repository
 	prompts      *prompts.Composer
+	// designGate is the project's design gate policy (gates.design), which a tree's root architect
+	// is told after its addressing (designGateFragment).
+	designGate config.DesignGate
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
@@ -55,6 +59,9 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	addressing, err := addressingFragment(s.project, c)
 	if err != nil {
 		return runtime.SpawnSpec{}, err
+	}
+	if claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
+		addressing += " " + designGateFragment(s.designGate)
 	}
 	env := map[string]string{}
 	if s.identity != nil {
@@ -114,4 +121,18 @@ func addressingFragment(project string, c supervise.Claim) (string, error) {
 	return fmt.Sprintf("Legion addressing: your role topic is `%s%s`; the architect that owns your issue is `%s%s`; "+
 		"the project's controller is `%s%s`; a sibling role on your issue is your topic with the trailing `-<role>` replaced.",
 		roleTopicPrefix, c.Token, roleTopicPrefix, architect, roleTopicPrefix, claim.ControllerToken(project)), nil
+}
+
+// designGateFragment is the sentence a tree's root architect is told after its addressing: whether
+// this project arms the design gate, the "Design gate policy" line the shared role prompt reads
+// (designGateFragment, packages/daemon/src/daemon/processes.ts). It is worded for this daemon,
+// which starts the tree's work only once the architect registers its spec with register_gate,
+// whatever the policy: with the gate off, the registration opens it at once.
+func designGateFragment(policy config.DesignGate) string {
+	if policy == config.DesignGateOff {
+		return "Design gate policy: `gates.design: off` — this project does not arm the design gate: request no approval and wait for no `design-approved`; " +
+			"register your spec document with `register_gate` at its current version, which opens the gate at once and starts the tree's work."
+	}
+	return "Design gate policy: `gates.design: root-issues` — this project arms the root design gate: request your spec's approval with `dispatch_request_approval`, " +
+		"then register the document with `register_gate` at the version that request returned; the tree's work starts once a human approves that version."
 }

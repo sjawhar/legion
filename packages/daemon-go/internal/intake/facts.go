@@ -260,7 +260,8 @@ type ClaimFailed struct {
 
 func (ClaimFailed) isFact() {}
 
-// ClaimReady is the supervision observation that a claimed phase worker is ready.
+// ClaimReady is the supervision observation that a claim is ready: its agent took its Envoy role
+// and said it can be prompted.
 type ClaimReady struct {
 	Issue string
 	Role  claim.Role
