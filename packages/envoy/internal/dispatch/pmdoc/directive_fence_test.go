@@ -47,8 +47,8 @@ func TestTypedFencesReadTheSameInTheEngineAndHere(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse(%q): %v", test.Markdown, err)
 			}
-			if want, got := shapeDifference(doc, back); want != "" || codeText(back) != codeText(doc) {
-				t.Fatalf("Parse(%q) reads %s as %s, code %q, want the tree's blocks holding %q", test.Markdown, want, got, codeText(back), codeText(doc))
+			if reason := readDifference(doc, back, shapeOnly); reason != "" || codeText(back) != codeText(doc) {
+				t.Fatalf("Parse(%q): %s, code %q, want the tree's blocks holding %q", test.Markdown, reason, codeText(back), codeText(doc))
 			}
 		})
 	}

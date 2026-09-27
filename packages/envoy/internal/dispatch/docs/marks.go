@@ -308,8 +308,12 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		code := at.Node.Type == "code_block"
 		var replacement *pmdoc.Node
 		if code {
-			replacement = codeReplacement(with)
-		} else if replacement, err = inlineAware(with, edgesOf(at, range_)); err != nil {
+			codeText := with
+			if accept {
+				codeText, range_ = acceptedCode(with, at, range_)
+			}
+			replacement = codeReplacement(codeText)
+		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From)); err != nil {
 			return err
 		}
 		next, err := pmdoc.Splice(tree, range_, replacement)
@@ -329,6 +333,19 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 				return err
 			}
 		}
+		if accept {
+			if next, err = settleAccepted(tree, next, range_, with); err != nil {
+				return err
+			}
+			if !insideAsk(at) {
+				if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
+					return err
+				}
+				if err := refuseReshapedAccept(tree, next, range_, at, with, replacement); err != nil {
+					return err
+				}
+			}
+		}
 		if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
 		}
@@ -336,6 +353,9 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// back the document the insert started from.
 		if accept {
 			if err := refuseBrokenAsks(tree, next); err != nil {
+				return err
+			}
+			if err := refuseMisreadAccept(tree, next, with); err != nil {
 				return err
 			}
 		}

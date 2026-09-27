@@ -285,14 +285,47 @@ func askContentBreak(children []*Node) string {
 // blockName is a block type as a reader names it, with its article: "a code block", "an
 // ordered list", "a horizontal rule".
 func blockName(nodeType string) string {
-	name := strings.ReplaceAll(nodeType, "_", " ")
-	if nodeType == "hr" {
-		name = "horizontal rule"
-	}
+	name := blockNoun(nodeType)
 	if strings.ContainsRune("aeiou", rune(name[0])) {
 		return "an " + name
 	}
 	return "a " + name
+}
+
+func blockNoun(nodeType string) string {
+	if nodeType == "hr" {
+		return "horizontal rule"
+	}
+	return strings.ReplaceAll(nodeType, "_", " ")
+}
+
+// BlockNames names blocks in order as a reader names them, a run of one type counted: "a bullet
+// list", "two paragraphs", "a horizontal rule and a heading".
+func BlockNames(blocks []*Node) string {
+	var names []string
+	for start := 0; start < len(blocks); {
+		end := start + 1
+		for end < len(blocks) && blocks[end].Type == blocks[start].Type {
+			end++
+		}
+		if count := end - start; count > 1 {
+			names = append(names, fmt.Sprintf("%s %ss", countWord(count), blockNoun(blocks[start].Type)))
+		} else {
+			names = append(names, blockName(blocks[start].Type))
+		}
+		start = end
+	}
+	if len(names) < 2 {
+		return strings.Join(names, "")
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+}
+
+func countWord(count int) string {
+	if words := []string{"two", "three", "four", "five", "six", "seven", "eight", "nine"}; count-2 < len(words) {
+		return words[count-2]
+	}
+	return fmt.Sprint(count)
 }
 
 func childrenAre(children []*Node, typeName string) bool {

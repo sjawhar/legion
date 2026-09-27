@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	"errors"
 	"fmt"
 	"html"
 	"reflect"
@@ -58,7 +59,7 @@ func blockParsers() []util.PrioritizedValue {
 
 // Parse converts markdown into the closed Proof ProseMirror tree.
 func Parse(markdown string) (*Node, error) {
-	doc, err := parseUnstamped(markdown)
+	doc, err := parseUnstamped(markdown, true)
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +73,19 @@ func Parse(markdown string) (*Node, error) {
 // whole, or nil for a fragment or a new document: a repeat live already carries is not refused
 // (RepeatedBlockID), and the repair keeps it for its first block, as settlement would.
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
-	doc, err := parseUnstamped(LineFeeds(markdown))
+	return parseForWrite(markdown, live, true)
+}
+
+// ParseFragment parses markdown a caller writes into a document, rather than one that begins it,
+// as ParseForWrite parses a fragment: a leading `---` line is a horizontal rule, as it is anywhere
+// after a document's start. Written where the document begins (opensDocument), a closed
+// front-matter block opening the markdown is front matter, as Parse reads it.
+func ParseFragment(markdown string, opensDocument bool) (*Node, error) {
+	return parseForWrite(markdown, nil, opensDocument)
+}
+
+func parseForWrite(markdown string, live *Node, readFrontmatter bool) (*Node, error) {
+	doc, err := parseUnstamped(LineFeeds(markdown), readFrontmatter)
 	if err != nil {
 		return nil, err
 	}
@@ -131,11 +144,16 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 }
 
 // parseUnstamped is Parse before EnsureBlockIDs: blocks keep the ids their markdown names, and a
-// block that names none has none yet.
-func parseUnstamped(markdown string) (*Node, error) {
+// block that names none has none yet. Without readFrontmatter a closed front-matter block is read
+// as the blocks its lines make.
+func parseUnstamped(markdown string, readFrontmatter bool) (*Node, error) {
 	source := []byte(markdown)
-	front, rest := parseFrontmatterBlock(source)
-	source = source[rest:]
+	var front *Node
+	if readFrontmatter {
+		var rest int
+		front, rest = parseFrontmatterBlock(source)
+		source = source[rest:]
+	}
 	root := blockReader.parse(source)
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
@@ -265,44 +283,10 @@ func BlockShapeError(block *Node) error {
 	if err != nil {
 		return err
 	}
-	if want, got := shapeDifference(doc, back); want != "" {
-		return fmt.Errorf("%s reads back as %s", want, got)
+	if reason := readDifference(doc, back, shapeOnly); reason != "" {
+		return errors.New(reason)
 	}
 	return nil
-}
-
-// shapeDifference names the first block of want that got holds as another kind, or holds where
-// want has none, or lacks; both are empty when the two have the same shape. An empty paragraph is
-// not written, so it is not expected back, except where the parser reads one as the browser editor
-// does (emptyParagraphFirst): as its container's only child, and ahead of a list item's first
-// block when that block is not a paragraph.
-func shapeDifference(want, got *Node) (string, string) {
-	if want.Type != got.Type {
-		return blockName(want.Type), blockName(got.Type)
-	}
-	if isTextblock(want.Type) {
-		return "", ""
-	}
-	only := len(want.Children) == 1
-	written := make([]*Node, 0, len(want.Children))
-	for index, child := range want.Children {
-		readFirst := want.Type == "list_item" && index == 0 && len(want.Children) > 1 && want.Children[1].Type != "paragraph"
-		if only || readFirst || child.Type != "paragraph" || len(child.Children) != 0 {
-			written = append(written, child)
-		}
-	}
-	for index := 0; index < max(len(written), len(got.Children)); index++ {
-		switch {
-		case index >= len(written):
-			return endOf(want.Type), blockName(got.Children[index].Type)
-		case index >= len(got.Children):
-			return blockName(written[index].Type), "nothing"
-		}
-		if w, g := shapeDifference(written[index], got.Children[index]); w != "" {
-			return w, g
-		}
-	}
-	return "", ""
 }
 
 // endOf names where a block's children end, as a reader names it.
