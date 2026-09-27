@@ -655,6 +655,13 @@ function AgentRow({
               </span>
             </button>
           </h2>
+          <Link
+            className={`min-h-11 rounded-lg border px-2 text-xs font-medium whitespace-nowrap md:min-h-7 md:leading-7 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+            title={`Watch ${label}'s conversation live`}
+            to={`/agents/${encodeURIComponent(agent.session_id)}/live`}
+          >
+            Open
+          </Link>
           <CopyButton value={agent.session_id} what="session ID">
             ID
           </CopyButton>

@@ -268,7 +268,8 @@ test("Agents shows one whose-turn pill per card: Needs you, plus Waiting on agen
     expect(waiting.getAttribute("title")).toContain("Builder");
 
     const reviewer = card(region, "Reviewer");
-    expect(within(reviewer).queryByRole("link")).toBeNull();
+    // Every card carries the Open action; what this card must not carry is a whose-turn pill.
+    expect(within(reviewer).queryByRole("link", { name: /Needs you|Waiting on agent/ })).toBeNull();
     expect(within(reviewer).queryByText(/^(Needs you|Waiting on agent|Open asks)/)).toBeNull();
   } finally {
     page.view.unmount();
