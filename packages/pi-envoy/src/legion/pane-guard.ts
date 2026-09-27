@@ -136,28 +136,24 @@ class Refusal extends Error {
     readonly snippet: string,
     readonly line: number,
     readonly detail: string,
-    readonly file?: string,
-    readonly pinned = false
+    readonly file?: string
   ) {
     super(detail);
   }
 }
 
-function rethrow(
-  error: unknown,
-  site: Site,
-  label: string,
-  file: string | undefined,
-  preserveLine = false
-): never {
+function locateRefusal(error: unknown, file: string | undefined): never {
+  if (!(error instanceof Refusal)) throw error;
+  throw new Refusal(error.snippet, error.line, error.detail, error.file ?? file);
+}
+
+function wrapRefusal(error: unknown, site: Site, label: string): never {
   if (!(error instanceof Refusal)) throw error;
   const source = error.file ?? label;
   throw new Refusal(
     site.snippet,
-    preserveLine ? error.line : site.line,
-    `line ${error.line} of ${source}, \`${error.snippet}\`: ${error.detail}`,
-    preserveLine ? (error.file ?? file) : file,
-    preserveLine
+    site.line,
+    `line ${error.line} of ${source}, \`${error.snippet}\`: ${error.detail}`
   );
 }
 
@@ -942,7 +938,7 @@ function walkScript(script: ParsedScript, st: State, ctx: Ctx, runTraps = true):
         trap.site
       );
     } catch (error) {
-      rethrow(error, trap.site, trap.file, trap.file, true);
+      locateRefusal(error, trap.file);
     }
   }
 }
@@ -1458,13 +1454,7 @@ function runFunction(
   try {
     walkNode(definition.body, child, ctx, false);
   } catch (error) {
-    rethrow(
-      error,
-      siteOf(definition.body, child),
-      definition.file ?? "<function>",
-      definition.file,
-      true
-    );
+    locateRefusal(error, definition.file);
   }
   outer.vars = child.vars;
   outer.exported = child.exported;
@@ -1497,13 +1487,7 @@ function functionOutput(
   try {
     walkNode(definition.body, child, ctx, false);
   } catch (error) {
-    rethrow(
-      error,
-      siteOf(definition.body, child),
-      definition.file ?? "<function>",
-      definition.file,
-      true
-    );
+    locateRefusal(error, definition.file);
   }
   return child.output?.length === 0 ? undefined : child.output;
 }
@@ -2229,7 +2213,7 @@ function runText(text: string, label: string, st: State, ctx: Ctx, site: Site): 
   try {
     walkScript(parse(text), { ...st, source: text, depth: st.depth + 1 }, ctx);
   } catch (error) {
-    rethrow(error, site, label, st.script, error instanceof Refusal && error.pinned);
+    wrapRefusal(error, site, label);
   }
 }
 
@@ -2384,7 +2368,7 @@ function runCode(
   try {
     checkCode(language, runtimeText(code.exp), childState(st, invocation.overlay), ctx);
   } catch (error) {
-    rethrow(error, site, "its code", st.script, error instanceof Refusal && error.pinned);
+    wrapRefusal(error, site, "its code");
   }
 }
 
@@ -2479,7 +2463,7 @@ function runFile(
       }
     } else checkCode(language, content, st, ctx);
   } catch (error) {
-    rethrow(error, site, label, st.script, error instanceof Refusal && error.pinned);
+    wrapRefusal(error, site, label);
   }
 }
 
@@ -2573,13 +2557,7 @@ function checkCode(
             ctx
           );
         } catch (error) {
-          rethrow(
-            error,
-            { snippet: `${call}(...)`, line: 1 },
-            "its shell text",
-            st.script,
-            error instanceof Refusal && error.pinned
-          );
+          wrapRefusal(error, { snippet: `${call}(...)`, line: 1 }, "its shell text");
         }
       },
       argv: (call, list) => {
