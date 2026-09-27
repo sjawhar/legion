@@ -440,10 +440,11 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // refused, not waved through; one that confirmed another contract is refused naming both. And it
 // must say the prompt-named agents' models resolved: any other mark, or none, does not prove the
 // workers run their agents on their models. When the daemon has a NATS nkey seed (Options.NATSUser),
-// the probe must also name the same user as the seed its pointer read (bootprobe.NATSUser): none,
-// or another, is the providers Secret holding no seed of the daemon's, a refusal. An image whose
-// CLI predates a flag the probe command passes stops at the flags, and its Failed pod is refused
-// naming the flag its CLI lacks.
+// the probe must also name the same user as the seed its pointer read (bootprobe.NATSUser), a
+// refusal otherwise: naming none is an image whose CLI predates the user line or a providers Secret
+// holding no seed, and the refusal names both fixes; naming another is the Secret holding another
+// seed. An image whose CLI predates a flag the probe command passes stops at the flags, and its
+// Failed pod is refused naming the flag its CLI lacks.
 func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, logErr error, contract int) bootprobe.Outcome {
 	if why := kubeletFailure(pod); why != "" {
 		// Whatever the container wrote before the kubelet ended it is quoted when it could be read.
@@ -483,10 +484,12 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 			name, mark, bootprobe.AgentModelsResolved, logTail)
 	}
 	if r.natsUser != "" {
-		if got := bootprobe.NATSUser(logTail); got != r.natsUser {
-			if got == "" {
-				got = "none"
-			}
+		switch got := bootprobe.NATSUser(logTail); got {
+		case r.natsUser:
+		case "":
+			return bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s named no nkey user, where the daemon's own seed is user %s: either its legion CLI predates the probe's nats-nkey-user line: rebuild the worker image at or after 1a7aca7b; or its NATS_NKEY_SEED_FILE, the providers Secret %s's NATS_NKEY_SEED, held no seed: put the daemon's seed in that key — log tail: %s",
+				name, r.natsUser, ProvidersSecretName(r.project), logTail)}
+		default:
 			return bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s read nkey user %s through its NATS_NKEY_SEED_FILE, the providers Secret %s's NATS_NKEY_SEED, where the daemon's own seed is user %s: put the daemon's seed in that key — log tail: %s",
 				name, got, ProvidersSecretName(r.project), r.natsUser, logTail)}
 		}

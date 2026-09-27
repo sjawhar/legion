@@ -368,7 +368,10 @@ mounted Secret only through the pod's `fsGroup` (the kubelet's file is root's), 
 whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same
 seed in the providers Secret under that key. The image probe refuses boot when the kubelet cannot
 mount the key, when it holds no user seed, and when its user is not the daemon's own seed's (the
-probe reports the user's public key, never the seed). The shim skips the file, since the pointer
+probe reports the user's public key, never the seed). A probe that reports no user at all is either
+an image whose `legion probe-image` predates the report (rebuild the worker image at or after
+1a7aca7b) or a key holding no seed (fill the providers Secret's `NATS_NKEY_SEED`); the refusal
+names both. The shim skips the file, since the pointer
 names it, so the seed is never a variable of Oh My Pi or the tools it runs. With none, a pod
 carries no pointer and mounts no such key. While the daemon has a seed, `provider_keys` may neither
 name `NATS_NKEY_SEED` (on either runtime) nor read the Secret's `NATS_NKEY_SEED` key under another

@@ -318,8 +318,9 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 }
 
 // With a NATS nkey seed, the probe passes only on a pod that named the user of the daemon's own
-// seed (Options.NATSUser, bootprobe.NATSUser): one that named none — its CLI read no seed through
-// the providers Secret's pointer — or another user is refused, once, naming both public keys.
+// seed (Options.NATSUser, bootprobe.NATSUser): one that named none — its CLI predates the user line,
+// or read no seed through the providers Secret's pointer — is refused naming both causes and both
+// fixes, and one that named another user is refused naming both public keys; each once.
 func TestProbeImageHoldsTheProvidersSecretToTheDaemonsSeed(t *testing.T) {
 	const daemons, other = "UDAEMONSUSERPUBLICKEY", "UANOTHERUSERPUBLICKEY"
 	for _, testCase := range []struct {
@@ -328,7 +329,11 @@ func TestProbeImageHoldsTheProvidersSecretToTheDaemonsSeed(t *testing.T) {
 		want []string
 	}{
 		{"the daemon's user", bootprobe.NATSUserLine(daemons) + "\n" + okLine(3), nil},
-		{"no user", okLine(3), []string{"read nkey user none through its NATS_NKEY_SEED_FILE", "where the daemon's own seed is user " + daemons}},
+		{"no user", okLine(3), []string{
+			"pod " + probeSandboxName + " named no nkey user, where the daemon's own seed is user " + daemons,
+			"either its legion CLI predates the probe's nats-nkey-user line: rebuild the worker image at or after 1a7aca7b",
+			"or its NATS_NKEY_SEED_FILE, the providers Secret legion-" + testProject + "-providers's NATS_NKEY_SEED, held no seed: put the daemon's seed in that key",
+		}},
 		{"another user", bootprobe.NATSUserLine(other) + "\n" + okLine(3),
 			[]string{"read nkey user " + other + " through its NATS_NKEY_SEED_FILE, the providers Secret legion-" + testProject + "-providers's NATS_NKEY_SEED", "where the daemon's own seed is user " + daemons}},
 	} {
