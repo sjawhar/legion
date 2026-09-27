@@ -1546,6 +1546,20 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         ]);
       },
     },
+    {
+      // The other three routes run over the local-path stand-in transport, which never asks for a
+      // credential, so they cannot witness this route: askpass runs only when git actually
+      // negotiates one, over https. A planted TLS host that answers every request 401 (in the
+      // shape of the url.insteadOf rewrite test above) forces that negotiation for real.
+      route: "an askpass program behind core.askPass, on a planted https host",
+      plant: async (rig: RealJjRig, witness: string) => {
+        const host = await plantedHost();
+        await gitConfig(rig.repoCloneDir, `url.${host.url}/acme/widgets.insteadOf`, rig.remoteDir);
+        await gitConfig(rig.repoCloneDir, "http.sslVerify", "false");
+        await gitConfig(rig.repoCloneDir, "core.askPass", witness);
+        return () => host.stop();
+      },
+    },
   ]) {
     test(`the credentialed fetch does not run ${route}`, async () => {
       for (const { name, command } of JJ_BINARIES) {
@@ -1559,12 +1573,16 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           `#!/bin/sh\nprintf 'witness token=%s\\n' "\${LEGION_PROVISIONING_TOKEN:+set}" >> ${JSON.stringify(sink)}\nexit 1\n`,
           { mode: 0o700 }
         );
-        await plant(rig, witness);
-        await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).rejects.toThrow(
-          "jj git fetch"
-        );
-        const recorded = existsSync(sink) ? await readFile(sink, "utf8") : "";
-        expect(recorded, `${name}, ${route}`).not.toContain("token=set");
+        const cleanup = await plant(rig, witness);
+        try {
+          await expect(provisionIssueWorkspace("WIDGETS-42", rig.deps), name).rejects.toThrow(
+            "jj git fetch"
+          );
+          const recorded = existsSync(sink) ? await readFile(sink, "utf8") : "";
+          expect(recorded, `${name}, ${route}`).not.toContain("token=set");
+        } finally {
+          await cleanup?.();
+        }
       }
     }, 60_000);
   }
