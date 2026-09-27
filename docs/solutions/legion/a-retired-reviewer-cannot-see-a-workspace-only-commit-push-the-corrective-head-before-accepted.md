@@ -42,7 +42,8 @@ minutes before the architect changed the order.
    architect resumes the reviewer on that head.
 4. **`legion threads resolve` waits for the `Accepted:`.** The command resolves a reviewer's thread only when
    its newest comment is the opener's own `Accepted:` (a bot's thread, since LEGION-208, on the
-   author's disposition instead); run it early and it prints `left open`. The
+   Legion reviewer's `Accepted:` too, never the author's reply); run it early and it prints
+   `left open`. The
    architect's next resume of the implementer does two things in one round: `threads resolve`
    (Threads line to `0 unresolved`, output quoted) and, if the re-review was clean, the `.legion/`
    deletion push the reviewer then approves by SHA.

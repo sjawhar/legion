@@ -260,10 +260,11 @@ later phase keeps it current rather than replacing it:
 - Thread <id>: fixed in <commit-sha> — <one line>.
 - Thread <id>: not a defect — <reason>.
 `legion threads resolve --pr <n> --repo <owner>/<repo>` at <head-sha>:
-resolved <thread URL>
+resolved <thread URL> — its opener's acceptance
+resolved <thread URL> — the Legion reviewer's acceptance of a bot's thread
 left open <thread URL> — newest reply by <login> is not an acceptance
 left open <thread URL> — newest reply by <login> is an unsubmitted draft in a pending review
-left open <thread URL> — newest reply by <login> is not the opener's acceptance or the pull request author's disposition (Fixed in <commit>: … or Declined: …)
+left open <thread URL> — newest reply by <login> is not its opener's or the Legion reviewer's acceptance
 
 **Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
 <verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
@@ -305,7 +306,8 @@ this proof.
 
 - **Threads are dispositioned individually, never resolved in bulk.** Every open review
   thread gets its own line naming the fixing commit or the reason it isn't a defect. The
-  reviewer answers each thread it opened with exactly one of `Accepted: fixed in <commit> — <one line>`,
+  reviewer answers each thread it opened, and each thread a bot opened that is none of Legion's
+  role Apps, with exactly one of `Accepted: fixed in <commit> — <one line>`,
   `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
   acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
   `Accepted:` — the opener's own follow-up included — leaves the thread open, because resolution
@@ -317,13 +319,16 @@ this proof.
   In a Legion pane, the **implementer** runs the command before every push that answers a review
   (the corrective push and the final `.legion/` deletion push) and pastes its output into the
   `Threads` section. The command resolves each unresolved thread whose newest submitted comment is
-  the opener's own `Accepted:` reply. It also resolves each thread a bot account opened that is
-  none of Legion's role Apps (a CI bot's; the daemon names Legion's App logins) once the newest
-  submitted comment is the pull request author's disposition, `Fixed in <commit>: …` or
-  `Declined: …` as its first line: a bot never posts `Accepted:`. A thread either Legion App
-  opened, a reviewer's finding included, still needs its opener's `Accepted:`. It makes one `resolveReviewThread` per thread, prints
-  `resolved <url>` or `left open <url> — newest reply by <login> is …` naming why, and exits 1
-  naming the thread's URL and GitHub's message when GitHub refuses one.
+  the opener's own `Accepted:` reply. On a thread a bot account opened that is none of Legion's
+  role Apps (the daemon names them, keyed by App role), the Legion reviewer's `Accepted:` also
+  closes it. GitHub cannot tell a CI bot, which never accepts, from a person whose `gh` is routed
+  to an App, so the reviewer adjudicates such a finding, and it may accept one an App-routed person
+  raised. The subject of a finding never closes it: the implementer's `Fixed in <commit>: …` or
+  `Declined: …` answers a thread and closes none. A thread either Legion App opened, a reviewer's
+  finding included, still needs its opener's `Accepted:`. It makes one `resolveReviewThread` per
+  thread, prints `resolved <url> — <whose acceptance>` (its opener's, or the Legion reviewer's on a
+  bot's thread, so the ledger shows which) or `left open <url> — newest reply by <login> is …`
+  naming why, and exits 1 naming the thread's URL and GitHub's message when GitHub refuses one.
 
   Without a grant, page through `reviewThreads`, skip `isResolved: true`, and compare the opener
   with the newest comment. Query shape, inside `repository { pullRequest { … } }`:
@@ -341,8 +346,9 @@ this proof.
 
   Resolve only when the newest comment is submitted, its `author { login }` equals the opener's,
   and its `body`, after removing leading spaces, tabs, CR, and LF, begins `Accepted:`. Without a
-  grant nothing names Legion's own App logins, so this route resolves no bot's thread: leave one
-  for the implementer's or merger's run in a pane, or report it. For each such thread:
+  grant nothing names Legion's own App logins, so this route closes a bot's thread only on its
+  opener's `Accepted:`: leave one the Legion reviewer accepted for the implementer's or merger's
+  run in a pane, or report it. For each thread to resolve:
 
   ```graphql
   mutation($threadId: ID!) {

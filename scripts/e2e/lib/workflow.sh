@@ -367,7 +367,7 @@ assert_handoff_committer() {
 # post_bot_thread opens one file-level review thread on the proof's pull request as the proof human,
 # a GitHub App and so a bot account, as a CI bot is, and none of Legion's role Apps; it prints the
 # thread's first comment's node id. The account is the devbox gh's, which acts as the user when its
-# App routing fails; a person's thread stays open on the implementer's disposition, so the thread's
+# App routing fails; the Legion reviewer's acceptance closes only a bot's thread, so the thread's
 # author is read back and anything but a bot outside Legion's Apps is refused, naming it.
 post_bot_thread() {
   local head posted id login type
@@ -382,15 +382,30 @@ post_bot_thread() {
   fi
   printf '%s\n' "$id"
 }
-# bot_thread_resolved COMMENT: the review thread whose first comment is COMMENT is resolved on GitHub.
-bot_thread_resolved() {
-  local resolved
-  resolved=$(timeout 60 gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$pr_number" -f query='
+# bot_thread_replies COMMENT prints the review thread whose first comment is COMMENT: its isResolved
+# on the first line, then each reply's author (GraphQL names an App by its bare slug) and first
+# line, tab-separated.
+bot_thread_replies() {
+  timeout 60 gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$pr_number" -f query='
     query($owner: String!, $name: String!, $number: Int!) {
       repository(owner: $owner, name: $name) { pullRequest(number: $number) {
-        reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { id } } } } } } }' \
-    --jq ".data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].id == \"$1\") | .isResolved") || return 1
-  [ "$resolved" = true ]
+        reviewThreads(first: 100) { nodes { isResolved comments(first: 50) { nodes { id author { login } body } } } } } } }' \
+    --jq ".data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].id == \"$1\") |
+      (.isResolved | tostring), (.comments.nodes[1:][] | \"\\(.author.login)\\t\\(.body | ltrimstr(\" \") | split(\"\\n\")[0])\")"
+}
+# bot_thread_answered_open COMMENT: the implementer has replied on the bot's thread, and the thread is
+# still open, since the pull request author's reply closes nothing.
+bot_thread_answered_open() {
+  local replies
+  replies=$(bot_thread_replies "$1") || return 1
+  [ "$(head -1 <<<"$replies")" = false ] && grep -q $'^legion-implementer\t' <<<"$replies"
+}
+# bot_thread_resolved_on_acceptance COMMENT: the bot's thread is resolved and carries the Legion
+# reviewer's Accepted: reply.
+bot_thread_resolved_on_acceptance() {
+  local replies
+  replies=$(bot_thread_replies "$1") || return 1
+  [ "$(head -1 <<<"$replies")" = true ] && grep -q $'^legion-reviewer\tAccepted:' <<<"$replies"
 }
 # retro_reported ISSUE: the daemon applied the implementer's retro completion, the one way out of
 # retro.

@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
-	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -248,17 +251,39 @@ func (s *reviewUnavailable) Token(ctx context.Context, role appauth.AppRole, own
 	return s.tokenSource.Token(ctx, role, owner)
 }
 
-// gh-token names both of Legion's role Apps beside the caller's own, so `legion threads resolve`
-// can tell a Legion App's review thread from a CI bot's. When either App's login cannot be read the
-// list is left out, and the command then applies no bot-thread rule; the caller's token still
-// comes back.
+// gh-token names each of Legion's role Apps beside the caller's own, keyed by App role, so `legion
+// threads resolve` can tell a Legion App's review thread from any other bot's and knows which
+// login is the review App's. When any App's login cannot be read the logins are left out, and the
+// command then applies no bot-thread rule; the caller's token still comes back.
+// A Legion App whose login cannot be read turns the bot-thread rule off for that answer, so the
+// daemon says so in its log, once: every `legion gh` call asks for a token, and a minute of GitHub
+// failing must not write a line per call.
+func TestAnUnreadableLegionAppLoginIsLoggedAtMostOnceAMinute(t *testing.T) {
+	h := newHarness(t)
+	var logged bytes.Buffer
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), Tokens: &reviewUnavailable{}, GitHubOwner: "acme",
+		Log: slog.New(slog.NewTextHandler(&logged, nil)),
+	}).Handler
+	grant := liveGrant(t, h, claim.RoleImplementer)
+	for range 3 {
+		if recorder := h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: grant.GrantID}, nil); recorder.Code != http.StatusOK {
+			t.Fatalf("gh-token = %d: %s", recorder.Code, recorder.Body)
+		}
+	}
+	if got := strings.Count(logged.String(), "could not read a Legion App's login"); got != 1 {
+		t.Fatalf("logged the unreadable login %d times over three calls, want once:\n%s", got, logged.String())
+	}
+}
+
 func TestGitHubTokenNamesEveryLegionAppLogin(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		source appauth.Tokens
-		want   []string
+		want   map[appauth.AppRole]string
 	}{
-		{"both Apps leased", &tokenSource{}, []string{"legion-implementer[bot]", "legion-reviewer[bot]"}},
+		{"both Apps leased", &tokenSource{}, map[appauth.AppRole]string{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"}},
 		{"the review App unavailable", &reviewUnavailable{}, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -270,7 +295,7 @@ func TestGitHubTokenNamesEveryLegionAppLogin(t *testing.T) {
 			}
 			var got GitHubTokenResponse
 			decodeInto(t, recorder, &got)
-			if got.Token != "installation-token" || got.AppLogin != "legion-implementer[bot]" || !slices.Equal(got.LegionAppLogins, tc.want) {
+			if got.Token != "installation-token" || got.AppLogin != "legion-implementer[bot]" || !maps.Equal(got.LegionAppLogins, tc.want) {
 				t.Fatalf("gh-token = %+v, want the implementer's token and Legion App logins %v", got, tc.want)
 			}
 		})

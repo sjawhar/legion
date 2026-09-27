@@ -64,8 +64,8 @@ func selectsNewestState(query string) bool {
 	return false
 }
 
-// legionLogins is the daemon's gh-token answer naming both of Legion's role Apps.
-const legionLogins = `,"legionAppLogins":["legion-implementer[bot]","legion-reviewer[bot]"]`
+// legionLogins is the daemon's gh-token answer naming both of Legion's role Apps by App role.
+const legionLogins = `,"legionAppLogins":{"implement":"legion-implementer[bot]","review":"legion-reviewer[bot]"}`
 
 // runThreadsResolve redeems a stub grant and runs `legion threads resolve` against githubURL.
 func runThreadsResolve(t *testing.T, githubURL string) (code int, stdout, stderr string) {
@@ -115,7 +115,7 @@ func TestThreadsResolveNeverCountsAPendingDraft(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("threads resolve = %d: %s", code, stderr)
 	}
-	want := "left open https://github.test/thread/draft — newest reply by reviewer is an unsubmitted draft in a pending review\nresolved https://github.test/thread/accepted\n"
+	want := "left open https://github.test/thread/draft — newest reply by reviewer is an unsubmitted draft in a pending review\nresolved https://github.test/thread/accepted — its opener's acceptance\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
@@ -147,7 +147,7 @@ func TestThreadsResolveTrimsOnlySpaceTabCRLFBeforeAccepted(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("threads resolve = %d: %s", code, stderr)
 	}
-	want := "resolved https://github.test/thread/ascii\nleft open https://github.test/thread/nbsp — newest reply by reviewer is not an acceptance\n"
+	want := "resolved https://github.test/thread/ascii — its opener's acceptance\nleft open https://github.test/thread/nbsp — newest reply by reviewer is not an acceptance\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
@@ -191,80 +191,104 @@ func TestThreadsResolveRejectsInvalidArgumentsBeforeGrantRedemption(t *testing.T
 	}
 }
 
-// botThread is one unresolved review thread as GitHub's GraphQL serves it: the opener's type and
-// login (a Bot's is its bare slug), and the newest comment's author, body and state.
-func botThread(id, openerType, opener, newest, body, state string) string {
+// threadVector is one unresolved review thread as GitHub's GraphQL serves it: the opener's type
+// and login (a Bot's is its bare slug), and the newest comment's author, body and state.
+type threadVector struct {
+	id, openerType, opener, newest, body, state string
+}
+
+func (v threadVector) node() string {
 	quote := func(value string) string {
 		encoded, _ := json.Marshal(value)
 		return string(encoded)
 	}
-	return `{"id":"` + id + `","isResolved":false,"opener":{"nodes":[{"author":{"__typename":"` + openerType + `","login":"` + opener + `"},"url":"https://github.test/thread/` + id + `"}]},"newest":{"nodes":[{"author":{"login":"` + newest + `"},"url":"https://github.test/thread/` + id + `","body":` + quote(body) + `,"state":"` + state + `"}]}}`
+	return `{"id":"` + v.id + `","isResolved":false,"opener":{"nodes":[{"author":{"__typename":"` + v.openerType + `","login":"` + v.opener + `"},"url":"https://github.test/thread/` + v.id + `"}]},"newest":{"nodes":[{"author":{"login":"` + v.newest + `"},"url":"https://github.test/thread/` + v.id + `","body":` + quote(v.body) + `,"state":"` + v.state + `"}]}}`
 }
 
-// botThreadsPage is a reviewThreads page of nodes on a pull request legion-implementer authored.
-func botThreadsPage(nodes ...string) string {
-	return `{"data":{"repository":{"pullRequest":{"author":{"login":"legion-implementer"},"reviewThreads":{"nodes":[` + strings.Join(nodes, ",") + `],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}`
-}
-
-// The shared vector with review-threads.test.ts for a bot's threads. A bot never posts Accepted:,
-// so a thread a bot opened closes when the pull request's author answers it, in its newest
-// submitted comment, with a disposition as its first line: `Fixed in <commit>: …` or `Declined: …`
-// (a disposition below another first line does not count). The bot must be none of Legion's own
-// role Apps, which the daemon names: a thread legion-reviewer or legion-implementer opened closes
-// only on its opener's Accepted:, whatever its review says, so the implementer's ordinary reply
-// never closes a reviewer's finding. A human's thread is unchanged.
-func TestThreadsResolveClosesABotsThreadOnTheAuthorsDisposition(t *testing.T) {
-	nodes := []string{
-		botThread("fixed", "Bot", "claude", "legion-implementer", "Fixed in 1a2b3c4: moved the guard", "SUBMITTED"),
-		botThread("declined", "Bot", "claude", "legion-implementer", " \t\r\nDeclined: the loop is bounded", "SUBMITTED"),
-		botThread("vague", "Bot", "claude", "legion-implementer", "Addressed it", "SUBMITTED"),
-		botThread("second-line", "Bot", "claude", "legion-implementer", "Thanks for the catch.\nDeclined: the loop is bounded", "SUBMITTED"),
-		botThread("multiline", "Bot", "claude", "legion-implementer", "Declined: the loop is bounded\r\nThe bound is the page size.", "SUBMITTED"),
-		botThread("not-author", "Bot", "claude", "legion-reviewer", "Declined: not ours", "SUBMITTED"),
-		botThread("draft", "Bot", "claude", "legion-implementer", "Fixed in 1a2b3c4: drafted", "PENDING"),
-		botThread("reviewer", "Bot", "legion-reviewer", "legion-implementer", "Fixed in 1a2b3c4: moved the guard", "SUBMITTED"),
-		botThread("implementer-app", "Bot", "legion-implementer", "legion-implementer", "Declined: my own note", "SUBMITTED"),
-		botThread("human", "User", "octocat", "legion-implementer", "Fixed in 1a2b3c4: moved the guard", "SUBMITTED"),
+// threadsPage is a reviewThreads page of the vectors' threads.
+func threadsPage(vectors ...threadVector) string {
+	nodes := make([]string, 0, len(vectors))
+	for _, vector := range vectors {
+		nodes = append(nodes, vector.node())
 	}
-	github, resolved := fakeThreadsGitHub(t, botThreadsPage(nodes...))
+	return `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[` + strings.Join(nodes, ",") + `],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}`
+}
+
+// The shared vector with review-threads.test.ts for a bot's threads. The subject of a finding never
+// closes it. A thread a Bot opened that is none of Legion's role Apps (a CI bot, or a person whose
+// gh is routed to an App: GitHub cannot tell them apart) closes on its opener's Accepted:, or on
+// Legion's review App's, the independent party, and the resolved line says which. The pull
+// request author's reply (Fixed in, Declined) closes nothing. The review App's Accepted: counts
+// only as the first line of a submitted comment, after space, tab, CR or LF alone, whatever the
+// login's case. A thread either Legion App opened closes only on its opener's Accepted:, and a
+// person's thread is unchanged.
+func TestThreadsResolveClosesABotsThreadOnTheLegionReviewersAcceptance(t *testing.T) {
+	vectors := []threadVector{
+		{id: "reviewer-accepts", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Accepted: fixed in 1a2b3c4 — moved the guard", state: "SUBMITTED"},
+		{id: "reviewer-accepts-any-case", openerType: "Bot", opener: "claude", newest: "Legion-Reviewer", body: " \t\r\nAccepted: not a defect — the loop is bounded", state: "SUBMITTED"},
+		{id: "author-declined", openerType: "Bot", opener: "claude", newest: "legion-implementer", body: "Declined: the loop is bounded", state: "SUBMITTED"},
+		{id: "author-fixed", openerType: "Bot", opener: "claude", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
+		{id: "author-accepts", openerType: "Bot", opener: "claude", newest: "legion-implementer", body: "Accepted: my own fix", state: "SUBMITTED"},
+		{id: "reviewer-still-open", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Still open: the loop is not bounded", state: "SUBMITTED"},
+		{id: "reviewer-nbsp", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "\u00a0Accepted: fixed", state: "SUBMITTED"},
+		{id: "reviewer-second-line", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Thanks.\nAccepted: fixed", state: "SUBMITTED"},
+		{id: "reviewer-draft", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Accepted: drafted", state: "PENDING"},
+		{id: "routed-person", openerType: "Bot", opener: "sjawhar-agent", newest: "legion-reviewer", body: "Accepted: fixed in 1a2b3c4 — moved the guard", state: "SUBMITTED"},
+		{id: "routed-person-own", openerType: "Bot", opener: "sjawhar-agent", newest: "sjawhar-agent", body: "Accepted: fixed", state: "SUBMITTED"},
+		{id: "reviewer-thread", openerType: "Bot", opener: "legion-reviewer", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
+		{id: "implementer-app-thread", openerType: "Bot", opener: "legion-implementer", newest: "legion-reviewer", body: "Accepted: fine", state: "SUBMITTED"},
+		{id: "human", openerType: "User", opener: "octocat", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
+	}
+	github, resolved := fakeThreadsGitHub(t, threadsPage(vectors...))
 	code, stdout, stderr := runThreadsResolve(t, github)
 	if code != 0 {
 		t.Fatalf("threads resolve = %d: %s", code, stderr)
 	}
-	bot := "not the opener's acceptance or the pull request author's disposition (Fixed in <commit>: … or Declined: …)"
-	want := "resolved https://github.test/thread/fixed\n" +
-		"resolved https://github.test/thread/declined\n" +
-		"left open https://github.test/thread/vague — newest reply by legion-implementer is " + bot + "\n" +
-		"left open https://github.test/thread/second-line — newest reply by legion-implementer is " + bot + "\n" +
-		"resolved https://github.test/thread/multiline\n" +
-		"left open https://github.test/thread/not-author — newest reply by legion-reviewer is " + bot + "\n" +
-		"left open https://github.test/thread/draft — newest reply by legion-implementer is an unsubmitted draft in a pending review\n" +
-		"left open https://github.test/thread/reviewer — newest reply by legion-implementer is not an acceptance\n" +
-		"left open https://github.test/thread/implementer-app — newest reply by legion-implementer is not an acceptance\n" +
-		"left open https://github.test/thread/human — newest reply by legion-implementer is not an acceptance\n"
+	byReviewer := " — the Legion reviewer's acceptance of a bot's thread\n"
+	notEither := "not its opener's or the Legion reviewer's acceptance\n"
+	want := "resolved https://github.test/thread/reviewer-accepts" + byReviewer +
+		"resolved https://github.test/thread/reviewer-accepts-any-case" + byReviewer +
+		"left open https://github.test/thread/author-declined — newest reply by legion-implementer is " + notEither +
+		"left open https://github.test/thread/author-fixed — newest reply by legion-implementer is " + notEither +
+		"left open https://github.test/thread/author-accepts — newest reply by legion-implementer is " + notEither +
+		"left open https://github.test/thread/reviewer-still-open — newest reply by legion-reviewer is " + notEither +
+		"left open https://github.test/thread/reviewer-nbsp — newest reply by legion-reviewer is " + notEither +
+		"left open https://github.test/thread/reviewer-second-line — newest reply by legion-reviewer is " + notEither +
+		"left open https://github.test/thread/reviewer-draft — newest reply by legion-reviewer is an unsubmitted draft in a pending review\n" +
+		"resolved https://github.test/thread/routed-person" + byReviewer +
+		"resolved https://github.test/thread/routed-person-own — its opener's acceptance\n" +
+		"left open https://github.test/thread/reviewer-thread — newest reply by legion-implementer is not an acceptance\n" +
+		"left open https://github.test/thread/implementer-app-thread — newest reply by legion-reviewer is not an acceptance\n" +
+		"left open https://github.test/thread/human — newest reply by legion-reviewer is not an acceptance\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q\nwant     %q", stdout, want)
 	}
-	if got := strings.Join(resolved(), ","); got != "fixed,declined,multiline" {
-		t.Fatalf("resolved = %s, want fixed,declined,multiline", got)
+	if got := strings.Join(resolved(), ","); got != "reviewer-accepts,reviewer-accepts-any-case,routed-person,routed-person-own" {
+		t.Fatalf("resolved = %s, want reviewer-accepts,reviewer-accepts-any-case,routed-person,routed-person-own", got)
 	}
 }
 
-// Which accounts are Legion's own is the daemon's to say. A daemon whose gh-token answer names no
-// Legion App logins (one that predates them, or could not read one) leaves every bot's thread to
-// the opener's-Accepted: rule: a CI bot's thread the author answered stays open rather than risk
-// closing a Legion reviewer's.
+// Which accounts are Legion's own, and which is its review App, is the daemon's to say. A daemon
+// whose gh-token answer names no Legion App logins (one that could not read one) leaves every
+// bot's thread to its opener's Accepted:, and the left-open line says the session cannot tell,
+// rather than that the reply was not an acceptance. A daemon names every App or none: an answer
+// naming some is refused as invalid, as the contract refuses it.
 func TestThreadsResolveAppliesNoBotRuleWithoutLegionsAppLogins(t *testing.T) {
-	github, resolved := fakeThreadsGitHub(t, botThreadsPage(
-		botThread("ci-bot", "Bot", "claude", "legion-implementer", "Fixed in 1a2b3c4: moved the guard", "SUBMITTED"),
-		botThread("reviewer", "Bot", "legion-reviewer", "legion-implementer", "Fixed in 1a2b3c4: moved the guard", "SUBMITTED"),
+	github, resolved := fakeThreadsGitHub(t, threadsPage(threadVector{id: "ci-bot", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"}))
+	if code, stdout, stderr := runThreadsResolveNaming(t, github, `,"legionAppLogins":{"implement":"legion-implementer[bot]"}`); code != 1 || stdout != "" ||
+		stderr != "legion threads resolve: daemon returned an invalid GitHub credential response\n" || len(resolved()) != 0 {
+		t.Fatalf("a partial login answer = %d %q %q, resolved %v; want it refused as invalid", code, stdout, stderr, resolved())
+	}
+	github, resolved = fakeThreadsGitHub(t, threadsPage(
+		threadVector{id: "ci-bot", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
+		threadVector{id: "human", openerType: "User", opener: "octocat", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
 	))
 	code, stdout, stderr := runThreadsResolveNaming(t, github, "")
 	if code != 0 {
 		t.Fatalf("threads resolve = %d: %s", code, stderr)
 	}
-	want := "left open https://github.test/thread/ci-bot — newest reply by legion-implementer is not an acceptance\n" +
-		"left open https://github.test/thread/reviewer — newest reply by legion-implementer is not an acceptance\n"
+	want := "left open https://github.test/thread/ci-bot — newest reply by legion-reviewer is not its opener's acceptance, and this session cannot identify Legion's review App, so a bot's thread closes only on its opener's Accepted:\n" +
+		"left open https://github.test/thread/human — newest reply by legion-implementer is not an acceptance\n"
 	if stdout != want || len(resolved()) != 0 {
 		t.Fatalf("stdout = %q, resolved %v; want both left open", stdout, resolved())
 	}

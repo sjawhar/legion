@@ -368,9 +368,12 @@ export const LegionDaemonApi = {
     response: z.object({
       token: nonEmptyString,
       appLogin: z.string().endsWith("[bot]"),
-      /** Every Legion role App's login, which `legion threads resolve` keeps out of its bot-thread
-       * rule; absent when the daemon could not read both. */
-      legionAppLogins: z.array(z.string().endsWith("[bot]")).optional(),
+      /** Each Legion role App's login, keyed by its App role: `legion threads resolve` keeps them
+       * out of its bot-thread rule and takes the review App's `Accepted:` on a bot's thread;
+       * absent when the daemon could not read every one. */
+      legionAppLogins: z
+        .object({ implement: z.string().endsWith("[bot]"), review: z.string().endsWith("[bot]") })
+        .optional(),
     }),
   },
   GitCredential: {

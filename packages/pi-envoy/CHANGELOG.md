@@ -34,16 +34,19 @@
 
 ### Changed
 
-- `legion.goDaemonApiVersion` is 10. Contract 10 adds `legionAppLogins` to the Go daemon's `POST /legion/v1/gh-token` answer, every Legion role App's login, which the Go client's strict `LegionGoGitHubTokenResponse` now accepts (LEGION-208). Nothing in the extension calls `githubToken`, but the credential shapes are part of the contract.
+- `legion.goDaemonApiVersion` is 10. Contract 10 adds `legionAppLogins` to the Go daemon's `POST /legion/v1/gh-token` answer, each Legion role App's login keyed by its App role (`{implement, review}`), which the Go client's strict `LegionGoGitHubTokenResponse` now accepts (LEGION-208). Nothing in the extension calls `githubToken`, but the credential shapes are part of the contract.
 - `legion threads resolve` also resolves a thread a bot account opened that is none of Legion's
-  role Apps (a CI bot's) once the pull request's author answers it, in its newest
-  submitted comment, with `Fixed in <commit>: …` or `Declined: …` as its first line. A bot never posts `Accepted:`,
-  so the merger's zero-open-threads check could never pass on a repository whose CI bot opens
-  review threads. A Legion reviewer's thread and a person's still close only on the opener's
-  `Accepted:`. Legion's role Apps are the logins the daemon now names on `/legion/v1/gh-token`
-  (`legionAppLogins`, optional, in both daemons). Without them (`--gh`, which has no grant, or a
-  daemon that could not read both Apps) no thread counts as a bot's. The implementer, reviewer and
-  merger role texts say so (LEGION-208).
+  role Apps once the Legion review App's `Accepted:` is its newest submitted comment. A CI bot
+  never posts `Accepted:`, so the merger's zero-open-threads check could never pass on a
+  repository whose CI bot opens review threads; the reviewer, the independent party, now decides
+  such a finding. GitHub cannot tell a CI bot from a person whose `gh` is routed to an App, so the
+  reviewer may accept a finding such a person raised, and each `resolved <url>` line says whose
+  acceptance closed the thread. The pull request author's reply closes nothing. A Legion App's
+  thread and a person's still close only on the opener's `Accepted:`. Legion's role Apps are the
+  logins the daemon now names on `/legion/v1/gh-token`, keyed by App role (`legionAppLogins`,
+  optional, in both daemons). Without them (`--gh`, which has no grant, or a daemon that could not
+  read every App) no thread counts as a bot's, and a bot's left-open line says the session cannot
+  identify the review App. The implementer, reviewer and merger role texts say so (LEGION-208).
 - `legion.goDaemonApiVersion` is 8. Contract 8 adds `NATS_NKEY_SEED_FILE` to the Go daemon's pane environment when the daemon has the `legion-pane` NATS nkey seed (LEGION-279): a 0600 file of the pane's own under tmux, the providers Secret's `NATS_NKEY_SEED` file on a Sandbox pod, and the operator file's `nats_nkey_seed_file` under `legion controller start`. The extension's Envoy connections authenticate with it. A Go daemon at 8 refuses to boot beside a plugin at 7.
 - Under the Go daemon, a claim no longer subscribes to an issue's notice topic (`notifications.legion.<project>.<issue>`): the architect's tree root and each phase worker's issue used to be subscribed. The Go daemon now sends every notice to the owning architect's role topic, which the architect already claims as its Envoy role, and a phase worker receives none. A plugin from this release beside a Go daemon that still publishes notices on issue topics hears none of them.
 - `legion.goDaemonApiVersion` is 7. Contract 7 adds `holdReason` to an issue on `/legion/v1/state` (`escalated` while an escalated issue stays held in a tree that runs; absent while its tree lingers or is closed), which the controller skill reads at every start. A plugin at 6 refuses a state response carrying it, and a Go daemon at 7 refuses to boot beside a plugin at 6.

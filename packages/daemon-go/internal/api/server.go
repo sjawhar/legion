@@ -84,6 +84,10 @@ type server struct {
 	dispatch     dispatch.Client
 	claimReady   func(c supervise.Claim)
 	log          *slog.Logger
+	// loginsWarned is when the daemon last logged that it could not read a Legion App's login
+	// (legionAppLogins), which it does at most once a minute.
+	loginsWarnedMu sync.Mutex
+	loginsWarned   time.Time
 }
 
 // NewServer builds the daemon's HTTP server on bind:port — the configured address only, never

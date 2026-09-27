@@ -282,16 +282,17 @@ the round returns to implementing only once the reviewer's handoff is recorded, 
 committed by the review App; in round one the proof human, a GitHub App and so a bot account like a
 CI bot and none of Legion's role Apps, also opens a file-level review thread (the run reads the
 thread's author back and stops, naming it, when the devbox `gh` posted as anything else, such as
-the user after its App routing failed), and the round's correction
-must leave it resolved by the implementer's `legion threads resolve` after the implementer answers
-it with a disposition as its reply's first line (`Fixed in <commit>: …` or `Declined: …`) — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
+the user after its App routing failed). The implementer answers that thread in round one's
+correction, and the thread must stay open, since the pull request author's reply closes nothing.
+The round-two reviewer accepts it with `Accepted:`, and round two's correction must leave it
+resolved by the implementer's `legion threads resolve`, carrying that acceptance. Each round names
+one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
 implementer's pull request changed, which the run records and requires to be exactly one; the
-correction counts only in that file's patch on the pull request) and reaching testing only on
+correction counts only in that file's patch on the pull request) and reaches testing only on
 that round's own implementer handoff (the daemon's phase record must hold the implementer's
 handoff for that round when the issue reaches testing, and the commit carrying every planner,
 implementer, tester, and reviewer handoff is authored and committed by that role's own App, read
-from the issue's workspace),
-and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
+from the issue's workspace). It also proves `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
 worker after its launch budget and the architect's retry relaunching it, restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
 credentials: in one bash tool call of a real implementer pane, plain `gh` resolves

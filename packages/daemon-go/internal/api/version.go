@@ -23,5 +23,6 @@ package api
 // 9: AGENTC-393 Plan C -- the daemon's own agent-secrets machine login state
 // (agentSecretsLogin) on GET /legion/v1/state.
 //
-// 10: LEGION-208 -- legionAppLogins on POST /legion/v1/gh-token, every Legion role App's login.
+// 10: LEGION-208 -- legionAppLogins on POST /legion/v1/gh-token, each Legion role App's login keyed by
+// its App role.
 const GoDaemonAPIVersion = 10

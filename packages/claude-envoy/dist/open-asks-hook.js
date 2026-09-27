@@ -14883,7 +14883,7 @@ var LegionDaemonApi = {
     response: exports_external.object({
       token: nonEmptyString,
       appLogin: exports_external.string().endsWith("[bot]"),
-      legionAppLogins: exports_external.array(exports_external.string().endsWith("[bot]")).optional()
+      legionAppLogins: exports_external.object({ implement: exports_external.string().endsWith("[bot]"), review: exports_external.string().endsWith("[bot]") }).optional()
     })
   },
   GitCredential: {

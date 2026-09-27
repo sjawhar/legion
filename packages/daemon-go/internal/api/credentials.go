@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -40,9 +41,10 @@ type GrantCredentialRequest struct {
 type GitHubTokenResponse struct {
 	Token    string `json:"token"`
 	AppLogin string `json:"appLogin"`
-	// LegionAppLogins, on gh-token alone, is the login of every role App this daemon leases for the
-	// repository owner: the accounts Legion's own roles post as (legionAppLogins).
-	LegionAppLogins []string `json:"legionAppLogins,omitempty"`
+	// LegionAppLogins, on gh-token alone, is the login of each role App this daemon leases for the
+	// repository owner, keyed by its App role: the accounts Legion's own roles post as
+	// (legionAppLogins).
+	LegionAppLogins map[appauth.AppRole]string `json:"legionAppLogins,omitempty"`
 }
 
 // GitCredentialResponse is the logical credential a git helper writes in the credential protocol.
@@ -146,20 +148,27 @@ func (s *server) githubToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, GitHubTokenResponse{Token: lease.Token, AppLogin: lease.Identity.Name, LegionAppLogins: logins})
 }
 
-// legionAppLogins is the login of each role App the daemon leases for the repository owner, the
-// accounts Legion's own roles post as. `legion threads resolve` keeps their threads out of its
-// bot-thread rule, which a CI bot's thread needs, so a Legion reviewer's finding still closes only
-// on the reviewer's own Accepted:. It is nil when either App's identity cannot be read: the
-// command then cannot tell a Legion App from a CI bot and applies only the Accepted: rule.
-func (s *server) legionAppLogins(ctx context.Context) []string {
-	var logins []string
-	for _, role := range []appauth.AppRole{appauth.Implement, appauth.Review} {
+// legionAppLogins is the login of each role App the daemon leases for the repository owner, keyed
+// by its App role: the accounts Legion's own roles post as. `legion threads resolve` keeps their
+// threads out of its bot-thread rule and takes the review App's Accepted: on a thread a bot outside
+// them opened. It is nil when any App's identity cannot be read: the command then cannot tell a
+// Legion App from any other bot, and a bot's thread closes only on its opener's Accepted:. The
+// failure turns that rule off for the answer, so it is logged, at most once a minute, since every
+// `legion gh` call in every pane asks for a token.
+func (s *server) legionAppLogins(ctx context.Context) map[appauth.AppRole]string {
+	logins := map[appauth.AppRole]string{}
+	for _, role := range appauth.Roles {
 		lease, err := s.tokens.Token(ctx, role, s.githubOwner)
 		if err != nil || lease.Identity.Name == "" {
-			s.log.Warn("api: read a Legion App's login for threads resolve", "role", role, "error", err)
+			s.loginsWarnedMu.Lock()
+			if time.Since(s.loginsWarned) >= time.Minute {
+				s.loginsWarned = time.Now()
+				s.log.Warn("api: could not read a Legion App's login, so legion threads resolve applies no bot-thread rule for this answer (logged at most once a minute)", "role", role, "error", err)
+			}
+			s.loginsWarnedMu.Unlock()
 			return nil
 		}
-		logins = append(logins, lease.Identity.Name)
+		logins[role] = lease.Identity.Name
 	}
 	return logins
 }

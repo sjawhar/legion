@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { LegionDaemonApi } from "@legion/contracts";
+import { GITHUB_APP_ROLES, type GitHubAppRole } from "../../config";
 import { appRoleForLegionRole } from "../../github-apps";
 import type { RouteContext } from "../context";
 import {
@@ -90,23 +91,41 @@ export async function handleGhToken(
     validateContractResponse(LegionDaemonApi.GitHubToken.response, {
       token: lease.token,
       appLogin: lease.gitIdentity.name,
-      ...(legionAppLogins === undefined ? {} : { legionAppLogins }),
+      legionAppLogins,
     })
   );
 }
 
-/** Every Legion role App's login for the issue's repository, the accounts Legion's own roles post
- * as. `legion threads resolve` keeps their threads out of its bot-thread rule, so a Legion
- * reviewer's finding still closes only on the reviewer's own `Accepted:`. Undefined when either
- * App's identity cannot be read: the command then cannot tell a Legion App from a CI bot and
- * applies only the `Accepted:` rule. */
-async function legionAppLoginsFor(ctx: RouteContext, issue: string): Promise<string[] | undefined> {
+/** When the daemon last logged that it could not read a Legion App's login, which it does at most
+ * once a minute: every `legion gh` call in every pane asks for a token. */
+let loginsWarnedAt = 0;
+
+/** Each Legion role App's login for the issue's repository, keyed by its App role: the accounts
+ * Legion's own roles post as. `legion threads resolve` keeps their threads out of its bot-thread
+ * rule and takes the review App's `Accepted:` on a thread any other bot opened. Undefined when any
+ * App's identity cannot be read: the command then cannot tell a Legion App from another bot, and a
+ * bot's thread closes only on its opener's `Accepted:`. That turns the rule off for the answer, so
+ * it is logged. */
+async function legionAppLoginsFor(
+  ctx: RouteContext,
+  issue: string
+): Promise<Record<GitHubAppRole, string> | undefined> {
   try {
     const leases = await Promise.all(
-      (["implement", "review"] as const).map((role) => ctx.github.tokenForIssue(role, issue))
+      GITHUB_APP_ROLES.map(
+        async (role) =>
+          [role, (await ctx.github.tokenForIssue(role, issue)).gitIdentity.name] as const
+      )
     );
-    return leases.map((lease) => lease.gitIdentity.name);
-  } catch {
+    return Object.fromEntries(leases) as Record<GitHubAppRole, string>;
+  } catch (error) {
+    if (Date.now() - loginsWarnedAt >= 60_000) {
+      loginsWarnedAt = Date.now();
+      console.warn(
+        "[legion] gh-token: could not read a Legion App's login, so legion threads resolve applies no bot-thread rule for this answer (logged at most once a minute):",
+        error
+      );
+    }
     return undefined;
   }
 }

@@ -2204,7 +2204,7 @@ describe("Legion HTTP API", () => {
     expect(token.body).toEqual({
       token: "minted-review-acme",
       appLogin: "legion-review[bot]",
-      legionAppLogins: ["legion-implement[bot]", "legion-review[bot]"],
+      legionAppLogins: { implement: "legion-implement[bot]", review: "legion-review[bot]" },
     });
     expect(tokenRoles).toEqual(["review", "review", "implement", "review"]);
 

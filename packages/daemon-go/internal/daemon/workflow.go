@@ -110,7 +110,7 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 	err := bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
 		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
 		defer cancel()
-		for _, role := range []appauth.AppRole{appauth.Implement, appauth.Review} {
+		for _, role := range appauth.Roles {
 			lease, err := tokens.Token(attempt, role, owner)
 			if err == nil {
 				logins[role] = lease.Identity.Name

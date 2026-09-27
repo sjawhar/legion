@@ -300,9 +300,11 @@ export const LegionGoGrantResponse = z.strictObject({
 export const LegionGoGitHubTokenResponse = z.strictObject({
   token: nonEmptyString,
   appLogin: z.string().endsWith("[bot]"),
-  /** `api.GitHubTokenResponse.LegionAppLogins`: every Legion role App's login, on gh-token alone;
-   * absent when the daemon could not read both. */
-  legionAppLogins: z.array(z.string().endsWith("[bot]")).optional(),
+  /** `api.GitHubTokenResponse.LegionAppLogins`: each Legion role App's login, keyed by its App role,
+   * on gh-token alone; absent when the daemon could not read every one. */
+  legionAppLogins: z
+    .strictObject({ implement: z.string().endsWith("[bot]"), review: z.string().endsWith("[bot]") })
+    .optional(),
 });
 export const LegionGoGitCredentialResponse = z.strictObject({
   username: z.literal("x-access-token"),
