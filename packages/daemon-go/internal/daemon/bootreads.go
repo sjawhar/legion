@@ -103,11 +103,20 @@ func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func
 // (natsauth.DaemonSeed) when it has one, else the pane seed every pane receives (launchSecrets),
 // else no credential. No launch carries it.
 type natsConnection struct {
-	seed     string // "" for no credential
-	user     string // seed's user's public key, "" with no seed
-	source   string // "daemon", "pane" or "none": where seed came from
-	paneUser bool   // whether user is the pane seed's user, as when the daemon seed is the pane seed
+	seed     string         // "" for no credential
+	user     string         // seed's user's public key, "" with no seed
+	source   natsSeedSource // where seed came from
+	paneUser bool           // whether user is the pane seed's user, as when the daemon seed is the pane seed
 }
+
+// natsSeedSource is where the daemon's own connection's seed came from, as its boot line names it.
+type natsSeedSource string
+
+const (
+	natsSeedDaemon natsSeedSource = "daemon" // natsauth.DaemonSeed
+	natsSeedPane   natsSeedSource = "pane"   // the pane seed every pane receives
+	natsSeedNone   natsSeedSource = "none"   // no seed: no credential
+)
 
 // chooseNATSConnection is the connection over daemonSeed and paneSeed, each "" for none, where
 // paneUser is paneSeed's user's public key, already read.
@@ -118,18 +127,18 @@ func chooseNATSConnection(daemonSeed, paneSeed, paneUser string) (natsConnection
 		if err != nil {
 			return natsConnection{}, err
 		}
-		return natsConnection{seed: daemonSeed, user: user, source: "daemon", paneUser: user == paneUser}, nil
+		return natsConnection{seed: daemonSeed, user: user, source: natsSeedDaemon, paneUser: user == paneUser}, nil
 	case paneSeed != "":
-		return natsConnection{seed: paneSeed, user: paneUser, source: "pane", paneUser: true}, nil
+		return natsConnection{seed: paneSeed, user: paneUser, source: natsSeedPane, paneUser: true}, nil
 	default:
-		return natsConnection{source: "none"}, nil
+		return natsConnection{source: natsSeedNone}, nil
 	}
 }
 
 // log logs, once, the user the connection authenticates as, by public key, whether that is the pane
 // user, and where its seed came from; never the seed.
 func (c natsConnection) log(log *slog.Logger) {
-	log.Info("legion daemon connects to NATS", "user", c.user, "paneUser", c.paneUser, "seed", c.source)
+	log.Info("legion daemon connects to NATS", "user", c.user, "paneUser", c.paneUser, "seed", string(c.source))
 }
 
 // tmuxReads is what panes on this host need that readBoot reads: the OMP invocation, and the host's
@@ -167,7 +176,7 @@ func CheckStart(cfg config.Config, lookup func(string) (string, bool)) (paneNats
 	if err != nil {
 		return "", "", err
 	}
-	if r.nats.source == "daemon" {
+	if r.nats.source == natsSeedDaemon {
 		daemonNatsUser = r.nats.user
 	}
 	return r.paneNatsUser, daemonNatsUser, nil
