@@ -1151,6 +1151,16 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 	)
 }
 
+// emptyTextblock reports whether a textblock holds no text but whitespace.
+func emptyTextblock(textblock *pmdoc.Node) bool {
+	for _, child := range textblock.Children {
+		if child.Type != "text" || strings.TrimSpace(child.Text) != "" {
+			return false
+		}
+	}
+	return true
+}
+
 // replacementBroke is what check says of a document-level block the write changed, when it said
 // nothing of the blocks the match lay in before: a block that already failed the check, or another
 // block that does, is no reason to refuse this write. The write changed the blocks from the one
@@ -1391,16 +1401,6 @@ func isInlineDocument(tree *pmdoc.Node) bool {
 	}
 	for _, child := range tree.Children[0].Children {
 		if child.Type != "text" && !isInlineLeaf(child) {
-			return false
-		}
-	}
-	return true
-}
-
-// emptyTextblock reports whether a textblock holds no text but whitespace.
-func emptyTextblock(textblock *pmdoc.Node) bool {
-	for _, child := range textblock.Children {
-		if child.Type != "text" || strings.TrimSpace(child.Text) != "" {
 			return false
 		}
 	}
