@@ -14,8 +14,9 @@
 // Load reads the file and nothing it names: a path key (`instructions`, `envoy_token_file`,
 // `nats_nkey_seed_file`, `operator_token_file`, `runtime.kubernetes.kubeconfig`) is resolved
 // against the file's directory and kept as a path. What sits at that path is read at boot, by
-// ReadSecretPointer, MaterializeDeploymentInstructions, and the runtime's client, so a
-// configuration validates on a machine that has none of the files it names.
+// ReadSecretPointer, ReadDeploymentInstructions, and the runtime's client, so a configuration loads
+// on a machine that has none of the files it names; `legion start --check-config` then reads them
+// as boot does (daemon.CheckStart).
 package config
 
 import (

@@ -44,9 +44,9 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // of the role prompts the daemon inlines into its pods (promptrefs.Encode's encoding, decoded as the
 // flags are read), resolved beside the plugin's own. Without it the image's own role prompts are
 // read and resolved the same way. When its environment names a NATS nkey seed (a probe pod's
-// NATS_NKEY_SEED_FILE, the providers Secret's key), that seed must be a user's (natsauth.MountedSeed), and
-// the line before the OK line names that user's public key (bootprobe.NATSUserLine), never the
-// seed, for the daemon to compare with its own.
+// NATS_NKEY_SEED_FILE, the providers Secret's key), that seed is read as the daemon reads its own
+// (natsauth.Seed) and must be a user's, and the line before the OK line names that user's public
+// key (bootprobe.NATSUserLine), never the seed, for the daemon to compare with its own.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -110,7 +110,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	// the providers Secret's NATS_NKEY_SEED, which must be a user's seed, and whose user the daemon
 	// compares with its own seed's. The image build's probe names none.
 	natsUser := ""
-	if seed, err := natsauth.MountedSeed(os.LookupEnv); err != nil {
+	if seed, err := natsauth.Seed("", os.LookupEnv); err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	} else if seed != "" {
