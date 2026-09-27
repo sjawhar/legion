@@ -321,6 +321,19 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 		return nil
 	})
 	group.Go(func() error {
+		// A notice the listener accepted but could not forward is queued again (outbox.rehold).
+		sub, err := subscribeNoticeExceptions(w.conn, func(data []byte) {
+			if err := w.outbox.rehold(running, data); err != nil {
+				w.log.Error("role-lane exception not re-held", "error", err)
+			}
+		})
+		if err != nil {
+			return err
+		}
+		<-running.Done()
+		return sub.Unsubscribe()
+	})
+	group.Go(func() error {
 		select {
 		case err := <-w.failed:
 			return fmt.Errorf("workflow supervision fact: %w", err)

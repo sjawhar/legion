@@ -288,7 +288,9 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // once nobody will hold that role for this notice — the claim has failed or retired, or its tree
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
-// notice either.
+// notice either. A publish the listener accepts but then cannot forward, to a session that is
+// registered but no longer running, comes back as a role-lane exception and is queued again
+// (rehold, notice_exceptions.go).
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
