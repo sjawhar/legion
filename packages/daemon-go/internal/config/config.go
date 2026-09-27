@@ -674,6 +674,9 @@ func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 		if envNode.Kind != yaml.ScalarNode || !envVarName.MatchString(env) {
 			return nil, fmt.Errorf("%s key %q (the variable OMP reads) %s", key, env, envNameRule)
 		}
+		if strings.HasPrefix(env, "AGENT_SECRETS_") {
+			return nil, fmt.Errorf("%s names %s: an AGENT_SECRETS_* variable is the runtime's (AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR) or the daemon's own agent-secrets machine login, and is never exported into an agent's environment", key, env)
+		}
 		if seen[env] {
 			return nil, fmt.Errorf("%s names %s twice", key, env)
 		}

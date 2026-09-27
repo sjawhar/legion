@@ -93,9 +93,14 @@ type Claim struct {
 	// written to end a run that is over, and acting on it would stop the run that start began.
 	LastStartRow int64
 	Locator      *runtime.Locator
-	State        ClaimState
-	Budgets      Budgets
-	Pending      *Delivery
+	// Enrollment is the secrets broker's record of the claim's running process, when the runtime
+	// enrolls pods (AGENTC-393): the enrollment id, and the incarnation it was made for. It is
+	// revoked and cleared wherever the process is let go (letGo), so a record for another
+	// incarnation is never acted on.
+	Enrollment *Enrollment
+	State      ClaimState
+	Budgets    Budgets
+	Pending    *Delivery
 	// BootTokenHash is the hash of the current launch's boot token, which the shim's hello and the
 	// agent's registration are resolved by. CapabilityHash is the hash of the secret the agent's
 	// registration was issued.
@@ -175,6 +180,9 @@ type Deps struct {
 	Log      *slog.Logger
 	Limits   Limits
 	Timeouts Timeouts
+	// Secrets is the secrets broker's enrollment routes for the runtime's pods (AGENTC-393). nil
+	// deploys with no broker: no identity is kept, and nothing is enrolled or revoked.
+	Secrets Enroller
 	// Identity is the git identity a role's commits carry: its App's bot. Every delivery hands it
 	// to the agent's working copy before the task. nil, for a daemon with no GitHub Apps, adopts
 	// nothing.
@@ -293,6 +301,11 @@ type Machine struct {
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
 	// memory only: after a restart the boot orphan sweep has reaped every process no claim records.
 	previous *runtime.Locator
+	// identity is the latest hello2 identity for the claim's current incarnation (AGENTC-393),
+	// kept until its enrollment lands; enrollmentSent is whether that enrollment has been handed
+	// to the shim over the claim's current connection.
+	identity       *heldIdentity
+	enrollmentSent bool
 	// stale is every stale event already logged, so a repeated one is dropped in silence.
 	stale map[string]bool
 	// goroutines counts sends whose outcome has not been handled yet; idle wakes Wait.
@@ -364,6 +377,14 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	}
 	if pass, err := m.fence(ctx, ev); !pass {
 		return err
+	}
+	if hello, ok := ev.(StreamHello); ok && hello.AgentSecrets != nil && m.claim.Locator != nil && m.deps.Secrets != nil {
+		identity := *hello.AgentSecrets
+		if e := m.claim.Enrollment; e != nil && e.Incarnation == m.claim.Locator.Incarnation {
+			identity.PodToken = "" // already enrolled for this incarnation; the token is not needed again
+		}
+		m.identity = &heldIdentity{incarnation: m.claim.Locator.Incarnation, AgentSecretsIdentity: identity}
+		m.enrollmentSent = false
 	}
 	k := key{m.claim.State, kindOf(ev)}
 	r, ok := table[k]
@@ -734,6 +755,11 @@ func (m *Machine) retire(ctx context.Context) error {
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.forgetSend()
+	if e := m.claim.Enrollment; e != nil {
+		m.revoke(*e)
+		m.claim.Enrollment = nil
+	}
+	m.identity, m.enrollmentSent = nil, false
 	if m.claim.Locator != nil {
 		m.previous, m.claim.Locator = m.claim.Locator, nil
 	}
@@ -904,6 +930,10 @@ func copyClaim(c Claim) Claim {
 	if c.Locator != nil {
 		loc := *c.Locator
 		c.Locator = &loc
+	}
+	if c.Enrollment != nil {
+		e := *c.Enrollment
+		c.Enrollment = &e
 	}
 	if c.Pending != nil {
 		d := *c.Pending

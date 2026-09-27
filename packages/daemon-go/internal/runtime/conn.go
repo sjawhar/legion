@@ -39,6 +39,9 @@ type Conn interface {
 	// AdoptWorkingCopy makes the agent's side set the author of its working copy, for a
 	// workspace the daemon cannot reach itself.
 	AdoptWorkingCopy(ctx context.Context, id GitIdentity, timeout time.Duration) error
+	// AgentSecretsEnrollment hands the agent's shim the secrets broker's enrollment id for its
+	// process, which the shim keeps beside the key it generated (AGENTC-393).
+	AgentSecretsEnrollment(ctx context.Context, enrollmentID string) error
 	// Sequence is the order the connection was registered in: one registered later has a larger
 	// sequence, so a caller can tell a connection newer than another.
 	Sequence() uint64

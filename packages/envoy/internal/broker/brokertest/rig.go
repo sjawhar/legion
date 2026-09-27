@@ -37,6 +37,8 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/broker/webauthntest"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 // Origin and RPID are the fixed WebAuthn origin/rpId every Rig's approver key and every
@@ -51,6 +53,11 @@ const (
 	testAAGUID = "ee882879-721c-4913-9775-3dfcce97072a"
 	uiToken    = "brokertest-ui-token-0123456789ab"
 )
+
+// podAudience is the fixed audience every Rig's pod verifier is constructed for, and the value
+// MintPodToken signs pod tokens against — arbitrary, since a Rig both mints and verifies them
+// itself; chosen only to read clearly in a failure message.
+const podAudience = "legion-broker-pod"
 
 // Rig is a live broker HTTP server (real handlers, real Postgres) plus direct handles to its
 // store and a real WebAuthn software authenticator seeded as Operator's approver key — enough to
@@ -73,12 +80,18 @@ type Rig struct {
 	// Approver is Operator's seeded real WebAuthn key: the software authenticator that produces
 	// real assertions for the human-approval half of a machine login or a credential request.
 	Approver *webauthntest.Authenticator
+	// podIssuer and podKey back MintPodToken: a local OIDC issuer this Rig's own pod verifier
+	// (wired into its enroll.Service by NewRig) trusts, and the signing key MintPodToken mints
+	// under.
+	podIssuer *oidctest.Issuer
+	podKey    *oidctest.Key
 }
 
 // NewRig seeds one approver key for login "sjawhar", a rules file naming it as a test secret's
-// approver and as a box operator, and mounts api.Register on an httptest.Server — wired exactly
-// as cmd/broker/main.go and api_test.go's newTestServer wire it. It skips t when
-// BROKER_TEST_DATABASE_URL is unset (storetest.Open's own contract).
+// approver and as a box operator, wires a real pod verifier (a local OIDC issuer trusted by an
+// enroll.K8sPodVerifier, mirroring cmd/broker/main.go's own wiring), and mounts api.Register on
+// an httptest.Server — wired exactly as cmd/broker/main.go and api_test.go's newTestServer wire
+// it. It skips t when BROKER_TEST_DATABASE_URL is unset (storetest.Open's own contract).
 func NewRig(t *testing.T) *Rig {
 	t.Helper()
 	st := storetest.Open(t)
@@ -138,7 +151,14 @@ approvers:
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	enr := &enroll.Service{Store: st, Lease: time.Hour}
+	issuer := oidctest.New(t)
+	podKey := issuer.PublishKey(t, "signing-key")
+	podVerifier, err := oidc.New(context.Background(), issuer.URL(), podAudience)
+	if err != nil {
+		t.Fatalf("oidc.New: %v", err)
+	}
+
+	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}}
 	enr.Chain = enroll.NewChainVerifier(st, approversSvc, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
@@ -167,6 +187,7 @@ approvers:
 	return &Rig{
 		URL: srv.URL, Operator: operator, OperatorFile: operatorFile,
 		Store: st, Approvers: approversSvc, CA: ca, Approver: auth,
+		podIssuer: issuer, podKey: podKey,
 	}
 }
 
@@ -210,4 +231,23 @@ func (r *Rig) Req(t *testing.T, method, path string, headers map[string]string, 
 func (r *Rig) UI(t *testing.T, method, path string, body any) (int, []byte) {
 	t.Helper()
 	return r.Req(t, method, path, map[string]string{"Authorization": "Bearer " + uiToken}, body)
+}
+
+// MintPodToken mints a projected service-account token bound to podUID — the shape
+// enroll.K8sPodVerifier.Verify reads — signed by this Rig's own local OIDC issuer, which the
+// Rig's enroll.Service trusts as its PodVerifier (wired in NewRig). Mirrors
+// internal/broker/enroll/enroll_test.go's own mintPodToken helper.
+func (r *Rig) MintPodToken(t *testing.T, podUID string) string {
+	t.Helper()
+	claims := r.podIssuer.Claims("system:serviceaccount:legion:worker", podAudience)
+	raw, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
+	var merged map[string]any
+	if err := json.Unmarshal(raw, &merged); err != nil {
+		t.Fatalf("unmarshal claims: %v", err)
+	}
+	merged["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
+	return r.podIssuer.Mint(t, r.podKey, merged)
 }

@@ -46,26 +46,34 @@ func goldenOptions() Options {
 const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
 
 // manifestCases are the Sandboxes the goldens pin: the root, which owns the tree volume; a worker
-// placed beside a scheduled pod of its tree, and one placed with none; a resume; and a relaunch
-// whose workspace is recovered after its volume was lost. colocate is whether another pod of the
-// tree is scheduled when the launch runs.
+// placed beside a scheduled pod of its tree, and one placed with none; a resume; a relaunch
+// whose workspace is recovered after its volume was lost; and the root enrolled with the secrets
+// broker. colocate is whether another pod of the tree is scheduled when the launch runs, and
+// agentSecrets, set for root-enrolled alone, is the runtime's enrollment for that one case
+// (TestManifestGoldens, TestManifestMatchesTheSandboxCRD apply it to the shared runtime before
+// building that case's manifest, and restore nil after — every other case runs unenrolled).
 func manifestCases(t *testing.T) map[string]struct {
-	spec     runtime.SpawnSpec
-	colocate bool
+	spec         runtime.SpawnSpec
+	colocate     bool
+	agentSecrets *AgentSecrets
 } {
 	resume := workerSpec(t)
 	resume.Generation, resume.BootToken, resume.ResumeSessionFile = 2, "boot-g2", resumeSession
 	recovered := workerSpec(t)
 	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
 	return map[string]struct {
-		spec     runtime.SpawnSpec
-		colocate bool
+		spec         runtime.SpawnSpec
+		colocate     bool
+		agentSecrets *AgentSecrets
 	}{
-		"root":               {rootSpec(t), false},
-		"worker-affinity":    {workerSpec(t), true},
-		"worker-no-affinity": {workerSpec(t), false},
-		"resume":             {resume, true},
-		"recovered":          {recovered, true},
+		"root":               {rootSpec(t), false, nil},
+		"worker-affinity":    {workerSpec(t), true, nil},
+		"worker-no-affinity": {workerSpec(t), false, nil},
+		"resume":             {resume, true, nil},
+		"recovered":          {recovered, true, nil},
+		"root-enrolled": {rootSpec(t), false, &AgentSecrets{
+			URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour,
+		}},
 	}
 }
 
@@ -96,6 +104,7 @@ func TestManifestGoldens(t *testing.T) {
 	}
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
+			r.agentSecrets = tc.agentSecrets
 			var buffer bytes.Buffer
 			encoder := json.NewEncoder(&buffer)
 			encoder.SetEscapeHTML(false)
@@ -136,6 +145,7 @@ func TestManifestMatchesTheSandboxCRD(t *testing.T) {
 	schema := sandboxSchema(t)
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
+			r.agentSecrets = tc.agentSecrets
 			if found := schemaViolations(manifestOf(t, r, tc.spec, tc.colocate), schema, ""); len(found) > 0 {
 				t.Fatalf("the manifest has fields the CRD does not declare as sent:\n%s", strings.Join(found, "\n"))
 			}
@@ -505,6 +515,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -586,31 +597,123 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 	}
 }
 
-// A pod holds no token Legion projects: it runs as the operator's ServiceAccount, the namespace's
-// default when the operator names none, with the API server's own token never mounted and no
-// projected volume of Legion's (the one token a pod carries, if any, is the operator's own).
-func TestAPodRunsAsTheOperatorsAccountWithNoTokenOfLegions(t *testing.T) {
-	for name, account := range map[string]string{"the operator's account": "operator-worker", "none named": ""} {
+// Without agent_secrets a pod carries no projected token of Legion's (the one token a pod carries,
+// if any, is the operator's own); with it, exactly one — alone in its volume, for the configured
+// audience and lifetime, mounted read-only in the worker container alone — beside a memory-backed
+// key directory, the two AGENT_SECRETS_* variables, and the shim's three flags. The probe pod
+// carries none of it: it runs no shim and enrolls nothing.
+func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
+	for name, tc := range map[string]struct {
+		secrets *AgentSecrets
+		account string
+	}{
+		"not enrolled, the operator's account": {nil, "operator-worker"},
+		"not enrolled, no account":             {nil, ""},
+		"enrolled":                             {&AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}, "legion-worker"},
+	} {
 		t.Run(name, func(t *testing.T) {
 			opts := goldenOptions()
-			opts.Pod.ServiceAccount = account
+			opts.Pod.ServiceAccount = tc.account
+			opts.AgentSecrets = tc.secrets
 			r, err := configure(opts)
 			if err != nil {
 				t.Fatal(err)
 			}
-			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
-			for pod, spec := range map[string]corev1.PodSpec{"root": podOf(t, r, rootSpec(t), false), "worker": podOf(t, r, workerSpec(t), true), "probe": probe} {
-				if spec.ServiceAccountName != account {
-					t.Errorf("%s: serviceAccountName = %q, want %q", pod, spec.ServiceAccountName, account)
+			l, err := r.prepare(manifestCases(t)["root"].spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := r.podTemplate(l, false).Spec
+			if spec.ServiceAccountName != tc.account || spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+				t.Fatalf("serviceAccountName %q automount %v", spec.ServiceAccountName, spec.AutomountServiceAccountToken)
+			}
+			var tokens []corev1.Volume
+			for _, v := range spec.Volumes {
+				if v.Projected != nil && slices.ContainsFunc(v.Projected.Sources, func(s corev1.VolumeProjection) bool { return s.ServiceAccountToken != nil }) {
+					tokens = append(tokens, v)
 				}
-				if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
-					t.Errorf("%s: the API server's service account token is mounted", pod)
+			}
+			worker := spec.Containers[0]
+			env := map[string]string{}
+			for _, e := range worker.Env {
+				env[e.Name] = e.Value
+			}
+			if tc.secrets == nil {
+				if len(tokens) != 0 || env["AGENT_SECRETS_URL"] != "" || env["AGENT_SECRETS_KEY_DIR"] != "" || slices.Contains(worker.Command, "--agent-secrets-key-dir") {
+					t.Fatalf("an unenrolled pod carries agent-secrets pieces: tokens %d, env %v, command %v", len(tokens), env, worker.Command)
 				}
-				for _, volume := range spec.Volumes {
-					if volume.Projected != nil {
-						t.Errorf("%s: Legion projects volume %+v", pod, volume)
+				return
+			}
+			if len(tokens) != 1 || tokens[0].Name != agentSecretsTokenVolume || len(tokens[0].Projected.Sources) != 1 {
+				t.Fatalf("token volumes %+v, want exactly %s with one source", tokens, agentSecretsTokenVolume)
+			}
+			token := tokens[0].Projected.Sources[0].ServiceAccountToken
+			if token.Audience != "agent-secrets" || token.ExpirationSeconds == nil || *token.ExpirationSeconds != 3600 || token.Path != AgentSecretsTokenFile {
+				t.Fatalf("token source %+v", token)
+			}
+			mounts := map[string]corev1.VolumeMount{}
+			for _, m := range worker.VolumeMounts {
+				mounts[m.Name] = m
+			}
+			if m := mounts[agentSecretsTokenVolume]; m.MountPath != AgentSecretsTokenDir || !m.ReadOnly {
+				t.Fatalf("token mount %+v, want read-only at %s", m, AgentSecretsTokenDir)
+			}
+			if m := mounts[agentSecretsKeyVolume]; m.MountPath != AgentSecretsKeyDir || m.ReadOnly {
+				t.Fatalf("key mount %+v, want writable at %s", m, AgentSecretsKeyDir)
+			}
+			key := slices.IndexFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == agentSecretsKeyVolume })
+			if key < 0 || spec.Volumes[key].EmptyDir == nil || spec.Volumes[key].EmptyDir.Medium != corev1.StorageMediumMemory {
+				t.Fatalf("key volume %+v, want a memory-backed emptyDir", spec.Volumes[key])
+			}
+			for _, init := range spec.InitContainers {
+				for _, m := range init.VolumeMounts {
+					if m.Name == agentSecretsTokenVolume || m.Name == agentSecretsKeyVolume {
+						t.Fatalf("init container %s mounts %s", init.Name, m.Name)
 					}
 				}
+			}
+			if env["AGENT_SECRETS_URL"] != tc.secrets.URL || env["AGENT_SECRETS_KEY_DIR"] != AgentSecretsKeyDir {
+				t.Fatalf("env %v", env)
+			}
+			want := []string{"--agent-secrets-key-dir", AgentSecretsKeyDir, "--pod-token-file", AgentSecretsTokenDir + "/" + AgentSecretsTokenFile, "--agent-secrets-bin", opts.Tools.AgentSecrets}
+			joined := strings.Join(worker.Command, "\x00")
+			if !strings.Contains(joined, strings.Join(want, "\x00")) || strings.Index(joined, "--agent-secrets-key-dir") > strings.Index(joined, "\x00--\x00") {
+				t.Fatalf("shim command %v, want the three flags before --", worker.Command)
+			}
+			probe := r.probeManifest("legion-probe-test", ImageProbe{Contract: 7}, time.Now().Add(time.Hour)).Spec.PodTemplate.Spec
+			for _, v := range probe.Volumes {
+				if v.Name == agentSecretsTokenVolume || v.Name == agentSecretsKeyVolume {
+					t.Fatalf("the probe pod carries %s", v.Name)
+				}
+			}
+		})
+	}
+}
+
+// New refuses an agent-secrets configuration no pod could run: no broker URL, no token audience,
+// an expiry outside the API server's floor (10m) and agent-c's admission cap (1h), or the image's
+// agent-secrets binary missing.
+func TestNewRefusesAnAgentSecretsOptionNoPodCouldRun(t *testing.T) {
+	for name, tc := range map[string]struct {
+		edit func(*Options)
+		want string
+	}{
+		"no url":      {func(o *Options) { o.AgentSecrets = &AgentSecrets{Audience: "a", TokenExpiry: time.Hour} }, "agent secrets: no broker URL"},
+		"no audience": {func(o *Options) { o.AgentSecrets = &AgentSecrets{URL: "https://s", TokenExpiry: time.Hour} }, "agent secrets: no token audience"},
+		"expiry too long": {func(o *Options) {
+			o.AgentSecrets = &AgentSecrets{URL: "https://s", Audience: "a", TokenExpiry: 2 * time.Hour}
+		}, "agent secrets: token expiry 2h0m0s is not between 10m0s and 1h0m0s"},
+		"no binary": {func(o *Options) {
+			o.AgentSecrets = &AgentSecrets{URL: "https://s", Audience: "a", TokenExpiry: time.Hour}
+			o.Tools.AgentSecrets = ""
+		}, "the image's agent-secrets path \"\" is not absolute"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := goldenOptions()
+			tc.edit(&opts)
+			_, err := configure(opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("configure() = %v, want %q", err, tc.want)
 			}
 		})
 	}
@@ -843,6 +946,7 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts := goldenOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)

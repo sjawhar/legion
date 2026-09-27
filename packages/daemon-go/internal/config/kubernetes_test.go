@@ -739,3 +739,67 @@ runtime:
 		t.Errorf("the operator pod settled as %+v, want the fixture's account, two volumes, three mounts, and its overlay", pod)
 	}
 }
+
+func TestAgentSecretsBlockSettlesWithDefaults(t *testing.T) {
+	path := writeConfigFile(t, kubernetesFile+`    agent_secrets:
+      url: https://secrets.dev1.internal.trajectorylabs.com
+      operator: sjawhar
+`)
+	cfg, err := LoadForValidation(path, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Runtime.Kubernetes.AgentSecrets
+	want := &AgentSecretsConfig{
+		URL: "https://secrets.dev1.internal.trajectorylabs.com", Operator: "sjawhar",
+		Audience: "agent-secrets", TokenExpirySeconds: 3600,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("agent_secrets = %+v, want %+v", got, want)
+	}
+}
+
+func TestAgentSecretsBlockIsAbsentByDefault(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.Kubernetes.AgentSecrets != nil {
+		t.Fatalf("agent_secrets = %+v without the block", cfg.Runtime.Kubernetes.AgentSecrets)
+	}
+}
+
+func TestAgentSecretsBlockRefusals(t *testing.T) {
+	for name, tc := range map[string]struct{ block, want string }{
+		"no url":            {"    agent_secrets:\n      operator: sjawhar\n", "runtime.kubernetes.agent_secrets.url is required"},
+		"no operator":       {"    agent_secrets:\n      url: https://s\n", "runtime.kubernetes.agent_secrets.operator is required"},
+		"url with a path":   {"    agent_secrets:\n      url: https://s/v1\n      operator: sjawhar\n", "runtime.kubernetes.agent_secrets.url must be an absolute URL with no path"},
+		"plain http remote": {"    agent_secrets:\n      url: http://secrets.example.com\n      operator: sjawhar\n", "runtime.kubernetes.agent_secrets.url must use https unless the host is a loopback address"},
+		"expiry too long":   {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n      token_expiry_seconds: 7200\n", "runtime.kubernetes.agent_secrets.token_expiry_seconds must be between 600 and 3600"},
+		"expiry too short":  {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n      token_expiry_seconds: 60\n", "runtime.kubernetes.agent_secrets.token_expiry_seconds must be between 600 and 3600"},
+		"blank audience":    {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n      audience: \"\"\n", "runtime.kubernetes.agent_secrets.audience must not be empty"},
+		"unknown key":       {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n      token: abc\n", "unknown key runtime.kubernetes.agent_secrets.token"},
+		// The Plan C daemon runs its own machine login instead of reading a launcher credential
+		// off disk: the old key must fail loudly, never parse as a silently-ignored unknown.
+		"the removed launcher_token_file key": {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n      launcher_token_file: x\n", "unknown key runtime.kubernetes.agent_secrets.launcher_token_file"},
+		"not a mapping":                       {"    agent_secrets: yes\n", "runtime.kubernetes.agent_secrets must be a mapping"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+tc.block), noEnv)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
+	for _, url := range []string{"http://127.0.0.1:13380", "http://LOCALHOST:13380"} {
+		t.Run(url, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: "+url+"\n      operator: sjawhar\n"), noEnv)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
