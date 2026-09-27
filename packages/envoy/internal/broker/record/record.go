@@ -41,9 +41,8 @@ var (
 )
 
 // CanonicalLogin lowercases and trims a GitHub login. Every login comparison in the module goes
-// through this form on both sides. Moved here verbatim from
-// internal/broker/dispatch/client.go; that package is deleted in a later task, so both copies
-// exist until then and are equal.
+// through this form on both sides. Moved here verbatim from the deleted internal/broker/dispatch
+// package's client.go (AGENTC-393 v9: the broker holds no Dispatch credential).
 func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }

@@ -354,43 +354,59 @@ func (m *Machine) Cancel(ctx context.Context, id, enrollmentID string) error {
 	return tx.Commit(ctx)
 }
 
+// expiredRequest is one row a sweep's own transaction moved from pending to expired: enough to
+// wake its owner (Sweeper's own job) without re-reading the request afterward.
+type expiredRequest struct {
+	id, enrollmentID, recordID string
+}
+
 // ExpirePending expires every pending request past its deadline, writing the state transition,
 // its audit row, and its record's expired event together.
 func (m *Machine) ExpirePending(ctx context.Context, now time.Time) (int, error) {
+	expired, err := m.expirePending(ctx, now)
+	return len(expired), err
+}
+
+// expirePending is ExpirePending's shared implementation: it returns the rows it moved to
+// 'expired' so Sweeper (this package's own Tick) can wake each one's owner once the transaction
+// has actually committed.
+func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]expiredRequest, error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	defer tx.Rollback(ctx)
 	const detail = "no answer before the request expired"
 	rows, err := tx.Query(ctx, `update requests set state='expired', decided_at=$1, decision_detail=$2
 		where state='pending' and pending_expires_at < $1 returning id, enrollment_id, record_id`, now, detail)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
-	type expiredRow struct{ id, enrollmentID, recordID string }
-	var expired []expiredRow
+	var expired []expiredRequest
 	for rows.Next() {
-		var r expiredRow
+		var r expiredRequest
 		if err := rows.Scan(&r.id, &r.enrollmentID, &r.recordID); err != nil {
 			rows.Close()
-			return 0, err
+			return nil, err
 		}
 		expired = append(expired, r)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return nil, err
 	}
 	rows.Close()
 	for _, r := range expired {
 		if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, actor) values ('request.expired',$1,$2,'broker')`, r.enrollmentID, r.id); err != nil {
-			return 0, err
+			return nil, err
 		}
 		if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, actor, detail) values ($1,'expired','broker',$2)`, r.recordID, detail); err != nil {
-			return 0, err
+			return nil, err
 		}
 	}
-	return len(expired), tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return expired, nil
 }
 
 // ApplyDecision decides a pending agent_secret record on a verified assertion. approve=true mints

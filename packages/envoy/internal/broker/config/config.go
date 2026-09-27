@@ -17,9 +17,8 @@ type Config struct {
 	ListenAddr         string
 	DatabaseURL        string
 	PublicURL          string
-	DispatchURL        string
-	DispatchToken      string
-	DispatchProject    string
+	UIOrigin           string
+	UIToken            string
 	RulesFile          string
 	RulesS3URI         string
 	RulesReloadSeconds int
@@ -28,9 +27,13 @@ type Config struct {
 	EnvoyURL           string
 	EnvoyToken         string
 	LeaseSeconds       int
-	AskPollSeconds     int
 	ProofSkewSeconds   int
 	MaxGrantSeconds    int
+	// LauncherCredentialSeconds is a machine login's minted launcher credential lifetime
+	// (BROKER_LAUNCHER_CREDENTIAL_SECONDS).
+	LauncherCredentialSeconds int
+	// SweepSeconds is the Sweeper's tick interval (BROKER_SWEEP_SECONDS).
+	SweepSeconds int
 	// TrustedProxyHeader is the request header the launcher-credential rate limiter trusts for
 	// the caller's real address (BROKER_TRUSTED_PROXY_HEADER), e.g. "X-Forwarded-For". Empty (the
 	// default) means the broker is reached directly, so it keys on r.RemoteAddr as before. Set it
@@ -39,13 +42,55 @@ type Config struct {
 	TrustedProxyHeader string
 }
 
+// removedVars are AGENTC-393 v9's removed Dispatch environment variables: the broker holds no
+// Dispatch credential and asks/issues nothing, so a stale deployment still setting one of these
+// must fail loudly rather than silently running with a Dispatch dependency it no longer has.
+var removedVars = []string{
+	"BROKER_DISPATCH_URL",
+	"BROKER_DISPATCH_TOKEN",
+	"BROKER_DISPATCH_TOKEN_FILE",
+	"BROKER_DISPATCH_PROJECT",
+	"BROKER_ASK_POLL_SECONDS",
+}
+
+// databasePasswordPlaceholder is substituted in BROKER_DATABASE_URL with the URL-escaped value of
+// BROKER_DATABASE_PASSWORD, so the password itself never has to be pre-escaped by whoever sets the
+// URL. Naming the placeholder without the variable, or the variable without the placeholder, is
+// refused naming both: a silently-unsubstituted placeholder would try to connect to a literal
+// "${BROKER_DATABASE_PASSWORD}" password, and a silently-unused password is a stale, ignored
+// configuration entry.
+const databasePasswordPlaceholder = "${BROKER_DATABASE_PASSWORD}"
+
+func substituteDatabasePassword(rawURL string, getenv func(string) string) (string, error) {
+	password := getenv("BROKER_DATABASE_PASSWORD")
+	hasPlaceholder := strings.Contains(rawURL, databasePasswordPlaceholder)
+	switch {
+	case hasPlaceholder && password == "":
+		return "", fmt.Errorf("BROKER_DATABASE_URL names %s but BROKER_DATABASE_PASSWORD is not set", databasePasswordPlaceholder)
+	case !hasPlaceholder && password != "":
+		return "", fmt.Errorf("BROKER_DATABASE_PASSWORD is set but BROKER_DATABASE_URL does not name %s", databasePasswordPlaceholder)
+	case hasPlaceholder:
+		return strings.ReplaceAll(rawURL, databasePasswordPlaceholder, url.QueryEscape(password)), nil
+	default:
+		return rawURL, nil
+	}
+}
+
 func Load(getenv func(string) string) (Config, error) {
+	for _, name := range removedVars {
+		if getenv(name) != "" {
+			return Config{}, fmt.Errorf("%s is removed; the broker holds no Dispatch credential (AGENTC-393 v9)", name)
+		}
+	}
+	databaseURL, err := substituteDatabasePassword(getenv("BROKER_DATABASE_URL"), getenv)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		ListenAddr:         orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
-		DatabaseURL:        getenv("BROKER_DATABASE_URL"),
+		DatabaseURL:        databaseURL,
 		PublicURL:          getenv("BROKER_PUBLIC_URL"),
-		DispatchURL:        getenv("BROKER_DISPATCH_URL"),
-		DispatchProject:    getenv("BROKER_DISPATCH_PROJECT"),
+		UIOrigin:           getenv("BROKER_UI_ORIGIN"),
 		RulesFile:          getenv("BROKER_RULES_FILE"),
 		RulesS3URI:         getenv("BROKER_RULES_S3_URI"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
@@ -54,15 +99,14 @@ func Load(getenv func(string) string) (Config, error) {
 		TrustedProxyHeader: getenv("BROKER_TRUSTED_PROXY_HEADER"),
 	}
 	for _, req := range []struct{ name, value string }{
-		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},
-		{"BROKER_DISPATCH_URL", cfg.DispatchURL}, {"BROKER_DISPATCH_PROJECT", cfg.DispatchProject},
+		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL}, {"BROKER_UI_ORIGIN", cfg.UIOrigin},
 	} {
 		if strings.TrimSpace(req.value) == "" {
 			return Config{}, fmt.Errorf("%s is required", req.name)
 		}
 	}
 	for _, u := range []struct{ name, value string }{
-		{"BROKER_PUBLIC_URL", cfg.PublicURL}, {"BROKER_DISPATCH_URL", cfg.DispatchURL},
+		{"BROKER_PUBLIC_URL", cfg.PublicURL}, {"BROKER_UI_ORIGIN", cfg.UIOrigin},
 	} {
 		parsed, err := url.Parse(u.value)
 		if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
@@ -80,14 +124,14 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience = issuer, audience
-	token, err := secretValue(getenv, "BROKER_DISPATCH_TOKEN")
+	token, err := secretValue(getenv, "BROKER_UI_TOKEN")
 	if err != nil {
 		return Config{}, err
 	}
 	if token == "" {
-		return Config{}, fmt.Errorf("BROKER_DISPATCH_TOKEN_FILE or BROKER_DISPATCH_TOKEN is required")
+		return Config{}, fmt.Errorf("BROKER_UI_TOKEN_FILE or BROKER_UI_TOKEN is required")
 	}
-	cfg.DispatchToken = token
+	cfg.UIToken = token
 	if cfg.EnvoyURL != "" {
 		if cfg.EnvoyToken, err = secretValue(getenv, "BROKER_ENVOY_TOKEN"); err != nil {
 			return Config{}, err
@@ -100,10 +144,11 @@ func Load(getenv func(string) string) (Config, error) {
 		max  int
 	}{
 		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 3600},
-		{"BROKER_ASK_POLL_SECONDS", &cfg.AskPollSeconds, 5, 60},
 		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 300},
 		{"BROKER_MAX_GRANT_SECONDS", &cfg.MaxGrantSeconds, 43200, 43200},
 		{"BROKER_RULES_RELOAD_SECONDS", &cfg.RulesReloadSeconds, 300, 3600},
+		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 2592000},
+		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 60},
 	}
 	for _, i := range ints {
 		raw := getenv(i.name)

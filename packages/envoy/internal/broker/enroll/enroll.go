@@ -22,7 +22,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/broker/approvers"
-	"github.com/sjawhar/envoy/internal/broker/dispatch"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
 )
@@ -100,7 +99,7 @@ type execer interface {
 // machine-login flow); AuthenticateLauncher refuses such a credential outright.
 func (s *Service) mintLauncherCredential(ctx context.Context, exec execer, operator, service *string, host, thumbprint string, jwk json.RawMessage, recordID string, expires time.Time) (uuid.UUID, error) {
 	if operator != nil {
-		operator = new(dispatch.CanonicalLogin(*operator))
+		operator = new(record.CanonicalLogin(*operator))
 	}
 	id := uuid.New()
 	_, err := exec.Exec(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, expires_at) values ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -210,7 +209,7 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
 	if in.Operator != nil {
-		in.Operator = new(dispatch.CanonicalLogin(*in.Operator))
+		in.Operator = new(record.CanonicalLogin(*in.Operator))
 	}
 	if !authorized(cred, in.Kind, in.Operator) {
 		return Enrollment{}, ErrOperatorMismatch

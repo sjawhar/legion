@@ -719,6 +719,18 @@ func (s *Service) FinishEndorse(ctx context.Context, login, ceremonyID string, r
 	return renderEndorsementYAML(*subject, response)
 }
 
+// SweepExpiredCeremonies deletes every registration or endorsement ceremony past its own
+// expires_at: a caller who opened one and never finished it (closed the tab, never returned)
+// would otherwise leave that row in webauthn_ceremonies forever, since only Finish* consumes a
+// ceremony and only on the path that completes it. It returns the number of rows removed.
+func (s *Service) SweepExpiredCeremonies(ctx context.Context) (int, error) {
+	tag, err := s.Store.Pool.Exec(ctx, `delete from webauthn_ceremonies where expires_at < now()`)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func renderEndorsementYAML(by string, assertion json.RawMessage) (string, error) {
 	var response any
 	if err := json.Unmarshal(assertion, &response); err != nil {

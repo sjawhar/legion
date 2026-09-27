@@ -387,3 +387,51 @@ func TestEndorseCeremonyRoundTripsAndKeysListsBothKeys(t *testing.T) {
 		t.Fatalf("key2 EndorsedBy = %q, want %q", byCredentialID[key2.CredentialID].EndorsedBy, key1.CredentialID)
 	}
 }
+
+// TestSweepExpiredCeremoniesRemovesOnlyOverdueRows pins SweepExpiredCeremonies's own contract: a
+// registration or endorsement ceremony past its own expires_at is removed, one still inside its
+// window is left alone, and the returned count matches exactly what was removed.
+func TestSweepExpiredCeremoniesRemovesOnlyOverdueRows(t *testing.T) {
+	svc, _ := newFixture(t)
+	ctx := context.Background()
+
+	expired, err := svc.BeginRegister(ctx, "sjawhar")
+	if err != nil {
+		t.Fatalf("BeginRegister: %v", err)
+	}
+	if _, err := svc.Store.Pool.Exec(ctx, `update webauthn_ceremonies set expires_at = now() - interval '1 minute' where id=$1`, expired.ID); err != nil {
+		t.Fatalf("backdate ceremony: %v", err)
+	}
+
+	live, err := svc.BeginRegister(ctx, "sjawhar")
+	if err != nil {
+		t.Fatalf("BeginRegister: %v", err)
+	}
+
+	n, err := svc.SweepExpiredCeremonies(ctx)
+	if err != nil {
+		t.Fatalf("SweepExpiredCeremonies: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("SweepExpiredCeremonies = %d, want 1", n)
+	}
+
+	var expiredCount, liveCount int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from webauthn_ceremonies where id=$1`, expired.ID).Scan(&expiredCount); err != nil {
+		t.Fatalf("count expired ceremony: %v", err)
+	}
+	if expiredCount != 0 {
+		t.Fatalf("expired ceremony still present: count = %d, want 0", expiredCount)
+	}
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from webauthn_ceremonies where id=$1`, live.ID).Scan(&liveCount); err != nil {
+		t.Fatalf("count live ceremony: %v", err)
+	}
+	if liveCount != 1 {
+		t.Fatalf("live ceremony was removed: count = %d, want 1", liveCount)
+	}
+
+	// A second sweep with nothing overdue removes nothing.
+	if n, err := svc.SweepExpiredCeremonies(ctx); err != nil || n != 0 {
+		t.Fatalf("SweepExpiredCeremonies (nothing overdue) = %d, %v, want 0, nil", n, err)
+	}
+}

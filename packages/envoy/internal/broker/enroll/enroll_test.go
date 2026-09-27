@@ -10,8 +10,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/google/uuid"
 
-	"github.com/sjawhar/envoy/internal/broker/dispatch"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
@@ -84,7 +84,7 @@ func mintCredential(t *testing.T, svc *Service, operator, service *string, host 
 		t.Fatalf("mintLauncherCredential: %v", err)
 	}
 	if operator != nil {
-		operator = new(dispatch.CanonicalLogin(*operator))
+		operator = new(record.CanonicalLogin(*operator))
 	}
 	return Credential{ID: id, Operator: operator, Service: service, Host: host}
 }

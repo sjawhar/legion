@@ -72,8 +72,6 @@ func routes() []apiRoute {
 	return []apiRoute{
 		{http.MethodPost, "/v1/enrollments", launcherAuth((*server).createEnrollment)},
 		{http.MethodDelete, "/v1/enrollments/{id}", launcherAuth((*server).deleteEnrollment)},
-		{http.MethodPost, "/v1/launcher-credentials", public((*server).requestLauncherCredential)},
-		{http.MethodGet, "/v1/launcher-credentials/{pending}", public((*server).readLauncherCredential)},
 		{http.MethodPost, "/v1/enrollments/{id}/renew", sessionAuth((*server).renewEnrollment)},
 		{http.MethodGet, "/v1/enrollments/self", sessionAuth((*server).readSelf)},
 		{http.MethodPost, "/v1/requests", sessionAuth((*server).createRequest)},

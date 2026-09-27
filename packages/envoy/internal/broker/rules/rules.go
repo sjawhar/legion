@@ -32,7 +32,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/envoy/internal/broker/approvers"
-	"github.com/sjawhar/envoy/internal/broker/dispatch"
+	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
 var ErrUnknownSecret = errors.New("no rule names this secret")
@@ -195,7 +195,7 @@ func Parse(data []byte) (*Set, error) {
 		requesters := make([]requester, 0, len(*r.Requesters))
 		pods, podsForAnyAccount := 0, false
 		for i, q := range *r.Requesters {
-			q.Operator = dispatch.CanonicalLogin(q.Operator)
+			q.Operator = record.CanonicalLogin(q.Operator)
 			q.ServiceAccount = strings.TrimSpace(q.ServiceAccount)
 			switch q.Kind {
 			case "box", "host":
@@ -231,7 +231,7 @@ func Parse(data []byte) (*Set, error) {
 						return nil, fmt.Errorf("rules: %s: approver operator %s has no approvers entry", name, q.Operator)
 					}
 				case strings.HasPrefix(q.Approver, "login:"):
-					login := dispatch.CanonicalLogin(strings.TrimPrefix(q.Approver, "login:"))
+					login := record.CanonicalLogin(strings.TrimPrefix(q.Approver, "login:"))
 					if login == "" {
 						return nil, fmt.Errorf("rules: %s requesters[%d]: approver login: names nobody", name, i)
 					}
@@ -287,7 +287,7 @@ func parseApprovers(spec *approversSpec) (Approvers, error) {
 	}
 	logins := make(map[string][]approvers.KeyEntry, len(spec.Logins))
 	for login, l := range spec.Logins {
-		canon := dispatch.CanonicalLogin(login)
+		canon := record.CanonicalLogin(login)
 		if canon == "" {
 			return Approvers{}, fmt.Errorf("rules: approvers.logins: a login key must not be blank")
 		}
@@ -360,7 +360,7 @@ func (s *Set) Evaluate(name string, r Requester) (Decision, error) {
 		return Decision{}, ErrUnknownSecret
 	}
 	d := Decision{Outcome: "deny", Delivery: secret.Delivery, Source: secret.Source, MaxLifetime: secret.MaxLifetime}
-	operator := dispatch.CanonicalLogin(r.Operator)
+	operator := record.CanonicalLogin(r.Operator)
 	for _, q := range secret.Requesters {
 		switch {
 		case q.Kind != r.Kind:
