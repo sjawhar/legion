@@ -578,7 +578,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		if err != nil {
 			return nil, err
 		}
-		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": string(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": unescapeMarkdownText(current.Ref)}, Children: emptyParagraphFirst(children, false)}, nil
 	case *typedDirective:
 		return parseTypedDirective(current, source, footnotes)
 	case *unsupportedDirective:
@@ -949,7 +949,9 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			if written, set := current.AttributeString(string(referenceLabelAttr)); set {
 				label = written.(string)
 			}
-			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": label}})
+			// The browser editor's parser decodes a label's escapes and character references, and
+			// matches a reference to its definition by the label as written.
+			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": unescapeMarkdownText([]byte(label))}})
 		case *extensionast.FootnoteBacklink:
 			continue
 		case *ast.RawHTML:

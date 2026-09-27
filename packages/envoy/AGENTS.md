@@ -838,7 +838,11 @@ footnote definition is refused, since that parser reads a line of `=` or `-` con
 one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text, and so
 is one inside a typed block, which that parser's references reach only from inside a typed block or
 after it. A definition whose label holds whitespace is refused, which that parser reads as a
-paragraph. A definition's later
+paragraph. A label is stored as that parser reads it, its escapes and character references decoded
+(`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the
+label as written; the writer escapes a bracket, a pipe, a backslash before punctuation or at the
+end, an ampersand opening a character reference, and white space as a numeric one, so each label
+reads back and one that needs none is written as it is (`escapeFootnoteLabel`). A definition's later
 lines start four columns past where its container's content starts, whatever indentation stands
 before its `[^` (`browserTextColumn`, `quoteContentColumn`). Goldmark gathers
 the definitions it keeps at the document's end in the order of their first references and drops

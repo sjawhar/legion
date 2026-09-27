@@ -8808,6 +8808,359 @@
     "rendered_by_milkdown": "Code[^1], a list[^2], a quote[^3] and a callout[^4].\n\n[^1]: Note.\n\n    ```\n    code\n    ```\n\n[^2]: Note.\n\n    * item\n\n[^3]: Note.\n\n    > quoted\n\n[^4]: :::callout{#footnote-callout kind=\"note\" title=\"In a footnote\"}\n    Body.\n    :::\n"
   },
   {
+    "name": "footnote-label-escapes",
+    "markdown": "Labels written with escapes and character references, which the browser editor's parser decodes.\n\nSee[^a\\*], [^b\\_c], [^d\\\\e], [^f&amp;g], [^h\\]i], [^A\\*j], [^k&b], [^l\\m], [^n&#32;o] and [^p\\|q].\n\n[^a\\*]: One.\n\n[^b\\_c]: Two.\n\n[^d\\\\e]: Three.\n\n[^f&amp;g]: Four.\n\n[^h\\]i]: Five.\n\n> [^a\\*j]: Six, in a quote.\n\n[^k&b]: Seven.\n\n[^l\\m]: Eight.\n\n[^n&#32;o]: Nine.\n\n[^p\\|q]: Ten.\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Labels written with escapes and character references, which the browser editor's parser decodes."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "See"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "a*"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "b_c"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "d\\e"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "f&g"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "h]i"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "A*j"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "k&b"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "l\\m"
+              }
+            },
+            {
+              "type": "text",
+              "text": ", "
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "n o"
+              }
+            },
+            {
+              "type": "text",
+              "text": " and "
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "p|q"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "a*",
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "One."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "b_c",
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000006"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Two."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "d\\e",
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000008"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Three."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "f&g",
+            "blockId": "b-000009"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000010"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Four."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "h]i",
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000012"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Five."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "footnote_definition",
+              "attrs": {
+                "label": "a*j",
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000015"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Six, in a quote."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "k&b",
+            "blockId": "b-000016"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000017"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Seven."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "l\\m",
+            "blockId": "b-000018"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000019"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Eight."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "n o",
+            "blockId": "b-000020"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000021"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Nine."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "p|q",
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000023"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Ten."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AXgBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQFgTGFiZWxzIHdyaXR0ZW4gd2l0aCBlc2NhcGVzIGFuZCBjaGFyYWN0ZXIgcmVmZXJlbmNlcywgd2hpY2ggdGhlIGJyb3dzZXIgZWRpdG9yJ3MgcGFyc2VyIGRlY29kZXMuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAAWMGBAABZANTZWWHAWQDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAWgFbGFiZWwBdwJhKocBaAYEAAFqAiwghwFqAxJmb290bm90ZV9yZWZlcmVuY2UoAAFtBWxhYmVsAXcDYl9jhwFtBgQAAW8CLCCHAW8DEmZvb3Rub3RlX3JlZmVyZW5jZSgAAXIFbGFiZWwBdwNkXGWHAXIGBAABdAIsIIcBdAMSZm9vdG5vdGVfcmVmZXJlbmNlKAABdwVsYWJlbAF3A2YmZ4cBdwYEAAF5AiwghwF5AxJmb290bm90ZV9yZWZlcmVuY2UoAAF8BWxhYmVsAXcDaF1phwF8BgQAAX4CLCCHAX4DEmZvb3Rub3RlX3JlZmVyZW5jZSgAAYEBBWxhYmVsAXcDQSpqhwGBAQYEAAGDAQIsIIcBgwEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAYYBBWxhYmVsAXcDayZihwGGAQYEAAGIAQIsIIcBiAEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAYsBBWxhYmVsAXcDbFxthwGLAQYEAAGNAQIsIIcBjQEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAZABBWxhYmVsAXcDbiBvhwGQAQYEAAGSAQUgYW5kIIcBkgEDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAZgBBWxhYmVsAXcDcHxxhwGYAQYEAAGaAQEuKAABYwdibG9ja0lkAXcIYi0wMDAwMDKHAWMDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGdAQMJcGFyYWdyYXBoBwABngEGBAABnwEET25lLigAAZ4BB2Jsb2NrSWQBdwhiLTAwMDAwNCgAAZ0BBWxhYmVsAXcCYSooAAGdAQdibG9ja0lkAXcIYi0wMDAwMDOHAZ0BAxNmb290bm90ZV9kZWZpbml0aW9uBwABpwEDCXBhcmFncmFwaAcAAagBBgQAAakBBFR3by4oAAGoAQdibG9ja0lkAXcIYi0wMDAwMDYoAAGnAQVsYWJlbAF3A2JfYygAAacBB2Jsb2NrSWQBdwhiLTAwMDAwNYcBpwEDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGxAQMJcGFyYWdyYXBoBwABsgEGBAABswEGVGhyZWUuKAABsgEHYmxvY2tJZAF3CGItMDAwMDA4KAABsQEFbGFiZWwBdwNkXGUoAAGxAQdibG9ja0lkAXcIYi0wMDAwMDeHAbEBAxNmb290bm90ZV9kZWZpbml0aW9uBwABvQEDCXBhcmFncmFwaAcAAb4BBgQAAb8BBUZvdXIuKAABvgEHYmxvY2tJZAF3CGItMDAwMDEwKAABvQEFbGFiZWwBdwNmJmcoAAG9AQdibG9ja0lkAXcIYi0wMDAwMDmHAb0BAxNmb290bm90ZV9kZWZpbml0aW9uBwAByAEDCXBhcmFncmFwaAcAAckBBgQAAcoBBUZpdmUuKAAByQEHYmxvY2tJZAF3CGItMDAwMDEyKAAByAEFbGFiZWwBdwNoXWkoAAHIAQdibG9ja0lkAXcIYi0wMDAwMTGHAcgBAwpibG9ja3F1b3RlBwAB0wEDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAHUAQMJcGFyYWdyYXBoBwAB1QEGBAAB1gEQU2l4LCBpbiBhIHF1b3RlLigAAdUBB2Jsb2NrSWQBdwhiLTAwMDAxNSgAAdQBBWxhYmVsAXcDYSpqKAAB1AEHYmxvY2tJZAF3CGItMDAwMDE0KAAB0wEHYmxvY2tJZAF3CGItMDAwMDEzhwHTAQMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAesBAwlwYXJhZ3JhcGgHAAHsAQYEAAHtAQZTZXZlbi4oAAHsAQdibG9ja0lkAXcIYi0wMDAwMTcoAAHrAQVsYWJlbAF3A2smYigAAesBB2Jsb2NrSWQBdwhiLTAwMDAxNocB6wEDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAH3AQMJcGFyYWdyYXBoBwAB+AEGBAAB+QEGRWlnaHQuKAAB+AEHYmxvY2tJZAF3CGItMDAwMDE5KAAB9wEFbGFiZWwBdwNsXG0oAAH3AQdibG9ja0lkAXcIYi0wMDAwMTiHAfcBAxNmb290bm90ZV9kZWZpbml0aW9uBwABgwIDCXBhcmFncmFwaAcAAYQCBgQAAYUCBU5pbmUuKAABhAIHYmxvY2tJZAF3CGItMDAwMDIxKAABgwIFbGFiZWwBdwNuIG8oAAGDAgdibG9ja0lkAXcIYi0wMDAwMjCHAYMCAxNmb290bm90ZV9kZWZpbml0aW9uBwABjgIDCXBhcmFncmFwaAcAAY8CBgQAAZACBFRlbi4oAAGPAgdibG9ja0lkAXcIYi0wMDAwMjMoAAGOAgVsYWJlbAF3A3B8cSgAAY4CB2Jsb2NrSWQBdwhiLTAwMDAyMgA=",
+    "rendered_by_milkdown": "Labels written with escapes and character references, which the browser editor's parser decodes.\n\nSee[^a*], [^b_c], [^d\\e], [^f\\&g], [^h\\]i], [^A*j], [^k\\&b], [^l\\m], [^n o] and [^p|q].\n\n[^a*]: One.\n\n[^b_c]: Two.\n\n[^d\\e]: Three.\n\n[^f&g]: Four.\n\n[^h\\]i]: Five.\n\n> [^a*j]: Six, in a quote.\n\n[^k&b]: Seven.\n\n[^l\\m]: Eight.\n\n[^n o]: Nine.\n\n[^p|q]: Ten.\n"
+  },
+  {
     "name": "footnote-opening-on-a-later-line",
     "markdown": "Footnote definitions[^a][^b][^c][^d][^e][^f][^g] whose first line holds nothing, in list items.\n\nNext.\n\n- a\n  [^a]:\n      x\n\nNext.\n\n- a\n  [^b]:   \n      x\n\nNext.\n\n- a\n  - b\n    [^c]:\n        x\n\nNext.\n\n1. a\n   [^d]:\n       x\n2. b\n\nNext.\n\n- a\n  [^e]:\n- b\n\nNext.\n\n- a\n  > [^f]:\n  >     x\n\nNext.\n\n> - a\n>   [^g]:\n>       x\n",
     "pm_json": {

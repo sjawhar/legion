@@ -3,8 +3,10 @@ package pmdoc
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 type renderer struct {
@@ -1010,26 +1012,35 @@ func escapeTableLinkDestination(value string) string {
 	}
 	return rendered.String()
 }
+
+// escapeFootnoteLabel writes label so that the browser editor's parser, which decodes a label's
+// escapes and character references, reads it back: a bracket, a pipe, and a backslash before ASCII
+// punctuation or at the label's end are escaped, an ampersand only where it would open a character
+// reference, and white space, which no label holds as written, is a numeric character reference.
+// A label that reads back as written stays as it is.
 func escapeFootnoteLabel(label string) string {
-	return escapeTableSyntaxPipes(label)
+	var written strings.Builder
+	written.Grow(len(label))
+	for index, char := range label {
+		switch {
+		case char == '[' || char == ']' || char == '|':
+			written.WriteByte('\\')
+		case char == '\\' && (index+1 == len(label) || isASCIIPunctuation(label[index+1])):
+			written.WriteByte('\\')
+		case char == '&' && characterReference.MatchString(label[index:]):
+			written.WriteByte('\\')
+		case unicode.IsSpace(char):
+			written.WriteString("&#" + strconv.Itoa(int(char)) + ";")
+			continue
+		}
+		written.WriteRune(char)
+	}
+	return written.String()
 }
 
-func escapeTableSyntaxPipes(value string) string {
-	if !strings.Contains(value, "|") {
-		return value
-	}
-	var escaped bool
-	var rendered strings.Builder
-	rendered.Grow(len(value))
-	for _, char := range value {
-		if char == '|' && !escaped {
-			rendered.WriteByte('\\')
-		}
-		rendered.WriteRune(char)
-		escaped = char == '\\'
-	}
-	return rendered.String()
-}
+// characterReference is a character reference opening text: a named one, or a decimal or
+// hexadecimal numeric one.
+var characterReference = regexp.MustCompile(`^&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});`)
 
 func holdsHardBreak(nodes []*Node) bool {
 	for _, n := range nodes {
