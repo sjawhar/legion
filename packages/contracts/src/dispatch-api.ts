@@ -751,19 +751,6 @@ export const DELIVERY_CAPABILITIES = ["aside", "btw", "steer"] as const;
 export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
 /**
- * The capability a session advertises when its Envoy plugin publishes its own conversation for
- * Dispatch's live agent view: it answers on `agentstream.<session id>.control` and publishes
- * frames on `agentstream.<session id>.frames`. A session registered without it cannot be
- * streamed however long a viewer waits, so the live view says that instead of showing an empty
- * transcript and a promise that the next turn will appear.
- *
- * It joins the same open `capabilities` list the delivery modes are advertised on rather than
- * adding a field, so a plugin that predates it registers exactly as it does today and simply
- * does not name it.
- */
-export const AGENT_STREAM_CAPABILITY = "agentstream";
-
-/**
  * How long the notification stream recognises a repeated delivery as a duplicate, in
  * milliseconds. This is the single source for that window: `bus/stream.go`'s
  * `streamDuplicateWindow` is generated from it (`scripts/gen-go.ts` emits

@@ -35,14 +35,20 @@ type Source interface {
 	// Subscribe delivers each frame the session publishes until stop is called. deliver runs on
 	// the transport's own goroutine and must not block.
 	Subscribe(sessionID string, deliver func(Frame)) (stop func(), err error)
-	// Replay asks the session for what it can still replay. A session that does not answer —
-	// one that has just started, or is no longer running — returns a nil frame and no error:
-	// an empty history is an answer, not a failure.
+	// Replay asks the session for what it can still replay. A session answering with nothing
+	// returns a nil frame and no error: an empty history is an answer. A session with nobody
+	// listening on its control subject returns ErrNoResponder, which is a different statement
+	// and the only thing that tells a session that cannot stream from one that has not spoken
+	// yet - every plugin release that can stream answers, and none that cannot does.
 	Replay(ctx context.Context, sessionID string) (Frame, error)
 	// Watch tells the session a viewer is attached. A session hears nothing for long enough
 	// stops publishing, so a viewer that stays open keeps calling it.
 	Watch(sessionID string) error
 }
+
+// ErrNoResponder is a replay request nobody was listening for. It is not a failure of the relay
+// and not an empty history: it says this session is not on the live view's control subject.
+var ErrNoResponder = errors.New("agent stream: no responder on the session's control subject")
 
 // NATS is the production Source: core NATS, never JetStream.
 type NATS struct {
@@ -75,9 +81,12 @@ func (n *NATS) Replay(ctx context.Context, sessionID string) (Frame, error) {
 		frame := make(Frame, len(reply.Data))
 		copy(frame, reply.Data)
 		return frame, nil
-	case errors.Is(err, nats.ErrNoResponders), errors.Is(err, nats.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
-		// Nobody is listening on the session's control subject, or it did not answer in time:
-		// the viewer gets the live stream with no history behind it.
+	case errors.Is(err, nats.ErrNoResponders):
+		// Nobody is listening on the session's control subject.
+		return nil, ErrNoResponder
+	case errors.Is(err, nats.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
+		// Somebody may well be there and slow: the viewer gets the live stream with no history
+		// behind it, which is what a session that just started offers anyway.
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("request agent stream replay: %w", err)

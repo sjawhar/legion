@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,12 +110,17 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	replayCtx, cancelReplay := context.WithTimeout(r.Context(), agentStreamReplayTimeout)
-	replay, replayErr := source.Replay(replayCtx, sessionID)
-	cancelReplay()
-	// A replay that failed is not a failed stream: the viewer gets the live conversation with no
-	// history behind it, which is what a session that just started offers anyway.
-	if replayErr == nil && len(replay) > 0 {
+	// Two questions, and the viewer needs both answers. Whether anyone is listening on the
+	// session's control subject says whether it can stream at all - every plugin release that
+	// can answers, and one that predates the live view never does - and a session that answers
+	// with nothing has simply not spoken yet. A replay that failed for any other reason is not
+	// a failed stream: the viewer gets the live conversation with no history behind it.
+	replay, responding := s.replayAgentStream(r.Context(), source, sessionID)
+	if err := writeStreamEvent(w, "responder", responderEvent(responding)); err != nil {
+		return
+	}
+	flusher.Flush()
+	if len(replay) > 0 {
 		if err := writeStreamEvent(w, "replay", replay); err != nil {
 			return
 		}
@@ -142,6 +149,26 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 			if err := source.Watch(sessionID); err != nil {
 				return
 			}
+			if responding {
+				continue
+			}
+			// The session was not on its control subject when this viewer arrived. It may be
+			// now - a session restarted onto a plugin that streams - so every re-arm asks
+			// again, and the first answer delivers its history without the viewer reloading.
+			retry, answered := s.replayAgentStream(r.Context(), source, sessionID)
+			if !answered {
+				continue
+			}
+			responding = true
+			if err := writeStreamEvent(w, "responder", responderEvent(true)); err != nil {
+				return
+			}
+			if len(retry) > 0 {
+				if err := writeStreamEvent(w, "replay", retry); err != nil {
+					return
+				}
+			}
+			flusher.Flush()
 		case <-heartbeat.C:
 			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
 				return
@@ -149,6 +176,34 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 			flusher.Flush()
 		}
 	}
+}
+
+// replayAgentStream asks the session for its history, reporting separately whether anyone
+// answered at all. Only ErrNoResponder means nobody did: a timeout leaves the question open
+// (somebody may be there and slow), and the viewer is not told a live session cannot stream on
+// the strength of one slow answer.
+func (s *server) replayAgentStream(
+	ctx context.Context, source agentstream.Source, sessionID string,
+) (agentstream.Frame, bool) {
+	replayCtx, cancel := context.WithTimeout(ctx, agentStreamReplayTimeout)
+	defer cancel()
+	replay, err := source.Replay(replayCtx, sessionID)
+	if errors.Is(err, agentstream.ErrNoResponder) {
+		return nil, false
+	}
+	if err != nil {
+		return nil, true
+	}
+	return replay, true
+}
+
+// responderEvent is the stream's `responder` payload; see AgentStreamResponder in
+// packages/contracts/src/agent-stream.ts.
+func responderEvent(responding bool) []byte {
+	if responding {
+		return []byte(`{"v":1,"responding":true}`)
+	}
+	return []byte(`{"v":1,"responding":false}`)
 }
 
 // publishAgentStreamFrame injects one frame into a session's viewers. Mounted only with
@@ -173,9 +228,21 @@ func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request)
 	if !valid {
 		return
 	}
-	if r.URL.Query().Get("as") == "replay" {
+	switch r.URL.Query().Get("as") {
+	case "replay":
 		memory.SetReplay(sessionID, frame)
-	} else {
+	case "responder":
+		// Whether anyone is on the session's control subject, with no history behind it: a live
+		// session that has produced nothing, or one whose plugin cannot stream at all.
+		var body struct {
+			Responding bool `json:"responding"`
+		}
+		if err := json.Unmarshal(frame, &body); err != nil {
+			writeError(w, "FRAME_INPUT", http.StatusBadRequest, "responder takes {\"responding\": bool}")
+			return
+		}
+		memory.SetResponder(sessionID, body.Responding)
+	default:
 		memory.Publish(sessionID, frame)
 	}
 	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})

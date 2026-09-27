@@ -5,7 +5,6 @@ import {
   type AgentStreamControlMessage,
   agentStreamControlSubject,
   agentStreamFramesSubject,
-  AGENT_STREAM_CAPABILITY,
   agentSubject,
   DELIVERY_CAPABILITIES,
   type DeliveryCapability,
@@ -87,16 +86,6 @@ const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABIL
   (capability) => capability !== "btw"
 );
 
-/**
- * What this session advertises: the delivery modes it can be reached with, and the fact that it
- * answers the live view's control subject. A viewer of a session registered without the stream
- * capability is told the session cannot stream instead of waiting on a turn that never arrives,
- * so the publisher below and this string ship together.
- */
-const capabilitiesOf = (delivery: readonly DeliveryCapability[]): string[] => [
-  ...delivery,
-  AGENT_STREAM_CAPABILITY,
-];
 
 /**
  * Transcript entry recording the role this session holds. Successful claims
@@ -867,9 +856,8 @@ export default function envoyExtension(pi: PiApi): void {
       // Read at every registration: the heartbeat re-registers, which picks up
       // titles assigned after session_start and later renames.
       title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
-      capabilities: capabilitiesOf(
-        typeof pi.askEphemeral === "function" ? DELIVERY_CAPABILITIES : CAPABILITIES_WITHOUT_BTW
-      ),
+      capabilities:
+        typeof pi.askEphemeral === "function" ? DELIVERY_CAPABILITIES : CAPABILITIES_WITHOUT_BTW,
       driving: false,
       selfSubscribed: true,
     });

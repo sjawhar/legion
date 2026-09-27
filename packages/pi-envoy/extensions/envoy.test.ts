@@ -1998,7 +1998,7 @@ describe("envoy OMP extension", () => {
           title: "",
           driving: false,
           self_subscribed: true,
-          capabilities: ["aside", "steer", "agentstream"],
+          capabilities: ["aside", "steer"],
         },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_omp", role: "controller" } },
@@ -4094,7 +4094,7 @@ describe("envoy OMP extension", () => {
         title: "",
         driving: false,
         self_subscribed: true,
-        capabilities: ["aside", "steer", "agentstream"],
+        capabilities: ["aside", "steer"],
       },
     });
   });
@@ -4163,7 +4163,7 @@ describe("envoy OMP extension", () => {
         body: "Yes, ship it.",
       },
     ]);
-    expect(registrations).toMatchObject([{ capabilities: ["aside", "btw", "steer", "agentstream"] }]);
+    expect(registrations).toMatchObject([{ capabilities: ["aside", "btw", "steer"] }]);
     // A targeted Dispatch frame is a JetStream publish to the direct subject: its
     // reply inbox belongs to the server's PubAck, so no receipt is published —
     // the frame goes straight to the ephemeral question and the Dispatch reply.
