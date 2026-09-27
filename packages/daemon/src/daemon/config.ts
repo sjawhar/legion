@@ -269,13 +269,14 @@ export interface ResolveDaemonConfigOptions {
   env?: Record<string, string | undefined>;
   configFile?: Record<string, unknown>;
   cliOverrides?: Partial<DaemonConfig>;
-  /** When false, an `envoy_token_file` / `ENVOY_TOKEN_FILE`, `nats_nkey_seed_file` /
-   * `NATS_NKEY_SEED_FILE`, or `nats_daemon_nkey_seed_file` / `NATS_DAEMON_NKEY_SEED_FILE` pointer
-   * is validated as a path but the file is never read — `envoyToken`, `natsNkeySeed`, and
+  /** When false, no secret file's contents are read: `envoyToken`, `natsNkeySeed`, and
    * `natsDaemonNkeySeed` become the same "(not executed)" placeholder `loadGitHubApps` uses for an
-   * unexecuted key command — so `legion start --check-config` can validate a `legion.yaml` whose
-   * secret files are not on this machine. Defaults to true (the daemon always reads the real
-   * values). */
+   * unexecuted key command. An `envoy_token_file` / `ENVOY_TOKEN_FILE` pointer is validated as a
+   * path only, so `legion start --check-config` can validate a `legion.yaml` whose Envoy token file
+   * is not on this machine; a `nats_nkey_seed_file` / `NATS_NKEY_SEED_FILE` or
+   * `nats_daemon_nkey_seed_file` / `NATS_DAEMON_NKEY_SEED_FILE` pointer is opened and checked
+   * (`checkOwnerOnlySecretPointer`), so a seed file boot could not open is refused here too.
+   * Defaults to true (the daemon always reads the real values). */
   resolveSecrets?: boolean;
 }
 
