@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -26,6 +28,13 @@ type pullRequestView struct {
 // round is approved, with lateApplied as its clock. It applies facts and reads both records back.
 func afterEvents(t *testing.T, state record.PullRequestState, facts ...intake.Fact) pullRequestView {
 	t.Helper()
+	return pullRequestAt(t, appliedEvents(t, state, facts...))
+}
+
+// appliedEvents is afterEvents' database: the seeded issue and pull request, with facts applied in
+// order.
+func appliedEvents(t *testing.T, state record.PullRequestState, facts ...intake.Fact) *pgxpool.Pool {
+	t.Helper()
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: state, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208",
@@ -38,6 +47,12 @@ func afterEvents(t *testing.T, state record.PullRequestState, facts ...intake.Fa
 			t.Fatalf("step %d: %v", i, err)
 		}
 	}
+	return pool
+}
+
+// pullRequestAt reads back the pull request and the reviewer round's decision.
+func pullRequestAt(t *testing.T, pool *pgxpool.Pool) pullRequestView {
+	t.Helper()
 	var got pullRequestView
 	if err := pool.QueryRow(context.Background(), `select pr.head_sha, pr.verdict, coalesce(reviewer.decision ->> 'state', ''), pr.state
 		from pull_requests pr left join phases reviewer on reviewer.issue = pr.issue and reviewer.role = $1
@@ -136,9 +151,12 @@ func TestAnEventWithNoClockKeepsTheLatestClock(t *testing.T) {
 // GitHub's close and reopen payloads carry the head every synchronize before them left, so a close
 // or reopen that is not late records that head with its clock. A synchronize older than the close,
 // delivered after it, is late and changes nothing, and the pull request still ends at the head
-// GitHub ended at.
+// GitHub ended at. A close that finds the pull request already closed is not late either: closed,
+// reopened and closed again, with the reopen delivered last, the second close records its head and
+// clock, so the reopen changes nothing.
 func TestACloseOrReopenCarriesItsHead(t *testing.T) {
 	synchronized, finished := lateApplied.Add(time.Minute), lateApplied.Add(2*time.Minute)
+	reopened, resynchronized := lateApplied.Add(time.Minute), lateApplied.Add(90*time.Second)
 	for _, tc := range []struct {
 		name  string
 		seed  record.PullRequestState
@@ -149,10 +167,51 @@ func TestACloseOrReopenCarriesItsHead(t *testing.T) {
 			[]intake.Fact{lateClosed("head-d", finished), lateSync("head-d", synchronized)}, pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestClosed}},
 		{"a reopen delivered before the synchronize it followed", record.PullRequestClosed,
 			[]intake.Fact{lateReopened("head-e", finished), lateSync("head-e", synchronized)}, pullRequestView{head: "head-e", decision: "approved", state: record.PullRequestOpen}},
+		{"a close delivered before the reopen it followed", record.PullRequestClosed,
+			[]intake.Fact{lateClosed("head-d", finished), lateReopened("head-c", reopened)}, pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestClosed}},
+		{"a close delivered before the reopen and the synchronize it followed", record.PullRequestClosed,
+			[]intake.Fact{lateClosed("head-e", finished), lateReopened("head-c", reopened), lateSync("head-e", resynchronized)}, pullRequestView{head: "head-e", decision: "approved", state: record.PullRequestClosed}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := afterEvents(t, tc.seed, tc.facts...); got != tc.want {
 				t.Fatalf("pull request %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A branch can carry a second pull request: after a merge, or once park and rerun open a new one
+// from the same branch. A late opened or reopened of the earlier pull request, older than the
+// newer one's clock, is a redelivery and changes nothing: the record stays the newer pull request,
+// whose later events still apply. The same holds for an older pull request's late opened while the
+// newer one is open.
+func TestALateEventOfAnEarlierPullRequestLeavesTheNewerOne(t *testing.T) {
+	opened43, synced43 := lateApplied.Add(time.Minute), lateApplied.Add(2*time.Minute)
+	pr43 := intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-208", HeadSHA: "head-e", UpdatedAt: opened43}
+	sync43 := intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-208", HeadSHA: "head-f", UpdatedAt: synced43}
+	pr41 := intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 41, Branch: "legion/LEGION-208", HeadSHA: "head-a", UpdatedAt: lateApplied.Add(-time.Hour)}
+	for _, tc := range []struct {
+		name   string
+		seed   record.PullRequestState
+		facts  []intake.Fact
+		number int
+		head   string
+		state  record.PullRequestState
+	}{
+		{"merged #42, #43 opened, then #42's late opened", record.PullRequestMerged, []intake.Fact{pr43, lateOpened("head-c", lateApplied), sync43}, 43, "head-f", record.PullRequestOpen},
+		{"merged #42, #43 opened, then #42's late reopen", record.PullRequestMerged, []intake.Fact{pr43, lateReopened("head-c", lateApplied.Add(30*time.Second)), sync43}, 43, "head-f", record.PullRequestOpen},
+		{"open #42, then an older #41's late opened", record.PullRequestOpen, []intake.Fact{pr41}, 42, "head-c", record.PullRequestOpen},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := appliedEvents(t, tc.seed, tc.facts...)
+			var number int
+			var head string
+			var state record.PullRequestState
+			if err := pool.QueryRow(t.Context(), "select number, head_sha, state from pull_requests where issue = 'LEGION-208'").Scan(&number, &head, &state); err != nil {
+				t.Fatalf("read the pull request: %v", err)
+			}
+			if number != tc.number || head != tc.head || state != tc.state {
+				t.Fatalf("the record is #%d at %s, %s; want #%d at %s, %s", number, head, state, tc.number, tc.head, tc.state)
 			}
 		})
 	}

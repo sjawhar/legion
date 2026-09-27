@@ -256,6 +256,24 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+	// A write whose text a concurrent browser change removed before the write could be versioned
+	// (LEGION-269). Nothing was written, so this reads like PRECONDITION_FAILED: re-read the
+	// document and decide again.
+	var lostEdit *docs.ErrEditLost
+	if errors.As(err, &lostEdit) {
+		body := map[string]any{
+			"error":        lostEdit.Error(),
+			"code":         "EDIT_LOST_TO_CONCURRENT_CHANGE",
+			"participants": participantsOrEmpty(lostEdit.Participants),
+		}
+		if lostEdit.Suggestion != "" {
+			body["suggestion"] = lostEdit.Suggestion
+		} else {
+			body["lost_ops"] = lostEdit.Ops
+		}
+		WriteJSON(w, http.StatusConflict, body)
+		return
+	}
 	var invalidPrecondition *docs.ErrInvalidPrecondition
 	if errors.As(err, &invalidPrecondition) {
 		writeError(w, "INVALID_PRECONDITION", http.StatusBadRequest, invalidPrecondition.Error())

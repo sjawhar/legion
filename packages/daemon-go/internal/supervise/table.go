@@ -338,6 +338,12 @@ var (
 	gone        = []ClaimState{StateSuspended, StateFailed, StateRetired}
 )
 
+// LiveStates are the states of a claim whose process is up or coming up: launched, and not
+// suspended, failed or retired. It is a copy, so no caller changes the table's own set.
+func LiveStates() []ClaimState {
+	return slices.Clone(live)
+}
+
 const (
 	noProcess     = "no process of this claim is running"
 	noSend        = "no prompt is sent in this state"
@@ -865,12 +871,17 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 // stop ends one claim: the runtime releases it, and it retires. A release that fails changes
 // nothing, so the stop can be asked again. The tree's root claim ends only with its tree: a
 // retired root would leave the orphan sweep's known set, which would then take whatever the
-// runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused.
+// runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused,
+// naming the operator's close when it is that close which ends the tree.
 func stop(m *Machine, ctx context.Context, _ Event) error {
-	if m.claim.treeRoot() {
-		return &RefusedError{State: m.claim.State, Request: "stop", Err: rootStopRefusal(m.claim.State)}
+	if !m.claim.treeRoot() {
+		return m.end(ctx)
 	}
-	return m.end(ctx)
+	closable, err := m.treeClosable(ctx)
+	if err != nil {
+		return fmt.Errorf("stop %s: %w", m.claim.Token, err)
+	}
+	return &RefusedError{State: m.claim.State, Request: "stop", Err: rootStopRefusal(m.claim.State, closable)}
 }
 
 // treeClose is the workflow's close of the tree, which ends the root claim too. It is the
@@ -907,10 +918,7 @@ func (m *Machine) closeRefusal(ctx context.Context) error {
 		return &RefusedError{State: m.claim.State, Request: "close",
 			Err: fmt.Errorf("%s is not its tree's root claim; stop it instead", m.claim.Token)}
 	}
-	if m.deps.TreeClosable == nil {
-		return nil
-	}
-	closable, err := m.deps.TreeClosable(ctx, m.claim)
+	closable, err := m.treeClosable(ctx)
 	if err != nil {
 		return fmt.Errorf("close %s: %w", m.claim.Token, err)
 	}
@@ -919,6 +927,15 @@ func (m *Machine) closeRefusal(ctx context.Context) error {
 			Err: fmt.Errorf("%s is a workflow issue's tree, which closes when its linger expires", m.claim.Tree)}
 	}
 	return nil
+}
+
+// treeClosable is Deps.TreeClosable's answer for this claim's tree; with none, every tree closes.
+// Each caller names the request it answers when the read fails.
+func (m *Machine) treeClosable(ctx context.Context) (bool, error) {
+	if m.deps.TreeClosable == nil {
+		return true, nil
+	}
+	return m.deps.TreeClosable(ctx, m.claim)
 }
 
 // end releases the claim's process and retires the claim, which is what every stop and close does
@@ -931,16 +948,23 @@ func (m *Machine) end(ctx context.Context) error {
 }
 
 // rootStopRefusal is ErrRootStop with what stops the root's process in state instead: a suspension,
-// which takes a registered agent, and nothing where no process runs.
-func rootStopRefusal(state ClaimState) error {
+// which takes a registered agent, and nothing where no process runs. A tree no workflow issue backs
+// (closable) ends by the operator's close, which the refusal names; a workflow issue's tree ends
+// when its linger expires.
+func rootStopRefusal(state ClaimState, closable bool) error {
+	var err error
 	switch {
 	case slices.Contains(processless, state):
-		return fmt.Errorf("%w; %s", ErrRootStop, noProcess)
+		err = fmt.Errorf("%w; %s", ErrRootStop, noProcess)
 	case slices.Contains(booting, state):
-		return fmt.Errorf("%w; suspend it to stop its process once its agent has registered", ErrRootStop)
+		err = fmt.Errorf("%w; suspend it to stop its process once its agent has registered", ErrRootStop)
 	default:
-		return fmt.Errorf("%w; suspend it to stop its process", ErrRootStop)
+		err = fmt.Errorf("%w; suspend it to stop its process", ErrRootStop)
 	}
+	if closable {
+		return fmt.Errorf("%w; no workflow issue backs its tree, so legion claims close ends it", err)
+	}
+	return err
 }
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -138,11 +139,13 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 }
 
 // engineConfig is the workflow engine's configuration from the daemon's and the review App's bot
-// login from its boot lease.
+// login from its boot lease: its own project's merge_queue_role is the role the merger's READY is
+// published to.
 func engineConfig(cfg config.Config, reviewAppLogin string) workflow.Config {
 	return workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ReviewAppLogin: reviewAppLogin,
+		MergeQueueRole: cfg.Projects[cfg.Project].MergeQueueRole,
 	}
 }
 
@@ -155,7 +158,7 @@ func (w *workflowRuntime) bind(url, token string) {
 // notification stream refuses boot rather than leaving a daemon that reads no events. Boot runs it
 // before reconcile, whose Dispatch listing covers only what precedes a consumer created now.
 func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error {
-	conn, err := nats.Connect(strings.Join(cfg.NatsURLs, ","))
+	conn, err := natsauth.Connect(cfg.NatsURLs, os.LookupEnv)
 	if err != nil {
 		return fmt.Errorf("connect Envoy NATS: %w", err)
 	}
@@ -204,8 +207,9 @@ func (w *workflowRuntime) phaseHolds(ctx context.Context, key string, queuedFor 
 
 // treeClosable answers supervise's Deps.TreeClosable: a tree a workflow issue backs closes when
 // its linger expires, never on an operator's close of its root claim. The machine asks it where
-// the close is decided rather than a round trip before it, and only for the operator's own close:
-// the workflow's linger close holds that same issue record, so asking would refuse exactly the
+// the close is decided rather than a round trip before it, for the operator's own close and for a
+// refused stop of the tree's root, whose refusal then names that close. The workflow's linger
+// close is never asked: it holds that same issue record, so asking would refuse exactly the
 // closes the workflow is entitled to make. It is not a lock on what it reads: admission and the
 // engine commit issue records in their own transactions and take no machine lock, so one can
 // still land between this answer and the retire.

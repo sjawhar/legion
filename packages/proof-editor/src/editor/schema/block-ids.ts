@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 /**
  * Stable block identity.
  *
@@ -23,10 +21,12 @@
  */
 import type { Ctx } from '@milkdown/kit/ctx';
 import { Plugin, PluginKey } from '@milkdown/kit/prose/state';
-import type { Node as ProseMirrorNode, NodeSpec, DOMOutputSpec, ParseRule } from '@milkdown/kit/prose/model';
+import type { Node as ProseMirrorNode, DOMOutputSpec, TagParseRule } from '@milkdown/kit/prose/model';
 import type { Transaction } from '@milkdown/kit/prose/state';
 import { Mapping } from '@milkdown/kit/prose/transform';
+import type { NodeSchema } from '@milkdown/kit/transformer';
 import { $prose } from '@milkdown/kit/utils';
+import type { $NodeSchema } from '@milkdown/kit/utils';
 import { withDomAttributes } from './dom-attributes';
 import {
   blockquoteSchema,
@@ -46,7 +46,8 @@ import {
   tableRowSchema,
   tableSchema,
 } from '@milkdown/preset-gfm';
-import { codeBlockSchemaExt, frontmatterSchema } from "./upstream-schemas.js";
+import { codeBlockSchemaExt } from 'proof-sdk-upstream/src/editor/schema/code-block-ext';
+import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { ySyncPluginKey } from 'y-prosemirror';
 
 export const BLOCK_ID_ATTR = 'blockId';
@@ -87,9 +88,9 @@ function withDomBlockId(spec: DOMOutputSpec, blockId: string | null): DOMOutputS
   return blockId === null ? spec : withDomAttributes(spec, { [BLOCK_ID_DOM_ATTR]: blockId });
 }
 
-function withParsedBlockId(rule: ParseRule): ParseRule {
+function withParsedBlockId(rule: TagParseRule): TagParseRule {
   if (!('tag' in rule)) return rule;
-  const { getAttrs, attrs: staticAttrs, ...rest } = rule as ParseRule & {
+  const { getAttrs, attrs: staticAttrs, ...rest } = rule as TagParseRule & {
     getAttrs?: (dom: HTMLElement) => Record<string, unknown> | false | null;
     attrs?: Record<string, unknown>;
   };
@@ -100,11 +101,11 @@ function withParsedBlockId(rule: ParseRule): ParseRule {
       if (base === false) return false;
       return { ...(base ?? {}), [BLOCK_ID_ATTR]: readBlockId(dom) };
     },
-  } as ParseRule;
+  } as TagParseRule;
 }
 
-/** Extends a block NodeSpec with the `blockId` attribute and its DOM round-trip. */
-export function withBlockIdSpec(spec: NodeSpec): NodeSpec {
+/** Extends a block NodeSchema with the `blockId` attribute and its DOM round-trip. */
+export function withBlockIdSpec(spec: NodeSchema): NodeSchema {
   const toDOM = spec.toDOM;
   return {
     ...spec,
@@ -114,10 +115,8 @@ export function withBlockIdSpec(spec: NodeSpec): NodeSpec {
   };
 }
 
-type SchemaFactory = (ctx: Ctx) => NodeSpec;
-
-function extend(schema: { extendSchema: (handler: (prev: SchemaFactory) => SchemaFactory) => unknown }) {
-  return schema.extendSchema((prev) => (ctx) => withBlockIdSpec(prev(ctx)));
+function extend<T extends string>(schema: $NodeSchema<T>): $NodeSchema<T> {
+  return schema.extendSchema((prev) => (ctx: Ctx) => withBlockIdSpec(prev(ctx)));
 }
 
 /**

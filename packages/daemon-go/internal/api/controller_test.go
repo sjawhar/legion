@@ -214,6 +214,8 @@ func TestCredentialAndWorkflowRoutesRefuseAMissingFieldWithACode(t *testing.T) {
 		{"/legion/v1/handoff/complete", `{"grantId":"g","commit":"c"}`, "summary"},
 		{"/legion/v1/issues/status", `{"grantId":"g","issue":"LEGION-208"}`, "status"},
 		{"/legion/v1/signoff", `{"grantId":"g"}`, "issue"},
+		{"/legion/v1/children/park", `{"grantId":"g"}`, "issue"},
+		{"/legion/v1/children/rerun", `{"grantId":"g"}`, "issue"},
 	} {
 		recorder := h.request(http.MethodPost, route.path, route.body, nil)
 		if recorder.Code != http.StatusBadRequest {

@@ -1,5 +1,6 @@
 import { messageFor } from "@legion/envoy-client/errors";
 import {
+  LegionGoChildRequest,
   LegionGoControllerGrantRequest,
   LegionGoControllerRegisterResponse,
   type LegionGoControllerRegistration,
@@ -103,6 +104,12 @@ export interface LegionGoDaemonClient {
   ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
   readonly signOff: (
     input: z.input<typeof LegionGoSignOffRequest>
+  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+  readonly childPark: (
+    input: z.input<typeof LegionGoChildRequest>
+  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+  readonly childRerun: (
+    input: z.input<typeof LegionGoChildRequest>
   ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
 }
 
@@ -311,5 +318,9 @@ export function createLegionGoDaemonClient(
       ),
     signOff: (input) =>
       post("/legion/v1/signoff", LegionGoSignOffRequest, LegionGoEmptyResponse, input),
+    childPark: (input) =>
+      post("/legion/v1/children/park", LegionGoChildRequest, LegionGoEmptyResponse, input),
+    childRerun: (input) =>
+      post("/legion/v1/children/rerun", LegionGoChildRequest, LegionGoEmptyResponse, input),
   };
 }

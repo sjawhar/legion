@@ -192,11 +192,12 @@ type Deps struct {
 	PhaseHolds func(ctx context.Context, issue string, p phase.Phase) (bool, error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather
-	// than a refusal. It is asked only for the operator's own close — the workflow's linger close
-	// is its own decision — and here rather than by the caller, so the answer and the stop it
-	// decides are one decision rather than two round trips apart. It is not a lock on what it
-	// reads: an issue recorded for the tree commits in its own transaction and can still land
-	// between this answer and the retire. nil closes every tree.
+	// than a refusal. It is asked for the operator's own close — the workflow's linger close is its
+	// own decision — and here rather than by the caller, so the answer and the stop it decides are
+	// one decision rather than two round trips apart; and by a refused stop of the tree's root,
+	// whose refusal then names that close. It is not a lock on what it reads: an issue recorded for
+	// the tree commits in its own transaction and can still land between this answer and the
+	// retire. nil closes every tree.
 	TreeClosable func(ctx context.Context, c Claim) (bool, error)
 }
 

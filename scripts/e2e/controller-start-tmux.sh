@@ -14,6 +14,10 @@
 # tmux servers, and its Postgres and NATS containers. CONTROLLER_START_EVIDENCE_DIR (default a fresh
 # /tmp directory, kept and printed) keeps the daemon and listener logs.
 set -euo pipefail
+# This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
+# no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
+# NATS_NKEY_SEED or NATS_NKEY_SEED_FILE.
+unset NATS_NKEY_SEED NATS_NKEY_SEED_FILE
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e-controller.$$.XXXXXXXX")

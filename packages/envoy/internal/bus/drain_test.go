@@ -18,7 +18,7 @@ import (
 func connectWithHandler(t *testing.T, hold time.Duration) (*bus.Client, *atomic.Bool) {
 	t.Helper()
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestDrainLetsARoleForwardInItsHandlerFinish(t *testing.T) {
 		t.Fatalf("holder flush: %v", err)
 	}
 
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestAPublishAfterDrainDoesNotReconnect(t *testing.T) {
 // for the subscriptions it drains only until the deadline, then closes the connection.
 func TestDrainClosesAtItsDeadlineWhileADeliverySubscriptionDrains(t *testing.T) {
 	_, uri := startNATS(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestDrainClosesAtItsDeadlineWhileADeliverySubscriptionDrains(t *testing.T) 
 // reconnect re-sends it) and the drain would only run out its deadline.
 func TestDrainWhileReconnectingClosesAtOnce(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

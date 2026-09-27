@@ -420,7 +420,7 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 	// one, so this change puts the connection's actor on the next version, as the server persists it.
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 
-	named, err := service.NamedVersion(context.Background(), artifactID,
+	named, err := namedVersion(t, service, artifactID,
 		"checkpoint", model.Actor{Kind: "user", ID: "alice"})
 	if err != nil {
 		t.Fatalf("name document version: %v", err)
