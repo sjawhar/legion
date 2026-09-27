@@ -345,12 +345,13 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return acceptSpliceRefusal(err)
 		}
 		// The browser editor's table plugin pads a table the accept cut to its width, as it does
-		// after a reject (rejectedInsert), before anything reads the accept back.
-		first, _, lastAfter, err := changedBlocks(tree, next, range_)
-		if err != nil {
-			return err
+		// after a reject, before anything reads the accept back, where the browser's accept writes
+		// the replacement where Splice does (padsLikeTheBrowser).
+		if padsLikeTheBrowser(tree, range_, replacement, code) {
+			if next, err = padCutTables(tree, next, range_); err != nil {
+				return err
+			}
 		}
-		next = pmdoc.PadTables(next, first, lastAfter)
 		if code {
 			if err := refuseAcceptedCodeThatReshapes(tree, next, range_, at, with); err != nil {
 				return err

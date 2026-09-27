@@ -1036,3 +1036,90 @@ func StripAnchorMarks(node *Node) *Node {
 	}
 	return out
 }
+
+// MultiblockAligned reports whether the browser editor's accept takes block content over r
+// across textblocks (proof-sdk marks.ts resolveStructuralMultiblockRange): r overlaps two
+// textblocks, no more, their text is at most 240 characters, and r starts within one character of
+// the first's text, past its leading whitespace, and ends within one of the last's text, short of
+// its trailing whitespace, or its text is theirs, whitespace aside. The editor takes a textblock's
+// text as its content short of its last position, so r ending two characters before the last's
+// end is aligned too; this keeps that reading, since it decides what the browser accepts.
+func MultiblockAligned(doc *Node, r Range) bool {
+	type slice struct {
+		from, to    int
+		text        []uint16
+		lead, trail int
+	}
+	var slices []slice
+	var within [][]uint16
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if !isTextblock(node.Type) {
+			return true
+		}
+		from, to := pos+1, end-2
+		if r.To <= from || r.From >= to {
+			return true
+		}
+		// An empty textblock's text is empty, as the editor reads it over a range that ends
+		// before it starts.
+		content := inlineUnits(node)
+		text := content[:max(to-from, 0)]
+		slices = append(slices, slice{from: from, to: to, text: text, lead: edgeSpace(text, false), trail: edgeSpace(text, true)})
+		within = append(within, content[max(r.From, from)-from:min(r.To, end-1)-from])
+		return true
+	})
+	if len(slices) != 2 {
+		return false
+	}
+	first, last := slices[0], slices[len(slices)-1]
+	startAligned := r.From >= max(0, first.from-1) && r.From <= min(first.to, first.from+first.lead+1)
+	endAligned := r.To <= min(nodeSize(doc), last.to+1) && r.To >= max(last.from, last.to-last.trail-1)
+	if !startAligned || !endAligned {
+		var ranged, texts []string
+		for index, slice := range slices {
+			ranged = append(ranged, string(utf16.Decode(within[index])))
+			texts = append(texts, string(utf16.Decode(slice.text)))
+		}
+		rangeText := strings.Join(strings.Fields(strings.Join(ranged, "\n")), " ")
+		if rangeText == "" || rangeText != strings.Join(strings.Fields(strings.Join(texts, "\n")), " ") {
+			return false
+		}
+	}
+	total := 0
+	for _, slice := range slices {
+		total += len(slice.text)
+	}
+	return total <= 240
+}
+
+// inlineUnits is a textblock's content as the editor counts its positions: each text node's
+// UTF-16 units, and a line feed for every other inline node.
+func inlineUnits(textblock *Node) []uint16 {
+	var units []uint16
+	for _, child := range textblock.Children {
+		if child.Type == "text" {
+			units = append(units, utf16.Encode([]rune(child.Text))...)
+			continue
+		}
+		for range nodeSize(child) {
+			units = append(units, '\n')
+		}
+	}
+	return units
+}
+
+// edgeSpace counts the UTF-16 units of whitespace text starts with, or ends with.
+func edgeSpace(text []uint16, trailing bool) int {
+	runes := utf16.Decode(text)
+	count := 0
+	for index := range runes {
+		if trailing {
+			index = len(runes) - 1 - index
+		}
+		if !unicode.IsSpace(runes[index]) {
+			break
+		}
+		count += len(utf16.Encode(runes[index : index+1]))
+	}
+	return count
+}

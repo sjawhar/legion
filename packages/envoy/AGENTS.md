@@ -172,7 +172,8 @@ and tabs it leaves in a list item's code reads back empty and the accept is refu
 lines stays as it was. An accept whose code changes how a block around it reads back is refused,
 advising rejecting the suggestion (`refuseAcceptedCodeThatReshapes`). It names the typed block
 holding the code when the document-level block that reads back otherwise is the one holding the
-code, and otherwise names that block, such as a table the suggestion runs into. The edit route's
+code, and otherwise names that block, such as the list of a task item the suggestion empties ahead
+of its nested list. The edit route's
 refusal of the same shape advises moving the code out of the typed block instead, and a reject in
 code, like any reject, is not read back. A line of colons in code inside a typed block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
@@ -189,7 +190,15 @@ paragraph is stored `\---` and so on (the renderer's line-start escapes). Beside
 paragraph it is written the same way, since an empty paragraph is not written. Accepting a
 suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`, its checks in
 `docs/accept.go`) writes blocks, so it stores what reads back as the live document, and refuses
-what cannot, naming `replace_with`. It first settles the blocks it changed (`settleAccepted`,
+what cannot, naming `replace_with`. A table the splice cut is padded to its width as the browser
+editor's table plugin pads it (`padCutTables`, `pmdoc.PadTables`), where the browser's accept
+writes the replacement where `Splice` does (`padsLikeTheBrowser`): inline text, nothing, code's
+literal text, or block content across two textblocks whose edges it aligns with as the browser
+requires (`pmdoc.MultiblockAligned`), the first of them document-level. Other block content over
+a table, such as a list over one cell's whole text, or one running from a paragraph in a callout,
+a quote or a list item, or from a cell into the next row, is not padded, and nor is anything
+running from one table into the next, which the browser joins into one table. Such an accept is
+judged as the splice left it, and the checks below refuse it. It then settles the blocks it changed (`settleAccepted`,
 `pmdoc.AgreeWithReadBack`): the empty halves a block replacement leaves of the textblock it lands
 in, which carry no block id, go where the renderer does not write them, and each list and list
 item takes the spread its markdown reads back with, paired as far down as the read-back check
@@ -339,7 +348,7 @@ reject does (`rejectedInsert`): the insert's runs that meet across a block bound
 the boundary between them, are one range (`pmdoc.MarkSpans`), so the blocks join, which undoes the
 split an insert made (Enter typed while suggesting), and a table the range cuts is padded to its
 width as the editor's table plugin pads it (`pmdoc.PadTables`, after prosemirror-tables'
-`fixTables`; an accept pads the tables it cuts the same way before it is read back). A removal the
+`fixTables`). A removal the
 document cannot hold, one the schema refuses or the renderer cannot write, is refused, `400
 INVALID_OP` on `anchor`, advising accepting the suggestion or editing the document
 (`rejectSpliceRefusal`), with the document unchanged and the suggestion open. A reject is not read

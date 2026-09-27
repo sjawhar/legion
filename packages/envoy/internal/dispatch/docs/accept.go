@@ -208,6 +208,38 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 	)
 }
 
+// padCutTables pads each table in the document-level blocks a splice of r changed, from before to
+// after (changedBlocks), to its width (pmdoc.PadTables), as the browser editor's table plugin pads a
+// table after any change.
+func padCutTables(before, after *pmdoc.Node, r pmdoc.Range) (*pmdoc.Node, error) {
+	first, _, last, err := changedBlocks(before, after, r)
+	if err != nil {
+		return nil, err
+	}
+	return pmdoc.PadTables(after, first, last), nil
+}
+
+// padsLikeTheBrowser reports whether an accept may pad the tables its splice cut: whether the
+// browser editor's accept writes the replacement where Splice does (proof-sdk marks.ts accept and
+// applyMarkdownReplace). A range running from one table into the next is never padded: the
+// browser joins the two tables, which Splice does not. Inline text, nothing, and code's literal
+// text replace the matched range there as here. Block content the browser takes across two
+// textblocks only when the range is aligned with them (pmdoc.MultiblockAligned), and then replaces
+// them from the start of the first, which lands where Splice puts it only when the first is a
+// document-level block, not one inside a callout, a quote, a list item or a table cell. Other block
+// content over a table, such as a list over one cell's whole text, is not padded either. An accept
+// that is not padded is judged by the read-back as it stands, which refuses one that cut a table.
+func padsLikeTheBrowser(tree *pmdoc.Node, match pmdoc.Range, replacement *pmdoc.Node, code bool) bool {
+	if joinsTwoTables(tree, match) {
+		return false
+	}
+	if code || isInlineDocument(replacement) {
+		return true
+	}
+	at, ok := pmdoc.ContainingTextblock(tree, match.From)
+	return ok && len(at.Ancestors) == 1 && pmdoc.MultiblockAligned(tree, match)
+}
+
 // acceptSpliceRefusal words the refusal of an accept whose replacement Splice cannot fit, naming
 // what the person accepting can do: an inline replacement running into an ask or callout from the
 // text before it would join the two and leave the ask or callout empty; a replacement no level of
@@ -232,7 +264,8 @@ func acceptSpliceRefusal(err error) error {
 // and what the person accepting can do, since they cannot move the code as the edit route's
 // refusal (refuseCodeThatReshapesItsBlock) advises. The block named is the typed block holding
 // the code when the document-level block that reads back otherwise is the one holding the code,
-// and otherwise that block, such as the table a suggestion running out of the code runs into.
+// and otherwise that block, such as the list of a task item that a suggestion running out of the
+// code empties ahead of the item's nested list.
 func refuseAcceptedCodeThatReshapes(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string) error {
 	broken, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
