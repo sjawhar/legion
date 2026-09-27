@@ -261,24 +261,28 @@ function NavigationContents({
           onSearch();
         }}
       />
-      <p className={`mt-3 text-sm ${railMutedText}`}>Signed in as {user.login}</p>
-      <button
-        className={`mt-1 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${railAccentText} ${railAccentHoverText}`}
-        disabled={signOutPending}
-        onClick={onSignOut}
-        type="button"
-      >
-        Sign out
-      </button>
-      {signOutError ? (
-        <p className={`mt-1 text-sm ${railDangerText}`} role="alert">
-          Couldn&apos;t sign out.{" "}
-          <button className="font-medium underline" onClick={onSignOut} type="button">
-            Retry
-          </button>
-        </p>
-      ) : null}
       <Sidebar onHide={compact ? undefined : onHideSidebar} onNavigate={onClose} user={user} />
+      {/* Identity is chrome: who you are and how to leave are read once, while the navigation
+          above is read on every visit, so the footer sits under it rather than over it. */}
+      <div className={`mt-auto border-t pt-4 ${railBorder}`}>
+        <p className={`text-sm ${railMutedText}`}>Signed in as {user.login}</p>
+        <button
+          className={`mt-1 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 ${railAccentText} ${railAccentHoverText}`}
+          disabled={signOutPending}
+          onClick={onSignOut}
+          type="button"
+        >
+          Sign out
+        </button>
+        {signOutError ? (
+          <p className={`mt-1 text-sm ${railDangerText}`} role="alert">
+            Couldn&apos;t sign out.{" "}
+            <button className="font-medium underline" onClick={onSignOut} type="button">
+              Retry
+            </button>
+          </p>
+        ) : null}
+      </div>
     </>
   );
 }
@@ -458,7 +462,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             <aside
               aria-label="Navigation"
               aria-modal="true"
-              className={`fixed inset-y-0 left-0 z-30 w-80 max-w-[calc(100vw-2rem)] border-b p-5 shadow-2xl ${railBorder} ${railBg} ${railText}`}
+              className={`fixed inset-y-0 left-0 z-30 flex w-80 max-w-[calc(100vw-2rem)] flex-col border-b p-5 shadow-2xl ${railBorder} ${railBg} ${railText}`}
               ref={drawer.containerRef}
               role="dialog"
             >
@@ -489,9 +493,13 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           // longer shifts what they are looking at.
           <aside
             aria-label="Navigation"
-            className={`relative order-1 min-h-dvh w-80 max-w-none border-r p-5 [overflow-anchor:none] ${railBorder} ${railBg} ${railText}`}
+            className={`relative order-1 w-80 max-w-none border-r [overflow-anchor:none] ${railBorder} ${railBg} ${railText}`}
           >
-            {navigation}
+            {/* The aside stretches to the page's height, so the navigation is a viewport-tall
+                column that sticks inside it: on a long issue the links stay reachable, and the
+                identity footer sits at the bottom of the screen rather than the bottom of the
+                document. */}
+            <div className="sticky top-0 flex min-h-dvh flex-col p-5">{navigation}</div>
           </aside>
         )}
         <main

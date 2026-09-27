@@ -1,4 +1,6 @@
 import { type ReactNode, useRef } from "react";
+import { useLocation } from "react-router-dom";
+
 import {
   borderDefault,
   focusVisibleRing,
@@ -7,6 +9,7 @@ import {
   railHoverBg,
   railText,
 } from "../../theme/classes";
+import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { MarginSheet } from "./MarginSheet";
 import { useMarginSheet } from "./useMarginSheet";
@@ -39,6 +42,7 @@ export function Margin({
 }: MarginProps): ReactNode {
   const model = useMarginSheet();
   const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
+  const { pathname, search } = useLocation();
   const resizePointer = useRef<
     { pointerId: number; startWidth: number; startX: number } | undefined
   >(undefined);
@@ -47,6 +51,19 @@ export function Margin({
   const setClampedMarginWidth = (nextWidth: number) => {
     onWidthChange?.(clampMarginWidth(nextWidth));
   };
+
+  // A margin is a property of a document surface. On a route that has none - the Inbox, a
+  // project, Settings, Agents - the desktop column used to spend 384 px, a third of a 1280 px
+  // viewport, saying so in a sentence. It now takes no width at all, and the reader's own
+  // collapse preference is untouched, so it returns as they left it on the next issue or
+  // document. The route decides rather than `useMarginOwner`, whose document owner only
+  // resolves once the artifact query lands: keying on it would open the column a beat late.
+  const routeHasMargin =
+    parseIssuePath(pathname, search) !== undefined ||
+    parseProjectPath(pathname, search)?.kind === "document";
+  if (!isCompactViewport && !routeHasMargin) {
+    return null;
+  }
 
   if (!isCompactViewport && collapsed) {
     return (
