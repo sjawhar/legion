@@ -73,6 +73,12 @@ the reviewer can hold the resolution to a written target.
 
 ## 2. The rebase itself
 
+**Superseded 2026-09-27 (LEGION-118):** a rebase rooted at the branch's fork point also rewrites
+another tree's branch when one is stacked on it; resolve with a forward merge instead, from the
+bookmark rather than `@` (`jj new legion/<KEY> main@origin -m "<message>"`,
+`skills/legion-worker/SKILL.md`; a handoff split leaves `@` empty and undescribed, and `jj git
+push` refuses a commit with no description). What follows records the earlier workflow.
+
 ```sh
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch
 jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin   # the whole chain
