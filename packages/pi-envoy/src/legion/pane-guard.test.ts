@@ -27,18 +27,17 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "packages/dispatch/e2e/acceptance/omp-roundtrip.sh": "tmux kill-session",
   "packages/envoy/deploy/scripts/autodeploy.sh": "dispatch-backups",
   "packages/envoy/deploy/scripts/autodeploy_test.sh": "dumps[i]",
-  "packages/envoy/scripts/dev-broker.test.sh": "$instance_pid",
   "packages/envoy/scripts/e2e-api.sh": "$sse_pid",
   "packages/envoy/scripts/verify-cluster.sh": "cannot parse",
   "packages/pi-envoy/scripts/grant-rig/setup.sh": "profiles/l12rig",
   "packages/pi-envoy/scripts/smoke-btw.sh": "tmux kill-session",
   "packages/pi-envoy/scripts/smoke-delivery.sh": "tmux kill-session",
-  "scripts/e2e/controller-start-tmux.sh": "needs a socket",
+  "scripts/e2e/controller-start-tmux.sh": "a loop variable",
   "scripts/e2e/lib/check-model-route.sh": "$control",
   "scripts/e2e/lib/install-model-gateway.sh": "realpath -m",
   "scripts/e2e/stage2-tmux-supervision.sh": "realpath -m",
-  "scripts/e2e/stage3-4b13b-acceptance.sh": "needs a socket",
-  "scripts/e2e/stage3-devbox-workflow.sh": "needs a socket",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "a loop variable",
+  "scripts/e2e/stage3-devbox-workflow.sh": "a loop variable",
   "scripts/e2e/stage4b-sandbox-tree.sh": "$p",
 };
 
@@ -261,6 +260,35 @@ describe("scripts a command runs", () => {
     expect(bash(`bash ${generated}`)).toBeUndefined();
   });
 
+  test("refuses every path a function can write to stdout", () => {
+    const reason = bash('f() { echo "$HOME"; echo "$LEGION_WORKSPACE/x"; }; rm -rf $(f)');
+    expect(reason).toBeDefined();
+    expect(reason ?? "").toContain(home);
+  });
+
+  test("invalidates a pid file after a later write from any source", () => {
+    const pidFile = path.join(scratch, "mine", "replaced.pid");
+    const reason = bash(
+      `sleep 60 & echo "$!" > ${pidFile}; pgrep server > ${pidFile}; kill "$(<${pidFile})"`
+    );
+    expect(reason).toBeDefined();
+    expect(reason ?? "").toContain("cannot resolve the pid");
+  });
+
+  test("tracks every array element's process provenance", () => {
+    const reason = bash(`ids[0]=$(pgrep sleep); sleep 60 & ids[1]=$!; kill "\${ids[0]}"`);
+    expect(reason).toBeDefined();
+    expect(reason ?? "").toContain("cannot resolve the pid");
+  });
+
+  test("preserves an indexed descendant pid through local declarations", () => {
+    expect(
+      bash(
+        `ids=(); sleep 60 & ids[0]=$!; f() { local n="$1"; local pid="\${ids[$n]}"; kill "$pid"; }; f 0`
+      )
+    ).toBeUndefined();
+  });
+
   test("checks every tracked shell script against the documented allow-list", () => {
     const listed = spawnSync("git", ["ls-files", "-z", "--", ":(glob)**/*.sh"], {
       cwd: repository,
@@ -448,7 +476,9 @@ describe("signals", () => {
       expect(bash('kill "$(cat server.pid)"')).toContain("cannot resolve the pid");
       expect(bash("tmux kill-server")).toContain("needs a socket");
       expect(bash("tmux -L scratch kill-server")).toContain("needs a socket");
-      expect(bash("tmux -L scratch new-session -d; tmux -L scratch kill-server")).toBeUndefined();
+      const foreignTmux = bash("tmux -L scratch new-session -d; tmux -L scratch kill-server");
+      expect(foreignTmux).toBeDefined();
+      expect(foreignTmux ?? "").toContain("needs a socket");
       expect(bash(`echo ${process.ppid} | xargs kill`)).toContain("standard input");
       const pidFile = path.join(scratch, "mine", "child.pid");
       expect(
@@ -483,6 +513,12 @@ describe("signals", () => {
       child.kill();
       await child.exited;
     }
+  });
+
+  test("allows tmux only through a socket path inside the pane roots", () => {
+    expect(bash(`tmux -S "${scratch}/mine/tmux" kill-server`)).toBeUndefined();
+    expect(bash('TMUX_TMPDIR="$LEGION_WORKSPACE/t" tmux kill-server')).toBeUndefined();
+    expect(bash('TMUX_TMPDIR="$HOME/t" tmux kill-server')).toContain("needs a socket");
   });
 
   test("follows a trap handler after `--`", () => {

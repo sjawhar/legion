@@ -101,12 +101,12 @@ interface State {
   readonly script: string | undefined;
   /** The `$0` a `bash -c` invocation supplies; a script otherwise names itself. */
   argv0: Expansion | undefined;
-  /** The known output of a function's final `echo`, when a substitution consumes it. */
-  output: Expansion | undefined;
+  /** Every output a function's substitution can emit. `undefined` means it emitted an unknown value. */
+  output: readonly Expansion[] | undefined;
   /** Files this shell wrote with a pid it started, indexed by resolved path. */
   readonly pidFiles: Map<string, Expansion>;
-  /** Explicit tmux sockets this shell started before it tries to stop them. */
-  readonly startedTmux: Set<string>;
+  /** Per-element values of shell arrays. */
+  readonly arrays: Map<string, Map<string, Expansion>>;
   /** Functions available in this shell, with their definition source for diagnostic locations. */
   functions: Map<string, FunctionDefinition>;
   /** EXIT handlers run when this shell finishes, after its last assignment. */
@@ -178,6 +178,48 @@ const FILE_COMMANDS = new Set([
   "chgrp",
 ]);
 const SIGNAL_COMMANDS = new Set(["kill", "pkill", "killall", "killall5"]);
+
+/** Commands that do not add a path to a function's stdout. */
+const FUNCTION_OUTPUT_SILENT: Record<string, true> = {
+  ":": true,
+  break: true,
+  cd: true,
+  chmod: true,
+  chgrp: true,
+  chown: true,
+  continue: true,
+  declare: true,
+  false: true,
+  getopts: true,
+  kill: true,
+  killall: true,
+  killall5: true,
+  local: true,
+  ln: true,
+  mapfile: true,
+  mkdir: true,
+  mv: true,
+  popd: true,
+  pushd: true,
+  read: true,
+  readarray: true,
+  readonly: true,
+  return: true,
+  rm: true,
+  set: true,
+  shift: true,
+  shred: true,
+  sleep: true,
+  touch: true,
+  trap: true,
+  true: true,
+  truncate: true,
+  unlink: true,
+  unset: true,
+  wait: true,
+};
+
+const UNKNOWN_ARRAY_INDEX = "\u0000";
 
 const HINT =
   "Name a path under $LEGION_WORKSPACE or under a /tmp directory of your own; the Legion pane " +
@@ -368,6 +410,13 @@ function lookup(name: string, st: State, ctx: Ctx): Expansion | undefined {
   return value === undefined ? undefined : [literal(value)];
 }
 
+function resolveArrayIndex(index: string | undefined, st: State, ctx: Ctx): string | undefined {
+  if (index === undefined) return undefined;
+  if (/^[0-9]+$/.test(index)) return index;
+  const match = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(index);
+  return match === null ? undefined : literalText(lookup(match[1] as string, st, ctx));
+}
+
 /** Every alternative of `$name` / `${name}`; `quoted` keeps an unquoted value from being taken
  * as one word when bash would split or glob it. */
 function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][] {
@@ -414,17 +463,24 @@ function parameterExpansion(
   if (name === "BASH_SOURCE" && part.index === "0" && st.script !== undefined) {
     return [[literal(st.script)]];
   }
-  const indexed = lookup(name, st, ctx);
-  if (
-    part.index !== undefined &&
-    indexed !== undefined &&
-    indexed.length > 0 &&
-    indexed.every((piece) => piece.descendantPid)
-  ) {
-    return [[...indexed]];
+  const array = st.arrays.get(name);
+  if (part.index === "@" || part.index === "*") {
+    if (array !== undefined) {
+      const unknownElement = array.get(UNKNOWN_ARRAY_INDEX);
+      if (unknownElement !== undefined) return [[...unknownElement]];
+      const values = [...array.values()];
+      return values.length === 0 ? [[literal("")]] : values.map((value) => [...value]);
+    }
+    return parameter(name, quoted, st, ctx);
   }
-  if (part.index === "@" || part.index === "*") return parameter(name, quoted, st, ctx);
-  if (part.length || part.indirect || part.slice || part.replace || part.index !== undefined) {
+  if (part.index !== undefined) {
+    const index = resolveArrayIndex(part.index, st, ctx);
+    if (array !== undefined && index !== undefined) {
+      return [[...(array.get(index) ?? array.get(UNKNOWN_ARRAY_INDEX) ?? [literal("")])]];
+    }
+    return [[unknown(`\`${part.text}\``)]];
+  }
+  if (part.length || part.indirect || part.slice || part.replace) {
     return [[unknown(`\`${part.text}\``)]];
   }
   const operator = part.operator;
@@ -465,7 +521,7 @@ function substitution(
   text: string,
   st: State,
   ctx: Ctx
-): Piece[] {
+): Piece[][] {
   const pidRead = /^\$\(<(.+)\)$/.exec(text);
   const variableRead = /^\$\(<"?\$([A-Za-z_][A-Za-z0-9_]*)"?\)$/.exec(text);
   const directFile = pidRead?.[1]?.includes("$") === true ? undefined : pidRead?.[1];
@@ -474,22 +530,22 @@ function substitution(
     (variableRead === null ? undefined : literalText(lookup(variableRead[1] as string, st, ctx)));
   if (file !== undefined && st.cwd !== undefined) {
     const pid = st.pidFiles.get(path.resolve(st.cwd, file));
-    if (pid !== undefined) return [...pid];
+    if (pid !== undefined) return [[...pid]];
   }
   const only = script?.commands.length === 1 ? script.commands[0]?.command : undefined;
   const invocation = substitutionInvocation(only, st, ctx);
   const definition = invocation === undefined ? undefined : st.functions.get(invocation.base);
   if (definition !== undefined && invocation !== undefined) {
     const output = functionOutput(invocation.base, definition, invocation.rest, st, ctx);
-    if (output !== undefined) return [...output];
+    if (output !== undefined) return output.map((value) => [...value]);
   }
   if (invocation !== undefined) {
     if (invocation.base === "pwd" && invocation.rest.length === 0 && st.cwd !== undefined) {
-      return [literal(st.cwd)];
+      return [[literal(st.cwd)]];
     }
-    if (invocation.base === "mktemp") return mktempPath(invocation.command, st, ctx);
+    if (invocation.base === "mktemp") return [mktempPath(invocation.command, st, ctx)];
     const resolved = substitutionPath(invocation.base, invocation.rest, st);
-    if (resolved !== undefined) return [literal(resolved)];
+    if (resolved !== undefined) return [[literal(resolved)]];
   }
   if (only?.type === "AndOr" && only.operators.length === 1 && only.operators[0] === "&&") {
     const [left, right] = only.commands;
@@ -498,11 +554,11 @@ function substitution(
     if (cd?.base === "cd" && pwd?.base === "pwd" && pwd.rest.length === 0 && cd.rest.length === 1) {
       const target = literalText(cd.rest[0]?.exp);
       if (target !== undefined && st.cwd !== undefined) {
-        return [literal(path.resolve(st.cwd, target))];
+        return [[literal(path.resolve(st.cwd, target))]];
       }
     }
   }
-  return [unknown(`\`${text}\` (a command's output)`)];
+  return [[unknown(`\`${text}\` (a command's output)`)]];
 }
 
 function substitutionInvocation(
@@ -584,7 +640,7 @@ function expandPart(part: WordPart, first: boolean, st: State, ctx: Ctx): Piece[
               : child.type === "ParameterExpansion"
                 ? parameterExpansion(child, true, st, ctx)
                 : child.type === "CommandExpansion"
-                  ? [substitution(child.script, child.text, st, ctx)]
+                  ? substitution(child.script, child.text, st, ctx)
                   : [[unknown(`\`${child.text}\``)]];
         alternatives = product(alternatives, options);
       }
@@ -595,7 +651,7 @@ function expandPart(part: WordPart, first: boolean, st: State, ctx: Ctx): Piece[
     case "ParameterExpansion":
       return parameterExpansion(part, false, st, ctx);
     case "CommandExpansion":
-      return [substitution(part.script, part.text, st, ctx)];
+      return substitution(part.script, part.text, st, ctx);
     case "ArithmeticExpansion":
       return [[unknown(`\`${part.text}\` (arithmetic)`)]];
     case "ProcessSubstitution":
@@ -773,11 +829,11 @@ function clone(st: State): State {
     ...st,
     vars: new Map(st.vars),
     exported: new Set(st.exported),
+    arrays: new Map([...st.arrays].map(([name, elements]) => [name, new Map(elements)] as const)),
     functions: new Map(st.functions),
     traps: [...st.traps],
     runningFunctions: new Set(st.runningFunctions),
     pidFiles: new Map(st.pidFiles),
-    startedTmux: new Set(st.startedTmux),
   };
 }
 
@@ -793,6 +849,19 @@ function merge(target: State, branches: readonly State[]): void {
       target.vars.set(name, first);
     } else {
       target.vars.set(name, [unknown(`\`$${name}\`, which a branch sets differently`)]);
+    }
+  }
+  const arrayNames = new Set<string>();
+  for (const branch of branches) for (const name of branch.arrays.keys()) arrayNames.add(name);
+  target.arrays.clear();
+  for (const name of arrayNames) {
+    const values = branches.map((branch) => JSON.stringify([...(branch.arrays.get(name) ?? [])]));
+    const first = branches[0]?.arrays.get(name);
+    if (first !== undefined && values.every((value) => value === values[0])) {
+      target.arrays.set(name, new Map(first));
+    } else {
+      const unknownElement = [unknown(`\`$${name}\`, which a branch sets differently`)];
+      target.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, unknownElement]]));
     }
   }
   const cwds = new Set(branches.map((branch) => branch.cwd));
@@ -1022,6 +1091,7 @@ function checkRedirects(
         const words = command.args.map((arg) => literalText(arg.exp));
         content = words.every((word) => word !== undefined) ? `${words.join(" ")}\n` : null;
       }
+      st.pidFiles.delete(file);
       const before = appends ? st.files.get(file) : "";
       st.files.set(file, content === null || before === null ? null : `${before ?? ""}${content}`);
       if (
@@ -1075,19 +1145,53 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
       assignment.value === undefined
         ? [literal("")]
         : (expandWord(assignment.value, st, ctx)[0] ?? []);
+    const arrayAssignment =
+      assignment.array !== undefined || assignment.append || assignment.index !== undefined;
     const descendantPid = expanded.length > 0 && expanded.every((piece) => piece.descendantPid);
-    const value =
-      assignment.array !== undefined || assignment.append || assignment.index !== undefined
-        ? [
-            unknown(
-              `\`$${assignment.name}\`, an array or appended value`,
-              descendantPid || undefined
-            ),
-          ]
-        : expanded;
+    const value = arrayAssignment
+      ? [unknown(`\`$${assignment.name}\`, an array or appended value`, descendantPid || undefined)]
+      : expanded;
     overlay.set(assignment.name, value);
     // `a=1 b=$a` alone assigns left to right in this shell.
-    if (command.name === undefined) st.vars.set(assignment.name, value);
+    if (command.name === undefined) {
+      if (arrayAssignment) {
+        const elements =
+          assignment.array !== undefined && !assignment.append
+            ? new Map<string, Expansion>()
+            : new Map(st.arrays.get(assignment.name) ?? []);
+        if (assignment.array !== undefined) {
+          let index = assignment.append
+            ? Math.max(
+                0,
+                ...[...elements.keys()]
+                  .filter((key) => /^[0-9]+$/.test(key))
+                  .map((key) => Number(key) + 1)
+              )
+            : 0;
+          for (const word of assignment.array) {
+            elements.set(String(index), expandWord(word, st, ctx)[0] ?? []);
+            index += 1;
+          }
+        } else if (assignment.append) {
+          const index = Math.max(
+            0,
+            ...[...elements.keys()]
+              .filter((key) => /^[0-9]+$/.test(key))
+              .map((key) => Number(key) + 1)
+          );
+          elements.set(String(index), expanded);
+        } else {
+          elements.set(
+            resolveArrayIndex(assignment.index, st, ctx) ?? UNKNOWN_ARRAY_INDEX,
+            expanded
+          );
+        }
+        st.arrays.set(assignment.name, elements);
+      } else {
+        st.arrays.delete(assignment.name);
+      }
+      st.vars.set(assignment.name, value);
+    }
   }
   const words = command.name === undefined ? command.suffix : [command.name, ...command.suffix];
   for (const word of words) visitWord(word, st, ctx);
@@ -1261,10 +1365,13 @@ function runFunction(
   walkNode(definition.body, child, ctx, false);
   outer.vars = child.vars;
   outer.exported = child.exported;
+  outer.arrays.clear();
+  for (const [name, elements] of child.arrays) outer.arrays.set(name, new Map(elements));
   outer.cwd = child.cwd;
   outer.cwdWhy = child.cwdWhy;
   outer.functions = child.functions;
   outer.traps = child.traps;
+  outer.output = child.output;
   outer.backgroundStarted ||= child.backgroundStarted;
 }
 
@@ -1274,17 +1381,17 @@ function functionOutput(
   args: readonly Arg[],
   outer: State,
   ctx: Ctx
-): Expansion | undefined {
+): readonly Expansion[] | undefined {
   if (outer.runningFunctions.has(name)) return undefined;
   const child: State = {
     ...clone(outer),
     positional: args.map((arg) => arg.exp),
     source: definition.source,
-    output: undefined,
+    output: [],
   };
   child.runningFunctions.add(name);
   walkNode(definition.body, child, ctx, false);
-  return child.output;
+  return child.output?.length === 0 ? undefined : child.output;
 }
 
 function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
@@ -1303,9 +1410,26 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     runFunction(base, functionDefinition, rest, outer, ctx);
     return;
   }
+  const stdoutRedirected = invocation.redirects.some(
+    (redirect) =>
+      (redirect.fileDescriptor === undefined || redirect.fileDescriptor === 1) &&
+      [">", ">>", ">|", "&>", "&>>", ">&"].includes(redirect.operator)
+  );
+  if (
+    outer.output !== undefined &&
+    !stdoutRedirected &&
+    base !== "echo" &&
+    base !== "printf" &&
+    FUNCTION_OUTPUT_SILENT[base] !== true
+  ) {
+    outer.output = undefined;
+  }
   switch (base) {
     case "echo":
-      outer.output = rest.length === 1 ? rest[0]?.exp : undefined;
+      if (outer.output !== undefined && !stdoutRedirected) {
+        outer.output =
+          rest.length === 1 && rest[0] !== undefined ? [...outer.output, rest[0].exp] : undefined;
+      }
       return;
     case "cd":
     case "pushd": {
@@ -1327,7 +1451,10 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     case "unset":
       for (const arg of operands(rest, "").operands) {
         const variable = literalText(arg.exp);
-        if (variable !== undefined) outer.vars.set(variable, [literal("")]);
+        if (variable !== undefined) {
+          outer.vars.set(variable, [literal("")]);
+          outer.arrays.delete(variable);
+        }
       }
       return;
     case "read":
@@ -1365,8 +1492,11 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         outer.vars.set(variable, [unknown(`\`$${variable}\` (printf -v)`)]);
         return;
       }
-      if (literalText(rest[0]?.exp) === "%s\\n" && rest.length === 2) {
-        outer.output = rest[1]?.exp;
+      if (outer.output !== undefined && !stdoutRedirected) {
+        outer.output =
+          literalText(rest[0]?.exp) === "%s\\n" && rest.length === 2 && rest[1] !== undefined
+            ? [...outer.output, (rest[1] as Arg).exp]
+            : undefined;
       }
       return;
     }
@@ -1466,7 +1596,9 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         }
         const target = literalText(arg.exp);
         if (target !== undefined && st.cwd !== undefined) {
-          st.files.set(path.resolve(st.cwd, target), append ? null : (heredoc?.content ?? null));
+          const file = path.resolve(st.cwd, target);
+          st.pidFiles.delete(file);
+          st.files.set(file, append ? null : (heredoc?.content ?? null));
         }
       }
       return;
@@ -1508,28 +1640,39 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           socketIsPath = true;
         }
       }
-      const socketKey = socket === undefined ? undefined : (literalText(socket.exp) ?? socket.text);
-      const startsServer = rest.some((arg) =>
-        /^(?:new|new-session)$/.test(literalText(arg.exp) ?? "")
-      );
-      if (startsServer && socketKey !== undefined) st.startedTmux.add(socketKey);
       const killing = rest.find((arg) =>
         /^kill-(?:server|session|window|pane)$/.test(literalText(arg.exp) ?? "")
       );
       if (killing === undefined) return;
+      const tmpdir = invocation.overlay.get("TMUX_TMPDIR") ?? lookup("TMUX_TMPDIR", st, ctx);
+      const tmpdirText = literalText(tmpdir);
+      const tmpdirPath =
+        tmpdirText === undefined || (!tmpdirText.startsWith("/") && st.cwd === undefined)
+          ? undefined
+          : realish(path.resolve(st.cwd ?? "/", tmpdirText), true);
+      const tmpdirComponent =
+        tmpdirPath?.startsWith(`${ctx.roots.scratch}/`) === true
+          ? tmpdirPath.slice(ctx.roots.scratch.length + 1).split("/")[0]
+          : undefined;
+      const tmpdirAllowed =
+        tmpdirPath !== undefined &&
+        (inWorkspace(tmpdirPath, ctx.roots) ||
+          (tmpdirComponent !== undefined &&
+            tmpdirComponent !== "" &&
+            !PROTECTED_SCRATCH.some((name) => tmpdirComponent.startsWith(name))));
       if (
-        socket !== undefined &&
-        socketIsPath &&
-        judgePath(socket.exp, st, ctx, { follow: true, overwrite: false }).ok
+        (socket !== undefined &&
+          socketIsPath &&
+          judgePath(socket.exp, st, ctx, { follow: true, overwrite: false }).ok) ||
+        tmpdirAllowed
       ) {
         return;
       }
-      if (socketKey !== undefined && st.startedTmux.has(socketKey)) return;
       throw new Refusal(
         site.snippet,
         site.line,
-        `\`tmux ${literalText(killing.exp)}\` needs a socket this shell started; the default and an ` +
-          "unproven socket can end panes and processes this pane did not start"
+        `\`tmux ${literalText(killing.exp)}\` needs a socket path inside this pane's roots; the ` +
+          "default, every -L name, and an unproven socket can end panes and processes this pane did not start"
       );
     }
     default:
@@ -1569,16 +1712,22 @@ function declaration(builtin: string, list: readonly Arg[], st: State, ctx: Ctx)
   const array = list.some((arg) => /^-[a-zA-Z]*[aA]/.test(literalText(arg.exp) ?? ""));
   for (const arg of list) {
     const first = arg.exp[0];
-    if (first?.kind !== "literal" || first.text.startsWith("-")) continue;
-    const equals = first.text.indexOf("=");
-    const variable = equals === -1 ? first.text : first.text.slice(0, equals);
+    const equals = arg.text.indexOf("=");
+    const variable = equals === -1 ? literalText(arg.exp) : arg.text.slice(0, equals);
+    if (variable === undefined || variable.startsWith("-")) continue;
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) continue;
     if (builtin === "export") st.exported.add(variable);
     if (equals === -1) continue;
-    let value: Piece[] = [literal(first.text.slice(equals + 1)), ...arg.exp.slice(1)];
+    let value =
+      first?.kind === "literal" && first.text.startsWith(`${variable}=`)
+        ? [
+            ...(first.text.length === equals + 1 ? [] : [literal(first.text.slice(equals + 1))]),
+            ...arg.exp.slice(1),
+          ]
+        : [...arg.exp];
     // Tilde expands after an assignment's `=` in a declaration's argument too.
-    if (first.text.charAt(equals + 1) === "~" && arg.text.startsWith(`${variable}=~`)) {
-      value = [...unquotedLiteral(first.text.slice(equals + 1), 0, st, ctx), ...arg.exp.slice(1)];
+    if (arg.text.charAt(equals + 1) === "~" && arg.text.startsWith(`${variable}=~`)) {
+      value = [...unquotedLiteral(arg.text.slice(equals + 1), 0, st, ctx), ...arg.exp.slice(1)];
     }
     st.vars.set(variable, array ? [unknown(`\`$${variable}\`, an array`)] : value);
   }
@@ -1601,6 +1750,10 @@ function checkTargets(
         `${program} would ${verb} \`${target.text}\` (${verdict.resolution})`,
         ctx
       );
+    }
+    const text = literalText(target.exp);
+    if (text !== undefined && (text.startsWith("/") || st.cwd !== undefined)) {
+      st.pidFiles.delete(path.resolve(st.cwd ?? "/", text));
     }
   }
 }
@@ -1826,7 +1979,7 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
     argv0: undefined,
     output: undefined,
     pidFiles: new Map(),
-    startedTmux: new Set(),
+    arrays: new Map(),
     functions: new Map(),
     traps: [],
     runningFunctions: new Set(),
@@ -2296,7 +2449,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     argv0: undefined,
     output: undefined,
     pidFiles: new Map(),
-    startedTmux: new Set(),
+    arrays: new Map(),
     functions: new Map(),
     traps: [],
   });
