@@ -1,10 +1,5 @@
-import {
-  AssistantRuntimeProvider,
-  type ThreadMessageLike,
-  useExternalStoreRuntime,
-} from "@assistant-ui/react";
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
-import { type ReactNode, useCallback, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -23,8 +18,7 @@ import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { AgentThread } from "./AgentThread";
-import { isRunning, toThreadMessages } from "./conversation";
+import { AgentRuntimeThread, type SentMessage } from "./AgentRuntimeThread";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
 
 /** What the live dot says about the relay, and how it reads to a screen reader. */
@@ -58,19 +52,7 @@ export function AgentConversationPage(): ReactNode {
   // for it (measured against a live Oh My Pi session) and the thread would otherwise show a
   // reply to a message the human cannot see. These are this page's own echo and are dropped on
   // reload, which is what "nothing is stored" means here too.
-  const [sent, setSent] = useState<readonly { id: string; at: number; body: string }[]>([]);
-  const messages = useMemo(() => {
-    const streamed = toThreadMessages(conversation);
-    const echoes: ThreadMessageLike[] = sent.map((entry) => ({
-      content: [{ text: entry.body, type: "text" as const }],
-      createdAt: new Date(entry.at),
-      id: entry.id,
-      role: "user" as const,
-    }));
-    return [...streamed, ...echoes].sort(
-      (left, right) => (left.createdAt?.getTime() ?? 0) - (right.createdAt?.getTime() ?? 0)
-    );
-  }, [conversation, sent]);
+  const [sent, setSent] = useState<readonly SentMessage[]>([]);
 
   // Talking to the agent is Dispatch's existing targeted delivery, unchanged: the stream itself
   // stays read-only and this adds no write path of its own.
@@ -93,14 +75,6 @@ export function AgentConversationPage(): ReactNode {
     },
     [mode, sessionId]
   );
-  const runtime = useExternalStoreRuntime({
-    // The frames already arrive in assistant-ui's own message shape, so the store's converter
-    // is the identity: `conversation.ts` is the one place the session's wire shape is read.
-    convertMessage: (message: ThreadMessageLike) => message,
-    isRunning: isRunning(conversation),
-    messages,
-    onNew,
-  });
   const presence = STATUS[status];
 
   return (
@@ -155,19 +129,21 @@ export function AgentConversationPage(): ReactNode {
           Could not send: {sendError}
         </p>
       )}
-      {/* The outer boundary is the catch-all: building the runtime is where assistant-ui
-          converts every message, so a throw there happens above the thread and takes the
-          composer with it whatever the thread does. Both guards against that are in
-          `conversation.ts`; this keeps the header and the delivery controls if one ever fails.
-          The transcript has a boundary of its own inside `AgentThread`, which is what keeps the
-          composer alive when the thread's own rendering is what failed. */}
+      {/* Everything that reads a frame lives inside this boundary, in `AgentRuntimeThread`:
+          assistant-ui converts every message while the runtime is built, so a message it
+          refuses throws in the render of whichever component calls `useExternalStoreRuntime`.
+          While that was this page, this boundary sat above nothing and a bad frame took the
+          header and the delivery controls with the thread. The transcript has a boundary of its
+          own inside `AgentThread`, which keeps the composer when the thread's own rendering is
+          what failed. */}
       <ErrorBoundary region="this conversation" resetKey={sessionId}>
-        <AssistantRuntimeProvider runtime={runtime}>
-          <AgentThread
-            placeholder={`Message ${label} — delivered as ${mode}…`}
-            resetKey={sessionId}
-          />
-        </AssistantRuntimeProvider>
+        <AgentRuntimeThread
+          conversation={conversation}
+          onNew={onNew}
+          placeholder={`Message ${label} — delivered as ${mode}…`}
+          resetKey={sessionId}
+          sent={sent}
+        />
       </ErrorBoundary>
     </div>
   );
