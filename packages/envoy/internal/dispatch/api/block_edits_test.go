@@ -306,7 +306,10 @@ func TestDocumentEditsWriteAColonLineIntoCodeInsideATypedBlock(t *testing.T) {
 // as a rule or a list over a whole paragraph, and a line of dashes is such a rule. Blocks at a
 // list item's start follow its empty first paragraph, and an emptied paragraph is not written
 // where the rest of its block stands without it. Where the text lands at the document's start, a
-// closed front-matter block that opens it is front matter.
+// closed front-matter block that opens it is front matter. What the live document holds after a
+// non-empty accept is what its markdown reads back as: the token of a document seeded with the
+// stored markdown is the accepted document's, so two paragraphs in a tight list item leave the
+// item spread, and a block over an item's text leaves no empty paragraph before its nested list.
 func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -363,6 +366,8 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 		{"nothing in a list item", listItem, "", "Intro.\n\n- \n- two\n"},
 		{"nothing in a list item holding two paragraphs", longItem, "", "Intro.\n\n- more\n- two\n"},
 		{"nothing in a list item holding a nested list", nestedItem, "", "Intro.\n\n- - nested\n- two\n"},
+		{"a heading in a list item holding a nested list", nestedItem, "# H", "Intro.\n\n- # H\n  - nested\n- two\n"},
+		{"code in a list item holding a nested list", nestedItem, "```\nc\n```", "Intro.\n\n- ```\n  c\n  ```\n  - nested\n- two\n"},
 		// An emptied footnote definition holds one empty paragraph, which reads back as the
 		// definition, so its reference stays a reference.
 		{"nothing in a footnote definition", footnote, "", "x[^1]\n\n[^1]: \n"},
@@ -379,12 +384,24 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 		{"nothing over a document's only paragraph", "Body.\n", "", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			artifactID, comment := suggest(t, "K"+string(rune('A'+index)), test.spec, test.with)
+			artifactID, comment := suggest(t, "K"+string(rune('A'+index/26))+string(rune('A'+index%26)), test.spec, test.with)
 			if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
 				t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
 			}
 			if after := text(artifactID); after != test.want {
 				t.Fatalf("after accepting = %q, want %q", after, test.want)
+			}
+			if test.with == "" {
+				// An emptied paragraph stays in the live document where the markdown drops it.
+				return
+			}
+			_, token, err := documentService.TextWithToken(context.Background(), artifactID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seeded := createInteractionIssue(t, handler, "S"+string(rune('A'+index/26))+string(rune('A'+index%26)), "seeded "+test.name, test.want)
+			if _, readBack, err := documentService.TextWithToken(context.Background(), seeded.PrimaryArtifactID); err != nil || readBack != token {
+				t.Fatalf("the accepted document's token = %s, but its markdown reads back as %s (%v)", token, readBack, err)
 			}
 		})
 	}
@@ -399,6 +416,21 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 	}
 	if opening["---"] != opening["***"] {
 		t.Fatalf("accepting `---` over an opening heading = %q, want what `***` writes, %q", opening["---"], opening["***"])
+	}
+}
+
+// deleteText deletes find's text through the edit route, as an edit can leave a document that
+// already reads back otherwise; an empty find deletes nothing.
+func deleteText(t *testing.T, handler http.Handler, artifactID, find string) {
+	t.Helper()
+	if find == "" {
+		return
+	}
+	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits", map[string]any{
+		"ops": []map[string]any{{"op": "delete", "find": find}},
+	}, "alice")
+	if edited.Code != http.StatusOK || !strings.Contains(edited.Body.String(), `"changed":true`) {
+		t.Fatalf("delete %q: status=%d body=%s", find, edited.Code, edited.Body.String())
 	}
 }
 
@@ -418,18 +450,22 @@ func TestAcceptingASuggestionRefusesListsThatReadBackAsOne(t *testing.T) {
 		bullets = "a bullet list beside another of its kind reads back as one list"
 		callout = ":::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::"
 	)
-	for index, test := range []struct{ name, spec, quote, with, says string }{
-		{"a list before a list", "Intro.\n\nBody.\n\n- y\n", "Body.", "- x", bullets},
-		{"a list after a list", "Intro.\n\n- y\n\nBody.\n", "Body.", "- x", bullets},
-		{"an ordered list before an ordered list", "Intro.\n\nBody.\n\n1. y\n", "Body.", "1. x", "an ordered list beside another of its kind reads back as one list"},
-		{"two bullet lists", "Intro.\n\nBody.\n\nAfter.\n", "Body.", "- a\n\n* b", bullets},
-		{"nothing between two lists", "- a\n\nBody.\n\n- b\n", "Body.", "", bullets},
-		{"text joining a list item to the paragraph before a list", "- y\n- Body.\n\nAfter here.\n\n- z\n", "Body. After", "x", bullets},
-		{"a list beside a callout's rewrite, before a list", "- y\n\n" + callout + "\n", "Body.", "- x\n\n" + callout, bullets},
-		{"a list consuming a callout beside a list", "Intro.\n\n" + callout + "\n\n- After here.\n", "Body. After", "- a", bullets},
+	for index, test := range []struct{ name, spec, quote, with, says, deleted string }{
+		{"a list before a list", "Intro.\n\nBody.\n\n- y\n", "Body.", "- x", bullets, ""},
+		{"a list after a list", "Intro.\n\n- y\n\nBody.\n", "Body.", "- x", bullets, ""},
+		{"an ordered list before an ordered list", "Intro.\n\nBody.\n\n1. y\n", "Body.", "1. x", "an ordered list beside another of its kind reads back as one list", ""},
+		{"two bullet lists", "Intro.\n\nBody.\n\nAfter.\n", "Body.", "- a\n\n* b", bullets, ""},
+		{"nothing between two lists", "- a\n\nBody.\n\n- b\n", "Body.", "", bullets, ""},
+		{"text joining a list item to the paragraph before a list", "- y\n- Body.\n\nAfter here.\n\n- z\n", "Body. After", "x", bullets, ""},
+		{"a list beside a callout's rewrite, before a list", "- y\n\n" + callout + "\n", "Body.", "- x\n\n" + callout, bullets, ""},
+		{"a list consuming a callout beside a list", "Intro.\n\n" + callout + "\n\n- After here.\n", "Body. After", "- a", bullets, ""},
+		// Two lists the document already reads back as one (an edit that deletes what stood between
+		// them leaves them so) are not this accept's, and do not let it join two more.
+		{"nothing between two lists, beside two that already read back as one", "- a\n\nSep.\n\n- b\n\nIntro.\n\n- c\n\nBody.\n\n- d\n", "Body.", "", bullets, "Sep."},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			issue := createInteractionIssue(t, handler, "L"+string(rune('A'+index)), test.name, test.spec)
+			deleteText(t, handler, issue.PrimaryArtifactID, test.deleted)
 			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
 				"suggestion": map[string]string{"replace_with": test.with}, "actor": sessionActor(),
@@ -519,8 +555,10 @@ func TestAcceptingAnEmptySuggestionInATypedBlock(t *testing.T) {
 	}
 }
 
-// An accept in a typed block is refused when the typed block it stores reads back as another
-// tree: two lists of one kind side by side read back as one inside a callout.
+// An accept in a typed block is refused when the block it stores reads back as another tree: two
+// lists of one kind side by side read back as one inside a callout, or inside the blockquote a
+// callout rewritten under its own id stands in, which the refusal names. Lists the document
+// already reads back as one elsewhere do not let it through.
 func TestAcceptingASuggestionAroundATypedBlockRefusesWhatCannotRoundTrip(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -528,12 +566,17 @@ func TestAcceptingASuggestionAroundATypedBlockRefusesWhatCannotRoundTrip(t *test
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
 	})
-	for index, test := range []struct{ name, spec, quote, with string }{
-		{"a list beside a list in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\n- y\n:::\n", "Body.", "- x"},
-		{"a list beside a list in a blockquote inside a callout", ":::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n>\n> - y\n:::\n", "Body.", "- x"},
+	const rewrite = ":::callout{#c1 kind=\"note\" title=\"T\"}\nBody2.\n:::\n\n- x\n"
+	const quoted = "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n> :::\n>\n> - y\n"
+	for index, test := range []struct{ name, spec, quote, with, says, deleted string }{
+		{"a list beside a list in a callout", "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\n- y\n:::\n", "Body.", "- x", "writes a bullet list in this callout", ""},
+		{"a list beside a list in a blockquote inside a callout", ":::callout{#c1 kind=\"note\" title=\"T\"}\n> Body.\n>\n> - y\n:::\n", "Body.", "- x", "writes a bullet list in this blockquote", ""},
+		{"a callout rewritten beside a list in a blockquote", "Intro.\n\n" + quoted, "Body.", rewrite, "writes a callout and a bullet list in this blockquote", ""},
+		{"a callout rewritten beside a list in a blockquote, beside lists that already read back as one", "- a\n\nSep.\n\n- b\n\n" + quoted, "Body.", rewrite, "writes a callout and a bullet list in this blockquote", "Sep."},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			issue := createInteractionIssue(t, handler, "N"+string(rune('A'+index)), test.name, test.spec)
+			deleteText(t, handler, issue.PrimaryArtifactID, test.deleted)
 			created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 				"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": test.quote},
 				"suggestion": map[string]string{"replace_with": test.with}, "actor": sessionActor(),
@@ -547,8 +590,8 @@ func TestAcceptingASuggestionAroundATypedBlockRefusesWhatCannotRoundTrip(t *test
 				t.Fatal(err)
 			}
 			accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice")
-			if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_OP"`) {
-				t.Fatalf("accept: status=%d body=%s, want 400 INVALID_OP", accepted.Code, accepted.Body.String())
+			if accepted.Code != http.StatusBadRequest || !strings.Contains(accepted.Body.String(), `"code":"INVALID_OP"`) || !strings.Contains(accepted.Body.String(), test.says) {
+				t.Fatalf("accept: status=%d body=%s, want 400 INVALID_OP saying %q", accepted.Code, accepted.Body.String(), test.says)
 			}
 			after, err := documentService.Text(context.Background(), issue.PrimaryArtifactID)
 			if err != nil || after != before {
