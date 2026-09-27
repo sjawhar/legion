@@ -410,16 +410,19 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	}
 	// An opened or reopened older than the recorded pull request's clock is a late redelivery,
 	// whichever pull request it names: a branch can carry a newer pull request after a merge or a
-	// park and rerun, and an earlier one's late event must not replace it.
+	// park and rerun, and an earlier one's late event must not replace it. The workflow keeps one
+	// pull request per branch and assumes one is open at a time; two open at once from one branch,
+	// on different bases, are not modelled, and this fence can then keep the earlier one, whose
+	// close still tells the architect.
 	if recorded != nil && classify.LateLifecycle(fact.UpdatedAt, recorded.HeadUpdatedAt) {
 		return intake.Result{}, nil
 	}
 	if recorded != nil && recorded.Repo == fact.Repo && recorded.Number == fact.Number {
 		// GitHub sends opened once per pull request, so an opened for one already recorded is a
-		// redelivery whatever its clock; a reopen is fenced by its clock. GitHub never reopens a
-		// merged pull request, so a reopen of one is older than the merge, which carries no clock
-		// to fence it.
-		if !fact.Reopened || recorded.State == record.PullRequestMerged || classify.LateLifecycle(fact.UpdatedAt, recorded.HeadUpdatedAt) {
+		// redelivery whatever its clock; a reopen's clock is left to the fence above. GitHub never
+		// reopens a merged pull request, so a reopen of one is older than the merge, which carries
+		// no clock to fence it.
+		if !fact.Reopened || recorded.State == record.PullRequestMerged {
 			return intake.Result{}, nil
 		}
 		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
