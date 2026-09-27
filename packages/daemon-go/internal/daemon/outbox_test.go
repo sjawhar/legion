@@ -160,8 +160,9 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-2", Title: "Root", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
 	row := mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now())
 	publisher := &outboxPublisher{err: errors.New("listener unavailable")}
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 
-	if err := (&outbox{pool: pool, dispatchProject: "LEGION", records: records, notices: publisher}).execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
+	if err := (&outbox{pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup}).execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
 		t.Fatalf("notice failure = %v, want listener failure", err)
 	}
 }

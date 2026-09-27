@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -112,12 +113,21 @@ func mustClaimToken(t *testing.T, issue string, role claim.Role) claim.Token {
 	return token
 }
 
-// Every notice is architect-facing, so it goes to the architect that owns its issue, on that
-// architect's own role topic, by the TypeScript daemon's rule (owningArchitect): the nearest issue
-// at or above it whose architect claim runs (not suspended, failed or retired), else the tree root;
-// a child's close or status change starts at its parent. No issue topic carries it, since every
-// issue topic is a subject that issue's phase workers subscribe to.
-func TestANoticeGoesToTheOwningArchitectsRoleTopicAlone(t *testing.T) {
+// Every notice is architect-facing, so it goes to the architect that owns its issue, by the
+// TypeScript daemon's rule (owningArchitect): the nearest issue at or above it whose sub-architect
+// claim runs (not suspended, failed or retired), else the tree root; a child's close or status
+// change starts at its parent. The walk stays inside the issue's tree: admission records a Dispatch
+// re-parent as it comes and leaves the issue's tree as it was, so a parent that is not an issue of
+// that tree — not recorded, or recorded in another tree — ends the walk at the tree's root.
+func TestTheArchitectThatOwnsANotice(t *testing.T) {
+	root, child, unrecorded, elsewhere := "LEGION-1", "LEGION-2", "LEGION-77", "LEGION-50"
+	tree := map[string]record.Issue{
+		root:       {Key: root, Tree: root},
+		child:      {Key: child, Tree: root, Parent: &root},
+		"LEGION-3": {Key: "LEGION-3", Tree: root, Parent: &child},
+		"LEGION-4": {Key: "LEGION-4", Tree: root, Parent: &unrecorded},
+		"LEGION-5": {Key: "LEGION-5", Tree: root, Parent: &elsewhere},
+	}
 	for _, tc := range []struct {
 		name         string
 		issue        string
@@ -128,51 +138,68 @@ func TestANoticeGoesToTheOwningArchitectsRoleTopicAlone(t *testing.T) {
 		{name: "a child's notice with no sub-architect", issue: "LEGION-2", owner: "LEGION-1"},
 		{name: "the root's own notice", issue: "LEGION-1", owner: "LEGION-1"},
 		{name: "a child owned by its sub-architect", issue: "LEGION-2", subArchitect: supervise.StateWorking, owner: "LEGION-2"},
+		{name: "a child whose sub-architect is launching", issue: "LEGION-2", subArchitect: supervise.StateLaunching, owner: "LEGION-2"},
 		{name: "a grandchild under the sub-architect's child", issue: "LEGION-3", subArchitect: supervise.StateWorking, owner: "LEGION-2"},
 		{name: "a child whose sub-architect retired", issue: "LEGION-2", subArchitect: supervise.StateRetired, owner: "LEGION-1"},
+		{name: "a child whose sub-architect failed", issue: "LEGION-2", subArchitect: supervise.StateFailed, owner: "LEGION-1"},
 		{name: "a child whose sub-architect was suspended", issue: "LEGION-2", subArchitect: supervise.StateSuspended, owner: "LEGION-1"},
 		{name: "a child's close under its running sub-architect", issue: "LEGION-2", kind: "child-closed", subArchitect: supervise.StateWorking, owner: "LEGION-1"},
 		{name: "a child's status change under its running sub-architect", issue: "LEGION-2", kind: "child-status", subArchitect: supervise.StateWorking, owner: "LEGION-1"},
 		{name: "a grandchild's close under the sub-architect's child", issue: "LEGION-3", kind: "child-closed", subArchitect: supervise.StateWorking, owner: "LEGION-2"},
+		{name: "the root's own close", issue: "LEGION-1", kind: "child-closed", owner: "LEGION-1"},
+		{name: "a child whose parent is not recorded", issue: "LEGION-4", owner: "LEGION-1"},
+		{name: "a child whose parent is in another tree", issue: "LEGION-5", owner: "LEGION-1"},
+		{name: "the close of a child whose parent is not recorded", issue: "LEGION-4", kind: "child-closed", owner: "LEGION-1"},
+		{name: "the close of a child whose parent is in another tree", issue: "LEGION-5", kind: "child-status", owner: "LEGION-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pool := isolatedOutboxPool(t)
-			records := record.NewStore()
-			noticeTree(t, pool, records, false)
-			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-			architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
-			if tc.subArchitect != "" {
-				architectClaim(t, sup, "LEGION-2", tc.subArchitect)
+			states := map[claim.Token]supervise.ClaimState{
+				mustClaimToken(t, root, claim.RoleArchitect):  supervise.StateWorking,
+				mustClaimToken(t, child, claim.RoleArchitect): tc.subArchitect,
 			}
-			publisher := &holderPublisher{}
-			notice := record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}
-			if tc.kind != "" {
-				notice = record.Notice{Kind: tc.kind, Role: claim.RoleArchitect, Reason: tc.issue + " moved"}
+			kind := tc.kind
+			if kind == "" {
+				kind = "phase-finished"
 			}
-			row := mustOutboxRow(t, tc.issue, notice, time.Now())
-			row.ID = 56
-
-			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion"}
-			if err := runner.execute(context.Background(), row); err != nil {
-				t.Fatalf("execute notice: %v", err)
-			}
-			want := roleTopicPrefix + string(mustClaimToken(t, tc.owner, claim.RoleArchitect))
-			_, delivered := publisher.snapshot()
-			if len(delivered) != 1 || delivered[0].topic != want || delivered[0].key != "legion-outbox:56" {
-				t.Fatalf("notice publishes = %+v, want one to %s under the row's key", delivered, want)
-			}
-			// No phase worker of the root, the child or the grandchild holds the subject it went to:
-			// neither an issue topic nor a worker's role topic.
-			for _, issue := range []string{"LEGION-1", "LEGION-2", "LEGION-3"} {
-				subjects := []string{notify.Topic("legion", issue)}
-				for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
-					subjects = append(subjects, roleTopicPrefix+string(mustClaimToken(t, issue, role)))
-				}
-				if slices.Contains(subjects, delivered[0].topic) {
-					t.Fatalf("the notice went to %s, a subject a phase worker of %s holds", delivered[0].topic, issue)
-				}
+			got, err := owningArchitect("legion", tree, tree[tc.issue], kind, func(token claim.Token) bool { return claimRuns(states[token]) })
+			if want := mustClaimToken(t, tc.owner, claim.RoleArchitect); err != nil || got != want {
+				t.Fatalf("owner = %s, %v; want %s", got, err, want)
 			}
 		})
+	}
+}
+
+// The executor publishes a notice to its owner's role topic and to nothing else: no issue topic,
+// since every issue topic is a subject that issue's phase workers subscribe to, and no worker's role
+// topic.
+func TestANoticeGoesToTheOwningArchitectsRoleTopicAlone(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	architectClaim(t, sup, "LEGION-2", supervise.StateWorking)
+	publisher := &holderPublisher{}
+	row := mustOutboxRow(t, "LEGION-3", record.Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing}, time.Now())
+	row.ID = 56
+
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion"}
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute notice: %v", err)
+	}
+	want := architectTopic(t, "LEGION-2")
+	_, delivered := publisher.snapshot()
+	if len(delivered) != 1 || delivered[0].topic != want || delivered[0].key != "legion-outbox:56" {
+		t.Fatalf("notice publishes = %+v, want one to %s under the row's key", delivered, want)
+	}
+	for _, issue := range []string{"LEGION-1", "LEGION-2", "LEGION-3"} {
+		subjects := []string{"notifications.legion.legion." + issue}
+		for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
+			subjects = append(subjects, roleTopicPrefix+string(mustClaimToken(t, issue, role)))
+		}
+		if slices.Contains(subjects, delivered[0].topic) {
+			t.Fatalf("the notice went to %s, a subject a phase worker of %s holds", delivered[0].topic, issue)
+		}
 	}
 }
 
@@ -214,6 +241,16 @@ func TestANoticeHeldForAnAbsentArchitectArrivesInOrderOnceItReturns(t *testing.T
 		if got := strings.Count(logged.String(), fmt.Sprintf("msg=\"outbox notice waits for its architect\" row=%d ", row)); got != 1 {
 			t.Fatalf("held notice row %d was logged %d times over 3 ticks, want once:\n%s", row, got, logged.String())
 		}
+	}
+	// The held row's error carries the listener's refusal, which is what the log line and the row's
+	// last_error show an operator.
+	var lastError string
+	if err := pool.QueryRow(context.Background(), "select id, last_error from outbox order by id limit 1").Scan(&first.ID, &lastError); err != nil {
+		t.Fatalf("read the first held row: %v", err)
+	}
+	if held := runner.execute(context.Background(), first); !errors.Is(held, errNoticeWaits) || !errors.Is(held, notify.ErrNoHolder) ||
+		!strings.Contains(lastError, `"reason":"unclaimed"`) {
+		t.Fatalf("held error %v, last_error %q: want a wait that carries the listener's no-holder refusal", held, lastError)
 	}
 
 	publisher.setAbsent()
@@ -405,5 +442,97 @@ func TestAHeldChildCloseHoldsTheArchitectsLaterNotices(t *testing.T) {
 	}
 	if _, delivered := publisher.snapshot(); fmt.Sprint(deliveredKinds(t, delivered)) != "[child-closed to LEGION-1 design-approved to LEGION-1]" || outboxRows(t, pool) != 0 {
 		t.Fatalf("delivered %v with %d rows left, want the held close first, then the later notice, both to the root", deliveredKinds(t, delivered), outboxRows(t, pool))
+	}
+}
+
+// reparent records a Dispatch re-parent of LEGION-2 as admission does: its parent changes and its
+// tree does not.
+func reparent(t *testing.T, pool *pgxpool.Pool, records record.Store, parent string) {
+	t.Helper()
+	root := "LEGION-1"
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: root, Parent: &parent, Title: "Child", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+}
+
+// A child re-parented under an issue the workflow has not recorded stays in its tree: its notice
+// goes to the tree's root architect, and neither it nor the tree's other notices wait on the
+// unrecorded parent. The root's own notice and a grandchild's, to the grandchild's running
+// sub-architect, are delivered on the same tick.
+func TestANoticeOfAChildReparentedOutsideTheRecordReachesItsTreesRoot(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	reparent(t, pool, records, "LEGION-99")
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	architectClaim(t, sup, "LEGION-3", supervise.StateWorking)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", record.Notice{Kind: "design-approved", Version: 2}, time.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-3", record.Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing}, time.Now()))
+	publisher := &holderPublisher{}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion", now: time.Now}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, delivered := publisher.snapshot(); fmt.Sprint(deliveredKinds(t, delivered)) != "[phase-finished to LEGION-1 design-approved to LEGION-1 phase-finished to LEGION-3]" || outboxRows(t, pool) != 0 {
+		t.Fatalf("delivered %v with %d rows left, want the re-parented child's and the root's notices to the root, the grandchild's to its sub-architect, none left",
+			deliveredKinds(t, delivered), outboxRows(t, pool))
+	}
+}
+
+// A child re-parented under another tree's root stays in its own tree: its notices, its close
+// included, go to its own tree's root architect, never to the other tree's.
+func TestANoticeOfAChildReparentedUnderAnotherTreeStaysWithItsOwnTree(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-50", Project: "LEGION", Tree: "LEGION-50", Title: "Other root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	reparent(t, pool, records, "LEGION-50")
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	architectClaim(t, sup, "LEGION-50", supervise.StateWorking)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now()))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "child-closed", Role: claim.RoleArchitect, Reason: "LEGION-2 is done"}, time.Now()))
+	publisher := &holderPublisher{}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion", now: time.Now}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, delivered := publisher.snapshot(); fmt.Sprint(deliveredKinds(t, delivered)) != "[phase-finished to LEGION-1 child-closed to LEGION-1]" || outboxRows(t, pool) != 0 {
+		t.Fatalf("delivered %v with %d rows left, want both notices to LEGION-1's architect", deliveredKinds(t, delivered), outboxRows(t, pool))
+	}
+}
+
+// A notice whose architect cannot be resolved from the record (here an issue whose key makes no
+// claim token) holds back no later notice of its tree, and finishes undelivered on its own attempt
+// with one log line: retrying cannot change the record, and the outbox has no dead-letter path.
+func TestAnUnroutableNoticeHoldsNothingBackAndFinishesOnItsOwnAttempt(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	root := "LEGION-1"
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-4x", Project: "LEGION", Tree: root, Parent: &root, Title: "Malformed", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
+	clock := time.Now()
+	// The unroutable row is written first but falls due after the root's notice, so the root's
+	// notice meets it as an earlier notice of the tree.
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-4x", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, clock.Add(time.Minute)))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", record.Notice{Kind: "design-approved", Version: 2}, clock))
+	var logged bytes.Buffer
+	publisher := &holderPublisher{}
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
+		project: "legion", now: func() time.Time { return clock }}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if _, delivered := publisher.snapshot(); fmt.Sprint(deliveredKinds(t, delivered)) != "[design-approved to LEGION-1]" || outboxRows(t, pool) != 1 {
+		t.Fatalf("delivered %v with %d rows left, want the root's notice delivered past the unroutable one", deliveredKinds(t, delivered), outboxRows(t, pool))
+	}
+	clock = clock.Add(2 * time.Minute)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if outboxRows(t, pool) != 0 || strings.Count(logged.String(), `msg="outbox notice finished undelivered: it has no architect"`) != 1 || !strings.Contains(logged.String(), "issue=LEGION-4x") {
+		t.Fatalf("%d rows left, log %q; want the unroutable row finished with one line naming its issue", outboxRows(t, pool), logged.String())
 	}
 }
