@@ -147,6 +147,15 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPut, "/api/v1/me/asks/{id}/snooze", authHuman, "Snooze an inbox row for the caller until snoozed_until.", s.putAskSnooze},
 		{http.MethodDelete, "/api/v1/me/asks/{id}/snooze", authHuman, "Un-snooze an inbox row for the caller.", s.deleteAskSnooze},
 		{http.MethodGet, "/api/v1/events", authAny, "Server-sent event stream; Last-Event-ID or ?since= resumes.", s.streamEvents},
+		{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests pending the caller's own decision (?approver=me only); 404 FEATURE_OFF without a configured secrets broker.", s.listCredentialPending},
+		{http.MethodGet, "/api/v1/credential-requests/{id}", authHuman, "Read one credential request's facts and, while pending, its WebAuthn challenges; the broker is authoritative.", s.getCredentialRecord},
+		{http.MethodPost, "/api/v1/credential-requests/{id}/approve", authHuman, "Approve a credential request with a WebAuthn assertion; relayed verbatim, the broker decides.", s.approveCredentialRecord},
+		{http.MethodPost, "/api/v1/credential-requests/{id}/deny", authHuman, "Deny a credential request with a WebAuthn assertion; relayed verbatim, the broker decides.", s.denyCredentialRecord},
+		{http.MethodPost, "/api/v1/credential-requests/machine-lookup", authHuman, "Resolve a pending machine login by its typed confirmation code, returning its facts and challenges.", s.lookupMachineCredential},
+		{http.MethodGet, "/api/v1/credential-keys/{login}", authHuman, "List a login's registered approver keys.", s.getCredentialKeys},
+		{http.MethodPost, "/api/v1/credential-keys/{login}/{kind}/{step}", authHuman, "Drive one step of a key ceremony (kind register|endorse, step begin|finish; anything else 404).", s.credentialKeyCeremony},
+		{http.MethodGet, "/api/v1/credential-grants", authHuman, "List credential grants the caller may revoke (?approver=me only).", s.listCredentialGrants},
+		{http.MethodPost, "/api/v1/credential-grants/{id}/revoke", authHuman, "Revoke a credential grant with a WebAuthn assertion.", s.revokeCredentialGrant},
 	}
 	if s.deps.TestHooksEnabled {
 		routes = append(routes,
