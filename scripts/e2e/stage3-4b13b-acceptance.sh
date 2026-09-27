@@ -43,6 +43,10 @@ project=${project:0:10}
 ptoken=${project,,}
 profile="legion-accept4b13b-$$-$stamp"
 state="$work/state"
+# The HOME the run's Oh My Pi processes run under, so its profile lives in the work directory
+# (make_omp_home, lib/omp-home.sh).
+omp_home="$work/omp-home"
+profile_agent="$omp_home/.omp/profiles/$profile/agent"
 repo="sjawhar/legion-smoke"
 scratch_base="l208-4b13b-accept-$stamp"
 merge_base="$scratch_base-merge"
@@ -74,12 +78,14 @@ soft() { printf 'SOFT-FAIL %s: %s\n' "$check" "$*" | tee -a "$soft_failures" >&2
 # shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source=/dev/null
+. "$root/scripts/e2e/lib/omp-home.sh"
+# shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/workflow.sh"
 # The daemon's database is this run's own in the shared Postgres container, read with the host psql.
 db_value() { PGPASSWORD=$(cat "$work/postgres-password") psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d "$legion_db" -tAc "$1"; }
 
 collect_transcripts() {
-  local sessions="$HOME/.omp/profiles/$profile/agent/sessions"
+  local sessions="$profile_agent/sessions"
   [ -d "$sessions" ] || return 0
   cp -a "$sessions/." "$evidence/transcripts/" 2>/dev/null || true
 }
@@ -113,7 +119,7 @@ cleanup() {
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   collect_transcripts
-  rm -rf "$HOME/.omp/profiles/$profile" "$work/model-gateway-cache" || true
+  rm -rf "$work/model-gateway-cache" || true
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
@@ -231,7 +237,7 @@ start_daemon() {
       write_legion_config
     fi
     offset=$(log_size daemon)
-    OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
+    HOME="$omp_home" OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
       -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
       -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
@@ -588,7 +594,8 @@ note "head under test: $head_commit ($(jj -R "$root" log -r @- --no-graph -T 'de
 printf '%s\n' "$head_commit" >"$evidence/head.txt"
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+make_omp_home "$omp_home"
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed"
 note "the agents' model route keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
@@ -639,7 +646,7 @@ SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
     bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --dest "$work/plugin")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
 pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
@@ -1249,7 +1256,7 @@ for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
 pass
 
 begin model-turns-through-the-gateway
-route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
+route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
   --control "$evidence/model-route-control") || fail "an agent turn left the gateway route"
 note "$route"
 collect_transcripts

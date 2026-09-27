@@ -31,6 +31,10 @@ project=${project:0:10}
 ptoken=${project,,}
 profile="legion-e2e3-$$-$(date +%s)"
 state="$work/state"
+# The HOME the run's Oh My Pi processes run under, so its profile lives in the work directory
+# (make_omp_home, lib/omp-home.sh).
+omp_home="$work/omp-home"
+profile_agent="$omp_home/.omp/profiles/$profile/agent"
 repo="sjawhar/legion-smoke"
 # Anthropic through the gateway: the Google provider answered long workflow turns with empty
 # responses (finishReason STOP with no content), so no Gemini-backed implementer could finish.
@@ -72,6 +76,8 @@ pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 # shellcheck source-path=SCRIPTDIR source=lib/rig.sh
 . "$root/scripts/e2e/lib/rig.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
+. "$root/scripts/e2e/lib/omp-home.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
 . "$root/scripts/e2e/lib/workflow.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
@@ -80,7 +86,7 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 # collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
 # before the isolated profile is removed.
 collect_transcripts() {
-  local sessions="$HOME/.omp/profiles/$profile/agent/sessions"
+  local sessions="$profile_agent/sessions"
   [ -d "$sessions" ] || return 0
   cp -a "$sessions/." "$evidence/transcripts/" 2>/dev/null || true
 }
@@ -107,7 +113,7 @@ cleanup() {
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
   close_unpassed_run_pull_requests
-  rm -rf "$HOME/.omp/profiles/$profile" "$work/model-gateway-cache" || true
+  rm -rf "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
@@ -216,7 +222,7 @@ start_daemon() {
       write_legion_config
     fi
     offset=$(log_size daemon)
-    OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
+    HOME="$omp_home" OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
       -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
       -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
@@ -578,13 +584,14 @@ real_gh=$(mise which gh) || fail "mise has no gh"
 gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 mkdir -p "$evidence/logs" "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
-# The model route, installed while this shell still holds the operator's XDG directories, which
-# the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
+make_omp_home "$omp_home"
+# The model route, installed while this shell still holds the operator's HOME and XDG directories,
+# which the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
 # run here, by name. The key command's log is evidence.
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-pinned=$(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml")
-[ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $HOME/.omp/profiles/$profile/agent/config.yml"
+pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
+[ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"
 note "the agents' model route: $pinned through the gateway, keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
@@ -629,7 +636,7 @@ SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
     bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --dest "$work/plugin")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
 pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
@@ -1027,7 +1034,7 @@ status_actors() {
 # (checked where each is written), and no phase-worker session of the run receives any notice.
 notices_reach_architects_alone() {
   begin notices-reach-architects-alone
-  local sessions="$HOME/.omp/profiles/$profile/agent/sessions" negative="$work/worker-notice-negative" worker
+  local sessions="$profile_agent/sessions" negative="$work/worker-notice-negative" worker
   worker_sessions "$sessions" >"$evidence/worker-sessions.txt"
   worker_notices "$sessions" >"$evidence/worker-notices.txt"
   [ -s "$evidence/worker-notices.txt" ] && fail "phase-worker sessions received workflow notices: $(head -3 "$evidence/worker-notices.txt" | tr '\n' ';')"
@@ -1079,7 +1086,7 @@ begin model-turns-through-the-gateway
 # was served by the anthropic provider, the gateway's; and the same check refuses a copy of one
 # captured session with a turn rewritten as Bedrock's, kept in the evidence. It reads the profile
 # only now, with every agent process gone, and before the profile is copied and removed.
-route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
+route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
   --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
 note "$route"
 note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log" || true) times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log" || true) ($evidence/model-gateway/hawk-token.log)"
@@ -1105,8 +1112,9 @@ open=$(run_pull_requests) || fail "list the open pull requests on $repo (gh's re
 note "${closed:-no pull request of this run was open on $repo}"
 
 # The isolated OMP profile and the scratch work directory go last, once the transcripts are kept.
-rm -rf "$HOME/.omp/profiles/$profile"
-[ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the isolated OMP profile remains"
+[ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
+rm -rf "$omp_home"
+[ ! -e "$omp_home" ] || fail "the isolated OMP profile remains under $omp_home"
 transcripts=$(find "$evidence/transcripts" -name '*.jsonl' -type f | wc -l)
 [ "$transcripts" -gt 0 ] || fail "no agent transcript reached $evidence/transcripts"
 [ -s "$evidence/logs/daemon.log" ] || fail "the daemon log is missing from $evidence/logs"
