@@ -148,11 +148,12 @@ a {
    `h1` at 2em, so an issue specification that opens with a heading repeating the issue title
    printed that title twice, the second time at nearly twice the size of the page title 40px
    above it, and wrapped it over three lines on a phone before a reader met a sentence of the
-   document. The scale is capped at the page title's own 22px and descends from there. The
+   document. The scale starts one step below the page title's own 22px and descends from
+   there, so the page's identity outranks its document's heading rather than tying with it. The
    library's stylesheet is unlayered, so the override has to outrank `.milkdown h1` (0,1,1);
    `.dispatch-doc .milkdown h1` (0,2,1) does. */
 .dispatch-doc .milkdown h1 {
-  font-size: 1.375rem;
+  font-size: 1.25rem;
   line-height: 1.3;
 }
 
