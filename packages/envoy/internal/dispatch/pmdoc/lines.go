@@ -111,6 +111,60 @@ func (p tabIndented) Continue(node ast.Node, reader gmtext.Reader, pc parser.Con
 	return p.BlockParser.Continue(node, reader, pc)
 }
 
+// footnoteReferenceParser is goldmark's footnote reference parser, with a reference whose label
+// matches a definition's only up to case resolved to that definition, as the browser editor's
+// parser resolves it: goldmark matches a label byte for byte, and read `[^A]` as text beside
+// `[^a]: `. Such a reference carries its label as written (referenceLabelAttr), which the browser
+// editor keeps on it.
+type footnoteReferenceParser struct{ parser.InlineParser }
+
+// referenceLabelAttr is the label a reference resolved by footnoteReferenceParser is written with.
+var referenceLabelAttr = []byte("pmdoc-reference-label")
+
+func (p footnoteReferenceParser) Parse(parent ast.Node, block gmtext.Reader, pc parser.Context) ast.Node {
+	row, position := block.Position()
+	if node := p.InlineParser.Parse(parent, block, pc); node != nil {
+		return node
+	}
+	block.SetPosition(row, position)
+	line, segment := block.PeekLine()
+	start := 1
+	if len(line) > 0 && line[0] == '!' {
+		start++
+	}
+	if start+1 >= len(line) || line[start] != '^' {
+		return nil
+	}
+	closure := util.FindClosure(line[start+1:], '[', ']', false, false) //nolint:staticcheck
+	if closure < 0 {
+		return nil
+	}
+	label := line[start+1 : start+1+closure]
+	slots, _ := pc.Get(footnoteSlotsKey).([]*footnoteSlot)
+	for _, slot := range slots {
+		definition, ok := slot.definition.(*extensionast.Footnote)
+		if !ok || !bytes.EqualFold(definition.Ref, label) {
+			continue
+		}
+		list, ok := definition.Parent().(*extensionast.FootnoteList)
+		if !ok {
+			continue
+		}
+		if definition.Index < 0 {
+			list.Count++
+			definition.Index = list.Count
+		}
+		block.Advance(start + 1 + closure + 1)
+		link := extensionast.NewFootnoteLink(definition.Index)
+		link.SetAttribute(referenceLabelAttr, string(label))
+		if line[0] == '!' {
+			parent.AppendChild(parent, ast.NewTextSegment(gmtext.NewSegment(segment.Start, segment.Start+1)))
+		}
+		return link
+	}
+	return nil
+}
+
 // setPadding sets reader's padding and drops the line it has peeked, which goldmark's
 // SetPadding keeps: a zero advance drops it.
 func setPadding(reader gmtext.Reader, padding int) {
@@ -211,11 +265,12 @@ func (footnotes) Extend(m goldmark.Markdown) {
 }
 
 // footnoteParserOptions registers footnotes: the definition parser (footnoteDefinitionParser),
-// goldmark's reference parser, and its transformer, which numbers the references and definitions.
+// goldmark's reference parser (footnoteReferenceParser), and its transformer, which numbers the
+// references and definitions.
 func footnoteParserOptions() []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999)),
-		parser.WithInlineParsers(util.Prioritized(extension.NewFootnoteParser(), 101)),
+		parser.WithInlineParsers(util.Prioritized(footnoteReferenceParser{extension.NewFootnoteParser()}, 101)),
 		parser.WithASTTransformers(util.Prioritized(extension.NewFootnoteASTTransformer(), 999)),
 	}
 }

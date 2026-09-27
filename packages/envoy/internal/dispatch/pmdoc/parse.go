@@ -839,6 +839,9 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			if !ok {
 				return nil, fmt.Errorf("%w: footnote reference %d has no definition", ErrSchema, current.Index)
 			}
+			if written, set := current.AttributeString(string(referenceLabelAttr)); set {
+				label = written.(string)
+			}
 			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": label}})
 		case *extensionast.FootnoteBacklink:
 			continue

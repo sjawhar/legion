@@ -4808,7 +4808,7 @@
   },
   {
     "name": "footnote",
-    "markdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n",
+    "markdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n\nA reference written in another case[^Case].\n\n[^case]: Its definition.\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -4850,11 +4850,54 @@
               ]
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A reference written in another case"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "Case"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "case",
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000006"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Its definition."
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AQ0BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEVQSBmb290bm90ZSByZWZlcmVuY2UuhwEBAxJmb290bm90ZV9yZWZlcmVuY2UoAAEXBWxhYmVsAXcHZml4dHVyZSgAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAxNmb290bm90ZV9kZWZpbml0aW9uBwABGgMJcGFyYWdyYXBoBwABGwYEAAEcFEZvb3Rub3RlIGRlZmluaXRpb24uKAABGwdibG9ja0lkAXcIYi0wMDAwMDMoAAEaBWxhYmVsAXcHZml4dHVyZSgAARoHYmxvY2tJZAF3CGItMDAwMDAyAA==",
-    "rendered_by_milkdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n"
+    "yjs_update_v1_b64": "ARwBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEVQSBmb290bm90ZSByZWZlcmVuY2UuhwEBAxJmb290bm90ZV9yZWZlcmVuY2UoAAEXBWxhYmVsAXcHZml4dHVyZSgAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAxNmb290bm90ZV9kZWZpbml0aW9uBwABGgMJcGFyYWdyYXBoBwABGwYEAAEcFEZvb3Rub3RlIGRlZmluaXRpb24uKAABGwdibG9ja0lkAXcIYi0wMDAwMDMoAAEaBWxhYmVsAXcHZml4dHVyZSgAARoHYmxvY2tJZAF3CGItMDAwMDAyhwEaAwlwYXJhZ3JhcGgHAAE0BgQAATUjQSByZWZlcmVuY2Ugd3JpdHRlbiBpbiBhbm90aGVyIGNhc2WHATUDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAVkFbGFiZWwBdwRDYXNlhwFZBgQAAVsBLigAATQHYmxvY2tJZAF3CGItMDAwMDA0hwE0AxNmb290bm90ZV9kZWZpbml0aW9uBwABXgMJcGFyYWdyYXBoBwABXwYEAAFgD0l0cyBkZWZpbml0aW9uLigAAV8HYmxvY2tJZAF3CGItMDAwMDA2KAABXgVsYWJlbAF3BGNhc2UoAAFeB2Jsb2NrSWQBdwhiLTAwMDAwNQA=",
+    "rendered_by_milkdown": "A footnote reference.[^fixture]\n\n[^fixture]: Footnote definition.\n\nA reference written in another case[^Case].\n\n[^case]: Its definition.\n"
   },
   {
     "name": "frontmatter-empty",
