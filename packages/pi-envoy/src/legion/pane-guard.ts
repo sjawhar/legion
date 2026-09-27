@@ -833,7 +833,7 @@ function clone(st: State): State {
     functions: new Map(st.functions),
     traps: [...st.traps],
     runningFunctions: new Set(st.runningFunctions),
-    pidFiles: new Map(st.pidFiles),
+    pidFiles: st.pidFiles,
   };
 }
 
@@ -923,6 +923,16 @@ function walkList(statements: readonly Statement[], st: State, ctx: Ctx): void {
   for (const statement of statements) walkNode(statement, st, ctx, false);
 }
 
+function outputChanged(
+  before: readonly Expansion[] | undefined,
+  after: readonly Expansion[] | undefined
+): boolean {
+  return (
+    before !== undefined &&
+    (after === undefined || JSON.stringify(before) !== JSON.stringify(after))
+  );
+}
+
 function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
   switch (node.type) {
     case "Statement": {
@@ -934,11 +944,18 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
     case "Command":
       handleCommand(node, st, ctx, pipeIn);
       return;
-    case "Pipeline":
+    case "Pipeline": {
       // Every part of a pipeline runs in a subshell of its own.
-      for (const [index, command] of node.commands.entries())
-        walkNode(command, clone(st), ctx, index > 0);
+      const before = st.output;
+      const parts: State[] = [];
+      for (const [index, command] of node.commands.entries()) {
+        const part = clone(st);
+        walkNode(command, part, ctx, index > 0);
+        parts.push(part);
+      }
+      if (parts.some((part) => outputChanged(before, part.output))) st.output = undefined;
       return;
+    }
     case "AndOr":
       for (const command of node.commands) walkNode(command, st, ctx, pipeIn);
       return;
@@ -948,20 +965,34 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
     case "BraceGroup":
       walkList(node.body.commands, st, ctx);
       return;
-    case "Subshell":
-      walkList(node.body.commands, clone(st), ctx);
+    case "Subshell": {
+      const before = st.output;
+      const child = clone(st);
+      walkList(node.body.commands, child, ctx);
+      if (outputChanged(before, child.output)) st.output = undefined;
       return;
+    }
     case "If": {
+      const before = st.output;
       walkList(node.clause.commands, st, ctx);
+      const clauseOutput = st.output;
       const then = clone(st);
       walkList(node.then.commands, then, ctx);
       const otherwise = clone(st);
       if (node.else !== undefined) walkNode(node.else, otherwise, ctx, pipeIn);
       merge(st, [then, otherwise]);
+      if (
+        outputChanged(before, clauseOutput) ||
+        outputChanged(clauseOutput, then.output) ||
+        outputChanged(clauseOutput, otherwise.output)
+      ) {
+        st.output = undefined;
+      }
       return;
     }
     case "For":
     case "Select": {
+      const before = st.output;
       const words = args(node.wordlist, st, ctx);
       for (const word of node.wordlist) visitWord(word, st, ctx);
       const name = node.name.value;
@@ -992,25 +1023,31 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         branches.push(body);
       }
       merge(st, branches);
+      if (branches.some((branch) => outputChanged(before, branch.output))) st.output = undefined;
       return;
     }
     case "ArithmeticFor": {
+      const before = st.output;
       visitArithmetic(node.initialize, st, ctx);
       visitArithmetic(node.test, st, ctx);
       visitArithmetic(node.update, st, ctx);
       const body = clone(st);
       walkList(node.body.commands, body, ctx);
       merge(st, [clone(st), body]);
+      if (outputChanged(before, body.output)) st.output = undefined;
       return;
     }
     case "While": {
+      const before = st.output;
       const body = clone(st);
       walkList(node.clause.commands, body, ctx);
       walkList(node.body.commands, body, ctx);
       merge(st, [clone(st), body]);
+      if (outputChanged(before, body.output)) st.output = undefined;
       return;
     }
     case "Case": {
+      const before = st.output;
       visitWord(node.word, st, ctx);
       const branches: State[] = [clone(st)];
       for (const item of node.items) {
@@ -1020,16 +1057,21 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         branches.push(body);
       }
       merge(st, branches);
+      if (branches.some((branch) => outputChanged(before, branch.output))) st.output = undefined;
       return;
     }
     case "Function":
       st.functions.set(node.name.value, { body: node.body, source: st.source });
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
       return;
-    case "Coproc":
-      walkNode(node.body, clone(st), ctx, false);
+    case "Coproc": {
+      const before = st.output;
+      const child = clone(st);
+      walkNode(node.body, child, ctx, false);
+      if (outputChanged(before, child.output)) st.output = undefined;
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
       return;
+    }
     case "TestCommand":
       visitTest(node.expression, st, ctx);
       return;
@@ -1181,10 +1223,15 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
           );
           elements.set(String(index), expanded);
         } else {
-          elements.set(
-            resolveArrayIndex(assignment.index, st, ctx) ?? UNKNOWN_ARRAY_INDEX,
-            expanded
-          );
+          const index = resolveArrayIndex(assignment.index, st, ctx);
+          if (index === undefined) {
+            elements.clear();
+            elements.set(UNKNOWN_ARRAY_INDEX, [
+              unknown(`\`$${assignment.name}\`, an array element with an unresolved index`),
+            ]);
+          } else {
+            elements.set(index, expanded);
+          }
         }
         st.arrays.set(assignment.name, elements);
       } else {
@@ -1289,12 +1336,16 @@ function unwrap(
     } else if (base === "env") {
       let i = 0;
       const overlay = new Map<string, Expansion>();
+      const unset: string[] = [];
       let cwd = state.cwd;
       for (; i < rest.length; i += 1) {
         const arg = rest[i] as Arg;
         const text = literalText(arg.exp);
-        if (text === "-u" || text === "--unset") i += 1;
-        else if (text === "-C" || text === "--chdir") {
+        if (text === "-u" || text === "--unset") {
+          const name = literalText(rest[i + 1]?.exp);
+          if (name !== undefined) unset.push(name);
+          i += 1;
+        } else if (text === "-C" || text === "--chdir") {
           const dir = literalText(rest[i + 1]?.exp);
           cwd =
             dir === undefined || state.cwd === undefined ? undefined : path.resolve(state.cwd, dir);
@@ -1339,6 +1390,10 @@ function unwrap(
       }
       if (i !== -1) list = rest.slice(i);
       state = { ...clone(state), cwd, cwdWhy: "`env -C`" };
+      for (const name of unset) {
+        state.vars.set(name, [literal("")]);
+        state.exported.delete(name);
+      }
       for (const [name, value] of overlay) {
         state.vars.set(name, value);
         state.exported.add(name);
@@ -1461,12 +1516,20 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     case "mapfile":
     case "readarray":
     case "getopts": {
-      const found = operands(rest, "adnNptui");
+      const found = operands(rest, base === "read" || base === "getopts" ? "adnNptui" : "");
       const names = base === "getopts" ? found.operands.slice(1, 2) : found.operands;
-      for (const arg of names) {
+      const arrayAt = base === "read" ? rest.findIndex((arg) => literalText(arg.exp) === "-a") : -1;
+      const readsArray = base === "mapfile" || base === "readarray" || arrayAt !== -1;
+      const destinations =
+        arrayAt === -1 || rest[arrayAt + 1] === undefined ? names : [rest[arrayAt + 1] as Arg];
+      for (const arg of destinations) {
         const variable = literalText(arg.exp);
         if (variable !== undefined) {
           outer.vars.set(variable, [unknown(`\`$${variable}\`, read from input`)]);
+          if (readsArray) {
+            const unknownArray = [unknown(`\`$${variable}\`, read from input`)];
+            outer.arrays.set(variable, new Map([[UNKNOWN_ARRAY_INDEX, unknownArray]]));
+          }
         }
       }
       return;
@@ -1644,27 +1707,27 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         /^kill-(?:server|session|window|pane)$/.test(literalText(arg.exp) ?? "")
       );
       if (killing === undefined) return;
-      const tmpdir = invocation.overlay.get("TMUX_TMPDIR") ?? lookup("TMUX_TMPDIR", st, ctx);
-      const tmpdirText = literalText(tmpdir);
-      const tmpdirPath =
-        tmpdirText === undefined || (!tmpdirText.startsWith("/") && st.cwd === undefined)
-          ? undefined
-          : realish(path.resolve(st.cwd ?? "/", tmpdirText), true);
-      const tmpdirComponent =
-        tmpdirPath?.startsWith(`${ctx.roots.scratch}/`) === true
-          ? tmpdirPath.slice(ctx.roots.scratch.length + 1).split("/")[0]
-          : undefined;
-      const tmpdirAllowed =
-        tmpdirPath !== undefined &&
-        (inWorkspace(tmpdirPath, ctx.roots) ||
-          (tmpdirComponent !== undefined &&
-            tmpdirComponent !== "" &&
-            !PROTECTED_SCRATCH.some((name) => tmpdirComponent.startsWith(name))));
+      let resolvedSocket: Expansion | undefined;
+      if (socketIsPath) {
+        resolvedSocket = socket?.exp;
+      } else {
+        const tmux = invocation.overlay.get("TMUX") ?? lookup("TMUX", st, ctx);
+        const tmuxText = tmux === undefined ? undefined : literalText(tmux);
+        if (socket === undefined && tmuxText !== undefined && tmuxText !== "") {
+          resolvedSocket = [literal(tmuxText.split(",")[0] ?? "")];
+        } else if (socket !== undefined || tmux === undefined || tmuxText === "") {
+          const tmpdir = invocation.overlay.get("TMUX_TMPDIR") ?? lookup("TMUX_TMPDIR", st, ctx);
+          const root = tmpdir ?? [literal("/tmp")];
+          const name = socket === undefined ? [literal("default")] : socket.exp;
+          const uid = process.getuid?.();
+          if (uid !== undefined) {
+            resolvedSocket = [...root, literal(`/tmux-${uid}/`), ...name];
+          }
+        }
+      }
       if (
-        (socket !== undefined &&
-          socketIsPath &&
-          judgePath(socket.exp, st, ctx, { follow: true, overwrite: false }).ok) ||
-        tmpdirAllowed
+        resolvedSocket !== undefined &&
+        judgePath(resolvedSocket, st, ctx, { follow: true, overwrite: false }).ok
       ) {
         return;
       }
@@ -1672,7 +1735,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         site.snippet,
         site.line,
         `\`tmux ${literalText(killing.exp)}\` needs a socket path inside this pane's roots; the ` +
-          "default, every -L name, and an unproven socket can end panes and processes this pane did not start"
+          "resolved socket can end panes and processes this pane did not start"
       );
     }
     default:
@@ -1730,6 +1793,14 @@ function declaration(builtin: string, list: readonly Arg[], st: State, ctx: Ctx)
       value = [...unquotedLiteral(arg.text.slice(equals + 1), 0, st, ctx), ...arg.exp.slice(1)];
     }
     st.vars.set(variable, array ? [unknown(`\`$${variable}\`, an array`)] : value);
+    if (array) {
+      if (arg.text.slice(equals + 1) === "()") {
+        st.arrays.set(variable, new Map());
+      } else {
+        const unknownArray = [unknown(`\`$${variable}\`, an array assignment`)];
+        st.arrays.set(variable, new Map([[UNKNOWN_ARRAY_INDEX, unknownArray]]));
+      }
+    }
   }
 }
 
@@ -1978,7 +2049,7 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
     script: undefined,
     argv0: undefined,
     output: undefined,
-    pidFiles: new Map(),
+    pidFiles: st.pidFiles,
     arrays: new Map(),
     functions: new Map(),
     traps: [],

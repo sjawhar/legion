@@ -36,8 +36,8 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "scripts/e2e/lib/check-model-route.sh": "$control",
   "scripts/e2e/lib/install-model-gateway.sh": "realpath -m",
   "scripts/e2e/stage2-tmux-supervision.sh": "realpath -m",
-  "scripts/e2e/stage3-4b13b-acceptance.sh": "a loop variable",
-  "scripts/e2e/stage3-devbox-workflow.sh": "a loop variable",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "prod_header_file",
+  "scripts/e2e/stage3-devbox-workflow.sh": "prod_header_file",
   "scripts/e2e/stage4b-sandbox-tree.sh": "$p",
 };
 
@@ -266,6 +266,19 @@ describe("scripts a command runs", () => {
     expect(reason ?? "").toContain(home);
   });
 
+  test("treats function output from nested scopes as unknown", () => {
+    for (const command of [
+      'f() { echo /tmp/x; if true; then echo "$HOME"; fi; }; rm -rf $(f)',
+      'f() { echo /tmp/x; for d in "$HOME"; do echo "$d"; done; }; rm -rf $(f)',
+      'f() { echo /tmp/x; ( echo "$HOME" ); }; rm -rf $(f)',
+      'f() { echo /tmp/x; echo "$HOME" | cat; }; rm -rf $(f)',
+    ]) {
+      const reason = bash(command);
+      expect(reason, command).toBeDefined();
+      expect(reason ?? "", command).toContain("a command's output");
+    }
+  });
+
   test("invalidates a pid file after a later write from any source", () => {
     const pidFile = path.join(scratch, "mine", "replaced.pid");
     const reason = bash(
@@ -275,10 +288,35 @@ describe("scripts a command runs", () => {
     expect(reason ?? "").toContain("cannot resolve the pid");
   });
 
+  test("invalidates pid files rewritten from a pipeline or subshell", () => {
+    const pidFile = path.join(scratch, "mine", "nested-replaced.pid");
+    for (const command of [
+      `sleep 60 & echo "$!" > ${pidFile}; pgrep sleep | tee ${pidFile}; kill "$(<${pidFile})"`,
+      `sleep 60 & echo "$!" > ${pidFile}; (cd ${path.dirname(pidFile)} && pgrep x > ${path.basename(pidFile)}); kill "$(<${pidFile})"`,
+    ]) {
+      const reason = bash(command);
+      expect(reason, command).toBeDefined();
+      expect(reason ?? "", command).toContain("cannot resolve the pid");
+    }
+  });
+
   test("tracks every array element's process provenance", () => {
     const reason = bash(`ids[0]=$(pgrep sleep); sleep 60 & ids[1]=$!; kill "\${ids[0]}"`);
     expect(reason).toBeDefined();
     expect(reason ?? "").toContain("cannot resolve the pid");
+  });
+
+  test("invalidates every array element on an untracked replacement", () => {
+    for (const command of [
+      `sleep 60 & ids[0]=$!; n=$(cat f); ids[$n]=$(pgrep sleep); kill "\${ids[0]}"`,
+      `sleep 60 & ids[0]=$!; read -r -a ids < f; kill "\${ids[0]}"`,
+      `sleep 60 & ids[0]=$!; mapfile -t ids < <(pgrep sleep); kill "\${ids[0]}"`,
+      `sleep 60 & ids[0]=$!; declare -a ids=($(pgrep sleep)); kill "\${ids[0]}"`,
+    ]) {
+      const reason = bash(command);
+      expect(reason, command).toBeDefined();
+      expect(reason ?? "", command).toContain("cannot resolve the pid");
+    }
   });
 
   test("preserves an indexed descendant pid through local declarations", () => {
@@ -515,10 +553,43 @@ describe("signals", () => {
     }
   });
 
-  test("allows tmux only through a socket path inside the pane roots", () => {
-    expect(bash(`tmux -S "${scratch}/mine/tmux" kill-server`)).toBeUndefined();
-    expect(bash('TMUX_TMPDIR="$LEGION_WORKSPACE/t" tmux kill-server')).toBeUndefined();
-    expect(bash('TMUX_TMPDIR="$HOME/t" tmux kill-server')).toContain("needs a socket");
+  test("resolves the tmux socket before allowing a scratch path", () => {
+    const attachedEnv = { ...env, TMUX: `${home}/.tmux/sockets/tmux-1000/legion-agentc,4242,0` };
+    const foreignDefault = guard.bash(
+      'TMUX_TMPDIR="$LEGION_WORKSPACE/t" tmux kill-server',
+      workspace,
+      attachedEnv
+    );
+    expect(foreignDefault).toBeDefined();
+    expect(foreignDefault ?? "").toContain("needs a socket");
+    const foreignSocket = guard.bash(
+      `TMUX_TMPDIR="${scratch}/mine" tmux -S "${home}/.tmux/sockets/tmux-1000/legion-agentc" kill-server`,
+      workspace,
+      attachedEnv
+    );
+    expect(foreignSocket).toBeDefined();
+    expect(foreignSocket ?? "").toContain("needs a socket");
+    expect(
+      guard.bash(
+        `TMUX_TMPDIR="${scratch}/mine" tmux -S "${scratch}/mine/tmux" kill-server`,
+        workspace,
+        attachedEnv
+      )
+    ).toBeUndefined();
+    expect(
+      guard.bash(
+        'env -u TMUX TMUX_TMPDIR="$LEGION_WORKSPACE/t" tmux kill-server',
+        workspace,
+        attachedEnv
+      )
+    ).toBeUndefined();
+    expect(
+      guard.bash(
+        'TMUX_TMPDIR="$LEGION_WORKSPACE/t" tmux -L pane-private kill-server',
+        workspace,
+        attachedEnv
+      )
+    ).toBeUndefined();
   });
 
   test("follows a trap handler after `--`", () => {
