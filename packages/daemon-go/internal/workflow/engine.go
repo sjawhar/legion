@@ -656,20 +656,23 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 
 // closed records the pull request closed unmerged, which a re-admitted generation drops, and tells
 // the architect, whose decision it is whether the work is reopened, reassigned, or cancelled, as the
-// shipped daemon routes it. A redelivered close changes nothing. It records the head the close
-// carries, which every synchronize before it left, and keeps the close's clock when it is the later
-// one, so a reopen or a synchronize older than the close, redelivered late, changes nothing.
+// shipped daemon routes it. It records the head the close carries, which every synchronize before
+// it left, and keeps the close's clock when it is the later one, so a reopen or a synchronize older
+// than the close, redelivered late, changes nothing. That holds for a close that finds the pull
+// request already closed too — a newer close whose reopen has not been delivered yet — so only the
+// notice waits on the pull request being open: a redelivered close tells the architect nothing more.
 func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestClosed) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
-	if err != nil || pr == nil || pr.State == record.PullRequestClosed || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
+	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
+	already := pr.State == record.PullRequestClosed
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}
 	pr.State = record.PullRequestClosed
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
-	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil || already {
 		return intake.Result{}, err
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
@@ -683,8 +686,9 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 // claimFailed holds the issue whose phase worker's claim failed — a budget ran out — and tells the
 // architect and the controller of the hold; the worker-died that comes with it is the architect's
 // alone. The tree's architect failing holds nothing, since a phase is its worker's; it is told as a
-// worker-died of the architect, to the issue's topic and the controller, because every other notice
-// of the tree reaches the architect and nobody inside the tree is left to act on its own.
+// worker-died of the architect, lingering or not, to the issue's topic and the controller, because
+// every other notice of the tree reaches the architect and nobody inside the tree is left to act on
+// its own. That is why the architect's branch comes before the lingering tree's guard.
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {

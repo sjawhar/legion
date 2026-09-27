@@ -665,7 +665,7 @@ func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
 }
 
 // Every outbox kind the daemon writes is one the schema's check admits, on a fresh database and on
-// one that ran main's migrations before this build's, with a controller notice queued. 0016
+// one that recorded every migration through 0020 except 0016, with a controller notice queued. 0016
 // (merge_queue_publish) and 0020 (controller_notice) would each redefine the check with the other's
 // kind missing, and a database past 0020 applies the lower 0016 late, where a check without
 // controller_notice would refuse the queued row and the upgrade: neither sets the list, 0021 does,

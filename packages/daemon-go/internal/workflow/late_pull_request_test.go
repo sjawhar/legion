@@ -136,9 +136,12 @@ func TestAnEventWithNoClockKeepsTheLatestClock(t *testing.T) {
 // GitHub's close and reopen payloads carry the head every synchronize before them left, so a close
 // or reopen that is not late records that head with its clock. A synchronize older than the close,
 // delivered after it, is late and changes nothing, and the pull request still ends at the head
-// GitHub ended at.
+// GitHub ended at. A close that finds the pull request already closed is not late either: closed,
+// reopened and closed again, with the reopen delivered last, the second close records its head and
+// clock, so the reopen changes nothing.
 func TestACloseOrReopenCarriesItsHead(t *testing.T) {
 	synchronized, finished := lateApplied.Add(time.Minute), lateApplied.Add(2*time.Minute)
+	reopened, resynchronized := lateApplied.Add(time.Minute), lateApplied.Add(90*time.Second)
 	for _, tc := range []struct {
 		name  string
 		seed  record.PullRequestState
@@ -149,6 +152,10 @@ func TestACloseOrReopenCarriesItsHead(t *testing.T) {
 			[]intake.Fact{lateClosed("head-d", finished), lateSync("head-d", synchronized)}, pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestClosed}},
 		{"a reopen delivered before the synchronize it followed", record.PullRequestClosed,
 			[]intake.Fact{lateReopened("head-e", finished), lateSync("head-e", synchronized)}, pullRequestView{head: "head-e", decision: "approved", state: record.PullRequestOpen}},
+		{"a close delivered before the reopen it followed", record.PullRequestClosed,
+			[]intake.Fact{lateClosed("head-d", finished), lateReopened("head-c", reopened)}, pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestClosed}},
+		{"a close delivered before the reopen and the synchronize it followed", record.PullRequestClosed,
+			[]intake.Fact{lateClosed("head-e", finished), lateReopened("head-c", reopened), lateSync("head-e", resynchronized)}, pullRequestView{head: "head-e", decision: "approved", state: record.PullRequestClosed}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := afterEvents(t, tc.seed, tc.facts...); got != tc.want {
