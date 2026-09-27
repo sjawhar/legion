@@ -33,6 +33,9 @@ type renderer struct {
 	footnoteQuotes int
 	// itemDepth is how many list items the blocks being written stand in.
 	itemDepth int
+	// containers is the list items, quotes, footnote definitions and typed blocks the blocks being
+	// written stand in, outermost first.
+	containers []*Node
 	// asteriskRule makes the next rule written `***` rather than `---` (list).
 	asteriskRule bool
 	// otherListMarker makes the next list written with its kind's other marker (otherListMarkers).
@@ -253,17 +256,16 @@ func (r *renderer) block(n *Node, prefix string) {
 		}
 	case "blockquote":
 		r.writeSyntax("> ")
+		r.enter(n)
 		r.blocksNoTrailing(n.Children, prefix+"> ")
 		r.blanksEndingQuotedList(n.Children, prefix+"> ")
+		r.leave()
 	case "bullet_list", "ordered_list":
 		r.list(n, prefix)
 	case "code_block":
 		language, _ := n.Attrs["language"].(string)
 		fence := codeBlockFence(n)
-		if (r.inFootnote || r.itemDepth > 0 && r.typedPrefix != nil) && emptyCode(n) {
-			// An empty line written between the fences would carry the prefix: in a footnote
-			// definition both parsers keep its whitespace as the code's text, and in a typed block
-			// in a list item it is a blank line the browser editor reads as spacing the item.
+		if emptyCode(n) && r.emptyCodeWrittenBare() {
 			r.writeSyntax(fence + language + "\n" + prefix + fence)
 			return
 		}
@@ -299,7 +301,9 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
 		outer, outerQuotes := r.inFootnote, r.footnoteQuotes
 		r.inFootnote, r.footnoteQuotes = true, strings.Count(prefix, ">")
+		r.enter(n)
 		r.blocksNoTrailing(n.Children, prefix+definitionIndent)
+		r.leave()
 		r.inFootnote, r.footnoteQuotes = outer, outerQuotes
 	default:
 		typ, typed := typedBlock(n.Type)
@@ -314,7 +318,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		}
 		colons := typedFence(n, len(prefix))
 		fence := strings.Repeat(":", colons)
-		if r.itemDepth > 0 && holdsOnlyAnEmptyParagraph(n) {
+		if holdsOnlyAnEmptyParagraph(n) && r.inItemBelowQuotes() {
 			// Its empty paragraph written as a line would be a blank line in a typed block in a
 			// list item, which the browser editor reads as spacing the item; written as nothing,
 			// both parsers read the typed block back holding it.
@@ -324,11 +328,58 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
 		outer, outerColons := r.typedPrefix, r.typedColons
 		r.typedPrefix, r.typedColons = &prefix, colons
+		r.enter(n)
 		r.blocksNoTrailing(n.Children, prefix)
 		r.blanksEndingQuotedList(n.Children, prefix)
+		r.leave()
 		r.typedPrefix, r.typedColons = outer, outerColons
 		r.writeSyntax("\n" + prefix + fence)
 	}
+}
+
+// enter and leave bracket the writing of a container's blocks (containers).
+func (r *renderer) enter(container *Node) { r.containers = append(r.containers, container) }
+
+func (r *renderer) leave() { r.containers = r.containers[:len(r.containers)-1] }
+
+// inItemBelowQuotes reports whether the blocks being written stand in a list item with no quote
+// between: a line holding only their prefix is a blank line in the item, which the browser editor
+// reads as spacing it, where with a quote between it is the quote's.
+func (r *renderer) inItemBelowQuotes() bool {
+	for index := len(r.containers) - 1; index >= 0; index-- {
+		switch r.containers[index].Type {
+		case "blockquote":
+			return false
+		case "list_item":
+			return true
+		}
+	}
+	return false
+}
+
+// emptyCodeWrittenBare reports whether an empty code block is written as its fences alone, with no
+// line between them, where no quote between takes a line holding only the prefix as its own: in a
+// footnote definition, where both parsers keep that line as the code's text, and in a typed block in
+// a list item, where it is a blank line the browser editor reads as spacing the nearest item. Even
+// with every item that far spread, this parser reads that line only in a document holding no shape
+// it cannot decide the spacing of (browserOnlyShape), so it is never written there.
+func (r *renderer) emptyCodeWrittenBare() bool {
+	typed := false
+	for index := len(r.containers) - 1; index >= 0; index-- {
+		switch r.containers[index].Type {
+		case "blockquote":
+			return false
+		case "footnote_definition":
+			return true
+		case "list_item":
+			if typed {
+				return true
+			}
+		default:
+			typed = true
+		}
+	}
+	return false
 }
 
 // holdsOnlyAnEmptyParagraph reports whether container n holds nothing but one empty paragraph,
@@ -393,6 +444,7 @@ func (r *renderer) list(n *Node, prefix string) {
 		}
 		otherMarkers := otherListMarkers(children)
 		r.itemDepth++
+		r.enter(item)
 		for childIndex, child := range children {
 			// A tight item writes its blocks on consecutive lines, where a paragraph would run on
 			// into a paragraph after it and underline itself with a rule's `---`. The browser
@@ -427,6 +479,7 @@ func (r *renderer) list(n *Node, prefix string) {
 			r.otherListMarker = otherMarkers[childIndex]
 			r.block(child, indent)
 		}
+		r.leave()
 		r.itemDepth--
 	}
 }

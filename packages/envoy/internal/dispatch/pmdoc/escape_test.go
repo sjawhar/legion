@@ -890,6 +890,13 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"- [ ] ~~~ tildes\n",
 		// Whitespace just inside a mark's marker is the mark's text, not a paragraph's indentation.
 		"[    x](https://x.test)\n",
+		// An empty typed block or code block written with a line holding only the prefix, where a
+		// quote stands between it and any list item or footnote definition around it: both parsers
+		// read that line as the quote's, so it stays as main wrote it.
+		"- > :::callout{#e kind=\"note\" title=\"T\"}\n  > \n  > :::\n",
+		":::callout{#t1 kind=\"note\" title=\"T\"}\n- ```\n  \n  ```\n:::\n",
+		"x[^f1]\n\n[^f1]: > ```\n    > \n    > ```\n",
+		"- :::callout{#t1 kind=\"note\" title=\"T\"}\n  > ```\n  > \n  > ```\n  :::\n",
 	} {
 		t.Run(markdown, func(t *testing.T) {
 			tree, err := Parse(markdown)
