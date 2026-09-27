@@ -371,9 +371,12 @@ naming the key and the path. One exception: when root owns the file and the daem
 its group may read it, since a daemon running as a non-root uid in a pod reads a mounted Secret —
 always root's — only through the pod's `fsGroup`. Mount it with `defaultMode: 0440`, never the
 kubelet's default `0644`, which others can read; any other seed file, the daemon's own or another
-user's, stays 0600. `legion start --check-config` reads the seed as boot does, and its OK line then
-names the seed's user by public key (`Config OK: project=<project> nats-nkey-user=U…`), never the
-seed. With one, every pod's
+user's, stays 0600. A daemon running as root in a pod has no such exception: under `fsGroup` its
+mount is `root:<fsGroup>` 0440, which the reader refuses for a root reader, so give that pod no
+`fsGroup` and mount the Secret with `defaultMode: 0400`, or pass the seed as `NATS_NKEY_SEED` (and
+the daemon's own as `NATS_DAEMON_NKEY_SEED`) from a `secretKeyRef`. `legion start --check-config`
+reads the seed as boot does, and its OK line then names the seed's user by public key
+(`Config OK: project=<project> nats-nkey-user=U…`), never the seed. With one, every pod's
 `NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the providers Secret's own
 `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`,
 whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same
@@ -398,12 +401,18 @@ what the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
 durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`), and subscribe
 `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>`. It publishes on no core
 subject: role and controller notices go to the Envoy listener over HTTP, and control directives
-over the worker stream. It is read by the same rule and refusals as the pane seed, the
+over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subjects were verified
+live: a server granting exactly them logged no refusal across a boot creating both durables, a
+restart onto the existing ones, Dispatch and GitHub events acknowledged and a poison message
+terminated, and its trace showed no other API subject (no `$JS.API.INFO`, no
+`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead). It is read by the same rule
+and refusals as the pane seed, the
 group-readable mount included, and neither seed falls back to the other: an unusable
 daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane
 seed, and with neither, with no credential. Keep it out of the providers Secret, which every pod
 mounts: in-cluster, put it in a Secret of its own, mounted into the daemon's pod alone with
-`defaultMode: 0440` (on a host, a 0600 file the daemon's uid owns), and name that file in
+`defaultMode: 0440` (0400 with no `fsGroup` for a daemon running as root, as above; on a host, a
+0600 file the daemon's uid owns), and name that file in
 `nats_daemon_nkey_seed_file`. No launch carries it, and a tmux pane's environment drops its
 variables with every other credential-shaped name. Every command the daemon itself starts (git and
 jj in a managed repository's checkout, `mise where`, a key command) runs without
@@ -422,9 +431,13 @@ otherwise be silent.
 Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
 every daemon gets it and restarts, and each boot line must read `paneUser=false`; only then is the
-`legion-pane` seed written. `legion-pane` is never granted the daemon's subjects above. Reversed,
-a daemon holding only the `legion-pane` seed connects as `legion-pane`, and each refused subject
-logs the error line above (a refused consumer or subscription never delivers).
+`legion-pane` seed written. A clean boot line proves the user, not every grant: the check before
+the pane seed is written also has each daemon consume a Dispatch and a GitHub event with no error
+line, and, for a TypeScript daemon, send a control directive, since its `legion.ctl` publish is
+refused only when it first sends one (AGENTS.md). `legion-pane` is never granted the daemon's
+subjects above. Reversed, a daemon holding only the `legion-pane` seed connects as `legion-pane`,
+and each refused subject logs the error line above (a refused consumer or subscription never
+delivers).
 
 ### Anatomy of a Sandbox pod
 
