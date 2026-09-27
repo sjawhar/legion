@@ -127,8 +127,8 @@ func TestAPermissionTheServerRefusesIsLoggedAtError(t *testing.T) {
 	}
 }
 
-// fakeServer is the address of a NATS server that admits one client, answers its first PING, and
-// then sends it then, raw protocol lines.
+// fakeServer starts a NATS server that admits one client, answers its first PING, and then writes
+// the raw protocol lines in then to it; it returns the server's URL.
 func fakeServer(t *testing.T, then string) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
