@@ -6,24 +6,30 @@ Tracked Oh My Pi (`pi-*`) extension package for Envoy messaging.
 
 This package owns Pi-specific tool registration, direct NATS subscriptions, targeted Dispatch
 delivery, and self-subscription registration for every session. HTTP transport, tool metadata, and
-subject construction come from the Envoy core packages. Both NATS connections (the agent subjects
-in `extensions/envoy.ts`, Legion's control subject in `extensions/legion.ts`) connect as the nkey
-user `@legion/envoy-client/nats-auth` reads from `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, and
-without a credential when neither is set; an unusable seed fails the connect naming the variable,
-and a Legion daemon strips both from every pane it launches, handing it instead the `legion-pane`
-seed file it holds as `NATS_NKEY_SEED_FILE` when it has one. `@legion/envoy-client/delivery` is
-the sole inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
-Dispatch **BTW** frame runs `pi.askEphemeral` and posts its body or error to the correlated delivery
-attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective delivery mode. Role claims
-are routed by the listener: this extension receives a receipt-backed request on its direct agent
-subject instead of subscribing to a role subject itself. The agent pump replies the moment the
-envelope is decoded — before the inbox update, any Dispatch call, or the session injection — so the
-listener's two-second receipt window measures decoding, not the host's turn: a claimed-but-deaf
-holder still becomes a `delivery_failed` exception, and a busy one no longer does (LEGION-101). The
-receipt goes only to a role-lane frame — one whose envelope `topic` is not the direct subject, the
-shape the listener forwards to the holder. Every other frame carrying a reply inbox on the direct
-subject (a Dispatch author route, a peer `envoy_send`) is a JetStream publish whose inbox belongs to
-the server's PubAck; an empty receipt there fails the publisher with
+subject construction come from the Envoy core packages. Both NATS connections (the agent subjects in
+`extensions/envoy.ts`, Legion's control subject in `extensions/legion.ts`) connect as the nkey user
+`@legion/envoy-client/nats-auth` reads from `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, and without a
+credential when neither is set; an unusable seed fails the connect naming the variable, and a Legion
+daemon strips both from every pane it launches, handing it instead the `legion-pane` seed file it
+holds as `NATS_NKEY_SEED_FILE` when it has one. `@legion/envoy-client/delivery` is the sole inbound
+renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
+Dispatch **BTW** frame runs the host's side turn (`ctx.runEphemeralTurn` on Oh My Pi 18.3,
+`pi.askEphemeral` on the earlier fork releases Legion pins) and posts its body or error to the
+correlated delivery attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective
+delivery mode. On a host with `ctx.runEphemeralTurn` (the fork's 18.3 releases included, since the
+context's call wins there), a BTW side turn still running when the handler that subscribed the agent
+subject (`session_start`, a session switch, or a Legion handler re-establishing through the claim
+bridge) reaches the host's 30 s handler budget is aborted, and Dispatch gets the abort as the
+reply's error. `pi.askEphemeral` does not inherit the handler's signal, so the pin is unaffected.
+Role claims are routed by the listener: this extension receives a receipt-backed request on its
+direct agent subject instead of subscribing to a role subject itself. The agent pump replies the
+moment the envelope is decoded — before the inbox update, any Dispatch call, or the session
+injection — so the listener's two-second receipt window measures decoding, not the host's turn: a
+claimed-but-deaf holder still becomes a `delivery_failed` exception, and a busy one no longer does
+(LEGION-101). The receipt goes only to a role-lane frame — one whose envelope `topic` is not the
+direct subject, the shape the listener forwards to the holder. Every other frame carrying a reply
+inbox on the direct subject (a Dispatch author route, a peer `envoy_send`) is a JetStream publish
+whose inbox belongs to the server's PubAck; an empty receipt there fails the publisher with
 `nats: invalid jetstream publish response`. A frame that cannot be decoded is still never
 acknowledged, and a receipt that fails to publish is logged while delivery continues.
 
@@ -308,39 +314,41 @@ directive, not as an issue-level `dispatch_ask`. The extension passes the host t
 Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
 
 `before_agent_start` injects nothing into the conversation; its open-asks query arms the run-end
-nudge only for a turn carrying the user's own text, its snapshot `as_of` becoming the period's
-first window. It runs only for a session the stop could actually nudge — the host awaits this
-handler, so an excluded session does not pay up to `OPEN_ASKS_TIMEOUT_MS` for an answer nothing
-reads.
+nudge only for a turn carrying the user's own text, its snapshot `as_of` becoming the period's first
+window. It runs only for a session the stop could actually nudge — the host awaits this handler, so
+an excluded session does not pay up to `OPEN_ASKS_TIMEOUT_MS` for an answer nothing reads.
 
 `agent_end` is the nudge's stop signal. Every normally settled, UI-hosted session with an armed
-period runs one **silent self-check**: one `pi.askEphemeral` call — the host's one-shot, tool-free
-model call over a snapshot of the conversation, the same channel a targeted Dispatch BTW uses.
-The handler uses the open-asks snapshot it already reads to name the session's own open asks in
-the prompt: the first line of at most five questions, each truncated to about 120 characters,
-followed by `+N more`; with no asks it says so. Every Unicode line separator ends that displayed
-first line, and other C0/C1 controls become spaces, so a listed ask cannot add prompt lines. The
-one prompt asks whether the agent is waiting on a human for anything those asks do not cover,
-answered with exactly WAITING or PROCEEDING. An open ask or `opened_since` never suppresses this
-check.
+period runs one **silent self-check**: one side turn — the host's one-shot, tool-free model call
+over a snapshot of the conversation, the same channel a targeted Dispatch BTW uses. The check uses
+the open-asks snapshot it reads to name the session's own open asks in the prompt: the first line of
+at most five questions, each truncated to about 120 characters, followed by `+N more`; with no asks
+it says so. Every Unicode line separator ends that displayed first line, and other C0/C1 controls
+become spaces, so a listed ask cannot add prompt lines. The one prompt asks whether the agent is
+waiting on a human for anything those asks do not cover, answered with exactly WAITING or
+PROCEEDING. An open ask or `opened_since` never suppresses this check.
 
 Only a reply whose first word is WAITING, and which does not also name PROCEEDING (a model echoing
 the choice rather than making it), produces the one hidden `dispatch-ask-reminder` steer with
 `triggerTurn`: it says the agent is waiting on a human for something no open ask covers, and tells
 it to open an ask with `dispatch_ask` (or `dispatch_request_approval` for a document), naming
-exactly what it needs and from whom. The parse is case-sensitive and first-word-only because a
-false WAITING is the expensive error — its steer tells an agent to page a human with a question it
-does not need — while a false PROCEEDING is only silence. PROCEEDING, an unparsable reply, an
-`askEphemeral` failure, the timeout, and a host without `pi.askEphemeral` are silent; the last also
-arms no period.
+exactly what it needs and from whom. The parse is case-sensitive and first-word-only because a false
+WAITING is the expensive error — its steer tells an agent to page a human with a question it does
+not need — while a false PROCEEDING is only silence. PROCEEDING, an unparsable reply, a side-turn
+failure, the timeout, and a host with no side turn at all are silent; the last also arms no period.
+
+The check runs on the host's managed timer (`ctx.setTimeout`) once `agent_end` returns, not inside
+the handler: on Oh My Pi 18.3 a side turn started while a handler is still running inherits that
+handler's abort signal, which the host fires at its 30 s handler budget. When the timer fires, the
+check first confirms its settle is still current against the run count, the user-turn generation and
+the session id captured at the stop, and returns without reading Dispatch otherwise.
 
 The timeout is the extension's own clock, not the host's: the call gets an `AbortSignal`, but the
-handler races it against `ASK_SELF_CHECK_TIMEOUT_MS` (60 s, moved by
-`ENVOY_SELF_CHECK_TIMEOUT_MS`) and always settles there so a host that ignores the signal cannot
-hold the one-check-at-a-time latch. A late answer is dropped. A user typing, a session change, the
-agent opening an ask itself, and a post-race staleness re-check abort the in-flight call; an ask
-opened mid-check never produces its verdict. A failure is logged once per session (`logger.warn`),
-never notified.
+check races it against `ASK_SELF_CHECK_TIMEOUT_MS` (60 s, moved by `ENVOY_SELF_CHECK_TIMEOUT_MS`)
+and always settles there so a host that ignores the signal cannot hold the one-check-at-a-time
+latch. A late answer is dropped. A user typing, a session change, the agent opening an ask itself,
+and a post-race staleness re-check abort the in-flight call; an ask opened mid-check never produces
+its verdict. A failure is logged once per session (`logger.warn`), never notified.
 
 The check is owed and spent like the host's todo reminder rather than once per period: the arming
 turn owes one, running it spends it whatever came back, the agent opening the ask itself
@@ -349,14 +357,14 @@ successful `tool_result` whose tool is not a `dispatch_*` one — owes another. 
 only replies calls no tool, so the nudge's continuation cannot re-arm itself; work is bounded by
 `ASK_CHECKS_PER_PERIOD` (5).
 
-Each completed check carries `baseline_as_of` to its snapshot's `as_of`, keeping the next
-open-asks read current. One stop-time check runs at a time: `agent_end` handlers are not awaited by
-the host, so a latch spans the Dispatch read and self-check; a settle recorded while it is held is
-re-checked when the first check ends only if its run counter still matches and a check remains due.
-Every run the host starts increments that counter, so an Envoy delivery or another newer run makes
-an old verdict stale and unsteerable. The latch, period, and budget are in memory only; a cold start
-or session change begins at period 0, which nudges nothing until the next genuine user turn arms
-one. The normal-settle, UI-host, Legion-managed, task-subagent, generation, staleness, and
+Each completed check carries `baseline_as_of` to its snapshot's `as_of`, keeping the next open-asks
+read current. One stop-time check runs at a time: `agent_end` handlers are not awaited by the host,
+so a latch spans the Dispatch read and self-check; a settle recorded while it is held is re-checked
+when the first check ends only if it is still current under the same test the timer applies. Every
+run the host starts increments the run count that test reads, so an Envoy delivery or another newer
+run makes an old verdict stale and unsteerable. The latch, period, and budget are in memory only; a
+cold start or session change begins at period 0, which nudges nothing until the next genuine user
+turn arms one. The normal-settle, UI-host, Legion-managed, task-subagent, generation, staleness, and
 one-check-at-a-time guards remain load-bearing.
 
 What the arming rule excludes is as load-bearing as what it covers. An Envoy delivery wakes a session through the
@@ -390,7 +398,7 @@ state never nudges.
 ## Critical conventions
 
 - Register every schema through the injected `pi.zod`. Every field counts, not just the outer object: OMP's converter reads internals (`.ir`) only its own Zod produces, and a field from another Zod instance fails the whole extension load (`undefined is not an object (evaluating 'e.ir.desc')`). The shared Dispatch contract exposes field shapes and cross-field validation through `dispatchToolSchema`; pass it `zodSchemaApi(pi.zod)`. `envoy.test.ts` proves every registered field came from the injected instance. |
-- Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when `pi.askEphemeral` exists and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver targeted **Aside** / **Steer** with `triggerTurn: true`; reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address.
+- Keep direct NATS subscription lifecycle and Pi delivery adapter-local. Register `["aside", "btw", "steer"]` when the host has a side turn (`ctx.runEphemeralTurn` on Oh My Pi 18.3, or `pi.askEphemeral` on an earlier fork release; the context's call wins when both exist; pi-envoy wraps the question in the /btw prompt itself, which the older call left to the host) and `["aside", "steer"]` otherwise — both built from the contracts' `DELIVERY_CAPABILITIES`, never spelled here; an advertised `btw` frame never falls back to steering. Deliver targeted **Aside** / **Steer** with `triggerTurn: true`; reject an unparsed targeted frame without primary-turn injection, log it, and post its error to Dispatch whenever it has a reply address.
 - Render every inbound envelope through `renderInbound`. Keep its bounded 50-item `envoy_inbox` metadata-only; use the shared `envoy_role_get` transport operation for current role holders.
 - The registration heartbeat (`ensureHeartbeat`, `ENVOY_HEARTBEAT_MS`, default 120 s) re-asserts the session's held role after every successful re-registration: it reads `GET /v1/roles/<role>` and issues a soft `POST /v1/roles/set` only when the listener does not name this session as the live holder — a healthy tick writes nothing and appends no `envoy-role-claim` transcript entry. A 409 (a different live holder) drops the local claim, warns once, and ends re-assertion for that role; the newer holder is correct. A regain — or the first healthy tick after a failed registration, when a surviving claim may still have been unresolvable — fires `onEnvoyRoleRegained` detached from the heartbeat chain (a slow daemon never blocks the next re-registration), which re-runs the controller's `/controller/ready` and a root architect's `/process/ready` with bounded retries; a phase worker needs nothing, the daemon's own no-holder recovery prompts its catch-up. `legion.ts` registers that listener on the `LEGION_ROLE_CLAIM_BRIDGE` slot only once it holds a Legion identity (`claimController`, `bootstrapRoot`), since a `task` subagent's re-bound instance shares the process and would otherwise replace it.
 - A `task` subagent's session shares its parent's identity in both extensions (`isSubagentSession` in `src/subagent-session.ts`): in a Legion process it claims no role, calls no daemon route, installs no tool gate, and never exits (`extensions/legion.ts`), and in every process `extensions/envoy.ts` skips its `session_start` and switch events entirely — no listener registration, no agent-subject subscription, no heartbeat — so `envoy ps` lists only top-level sessions and a finished subagent leaves no row heartbeating for the life of the parent process. envoy.ts additionally asks the host's own roster (`isRegisteredSubagent`: `AgentRegistry.global()` from `@oh-my-pi/pi-coding-agent`, where `createAgentSession` registers every session as `main`, `sub`, or `advisor` before `session_start` fires), which needs no transcript and so also covers a subagent under `OMP_SESSION_STORAGE=sql` or of a `--no-session` parent, and stays per session rather than per process (an ACP host runs several top-level sessions in one process). The transcript-based check is recognised by either of two signals: the process-local one — `bootstrapRoot`, `bootstrapWorker`, and the controller's `session_start` record the bootstrapped session's transcript path on `globalThis` under `Symbol.for("legion.pi-envoy.bootstrapped-session")`, and any later `session_start` in the same process with a different transcript path is a subagent — or OMP's on-disk layout for file storage (the parent's `.jsonl` sits beside the subagent's transcript directory). The process-local signal is what holds when the transcript is a SQL row rather than a file (LEGION-80: `OMP_SESSION_STORAGE=sql`); the on-disk check stays as the fallback for a process that has not bootstrapped anything. The identity it shares is its reply address. Every top-level instance publishes its own session on `globalThis` under `Symbol.for("legion.pi-envoy.envoy-session")` (`src/envoy-session.ts`), keyed by its transcript path, at the one chokepoint that moves the module id — `restoreLocalSessionState`, which a start, a switch and the heartbeat's drift heal all run — and deletes its previous key when its id or transcript path changes, so a retired session leaves no entry to resolve. A session is recorded from its `session_start`, before the host has minted its id — under its transcript path, with the empty id it has — so a fresh TUI's subagent resolves that session and reports no address until the drift heal fills the id in, rather than falling through to another live session; and `session_shutdown` deletes the entry, since a deregistered session is not an address a reply reaches. It is a map, not one slot, because an ACP host runs several top-level sessions in one process: one slot would hand a subagent whichever of them last started. A subagent, whose module `sessionID` stays empty, resolves its own by walking OMP's layout up — `dirname(<own transcript>) + ".jsonl"`, repeated for a nested subagent — until a recorded session matches, and `envoy_whoami`, the `/whoami` command, and the `source_session` of `envoy_send` and `envoy_publish` all name that session. `envoy_whoami` reports it as `session_id` and the subagent's own host id under `subagent`. Where the walk matches nothing, one recorded session is used only when it is the only one in the process; otherwise there is no reply address at all — `session_id` is empty, the `subagent` note says so, and `packages/envoy-client/src/transport.ts` omits `source_session` rather than send an empty one, which the listener's `omitempty` erases on the way out, costing the recipient both the sender label and the reply hint. Naming an unrelated live session is never the answer. A subagent's `envoy_publish` never reaches its own parent: the listener delivers nothing to the session an envelope names as its source — `roleTopicDelivery` skips the resolved holder and `fanoutDelivery` skips any interest whose session is the source — so a publish to a role the parent holds, or to any topic it subscribes to, is accepted and delivered to nobody. The publish tool result says so for the role case, where the answer names the holder; the hop a subagent actually has to its parent is hub. A direct `envoy_send` is unaffected, the agent-subject lane having no such skip. The host's own `AgentRegistry` carries a `parentId`, but it is undocumented and a host upgrade could change it silently; the published record is this package's own.
