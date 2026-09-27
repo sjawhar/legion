@@ -20,6 +20,10 @@ import (
 // rooms pool - and a caller that only needs to read does it through its transaction.
 func TestPoolRefusesASecondConnectionInsideATransaction(t *testing.T) {
 	database := openTestStore(t)
+	// The health probe reads the applied schema version, so the database must have one.
+	if err := database.Migrate(context.Background()); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
 	ctx := WithTransactionTracking(context.Background())
 
 	tx, err := database.Pool.Begin(ctx)
