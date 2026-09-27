@@ -313,6 +313,8 @@ type commitHooksKey struct{}
 // WithCommitHooks scopes OnCommit to one transaction: the returned function runs, in order, every
 // hook registered on the returned context, and the transaction's owner calls it once the
 // transaction has committed, never when it rolls back. ApplyFact is that owner for every fact.
+// The hook list is not goroutine-safe: a transaction's handlers run one after another on one
+// goroutine, and OnCommit must only be called on that goroutine.
 func WithCommitHooks(ctx context.Context) (context.Context, func()) {
 	hooks := &[]func(){}
 	return context.WithValue(ctx, commitHooksKey{}, hooks), func() {

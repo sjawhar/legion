@@ -11,6 +11,9 @@ phase gets its own long-lived process against the same jj workspace, run in turn
 the phase assigned to you, report its completion to the architect, and leave the durable
 copy the next phase can trust.
 
+Every path this skill cites (`packages/...`, `docs/...`, `AGENTS.md`) is in sjawhar/legion, the
+Legion repository, which need not be the repository you are working in.
+
 ## Identity, scope, and role
 
 The daemon spawns you as a separate `omp --mode rpc` process (behind `legion worker-shim`,
@@ -102,8 +105,8 @@ committed predecessor handoffs in lifecycle order from `$LEGION_WORKSPACE/.legio
 5. `review.json`
 
 Read only files that precede the assigned phase. Every handoff is validated when it is read:
-`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts` in sjawhar/legion) checks the
-file, and the ledger (`packages/daemon/src/handoff/ledger.ts` in sjawhar/legion) treats a file that
+`validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the
+file, and the ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that
 fails validation as missing.
 Undeclared fields pass validation untouched and reach the next worker; a declared field of the
 wrong type fails the whole file, so the `legion` tool's `handoff_read` returns null for that phase.
@@ -172,8 +175,8 @@ shows your role's App in both columns **on every commit you made** — not on th
 earlier phases' commits are legitimately authored by their own role's App, and a conflict-forced
 rebase legitimately sets the committer of every rebased commit, other roles' included, to the
 rebaser. A wrong identity on your own commit, the other App or none, is a pane-environment
-problem to report to the architect, not something to pin (sjawhar/legion's
-`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`, Hazard 1).
+problem to report to the architect, not something to pin
+(`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`, Hazard 1).
 Your session receives the credential capability it needs; invoke GitHub through the
 credential helper:
 
@@ -182,7 +185,7 @@ legion gh -- <gh args…>
 ```
 
 Four facts about `gh` in a worker pane. The `gh` on your `PATH` is a shim
-(`<state_dir>/worker-bin/gh`, installed by the daemon at startup — `packages/daemon/src/daemon/worker-bin.ts` in sjawhar/legion)
+(`<state_dir>/worker-bin/gh`, installed by the daemon at startup — `packages/daemon/src/daemon/worker-bin.ts`)
 that execs `legion gh -- "$@"`, so `gh …` and `legion gh -- …` are the same call, and each call
 redeems a fresh token from your session's grant — identity is supplied per call, never stored.
 Never run `gh auth login` or `gh auth setup-git`; there is no login state to create. The shim
@@ -231,7 +234,7 @@ legion gh -- pr comment <pr-number> \
 
 The plan lives in `.legion/plan.json` and the Dispatch issue document; never commit a plan or spec file to the repository.
 No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
-and spec content goes into the issue, never into a PR (sjawhar/legion's root `AGENTS.md`
+and spec content goes into the issue, never into a PR (the root `AGENTS.md`
 calls its own `docs/plans/` human-authored design history, not a Legion artifact). A skill step that says "save the plan
 to a file" is satisfied by the handoff write in the completion gate below; the planner's only
 commit is `plan: record handoff`.
@@ -316,7 +319,7 @@ this proof.
   `Accepted:` — the opener's own follow-up included — leaves the thread open, because resolution
   considers only the newest comment). The review App can reply on a thread but cannot resolve it:
   GitHub grants resolving a review thread to the pull request's author, and the implementer opens
-  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md` in sjawhar/legion, GitHub Apps).
+  every Legion pull request (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps).
   When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`; when neither is set, use `gh api graphql`
   with the session's GitHub credential and the fallback below.
   In a Legion pane, the **implementer** runs the command before every push that answers a review
@@ -456,7 +459,7 @@ this proof.
   in READY (an empty output is quoted as `no file changes above the approved head`); then the same
   with `'~docs/solutions'` appended, which must print nothing. The merger always posts
   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` (the shape
-  `packages/pi-envoy/roles/merger.md` in sjawhar/legion defines), its summary, and the PR body's gate facts as a
+  `packages/pi-envoy/roles/merger.md` defines), its summary, and the PR body's gate facts as a
   `dispatch_message` on the issue. When the `Legion addressing` line names a merge queue, it also
   publishes the same packet there with `envoy_publish`; a 404 means the Dispatch message remains
   the durable notice and the merger stays idle. The READY packet names both the implementer's and
@@ -566,7 +569,7 @@ cd -- "$LEGION_WORKSPACE" && \
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
 tests it wrote — advance the issue bookmark and push it with the provisioned credential helper,
 which authenticates as your role's App (`appRoleForLegionRole` in
-`packages/daemon/src/daemon/github-apps.ts` in sjawhar/legion). `-r @-` puts the bookmark on the commit you just
+`packages/daemon/src/daemon/github-apps.ts`). `-r @-` puts the bookmark on the commit you just
 split off: the working copy left above it has no description, and `jj git push` refuses a
 commit without one. `--allow-backwards` is for that local step alone: after a split the bookmark
 can sit on the undescribed working copy above `@-`. `--bookmark` also publishes the locally
@@ -638,11 +641,13 @@ record of this issue's active phase. Do not add pipeline labels, run a controlle
 invent a different completion protocol — this is the whole contract.
 
 A reviewer's phase ends with its completion, not with its review. A round that writes a handoff
-takes this order: write, commit and push the handoff; wait for the CI verdict to settle at the
-head that push made; submit the review of that head by its SHA; then complete. A review of a head
-the handoff push then replaces names a head the pull request no longer has, and GitHub can
-dismiss an approval once the head moves. A round that writes none (the final approval of the
-`.legion/` deletion head) reviews the head as it is. The daemon moves the issue once both are in —
+takes this order: write, commit and push the handoff; submit the review of the head that push
+made, by its SHA; then complete. An approval waits for the CI verdict to settle green at that head
+before you submit it, since an approval stands only on green checks and GitHub can dismiss one
+once the head moves; a request for changes does not wait, since it stands whatever CI says and the
+issue leaves reviewing with it. A review of a head the handoff push then replaces names a head
+the pull request no longer has. A round that writes none (the final approval of the `.legion/`
+deletion head) reviews the head as it is. The daemon moves the issue once both are in —
 the decision GitHub reports and your completion, in either order — so a review posted without a
 completion leaves the issue in reviewing until you finish.
 

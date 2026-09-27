@@ -208,18 +208,9 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	artifactID := strings.ToLower(req.ArtifactID)
 	grant, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
-	if !ok {
-		return
-	}
 	// The gate is the tree root's: it opens planning for the whole tree, so a child's document
-	// cannot stand in for the root's review, and only the root's own architect registers it, not a
-	// sub-architect of the tree holding the root document's id.
-	if !claim.IsTreeRoot(req.Issue, grant.Tree) {
-		writeFailure(w, http.StatusForbidden, "GATE_ROOT_ONLY", fmt.Sprintf("the design gate belongs to the tree root %s; register it there", grant.Tree))
-		return
-	}
-	if !claim.IsTreeRoot(grant.Issue, grant.Tree) {
-		writeFailure(w, http.StatusForbidden, "GATE_ROOT_ONLY", fmt.Sprintf("the design gate belongs to the tree root %s; its root architect registers it", grant.Tree))
+	// cannot stand in for the root's review.
+	if !ok || !s.rootArchitectOf(w, r, grant, recorded, gateRoute) {
 		return
 	}
 	if !s.documentOfIssue(w, r, artifactID, req.Issue) {
@@ -409,7 +400,8 @@ func (s *server) phaseRetry(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_DECISION", "decision must be retry or escalate")
 		return
 	}
-	if _, _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue); !ok {
+	grant, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
+	if !ok || !s.architectOwns(w, r, grant, recorded, "retry_or_escalate") {
 		return
 	}
 	s.applyFact(w, r, requestFactID("phase/retry"),
@@ -425,7 +417,8 @@ func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issue is not an issue key")
 		return
 	}
-	if _, _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue); !ok {
+	grant, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
+	if !ok || !s.architectOwns(w, r, grant, recorded, "sign_off") {
 		return
 	}
 	s.applyFact(w, r, requestFactID("signoff"), intake.SignOff{Issue: req.Issue}, SignOffResponse{})
@@ -449,21 +442,77 @@ func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("the reason makes a %d-character message, over the %d one message holds; shorten it", length, record.MessagePostLimit))
 		return
 	}
-	grant, _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
-	if !ok {
-		return
-	}
-	if !claim.IsTreeRoot(req.Issue, grant.Tree) {
-		writeFailure(w, http.StatusForbidden, "ROOT_REQUIRED", fmt.Sprintf("close_root ends the tree root %s; a child leaves with park_child", grant.Tree))
-		return
-	}
-	// The tree root's own architect only: a sub-architect of the tree holds a grant for the same
-	// tree and can name the root, as gateRegister refuses it too.
-	if !claim.IsTreeRoot(grant.Issue, grant.Tree) {
-		writeFailure(w, http.StatusForbidden, "ROOT_REQUIRED", fmt.Sprintf("close_root ends the tree root %s; its root architect closes it", grant.Tree))
+	grant, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
+	if !ok || !s.rootArchitectOf(w, r, grant, recorded, closeRootRoute) {
 		return
 	}
 	s.applyFact(w, r, requestFactID("roots-close"), fact, EmptyResponse{})
+}
+
+// rootRoute is a route an architect takes only on its tree's root, and how its two refusals read:
+// code, what the route does to the root, where a child goes instead, and what the root's own
+// architect does.
+type rootRoute struct{ code, does, forChild, byRoot string }
+
+var (
+	gateRoute      = rootRoute{"GATE_ROOT_ONLY", "the design gate belongs to", "register it there", "registers it"}
+	closeRootRoute = rootRoute{"ROOT_REQUIRED", "close_root ends", "a child leaves with park_child", "closes it"}
+)
+
+// rootArchitectOf says whether grant acts on recorded, an issue of its tree, as a route that only
+// the tree root's own architect takes: recorded is the root, and the grant's architect owns it
+// (architectOwns), which for the root only its own architect does. It writes the route's 403
+// otherwise.
+func (s *server) rootArchitectOf(w http.ResponseWriter, r *http.Request, grant credential.Grant, recorded record.Issue, route rootRoute) bool {
+	if !claim.IsTreeRoot(recorded.Key, grant.Tree) {
+		writeFailure(w, http.StatusForbidden, route.code, fmt.Sprintf("%s the tree root %s; %s", route.does, grant.Tree, route.forChild))
+		return false
+	}
+	owns, err := s.owns(r.Context(), grant, recorded)
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read issue tree membership")
+		return false
+	}
+	if !owns {
+		writeFailure(w, http.StatusForbidden, route.code, fmt.Sprintf("%s the tree root %s; its root architect %s", route.does, grant.Tree, route.byRoot))
+	}
+	return owns
+}
+
+// architectOwns says whether grant's architect owns recorded, an issue of its tree, for the
+// operation op, writing a 403 ISSUE_NOT_OWNED when it does not (owns).
+func (s *server) architectOwns(w http.ResponseWriter, r *http.Request, grant credential.Grant, recorded record.Issue, op string) bool {
+	owns, err := s.owns(r.Context(), grant, recorded)
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read issue tree membership")
+		return false
+	}
+	if !owns {
+		writeFailure(w, http.StatusForbidden, "ISSUE_NOT_OWNED", fmt.Sprintf("%s of %s belongs to its own architect or one above it in the tree, not the architect of %s", op, recorded.Key, grant.Issue))
+	}
+	return owns
+}
+
+// owns says whether grant's architect owns recorded, an issue of its tree: recorded is the grant's
+// own issue or lies under it, through its recorded parents. So the tree root's architect owns every
+// issue of its tree, and a sub-architect its own issue and those under it, never the root or a
+// sibling: a sub-architect holds a grant for the whole tree and can name any issue of it.
+func (s *server) owns(ctx context.Context, grant credential.Grant, recorded record.Issue) (bool, error) {
+	seen := map[string]bool{}
+	for current := &recorded; ; {
+		if current.Key == grant.Issue {
+			return true, nil
+		}
+		if current.Parent == nil || claim.IsTreeRoot(current.Key, current.Tree) || seen[current.Key] {
+			return false, nil
+		}
+		seen[current.Key] = true
+		parent, err := s.recordedIssue(ctx, *current.Parent)
+		if err != nil || parent == nil || parent.Tree != grant.Tree {
+			return false, err
+		}
+		current = parent
+	}
 }
 
 // parkChild takes a running child of the architect's tree out of the workflow by moving it to

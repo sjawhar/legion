@@ -55,7 +55,7 @@ environment variable the TypeScript daemon sets on a pane that this extension re
 `LEGION_CONTROL_SUBJECT`, `LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`,
 `ENVOY_NATS_URL`, `ENVOY_URL`, `ENVOY_TOKEN_FILE` (the listener bearer, read by
 `@legion/envoy-client` ahead of `ENVOY_TOKEN`; contract 3, LEGION-25), `NATS_NKEY_SEED_FILE` (the
-`legion-pane` NATS nkey seed; contract 9, LEGION-279), and the `LEGION_*` identity
+`legion-pane` NATS nkey seed; contract 8, LEGION-279), and the `LEGION_*` identity
 variables `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_GENERATION`/`LEGION_WORKSPACE`/
 `LEGION_STATE_DIR`/`LEGION_CONTROLLER` (read by `src/legion/classify.ts` and
 `extensions/legion.ts`; the Dispatch and Envoy variables by `@legion/envoy-client`; the grant

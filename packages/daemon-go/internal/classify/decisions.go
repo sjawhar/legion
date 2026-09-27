@@ -205,6 +205,26 @@ func ApprovalStands(pr record.PullRequest, reviewed string) bool {
 	return false
 }
 
+// RedSendsBack says whether the verdict settled on the pull request's head sends an issue in
+// testing or reviewing back to implementing: it is red, the review App did not plan it (its
+// failing tests), and the head was not reached by a push that carries an approval across
+// (carriesApproval). Such a push changed only .legion/, so the head's code is that of the head it
+// replaced, and a red there is the same code's second run: acting on it would let a flake stop a
+// reviewer mid-round and spend a fix attempt with no code changed. The review round decides that
+// red instead, since the reviewer waits for the settled verdict at its own handoff head. A head
+// whose push is not recorded yet is read as one that may change code.
+func RedSendsBack(pr record.PullRequest) bool {
+	if pr.Verdict != "red" || pr.PlannedRed {
+		return false
+	}
+	for _, p := range pr.Pushes {
+		if p.SHA == pr.HeadSHA && carriesApproval(p) {
+			return false
+		}
+	}
+	return true
+}
+
 // BlockFixAttempt marks and reports one exhausted fix-attempt count when the settlement just
 // applied is red, as the shipped reducer decides pr-blocked on ci-settled-red alone: a green head
 // at an exhausted count is the fix that worked. A zero BlockedAttempts means no count has been

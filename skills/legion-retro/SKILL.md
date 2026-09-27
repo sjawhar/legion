@@ -9,6 +9,9 @@ Retro is mandatory for every issue that passed review. The architect revives the
 implementer so the person with implementation context performs the retrospective, and the
 skill obtains a separate fresh-eyes perspective. Retro runs before merge.
 
+Every path this skill cites (`packages/...`, `docs/...`) is in sjawhar/legion, the Legion
+repository, which need not be the repository you are working in.
+
 ## Merge-gate ordering
 
 Follow this ordering exactly. It keeps the reviewed branch clean while preserving the
@@ -46,7 +49,7 @@ before step 3. The design gate is not a substitute for review and retro.
 
 1. Re-read the issue, its acceptance criteria, the PR, test evidence, and review evidence.
    Confirm the PR carries both proofs: the implementer's own `E2E (implementer)` line and the tester's `E2E (tester)` line,
-   each naming a production-like surface (the daemon's test harness (`packages/daemon/src/daemon/__tests__/` in sjawhar/legion) and real-process fixtures; a live check at the operator's next daemon restart, recorded on the PR; a sandbox repository, a devN
+   each naming a production-like surface (the daemon's test harness (`packages/daemon/src/daemon/__tests__/`) and real-process fixtures; a live check at the operator's next daemon restart, recorded on the PR; a sandbox repository, a devN
    stack, staging, or a local stack with real migrations), a command or run id, an observation, a head
    SHA, and a negative control. If either is missing, or links only a unit suite, the retro's first
    durable learning is that gap and the issue goes back — to the implementer for its own proof, to the

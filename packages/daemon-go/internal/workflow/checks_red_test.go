@@ -18,27 +18,40 @@ import (
 // implementing, the implementer's task names the failing checks, and the architect is told with
 // the same checks. Its next push is then a counted fix attempt, as a red verdict makes any new head.
 // A red the review App planned (its failing tests) sends nothing back, and neither does a red in
-// implementing, where the implementer is already at work.
+// implementing, where the implementer is already at work. Nor does a red on a head a handoff-only
+// push reached, whose code is the head it replaced: in reviewing that is the reviewer's own
+// handoff head, whose settled verdict the reviewer waits for before it decides, so the round is
+// left open, its reviewer running, and the red is the round's to decide.
 func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		from    phase.Phase
-		status  string
-		planned bool
-		want    phase.Phase
+		name        string
+		from        phase.Phase
+		status      string
+		planned     bool
+		handoffHead bool
+		want        phase.Phase
 	}{
-		{"in testing", phase.Testing, "testing", false, phase.Implementing},
-		{"in reviewing", phase.Reviewing, "needs_review", false, phase.Implementing},
-		{"a planned red in testing", phase.Testing, "testing", true, phase.Testing},
-		{"in implementing", phase.Implementing, "in_progress", false, phase.Implementing},
+		{"in testing", phase.Testing, "testing", false, false, phase.Implementing},
+		{"in reviewing", phase.Reviewing, "needs_review", false, false, phase.Implementing},
+		{"a planned red in testing", phase.Testing, "testing", true, false, phase.Testing},
+		{"in implementing", phase.Implementing, "in_progress", false, false, phase.Implementing},
+		{"on the tester's handoff-only head", phase.Testing, "testing", false, true, phase.Testing},
+		{"on the reviewer's handoff-only head, its round half in", phase.Reviewing, "needs_review", false, true, phase.Reviewing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", PlannedRed: tc.planned})
+			pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", PlannedRed: tc.planned}
+			if tc.handoffHead {
+				pr.Pushes = []record.ClassifiedPush{{SHA: "head", Before: "code", HandoffOnly: true}}
+			}
+			seedPR(t, pool, pr)
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			if tc.from == phase.Reviewing {
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"})
+			}
 			engine := testEngine(config.DesignGateRootIssues, nil)
 			if result, err := intake.ApplyFact(context.Background(), pool, "github", "red", intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
 				HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "pytest", ID: 7}}, Generation: 1, Snapshot: "red-head", Verdict: "red",
@@ -52,6 +65,7 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 				if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
 					t.Fatalf("notices %v, want no checks-red", got)
 				}
+				assertOutboxCount(t, pool, "supervise", 0)
 				return
 			}
 			var task string

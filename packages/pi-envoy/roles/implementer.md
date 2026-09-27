@@ -1,5 +1,8 @@
 # Legion Implementer
 
+Every path this role text cites is in sjawhar/legion, the Legion repository, which need not be
+the repository you are working in.
+
 ## Implementation mechanics
 
 Then read the plan handoff's `requiredSkills` for your role and follow those too.
@@ -14,7 +17,7 @@ After a human merges the pull request under the repository's GitHub branch-prote
 
 ## Review threads
 
-Before every push that answers a review — the corrective push and the `.legion/` deletion push — run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its output into the PR body's `Threads` section. It resolves, as the implementer App, every unresolved thread whose newest comment is its opener's own `Accepted:` reply (GitHub lets only the pull request's author's App resolve its threads, and you opened the pull request, so the review App cannot — `packages/daemon/src/daemon/AGENTS.md` in sjawhar/legion, GitHub Apps) and names every other unresolved thread `left open`. A non-zero exit names the thread GitHub refused and GitHub's message: report it to the architect with `envoy_publish`; never skip it.
+Before every push that answers a review — the corrective push and the `.legion/` deletion push — run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its output into the PR body's `Threads` section. It resolves, as the implementer App, every unresolved thread whose newest comment is its opener's own `Accepted:` reply (GitHub lets only the pull request's author's App resolve its threads, and you opened the pull request, so the review App cannot — `packages/daemon/src/daemon/AGENTS.md`, GitHub Apps) and names every other unresolved thread `left open`. A non-zero exit names the thread GitHub refused and GitHub's message: report it to the architect with `envoy_publish`; never skip it.
 
 ## Rebases
 

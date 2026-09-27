@@ -873,7 +873,8 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.suspended(ctx); err != nil {
 		return err
 	}
-	m.log.Info("supervise: suspended", "reason", ev.(RequestSuspend).Reason)
+	request, _ := ev.(RequestSuspend)
+	m.log.Info("supervise: suspended", "reason", request.Reason)
 	return nil
 }
 

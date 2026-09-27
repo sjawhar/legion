@@ -372,6 +372,50 @@ func TestArchitectRoutesRefuseWrongRoleAndForeignTree(t *testing.T) {
 	}
 }
 
+// sign_off and retry_or_escalate are the owning architect's: its own issue or one under it. A
+// sub-architect holds a grant for the whole tree and can name any issue of it, but signing off the
+// root ends the tree, and a sibling is another architect's; both are refused, and nothing applies.
+// The root's architect owns every issue of its tree, and a sub-architect its own.
+func TestSignOffAndRetryAreTheOwningArchitects(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209", "LEGION-210")
+	root := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	subArchitect := newLiveClaimIn(t, h, "LEGION-208", "LEGION-209", claim.RoleArchitect)
+	for n, route := range []struct {
+		path, op string
+		extra    map[string]any
+	}{{"/legion/v1/signoff", "sign_off", nil}, {"/legion/v1/phase/retry", "retry_or_escalate", map[string]any{"decision": "retry"}}} {
+		body := func(grant, issue string) map[string]any {
+			request := map[string]any{"grantId": grant, "issue": issue}
+			for key, value := range route.extra {
+				request[key] = value
+			}
+			return request
+		}
+		for _, issue := range []string{"LEGION-208", "LEGION-210"} {
+			refusal := h.request(http.MethodPost, route.path, body(subArchitect.grant(t), issue), nil)
+			if want := route.op + " of " + issue; !strings.Contains(refusal.Body.String(), want) {
+				t.Fatalf("%s refusal %s does not name %q", route.path, refusal.Body, want)
+			}
+			assertFailure(t, refusal, http.StatusForbidden, "ISSUE_NOT_OWNED")
+		}
+		if got := len(facts.recorded()); got != 3*n {
+			t.Fatalf("%s: refused calls applied facts %#v", route.path, facts.recorded()[3*n:])
+		}
+		for _, allowed := range []struct {
+			grant liveClaim
+			issue string
+		}{{subArchitect, "LEGION-209"}, {root, "LEGION-208"}, {root, "LEGION-210"}} {
+			if got := h.request(http.MethodPost, route.path, body(allowed.grant.grant(t), allowed.issue), nil); got.Code != http.StatusOK {
+				t.Fatalf("%s by the architect of %s on %s = %d: %s", route.path, allowed.grant.issue, allowed.issue, got.Code, got.Body)
+			}
+		}
+		if got := len(facts.recorded()); got != 3*(n+1) {
+			t.Fatalf("%s: %d facts applied, want one per owning architect's call", route.path, got-3*n)
+		}
+	}
+}
+
 func TestArchitectureRouteRefusalsExposeTheFactResultAndGrantState(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	h, _, _ := newArchitectHarness(t, credential.New(func() time.Time { return now }),
