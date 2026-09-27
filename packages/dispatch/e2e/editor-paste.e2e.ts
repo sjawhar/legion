@@ -258,7 +258,25 @@ async function openWithCellsSelected(
   const { alice, issue, page } = await openIssue(browser, "Cell selection paste", spec);
   await expect(documentEditor(page)).toContainText(to);
   await selectCells(page, from, to, how);
-  return { alice, artifactId: issue.primary_artifact_id, page };
+  return { alice, issue, page };
+}
+
+/** Where a paste lands in the two-row table: the caret after a cell's text, or the cells from one
+ * to another. */
+type Target = string | readonly [string, string];
+
+function targetName(target: Target): string {
+  return typeof target === "string"
+    ? `at the caret after "${target}"`
+    : `onto ${target[0]} to ${target[1]}`;
+}
+
+/** Opens the two-row table as alice with the caret after `target`, or with its cells selected. */
+async function openAt(browser: Browser, title: string, target: Target) {
+  if (typeof target === "string") return openWithCaret(browser, title, table, target, "end");
+  const opened = await openWithCellsSelected(browser, target[0], target[1], "shift-click");
+  await expect(opened.page.locator(".selectedCell")).not.toHaveCount(0);
+  return opened;
 }
 
 // Tab-separated text pasted onto a selection of cells fills them as a grid, one value per cell, the
@@ -269,7 +287,7 @@ for (const how of ["drag", "shift-click"] as const) {
   test(`tab-separated text pasted onto four cells selected by ${how} fills them as a grid`, async ({
     browser,
   }) => {
-    const { alice, artifactId, page } = await openWithCellsSelected(
+    const { alice, issue, page } = await openWithCellsSelected(
       browser,
       "alpha one",
       "delta four",
@@ -281,7 +299,7 @@ for (const how of ["drag", "shift-click"] as const) {
       await paste(page, { html: "", text: "H1\tH2\nB1\tB2" });
 
       await expect
-        .poll(async () => (await getArtifactText(artifactId)).markdown)
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
         .toBe("| H1 | H2 |\n| :--- | :--- |\n| B1 | B2 |\n");
     } finally {
       await alice.close();
@@ -342,22 +360,9 @@ for (const [name, clipboard, target, stored] of [
     "| b1 b2 | c |\n| :--- | :--- |\n| b1 b2 | c |\n",
   ],
 ] as const) {
-  const where =
-    typeof target === "string"
-      ? `at the caret after "${target}"`
-      : `onto ${target[0]} to ${target[1]}`;
-  test(`${name} pasted ${where} keeps each cell on one line`, async ({ browser }) => {
-    const { alice, issue, page } =
-      typeof target === "string"
-        ? await openWithCaret(browser, "Line break paste", table, target, "end")
-        : await openIssue(browser, "Line break paste", table);
+  test(`${name} pasted ${targetName(target)} keeps each cell on one line`, async ({ browser }) => {
+    const { alice, issue, page } = await openAt(browser, "Line break paste", target);
     try {
-      if (typeof target !== "string") {
-        await expect(documentEditor(page)).toContainText(target[1]);
-        await selectCells(page, target[0], target[1], "shift-click");
-        await expect(page.locator(".selectedCell")).not.toHaveCount(0);
-      }
-
       await paste(page, clipboard);
 
       await expect
@@ -399,25 +404,12 @@ for (const [clipboard, target, stored] of [
   ],
   [emptyLastRow, ["alpha one", "delta four"], "| a | b |\n| :--- | :--- |\n| a | b |\n"],
 ] as const) {
-  const where =
-    typeof target === "string"
-      ? `at the caret after "${target}"`
-      : `onto ${target[0]} to ${target[1]}`;
   const row = clipboard === emptyFirstRow ? "first" : "last";
-  test(`cells whose ${row} row is empty, pasted ${where}, paste the other row`, async ({
+  test(`cells whose ${row} row is empty, pasted ${targetName(target)}, paste the other row`, async ({
     browser,
   }) => {
-    const { alice, issue, page } =
-      typeof target === "string"
-        ? await openWithCaret(browser, "Empty row paste", table, target, "end")
-        : await openIssue(browser, "Empty row paste", table);
+    const { alice, issue, page } = await openAt(browser, "Empty row paste", target);
     try {
-      if (typeof target !== "string") {
-        await expect(documentEditor(page)).toContainText(target[1]);
-        await selectCells(page, target[0], target[1], "shift-click");
-        await expect(page.locator(".selectedCell")).not.toHaveCount(0);
-      }
-
       await paste(page, clipboard);
 
       await expect
@@ -428,6 +420,27 @@ for (const [clipboard, target, stored] of [
     }
   });
 }
+
+// A copied table whose rows hold no cells pastes as nothing, so onto selected cells it empties them,
+// as pasting nothing over selected text deletes it. Its cell-less row once reached prosemirror-tables
+// as a grid of no columns, which threw, and the paste stored nothing.
+test("a table with no cells, pasted onto the whole table, empties its cells", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openAt(browser, "No cells paste", [
+    "alpha one",
+    "delta four",
+  ]);
+  try {
+    await paste(page, { html: "<table><tr></tr></table>", text: "" });
+
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toBe("|  |  |\n| :--- | :--- |\n|  |  |\n");
+  } finally {
+    await alice.close();
+  }
+});
 
 // Cells copied inside the editor paste back as the same cells, at a caret in another row's cell
 // and onto a selection of that row's cells. The copy is ProseMirror's own clipboard HTML, a table
@@ -442,7 +455,7 @@ for (const target of [
   test(`cells copied in the editor and pasted at ${target} arrive as the same cells`, async ({
     browser,
   }) => {
-    const { alice, artifactId, page } = await openWithCellsSelected(
+    const { alice, issue, page } = await openWithCellsSelected(
       browser,
       "gamma three",
       "delta four",
@@ -463,7 +476,7 @@ for (const target of [
       await paste(page, copied);
 
       await expect
-        .poll(async () => (await getArtifactText(artifactId)).markdown)
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
         .toBe(
           "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | delta four |\n| gamma three | delta four |\n"
         );
@@ -477,7 +490,7 @@ for (const target of [
 // fills one selected cell. The flattening is for a caret in a cell's text, and applied to a cell
 // selection it would put all the pasted text into every selected cell.
 test("plain text pasted onto a selection of cells fills them line by line", async ({ browser }) => {
-  const { alice, artifactId, page } = await openWithCellsSelected(
+  const { alice, issue, page } = await openWithCellsSelected(
     browser,
     "gamma three",
     "delta four",
@@ -489,7 +502,7 @@ test("plain text pasted onto a selection of cells fills them line by line", asyn
     await paste(page, { html: "", text: "First\n\nSecond\n" });
 
     await expect
-      .poll(async () => (await getArtifactText(artifactId)).markdown)
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
       .toBe("| alpha one | beta two |\n| :--- | :--- |\n| First | Second |\n");
   } finally {
     await alice.close();
@@ -502,14 +515,13 @@ test("plain text pasted onto a selection of cells fills them line by line", asyn
 // that break. It was once pasted as a soft break, which the editor draws as a space while its stored
 // copy reads back as a line break. A markdown hard break, an HTML <br>, and a soft break in markdown
 // written through the API are the controls.
-for (const [shape, spec, quote, clipboard, stored, breaks] of [
+for (const [shape, spec, quote, clipboard, stored] of [
   [
     "a soft line break into a paragraph",
     "Intro end.\n",
     "Intro",
     { html: "", text: "First\nSecond" },
     "IntroFirst\\\nSecond end.\n",
-    1,
   ],
   [
     "a soft line break into a list item",
@@ -517,7 +529,6 @@ for (const [shape, spec, quote, clipboard, stored, breaks] of [
     "Intro",
     { html: "", text: "First\nSecond" },
     "- IntroFirst\\\n  Second end.\n",
-    1,
   ],
   [
     "a soft line break into a quote",
@@ -525,7 +536,6 @@ for (const [shape, spec, quote, clipboard, stored, breaks] of [
     "Intro",
     { html: "", text: "First\nSecond" },
     "> IntroFirst\\\n> Second end.\n",
-    1,
   ],
   [
     "a soft line break into a callout",
@@ -533,7 +543,6 @@ for (const [shape, spec, quote, clipboard, stored, breaks] of [
     "Intro",
     { html: "", text: "First\nSecond" },
     ':::callout{#k1 kind="note" title=""}\nIntroFirst\\\nSecond end.\n:::\n',
-    1,
   ],
   [
     "a soft line break into an ask's question",
@@ -541,7 +550,6 @@ for (const [shape, spec, quote, clipboard, stored, breaks] of [
     "Which here?",
     { html: "", text: "First\nSecond" },
     ':::ask{#q1 urgency="med" multiple="false" state="open"}\nWhich here?First\\\nSecond\n\n- X\n- Y\n:::\n',
-    1,
   ],
   [
     "a markdown hard break into a paragraph",
@@ -549,7 +557,6 @@ for (const [shape, spec, quote, clipboard, stored, breaks] of [
     "Intro",
     { html: "", text: "First\\\nSecond" },
     "IntroFirst\\\nSecond end.\n",
-    1,
   ],
   [
     "an HTML <br> into a paragraph",
@@ -557,7 +564,6 @@ for (const [shape, spec, quote, clipboard, stored, breaks] of [
     "Intro",
     { html: "<p>one<br>two</p>", text: "one\ntwo" },
     "Introone\\\ntwo end.\n",
-    1,
   ],
 ] as const) {
   test(`${shape} is stored as the break the editor shows`, async ({ browser }) => {
@@ -574,7 +580,7 @@ for (const [shape, spec, quote, clipboard, stored, breaks] of [
       await expect
         .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
         .toBe(stored);
-      await expect(documentEditor(page).locator('br[data-type="hardbreak"]')).toHaveCount(breaks);
+      await expect(documentEditor(page).locator('br[data-type="hardbreak"]')).toHaveCount(1);
       await expect(documentEditor(page).locator('span[data-type="hardbreak"]')).toHaveCount(0);
     } finally {
       await alice.close();
