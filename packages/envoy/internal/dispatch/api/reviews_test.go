@@ -135,8 +135,10 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("revise document: %v", err)
 	}
-	if _, err := documentService.NamedVersion(context.Background(), issue.PrimaryArtifactID, "revised", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("settle revised version: %v", err)
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("settle revised version: status=%d body=%s", named.Code, named.Body.String())
 	}
 	got = readApproval(t, handler, issue.PrimaryArtifactID)
 	if got.Approval.State != "stale" || got.Approval.LatestVersion != 2 || *got.Approval.Version != 1 {
@@ -185,8 +187,10 @@ func TestEditedLegacyTableCellPipeDocumentStalesApproval(t *testing.T) {
 	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one\\|three` |\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("edit legacy document: %v", err)
 	}
-	if _, err := documentService.NamedVersion(context.Background(), issue.PrimaryArtifactID, "human edit", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("record human version: %v", err)
+	if named := dispatchRequest(t, handler, http.MethodPost,
+		"/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions",
+		map[string]string{"summary": "human edit"}, "alice"); named.Code != http.StatusCreated {
+		t.Fatalf("record human version: status=%d body=%s", named.Code, named.Body.String())
 	}
 	got := readApproval(t, handler, issue.PrimaryArtifactID)
 	if got.Approval == nil || got.Approval.State != "stale" || got.Approval.LatestVersion != 2 || got.Approval.Version == nil || *got.Approval.Version != 1 {

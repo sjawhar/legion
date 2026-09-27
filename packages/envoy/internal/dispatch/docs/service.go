@@ -81,7 +81,11 @@ type Service struct {
 	// afterSettleLock runs after settleRoom has taken the document's advisory lock and before
 	// it touches the room. Nil outside tests; tests use it to fail the room in that window.
 	afterSettleLock func(room string)
-	settleWG        sync.WaitGroup
+	// afterPublishRefused runs when a committed write's publish is refused by its room, before
+	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
+	// refused room's recovery finish in that window.
+	afterPublishRefused func(room string)
+	settleWG            sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
 	// the store, so shutdown joins them before it closes.
 	evictWG sync.WaitGroup
@@ -107,6 +111,10 @@ type Service struct {
 	// write's (liveWriteOrigin), is a connected peer.
 	serviceOrigins   sync.Map
 	conditionalGates sync.Map
+	// settleAfterReload names the rooms whose failure dropped their settlement, so the load
+	// of the room that replaces one settles it once (failRoomLocked, onLoadDocument). A
+	// failed room's state is discarded with the room, so the mark cannot live on the state.
+	settleAfterReload sync.Map
 }
 
 type roomState struct {
@@ -1374,6 +1382,13 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	state.gen++
 	s.stopSettleTimer(state.settle)
 	s.purgeSuppressedPersistence(room)
+	// The failure drops this room's settlement: a queued one is stopped just above, one
+	// already running refuses on the failed room (settleRoom), and its retry stops because
+	// the generation moved (retrySettleLocked). The replacement room arms one on its next
+	// update alone (onLoadDocument's observer), so the ask blocks the dropped settlement
+	// would have indexed would stay out of the open asks until someone edited the document.
+	// The replacement's load settles once instead.
+	s.settleAfterReload.Store(room, struct{}{})
 	// Shutdown joins the evictions it did not cause. The consequence differs from settleWG's
 	// gate, which skips the work as well as the waiting: this eviction runs either way, because
 	// awaitRoomRecovery blocks every reader of a failed room on the close(done) below, and a
@@ -1428,6 +1443,9 @@ func (s *Service) roomFailed(room string) bool {
 // compacts the document under its advisory lock, which the transaction may hold,
 // or which a transaction waiting on one of its locks may hold; Postgres cannot see
 // a wait here, so it would never break the cycle.
+//
+// A room's own load never calls this: the eviction it would wait for waits for that load
+// (onLoadDocument).
 func (s *Service) awaitRoomRecovery(ctx context.Context, room string) error {
 	value, ok := s.rooms.Load(room)
 	if !ok {
@@ -1442,6 +1460,11 @@ func (s *Service) awaitRoomRecovery(ctx context.Context, room string) error {
 		return nil
 	}
 	if ledgerFrom(ctx).inTransaction() {
+		// A room that stays failed is otherwise visible only in its callers' 503s, which
+		// reach no server log at all: the refusal is what the server knows about the
+		// failure, so it names the room and the cause it refused for.
+		slog.Warn("dispatch: refuse a transaction's operation on a failed document room",
+			"room", room, "error", failure)
 		return fmt.Errorf("%w: %w", ErrServiceUnavailable, failure)
 	}
 	select {

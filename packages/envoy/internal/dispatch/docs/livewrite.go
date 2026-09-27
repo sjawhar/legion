@@ -313,14 +313,27 @@ func (s *Service) creditLiveWrite(write *liveWrite, actor model.Actor) {
 // they were made, as a room transaction and a broadcast each. A browser editor then receives
 // them as it would have received the operations themselves: an accepted suggestion's text
 // change before the margin projection that closes it, never both in one update.
+//
+// A room that cannot take an update is failed - but not one that refused the publish because it
+// had already failed (ErrServiceUnavailable). By the time such a refusal is handled the recovery
+// may have finished and registered a replacement room, which holds this write: its append
+// committed. Failing that room by name would fail a healthy replacement for the predecessor's
+// error, and every write to the document until it recovered again would be refused.
 func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
 	for _, update := range write.updates {
-		if err := s.publishLiveUpdate(write.artifactID, update); err != nil {
-			slog.Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
-			s.failRoom(write.artifactID, err)
-			return
+		err := s.publishLiveUpdate(write.artifactID, update)
+		if err == nil {
+			continue
 		}
+		slog.Error("dispatch: publish committed live document write", "room", write.artifactID, "error", err)
+		if s.afterPublishRefused != nil {
+			s.afterPublishRefused(write.artifactID)
+		}
+		if !errors.Is(err, ErrServiceUnavailable) {
+			s.failRoom(write.artifactID, err)
+		}
+		return
 	}
 }
 

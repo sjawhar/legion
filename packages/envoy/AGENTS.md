@@ -127,7 +127,10 @@ flushes and compacts under the advisory lock, so no transaction waits for a fail
 either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
 fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`), the transaction rolls back, and
 the caller retries once the room has reloaded; so does a write whose room fails before its first
-append, since the reloaded room may lack it.
+append, since the reloaded room may lack it. A room's own load never waits for that recovery
+either - the eviction waits in ygo's `CloseRoom` for the load's ready barrier, so the two would
+hold each other - and refuses instead, which ends the eviction; the replacement room's load then
+runs the one settlement the failure dropped.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
