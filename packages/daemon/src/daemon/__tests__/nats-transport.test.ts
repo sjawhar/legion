@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import {
   AckPolicy,
   type Authenticator,
@@ -508,14 +508,17 @@ describe("the user createNatsTransport connects as", () => {
   async function connectsAs(seeds: Pick<DaemonConfig, "natsNkeySeed" | "natsDaemonNkeySeed">) {
     let options: ConnectionOptions | undefined;
     const info: string[] = [];
-    await createNatsTransport(
-      { ...config(), ...seeds },
-      async (opts) => {
+    const infoSpy = spyOn(console, "info").mockImplementation((line: unknown) => {
+      info.push(String(line));
+    });
+    try {
+      await createNatsTransport({ ...config(), ...seeds }, async (opts) => {
         options = opts;
         return fakeConnection(new FakeJsm(), new FakePullSubscription());
-      },
-      { info: (line) => info.push(line), error: () => {} }
-    );
+      });
+    } finally {
+      infoSpy.mockRestore();
+    }
     const authenticator = options?.authenticator as Authenticator | undefined;
     const auth = authenticator?.("nonce") as NKeyAuth | undefined;
     return { nkey: auth?.nkey, info };

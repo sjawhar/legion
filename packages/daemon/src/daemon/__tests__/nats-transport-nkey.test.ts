@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, mock, spyOn } from "bun:test";
 import { connect, nkeys } from "nats";
 import type { DaemonConfig } from "../config";
 import { createNatsTransport } from "../nats-transport";
@@ -19,26 +19,30 @@ function createUser(): { readonly seed: string; readonly publicKey: string } {
 }
 
 /** The daemon's own transport, on the real client, against url, with `seeds` (the pane seed
- * `natsNkeySeed` and the daemon seed `natsDaemonNkeySeed`, each optional), recording its log;
- * `errors(n)` resolves once n error lines are recorded. */
+ * `natsNkeySeed` and the daemon seed `natsDaemonNkeySeed`, each optional), recording the lines it
+ * writes to the console (the suite's afterEach restores it); `errors(n)` resolves once n error
+ * lines are recorded. */
 async function transportAt(
   url: string,
   seeds: Pick<DaemonConfig, "natsNkeySeed" | "natsDaemonNkeySeed"> = {}
 ) {
   const lines = { info: [] as string[], error: [] as string[] };
   const waiters: { count: number; resolve: () => void }[] = [];
-  const transport = await createNatsTransport({ ...config(), natsUrls: [url], ...seeds }, connect, {
-    info: (line) => lines.info.push(line),
-    error: (line) => {
-      lines.error.push(line);
-      for (const waiter of waiters) if (lines.error.length >= waiter.count) waiter.resolve();
-    },
+  spyOn(console, "info").mockImplementation((line: unknown) => {
+    lines.info.push(String(line));
   });
+  spyOn(console, "error").mockImplementation((line: unknown) => {
+    lines.error.push(String(line));
+    for (const waiter of waiters) if (lines.error.length >= waiter.count) waiter.resolve();
+  });
+  const transport = await createNatsTransport({ ...config(), natsUrls: [url], ...seeds }, connect);
   await transport.ready();
-  const errors = (count: number) =>
-    lines.error.length >= count
-      ? Promise.resolve()
-      : new Promise<void>((resolve) => waiters.push({ count, resolve }));
+  const errors = (count: number) => {
+    if (lines.error.length >= count) return Promise.resolve();
+    const { promise, resolve } = Promise.withResolvers<void>();
+    waiters.push({ count, resolve });
+    return promise;
+  };
   return { transport, lines, errors };
 }
 
@@ -75,6 +79,9 @@ describe.skipIf(process.env.LEGION_E2E !== "1")(
     afterAll(() => {
       for (const server of [open, authorized, daemonOnly, denying]) server?.stop();
     }, 60_000);
+    afterEach(() => {
+      mock.restore();
+    });
 
     it("with no seed, connects to a server that asks for no credential", async () => {
       const { transport } = await transportAt(open.url);

@@ -251,17 +251,6 @@ export interface JetStreamConnection {
   status(): AsyncIterable<Status>;
 }
 
-/** Where the transport reports the user it connects as and the server's refusals. */
-export interface NatsTransportLog {
-  info(line: string): void;
-  error(line: string): void;
-}
-
-const consoleLog: NatsTransportLog = {
-  info: (line) => console.log(line),
-  error: (line) => console.error(line),
-};
-
 /** The seed the daemon's own connection authenticates with — `natsDaemonNkeySeed` when
  * configured, else the pane seed `natsNkeySeed`, else none — and the boot line naming that user
  * by public key and whether it is the pane user. Neither seed is in the line. */
@@ -296,11 +285,10 @@ function daemonNatsIdentity(config: DaemonConfig): { seed?: string; line: string
  * subject, since the server answers a refusal asynchronously and nothing else surfaces it. */
 export async function createNatsTransport(
   config: DaemonConfig,
-  connectFn: (opts: ConnectionOptions) => Promise<JetStreamConnection> = connect,
-  log: NatsTransportLog = consoleLog
+  connectFn: (opts: ConnectionOptions) => Promise<JetStreamConnection> = connect
 ): Promise<NatsTransport> {
   const identity = daemonNatsIdentity(config);
-  log.info(identity.line);
+  console.info(identity.line);
   const connection = await connectFn({
     servers: config.natsUrls,
     name: `legion-daemon-${config.project}`,
@@ -315,7 +303,7 @@ export async function createNatsTransport(
     for await (const status of connection.status()) {
       if (status.type !== Events.Error || status.data !== ErrorCode.PermissionsViolation) continue;
       const refused = status.permissionContext;
-      log.error(
+      console.error(
         refused === undefined
           ? "[legion] NATS refused the daemon a permission (Permissions Violation) on a subject the server did not name"
           : `[legion] NATS refused the daemon's ${refused.operation} to ${refused.subject} (Permissions Violation): the daemon's NATS user lacks that grant`
@@ -339,7 +327,7 @@ export async function createNatsTransport(
         } catch (error) {
           // A refused subscription ends here too; the status loop above reports it.
           if (error instanceof NatsError && error.code === ErrorCode.PermissionsViolation) return;
-          log.error(`[legion] NATS subscription to ${subject} ended: ${error}`);
+          console.error(`[legion] NATS subscription to ${subject} ended: ${error}`);
         }
       })();
       return () => {
