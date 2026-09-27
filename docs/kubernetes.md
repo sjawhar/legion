@@ -425,8 +425,11 @@ as boot does and adds
 `nats-daemon-nkey-user=U…` to its OK line. Every permission the server refuses the daemon's
 connection, a subscription or a publish (its JetStream consumers' API requests included), is logged
 at error as `NATS refused the daemon a permission: its NATS user lacks that grant` with its
-`operation` and `subject`: the server reports a refusal asynchronously, so a missing grant would
-otherwise be silent.
+`operation` and `subject`; the server reports a refusal asynchronously, and nats.go's default
+handler would only write it to stderr, outside the daemon's log. Every other asynchronous error is
+logged at warn with the `subject` of the subscription it names, a dropped connection at warn as
+`NATS connection lost` with its `error`, and the reconnect at info as `NATS connection restored`
+with its `server`.
 
 Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,

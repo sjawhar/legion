@@ -122,7 +122,7 @@ func TestAPermissionTheServerRefusesIsLoggedAtError(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(&out, nil))
 	refused := make(chan struct{}, 2)
 	conn, err := natsauth.Connect([]string{url}, seed, nats.Timeout(5*time.Second),
-		natsauth.LogPermissionViolations(log),
+		natsauth.LogEvents(log),
 		// Runs after the option above: the test waits on the refusals it saw logged.
 		func(o *nats.Options) error {
 			logged := o.AsyncErrorCB

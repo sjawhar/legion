@@ -165,22 +165,41 @@ func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, er
 // (`Permissions Violation for Subscription to "<subject>"`, or `… Publish to …`).
 var permissionRefusal = regexp.MustCompile(`(?i)(publish|subscription) to "([^"]+)"`)
 
-// LogPermissionViolations is the connection option that logs, at error, every permission the
-// server refuses the connection: a subscription or a publish, the JetStream API requests a consumer
-// makes included. The server answers a refusal asynchronously, so without it a missing grant is
-// silent. Every other asynchronous error is logged at warn.
-func LogPermissionViolations(log *slog.Logger) nats.Option {
-	return nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, err error) {
-		if !errors.Is(err, nats.ErrPermissionViolation) {
-			log.Warn("NATS reported an asynchronous error", "error", err)
-			return
+// LogEvents is the connection option that logs what the server reports about the connection
+// asynchronously: at error, every permission the server refuses it, a subscription or a publish,
+// the JetStream API requests a consumer makes included; at warn, every other asynchronous error,
+// with the subject of the subscription it names, and every disconnect, with its cause; at info,
+// every reconnect, with the server. nats.go's default handler writes a refusal to stderr unlabelled
+// and nothing for a disconnect or a reconnect. It owns the connection's AsyncErrorCB,
+// DisconnectedErrCB and ReconnectedCB: an option after it that sets one replaces its handler.
+func LogEvents(log *slog.Logger) nats.Option {
+	return func(o *nats.Options) error {
+		o.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
+			if !errors.Is(err, nats.ErrPermissionViolation) {
+				subject := ""
+				if sub != nil {
+					subject = sub.Subject
+				}
+				log.Warn("NATS reported an asynchronous error", "subject", subject, "error", err)
+				return
+			}
+			operation, subject := "", ""
+			if m := permissionRefusal.FindStringSubmatch(err.Error()); m != nil {
+				operation, subject = strings.ToLower(m[1]), m[2]
+			}
+			log.Error("NATS refused the daemon a permission: its NATS user lacks that grant", "operation", operation, "subject", subject, "error", err)
 		}
-		operation, subject := "", ""
-		if m := permissionRefusal.FindStringSubmatch(err.Error()); m != nil {
-			operation, subject = strings.ToLower(m[1]), m[2]
+		// A nil cause is the daemon closing the connection itself, which is no disconnect to report.
+		o.DisconnectedErrCB = func(_ *nats.Conn, err error) {
+			if err != nil {
+				log.Warn("NATS connection lost", "error", err)
+			}
 		}
-		log.Error("NATS refused the daemon a permission: its NATS user lacks that grant", "operation", operation, "subject", subject, "error", err)
-	})
+		o.ReconnectedCB = func(c *nats.Conn) {
+			log.Info("NATS connection restored", "server", c.ConnectedUrlRedacted())
+		}
+		return nil
+	}
 }
 
 // PublicKey is the public key of the nkey user seed is the seed of, a seed Seed answered: what a
