@@ -923,15 +923,18 @@ async function restoreGitWorktree(
       `Workspace ${workspaceDir}: jj printed no parent commit for its working copy: ${JSON.stringify(parents.stdout)}`
     );
   }
-  // worktrees can be gone entirely by now, not merely target: on CI's git 2.55, an earlier step in
-  // this same provisioning removed it along with the last stale entry it held, so it is
-  // (re)created before the temporary entry goes into it. A random suffix under a leading dot: git
+  // git removes .git/worktrees along with its last entry, so the directory may be absent when the
+  // temporary entry is built; it is (re)created first. A random suffix under a leading dot: git
   // assigns a worktree id from its directory's own base name, and never assigns one beginning with
   // a dot (verified: a directory named ".x" gets the id "-x"), so no real worktree can ever collide
   // with this temporary one. The random suffix also keeps two concurrent restores of the same
   // workspace from writing into, and renaming, the same temporary directory.
   await mkdir(worktrees, { recursive: true });
   const tmp = await mkdtemp(path.join(worktrees, `.${path.basename(target)}.restore-`));
+  // mkdtemp creates tmp at 0o700; git's own worktree entries land at 0o755 (a plain mkdir under the
+  // ordinary 022 umask), and this restore's doc comment says it writes what `git worktree add`
+  // would, so the mode matches too.
+  await chmod(tmp, 0o755);
   let headContent = head;
   let readTreeArg = "HEAD";
   let where = `at ${head}`;
