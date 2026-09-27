@@ -1524,6 +1524,96 @@ func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 	}
 }
 
+// A caller's message NATS cannot take whole is the caller's to fix, so both message routes answer
+// it 413 and say how large it was against the server's max payload, rather than a 500 that reads
+// as the listener's own failure.
+func TestMessageHandlersAnswerAMessageNATSCannotTakeWholeWith413(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, map[string][]string{}, map[string]int{"ses_target": 1})
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	message := strings.Repeat("m", 2<<20)
+	for _, tc := range []struct {
+		path    string
+		handler http.Handler
+		body    map[string]string
+	}{
+		{"/v1/messages/publish", publishHandler(state), map[string]string{
+			"topic": "notifications.github.example-org.example-repo.pr.1", "message": message,
+		}},
+		{"/v1/messages/send", sendHandler(state), map[string]string{"target_session": "ses_target", "message": message}},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			body, err := json.Marshal(tc.body)
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			recorder := httptest.NewRecorder()
+			tc.handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(string(body))))
+			if recorder.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("status = %d, want 413; body = %.300s", recorder.Code, recorder.Body.String())
+			}
+			if got := recorder.Body.String(); !strings.Contains(got, "max payload of 1048576 bytes") {
+				t.Fatalf("body = %.300s, want it to name the server's max payload", got)
+			}
+		})
+	}
+}
+
+// A session id or role a caller names becomes a KV key, and a key NATS would refuse (one long enough
+// to take its subject past the server's protocol line, which would close the connection every
+// subscription and watcher of the listener runs on, or one holding an empty token, which no stream
+// matches) is the caller's to fix: every /v1 route that reads or writes one answers 413 or 400, as
+// for a message NATS cannot take, and the connection stays up.
+func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	resetListenerTestState(t, client.Conn)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	if err := sessions.Put("ses_live", session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register ses_live: %v", err)
+	}
+	mux := http.NewServeMux()
+	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+
+	long := strings.Repeat("s", 5000)
+	longRole := strings.Repeat("r", 4100)
+	for _, tc := range []struct {
+		name, method, path, body string
+		want                     int
+	}{
+		{"subscribe a long session id", http.MethodPost, "/v1/interests/subscribe", `{"session_id":"` + long + `","self_subscribed":true}`, http.StatusRequestEntityTooLarge},
+		{"subscribe a session id holding an empty token", http.MethodPost, "/v1/interests/subscribe", `{"session_id":"sess..x","self_subscribed":true}`, http.StatusBadRequest},
+		{"unsubscribe a long session id", http.MethodPost, "/v1/interests/unsubscribe", `{"session_id":"` + long + `","topics":["notifications.agent.x"]}`, http.StatusRequestEntityTooLarge},
+		{"read a long session id's interests", http.MethodGet, "/v1/interests/" + long, "", http.StatusRequestEntityTooLarge},
+		{"remove a long session id's interests", http.MethodDelete, "/v1/interests/" + long, "", http.StatusRequestEntityTooLarge},
+		{"remove a long session id", http.MethodDelete, "/v1/sessions/" + long, "", http.StatusRequestEntityTooLarge},
+		{"read a long role", http.MethodGet, "/v1/roles/" + long, "", http.StatusRequestEntityTooLarge},
+		{"claim a long role", http.MethodPost, "/v1/roles/set", `{"session_id":"ses_live","role":"` + longRole + `"}`, http.StatusRequestEntityTooLarge},
+		{"publish to a long role", http.MethodPost, "/v1/messages/publish", `{"topic":"notifications.role.` + longRole + `","message":"hi"}`, http.StatusRequestEntityTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body = %.300s", recorder.Code, tc.want, recorder.Body.String())
+			}
+			if !client.Conn.IsConnected() {
+				t.Fatalf("the refusal left the connection %v, want it connected", client.Conn.Status())
+			}
+		})
+	}
+}
+
 func TestPublishHandler_DedupeKeySelection(t *testing.T) {
 	client := setupPublishTestClient(t)
 	state := &listenerDeps{client: client}

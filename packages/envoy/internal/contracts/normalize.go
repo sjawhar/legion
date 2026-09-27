@@ -1,6 +1,8 @@
 package contracts
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -8,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type GithubEnvelopeInput struct {
@@ -113,13 +116,18 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 		return nil
 	}
 	owner, repo := githubRepo(body)
+	// The listener writes an observation to its CI store with a publish, so each text it copies is
+	// capped like an envelope's.
+	text := func(path ...string) string {
+		return truncateWithEllipsis(nestedString(body, append([]string{key}, path...)...), maxEnvelopeTextRunes)
+	}
 	obs := CIObservation{
 		Owner:      owner,
 		Repo:       repo,
 		SHA:        sha,
 		AppID:      nestedNumberString(body, key, "app", "id"),
-		Status:     nestedString(body, key, "status"),
-		Conclusion: nestedString(body, key, "conclusion"),
+		Status:     text("status"),
+		Conclusion: text("conclusion"),
 	}
 	if event == "check_run" {
 		checkRunID := githubPositiveUint64(nested(body, key, "id"))
@@ -127,19 +135,19 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 			log.Printf("github ci check run skipped: invalid id=%v", nested(body, key, "id"))
 			return nil
 		}
-		obs.CheckName = nestedString(body, key, "name")
+		obs.CheckName = checkName(nestedString(body, key, "name"))
 		obs.CheckRunID = checkRunID
-		obs.URL = nestedString(body, key, "html_url")
-		obs.ObservedAt = nestedString(body, key, "completed_at")
+		obs.URL = text("html_url")
+		obs.ObservedAt = text("completed_at")
 		if obs.ObservedAt == "" {
-			obs.ObservedAt = nestedString(body, key, "started_at")
+			obs.ObservedAt = text("started_at")
 		}
 		if obs.CheckName == "" {
 			return nil
 		}
 	} else {
 		obs.SuiteID = nestedNumberString(body, key, "id")
-		obs.ObservedAt = nestedString(body, key, "updated_at")
+		obs.ObservedAt = text("updated_at")
 		if obs.SuiteID == "" {
 			return nil
 		}
@@ -150,6 +158,18 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 		out = append(out, obs)
 	}
 	return out
+}
+
+// checkName is a check's name as the CI store keys it: whole, or past maxEnvelopeTextRunes its first
+// maxEnvelopeTextRunes runes and an ellipsis followed by a digest of the whole name, so two names
+// that share the kept text stay two checks and one name keys the same entry every time. The name is
+// the one text a repository chooses in an observation (a workflow's job names it).
+func checkName(name string) string {
+	if utf8.RuneCountInString(name) <= maxEnvelopeTextRunes {
+		return name
+	}
+	digest := sha256.Sum256([]byte(name))
+	return truncateWithEllipsis(name, maxEnvelopeTextRunes) + " " + hex.EncodeToString(digest[:8])
 }
 
 func GithubIsBotSender(body map[string]any) bool {
@@ -650,7 +670,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":      action,
 			"repo":        repo,
 			"number":      number,
-			"title":       truncateWithEllipsis(nestedString(body, "issue", "title"), maxEnvelopeTextRunes),
+			"title":       nestedString(body, "issue", "title"),
 			"parent_kind": githubParentKind(event, body),
 			"author":      nestedString(body, "comment", "user", "login"),
 			"url":         nestedString(body, "comment", "html_url"),
@@ -668,7 +688,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":      action,
 			"repo":        repo,
 			"number":      number,
-			"title":       truncateWithEllipsis(nestedString(body, "pull_request", "title"), maxEnvelopeTextRunes),
+			"title":       nestedString(body, "pull_request", "title"),
 			"parent_kind": githubParentKind(event, body),
 			"author":      nestedString(body, "comment", "user", "login"),
 			"url":         nestedString(body, "comment", "html_url"),
@@ -693,7 +713,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":      action,
 			"repo":        repo,
 			"number":      number,
-			"title":       truncateWithEllipsis(nestedString(body, "pull_request", "title"), maxEnvelopeTextRunes),
+			"title":       nestedString(body, "pull_request", "title"),
 			"parent_kind": "pr",
 			"author":      nestedString(body, "review", "user", "login"),
 			"url":         nestedString(body, "review", "html_url"),
@@ -714,7 +734,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action":           action,
 			"repo":             repo,
 			"number":           number,
-			"title":            truncateWithEllipsis(nestedString(body, "pull_request", "title"), maxEnvelopeTextRunes),
+			"title":            nestedString(body, "pull_request", "title"),
 			"author":           nestedString(body, "pull_request", "user", "login"),
 			"url":              nestedString(body, "pull_request", "html_url"),
 			"head_sha":         nestedString(body, "pull_request", "head", "sha"),
@@ -733,7 +753,7 @@ func githubPayload(event string, body map[string]any) string {
 			"action": action,
 			"repo":   repo,
 			"number": number,
-			"title":  truncateWithEllipsis(nestedString(body, "issue", "title"), maxEnvelopeTextRunes),
+			"title":  nestedString(body, "issue", "title"),
 			"author": nestedString(body, "issue", "user", "login"),
 			"url":    nestedString(body, "issue", "html_url"),
 		}
@@ -747,7 +767,7 @@ func githubPayload(event string, body map[string]any) string {
 			"after":                   stringValue(body["after"]),
 			"before":                  stringValue(body["before"]),
 			"pusher":                  nestedString(body, "pusher", "name"),
-			"head_subject":            first(nestedString(body, "head_commit", "message"), maxEnvelopeTextRunes),
+			"head_subject":            firstNonEmptyLine(nestedString(body, "head_commit", "message")),
 			"commit_count":            strconv.Itoa(len(sliceValue(body["commits"]))),
 			"compare_url":             stringValue(body["compare"]),
 			"changed_paths":           strings.Join(changedPaths, "\n"),
@@ -1026,16 +1046,24 @@ func slackFilesSuffix(files []any) string {
 	return fmt.Sprintf(" (%d file(s): %s)", len(files), first(label, 80))
 }
 
-// maxPushChangedPaths caps the unique paths a push payload lists. A push touching more sets
-// changed_paths_truncated so a consumer never mistakes a capped list for the whole change.
-const maxPushChangedPaths = 100
+// maxPushChangedPaths caps the unique paths a push payload lists, and maxPushChangedPathRunes caps
+// their text, newlines included: git bounds no path's length, and the envelope carries the list
+// whole, so a count alone does not keep it under NATS's max payload. A push past either sets
+// changed_paths_truncated so a consumer never mistakes a capped list for the whole change. The
+// budget lists a hundred paths of about 320 runes each.
+const (
+	maxPushChangedPaths     = 100
+	maxPushChangedPathRunes = 32 << 10
+)
 
 // githubPushChangedPaths collects the unique paths across every pushed commit's added, removed,
-// and modified lists, in first-seen order, capped at maxPushChangedPaths. truncated reports that
-// a further unique path was seen past the cap; repeats of an already-listed path never count.
-// Only commits[] is read — head_commit is one of them.
+// and modified lists, in first-seen order, capped at maxPushChangedPaths and
+// maxPushChangedPathRunes. A path is listed whole or not at all, so the list ends at the first
+// unique path past either cap, and truncated reports that one was seen; repeats of an
+// already-listed path never count. Only commits[] is read — head_commit is one of them.
 func githubPushChangedPaths(body map[string]any) (paths []string, truncated bool) {
 	seen := map[string]struct{}{}
+	runes := 0
 	for _, item := range sliceValue(body["commits"]) {
 		commit := mapValue(item)
 		for _, key := range [...]string{"added", "removed", "modified"} {
@@ -1047,21 +1075,33 @@ func githubPushChangedPaths(body map[string]any) (paths []string, truncated bool
 				if _, dup := seen[path]; dup {
 					continue
 				}
-				if len(paths) == maxPushChangedPaths {
+				size := utf8.RuneCountInString(path)
+				if len(paths) > 0 {
+					size++ // the newline that joins it to the list
+				}
+				if len(paths) == maxPushChangedPaths || runes+size > maxPushChangedPathRunes {
 					return paths, true
 				}
 				seen[path] = struct{}{}
 				paths = append(paths, path)
+				runes += size
 			}
 		}
 	}
 	return paths, false
 }
 
+// payloadJSON encodes a webhook payload without its empty fields. Every value is copied from the
+// webhook and the listener publishes the envelope whole, so each is capped at maxEnvelopeTextRunes
+// (a body, which says it was cut, caps itself first); only changed_paths, which
+// githubPushChangedPaths bounds by whole paths, runs longer.
 func payloadJSON(data map[string]string) string {
 	for key, value := range data {
-		if value == "" {
+		switch {
+		case value == "":
 			delete(data, key)
+		case key != "changed_paths":
+			data[key] = truncateWithEllipsis(value, maxEnvelopeTextRunes)
 		}
 	}
 	out, _ := json.Marshal(data)
@@ -1130,23 +1170,23 @@ func OneLineSummary(s string) string {
 }
 
 func truncateWithEllipsis(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
+	if utf8.RuneCountInString(s) <= maxRunes {
 		return s
 	}
 	if maxRunes <= 0 {
 		return "…"
 	}
-	return string(runes[:maxRunes]) + "…"
+	return string([]rune(s)[:maxRunes]) + "…"
 }
 
-// maxEnvelopeTextRunes caps the free-text fields an envelope copies from its webhook body: a
-// comment or review body (GitHub allows up to 65,536 characters), a push's head_subject (a commit
-// message has no limit), an issue or pull request title, and a Ghost Wispr title. GitHub's own
-// interface stops a title at 256 characters, but the listener checks a delivery's signature, not
-// its fields' lengths, so a title is capped here too. The listener publishes an envelope to NATS
-// whole, and a publish larger than the server's max payload (1 MiB by default) fails, so no field
-// may grow with the webhook it came from.
+// maxEnvelopeTextRunes caps each text an envelope copies from its webhook body, but for a push's
+// changed paths, which maxPushChangedPathRunes bounds as a list. The listener publishes an envelope
+// to NATS whole, and a publish larger than the server's max payload (1 MiB by default) fails, so no
+// field may grow with the webhook it came from. The listener checks a delivery's signature, not its
+// fields' lengths, so a field GitHub itself bounds (its interface stops a title at 256 characters)
+// is capped as well as one it does not (a ref, a path, a workflow name, a commit message). A comment
+// or review body, which GitHub allows up to 65,536 characters, is cut without an ellipsis and says
+// so in body_truncated.
 const maxEnvelopeTextRunes = 2048
 
 func capBody(s string) (string, bool) {
@@ -1237,7 +1277,7 @@ func ghostWisprPayload(eventType string, body map[string]any) string {
 	normalizedEventType := normalizeGhostWisprEventType(eventType)
 	data := map[string]string{"event_type": normalizedEventType}
 	data["session_id"] = ghostWisprSummarySessionID(body)
-	data["title"] = truncateWithEllipsis(nestedString(body, "payload", "title"), maxEnvelopeTextRunes)
+	data["title"] = nestedString(body, "payload", "title")
 	data["duration"] = nestedNumberString(body, "payload", "duration")
 	data["created_at"] = stringValue(body["created_at"])
 	if normalizedEventType == "summary_ready" {

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
@@ -203,7 +204,7 @@ func getState(t *testing.T, s *Store, owner, repo, number, sha string) State {
 func useKV(t testing.TB, s *Store, kv natsgo.KeyValue) {
 	t.Helper()
 	s.watcher.Stop()
-	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)
+	s.watcher = kvwatch.New("cistore", bus.KeyValue{KeyValue: kv}, s.applyWatched, s.resetCache)
 	s.watcher.Start()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

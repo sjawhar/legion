@@ -1833,6 +1833,24 @@ func TestGithubPayloadFields(t *testing.T) {
 			},
 		},
 		{
+			// A hundred paths are not bounded by their count alone: git bounds no path's length, and
+			// the envelope carries the list whole. The list stops at a path that would take it past
+			// its text budget, keeps every path it lists whole, and says it stopped.
+			name:  "push stops listing changed paths at their text budget and flags truncation",
+			event: "push",
+			body: map[string]any{
+				"repository": map[string]any{"full_name": "example-org/example-repo"},
+				"ref":        "refs/heads/legion/X",
+				"commits": []any{
+					map[string]any{"id": "1", "added": longPaths(0, 100), "removed": []any{}, "modified": []any{}},
+				},
+			},
+			want: map[string]string{
+				"changed_paths":           strings.Join(pathsWithinBudget(longPathStrings(0, 100)), "\n"),
+				"changed_paths_truncated": "true",
+			},
+		},
+		{
 			name:  "push with no commits omits changed_paths",
 			event: "push",
 			body: map[string]any{
@@ -2118,11 +2136,199 @@ func TestGhostWisprTitleIsCappedAtTheEnvelopeTextCap(t *testing.T) {
 	}
 }
 
+// TestAGithubEnvelopeStaysUnderNATSMaxPayloadWhateverItsFieldsHold: the listener publishes an
+// envelope whole, and a publish past the server's max payload (1 MiB by default) fails, so the
+// envelope a GitHub body produces must stay under it however large each of the body's fields is,
+// now that a body may be 25 MiB. Every string in each captured fixture grows by 256 KiB of `<`, which
+// JSON writes as six bytes and the envelope, carrying the payload as a string, as seven. The topic is
+// left out of the measure: a push's ref and a workflow's file name name the subject it is published
+// on, which is bounded where it is published (bus.ErrTooLarge), not cut here, since a cut subject
+// would reach the wrong subscribers.
+func TestAGithubEnvelopeStaysUnderNATSMaxPayloadWhateverItsFieldsHold(t *testing.T) {
+	const natsDefaultMaxPayload = 1 << 20
+	grow := strings.Repeat("<", 256<<10)
+	var inflate func(value any) any
+	inflate = func(value any) any {
+		switch v := value.(type) {
+		case string:
+			return v + grow
+		case map[string]any:
+			for key, item := range v {
+				v[key] = inflate(item)
+			}
+		case []any:
+			for i, item := range v {
+				v[i] = inflate(item)
+			}
+		}
+		return value
+	}
+	for _, fixture := range []struct{ name, event string }{
+		{"pull-request-opened", "pull_request"},
+		{"pull-request-synchronize", "pull_request"},
+		{"pull-request-closed-merged", "pull_request"},
+		{"issue-comment-created", "issue_comment"},
+		{"issue-comment-edited", "issue_comment"},
+		{"issue-comment-pr-created", "issue_comment"},
+		{"pull-request-review-submitted", "pull_request_review"},
+		{"pull-request-review-comment-created", "pull_request_review_comment"},
+		{"push", "push"},
+		{"workflow-run-without-pr", "workflow_run"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			raw, err := os.ReadFile(filepath.Join("..", "..", "scripts", "fixtures", "github", fixture.name+".json"))
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err != nil {
+				t.Fatalf("decode fixture: %v", err)
+			}
+			items := GithubEnvelopes(GithubEnvelopeInput{
+				Event: fixture.event, Delivery: "delivery", EventID: "event", TraceID: "trace",
+				Body: inflate(body).(map[string]any),
+			}, "@legion")
+			if len(items) == 0 {
+				t.Fatal("the grown fixture produced no envelope")
+			}
+			for _, item := range items {
+				item.Topic = ""
+				data, err := json.Marshal(item)
+				if err != nil {
+					t.Fatalf("encode envelope: %v", err)
+				}
+				// Half the server's default: the other half is more than the topic and the MsgId
+				// header that repeats it need.
+				if len(data) > natsDefaultMaxPayload/2 {
+					t.Fatalf("the envelope is %d bytes without its topic, past half NATS's default max payload (%d)",
+						len(data), natsDefaultMaxPayload/2)
+				}
+			}
+		})
+	}
+}
+
+// What a CI observation copies from its check run goes to the listener's CI store, which writes the
+// record with a publish, so each text is capped like an envelope's.
+func TestACheckRunIsCappedAtTheEnvelopeTextCap(t *testing.T) {
+	observe := func(t *testing.T, checkRun map[string]any) CIObservation {
+		t.Helper()
+		fields := map[string]any{
+			"id": float64(7), "name": "build", "head_sha": strings.Repeat("a", 40), "status": "completed",
+			"pull_requests": []any{map[string]any{"number": float64(3)}},
+		}
+		for key, value := range checkRun {
+			fields[key] = value
+		}
+		observations := GithubCIObservations("check_run", map[string]any{
+			"repository": map[string]any{"name": "widgets", "owner": map[string]any{"login": "acme"}},
+			"check_run":  fields,
+		})
+		if len(observations) != 1 {
+			t.Fatalf("observations = %d, want 1", len(observations))
+		}
+		return observations[0]
+	}
+	name := func(t *testing.T, check string) string {
+		t.Helper()
+		return observe(t, map[string]any{"name": check}).CheckName
+	}
+
+	t.Run("a real name is kept whole", func(t *testing.T) {
+		if got := name(t, "envoy-go / test (ubuntu-latest)"); got != "envoy-go / test (ubuntu-latest)" {
+			t.Fatalf("check name = %q, want it whole", got)
+		}
+	})
+	// The CI record is keyed by check name, so two names that share the text the cap keeps must
+	// stay two checks, and one name must key the same entry on every observation.
+	t.Run("a name past the cap is cut and stays its own", func(t *testing.T) {
+		shared := strings.Repeat("c", 3000)
+		first, second := name(t, shared+" / lint"), name(t, shared+" / test")
+		if first == second {
+			t.Fatalf("two names sharing their first %d runes capped to one: %.60q", maxEnvelopeTextRunes, first)
+		}
+		if again := name(t, shared+" / lint"); again != first {
+			t.Fatalf("one name capped two ways: %.60q and %.60q", first, again)
+		}
+		for _, got := range []string{first, second} {
+			if !strings.HasPrefix(got, strings.Repeat("c", 2048)+"…") {
+				t.Fatalf("capped name %.60q does not keep the name's first 2,048 runes and an ellipsis", got)
+			}
+			if runes := len([]rune(got)); runes > 2048+32 {
+				t.Fatalf("capped name has %d runes, want at most %d", runes, 2048+32)
+			}
+		}
+	})
+	t.Run("every other copied text is capped", func(t *testing.T) {
+		long := strings.Repeat("u", 600_000)
+		got := observe(t, map[string]any{"html_url": long, "status": long, "conclusion": long, "completed_at": long})
+		for field, value := range map[string]string{"URL": got.URL, "Status": got.Status, "Conclusion": got.Conclusion, "ObservedAt": got.ObservedAt} {
+			if value != strings.Repeat("u", 2048)+"…" {
+				t.Fatalf("%s has %d runes, want the first 2,048 and an ellipsis", field, len([]rune(value)))
+			}
+		}
+	})
+}
+
+// A workflow's file name is whatever the repository named the file, and a published NATS subject
+// may hold no whitespace (nats.go refuses it) or wildcard, so its segment writes each as `_`, as it
+// writes a dot.
+func TestAWorkflowFileNameIsOneValidSubjectSegment(t *testing.T) {
+	for _, tc := range []struct{ file, want string }{
+		{"my ci.yml", "notifications.github.acme.widgets.workflow.my_ci_yml.completed"},
+		{"a\tb\nc*d>e.yml", "notifications.github.acme.widgets.workflow.a_b_c_d_e_yml.completed"},
+	} {
+		item := GithubEnvelope(GithubEnvelopeInput{Event: "workflow_run", Delivery: "d", EventID: "e", TraceID: "t", Body: map[string]any{
+			"action":     "completed",
+			"repository": map[string]any{"name": "widgets", "full_name": "acme/widgets", "owner": map[string]any{"login": "acme"}},
+			"workflow_run": map[string]any{
+				"name": "CI", "path": ".github/workflows/" + tc.file, "head_branch": "main", "id": float64(1),
+			},
+		}})
+		if item.Topic != tc.want {
+			t.Errorf("workflow file %q: topic = %q, want %q", tc.file, item.Topic, tc.want)
+		}
+	}
+}
+
 // numberedPathStrings returns src/f<from>.ts .. src/f<to-1>.ts.
 func numberedPathStrings(from, to int) []string {
 	paths := make([]string, 0, to-from)
 	for n := from; n < to; n++ {
 		paths = append(paths, fmt.Sprintf("src/f%d.ts", n))
+	}
+	return paths
+}
+
+// longPathStrings returns paths of 400 runes each, numbered from..to-1.
+func longPathStrings(from, to int) []string {
+	paths := make([]string, 0, to-from)
+	for n := from; n < to; n++ {
+		paths = append(paths, fmt.Sprintf("src/%s/f%03d.ts", strings.Repeat("d", 388), n))
+	}
+	return paths
+}
+
+func longPaths(from, to int) []any {
+	paths := make([]any, 0, to-from)
+	for _, path := range longPathStrings(from, to) {
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+// pathsWithinBudget returns the longest prefix of paths whose newline-joined list fits the push
+// payload's changed-paths budget.
+func pathsWithinBudget(paths []string) []string {
+	runes := 0
+	for i, path := range paths {
+		if i > 0 {
+			runes++
+		}
+		runes += len([]rune(path))
+		if runes > maxPushChangedPathRunes {
+			return paths[:i]
+		}
 	}
 	return paths
 }
