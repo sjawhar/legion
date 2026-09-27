@@ -136,10 +136,29 @@ class Refusal extends Error {
     readonly snippet: string,
     readonly line: number,
     readonly detail: string,
-    readonly file?: string
+    readonly file?: string,
+    readonly pinned = false
   ) {
     super(detail);
   }
+}
+
+function rethrow(
+  error: unknown,
+  site: Site,
+  label: string,
+  file: string | undefined,
+  preserveLine = false
+): never {
+  if (!(error instanceof Refusal)) throw error;
+  const source = error.file ?? label;
+  throw new Refusal(
+    site.snippet,
+    preserveLine ? error.line : site.line,
+    `line ${error.line} of ${source}, \`${error.snippet}\`: ${error.detail}`,
+    preserveLine ? (error.file ?? file) : file,
+    preserveLine
+  );
 }
 
 /** Where a check happens: the command's own text and line, for the refusal. */
@@ -923,8 +942,7 @@ function walkScript(script: ParsedScript, st: State, ctx: Ctx, runTraps = true):
         trap.site
       );
     } catch (error) {
-      if (!(error instanceof Refusal)) throw error;
-      throw new Refusal(error.snippet, error.line, error.detail, trap.file);
+      rethrow(error, trap.site, trap.file, trap.file, true);
     }
   }
 }
@@ -1440,8 +1458,13 @@ function runFunction(
   try {
     walkNode(definition.body, child, ctx, false);
   } catch (error) {
-    if (!(error instanceof Refusal)) throw error;
-    throw new Refusal(error.snippet, error.line, error.detail, error.file ?? definition.file);
+    rethrow(
+      error,
+      siteOf(definition.body, child),
+      definition.file ?? "<function>",
+      definition.file,
+      true
+    );
   }
   outer.vars = child.vars;
   outer.exported = child.exported;
@@ -1474,8 +1497,13 @@ function functionOutput(
   try {
     walkNode(definition.body, child, ctx, false);
   } catch (error) {
-    if (!(error instanceof Refusal)) throw error;
-    throw new Refusal(error.snippet, error.line, error.detail, error.file ?? definition.file);
+    rethrow(
+      error,
+      siteOf(definition.body, child),
+      definition.file ?? "<function>",
+      definition.file,
+      true
+    );
   }
   return child.output?.length === 0 ? undefined : child.output;
 }
@@ -2022,12 +2050,9 @@ function checkFind(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void 
 function checkXargs(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void {
   const found = operands(list, "nLIPdsEa", [
     "--max-args",
-    "--max-lines",
-    "--replace",
     "--max-procs",
     "--delimiter",
     "--max-chars",
-    "--eof",
     "--arg-file",
   ]);
   let replacement: string | undefined;
@@ -2204,12 +2229,7 @@ function runText(text: string, label: string, st: State, ctx: Ctx, site: Site): 
   try {
     walkScript(parse(text), { ...st, source: text, depth: st.depth + 1 }, ctx);
   } catch (error) {
-    if (!(error instanceof Refusal)) throw error;
-    throw new Refusal(
-      site.snippet,
-      site.line,
-      `in ${label}, \`${error.snippet}\`: ${error.detail}`
-    );
+    rethrow(error, site, label, st.script, error instanceof Refusal && error.pinned);
   }
 }
 
@@ -2364,12 +2384,7 @@ function runCode(
   try {
     checkCode(language, runtimeText(code.exp), childState(st, invocation.overlay), ctx);
   } catch (error) {
-    if (!(error instanceof Refusal)) throw error;
-    throw new Refusal(
-      site.snippet,
-      site.line,
-      `in its code, \`${error.snippet}\`: ${error.detail}`
-    );
+    rethrow(error, site, "its code", st.script, error instanceof Refusal && error.pinned);
   }
 }
 
@@ -2464,13 +2479,7 @@ function runFile(
       }
     } else checkCode(language, content, st, ctx);
   } catch (error) {
-    if (!(error instanceof Refusal)) throw error;
-    const source = error.file ?? label;
-    throw new Refusal(
-      site.snippet,
-      site.line,
-      `line ${error.line} of ${source}, \`${error.snippet}\`: ${error.detail}`
-    );
+    rethrow(error, site, label, st.script, error instanceof Refusal && error.pinned);
   }
 }
 
@@ -2564,11 +2573,12 @@ function checkCode(
             ctx
           );
         } catch (error) {
-          if (!(error instanceof Refusal)) throw error;
-          throw new Refusal(
-            `${call}(...)`,
-            1,
-            `its shell text \`${error.snippet}\`: ${error.detail}`
+          rethrow(
+            error,
+            { snippet: `${call}(...)`, line: 1 },
+            "its shell text",
+            st.script,
+            error instanceof Refusal && error.pinned
           );
         }
       },

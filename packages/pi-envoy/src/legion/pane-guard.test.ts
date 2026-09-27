@@ -197,6 +197,9 @@ describe("resolution", () => {
       "echo x | xargs -I{} bash -c 'rm -rf $HOME/.ssh'",
       "echo x | xargs -I{} bash -c 'rm -rf {}'",
       "echo x | xargs -i sh -c 'rm -rf {}'",
+      "echo x | xargs --replace sh -c 'rm -rf \"$HOME\"'",
+      "echo x | xargs --eof sh -c 'rm -rf \"$HOME\"'",
+      "echo x | xargs --max-lines sh -c 'rm -rf \"$HOME\"'",
       "busybox rm -rf ~",
       "toybox rm -rf ~",
     ]) {
@@ -301,8 +304,8 @@ describe("scripts a command runs", () => {
       `p=$(pgrep x)\ncleanup() { kill "$p"; }\ntrap cleanup EXIT\n. ${sourced}\n`
     );
     const reason = bash(`bash ${parent}`);
-    expect(reason).toContain(`line 3 of ${parent}`);
-    expect(reason).not.toContain(`line 3 of ${sourced}`);
+    expect(reason).toContain(`line 2 of ${parent}`);
+    expect(reason).not.toContain(`line 2 of ${sourced}`);
   });
 
   test("attributes an EXIT trap declared by a sourced file to that file", () => {
@@ -312,8 +315,8 @@ describe("scripts a command runs", () => {
     );
     const parent = script("source-trap-includer.sh", `. ${sourced}\n`);
     const reason = bash(`bash ${parent}`);
-    expect(reason).toContain(`line 3 of ${sourced}`);
-    expect(reason).not.toContain(`line 3 of ${parent}`);
+    expect(reason).toContain(`line 2 of ${sourced}`);
+    expect(reason).not.toContain(`line 2 of ${parent}`);
   });
 
   test("attributes a nested script call-site to the enclosing script", () => {
