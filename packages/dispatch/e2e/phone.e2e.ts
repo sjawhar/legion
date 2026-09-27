@@ -3,6 +3,7 @@ import { setLiveSessions } from "./agents";
 
 import {
   createAsk,
+  createComment,
   createIssue,
   createMessage,
   createProject,
@@ -262,5 +263,61 @@ test("inline @ autocomplete has touch-sized controls and no overflow on iPhone",
     ).toBe(true);
   } finally {
     await alice.close();
+  }
+});
+
+// An anchor inside a sentence is part of the sentence. The compact touch-target rule gave every
+// anchor a 44px box, so a reply's `view` and a `dispatch://` reference inside a body became
+// 44px-tall inline-flex boxes with blank space around them in the middle of a line.
+test("an inline link keeps its line height and its 44px touch area", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Inline links" });
+  const ask = await createAsk(
+    issue.key,
+    { question: "Which transport?" },
+    {
+      actor: { id: "e2e-session", kind: "session" },
+      as: "agent",
+    }
+  );
+  // A session's reply to an ask is an activity line - "<author> replied to … view · <time>" -
+  // whose `view` is a link in the middle of a sentence.
+  await createComment(
+    issue.key,
+    { ask_id: ask.id, body: "Still measuring." },
+    { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
+  );
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const link = page.locator('[data-kind="activity"]').getByRole("link", { name: "view" }).first();
+    await expect(link).toBeVisible();
+
+    const box = await link.boundingBox();
+    expect(box).not.toBeNull();
+    // A line of body text, not a 44px control box: the link takes no layout space of its own.
+    expect(box?.height ?? 0).toBeLessThanOrEqual(28);
+
+    // Its touch area is an overlay at least 44px tall, centred on the link.
+    const overlay = await link.evaluate((node) => {
+      const after = getComputedStyle(node, "::after");
+      return { minHeight: after.minHeight, position: after.position };
+    });
+    expect(overlay).toEqual({ minHeight: "44px", position: "absolute" });
+
+    // And it really is hit-testable outside the link's own box: a tap below its last line,
+    // where the text is not, still lands on the link.
+    const hit = await page.evaluate(
+      ([x, y]) => {
+        const node = document.elementFromPoint(x, y);
+        return node === null ? null : (node.closest("a")?.textContent ?? node.tagName);
+      },
+      [(box?.x ?? 0) + (box?.width ?? 0) / 2, (box?.y ?? 0) + (box?.height ?? 0) + 5]
+    );
+    expect(hit).toBe("view");
+  } finally {
+    await context.close();
   }
 });

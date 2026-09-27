@@ -48,7 +48,7 @@ a {
     scroll-padding-bottom: 5rem;
   }
   button,
-  a,
+  a:not(.prose a):not(.dispatch-inline-link),
   input:not([type="checkbox"]):not([type="radio"]),
   select,
   textarea {
@@ -57,9 +57,31 @@ a {
   }
 
   button,
-  a:not(.prose a) {
+  a:not(.prose a):not(.dispatch-inline-link) {
     display: inline-flex;
     align-items: center;
+  }
+
+  /* An anchor inside a sentence is part of the sentence. A 44px box there is blank space in
+     the middle of a line - a reply's `view`, a `dispatch://` reference in a body - so an
+     inline link keeps its natural box and takes its touch area from an overlay that costs no
+     layout: centred on the link, the link's own size, never smaller than 44px. */
+  .prose a,
+  .dispatch-inline-link {
+    position: relative;
+  }
+
+  .prose a::after,
+  .dispatch-inline-link::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    translate: -50% -50%;
+    width: 100%;
+    height: 100%;
+    min-width: 44px;
+    min-height: 44px;
   }
 
   label:has(input[type="checkbox"]),
