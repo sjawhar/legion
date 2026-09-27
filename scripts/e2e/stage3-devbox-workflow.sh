@@ -827,7 +827,9 @@ primary_issue() {
 
   begin ordinary-human-squash-merge
   # This is intentionally the devbox's ordinary gh as the proof human (the dotfiles shim, acting as the
-  # sjawhar-agent App). Legion's Apps are neither invoked nor able to merge.
+  # sjawhar-agent App). Legion's Apps are neither invoked nor able to merge. The smoke main is held
+  # from here until smoke-main-clean has emptied it (hold_smoke_main).
+  hold_smoke_main
   gh -R "$repo" pr merge "$pr_number" --squash --delete-branch
   wait_for_phase "$root_issue" production_check 300
   # The resumed implementer's task names production_check, and it may record the check before the
@@ -853,6 +855,7 @@ primary_issue() {
   leftovers=$(smoke_main_leftovers)
   [ -z "$leftovers" ] || fail "$repo main still carries proof leftovers: $(tr '\n' ' ' <<<"$leftovers")"
   note "$repo main carries no .legion/ handoff and no docs/solutions/ learning"
+  release_smoke_main
   pass
 }
 

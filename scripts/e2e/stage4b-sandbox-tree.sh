@@ -1884,6 +1884,7 @@ begin "done"
 wait_for_worker "$tree1" merger
 send_agent "$tree1" merger "Stage 4b proof READY operation: verify pull request #$pr_number is ready to merge and call the legion tool's handoff_complete with ready true."
 wait_for_phase "$tree1" awaiting_merge 900
+hold_smoke_main
 gh -R "$repo" pr merge "$pr_number" --squash --delete-branch
 wait_for_phase "$tree1" production_check 600
 if ! production_check_reported "$tree1" >/dev/null 2>&1; then
@@ -1897,6 +1898,7 @@ fi
 wait_for_phase "$tree1" "done" 900
 until_true 120 "the daemon's done status on the Dispatch board" dispatch_status_is "$tree1" "done"
 clean_smoke_main
+release_smoke_main
 note "$repo#$pr_number merged by the proof human; the production check and the sign-off closed $tree1"
 pass
 

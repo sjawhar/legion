@@ -246,6 +246,36 @@ approve_as_reviewer() {
   send_agent "$issue" reviewer "Stage 3 proof final review: use the bash tool to submit APPROVE on pull request #$pr_number in $repo at its current head as legion-reviewer[bot], then complete the reviewer handoff. This exact smoke instruction takes precedence over waiting for another review round."
   until_true 300 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
 }
+# The smoke repository's main is shared by every proof on this box, and a proof merge leaves its
+# .legion/ handoffs there until clean_smoke_main removes them. Another run's merge in that window
+# adds the same paths with other content, and GitHub refuses it as a merge commit that cannot be
+# cleanly created, a failure that reads as a defect of whatever that run was proving.
+# hold_smoke_main takes an exclusive flock on one file per smoke repository, from the proof's
+# merge until its main is clean, and release_smoke_main gives it back. The lock is on an open
+# descriptor, so it goes with the process: a run that dies or is killed without releasing it frees
+# it, and no stale lock file can hold the next run. A child started while the lock is held
+# inherits the descriptor and holds it until that child exits; between the merge and the clean the
+# run starts none that outlives its step (gh, jq, sleep). A run that finds the lock held names the holder
+# and says every minute how long it has waited, up to 45 minutes (a holder's window spans the
+# production check and the sign-off), then fails naming the holder.
+smoke_main_lock="/tmp/legion-e2e-smoke-main.${repo//\//-}.lock"
+hold_smoke_main() {
+  local holder
+  exec {smoke_main_fd}>>"$smoke_main_lock"
+  if ! flock -n "$smoke_main_fd"; then
+    holder=$(cat "$smoke_main_lock" 2>/dev/null) || true
+    note "another proof holds $repo main from its merge until its main is clean: ${holder:-a holder that has not named itself}"
+    until_true 2700 "the smoke main lock $smoke_main_lock, held by ${holder:-a holder that has not named itself}" flock -n "$smoke_main_fd"
+  fi
+  printf '%s, project %s, pid %s, since %s\n' "${0##*/}" "${project:-unknown}" "$$" "$(date -u +%FT%TZ)" >"$smoke_main_lock"
+  note "holding $repo main ($smoke_main_lock) from the merge until it is clean"
+}
+release_smoke_main() {
+  : >"$smoke_main_lock"
+  flock -u "$smoke_main_fd"
+  exec {smoke_main_fd}>&-
+  note "released $repo main ($smoke_main_lock)"
+}
 # smoke_main_leftovers prints each path on the smoke repository's main under .legion/ or
 # docs/solutions/: the handoffs and retro learnings a merged proof pull request carries there.
 smoke_main_leftovers() {
