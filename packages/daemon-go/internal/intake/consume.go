@@ -94,20 +94,37 @@ func openConsumer(ctx context.Context, stream jetstream.Stream, config jetstream
 	return stream.UpdateConsumer(ctx, config)
 }
 
+// DispatchPending is the count of matching messages the Dispatch consumer has not yet delivered,
+// read fresh from JetStream. Boot reads it before Reconcile's own Dispatch listing, the same
+// ordering OpenConsumers already keeps between opening the consumer and reading that listing, so
+// the count taken here is at least the backlog the listing's snapshot needs the stream to still
+// deliver.
+func (c *Consumers) DispatchPending(ctx context.Context) (int64, error) {
+	info, err := c.dispatch.Info(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read Dispatch consumer info: %w", err)
+	}
+	return int64(info.NumPending), nil
+}
+
 // Run consumes both durable consumers until ctx ends, and returns the error of either one that
 // stops first. Every decoded fact enters ApplyFact; a committed transaction is acknowledged, a
 // rolled-back transaction is nacked with a delay, poison is terminated, and a committed refusal is
-// logged then acknowledged.
-func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, handlers ...Handler) error {
+// logged then acknowledged. dispatchObserved, when not nil, is told about every message the
+// Dispatch consumer delivers — decoded into a fact or not, poison or applied — never about the
+// GitHub consumer's.
+func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, dispatchObserved DispatchObserver, handlers ...Handler) error {
 	group, consumeContext := errgroup.WithContext(ctx)
-	group.Go(func() error { return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, handlers) })
-	group.Go(func() error { return consumeConsumer(consumeContext, c.github, c.spec, pool, handlers) })
+	group.Go(func() error {
+		return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, dispatchObserved, handlers)
+	})
+	group.Go(func() error { return consumeConsumer(consumeContext, c.github, c.spec, pool, nil, handlers) })
 	return group.Wait()
 }
 
-func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec ConsumerSpec, pool *pgxpool.Pool, handlers []Handler) error {
+func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec ConsumerSpec, pool *pgxpool.Pool, observer DispatchObserver, handlers []Handler) error {
 	consuming, err := consumer.Consume(func(message jetstream.Msg) {
-		consumeMessage(ctx, message, spec, pool, handlers)
+		consumeMessage(ctx, message, spec, pool, observer, handlers)
 	})
 	if err != nil {
 		return err
@@ -125,7 +142,10 @@ func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec Cons
 	}
 }
 
-func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, handlers []Handler) {
+func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, observer DispatchObserver, handlers []Handler) {
+	if observer != nil {
+		defer observer.NoteDelivery()
+	}
 	decoded, err := decodeMessage(message.Subject(), spec.Project, spec.Repositories, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)

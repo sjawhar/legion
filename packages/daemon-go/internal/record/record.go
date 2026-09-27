@@ -42,25 +42,18 @@ func (p ClassifiedPush) MayChangeCode() bool {
 
 // Issue is one durable workflow record. Status is the last Dispatch status the daemon observed.
 type Issue struct {
-	Key             string
-	Tree            string
-	Project         string
-	Title           string
-	Parent          *string
-	Phase           phase.Phase
-	Generation      uint64
-	Status          string
-	Rank            string
-	LingerUntil     *time.Time
-	Hold            *Hold
-	LastDispatchSeq int64
-	// SeenDispatchSeq is the highest Dispatch event sequence intake has observed for this issue,
-	// whatever the event's type: it advances on every event Dispatch's own last_seq does (a
-	// comment, an ask, a claim, an artifact review), not only the issue.created/updated/closed
-	// events that reach LastDispatchSeq. Admission's promote reads it, never LastDispatchSeq, to
-	// decide whether the stream has caught a boot-deferred candidate up to the sequence the boot
-	// read saw Dispatch's log ahead by.
-	SeenDispatchSeq     int64
+	Key                 string
+	Tree                string
+	Project             string
+	Title               string
+	Parent              *string
+	Phase               phase.Phase
+	Generation          uint64
+	Status              string
+	Rank                string
+	LingerUntil         *time.Time
+	Hold                *Hold
+	LastDispatchSeq     int64
 	ReadyPendingVersion *int
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.

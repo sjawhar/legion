@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -25,22 +26,32 @@ type Admission struct {
 	project string
 	log     *slog.Logger
 	now     func() time.Time
-	// pending holds, for a key Reconcile found Dispatch's own log ahead of the record, the
-	// smallest LastDispatchSeq that record must reach before promote treats it as a candidate
-	// again. It survives across calls on this Admission, since the stream can take any number of
-	// unrelated Apply calls — a non-Dispatch fact, another issue's event — to deliver the one that
-	// catches this record up, and every promote in between must still hold the candidate back.
-	pending map[string]int64
+
+	// mu guards pending and backlogRemaining, the only Admission state a caller outside its own
+	// transactions touches: NoteDelivery runs from the intake consume loop for a message that
+	// never opens a transaction at all (a comment, an ask, a claim), concurrently with whatever
+	// Apply or Reconcile call currently holds the database's own advisory fact lock.
+	mu sync.Mutex
+	// pending holds every key the last Reconcile found Dispatch's own log ahead of the record for,
+	// still waiting for the boot backlog Reconcile measured to clear. It empties all at once, not
+	// key by key: the backlog is one position in one stream, not a per-issue property, so nothing
+	// distinguishes one held key's own catching-up from another's.
+	pending map[string]struct{}
+	// backlogRemaining is the count of Dispatch consumer deliveries still owed before every key in
+	// pending releases: what Reconcile measured the consumer's backlog at, at the moment it found
+	// something behind. Zero means nothing is held.
+	backlogRemaining int64
 }
 
 var _ intake.Handler = (*Admission)(nil)
+var _ intake.DispatchObserver = (*Admission)(nil)
 
 // New creates an admission handler for one Dispatch project.
 func New(store record.Store, cap int, project string, log *slog.Logger) *Admission {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Admission{store: store, cap: cap, project: project, log: log, now: time.Now, pending: make(map[string]int64)}
+	return &Admission{store: store, cap: cap, project: project, log: log, now: time.Now, pending: make(map[string]struct{})}
 }
 
 // Apply records root and orphan todo observations of issues handed to Legion and every newer
@@ -51,11 +62,6 @@ func New(store record.Store, cap int, project string, log *slog.Logger) *Admissi
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	if err := a.releaseDoneSlots(ctx, tx); err != nil {
 		return intake.Result{}, err
-	}
-	if key, seq, ok := intake.DispatchSeq(fact); ok {
-		if err := a.observeSeen(ctx, tx, key, seq); err != nil {
-			return intake.Result{}, err
-		}
 	}
 
 	observation, ok := fact.(intake.DispatchIssue)
@@ -114,9 +120,11 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 // The read is a snapshot with no actor on it: in it, an agent's own status write during a restart
 // looks exactly like a human's move. Dispatch says how far each issue's event log has run, so a
 // record behind that sequence is left alone — the stream still holds those events, and delivers
-// them with the actor that made each one. A record level with Dispatch has nothing coming, and is
-// reconciled here.
-func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispatch.IssueSummary) error {
+// them with the actor that made each one. backlog is the Dispatch consumer's own backlog the
+// caller measured before this read: every key this call defers waits together, not individually,
+// for that many deliveries — an empty backlog means nothing is owed, so a deferred key here is
+// promoted or dequeued in this same call instead of waiting for a count that will never arrive.
+func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispatch.IssueSummary, backlog int64) error {
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("list admission slots: %w", err)
@@ -126,6 +134,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		slotted[slot.Issue] = struct{}{}
 	}
 
+	var deferred []string
 	for _, summary := range summaries {
 		stored, err := a.store.Issue(ctx, tx, summary.Key)
 		if err != nil {
@@ -150,8 +159,8 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		if summary.LastSeq > stored.LastDispatchSeq {
 			a.log.Info("admission reconcile: the stream holds newer events for this issue; leaving it to them",
 				"issue", stored.Key, "applied", stored.LastDispatchSeq, "dispatch", summary.LastSeq)
-			if existing, ok := a.pending[stored.Key]; !ok || summary.LastSeq > existing {
-				a.pending[stored.Key] = summary.LastSeq
+			if backlog > 0 {
+				deferred = append(deferred, stored.Key)
 			}
 			continue
 		}
@@ -175,6 +184,17 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		}
 	}
 
+	if len(deferred) > 0 {
+		a.mu.Lock()
+		for _, key := range deferred {
+			a.pending[key] = struct{}{}
+		}
+		if backlog > a.backlogRemaining {
+			a.backlogRemaining = backlog
+		}
+		a.mu.Unlock()
+	}
+
 	if err := a.releaseInactiveSlots(ctx, tx); err != nil {
 		return err
 	}
@@ -194,38 +214,12 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		Rank:            observation.Rank,
 		HandedOver:      record.CarriesLegionLabel(observation.Labels),
 		LastDispatchSeq: observation.Seq,
-		SeenDispatchSeq: observation.Seq,
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
 		return fmt.Errorf("record admitted root %s: %w", observation.Key, err)
 	}
 	if logOrphan && observation.Parent != "" {
 		a.log.Info("admission orphan", "issue", observation.Key, "parent", observation.Parent)
-	}
-	return nil
-}
-
-// observeSeen advances a recorded root's SeenDispatchSeq to seq, the one place any Dispatch event
-// of the issue reaches the record regardless of what else it changes — or whether it changes
-// anything at all admission or the workflow engine act on. Only promote's pending check ever reads
-// SeenDispatchSeq, and only a root or an admitted orphan (a root of its own) can ever wait in it, so
-// a live tree's child is left to the engine entirely, as every other admission write already does.
-// An unrecorded issue has nothing to advance; putNewRoot sets the field directly when it later
-// admits one.
-func (a *Admission) observeSeen(ctx context.Context, tx pgx.Tx, key string, seq int64) error {
-	if seq <= 0 {
-		return nil
-	}
-	stored, err := a.store.Issue(ctx, tx, key)
-	if err != nil {
-		return fmt.Errorf("read issue %s to advance its seen sequence: %w", key, err)
-	}
-	if stored == nil || !claim.IsTreeRoot(stored.Key, stored.Tree) || seq <= stored.SeenDispatchSeq {
-		return nil
-	}
-	stored.SeenDispatchSeq = seq
-	if err := a.store.PutIssue(ctx, tx, *stored); err != nil {
-		return fmt.Errorf("advance seen sequence of %s: %w", key, err)
 	}
 	return nil
 }
@@ -395,14 +389,9 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
-// waiting line empties. A candidate a.pending still names is held back: its record's SeenDispatchSeq
-// has not yet reached the Dispatch sequence Reconcile found the record behind by — comparing
-// Dispatch's own per-issue counter against the field that advances on every event of the issue, not
-// only the ones LastDispatchSeq tracks, so a candidate whose newest event never touched
-// LastDispatchSeq still catches up and releases. A satisfied candidate's entry is dropped only once
-// every step this call takes succeeds, never inside a loop iteration that might still fail and roll
-// the whole transaction back with it; a pending entry naming a record this call's own issues list no
-// longer holds is dropped outright, whatever caused that.
+// waiting line empties. A candidate a.pending still names is held back: the boot backlog Reconcile
+// measured when it deferred that key has not yet cleared. NoteDelivery, not promote, is what clears
+// pending — it empties the whole set at once, so this need only check membership.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 	if a.cap <= 0 {
 		return nil
@@ -411,32 +400,20 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 	if err != nil {
 		return fmt.Errorf("list admission issues: %w", err)
 	}
-	if len(a.pending) > 0 {
-		present := make(map[string]struct{}, len(issues))
-		for _, issue := range issues {
-			present[issue.Key] = struct{}{}
-		}
-		for key := range a.pending {
-			if _, ok := present[key]; !ok {
-				delete(a.pending, key)
-			}
-		}
-	}
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("list admission slots: %w", err)
 	}
 	own := ownSlots(issues, slots)
 	waiting := record.Waiting(issues, own)
-	var released []string
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
 		waiting = waiting[1:]
-		if threshold, held := a.pending[candidate.Key]; held {
-			if candidate.SeenDispatchSeq < threshold {
-				continue
-			}
-			released = append(released, candidate.Key)
+		a.mu.Lock()
+		_, held := a.pending[candidate.Key]
+		a.mu.Unlock()
+		if held {
+			continue
 		}
 		now := a.now()
 		index := nextSlotIndex(slots)
@@ -462,10 +439,24 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 		}
 		slots, own = append(slots, slot), append(own, slot)
 	}
-	for _, key := range released {
-		delete(a.pending, key)
-	}
 	return nil
+}
+
+// NoteDelivery counts one message the Dispatch consumer delivered, decoded into a fact or not: the
+// intake consume loop calls it once per message, outside any transaction. Reconcile's boot read
+// captured the consumer's own backlog at the moment it found the first record behind; once that
+// many deliveries have been counted, every key Reconcile deferred releases at once, whichever later
+// promote call notices the pending set is now empty starts admitting them like any other candidate.
+func (a *Admission) NoteDelivery() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.backlogRemaining <= 0 {
+		return
+	}
+	a.backlogRemaining--
+	if a.backlogRemaining <= 0 {
+		a.pending = make(map[string]struct{})
+	}
 }
 
 // ownSlots is the slots of issues, this project's. The slots table is shared by every project's

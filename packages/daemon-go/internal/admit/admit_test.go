@@ -703,7 +703,7 @@ func TestCapturedDispatchTodoEventAdmitsAndProjectsActiveSlot(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(ctx, pool, engineStub{}, admission) }()
+	go func() { done <- consumers.Run(ctx, pool, admission, engineStub{}, admission) }()
 	t.Cleanup(func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -969,32 +969,41 @@ func TestReadmissionReentersAChildStrandedTodoWithoutTheLabel(t *testing.T) {
 	assertSlots(t, pool, []record.Slot{{Issue: root, Index: 0, AdmittedAt: fixedNow}})
 }
 
-// Reconcile's boot read defers a record behind Dispatch's own log to the stream instead of touching
-// it, but its own promotion at the end of the same call must not promote that record while it is
-// still deferred: the stream is already carrying an event for it, here one that drops it from the
-// waiting line, and admitting it first only for the removal to arrive after would start an agent on
-// an issue no longer handed to Legion.
-func TestReconcilePromotionSkipsARootTheStreamHoldsANewerEventFor(t *testing.T) {
+// Reconcile's boot read defers a record behind Dispatch's own log to the stream, holding it back
+// from promote's waiting line until the consumer's own backlog at boot has cleared — not until any
+// one matching event arrives, since the event that put the record behind may be a comment or
+// another type intake never turns into a fact at all. Three unrelated deliveries release it; two
+// do not.
+func TestReconcileHoldsARootUntilTheConsumerDeliversItsBootBacklog(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 
-	reconcile(t, pool, admission, []dispatch.IssueSummary{
+	reconcileWithBacklog(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-EDGE", Title: "LEGION-EDGE", Status: "todo", Rank: "A", LastSeq: 2},
-	})
+	}, 3)
 	assertSlots(t, pool, nil)
 
-	apply(t, pool, admission, "label-removed", intake.DispatchIssue{Key: "LEGION-EDGE", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-EDGE", Rank: "A"}, engineStub{})
-	assertWaiting(t, pool, nil)
+	admission.NoteDelivery()
+	admission.NoteDelivery()
+	if _, err := intake.ApplyFact(context.Background(), pool, "timer", "unrelated", intake.LingerExpired{Issue: "LEGION-UNRELATED", Generation: 1}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact unrelated: %v", err)
+	}
 	assertSlots(t, pool, nil)
+
+	admission.NoteDelivery()
+	if _, err := intake.ApplyFact(context.Background(), pool, "timer", "unrelated-2", intake.LingerExpired{Issue: "LEGION-UNRELATED", Generation: 1}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact unrelated-2: %v", err)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-EDGE", Index: 0, AdmittedAt: fixedNow}})
 }
 
-// The deferred set must hold a candidate back across every promote until its own pending event
-// arrives, not only the Reconcile call that first found the stream ahead of it: any other fact —
-// a non-Dispatch one, or an unrelated issue's Dispatch event — also ends in a promote call, and
-// that must not admit the still-pending candidate either. Once its own event lands, it is dequeued
-// (here, a label removal) as that event says.
-func TestPromotionKeepsHoldingBackADeferredRootAcrossOtherFactsUntilItsOwnEventArrives(t *testing.T) {
+// The deferred set holds every key Reconcile placed in it back across any number of unrelated
+// facts — a non-Dispatch one, or another recorded tree's Dispatch event — since ordinary fact
+// processing is not what clears the boot backlog; only NoteDelivery, called for every message the
+// Dispatch consumer delivers regardless of source, does. Once the backlog empties, the next
+// promote-triggering call admits the deferred candidate.
+func TestPromotionHoldsADeferredRootAcrossUnrelatedFactsUntilTheBacklogClears(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		replay func(t *testing.T, pool *pgxpool.Pool, admission *Admission)
@@ -1020,22 +1029,61 @@ func TestPromotionKeepsHoldingBackADeferredRootAcrossOtherFactsUntilItsOwnEventA
 			seedSlotted(t, pool, "LEGION-OTHER", "Z")
 			putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 
-			reconcile(t, pool, admission, []dispatch.IssueSummary{
+			reconcileWithBacklog(t, pool, admission, []dispatch.IssueSummary{
 				{Key: "LEGION-EDGE", Title: "LEGION-EDGE", Status: "todo", Rank: "A", LastSeq: 2},
-			})
+			}, 1)
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-OTHER", Index: 0, AdmittedAt: fixedNow}})
 
 			tc.replay(t, pool, admission)
 
 			if got := issue(t, pool, "LEGION-EDGE"); got.Status != "todo" {
-				t.Fatalf("LEGION-EDGE promoted by an unrelated fact while its own event was still pending = %#v", got)
+				t.Fatalf("LEGION-EDGE promoted by an unrelated fact while the backlog was still owed = %#v", got)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-OTHER", Index: 0, AdmittedAt: fixedNow}})
 
-			apply(t, pool, admission, "edge-label-removed", intake.DispatchIssue{Key: "LEGION-EDGE", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-EDGE", Rank: "A"}, engineStub{})
+			admission.NoteDelivery()
+			if _, err := intake.ApplyFact(context.Background(), pool, "timer", "another-unrelated", intake.LingerExpired{Issue: "LEGION-UNRELATED-2", Generation: 1}, engineStub{}, admission); err != nil {
+				t.Fatalf("ApplyFact another-unrelated: %v", err)
+			}
 			assertWaiting(t, pool, nil)
+			if got := issue(t, pool, "LEGION-EDGE"); got.Status != "in_progress" {
+				t.Fatalf("LEGION-EDGE = %#v, want in_progress once the backlog clears", got)
+			}
 		})
 	}
+}
+
+// A restart whose boot backlog is empty releases every root the same boot read would otherwise
+// defer immediately, in that same Reconcile call, rather than wait for a delivery count that can
+// never arrive: a fresh consumer with nothing pending has already delivered everything it owes.
+// B is discovered by an earlier boot's Reconcile — whose own putNewRoot records no sequence — so
+// this restart's boot read finds Dispatch's log ahead of B's record; with no backlog behind it,
+// that must not hold B back once A's slot frees.
+func TestReconcileReleasesImmediatelyWhenTheBootBacklogIsEmpty(t *testing.T) {
+	pool := migratedPool(t)
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	admission := newAdmission(t, 1, log)
+
+	reconcileWithBacklog(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-A", Title: "A", Status: "todo", Rank: "A", Labels: handed, LastSeq: 5},
+		{Key: "LEGION-B", Title: "B", Status: "todo", Rank: "B", Labels: handed, LastSeq: 7},
+	}, 0)
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-A", Index: 0, AdmittedAt: fixedNow}})
+	assertWaiting(t, pool, []string{"LEGION-B"})
+
+	// Restart before A leaves: a fresh Admission, the same boot read. A still holds its slot; B's
+	// record — from the first boot's own putNewRoot, which records no sequence — reads behind
+	// Dispatch's log again, but the consumer has no backlog at all.
+	admission = newAdmission(t, 1, log)
+	reconcileWithBacklog(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-A", Title: "A", Status: "in_progress", Rank: "A", Labels: handed, LastSeq: 5},
+		{Key: "LEGION-B", Title: "B", Status: "todo", Rank: "B", Labels: handed, LastSeq: 7},
+	}, 0)
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-A", Index: 0, AdmittedAt: fixedNow}})
+
+	// A leaves after the restart: B must not still be waiting.
+	apply(t, pool, admission, "a-done", intake.DispatchIssue{Key: "LEGION-A", Seq: 1, Type: "issue.updated", Status: "done", Title: "A", Rank: "A"}, engineStub{})
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-B", Index: 0, AdmittedAt: fixedNow}})
 }
 
 // A child stranded while its root merely waits, not lingers — the root's label taken off drops its
@@ -1076,88 +1124,5 @@ func TestPromotingAWaitingRootReentersAChildStrandedWhileItsLabelWasOff(t *testi
 	got := issue(t, pool, child)
 	if got.Tree != root || got.Phase != phase.Admitted || got.Generation != 2 {
 		t.Fatalf("child after its root is promoted = %#v, want phase admitted, generation 2, kept in %s's tree", got, root)
-	}
-}
-
-// A waiting root whose newest Dispatch event is a comment is deferred at boot against a threshold
-// LastDispatchSeq alone could never reach, since only issue.created, issue.updated and issue.closed
-// advance it; every other Dispatch event of the issue — a comment, an ask, a claim — only advances
-// SeenDispatchSeq, which intake now records for those too (decodeDispatchFact's default case
-// yields a DispatchSeen fact instead of none). promote must compare against SeenDispatchSeq, not
-// LastDispatchSeq, or the hold never releases. Three facts about other issues must not release it;
-// the issue's own next Dispatch event, whatever its type, must.
-func TestPromotionReleasesAHoldOnceTheIssuesSeenSequenceCatchesUpEvenWithoutAFact(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	putIssue(t, pool, record.Issue{Key: "LEGION-W", Project: testProject, Title: "LEGION-W", Tree: "LEGION-W", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 2})
-
-	reconcile(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-W", Title: "LEGION-W", Status: "todo", Rank: "A", LastSeq: 3},
-	})
-	assertSlots(t, pool, nil)
-
-	for _, unrelated := range []struct {
-		id   string
-		fact intake.Fact
-	}{
-		{"unrelated-1", intake.LingerExpired{Issue: "LEGION-UNRELATED-1", Generation: 1}},
-		{"unrelated-2", intake.LingerExpired{Issue: "LEGION-UNRELATED-2", Generation: 1}},
-		{"unrelated-3", intake.LingerExpired{Issue: "LEGION-UNRELATED-3", Generation: 1}},
-	} {
-		if _, err := intake.ApplyFact(context.Background(), pool, "timer", unrelated.id, unrelated.fact, engineStub{}, admission); err != nil {
-			t.Fatalf("ApplyFact %s: %v", unrelated.id, err)
-		}
-	}
-	assertSlots(t, pool, nil)
-
-	// The trailing comment itself, as intake now decodes it: a DispatchSeen fact naming the
-	// issue's own key and the same seq Dispatch's log was already at.
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "comment-seen", intake.DispatchSeen{Key: "LEGION-W", Seq: 3}, engineStub{}, admission); err != nil {
-		t.Fatalf("ApplyFact comment: %v", err)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-W", Index: 0, AdmittedAt: fixedNow}})
-}
-
-// The hold survives a restart: a fresh Admission rebuilds pending from the same boot read (its own
-// in-memory state gone), and the deferred root's own next Dispatch event still releases it, since
-// SeenDispatchSeq is durable on the record, not on the Admission that first deferred the root.
-func TestPromotionSurvivesARestartOnceTheIssuesSeenSequenceCatchesUp(t *testing.T) {
-	pool := migratedPool(t)
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	admission := newAdmission(t, 1, log)
-	putIssue(t, pool, record.Issue{Key: "LEGION-W", Project: testProject, Title: "LEGION-W", Tree: "LEGION-W", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 2})
-
-	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-W", Title: "LEGION-W", Status: "todo", Rank: "A", LastSeq: 3}})
-	assertSlots(t, pool, nil)
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "timer", "unrelated", intake.LingerExpired{Issue: "LEGION-OTHER", Generation: 1}, engineStub{}, admission); err != nil {
-		t.Fatalf("ApplyFact unrelated: %v", err)
-	}
-	assertSlots(t, pool, nil)
-
-	// Restart: a fresh Admission, the same boot read.
-	admission = newAdmission(t, 1, log)
-	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-W", Title: "LEGION-W", Status: "todo", Rank: "A", LastSeq: 3}})
-	assertSlots(t, pool, nil)
-
-	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "comment-seen", intake.DispatchSeen{Key: "LEGION-W", Seq: 3}, engineStub{}, admission); err != nil {
-		t.Fatalf("ApplyFact comment: %v", err)
-	}
-	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-W", Index: 0, AdmittedAt: fixedNow}})
-}
-
-// promote drops a pending entry naming a key its own issues list holds no record for, whatever
-// caused that: a phantom threshold serves nothing once the record it was measuring is gone, and
-// leaving it would hold that key back forever if it were ever recorded again under the same key.
-func TestPromotionDropsAPendingEntryForARecordNoLongerFound(t *testing.T) {
-	pool := migratedPool(t)
-	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	admission.pending["LEGION-GHOST"] = 5
-	seedWaiting(t, pool, "LEGION-NEXT", "A")
-
-	apply(t, pool, admission, "unrelated", intake.DispatchIssue{Key: "LEGION-NEXT", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-NEXT", Rank: "A", Labels: handed}, engineStub{})
-
-	if _, held := admission.pending["LEGION-GHOST"]; held {
-		t.Fatalf("pending still holds LEGION-GHOST after its record was never found")
 	}
 }

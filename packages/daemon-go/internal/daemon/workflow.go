@@ -233,13 +233,21 @@ func (w *workflowRuntime) recordedIssue(ctx context.Context, key string) (*recor
 // reconcile takes Dispatch's bounded boot read to admission. Only admission acts on a snapshot:
 // a move a human made while the daemon was down carries its own event, which the durable stream
 // consumer still holds and delivers with the actor that made it, so nothing here re-derives one.
+// The consumer's own backlog is read first, the same ordering OpenConsumers already keeps between
+// opening it and reading this listing, so a record the listing shows behind the log is held only
+// until the consumer has delivered that many more messages — never for a specific one, which may
+// never itself carry any fact admission would otherwise see.
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
+	backlog, err := w.consumers.DispatchPending(ctx)
+	if err != nil {
+		return fmt.Errorf("read Dispatch consumer backlog: %w", err)
+	}
 	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, []string{"todo", "in_progress", "testing", "needs_review", "retro"})
 	if err != nil {
 		return fmt.Errorf("list Dispatch issues for admission: %w", err)
 	}
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		return w.admission.Reconcile(ctx, tx, issues)
+		return w.admission.Reconcile(ctx, tx, issues, backlog)
 	}); err != nil {
 		return fmt.Errorf("reconcile admission: %w", err)
 	}
@@ -308,7 +316,7 @@ func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, 
 func (w *workflowRuntime) run(ctx context.Context) error {
 	group, running := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		if err := w.consumers.Run(running, w.pool, w.handlers...); err != nil {
+		if err := w.consumers.Run(running, w.pool, w.admission, w.handlers...); err != nil {
 			return fmt.Errorf("workflow intake stopped: %w", err)
 		}
 		return nil

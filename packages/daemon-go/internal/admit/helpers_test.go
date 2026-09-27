@@ -294,8 +294,13 @@ func testJetStream(t *testing.T) jetstream.JetStream {
 
 func reconcile(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries []dispatch.IssueSummary) {
 	t.Helper()
+	reconcileWithBacklog(t, pool, admission, summaries, 0)
+}
+
+func reconcileWithBacklog(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries []dispatch.IssueSummary, backlog int64) {
+	t.Helper()
 	inTx(t, pool, func(tx pgx.Tx) {
-		if err := admission.Reconcile(context.Background(), tx, summaries); err != nil {
+		if err := admission.Reconcile(context.Background(), tx, summaries, backlog); err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
 	})

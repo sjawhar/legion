@@ -136,19 +136,19 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch artifact version",
 			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.version",
 			file:    "dispatch/artifact-version.json",
-			want:    DispatchArtifact{Key: "CAPTURE-4", Seq: 2, ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactVersion, Version: 2},
+			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactVersion, Version: 2},
 		},
 		{
 			name:    "Dispatch artifact approved",
 			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.approved",
 			file:    "dispatch/artifact-approved.json",
-			want:    DispatchArtifact{Key: "CAPTURE-4", Seq: 5, ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2},
+			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2},
 		},
 		{
 			name:    "Dispatch artifact changes requested",
 			subject: "notifications.dispatch.issue.CAPTURE-3.artifact.changes_requested",
 			file:    "dispatch/artifact-changes-requested.json",
-			want:    DispatchArtifact{Key: "CAPTURE-3", Seq: 7, ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason"},
+			want:    DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason"},
 		},
 		{
 			name:    "pull request opened",
@@ -584,7 +584,7 @@ func runConsumers(t *testing.T, consumers *Consumers, pool *pgxpool.Pool, handle
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(ctx, pool, handlers...) }()
+	go func() { done <- consumers.Run(ctx, pool, nil, handlers...) }()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -972,4 +972,56 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 			t.Fatalf("review with the time %#v = %#v, unread %q, %v; want it untimed and nothing reported", absent, decoded.Fact, decoded.Unread, err)
 		}
 	}
+}
+
+// The Dispatch consumer's every delivery reaches a DispatchObserver, decoded into a fact or not:
+// intake calls it once for a real issue.updated (a fact) and once for a comment (none), never for
+// the GitHub consumer's own delivery of an unrelated event.
+func TestConsumeNotesEveryDispatchDeliveryRegardlessOfFact(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, _ := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	observer := &deliveryCounter{}
+	consumers, err := OpenConsumers(context.Background(), js, spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- consumers.Run(ctx, pool, observer, writeHandler("applied", nil)) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("Run: %v", err)
+		}
+	}()
+
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.comment.created", envelopeJSON(t, "dispatch-comment", "dispatch",
+		`{"id":2,"issue_key":"CAPTURE-3","seq":9,"notify":true,"type":"comment.created","payload":{"body":"hi"}}`))
+	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
+
+	testwait.Eventually(t, "both Dispatch deliveries noted", func() bool { return observer.count() == 2 })
+	time.Sleep(3 * spec.AckWait)
+	if got := observer.count(); got != 2 {
+		t.Fatalf("Dispatch deliveries noted = %d, want exactly 2 (never the GitHub one)", got)
+	}
+}
+
+type deliveryCounter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (d *deliveryCounter) NoteDelivery() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.n++
+}
+
+func (d *deliveryCounter) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.n
 }

@@ -760,7 +760,7 @@ func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engi
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(ctx, pool, engine, admissionStub{}) }()
+	go func() { done <- consumers.Run(ctx, pool, nil, engine, admissionStub{}) }()
 	return func() {
 		cancel()
 		if err := <-done; err != nil {
