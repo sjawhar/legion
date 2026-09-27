@@ -221,12 +221,12 @@ describe("scripts a command runs", () => {
   });
 
   test("reads every tracked shell script from its repository workspace", () => {
-    const listed = spawnSync("jj", ["file", "list", "-r", "@", "glob:**/*.sh"], {
+    const listed = spawnSync("git", ["ls-files", "-z", "--", ":(glob)**/*.sh"], {
       cwd: repository,
       encoding: "utf8",
     });
     if (listed.status !== 0) throw new Error(listed.stderr);
-    const scripts = listed.stdout.split("\n").filter((file) => file !== "");
+    const scripts = listed.stdout.split("\0").filter((file) => file !== "");
     const unreadable = scripts
       .map((file) => repositoryGuard.bash(`bash ${file}`, repository, repositoryEnv))
       .filter((reason) => reason?.includes("cannot resolve the script"));
