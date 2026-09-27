@@ -400,6 +400,7 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 		blockquote = "Intro.\n\n> Body.\n"
 		callout    = "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n:::\n"
 		footnote   = "x[^1]\n\n[^1]: Body.\n"
+		code       = "Intro.\n\n```\nBody.\n```\n"
 	)
 	text := func(artifactID string) string {
 		markdown, err := documentService.Text(context.Background(), artifactID)
@@ -442,6 +443,10 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 		{"nothing in a list item holding a nested list", nestedItem, "", "Intro.\n\n- - nested\n- two\n"},
 		{"a heading in a list item holding a nested list", nestedItem, "# H", "Intro.\n\n- # H\n  - nested\n- two\n"},
 		{"code in a list item holding a nested list", nestedItem, "```\nc\n```", "Intro.\n\n- ```\n  c\n  ```\n  - nested\n- two\n"},
+		// Code text is written literally, but markdown drops the line breaks that end it, so an
+		// accept stores its code without them, as it reads back.
+		{"code text ending in a backslash and a line break", code, "x\\\n", "Intro.\n\n```\nx\\\n```\n"},
+		{"code text ending in spaces and a line break", code, "x  \n", "Intro.\n\n```\nx  \n```\n"},
 		// An emptied footnote definition holds one empty paragraph, which reads back as the
 		// definition, so its reference stays a reference.
 		{"nothing in a footnote definition", footnote, "", "x[^1]\n\n[^1]: \n"},
@@ -594,6 +599,7 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 		// accept changes it: text beside a stale break in it is stored, a new break is refused.
 		{name: "text beside a task item already read back as plain, in its list", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "Changed.", want: "- [ ] \n- [x] Changed.\n\nAfter.\n"},
 		{name: "nothing in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n", quote: "Body.", emptied: "Gone.", says: task},
+		{name: "two paragraphs in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "two\n\nparas", want: "MEASURE"},
 		{name: "text in a paragraph already reading back with a literal backslash", spec: "Body. more\\\nxyz\n\nAfter.\n", quote: "Body.", emptied: "xyz", with: "Changed.", want: "Changed. more\\\n\n\nAfter.\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
