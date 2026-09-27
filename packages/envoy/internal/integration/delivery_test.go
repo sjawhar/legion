@@ -51,7 +51,7 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 	uri := testnats.URL(t)
 
 	// Connect bus client
-	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}

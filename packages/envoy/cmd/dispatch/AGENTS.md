@@ -36,7 +36,10 @@ use the default get a `repo:owner/name` label. `DISPATCH_NATS_DISABLED=1` leaves
 database and SSE paths available and makes `/healthz` report `nats: null`.
 Otherwise Dispatch loads config in this precedence order: user `envoy.json`,
 repository `envoy.json`, then environment overrides. A present `NATS_URLS`
-overrides merged `natsUrls` before `bus.Connect` and the outbox start. A present
+overrides merged `natsUrls` before `bus.ConnectOwningStream` and the outbox
+start; the server owns `ENVOY_NOTIFICATIONS` on whichever server that resolves
+to, and refuses one that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1`
+says the run means it (every deployment sets it). A present
 `DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an
 absolute `http` or `https` URL with no path, and is the exact browser origin
 used for GitHub OAuth. It must equal the URL humans type into the browser, with
@@ -210,6 +213,13 @@ Document events publish retained envelopes on
 ```sh
 go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1
 ```
+
+`natstail` publishes nothing and owns nothing on the bus: it neither creates nor
+updates `ENVOY_NOTIFICATIONS`, and it refuses a NATS server that is not this
+machine's, naming the URL. A machine whose `envoy.json` names a shared NATS
+(an agent devbox names production's) runs it with
+`ENVOY_ALLOW_REMOTE_NATS=1 go run ./cmd/natstail …`, which is the run saying it
+means that server.
 
 ## Checks
 

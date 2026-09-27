@@ -23,7 +23,7 @@ import (
 // to a live connection afterwards.
 func TestAServerRestartKeepsJetStreamStateTakenFromTheConnection(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestAServerRestartKeepsJetStreamStateTakenFromTheConnection(t *testing.T) {
 // 500 for the sender to retry), so a copy held and sent after reconnecting would arrive twice.
 func TestAPublishThatFailedWhileReconnectingIsNeverSent(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestAPublishThatFailedWhileReconnectingIsNeverSent(t *testing.T) {
 // redeliver, so a failure fast enough to beat a one-second NATS restart loses the event.
 func TestAPublishWhileReconnectingWaitsForTheReconnect(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestAPublishWhileReconnectingWaitsForTheReconnect(t *testing.T) {
 // down: the reconnect closes it, quietly, instead of re-subscribing or logging a failure.
 func TestAReconnectDuringDrainClosesQuietly(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -227,7 +227,7 @@ func captureBusLogs(t *testing.T) *busLogs {
 // logs a resubscribe failure at ERROR (LEGION-278).
 func TestAReconnectInPlaceKeepsTheSubscriptionsNATSRestored(t *testing.T) {
 	ctr, uri := testnats.StartRestartable(t)
-	client, err := bus.Connect([]string{uri})
+	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestAReconnectHookFailureIsAnErrorUnlessTheClientStopped(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctr, uri := testnats.StartRestartable(t)
-			client, err := bus.Connect([]string{uri})
+			client, err := bus.ConnectOwningStream([]string{uri})
 			if err != nil {
 				t.Fatalf("connect: %v", err)
 			}

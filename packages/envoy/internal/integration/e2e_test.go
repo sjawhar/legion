@@ -88,7 +88,7 @@ type listenerHarness struct {
 
 func newListenerHarness(t *testing.T, env *testEnv, machineID, consumer string) *listenerHarness {
 	t.Helper()
-	client, err := bus.Connect([]string{env.client.Conn.ConnectedUrl()}, bus.WithReplicas(1))
+	client, err := bus.ConnectOwningStream([]string{env.client.Conn.ConnectedUrl()}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect listener harness: %v", err)
 	}
