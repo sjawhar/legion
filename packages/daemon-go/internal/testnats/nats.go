@@ -229,7 +229,7 @@ func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer
 
 // StartNkeyAuthorized runs a NATS container of its own, with JetStream, that accepts only clients
 // authenticating as the nkey user whose public key is user, removed when t ends, and returns its
-// client URL.
+// client URL once the server answers there (answering).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
 	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ { nkey: %q } ]\n}\n", user)
@@ -242,7 +242,33 @@ func StartNkeyAuthorized(t testing.TB, user string) string {
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
 	}
+	answering(t, url)
 	return url
+}
+
+// answering returns once the server at url speaks the client protocol: a connection with no
+// credential is admitted, or refused with the server's own authorization violation. The log line
+// the container's start waits for can come before a connection there is served, and until then a
+// dial ends in EOF or a refusal that says nothing about the server's users.
+func answering(t testing.TB, url string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), readinessTimeout)
+	defer cancel()
+	for {
+		conn, err := nats.Connect(url, nats.Timeout(time.Second), nats.NoReconnect())
+		if err == nil {
+			conn.Close()
+			return
+		}
+		if errors.Is(err, nats.ErrAuthorization) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("wait for NATS at %s to answer within %s: %v", url, readinessTimeout, err)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // connect returns a connection to the server once its JetStream API answers.

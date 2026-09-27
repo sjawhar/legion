@@ -230,7 +230,7 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 
 // StartNkeyAuthorized runs a NATS test container on Image, with JetStream, that accepts only
 // clients authenticating as the nkey user whose public key is user, removed when the test ends,
-// and returns its client URL.
+// and returns its client URL once the server answers there (answering).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
 	ctx := context.Background()
@@ -244,7 +244,30 @@ func StartNkeyAuthorized(t testing.TB, user string) string {
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
 	}
+	answering(t, uri)
 	return uri
+}
+
+// answering waits, within connectTimeout, for the server at uri to speak the client protocol: a
+// connection with no credential is admitted, or refused with the server's own authorization
+// violation. Testcontainers can report a mapped port before the NATS protocol handshake, and a
+// dial then ends in EOF or a refusal that says nothing about the server's users.
+func answering(t testing.TB, uri string) {
+	t.Helper()
+	deadline := time.Now().Add(connectTimeout)
+	var err error
+	for time.Now().Before(deadline) {
+		var conn *natsgo.Conn
+		if conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect()); err == nil {
+			conn.Close()
+			return
+		}
+		if errors.Is(err, natsgo.ErrAuthorization) {
+			return
+		}
+		time.Sleep(retryInterval)
+	}
+	t.Fatalf("NATS at %s did not answer within %s: %v", uri, connectTimeout, err)
 }
 
 // StartRestartable runs a NATS test container a test can stop and start as a server restarts, and
