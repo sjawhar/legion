@@ -366,12 +366,13 @@ The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `
 directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
 `legion-pane` user the daemon's own NATS connection authenticates as. A set source that is empty,
 missing, unreadable, blank, readable by more than its owner, or not an nkey user seed refuses boot,
-naming the key and the path. One exception: when another uid owns the file, its group may read it,
-since a daemon running as a non-root uid in a pod reads a mounted Secret — root's — only through the
-pod's `fsGroup`. Mount it with `defaultMode: 0440`, never the kubelet's default `0644`, which others
-can read; a seed file the daemon's own uid owns stays 0600. `legion start --check-config` reads the
-seed as boot does, and its OK line then names the seed's user by public key
-(`Config OK: project=<project> nats-nkey-user=U…`), never the seed. With one, every pod's
+naming the key and the path. One exception: when root owns the file and the daemon is not root,
+its group may read it, since a daemon running as a non-root uid in a pod reads a mounted Secret —
+always root's — only through the pod's `fsGroup`. Mount it with `defaultMode: 0440`, never the
+kubelet's default `0644`, which others can read; any other seed file, the daemon's own or another
+user's, stays 0600. `legion start --check-config` reads the seed as boot does, and its OK line then
+names the seed's user by public key (`Config OK: project=<project> nats-nkey-user=U…`), never the
+seed. With one, every pod's
 `NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the providers Secret's own
 `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`,
 whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same
@@ -1070,7 +1071,7 @@ deploy/kubernetes/daemon/controller.yaml.example`); `nats_urls` is required; `di
 no `~`. The operator token and the NATS nkey seed each sit in a file only you can read (mode 0600):
 a group- or world-readable one is refused naming the path and mode (`… is readable by its group or
 others (mode 0640); chmod 0600 it`). The daemon's own seed read holds a file it owns to the same
-rule, and lets the group read only a file another uid owns, as a pod's kubelet-mounted Secret is
+rule, and lets the group read only a root-owned file, as a pod's kubelet-mounted Secret is
 ([Configuration](#configuration)).
 
 **Starting it.** Run `legion controller start --config controller.yaml`, where `daemon_url` (or

@@ -36,11 +36,11 @@ func Configured(file string, lookup func(string) (string, bool)) bool {
 // NATS_NKEY_SEED_FILE, or a missing, unreadable, or blank file, or one whose mode lets more than
 // its owner read it, is an error naming the key or variable and the path, never a fallback to the
 // next source or to no credential; so is a blank NATS_NKEY_SEED, and a seed that is not a user nkey
-// seed. The file's group may read it only when another uid owns it (config.ReadGroupSecretPointer):
-// a non-root process in a pod — the daemon, or `legion probe-image` in the probe pod — reads a
-// kubelet-mounted Secret file, root's, through the pod's fsGroup. None set is "": the connection
-// carries no credential, as every connection did before servers required one. No error carries the
-// seed.
+// seed. The file's group may read it only when root owns it and the reader is not root
+// (config.ReadGroupSecretPointer): a non-root process in a pod — the daemon, or `legion
+// probe-image` in the probe pod — reads a kubelet-mounted Secret file, root's, through the pod's
+// fsGroup. None set is "": the connection carries no credential, as every connection did before
+// servers required one. No error carries the seed.
 // Deploy order: a process gets a seed only after its server has nkey users (the SRE's stage 1, with
 // the no_auth_user fallback); a server with no users sends no nonce, and nats.go then refuses the
 // nkey ("nats: nkeys not supported by the server") rather than connecting without it.

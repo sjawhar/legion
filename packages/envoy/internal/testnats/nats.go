@@ -263,7 +263,6 @@ func answering(t testing.TB, uri string) {
 		if conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect()); err == nil {
 			conn.Close()
 			t.Fatalf("NATS at %s admitted a client with no credential: it enforces no nkey users", uri)
-			return
 		}
 		if errors.Is(err, natsgo.ErrAuthorization) {
 			return

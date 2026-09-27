@@ -30,7 +30,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
-	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -345,112 +344,17 @@ type plan struct {
 // workflow's App tokens, nil without a workflow.
 type runtimeFactory func(ctx context.Context, conns runtime.Conns, stream string, tokens appauth.Tokens) (runtime.Runtime, error)
 
-// bootReads is what boot reads from the configuration, the daemon's environment and the files they
-// name before it writes anything (readBoot).
-type bootReads struct {
-	project, operatorToken, dispatchToken, rolesDir string
-	secrets                                         map[string]string
-	instructions                                    []byte // nil when the configuration names none
-	roleReferences                                  promptrefs.Names
-	invocation                                      string            // tmux, on the host's Oh My Pi: the OMP invocation
-	tools                                           map[string]string // tmux, with a repository: the host's gh, git and jj
-	sandbox                                         sandboxReads      // kubernetes
-}
-
-// readBoot is every refusal boot makes from the configuration, the daemon's environment (lookup,
-// and getenv for the OMP invocation) and the files they name, writing nothing: the project token,
-// the operator bearer's file, operator configuration colliding with Legion's own
-// (checkOperatorConfig), the launch secrets (readLaunchSecrets), the instructions file, the
-// Dispatch bearer's file, the role prompts, and the runtime's own reads — under tmux the OMP
-// invocation (whose one command is `mise where`, a read; skipped when getenv is nil, a runtime a
-// test replaced) and the host's gh, git and jj, under kubernetes the kubeconfig and the Options
-// every value becomes. prepare runs it first; CheckStart is it for `legion start --check-config`,
-// so the check refuses whatever boot refuses before its first write. What boot does after it is not
-// a check's to do: create the state directory, write the instructions copy and the Dispatch token
-// file, read provider keys from secretsd, and run the plugin gate or the image probe.
-func readBoot(cfg config.Config, lookup func(string) (string, bool), getenv func(string) string, log *slog.Logger) (bootReads, error) {
-	var r bootReads
-	var err error
-	if r.project, err = claim.ProjectToken(cfg.Project); err != nil {
-		return bootReads{}, err
-	}
-	if cfg.OperatorTokenFile == "" {
-		return bootReads{}, errors.New("operator_token_file is required: the operator routes that spawn and drive claims authenticate against the bearer it names")
-	}
-	if r.operatorToken, err = config.ReadSecretPointer("operator_token_file", cfg.OperatorTokenFile); err != nil {
-		return bootReads{}, err
-	}
-	if err := checkOperatorConfig(cfg, lookup); err != nil {
-		return bootReads{}, err
-	}
-	if r.secrets, err = readLaunchSecrets(cfg, lookup); err != nil {
-		return bootReads{}, err
-	}
-	if cfg.InstructionsPath != "" {
-		if r.instructions, err = config.ReadDeploymentInstructions(cfg.InstructionsPath); err != nil {
-			return bootReads{}, err
-		}
-	}
-	if cfg.DispatchURL != "" {
-		if r.dispatchToken, err = config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile); err != nil {
-			return bootReads{}, err
-		}
-	}
-	if r.rolesDir, err = prompts.ResolveRolePromptsDir(os.LookupEnv); err != nil {
-		return bootReads{}, fmt.Errorf("resolve role prompts: %w", err)
-	}
-	if r.roleReferences, err = promptrefs.Roles(r.rolesDir); err != nil {
-		return bootReads{}, err
-	}
-	switch cfg.Runtime.Name {
-	case "tmux":
-		if getenv != nil {
-			if r.invocation, err = omplaunch.ResolveInvocation(cfg.OmpInvocation, getenv); err != nil {
-				return bootReads{}, err
-			}
-		}
-		// Only a configuration with a repository runs Legion's own gh, git, and jj.
-		if _, ok := cfg.Projects[cfg.Project]; ok {
-			if r.tools, err = resolveTools(lookup); err != nil {
-				return bootReads{}, err
-			}
-		}
-	case "kubernetes":
-		if r.sandbox, err = readSandbox(cfg, r.project, r.dispatchToken, r.secrets[natsauth.SeedVariable], lookup, log); err != nil {
-			return bootReads{}, err
-		}
-	default:
-		return bootReads{}, fmt.Errorf("runtime %q is neither tmux nor kubernetes", cfg.Runtime.Name)
-	}
-	return r, nil
-}
-
-// CheckStart is `legion start --check-config`'s reading of what boot reads before it writes
-// anything (readBoot), over the daemon's environment (lookup): nil when boot would get past every
-// such refusal, and the public key of the NATS nkey seed's user when the daemon has one, never the
-// seed.
-func CheckStart(cfg config.Config, lookup func(string) (string, bool)) (natsUser string, err error) {
-	r, err := readBoot(cfg, lookup, os.Getenv, slog.New(slog.DiscardHandler))
-	if err != nil {
-		return "", err
-	}
-	if seed := r.secrets[natsauth.SeedVariable]; seed != "" {
-		return natsauth.PublicKey(seed)
-	}
-	return "", nil
-}
-
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
 // runtime needs) — all before the plugin gate runs and before any agent can launch.
 func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
-	var getenv func(string) string
-	if o.runtime == nil {
-		if getenv = o.getenv; getenv == nil {
-			getenv = os.Getenv
-		}
+	getenv := o.getenv
+	if getenv == nil {
+		getenv = os.Getenv
 	}
-	reads, err := readBoot(cfg, environLookup(o.environment()), getenv, log)
+	// A test that replaced the runtime runs no host Oh My Pi, so boot resolves no OMP invocation.
+	hostOMP := o.runtime == nil
+	reads, err := readBoot(cfg, environLookup(o.environment()), getenv, hostOMP, log)
 	if err != nil {
 		return plan{}, err
 	}
@@ -475,12 +379,12 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, instructions: instructions,
 		dispatchToken: reads.dispatchToken, rolesDir: reads.rolesDir, roleReferences: reads.roleReferences,
-		tools: reads.tools, clock: clock, orphanSweep: orphanSweep,
+		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
 	} else {
-		err = prepareTmux(cfg, log, o, reads.dispatchToken, reads.invocation, &p)
+		err = prepareTmux(cfg, log, o, reads.dispatchToken, reads.tmux.invocation, &p)
 	}
 	if err != nil {
 		return plan{}, err

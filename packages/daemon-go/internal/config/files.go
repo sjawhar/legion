@@ -45,21 +45,27 @@ func ReadPrivateSecretPointer(variable, file string) (string, error) {
 }
 
 // ReadGroupSecretPointer is ReadPrivateSecretPointer for the NATS nkey seed the daemon reads, whose
-// group may read it when another uid owns it: a daemon running as a non-root uid in a pod reads a
-// kubelet-mounted Secret file, root's, only through the pod's fsGroup. Such a file is refused only
-// when its group can write it or others can touch it at all. A file the reading uid owns — a seed
-// on a shared host — is held to ReadPrivateSecretPointer's 0600.
+// group may read it when root owns it and the reader is not root: a daemon running as a non-root
+// uid in a pod reads a kubelet-mounted Secret file, always root's, only through the pod's fsGroup.
+// Such a file is refused only when its group can write it or others can touch it at all. Any other
+// file — the reader's own seed on a shared host, or another user's — is held to
+// ReadPrivateSecretPointer's 0600. The owner and mode come from the descriptor the contents are
+// read from, so the file judged is the file read.
 func ReadGroupSecretPointer(variable, file string) (string, error) {
 	return readSecretFile(variable, file, func(info os.FileInfo) secretMode {
-		if stat, ok := info.Sys().(*syscall.Stat_t); ok && int(stat.Uid) != readerUID() {
+		if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Uid == mountOwner && readerUID() != int(mountOwner) {
 			return groupMount
 		}
 		return ownerOnly
 	})
 }
 
-// readerUID is the uid whose own files ReadGroupSecretPointer holds to 0600; tests replace it.
+// readerUID is the uid reading the file: when it is root, a root-owned file is its own, held to
+// 0600. Tests replace it.
 var readerUID = os.Geteuid
+
+// mountOwner is the uid a kubelet's Secret files belong to, root; tests replace it.
+var mountOwner uint32 = 0
 
 // secretMode is the mode a secret file must keep: forbidden holds the permission bits refused, and
 // says and fix word the refusal.
