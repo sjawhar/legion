@@ -3,33 +3,37 @@ package pmdoc
 import "strings"
 
 // blanksAfterList is how many blank lines separate list from next, the block after it: as many as
-// spread what they space there (spacingAfterList) when it is spread, and one everywhere else,
-// which spaces nothing - but none where next can stand on the line after the list, since it is a
-// list, which opens there whatever its first item, or opens after a paragraph as well
-// (opensAfterParagraph), or the list ends in no paragraph it would continue (endsInParagraph), and
-// either a single blank line would spread what it spaces, or the list stands in a typed block in
-// a footnote definition outside quotes, where the browser editor reads any blank line after it as
-// spreading its last item (spacedAfter), and that item is not spread already, or, inside a list
-// item, the list ends in an empty item, at a blank line after which goldmark ends the list item
-// around it or a quote the list stands in (emptyItemEndsOuterItem). In a quote a list ending in a
-// footnote definition takes the definition's count (blanksAfterDefinitionItem).
-// exact reports whether the count is one of those two; the one blank line everywhere else spaces
-// nothing, so a list item may write none instead.
+// spread what they space there (spacingAfterList) when it is spread; none where next can open on
+// the list's next line and one blank line would spread something; and one everywhere else, which
+// spaces nothing. In a quote a list ending in a footnote definition takes the definition's count
+// (blanksAfterDefinitionItem). exact reports whether the count is one of the first two; the one
+// blank line everywhere else spaces nothing, so a list item may write none instead.
 func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
 	if last := list.Children[len(list.Children)-1]; r.definitionEndsItem(last) {
 		return r.blanksAfterDefinitionItem(last, next), true
 	}
 	spaced, spacing := r.spacingAfterList(list, next)
-	frame := r.scope()
-	typedInFootnote := frame.footnote != nil && frame.typed != nil && frame.quotes == 0
-	switch {
-	case spaced != nil && spaced.Attrs["spread"] == true:
+	if spaced != nil && spaced.Attrs["spread"] == true {
 		return spacing, true
-	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && spacing == 1 || typedInFootnote && spacedAfter(list, false).Attrs["spread"] != true || r.scope().items > 0 && endsInEmptyItem(list)):
-		return 0, true
-	default:
-		return 1, false
 	}
+	// next can open on the list's next line: a list opens there whatever its first item, and so
+	// does a block that opens after a paragraph as well (opensAfterParagraph), or anything where
+	// the list ends in no paragraph it would continue (endsInParagraph).
+	opensOnNextLine := isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)
+	// One blank line would spread something: what it spaces, where one does (spacingAfterList); in
+	// a typed block in a footnote definition outside quotes, the list's last item, which the
+	// browser editor reads any blank line after the list as spreading (spacedAfter), unless it is
+	// spread already; and inside a list item, a list ending in an empty item, at a blank line after
+	// which goldmark ends the list item around it or a quote the list stands in
+	// (emptyItemEndsOuterItem).
+	frame := r.scope()
+	blankWouldSpread := spaced != nil && spacing == 1 ||
+		frame.footnote != nil && frame.typed != nil && frame.quotes == 0 && spacedAfter(list, false).Attrs["spread"] != true ||
+		frame.items > 0 && endsInEmptyItem(list)
+	if opensOnNextLine && blankWouldSpread {
+		return 0, true
+	}
+	return 1, false
 }
 
 // blanksAfterDefinitionItem is how many blank lines follow item, in a list in a quote, where it
