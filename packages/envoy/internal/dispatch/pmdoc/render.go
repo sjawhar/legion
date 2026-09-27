@@ -355,7 +355,7 @@ func (r *renderer) list(n *Node, prefix string) {
 		}
 		if index > 0 {
 			r.writeSyntax("\n" + prefix)
-			if r.blankAfterItem(n, n.Children[index-1], prefix) {
+			if r.writesBlankAfterItem(n, n.Children[index-1], prefix) {
 				r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + prefix)
 			}
 		}

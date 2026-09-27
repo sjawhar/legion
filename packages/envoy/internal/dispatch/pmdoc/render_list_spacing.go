@@ -74,7 +74,7 @@ func (r *renderer) inQuotedTypedBlock(prefix string) bool {
 // spreadByItsOwnLines reports whether a spread list or list item is written spread without a blank
 // line after it: an item by a blank line between two of its blocks, and a list in a quote outside
 // footnote definitions (quoted) by one after an item that neither ends in a list nor, in a list
-// item (nested), is empty (blankAfterItem).
+// item (nested), is empty (writesBlankAfterItem).
 func spreadByItsOwnLines(spaced *Node, quoted, nested bool) bool {
 	if spaced.Attrs["spread"] != true {
 		return false
@@ -171,13 +171,13 @@ func opensAfterParagraph(block *Node) bool {
 	return false
 }
 
-// blankAfterItem reports whether blank lines follow item, before the next item of list. The
+// writesBlankAfterItem reports whether blank lines follow item, before the next item of list. The
 // browser editor's parser reads them as spreading the list, except where the lines carry a quote's
 // or a footnote definition's prefix: in a footnote definition, a quote around it or inside it
 // included, they spread the item, and are written only where its own lines do not already
 // (spreadByItsOwnLines); in a quote blank lines after an item that ends in a list are that list's,
 // two of them spreading the list it ends in (spacedAfter).
-func (r *renderer) blankAfterItem(list, item *Node, prefix string) bool {
+func (r *renderer) writesBlankAfterItem(list, item *Node, prefix string) bool {
 	quoted := strings.Contains(prefix, ">")
 	switch last := item.Children[len(item.Children)-1]; {
 	case r.inFootnote && quoted && isList(last):

@@ -650,7 +650,7 @@ lines after its last item, one before a quote or a list (or anything, in a typed
 quote) and two before anything else; blank lines after an item that ends in a quote or a list are
 that block's; and a quote and a footnote definition together mix the two
 (`footnotedQuoteListSpread`). The renderer writes each spacing so that it reads back
-(`blanksAfterList`, `blankAfterItem`): no blank line before a block that opens on the line after
+(`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
 a list where one would spread what it follows, and none inside a list item after a list ending in
 an empty item, where goldmark ends the item at a blank line. Where the lines alone do not decide
 the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote
