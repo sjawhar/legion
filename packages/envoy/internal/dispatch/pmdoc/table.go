@@ -90,6 +90,7 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 	for index := range starts {
 		starts[index] = lineStart(reader.Source(), lines.At(index).Start)
 	}
+	segments := lines.Sliced(0, lines.Len())
 	lazy, _ := node.Attribute(lazyLinesAttr)
 	lazyStarts, _ := lazy.([]int)
 	node.SetLines(tabExpandedLines(lines, reader.Source()))
@@ -99,6 +100,7 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 			node.SetLines(lines)
 		} else if table, ok := node.NextSibling().(*extensionast.Table); ok {
 			markLazyRows(table, starts[kept:], lazyStarts)
+			markBlockRows(table, segments[kept:], reader.Source())
 		}
 		return
 	}
@@ -110,6 +112,7 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 		table.SetPos(start)
 		table.SetAttribute(blankAfterAttr, blank)
 		markLazyRows(table, starts, lazyStarts)
+		markBlockRows(table, segments, reader.Source())
 	}
 }
 
@@ -127,6 +130,32 @@ func markLazyRows(table *extensionast.Table, rows, lazy []int) {
 	for _, row := range rows[2:] {
 		if slices.Contains(lazy, row) {
 			table.SetAttribute(lazyRowAttr, true)
+			return
+		}
+	}
+}
+
+// blockRowAttr marks a table goldmark took a body row of from a line the browser editor's parser
+// reads as opening another block after the table (markBlockRows).
+var blockRowAttr = []byte("pmdoc-block-row")
+
+// markBlockRows marks table (blockRowAttr) where one of its body rows - the lines past its header
+// and delimiter rows, the first two of lines - is a line the browser editor's
+// parser reads as another block: a list item, whatever its marker, or indented code, four columns
+// or more past its container's content. Goldmark's table is a paragraph, so a line that cannot
+// interrupt one - an empty item, an ordered item numbered other than 1, indented code - becomes its
+// row, where that parser's table, which is no paragraph, ends.
+func markBlockRows(table *extensionast.Table, lines []gmtext.Segment, source []byte) {
+	for index := 2; index < len(lines); index++ {
+		segment := lines[index]
+		begin := lineStart(source, segment.Start)
+		text := segment.Start
+		for text < segment.Stop && (source[text] == ' ' || source[text] == '\t') {
+			text++
+		}
+		indent := columnOf(source[begin:text]) - columnOf(source[begin:segment.Start]) + segment.Padding
+		if indent >= 4 || listMarkerStart.Match(source[text:segment.Stop]) {
+			table.SetAttribute(blockRowAttr, true)
 			return
 		}
 	}

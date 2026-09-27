@@ -745,6 +745,9 @@ func parseTable(table *extensionast.Table, source []byte, footnotes map[int]stri
 	if _, lazy := table.Attribute(lazyRowAttr); lazy {
 		return nil, fmt.Errorf("%w: a table a line continuing its container lazily would be a row of, which the browser editor's parser reads as ending the table and the container", ErrSchema)
 	}
+	if _, block := table.Attribute(blockRowAttr); block {
+		return nil, fmt.Errorf("%w: a table a line opening another block would be a row of - a list item that cannot interrupt a paragraph, or indented code - which the browser editor's parser reads as that block after the table", ErrSchema)
+	}
 	children := make([]*Node, 0, table.ChildCount())
 	for child := table.FirstChild(); child != nil; child = child.NextSibling() {
 		switch row := child.(type) {

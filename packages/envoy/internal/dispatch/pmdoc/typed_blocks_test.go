@@ -397,6 +397,24 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     "a table a line continuing its container lazily would be a row of",
 		},
 		{
+			// Goldmark's table is a paragraph, so a line that cannot interrupt one - a list item
+			// numbered other than 1, an empty item, indented code - is its row; the browser editor's
+			// parser ends its table there and reads the line as that block.
+			name:     "an ordered item numbered 2 after a table",
+			markdown: "| a | b |\n| - | - |\n| 1 | 2 |\n2. a\n",
+			want:     "a table a line opening another block would be a row of",
+		},
+		{
+			name:     "indented code after a table in a quote",
+			markdown: "> | a |\n> | - |\n> | b |\n>     code\n",
+			want:     "a table a line opening another block would be a row of",
+		},
+		{
+			name:     "an empty item after a table in a footnote definition",
+			markdown: "x[^n]\n\n[^n]: | a |\n    | - |\n    | b |\n    *\n",
+			want:     "a table a line opening another block would be a row of",
+		},
+		{
 			// The browser editor's parser keeps a list whose item holds its content five or more
 			// columns in open across the code's first line, and so reads the code's later lines as
 			// a second code block.
