@@ -804,11 +804,16 @@ an item's blocks spreads the item; in a footnote definition a list is never spre
 spread by a blank line between its blocks or after it, before the next item or a quote or list the
 definition goes on with; in a quote a blank line after an item spreads the list, and so do blank
 lines after its last item, one before a quote or a list (or anything, in a typed block inside the
-quote) and two before anything else, or at a typed block's fence, three at the quote's end where
-no fence closes the typed block, and one more of each after an item ending in a quote in the typed
-block (`quotedListSpread`, `blanksEndingQuotedList`), and where the list's quote stands in a typed
-block in a quote that goes on past them, the blank lines of the quotes around it after one of its
-own count among them (`blanksThroughOuterQuotes`); blank lines after an item that ends in a quote or a list are
+quote) and two before anything else, or at a typed block's fence - where no fence of its own closes
+a typed block, the fence of the typed block it stands in (`fenceEnding`) - three at the quote's end
+where no fence ends the typed block, but for a container opening on the line right after them, and
+one more of each after an item ending in a quote in the typed block (`quotedListSpread`,
+`blanksEndingQuotedList`), and where a typed block inside the list's quote stands in a quote that
+goes on past them, the blank lines of the quotes around the list's after one of its own count among
+them (`blanksThroughOuterQuotes`). A typed block's content is a document of its own to that parser,
+ending where its fence or the block around it ends it, so where quotes and typed blocks nest around
+a list more than once a blank line in its quote at or after it, outside the code it holds, is
+refused (`quoteTypedAlternations`); blank lines after an item that ends in a quote or a list are
 that block's, and in a quote those after a footnote definition an item holds are the definition's -
 one spreads the item only before a quote, a list or a definition, and two before anything
 (`definitionBlanksInQuote`), the same after an item ending in one, where the next item and the

@@ -162,6 +162,33 @@ func (l sourceLines) blankLines(from, until ast.Node, blank func([]byte) bool) [
 	return l.blanks(l.lineOf(startOf(from)), last, blank)
 }
 
+// blankLinesOutsideCode is blankLines less the lines a code block inside from holds: a blank line
+// of code is the code's text, which spaces nothing.
+func (l sourceLines) blankLinesOutsideCode(from, until ast.Node, blank func([]byte) bool) []int {
+	code := map[int]bool{}
+	_ = ast.Walk(from, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch node.(type) {
+		case *ast.FencedCodeBlock, *ast.CodeBlock:
+			segments := node.Lines()
+			for index := range segments.Len() {
+				code[l.lineOf(segments.At(index).Start)] = true
+			}
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	var outside []int
+	for _, line := range l.blankLines(from, until, blank) {
+		if !code[line] {
+			outside = append(outside, line)
+		}
+	}
+	return outside
+}
+
 // blanks is the lines from first up to last that are blank.
 func (l sourceLines) blanks(first, last int, blank func([]byte) bool) []int {
 	var blanks []int
@@ -187,10 +214,16 @@ func (l sourceLines) blanksBefore(position int, blank func([]byte) bool) int {
 // right before next's line - the whitespace-only lines, or those and the blank lines of the
 // quotes around the container.
 func (l sourceLines) blanksEnding(next ast.Node, past, blank func([]byte) bool) int {
-	line := len(l.starts) - 1
+	line := len(l.starts)
 	if next != nil {
-		line = l.lineOf(startOf(next)) - 1
+		line = l.lineOf(startOf(next))
 	}
+	return l.blanksEndingBefore(line, past, blank)
+}
+
+// blanksEndingBefore is blanksEnding for a container ending before line.
+func (l sourceLines) blanksEndingBefore(line int, past, blank func([]byte) bool) int {
+	line--
 	for line >= 0 && past(l.text(line)) {
 		line--
 	}

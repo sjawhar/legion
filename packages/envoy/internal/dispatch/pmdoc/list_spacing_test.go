@@ -127,6 +127,24 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			name:    "a blank line at the end of a quote holding a footnote definition, after a list",
 			refused: "x[^1]\n\n> [^1]: t\n>\n>     - a\n>\n\nAfter.\n",
 		},
+		{
+			// The typed block's content is a document of its own to the browser editor's parser,
+			// and the quote inside it ends where that content does.
+			name:     "a blank line after a list in a quote in a typed block in a quote",
+			refused:  "- > q\n\n> :::callout{#c1 kind=\"note\" title=\"T\"}\n> > - a\n> >\n>\n> :::\n",
+			readable: "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> > - a\n> >\n>\n> :::\n",
+		},
+		{
+			name:     "a blank line after a list in a typed block in a quote in a typed block",
+			refused:  "- > q\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n> :::callout{#c2 kind=\"note\" title=\"T\"}\n> - a\n>\n>\n> :::\n:::\n",
+			readable: ":::callout{#c1 kind=\"note\" title=\"T\"}\n> :::callout{#c2 kind=\"note\" title=\"T\"}\n> - a\n>\n>\n> :::\n:::\n",
+		},
+		{
+			// The list's quote stands in an item of a list in the typed block, which stands in a
+			// quote; that item opening with a quote is itself a shape the browser editor alone reads.
+			name:    "a blank line after a list in a quote in a list item in a typed block in a quote",
+			refused: "> :::callout{#c1 kind=\"note\" title=\"T\"}\n> 1. > 1.\n>    >\n>\n> :::\n",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := Parse(test.refused); !errors.Is(err, ErrSchema) {

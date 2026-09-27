@@ -33,8 +33,9 @@ var browserSpreadAttr = []byte("pmdoc-browser-spread")
 //   - and blank lines after an item that ends in a quote or a list are that block's.
 //
 // The lines alone do not decide a typed block holding a blank line in a list item, a blank line at
-// the end of a quote after a list, or at or after a list in a typed block in a footnote
-// definition. A document holding such a shape is also refused where goldmark reads its blocks
+// the end of a quote after a list, at or after a list in a typed block in a footnote definition, or
+// in a quote at or after a list that quotes and typed blocks nest around more than once. A
+// document holding such a shape is also refused where goldmark reads its blocks
 // otherwise: an empty list item before a blank line and a block its outer item holds, where
 // goldmark ends the outer item (emptyItemEndsOuterItem).
 func browserListSpacing(root ast.Node, source []byte) error {
@@ -232,13 +233,17 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 			return blankBetweenBlocksBut(item, anyBlock, spreadsNothing) || lastSpread
 		}, lines)
 	case quoted:
-		// The browser editor spaces a list in a typed block inside a quote by one blank line,
-		// whether the list's own quote holds the typed block or stands inside it.
-		directiveQuoted := false
-		if typed {
-			_, directiveQuoted = ancestor[*ast.Blockquote](directive)
+		// A typed block's content is a document of its own to the browser editor's parser, whose
+		// last line ends where the fence, or the block around the typed block, ends it, and the
+		// blank lines that reach a list there are counted in that document. With a quote and a
+		// typed block once around the list that count is quotedListSpread's; where quotes and typed
+		// blocks alternate around it more than once, a blank line in its quote at or after it, outside
+		// the code it holds, is refused.
+		if quoteTypedAlternations(list) > 1 && len(lines.blankLinesOutsideCode(list, nextBlock(list), quoteBlankLine)) > 0 {
+			return nestedQuotedListBlank
 		}
-		spread, reason := quotedListSpread(list, quote, directive, directiveQuoted, lines)
+		// The browser editor spaces a list in a typed block inside its quote by one blank line.
+		spread, reason := quotedListSpread(list, quote, directive, typed && isAncestor(quote, directive), lines)
 		if reason != "" {
 			return reason
 		}
@@ -344,6 +349,31 @@ func itemEndsInDefinition(item ast.Node) bool {
 // footnote definition (blankAtOrAfterTypedList).
 const typedFootnoteListBlank = "a blank line at or after a list in a typed block in a footnote definition, which the browser editor reads as spacing the list by what follows it"
 
+// nestedQuotedListBlank is the refusal of a blank line in a quote at or after a list, outside the
+// code it holds, that quotes and typed blocks alternate around more than once
+// (quoteTypedAlternations).
+const nestedQuotedListBlank = "a blank line in a quote at or after a list that quotes and typed blocks nest around more than once, which the browser editor reads as spacing the list by where each typed block's content ends"
+
+// quoteTypedAlternations is how many times the quotes and typed blocks around node change from one
+// to the other, outward: a list in a quote in a typed block has one, and one in a quote in a typed
+// block in a quote, or in a typed block in a quote in a typed block, two.
+func quoteTypedAlternations(node ast.Node) int {
+	changes := 0
+	var last ast.NodeKind
+	seen := false
+	for parent := node.Parent(); parent != nil; parent = parent.Parent() {
+		kind := parent.Kind()
+		if kind != ast.KindBlockquote && kind != kindTypedDirective {
+			continue
+		}
+		if seen && kind != last {
+			changes++
+		}
+		last, seen = kind, true
+	}
+	return changes
+}
+
 // blankAtOrAfterTypedList reports whether a line blank(line) holds stands from list's start up to
 // the next block, or to the closing fence of directive, the typed block around it, where nothing
 // in directive follows the list: blank lines past the fence stand outside it.
@@ -407,20 +437,24 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 	}
 	if next == nil || !isAncestor(within, next) {
 		// At the end of the quote, or of a typed block inside it before its closing fence. A typed
-		// block no fence closes runs to the quote's end, which takes a third blank line, and an
+		// block no fence closes runs to the quote's end, which takes a third blank line - but for
+		// a container opening on the line right after them, which the last one spaces too - and an
 		// item ending in a quote gives that quote one more (least).
 		blanks := lines.blanksEnding(next, outerBlankLineAt(depth), blank)
 		need := 2
 		if typed, ok := within.(*typedDirective); ok {
-			if typed.Closed {
-				blanks = lines.blanksThroughOuterQuotes(typed.closer, depth)
-			} else {
+			if ending, ok := fenceEnding(typed); ok && (next == nil || !isAncestor(ending, next)) {
+				blanks = lines.blanksThroughOuterQuotes(ending.closer, depth)
+			} else if next == nil || !startsContainer(next) || lines.blanksBefore(startOf(next), blank) != blanks {
 				need = 3
 			}
 			need += least(last) - 1
-		} else if typed, ok := ancestor[*typedDirective](within); ok && typed.Closed && (next == nil || !isAncestor(typed, next)) {
-			// A quote in a typed block that nothing after the list goes on with ends at its fence.
-			blanks = lines.blanksBefore(typed.closer, blank)
+		} else if typed, ok := ancestor[*typedDirective](within); ok {
+			// A quote in a typed block that nothing after the list goes on with ends by the fence
+			// that ends the typed block, or at a line before it without the quote's markers.
+			if ending, ok := fenceEnding(typed); ok && (next == nil || !isAncestor(ending, next)) {
+				blanks = lines.blanksEndingBefore(lines.lineOf(ending.closer), outerBlankLineAt(depth), blank)
+			}
 		}
 		return blanks >= need, ""
 	}
@@ -436,6 +470,21 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 	default:
 		return blanks >= threshold, ""
 	}
+}
+
+// fenceEnding is the typed block whose closing fence ends typed: typed itself where a fence closes
+// it, or, where none does and typed stands directly in another typed block, the block whose fence
+// ends that one, since the browser editor's parser ends a typed block no fence closes with the
+// block around it. ok is false where no fence ends typed.
+func fenceEnding(typed *typedDirective) (*typedDirective, bool) {
+	for !typed.Closed {
+		outer, ok := typed.Parent().(*typedDirective)
+		if !ok {
+			return nil, false
+		}
+		typed = outer
+	}
+	return typed, true
 }
 
 // footnotedQuoteListSpread is the spread of a list in a quote and a footnote definition, and of its
