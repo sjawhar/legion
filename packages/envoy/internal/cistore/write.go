@@ -32,19 +32,33 @@ const (
 // write carries every observation of a batch, so a NATS reconnect or a JetStream 503 during a
 // server restart must not fail them all, and GitHub does not redeliver a delivery the listener
 // refused. A lasting error fails it at once. Each attempt takes the handle the latest Rewatch
-// installed, and each KV call is given up on if the store is rewatched before it is answered.
+// installed, and each KV call is given up on if the store is rewatched before it is answered. A
+// write that runs out of the budget logs `ci record exceeded its retry budget`, one JSON line
+// naming the head, the checks the record would have held (0 when no attempt read it), the attempts
+// it made, the observations it carried (each a delivery the webhook answers 503) and the last
+// attempt's error, so an alarm can count those 503s by their cause.
 //
 // A write that would take the record past maxRecordBytes, or its settlement past
 // maxSettlementBytes, is refused with bus.ErrTooLarge, which a redelivery would meet again: the
 // record is written as it was, marked Overflowed, so it never settles on the checks it could not
 // hold.
-func (s *Store) write(identity State, mutate func(*State) bool) error {
+func (s *Store) write(identity State, observations int, mutate func(*State) bool) error {
 	key := Key(identity.Owner, identity.Repo, identity.Number, identity.SHA)
 	deadline := time.Now().Add(recordBudget)
 	var retryErr error
+	checks := 0
 	for attempt := 0; ; attempt++ {
 		if retryErr != nil {
 			if time.Now().After(deadline) {
+				s.logger.Error("ci record exceeded its retry budget",
+					slog.String("owner", identity.Owner),
+					slog.String("repo", identity.Repo),
+					slog.String("number", identity.Number),
+					slog.String("sha", identity.SHA),
+					slog.Int("checks", checks),
+					slog.Int("attempts", attempt),
+					slog.Int("observations", observations),
+					slog.String("error", retryErr.Error()))
 				return retryErr
 			}
 			time.Sleep(casBackoff(attempt - 1))
@@ -72,6 +86,7 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 		if !mutate(&st) {
 			return nil
 		}
+		checks = len(st.Checks)
 		if rev != 0 && st.Hash() != beforeHash && st.Generation == generation {
 			bumpGeneration(&st)
 		}
