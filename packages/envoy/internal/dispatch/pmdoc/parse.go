@@ -300,14 +300,7 @@ func shapeDifference(want, got *Node) (string, string) {
 	if isTextblock(want.Type) {
 		return "", ""
 	}
-	only := len(want.Children) == 1
-	written := make([]*Node, 0, len(want.Children))
-	for index, child := range want.Children {
-		readFirst := want.Type == "list_item" && index == 0 && len(want.Children) > 1 && want.Children[1].Type != "paragraph"
-		if only || readFirst || child.Type != "paragraph" || len(child.Children) != 0 {
-			written = append(written, child)
-		}
-	}
+	written := writtenChildren(want)
 	for index := 0; index < max(len(written), len(got.Children)); index++ {
 		switch {
 		case index >= len(written):

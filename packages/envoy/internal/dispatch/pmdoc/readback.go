@@ -37,21 +37,21 @@ func ReadBack(doc *Node) (*Node, error) {
 // before whose markdown the parser refuses (a browser edit can leave one) gives nothing to judge
 // against, and is "" whether or not after parses: the checks that read each changed block alone
 // still refuse one the write leaves unreadable.
-func NewMisread(before, after *Node, first, last, lastAfter int) (string, error) {
+func NewMisread(before, after *Node, first, last, lastAfter int) string {
 	backAfter, err := ReadBack(after)
 	if err != nil {
 		if _, beforeErr := ReadBack(before); beforeErr != nil {
-			return "", nil
+			return ""
 		}
-		return err.Error(), nil
+		return err.Error()
 	}
 	written := StripAnchorMarks(after)
 	if _, misread := alignBlocks(written, backAfter, skip{}); len(misread) == 0 {
-		return "", nil
+		return ""
 	}
 	backBefore, err := ReadBack(before)
 	if err != nil {
-		return "", nil
+		return ""
 	}
 	previous := StripAnchorMarks(before)
 	drift := skip{names: attributeDrift(previous, backBefore)}
@@ -64,27 +64,26 @@ func NewMisread(before, after *Node, first, last, lastAfter int) (string, error)
 	sort.Ints(indexes)
 	for _, index := range indexes {
 		if index >= first && index <= lastAfter {
-			return misread[index], nil
+			return misread[index]
 		}
 		old := index
 		if index > lastAfter {
 			old = index - (lastAfter - last)
 		}
 		if _, already := misreadBefore[old]; !already {
-			return misread[index], nil
+			return misread[index]
 		}
 	}
-	return "", nil
+	return ""
 }
 
 // AgreeWithReadBack is doc with its document-level blocks first to last, which a write changed,
 // holding what their markdown reads back as where the write left a shape the markdown cannot carry
 // but reads back unambiguously. With halves, an empty paragraph without a block id that the
-// renderer does not write goes: Splice leaves the empty halves of the textblock a block
-// replacement lands in so, and no block the document held lacks an id. Each list's and list item's
-// spread is the one its markdown reads back with. It returns the index of the last changed block
-// too. Blocks outside first to last are doc's own.
-func AgreeWithReadBack(doc *Node, first, last int, halves bool) (*Node, int) {
+// renderer does not write goes, as Splice leaves the empty halves of the textblock a block
+// replacement lands in. Each list's and list item's
+// spread is the one its markdown reads back with. Blocks outside first to last are doc's own.
+func AgreeWithReadBack(doc *Node, first, last int, halves bool) *Node {
 	out := &Node{Type: doc.Type, Attrs: doc.Attrs, Children: slices.Clone(doc.Children)}
 	for index := first; index <= last; index++ {
 		out.Children[index] = cloneNode(doc.Children[index])
@@ -109,7 +108,7 @@ func AgreeWithReadBack(doc *Node, first, last int, halves bool) (*Node, int) {
 	}
 	back, err := ReadBack(out)
 	if err != nil {
-		return out, last
+		return out
 	}
 	pairs, _ := alignBlocks(StripAnchorMarks(out), back, skip{names: map[string]bool{"spread": true}})
 	writtenIndex := writtenIndexes(out)
@@ -118,7 +117,7 @@ func AgreeWithReadBack(doc *Node, first, last int, halves bool) (*Node, int) {
 			adoptSpread(out.Children[index], back.Children[pair[1]])
 		}
 	}
-	return out, last
+	return out
 }
 
 func dropUnwrittenHalves(node *Node) {
@@ -137,11 +136,10 @@ func dropUnwrittenHalves(node *Node) {
 	node.Children = kept
 }
 
-// adoptSpread gives node's lists and list items the spread their read-back holds, where the two
-// hold the same blocks.
+// adoptSpread gives node's lists and list items, which AgreeWithReadBack cloned, the spread their
+// read-back holds, where the two hold the same blocks.
 func adoptSpread(node, back *Node) {
 	if (node.Type == "bullet_list" || node.Type == "ordered_list" || node.Type == "list_item") && node.Attrs["spread"] != back.Attrs["spread"] {
-		node.Attrs = cloneAttrs(node.Attrs)
 		if node.Attrs == nil {
 			node.Attrs = Attrs{}
 		}

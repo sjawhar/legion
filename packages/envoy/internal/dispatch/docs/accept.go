@@ -24,8 +24,7 @@ func settleAccepted(before, after *pmdoc.Node, match pmdoc.Range, with string) (
 	if err != nil {
 		return nil, err
 	}
-	settled, _ := pmdoc.AgreeWithReadBack(after, first, lastAfter, with != "")
-	return settled, nil
+	return pmdoc.AgreeWithReadBack(after, first, lastAfter, with != ""), nil
 }
 
 // insideAsk reports whether an accepted suggestion lands in an ask. refuseBrokenAsks is the ask
@@ -71,9 +70,9 @@ func refuseMisreadAccept(before, after *pmdoc.Node, match pmdoc.Range, with stri
 	if err != nil {
 		return err
 	}
-	misread, err := pmdoc.NewMisread(before, after, first, last, lastAfter)
-	if err != nil || misread == "" {
-		return err
+	misread := pmdoc.NewMisread(before, after, first, last, lastAfter)
+	if misread == "" {
+		return nil
 	}
 	return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
 		"replace_with %q leaves blocks the document reads back otherwise (%s); reject the suggestion", with, misread,
