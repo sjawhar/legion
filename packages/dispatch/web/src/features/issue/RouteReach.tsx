@@ -40,7 +40,9 @@ export function UnreachableRouteMarker({
         ⚠
       </span>
       {showRoute ? <span className="min-w-0 truncate">{issue.route}:</span> : null}
-      <span className="shrink-0">{role ? "Nobody holds it right now" : "Session not running"}</span>
+      <span className="shrink-0">
+        {role ? "Nobody holds it right now" : "Not running right now"}
+      </span>
       <span className="sr-only">. {explanation}</span>
     </span>
   );

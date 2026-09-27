@@ -334,7 +334,9 @@ The audit finds four shapes:
   is absent from the listener for minutes, and its role with it. On 2026-09-27, 58 of 63 session
   routes one read showed as unreachable pointed at a single session that was moving between boxes.
   So a route is unowned only when it is `no_holder` on two reads at least ten minutes apart: list
-  again after ten minutes and act on the issues both lists name. Then staff the role, re-route the
+  again after ten minutes and act on the issues both lists name. Confirm with the second
+  `dispatch_issues` read, not `envoy_role_get`: a role lookup releases the claim of a holder whose
+  session is absent from the registry as it answers. Then staff the role, re-route the
   issue to a live holder, or clear the route and assign it (AGENTC-1065, a P2 production listener
   503, sat routed to an unheld `role:sre` with no assignee). `route_status: "unknown"` means the
   listener did not answer, so a route could not be judged; a `no_holder` filter refuses rather

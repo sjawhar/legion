@@ -139,7 +139,7 @@ test("marks only the rows whose route reaches nobody", async () => {
       .map((marker) => [marker.closest("li")?.getAttribute("aria-label"), marker.textContent]);
     expect(marked).toEqual([
       ["CORE-1 Unheld role", expect.stringContaining("Nobody holds it right now")],
-      ["CORE-2 Gone session", expect.stringContaining("Session not running")],
+      ["CORE-2 Gone session", expect.stringContaining("Not running right now")],
     ]);
   } finally {
     view.unmount();
