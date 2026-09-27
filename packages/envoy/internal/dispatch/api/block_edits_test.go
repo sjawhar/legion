@@ -115,6 +115,80 @@ func TestDocumentEditsRefuseBlockHTMLWithAdviceToKeepItInsideALine(t *testing.T)
 	}
 }
 
+// Two lists of one kind side by side are written with different markers, so a write that leaves
+// them so - by deleting or emptying what stood between them, inserting a list beside one, or
+// accepting a list beside one - is stored as the two lists it made, not one.
+func TestAdjacentListsAnEditLeavesReadBackAsTwoLists(t *testing.T) {
+	handler := newTestHandler(t)
+	for index, test := range []struct {
+		name, spec, want string
+		op               map[string]any
+		accept           string
+		// items is how many items the two lists hold together, two when unset.
+		items int
+	}{
+		{name: "a delete of the paragraph between them", spec: "- a\n\nBetween.\n\n- b\n", want: "- a\n\n* b\n",
+			op: map[string]any{"op": "delete", "find": "Between."}},
+		{name: "a replace that empties the paragraph between them", spec: "- a\n\nBetween.\n\n- b\n", want: "- a\n\n\n\n* b\n",
+			op: map[string]any{"op": "replace", "find": "Between.", "with": ""}},
+		{name: "an insert of a list before one", spec: "Intro.\n\n- y\n", want: "Intro.\n\n- x\n\n* y\n",
+			op: map[string]any{"op": "insert", "after": "Intro.", "markdown": "- x"}},
+		{name: "an insert of an ordered list before one", spec: "Intro.\n\n1. y\n", want: "Intro.\n\n1. x\n\n1) y\n",
+			op: map[string]any{"op": "insert", "after": "Intro.", "markdown": "1. x"}},
+		{name: "an accepted list over the paragraph before one", spec: "Intro.\n\nBody.\n\n- y\n", want: "Intro.\n\n- x\n\n* y\n",
+			accept: "- x\n"},
+		{name: "a delete beside a list whose item opens with a rule", spec: "- a\n\nBetween.\n\n- ***\n", want: "- a\n\n* ---\n",
+			op: map[string]any{"op": "delete", "find": "Between."}},
+		{name: "a delete beside a list whose later item opens with a rule", spec: "- a\n\nBetween.\n\n- b\n- ***\n", want: "- a\n\n* b\n* ---\n",
+			op: map[string]any{"op": "delete", "find": "Between."}, items: 3},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			issue := createInteractionIssue(t, handler, "AL"+string(rune('A'+index)), test.name, test.spec)
+			if test.accept != "" {
+				created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+					"body": "suggest", "anchor": map[string]any{"artifact": "spec", "quote": "Body."},
+					"suggestion": map[string]string{"replace_with": test.accept}, "actor": sessionActor(),
+				})
+				if created.Code != http.StatusCreated {
+					t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+				}
+				comment := decodeBody[model.Comment](t, created)
+				if accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/accept", map[string]any{}, "alice"); accepted.Code != http.StatusOK {
+					t.Fatalf("accept: status=%d body=%s", accepted.Code, accepted.Body.String())
+				}
+			} else {
+				response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+					"ops": []map[string]any{test.op},
+				}, "alice")
+				if response.Code != http.StatusOK {
+					t.Fatalf("edit: status=%d body=%s", response.Code, response.Body.String())
+				}
+			}
+			markdown := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+			if markdown != test.want {
+				t.Fatalf("stored %q, want %q", markdown, test.want)
+			}
+			back, err := pmdoc.Parse(markdown)
+			if err != nil {
+				t.Fatalf("stored %q does not read back: %v", markdown, err)
+			}
+			lists, items := 0, 0
+			for _, block := range back.Children {
+				if block.Type == "bullet_list" || block.Type == "ordered_list" {
+					lists++
+					items += len(block.Children)
+				}
+			}
+			if lists != 2 {
+				t.Fatalf("stored %q reads back holding %d lists, want 2", markdown, lists)
+			}
+			if want := max(test.items, 2); items != want {
+				t.Fatalf("stored %q reads back holding %d items, want %d", markdown, items, want)
+			}
+		})
+	}
+}
+
 // An empty with that empties a container's paragraph is taken: a list item, a blockquote or a
 // typed block holding only an empty paragraph reads back holding it, as the browser editor's
 // parser reads it, and so does a list item whose first block is an emptied paragraph. An ask's
