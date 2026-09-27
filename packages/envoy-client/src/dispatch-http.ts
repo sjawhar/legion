@@ -32,6 +32,7 @@ import type {
   IssuePriority,
   IssueRead,
   IssueReferences,
+  IssueRouteStatus,
   IssueSummary,
   Message,
   MessageRead,
@@ -77,6 +78,8 @@ export interface ListIssuesOptions {
   /** Each value repeats as `priority=`; `"none"` matches an issue with no priority. */
   readonly priority?: readonly (IssuePriority | "none")[];
   readonly updated_since?: string;
+  /** Only open issues whose route is in this state. */
+  readonly route_status?: IssueRouteStatus;
 }
 
 export interface SearchOptions {

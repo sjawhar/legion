@@ -24,6 +24,8 @@ import type {
   IssueDetails,
   IssuePriority,
   IssueReferences,
+  IssueRouteReach,
+  IssueRouteStatus,
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
@@ -1145,6 +1147,32 @@ function holdsSession(claim: IssueClaim | null | undefined): boolean {
   return claim?.actor.kind === "session";
 }
 
+type RoutedIssue = Pick<Issue, "route"> & Partial<IssueRouteReach>;
+
+/** Whether the route is a role a live session holds, which the live registry names. */
+function routeHeldBySession(issue: RoutedIssue): boolean {
+  return issue.route_status === "live" && issue.route?.startsWith("role:") === true;
+}
+
+/**
+ * An issue's route as every agent surface reads it: where its messages go and whether that
+ * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
+ * nobody holds, or to a session that is gone, reads as routed and reaches nobody, so it says so.
+ */
+function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {
+  if (issue.route === null) return "none";
+  const holder = issue.route_holder ?? null;
+  const reach: Record<IssueRouteStatus, string> = {
+    live:
+      routeHeldBySession(issue) && holder !== null
+        ? ` (held by ${titles?.get(holder) ?? holder})`
+        : "",
+    no_holder: issue.route.startsWith("role:") ? " (nobody holds it)" : " (that session is gone)",
+    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+  };
+  return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
@@ -1168,7 +1196,7 @@ function issueSummary(
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
-    `Route: ${issue.route ?? "none"}`,
+    `Route: ${routeText(issue, titles)}`,
     ...(specApproval === undefined
       ? []
       : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
@@ -1859,6 +1887,8 @@ export async function executeDispatchTool(
       const label = optionalString(args, "label");
       const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
+      // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
+      const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
       const issues = await client.listIssues({
         project,
@@ -1867,6 +1897,7 @@ export async function executeDispatchTool(
         ...(label === undefined ? {} : { label }),
         ...(priority === undefined ? {} : { priority }),
         ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
+        ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
       });
       const rows = issues.slice(0, limit).map((row) => ({
         key: row.key,
@@ -1877,6 +1908,9 @@ export async function executeDispatchTool(
         labels: row.labels ?? [],
         open_asks: row.open_asks,
         claim: row.claim ?? null,
+        route: row.route ?? null,
+        route_status: row.route_status ?? null,
+        route_holder: row.route_holder ?? null,
         updated_at: row.updated_at,
       }));
       const titles = await liveSessionTitles(
@@ -1898,7 +1932,12 @@ export async function executeDispatchTool(
                     (row.open_asks === 0
                       ? ""
                       : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
-                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`)
+                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`) +
+                    // A route that reaches a live session changes nothing about the row; one
+                    // that reaches nobody, or cannot be judged, is what the owner audit reads.
+                    (row.route === null || row.route_status === "live" || row.route_status === null
+                      ? ""
+                      : ` · route ${routeText(row)}`)
                 ),
               ].join("\n"),
         details: { issues: rows },
@@ -2490,7 +2529,7 @@ export async function executeDispatchTool(
       const [references, graph, titles] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim)),
+        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
       ]);
       return {
         text: issueSummary(read.issue, read.events, references, graph, titles),

@@ -1437,6 +1437,9 @@ describe("executeDispatchTool", () => {
             actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
             at: "2026-09-13T01:00:00Z",
           },
+          route: "role:sre",
+          route_status: "no_holder",
+          route_holder: null,
         },
       ]);
     };
@@ -1450,6 +1453,7 @@ describe("executeDispatchTool", () => {
         label: "bug",
         priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
+        route_status: "no_holder",
       },
       cwd: "/workspace",
       host: "omp",
@@ -1473,7 +1477,11 @@ describe("executeDispatchTool", () => {
       ["priority", "1"],
       ["priority", "none"],
       ["updated_since", "2026-09-01T00:00:00Z"],
+      ["route_status", "no_holder"],
     ]);
+    // A route that reaches nobody is what the owner audit reads, so the row says so.
+    expect(result.text).toContain("AGENTC-1 [todo] P1 First · 2 open asks · claimed by ");
+    expect(result.text).toContain(" · route role:sre (nobody holds it)");
     expect(result.details).toEqual({
       issues: [
         {
@@ -1488,10 +1496,83 @@ describe("executeDispatchTool", () => {
           },
           labels: ["bug"],
           open_asks: 2,
+          route: "role:sre",
+          route_status: "no_holder",
+          route_holder: null,
           updated_at: "2026-09-13T00:00:00Z",
         },
       ],
     });
+  });
+
+  test("dispatch_read says whether the issue's route reaches anyone", async () => {
+    const read = async (reach: Record<string, unknown>) => {
+      const agentCalls: string[] = [];
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const pathname = new URL(String(url)).pathname;
+        if (pathname === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            title: "Dispatch issue",
+            status: "todo",
+            priority: 2,
+            assignee: null,
+            claim: null,
+            components: {
+              mode: "inherit",
+              ids: [],
+              unknown: [],
+              reason: null,
+              inherited_from: null,
+            },
+            open_asks: [],
+            last_seq: 0,
+            labels: [],
+            ...reach,
+          });
+        }
+        if (pathname === "/api/v1/agents") {
+          agentCalls.push(pathname);
+          return response([{ session_id: "ses-sre", title: "SRE on call" }]);
+        }
+        if (pathname === "/api/v1/issues/DSP-42/events") return response([]);
+        if (pathname === "/api/v1/issues/DSP-42/references" || pathname === "/api/v1/references") {
+          return response({ node: { kind: "issue", id: "DSP-42" }, edges: [], members: [] });
+        }
+        throw new Error(`unexpected request: ${pathname}`);
+      };
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { issue: "DSP-42" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      return { text: result.text, agentCalls: agentCalls.length };
+    };
+
+    const unheld = await read({ route: "role:sre", route_status: "no_holder", route_holder: null });
+    expect(unheld.text).toContain("Route: role:sre (nobody holds it)\n");
+    expect(unheld.agentCalls).toBe(0);
+    const gone = await read({
+      route: "session:ses-gone",
+      route_status: "no_holder",
+      route_holder: null,
+    });
+    expect(gone.text).toContain("Route: session:ses-gone (that session is gone)\n");
+    const blind = await read({ route: "role:sre", route_status: "unknown", route_holder: null });
+    expect(blind.text).toContain(
+      "Route: role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)\n"
+    );
+    // A held role names its holder the way a claim does: by the live registry's title.
+    const held = await read({ route: "role:sre", route_status: "live", route_holder: "ses-sre" });
+    expect(held.text).toContain("Route: role:sre (held by SRE on call)\n");
+    expect(held.agentCalls).toBe(1);
+    const unrouted = await read({ route: null, route_status: null, route_holder: null });
+    expect(unrouted.text).toContain("Route: none\n");
   });
 
   test("dispatch_issues omits absent optional filters and clamps the row count to limit", async () => {

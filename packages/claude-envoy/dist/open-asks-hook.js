@@ -14118,6 +14118,7 @@ var ISSUE_STATUSES = [
   "retro",
   "done"
 ];
+var ISSUE_ROUTE_STATUSES = ["live", "no_holder", "unknown"];
 var DOC_EDIT_OPS = [
   "replace",
   "delete",
@@ -14424,8 +14425,8 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC", priority: [0, 1] },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, and open-ask count, so you can see backlog shape without " + "opening every issue. Optionally filter by status, parent, label, priority, or how recently it " + "changed; priority takes one or more of 0-3 (P0-P3) and null for an issue with no priority, so " + "an owner's P0/P1 audit is priority [0, 1]. Do not use it to search by keyword or phrase; " + "dispatch_search remains the keyword surface. Rows are capped at limit (default 50, max 250), " + "applied to the response here, not by the server.",
+    example: { project: "AGENTC", route_status: "no_holder" },
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is gone, whatever its priority: work that reads as routed and reaches nobody. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Rows are capped at limit (default 50, max 250), applied to the response here, not by the server.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -14433,6 +14434,7 @@ var dispatchToolSpecs = [
       label: z2.string().describe("Optional label filter.").optional(),
       priority: z2.array(z2.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z2.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
+      route_status: z2.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is gone. unknown: the Envoy listener did not answer.").optional(),
       limit: z2.number({ int: true, min: 1, max: 250 }).describe("Maximum rows, 1-250; default 50.").optional()
     })
   },
@@ -16178,6 +16180,20 @@ async function liveSessionTitles(client, needed) {
 function holdsSession(claim) {
   return claim?.actor.kind === "session";
 }
+function routeHeldBySession(issue2) {
+  return issue2.route_status === "live" && issue2.route?.startsWith("role:") === true;
+}
+function routeText(issue2, titles) {
+  if (issue2.route === null)
+    return "none";
+  const holder = issue2.route_holder ?? null;
+  const reach = {
+    live: routeHeldBySession(issue2) && holder !== null ? ` (held by ${titles?.get(holder) ?? holder})` : "",
+    no_holder: issue2.route.startsWith("role:") ? " (nobody holds it)" : " (that session is gone)",
+    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
+  };
+  return issue2.route + (issue2.route_status == null ? "" : reach[issue2.route_status]);
+}
 function issueSummary(issue2, events, references, graph, titles) {
   const asks = issue2.open_asks;
   const spec = issue2.artifacts?.find((artifact) => artifact.primary);
@@ -16199,7 +16215,7 @@ function issueSummary(issue2, events, references, graph, titles) {
     ...issue2.priority === null ? [] : [`Priority: P${issue2.priority}`],
     `Labels: ${issue2.labels.length === 0 ? "none" : issue2.labels.join(", ")}`,
     componentsLine(issue2.components),
-    `Route: ${issue2.route ?? "none"}`,
+    `Route: ${routeText(issue2, titles)}`,
     ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
     "Open asks:",
     ...asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`),
@@ -16707,6 +16723,7 @@ async function executeDispatchTool(input) {
       const label = optionalString(args, "label");
       const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
+      const routeStatus = optionalString(args, "route_status");
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
       const issues = await client.listIssues({
         project,
@@ -16714,7 +16731,8 @@ async function executeDispatchTool(input) {
         ...parent === undefined ? {} : { parent },
         ...label === undefined ? {} : { label },
         ...priority === undefined ? {} : { priority },
-        ...updatedSince === undefined ? {} : { updated_since: updatedSince }
+        ...updatedSince === undefined ? {} : { updated_since: updatedSince },
+        ...routeStatus === undefined ? {} : { route_status: routeStatus }
       });
       const rows = issues.slice(0, limit).map((row) => ({
         key: row.key,
@@ -16725,13 +16743,16 @@ async function executeDispatchTool(input) {
         labels: row.labels ?? [],
         open_asks: row.open_asks,
         claim: row.claim ?? null,
+        route: row.route ?? null,
+        route_status: row.route_status ?? null,
+        route_holder: row.route_holder ?? null,
         updated_at: row.updated_at
       }));
       const titles = await liveSessionTitles(client, rows.some((row) => holdsSession(row.claim)));
       return {
         text: rows.length === 0 ? `No issues in ${project}.` : [
           `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (issues.length > rows.length ? ` (showing ${rows.length} of ${issues.length})` : ""),
-          ...rows.map((row) => `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`))
+          ...rows.map((row) => `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`))
         ].join(`
 `),
         details: { issues: rows }
@@ -17167,7 +17188,7 @@ ${trailer.join(`
       const [references, graph, titles] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim))
+        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue))
       ]);
       return {
         text: issueSummary(read.issue, read.events, references, graph, titles),
