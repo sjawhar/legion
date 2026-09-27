@@ -72,11 +72,22 @@ dispatch_human() {
 # new_issue TITLE [PARENT] creates an issue in the run's project and prints its key. A root carries
 # the `legion` label, which hands it to the Go daemon (it admits no unlabeled root); a child carries
 # none, since it runs under its root's tree.
+# new_issue TITLE [PARENT] creates an issue in the run's project and prints its key. A root carries
+# the legion label and smoke_spec as its primary document: its architect is given no instruction by
+# the proof, so what the tree is for comes from the issue itself.
 new_issue() {
   local title=$1 parent=${2:-} payload
-  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" \
-    'if $parent == "" then {project:$project,title:$title,labels:["legion"],force:true} else {project:$project,title:$title,parent:$parent,force:true} end')
+  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" --arg spec "$(smoke_spec)" \
+    'if $parent == "" then {project:$project,title:$title,labels:["legion"],spec:$spec,force:true} else {project:$project,title:$title,parent:$parent,force:true} end')
   dispatch_human POST issues "$payload" | jq -er .key
+}
+# smoke_spec is every root's starting document: one tiny one-file change, and the one extra line a
+# scripted review round may ask for, which is in scope.
+smoke_spec() {
+  printf '%s\n' "## Summary" "" \
+    "A Legion smoke proof. Make one tiny, concrete one-file change in \`$repo\`: add one new Markdown file under \`smoke/\` holding a single line that names this issue." "" \
+    "## Scope" "" \
+    "A review of the pull request may ask for one more line appended to that same file; that is in scope. Nothing else changes."
 }
 set_status() { dispatch_human PATCH "issues/$1" "$(jq -cn --arg status "$2" '{status:$status}')" >/dev/null; }
 
@@ -156,14 +167,16 @@ gate_registered() {
   daemon_state | jq -e --arg issue "$1" --arg artifact "$2" \
     '.issues[$issue].designGate.artifactId == $artifact and .issues[$issue].designGate.currentVersion > 0'
 }
-# The architect owns spec editing and gate registration; the proof names the one primary artifact
-# Dispatch created so a real agent cannot register an unrelated document.
+# The architect owns spec editing and gate registration, and nobody prompts it: its first turn is
+# the daemon's catch-up notice, from which it writes the spec, requests approval and registers the
+# gate on its own. The proof requires that registration to name the one primary artifact Dispatch
+# created, so a real agent cannot register an unrelated document.
 drive_gate() {
   local issue=$1 label=$2 artifact
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
-  send_agent "$issue" architect "$label: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo, and say in it that a review of the pull request may ask for one more line appended to that same file, which is in scope. Request approval for primary artifact $artifact. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at the version returned by that approval request. Wait after registering."
-  until_true 300 "$label architect to register primary artifact $artifact" gate_registered "$issue" "$artifact"
+  until_true 120 "$label architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
+  until_true 900 "$label architect to register primary artifact $artifact on its own" gate_registered "$issue" "$artifact"
   gate_artifact=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.artifactId')
   gate_version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
   dispatch_human POST "artifacts/$gate_artifact/reviews" '{"state":"approved"}' >/dev/null

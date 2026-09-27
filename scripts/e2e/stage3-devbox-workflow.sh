@@ -668,8 +668,9 @@ note "active roots: $(jq -c .admission.active "$evidence/admission.json"); waiti
 pass
 
 begin panes-pinned-to-the-rig-before-any-agent-turn
-# The two admitted architects are the only panes before the proof sends its first instruction.
-# Every later pane is checked when it registers and again before each instruction.
+# The two admitted architects are the only panes before any phase worker: each takes its first turn
+# from the daemon's catch-up notice, not from the proof. Every later pane is checked when it
+# registers and again before each instruction.
 wait_for_worker "$root_issue" architect
 wait_for_worker "$held_issue" architect
 note "$(wc -l <"$evidence/pane-endpoints-checked.txt") pane checks: DISPATCH_URL=http://127.0.0.1:$port_dispatch, DISPATCH_TOKEN_FILE=$state/secrets/dispatch-token, ENVOY_URL=http://127.0.0.1:$port_listener, ENVOY_NATS_URL=nats://127.0.0.1:$port_nats"

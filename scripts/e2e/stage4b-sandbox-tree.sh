@@ -1398,14 +1398,15 @@ pod_shape_watcher 9>&- 7>&- &
 shape_pid=$!
 pass
 
-# drive_spec ISSUE: the architect writes its spec and registers the gate; with gates.design off the
+# drive_spec ISSUE: nobody prompts the architect. Its first turn is the daemon's catch-up notice,
+# from which it writes its spec and registers the gate on its own; with gates.design off the
 # daemon approves the registered version itself and the issue moves to planning.
 drive_spec() {
   local issue=$1 artifact
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
-  send_agent "$issue" architect "Stage 4b proof spec operation: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo, and say in it that a review of the pull request may ask for one more line appended to that same file, which is in scope. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at its current version. The design gate is off, so no approval is needed. Wait after registering."
-  until_true 600 "the $issue architect to register primary artifact $artifact" gate_registered "$issue" "$artifact"
+  until_true 300 "the $issue architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
+  until_true 900 "the $issue architect to register primary artifact $artifact on its own" gate_registered "$issue" "$artifact"
   wait_for_phase "$issue" planning
 }
 
