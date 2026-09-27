@@ -40,7 +40,7 @@ func WithPublishAcknowledgementClock(clock AcknowledgementClock) ConnectOption {
 	return func(o *connectOpts) { o.publishAcknowledgementClock = clock }
 }
 
-// WithReplicas overrides the stream replica count (default 1).
+// WithReplicas overrides the replica count of the stream ConnectOwningStream ensures (default 1).
 func WithReplicas(n int) ConnectOption {
 	return func(o *connectOpts) { o.replicas = n }
 }
@@ -209,19 +209,34 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 	return nil, lastErr
 }
 
-// Dial opens a tuned core NATS connection using envoy's standard options
-// (5s connect timeout, infinite reconnect every second, retry-loop for the
-// initial 10 attempts). Callers that only need core pub/sub —
-// no JetStream stream creation, no durable consumer — should use this.
-// The NATS Go client auto-resubscribes core subscriptions on reconnect,
-// so no callbacks are needed for plain subscribers.
+// Connect opens a client that publishes and subscribes without touching the shared
+// ENVOY_NOTIFICATIONS stream. Every caller that only publishes or only tails uses it -- natstail,
+// the MCP bridge and envoy-dispatch's operator commands own nothing on the server they reach, and
+// a stream ensure from one of them rewrites a resource several deployments share (LEGION-249).
 //
-// For JetStream-backed durable consumers, use Connect instead.
-func Dial(name string, urls []string) (*nats.Conn, error) {
-	return connect(name, urls, nil, nil)
+// It refuses a NATS server that is not this machine's unless ENVOY_ALLOW_REMOTE_NATS=1 says the
+// run means it: on an agent's machine ~/.config/opencode/envoy.json names production's bus, so a
+// scratch run of one of those commands otherwise reaches production with nothing said about it.
+// An empty urls is nats.go's own default, this machine's server.
+//
+// For the JetStream stream this codebase owns, use ConnectOwningStream.
+func Connect(urls []string, options ...ConnectOption) (*Client, error) {
+	if err := refuseRemoteNATS(urls); err != nil {
+		return nil, err
+	}
+	return newClient(urls, false, options)
 }
 
-func Connect(urls []string, options ...ConnectOption) (*Client, error) {
+// ConnectOwningStream opens a client that also reconciles ENVOY_NOTIFICATIONS against this
+// binary's subjects, retention and duplicate window (ensureStreamWithConfig), creating the stream
+// when the server has none. Only the deployed services call it: envoy-listener and
+// envoy-dispatch's server. The NATS they reach is the one their deployment names, so no locality
+// rule applies to them.
+func ConnectOwningStream(urls []string, options ...ConnectOption) (*Client, error) {
+	return newClient(urls, true, options)
+}
+
+func newClient(urls []string, ownsStream bool, options []ConnectOption) (*Client, error) {
 	opts := connectOpts{replicas: 1, publishAcknowledgementClock: wallClock{}}
 	for _, o := range options {
 		o(&opts)
@@ -240,11 +255,13 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 		nc.Close()
 		return nil, err
 	}
-	cfg := *streamCfg
-	cfg.Replicas = opts.replicas
-	if err := ensureStreamWithConfig(js, &cfg); err != nil {
-		nc.Close()
-		return nil, err
+	if ownsStream {
+		cfg := *streamCfg
+		cfg.Replicas = opts.replicas
+		if err := ensureStreamWithConfig(js, &cfg); err != nil {
+			nc.Close()
+			return nil, err
+		}
 	}
 	c.Conn = nc
 	c.js = js

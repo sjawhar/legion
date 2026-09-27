@@ -95,7 +95,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.Connect(envoyConfig.NatsURLs)
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.NatsURLs)
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
