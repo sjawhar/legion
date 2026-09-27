@@ -6,22 +6,26 @@
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
@@ -43,10 +47,19 @@ func buildAgentSecrets(t *testing.T) string {
 
 // brokerCounters records how many times fakeBroker served each route, so a test can assert on
 // call counts (e.g. "no second ask", "never entered the polling loop") instead of only on the
-// final observable outcome.
+// final observable outcome, plus (guarded by mu) the last session_id POST /v1/requests recorded.
 type brokerCounters struct {
 	createRequest int32
 	getRequest    int32
+
+	mu            sync.Mutex
+	lastSessionID string
+}
+
+func (c *brokerCounters) sessionID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastSessionID
 }
 
 // fakeBroker serves just enough of the AGENTC-393 contract (v9) for the exec-form and --json
@@ -75,6 +88,11 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Request == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			return
+		}
+		if body.SessionID != nil {
+			counters.mu.Lock()
+			counters.lastSessionID = *body.SessionID
+			counters.mu.Unlock()
 		}
 		obj, err := record.VerifyRequestObject(body.Request, audience, time.Minute, time.Now())
 		if err != nil || len(obj.Details) == 0 {
@@ -494,28 +512,37 @@ func TestSelfJSONPrintsExactlyOneContractObjectNamingTheIssuedEnrollment(t *test
 }
 
 // TestRequestSignsARequestObject pins contract v9's core wire-shape change: POST /v1/requests
-// posts a signed request object (record.Sign) instead of plain top-level "secrets"/"reason"/
-// "issue" fields. The fake broker asserts the body is exactly {"request": <jws>, "session_id":
-// null}, verifies the JWS with record.VerifyRequestObject against its own URL as audience, and
-// checks the request object's authorization_details name exactly the argv secret names with the
-// reason carried inside the signed object rather than as a top-level field.
+// posts a signed request object (record.Sign, via Signer.SignRequestObject) instead of plain
+// top-level "secrets"/"reason"/"issue" fields. The fake broker asserts the body is exactly
+// {"request": <jws>, "session_id": null}, verifies the JWS with record.VerifyRequestObject
+// against its own URL as audience, and checks the request object's authorization_details name
+// exactly the argv secret names with the reason carried inside the signed object rather than as
+// a top-level field.
 func TestRequestSignsARequestObject(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	keyDir := newKeyDir(t)
 
+	var mu sync.Mutex
 	var gotBody map[string]any
 	var gotObj record.RequestObject
 	var verifyErr error
 	var audience string
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/requests", func(w http.ResponseWriter, r *http.Request) {
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode request body: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		compact, _ := gotBody["request"].(string)
-		gotObj, verifyErr = record.VerifyRequestObject(compact, audience, time.Minute, time.Now())
+		mu.Lock()
+		aud := audience
+		mu.Unlock()
+		compact, _ := body["request"].(string)
+		obj, verr := record.VerifyRequestObject(compact, aud, time.Minute, time.Now())
+		mu.Lock()
+		gotBody, gotObj, verifyErr = body, obj, verr
+		mu.Unlock()
 		writeJSON(w, map[string]any{
 			"request_id": "req-signed", "state": "granted",
 			"secrets":  []map[string]string{{"name": "GRANT_ME", "decision": "automatic", "delivery": "inject"}},
@@ -524,13 +551,17 @@ func TestRequestSignsARequestObject(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
+	mu.Lock()
 	audience = srv.URL
+	mu.Unlock()
 
 	stdout, stderr, exit := runAgentSecrets(t, binary, srv.URL, keyDir, nil,
 		"request", "GRANT_ME", "--reason", "need it for the build")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
+	mu.Lock()
+	defer mu.Unlock()
 	sessionID, present := gotBody["session_id"]
 	if !present || sessionID != nil {
 		t.Fatalf(`request body["session_id"] = %v (present=%v), want a present null`, sessionID, present)
@@ -546,39 +577,211 @@ func TestRequestSignsARequestObject(t *testing.T) {
 	}
 }
 
-// TestLauncherSubcommandIsGone pins that "launcher login" is refused outright: Plan B's
-// helper-socket command replaces it, and this CLI holds no bearer launcher token to offer.
-func TestLauncherSubcommandIsGone(t *testing.T) {
-	binary := buildAgentSecrets(t)
-	keyDir := newKeyDir(t)
-
-	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused.invalid", keyDir, nil,
-		"launcher", "login", "--operator", "sjawhar", "--host", "devbox", "--out", filepath.Join(t.TempDir(), "token"))
-	if exit != exitUsageError {
-		t.Fatalf("agent-secrets launcher login: exit = %d, want %d (usage error): stdout=%q stderr=%q", exit, exitUsageError, stdout, stderr)
+// fakeLoginHelper serves just the launcher-login socket ops (login, login-status) a bare unix
+// listener needs to drive cmdLauncher's own poll loop, letting each test's states slice fully
+// drive the poll loop through however many pending answers it wants before a terminal state.
+func fakeLoginHelper(t *testing.T, code string, states []string) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "h.sock")
+	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: sock, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(stderr, "Plan B") {
-		t.Fatalf("stderr = %q, want it to name Plan B's helper-socket replacement", stderr)
+	t.Cleanup(func() { ln.Close() })
+	var calls int32
+	go func() {
+		for {
+			conn, err := ln.AcceptUnix()
+			if err != nil {
+				return
+			}
+			line, _ := bufio.NewReader(conn).ReadBytes('\n')
+			var req helper.Request
+			_ = json.Unmarshal(line, &req)
+			var resp helper.Response
+			switch req.Op {
+			case "login":
+				resp = helper.Response{OK: true, Code: code, LoginState: "pending"}
+			case "login-status":
+				idx := int(atomic.AddInt32(&calls, 1)) - 1
+				state := states[len(states)-1]
+				if idx < len(states) {
+					state = states[idx]
+				}
+				resp = helper.Response{OK: true, Code: code, LoginState: state}
+			}
+			data, _ := json.Marshal(resp)
+			_, _ = conn.Write(append(data, '\n'))
+			conn.Close()
+		}
+	}()
+	return sock
+}
+
+// TestLauncherLoginPrintsTheCodeAndWaits pins the socket-based launcher login: it prints the
+// confirmation code and, since AGENT_SECRETS_APPROVE_URL is unset, the generic Dispatch-page
+// line, then polls login-status through two pending answers before exiting 0 on "issued".
+func TestLauncherLoginPrintsTheCodeAndWaits(t *testing.T) {
+	t.Setenv("AGENT_SECRETS_APPROVE_URL", "")
+	binary := buildAgentSecrets(t)
+	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"pending", "pending", "issued"})
+	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login")
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	want := "machine login code: KQ7M-X4PZ\nenter it on the Dispatch credential page\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 }
 
-// TestEnrollWithLauncherTokenFileIsGone pins that "enroll --launcher-token-file ..." no longer
-// enrolls anything: with no "enroll" case left in run()'s dispatch table, it falls through to
-// the exec form, which requires a "--" command separator this invocation never supplies, so it
-// refuses as a usage error rather than silently trying to run "--launcher-token-file" as a
-// secret name.
-func TestEnrollWithLauncherTokenFileIsGone(t *testing.T) {
+// TestLauncherLoginPrintsTheDispatchURLWhenApproveURLIsSet pins the other half of the two-line
+// contract: with AGENT_SECRETS_APPROVE_URL set, the second line names it instead of the generic
+// "Dispatch credential page" fallback.
+func TestLauncherLoginPrintsTheDispatchURLWhenApproveURLIsSet(t *testing.T) {
 	binary := buildAgentSecrets(t)
+	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"issued"})
+	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_APPROVE_URL=https://dispatch.example/"},
+		"launcher", "login")
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	want := "machine login code: KQ7M-X4PZ\nenter it at https://dispatch.example/credentials/machine — approve only if the code matches this terminal\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+// TestLauncherLoginExitsOneOnDenied pins the terminal-failure half of the poll loop: a
+// login-status answer of "denied" exits 1 and names the state, never retrying past it.
+func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"denied"})
+	_, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login")
+	if exit != 1 {
+		t.Fatalf("exit = %d, want 1: stderr=%q", exit, stderr)
+	}
+	if !strings.Contains(stderr, "denied") {
+		t.Fatalf("stderr = %q, want it to name the denied state", stderr)
+	}
+}
+
+// TestLauncherLoginStatusPrintsStateAndExitsZeroOnlyWhenIssued pins login-status's read-only,
+// single-shot contract (AGENTC-834): it prints the bare state on stdout and its exit code is a
+// liveness probe — 0 only for "issued", 1 for every other terminal/pending state and for "none"
+// when login was never run (empty LoginState) — with a single helper call, never login's
+// mint-a-fresh-key-and-poll side effect.
+func TestLauncherLoginStatusPrintsStateAndExitsZeroOnlyWhenIssued(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	for _, tc := range []struct {
+		state string
+		want  string
+		exit  int
+	}{
+		{"issued", "issued\n", 0},
+		{"pending", "pending\n", 1},
+		{"denied", "denied\n", 1},
+		{"expired", "expired\n", 1},
+		{"", "none\n", 1},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{tc.state})
+			stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
+				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
+			if exit != tc.exit || stdout != tc.want {
+				t.Fatalf("state %q: exit = %d stdout = %q, want exit %d stdout %q (stderr=%q)", tc.state, exit, stdout, tc.exit, tc.want, stderr)
+			}
+		})
+	}
+}
+
+// TestEnrollHelperPrintsEnrollmentID pins enroll --helper's box contract: it asks the local
+// agent-secrets-helper over its unix socket (never the broker directly), writes the returned
+// enrollment id into AGENT_SECRETS_KEY_DIR/enrollment exactly as file mode's own buildSigner
+// reads it back, and prints the enrollment id alone on stdout — the contract scripts/agentbox
+// parses.
+func TestEnrollHelperPrintsEnrollmentID(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock, _ := fakeHelper(t, helper.Response{OK: true, EnrollmentID: "enr-box-1", LeaseExpires: time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)})
+	keyDir := t.TempDir()
+	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir,
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock},
+		"enroll", "--helper", "--kind", "box", "--runtime-id", "box-1", "--thumbprint", "tp-box")
+	if exit != 0 {
+		t.Fatalf("enroll --helper exit = %d: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if stdout != "enr-box-1\n" {
+		t.Fatalf("stdout = %q, want the bare enrollment id", stdout)
+	}
+	data, err := os.ReadFile(filepath.Join(keyDir, "enrollment"))
+	if err != nil || strings.TrimSpace(string(data)) != "enr-box-1" {
+		t.Fatalf("enrollment file: err=%v content=%q", err, string(data))
+	}
+}
+
+// TestUnenrollHelperSucceeds pins unenroll --helper's exit-code-only contract: it asks the local
+// helper to revoke the enrollment over its unix socket and prints nothing on success.
+func TestUnenrollHelperSucceeds(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock, _ := fakeHelper(t, helper.Response{OK: true})
+	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "unenroll", "--helper", "--enrollment", "enr-box-1")
+	if exit != 0 {
+		t.Fatalf("unenroll --helper exit = %d: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want nothing on success", stdout)
+	}
+}
+
+// TestEnrollHelperFlagValidation pins enroll/unenroll's remaining validation now that contract
+// v9 dropped launcher bearer tokens entirely: --helper is the only enrollment path left, so it
+// is required (not merely one of two mutually exclusive options), and enroll --helper still
+// supports only --kind box.
+func TestEnrollHelperFlagValidation(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	keyDir := t.TempDir()
+
+	if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, nil,
+		"enroll", "--kind", "box", "--runtime-id", "box-1", "--thumbprint", "tp-box"); exit != exitUsageError {
+		t.Fatalf("enroll without --helper exit = %d, want a usage error: %s", exit, stderr)
+	}
+	if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, nil,
+		"enroll", "--helper", "--kind", "host", "--runtime-id", "box-1", "--thumbprint", "tp-box"); exit != exitUsageError {
+		t.Fatalf("enroll --helper --kind host exit = %d, want a usage error naming box: %s", exit, stderr)
+	}
+	if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, nil,
+		"unenroll", "--enrollment", "enr-1"); exit != exitUsageError {
+		t.Fatalf("unenroll without --helper exit = %d, want a usage error: %s", exit, stderr)
+	}
+}
+
+// TestRequestAndExecFormSendOMPSessionIDAsSessionID is the regression for the review's finding
+// I3: POST /v1/requests carries session_id so the broker can wake this host session directly
+// once its request is decided (host enrollments carry no session_id of their own) — both call
+// sites, cmdRequest and cmdExec, must forward OMP_SESSION_ID rather than leaving it "".
+func TestRequestAndExecFormSendOMPSessionIDAsSessionID(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, counters := fakeBroker(t)
+	defer broker.Close()
 	keyDir := newKeyDir(t)
-	tokenFile := filepath.Join(t.TempDir(), "launcher-token")
-	if err := os.WriteFile(tokenFile, []byte("launcher-token\n"), 0o600); err != nil {
-		t.Fatal(err)
+
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, []string{"OMP_SESSION_ID=sess-request-123"}, "request", "GRANT_ME")
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if got := counters.sessionID(); got != "sess-request-123" {
+		t.Fatalf("request form session_id = %q, want %q", got, "sess-request-123")
 	}
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused.invalid", keyDir, nil,
-		"enroll", "--launcher-token-file", tokenFile, "--kind", "box", "--runtime-id", "box-1",
-		"--operator", "sjawhar", "--thumbprint", "tp-1")
-	if exit != exitUsageError {
-		t.Fatalf("agent-secrets enroll: exit = %d, want %d (usage error, no enroll subcommand remains): stdout=%q stderr=%q", exit, exitUsageError, stdout, stderr)
+	stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir, []string{"OMP_SESSION_ID=sess-exec-456"}, "GRANT_ME", "--", "true")
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if got := counters.sessionID(); got != "sess-exec-456" {
+		t.Fatalf("exec form session_id = %q, want %q", got, "sess-exec-456")
 	}
 }

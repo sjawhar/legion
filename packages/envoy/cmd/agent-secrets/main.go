@@ -1,21 +1,36 @@
-// Command agent-secrets is the box/pod-side client for the AGENTC-833 secrets broker: it
-// requests and reads back secret grants and — in its most common shape — requests one or more
-// secrets and execs a command with them in its environment. Contract v9: enrolling a runtime and
-// minting a launcher credential are Plan B/C helper-socket operations, not this CLI's own
-// subcommands (nothing on a devbox can enroll until Plan B lands).
+// Command agent-secrets is the client for the AGENTC-393 secrets broker: an agent box or pod
+// signs with the key.pem and enrollment file it keeps under AGENT_SECRETS_KEY_DIR (file mode); a
+// host session has no key of its own and asks agent-secrets-helper, over
+// AGENT_SECRETS_HELPER_SOCK, to sign on its behalf (helper mode). It enrolls a runtime (box
+// enrollment only, through the local helper — see cmdEnrollHelper below), requests and reads
+// back secret grants, and — in its most common shape — requests one or more secrets and execs a
+// command with them in its environment.
 //
 //	agent-secrets keygen --out <dir>
+//	agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]
+//	agent-secrets unenroll --helper --enrollment <id>
+//	agent-secrets launcher login
+//	agent-secrets launcher login-status
+//	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
 //	agent-secrets renew
 //	agent-secrets request NAME... [--reason TEXT] [--json]
 //	agent-secrets status <request_id> [--json]
 //	agent-secrets cancel <request_id>
 //	agent-secrets revoke <grant_id>
 //	agent-secrets self [--json]
+//	agent-secrets whoami [--json]
+//	agent-secrets sign --method M --url U [--enrollment E]
 //	agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
 //
-// Environment: AGENT_SECRETS_URL (the broker's base URL) and AGENT_SECRETS_KEY_DIR (holds
-// key.pem and enrollment, the two files keygen writes and every session-authenticated
-// subcommand reads; a runtime's enrollment is provisioned out of band, not by this CLI).
+// Environment: AGENT_SECRETS_URL (the broker's base URL) and, for every session-authenticated
+// subcommand, either AGENT_SECRETS_KEY_DIR (an agent box or pod's key.pem and enrollment, the
+// two files keygen and enroll write) or AGENT_SECRETS_HELPER_SOCK (a host session's
+// agent-secrets-helper socket, joined by `agent-secrets register`). A host session enrolls
+// (kind host) automatically through the helper's own enroll loop, and a pod's own enrollment is
+// its launcher's job — this CLI has no direct enrollment path for either; only a box enrolls
+// through it, and only via --helper (contract v9 dropped launcher bearer tokens: nothing on a
+// devbox can enroll except through a helper or the Legion daemon, the two processes that hold a
+// launcher's proof-signing key).
 package main
 
 import (
@@ -35,6 +50,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 )
 
@@ -62,9 +78,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "keygen":
 		return cmdKeygen(args[1:], stdout, stderr)
+	case "enroll":
+		return cmdEnroll(args[1:], stdout, stderr)
+	case "unenroll":
+		return cmdUnenroll(args[1:], stdout, stderr)
 	case "launcher":
-		fmt.Fprintln(stderr, "agent-secrets: launcher login is now a Plan B helper-socket command; this CLI no longer holds a bearer launcher token")
-		return exitUsageError
+		return cmdLauncher(args[1:], stdout, stderr)
+	case "register":
+		return cmdRegister(args[1:], stdout, stderr)
 	case "renew":
 		return cmdRenew(args[1:], stdout, stderr)
 	case "request":
@@ -77,6 +98,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdRevoke(args[1:], stdout, stderr)
 	case "self":
 		return cmdSelf(args[1:], stdout, stderr)
+	case "whoami":
+		// whoami is GET /v1/enrollments/self, but must always print the broker's raw JSON body
+		// (scripts/agentbox's box-doctor and host-doctor both pipe bare `agent-secrets whoami`
+		// straight into jq): identical to self --json, so it aliases cmdSelf with --json forced
+		// on rather than duplicating it.
+		return cmdSelf(append([]string{"--json"}, args[1:]...), stdout, stderr)
+	case "sign":
+		return cmdSign(args[1:], stdout, stderr)
 	default:
 		return cmdExec(args, stdout, stderr)
 	}
@@ -85,12 +114,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 func usage() string {
 	return `usage:
   agent-secrets keygen --out <dir>
+  agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]
+  agent-secrets unenroll --helper --enrollment <id>
+  agent-secrets launcher login
+  agent-secrets launcher login-status
+  agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
   agent-secrets renew
   agent-secrets request NAME... [--reason TEXT] [--json]
   agent-secrets status <request_id> [--json]
   agent-secrets cancel <request_id>
   agent-secrets revoke <grant_id>
   agent-secrets self [--json]
+  agent-secrets whoami [--json]
+  agent-secrets sign --method M --url U [--enrollment E]
   agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
 `
 }
@@ -153,28 +189,52 @@ func loadKey(path string) (*ecdsa.PrivateKey, error) {
 	return key, nil
 }
 
-// sessionContext resolves the broker URL, enrollment id, and signing key every session-
-// authenticated subcommand (renew, request, status, cancel, revoke, self, and the exec form)
-// needs, from AGENT_SECRETS_URL and the key.pem/enrollment files under AGENT_SECRETS_KEY_DIR.
-func sessionContext() (base, enrollmentID string, key *ecdsa.PrivateKey, err error) {
+// buildSigner selects and builds this process's Signer: an agent box or pod signs with the key
+// and enrollment id it keeps under AGENT_SECRETS_KEY_DIR (file mode); a host session has no key
+// of its own and asks agent-secrets-helper over AGENT_SECRETS_HELPER_SOCK, which signs only for
+// processes descending from a session `agent-secrets register` registered (helper mode). The
+// enrollment id it returns is file mode's own; helper mode returns "" because nothing needs it
+// as a literal except RenewEnrollment's URL path, and a host session's lease is renewed by the
+// helper itself — cmdRenew refuses outright once it sees an empty id from a successful build.
+func buildSigner() (enrollmentID string, signer Signer, err error) {
+	if dir := os.Getenv("AGENT_SECRETS_KEY_DIR"); dir != "" {
+		if _, statErr := os.Stat(filepath.Join(dir, "key.pem")); statErr == nil {
+			key, keyErr := loadKey(filepath.Join(dir, "key.pem"))
+			if keyErr != nil {
+				return "", nil, keyErr
+			}
+			id, idErr := readTrimmed(filepath.Join(dir, "enrollment"))
+			if idErr != nil {
+				if reason, rerr := readTrimmed(filepath.Join(dir, "enrollment.error")); rerr == nil {
+					return "", nil, fmt.Errorf("%w (enrollment.error: %s)", idErr, reason)
+				}
+				return "", nil, idErr
+			}
+			if id == "" {
+				return "", nil, fmt.Errorf("%s: empty", filepath.Join(dir, "enrollment"))
+			}
+			return id, &fileSigner{key: key, enrollmentID: id}, nil
+		}
+	}
+	if sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK"); sock != "" {
+		return "", &helperSigner{sock: sock}, nil
+	}
+	return "", nil, errors.New("no session identity: AGENT_SECRETS_KEY_DIR has no key.pem (an agent box or pod is enrolled by its launcher) and AGENT_SECRETS_HELPER_SOCK is unset (a host session is registered by `agent-secrets register`)")
+}
+
+// sessionContext resolves the broker URL and this process's Signer every session-authenticated
+// subcommand (renew, request, status, cancel, revoke, self, and the exec form) needs, plus the
+// enrollment id buildSigner read from file mode (empty in helper mode).
+func sessionContext() (base, enrollmentID string, signer Signer, err error) {
 	base = strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
 	if base == "" {
 		return "", "", nil, errors.New("AGENT_SECRETS_URL is required")
 	}
-	dir := os.Getenv("AGENT_SECRETS_KEY_DIR")
-	if dir == "" {
-		return "", "", nil, errors.New("AGENT_SECRETS_KEY_DIR is required")
-	}
-	if key, err = loadKey(filepath.Join(dir, "key.pem")); err != nil {
+	enrollmentID, signer, err = buildSigner()
+	if err != nil {
 		return "", "", nil, err
 	}
-	if enrollmentID, err = readTrimmed(filepath.Join(dir, "enrollment")); err != nil {
-		return "", "", nil, err
-	}
-	if enrollmentID == "" {
-		return "", "", nil, fmt.Errorf("%s: empty", filepath.Join(dir, "enrollment"))
-	}
-	return base, enrollmentID, key, nil
+	return base, enrollmentID, signer, nil
 }
 
 // writeVerbatim writes exactly raw, nothing more and nothing less: --json's contract is "the
@@ -249,6 +309,247 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 }
 
 // ---------------------------------------------------------------------------
+// enroll / unenroll (box only, through the local agent-secrets-helper socket)
+// ---------------------------------------------------------------------------
+
+// cmdEnroll implements "enroll --helper --kind box --runtime-id <id> --thumbprint <tp>
+// [--session-id <id>]". --helper is required: contract v9 dropped launcher bearer tokens, so
+// this CLI has no other way to enroll anything — the host's one launcher credential lives only
+// in agent-secrets-helper's memory (a human installs it with `agent-secrets launcher login`),
+// and only a box enrolls through this command at all (a host session enrolls itself
+// automatically via `agent-secrets register`; a pod's enrollment is its own launcher's job).
+func cmdEnroll(args []string, stdout, stderr io.Writer) int {
+	flagArgs, positional := splitArgs(args, map[string]bool{
+		"kind": true, "runtime-id": true, "thumbprint": true, "session-id": true,
+	})
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
+		return exitUsageError
+	}
+	flags := flag.NewFlagSet("agent-secrets enroll", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	kind := flags.String("kind", "", `"box" (the only kind --helper supports)`)
+	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
+	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
+	sessionID := flags.String("session-id", "", "the Envoy session id to wake on a decision")
+	helperFlag := flags.Bool("helper", false, "enroll through the local agent-secrets-helper socket (kind box only; the only enrollment path this CLI has left, since a launcher credential is a proof-signed key held only in a helper or the Legion daemon, never a bearer token this CLI could read from a file)")
+	if err := flags.Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if !*helperFlag {
+		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls only through the local agent-secrets-helper socket)")
+		return exitUsageError
+	}
+	return cmdEnrollHelper(*kind, *runtimeID, *thumbprint, *sessionID, stdout, stderr)
+}
+
+// cmdEnrollHelper asks the local agent-secrets-helper daemon, over its unix socket, to enroll
+// this box's key using the machine credential `agent-secrets launcher login` installed.
+// --helper supports only kind "box" today: a host session enrolls itself through
+// `agent-secrets register`, not this flag, and a pod has no local helper daemon to ask. On
+// success it writes the enrollment id into AGENT_SECRETS_KEY_DIR/enrollment (buildSigner reads
+// it back for every later session-authenticated subcommand) and prints the enrollment id alone
+// on stdout — the contract scripts/agentbox parses.
+func cmdEnrollHelper(kind, runtimeID, thumbprint, sessionID string, stdout, stderr io.Writer) int {
+	if kind != "box" {
+		fmt.Fprintln(stderr, `agent-secrets enroll: --helper supports only --kind box today`)
+		return exitUsageError
+	}
+	if runtimeID == "" || thumbprint == "" {
+		fmt.Fprintln(stderr, "agent-secrets enroll: --helper needs --runtime-id and --thumbprint")
+		return exitUsageError
+	}
+	dir := os.Getenv("AGENT_SECRETS_KEY_DIR")
+	if dir == "" {
+		fmt.Fprintln(stderr, "agent-secrets enroll: AGENT_SECRETS_KEY_DIR is required")
+		return exitUsageError
+	}
+	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
+	if sock == "" {
+		sock = helper.DefaultSocket(os.Getenv)
+	}
+	var sessionIDPtr *string
+	if sessionID != "" {
+		sessionIDPtr = &sessionID
+	}
+	resp, err := helper.Call(sock, helper.Request{Op: "enroll-box", RuntimeID: runtimeID, Thumbprint: thumbprint, SessionID: sessionIDPtr}, 30*time.Second)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
+		return 1
+	}
+	if !resp.OK {
+		fmt.Fprintf(stderr, "agent-secrets enroll: %s: %s\n", resp.Code, resp.Error)
+		return 1
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
+		return 1
+	}
+	if err := os.WriteFile(filepath.Join(dir, "enrollment"), []byte(resp.EnrollmentID+"\n"), 0o600); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(stdout, resp.EnrollmentID)
+	return 0
+}
+
+// cmdUnenroll implements "unenroll --helper --enrollment <id>". --helper is required for the
+// same reason cmdEnroll requires it: contract v9 dropped launcher bearer tokens entirely.
+func cmdUnenroll(args []string, stdout, stderr io.Writer) int {
+	flagArgs, positional := splitArgs(args, map[string]bool{"enrollment": true})
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets unenroll: unexpected argument %q\n", positional[0])
+		return exitUsageError
+	}
+	flags := flag.NewFlagSet("agent-secrets unenroll", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	enrollmentID := flags.String("enrollment", "", "the enrollment id to revoke")
+	helperFlag := flags.Bool("helper", false, "unenroll through the local agent-secrets-helper socket")
+	if err := flags.Parse(flagArgs); err != nil {
+		return exitUsage(err)
+	}
+	if !*helperFlag {
+		fmt.Fprintln(stderr, "agent-secrets unenroll: --helper is required (this CLI unenrolls only through the local agent-secrets-helper socket)")
+		return exitUsageError
+	}
+	if *enrollmentID == "" {
+		fmt.Fprintln(stderr, "agent-secrets unenroll: --enrollment is required")
+		return exitUsageError
+	}
+	return cmdUnenrollHelper(*enrollmentID, stderr)
+}
+
+// cmdUnenrollHelper asks the local agent-secrets-helper daemon to revoke a box enrollment over
+// its unix socket, using the machine credential `agent-secrets launcher login` installed.
+// Idempotent: the helper's UnenrollBox treats 204 and 404 as done. Prints nothing on success,
+// matching the exit-code-only unenroll contract.
+func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
+	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
+	if sock == "" {
+		sock = helper.DefaultSocket(os.Getenv)
+	}
+	resp, err := helper.Call(sock, helper.Request{Op: "unenroll-box", EnrollmentID: enrollmentID}, 30*time.Second)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets unenroll: %v\n", err)
+		return 1
+	}
+	if !resp.OK {
+		fmt.Fprintf(stderr, "agent-secrets unenroll: %s: %s\n", resp.Code, resp.Error)
+		return 1
+	}
+	return 0
+}
+
+// ---------------------------------------------------------------------------
+// launcher login / login-status
+// ---------------------------------------------------------------------------
+
+// cmdLauncher dispatches this CLI's two launcher subcommands: "login" and "login-status".
+func cmdLauncher(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, `agent-secrets launcher: "login" or "login-status" is required`)
+		return exitUsageError
+	}
+	switch args[0] {
+	case "login":
+		return cmdLauncherLogin(args[1:], stdout, stderr)
+	case "login-status":
+		return cmdLauncherLoginStatus(args[1:], stdout, stderr)
+	default:
+		fmt.Fprintf(stderr, "agent-secrets launcher: unknown subcommand %q\n", args[0])
+		return exitUsageError
+	}
+}
+
+// cmdLauncherLogin implements "launcher login". It asks agent-secrets-helper to start a machine
+// login, prints the broker's confirmation code for the operator to type on the Dispatch
+// credential page, then polls the helper until the login reaches a terminal state.
+func cmdLauncherLogin(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets launcher login: unexpected argument %q\n", args[0])
+		return exitUsageError
+	}
+	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
+	if sock == "" {
+		sock = helper.DefaultSocket(os.Getenv)
+	}
+	resp, err := helper.Call(sock, helper.Request{Op: "login"}, 10*time.Second)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
+		return 1
+	}
+	if !resp.OK {
+		fmt.Fprintf(stderr, "agent-secrets launcher login: %s: %s\n", resp.Code, resp.Error)
+		return 1
+	}
+	fmt.Fprintf(stdout, "machine login code: %s\n", resp.Code)
+	if approveURL := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_APPROVE_URL"), "/"); approveURL != "" {
+		fmt.Fprintf(stdout, "enter it at %s/credentials/machine — approve only if the code matches this terminal\n", approveURL)
+	} else {
+		fmt.Fprintln(stdout, "enter it on the Dispatch credential page")
+	}
+	backoff := 2 * time.Second
+	for {
+		resp, err := helper.Call(sock, helper.Request{Op: "login-status"}, 10*time.Second)
+		if err != nil {
+			fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
+			return 1
+		}
+		if !resp.OK {
+			fmt.Fprintf(stderr, "agent-secrets launcher login: %s: %s\n", resp.Code, resp.Error)
+			return 1
+		}
+		switch resp.LoginState {
+		case "issued":
+			return 0
+		case "denied", "expired":
+			fmt.Fprintf(stderr, "agent-secrets launcher login: %s\n", resp.LoginState)
+			return 1
+		}
+		time.Sleep(backoff)
+		backoff = nextBackoff(backoff)
+	}
+}
+
+// cmdLauncherLoginStatus implements "launcher login-status": a read-only, single-shot query of
+// the helper's current (or most recently settled) machine login state, with no side effect —
+// unlike re-running "login" itself, which mints a fresh key and opens a brand-new pending
+// machine-login record even while a credential is already issued (Broker.Login only
+// short-circuits a login that is still *pending*, per its own doc comment). Its exit code is a
+// liveness probe scripts can use directly: 0 only when the state is "issued", 1 for
+// "pending"/"denied"/"expired" and for "" (login never run) — the same distinction the doctor
+// and installer checks in ~/.dotfiles need and, before this verb existed, had no side-effect-free
+// way to make (AGENTC-834).
+func cmdLauncherLoginStatus(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets launcher login-status: unexpected argument %q\n", args[0])
+		return exitUsageError
+	}
+	sock := os.Getenv("AGENT_SECRETS_HELPER_SOCK")
+	if sock == "" {
+		sock = helper.DefaultSocket(os.Getenv)
+	}
+	resp, err := helper.Call(sock, helper.Request{Op: "login-status"}, 10*time.Second)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets launcher login-status: %v\n", err)
+		return 1
+	}
+	if !resp.OK {
+		fmt.Fprintf(stderr, "agent-secrets launcher login-status: %s: %s\n", resp.Code, resp.Error)
+		return 1
+	}
+	state := resp.LoginState
+	if state == "" {
+		state = "none"
+	}
+	fmt.Fprintln(stdout, state)
+	if resp.LoginState == "issued" {
+		return 0
+	}
+	return 1
+}
+
+// ---------------------------------------------------------------------------
 // renew
 // ---------------------------------------------------------------------------
 
@@ -258,17 +559,21 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agent-secrets renew: no arguments are accepted")
 		return exitUsageError
 	}
-	base, enrollmentID, key, err := sessionContext()
+	base, enrollmentID, signer, err := sessionContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
 		return exitUsageError
+	}
+	if enrollmentID == "" {
+		fmt.Fprintln(stderr, "agent-secrets renew: a host session's lease is renewed by agent-secrets-helper; agent-secrets renew is for agent boxes")
+		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	c := newClient(base)
 	backoff := 2 * time.Second
 	for {
-		expires, err := c.RenewEnrollment(ctx, key, enrollmentID)
+		expires, err := c.RenewEnrollment(ctx, signer, enrollmentID)
 		if err != nil {
 			if ctx.Err() != nil {
 				return 0
@@ -320,12 +625,12 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agent-secrets request: at least one secret NAME is required")
 		return exitUsageError
 	}
-	base, enrollmentID, key, err := sessionContext()
+	base, _, signer, err := sessionContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return exitUsageError
 	}
-	result, raw, err := newClient(base).CreateRequest(context.Background(), key, enrollmentID, names, *reason, "")
+	result, raw, err := newClient(base).CreateRequest(context.Background(), signer, names, *reason, os.Getenv("OMP_SESSION_ID"))
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return 1
@@ -361,12 +666,12 @@ func cmdStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agent-secrets status: exactly one request_id is required")
 		return exitUsageError
 	}
-	base, enrollmentID, key, err := sessionContext()
+	base, _, signer, err := sessionContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets status: %v\n", err)
 		return exitUsageError
 	}
-	result, raw, err := newClient(base).GetRequest(context.Background(), key, enrollmentID, positional[0])
+	result, raw, err := newClient(base).GetRequest(context.Background(), signer, positional[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets status: %v\n", err)
 		return 1
@@ -395,12 +700,12 @@ func cmdCancel(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agent-secrets cancel: exactly one request_id is required")
 		return exitUsageError
 	}
-	base, enrollmentID, key, err := sessionContext()
+	base, _, signer, err := sessionContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets cancel: %v\n", err)
 		return exitUsageError
 	}
-	if err := newClient(base).CancelRequest(context.Background(), key, enrollmentID, positional[0]); err != nil {
+	if err := newClient(base).CancelRequest(context.Background(), signer, positional[0]); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets cancel: %v\n", err)
 		return 1
 	}
@@ -418,12 +723,12 @@ func cmdRevoke(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agent-secrets revoke: exactly one grant_id is required")
 		return exitUsageError
 	}
-	base, enrollmentID, key, err := sessionContext()
+	base, _, signer, err := sessionContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets revoke: %v\n", err)
 		return exitUsageError
 	}
-	if err := newClient(base).RevokeGrant(context.Background(), key, enrollmentID, positional[0]); err != nil {
+	if err := newClient(base).RevokeGrant(context.Background(), signer, positional[0]); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets revoke: %v\n", err)
 		return 1
 	}
@@ -447,12 +752,12 @@ func cmdSelf(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
-	base, enrollmentID, key, err := sessionContext()
+	base, _, signer, err := sessionContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets self: %v\n", err)
 		return exitUsageError
 	}
-	result, raw, err := newClient(base).Self(context.Background(), key, enrollmentID)
+	result, raw, err := newClient(base).Self(context.Background(), signer)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets self: %v\n", err)
 		return 1
@@ -514,14 +819,14 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	base, enrollmentID, key, err := sessionContext()
+	base, _, signer, err := sessionContext()
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return exitUsageError
 	}
 	c := newClient(base)
 	ctx := context.Background()
-	result, _, err := c.CreateRequest(ctx, key, enrollmentID, names, *reason, "")
+	result, _, err := c.CreateRequest(ctx, signer, names, *reason, os.Getenv("OMP_SESSION_ID"))
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return 1
@@ -537,7 +842,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 				break
 			}
 			time.Sleep(minDuration(backoff, remaining))
-			status, _, err := c.GetRequest(ctx, key, enrollmentID, requestID)
+			status, _, err := c.GetRequest(ctx, signer, requestID)
 			if err != nil {
 				fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 				return 1
@@ -566,7 +871,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	values, err := c.GrantValues(ctx, key, enrollmentID, *grantID)
+	values, err := c.GrantValues(ctx, signer, *grantID)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return 1
