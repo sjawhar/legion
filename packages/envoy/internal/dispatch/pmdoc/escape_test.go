@@ -760,32 +760,84 @@ func TestRenderKeepsLeadingWhitespaceOnAParagraph(t *testing.T) {
 }
 
 // The line a setext underline underlines can end at a hard break, where the underline opens a
-// fresh text node whose own offsets show no predecessor.
+// fresh text node whose own offsets show no predecessor. The line before it can be a container's
+// first, which opens with the list marker or quote the container's later lines write as spaces.
 func TestRenderEscapesASetextUnderlineAfterAHardBreak(t *testing.T) {
-	doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
-		{Type: "text", Text: "Title"},
-		{Type: "hardbreak"},
-		{Type: "text", Text: "=="},
-	}}}}
-	markdown, err := Render(doc)
-	if err != nil {
-		t.Fatal(err)
+	paragraph := func() *Node {
+		return &Node{Type: "paragraph", Children: []*Node{
+			{Type: "text", Text: "Title"},
+			{Type: "hardbreak"},
+			{Type: "text", Text: "=="},
+		}}
 	}
-	if markdown != "Title\\\n\\==\n" {
-		t.Fatalf("Render() = %q", markdown)
+	quote := func(child *Node) *Node { return &Node{Type: "blockquote", Children: []*Node{child}} }
+	item := func(child *Node) *Node {
+		children := []*Node{child}
+		if child.Type != "paragraph" {
+			children = []*Node{{Type: "paragraph"}, child}
+		}
+		return &Node{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: children}}}
 	}
-	back, err := Parse(markdown)
-	if err != nil {
-		t.Fatal(err)
+	reference := &Node{Type: "paragraph", Children: []*Node{
+		{Type: "text", Text: "x"},
+		{Type: "footnote_reference", Attrs: Attrs{"label": "n"}},
+	}}
+	definition := func(child *Node) *Node {
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": "n"}, Children: []*Node{child}}
 	}
-	// The parser stamps a hard break with its own `isInline` attribute, so the tree is compared
-	// by what it renders and by the block it is: one paragraph, not a heading with an underline.
-	if len(back.Children) != 1 || back.Children[0].Type != "paragraph" {
-		t.Fatalf("Parse(Render()) children = %#v", back.Children)
+	for _, test := range []struct {
+		name   string
+		blocks []*Node
+		want   string
+	}{
+		{name: "a paragraph", blocks: []*Node{paragraph()}, want: "Title\\\n\\==\n"},
+		{name: "a quote", blocks: []*Node{quote(paragraph())}, want: "> Title\\\n> \\==\n"},
+		{name: "a list item", blocks: []*Node{item(paragraph())}, want: "- Title\\\n  \\==\n"},
+		{name: "a quote in a list item", blocks: []*Node{item(quote(paragraph()))}, want: "- > Title\\\n  > \\==\n"},
+		{name: "a list item in a quote", blocks: []*Node{quote(item(paragraph()))}, want: "> - Title\\\n>   \\==\n"},
+		{name: "a footnote definition", blocks: []*Node{reference, definition(paragraph())}, want: "x[^n]\n\n[^n]: Title\\\n    \\==\n"},
+		{name: "a quote in a footnote definition", blocks: []*Node{reference, definition(quote(paragraph()))}, want: "x[^n]\n\n[^n]: > Title\\\n    > \\==\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: test.blocks}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("Render() = %q, want %q", markdown, test.want)
+			}
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The parser stamps a hard break with its own `isInline` attribute, so the tree is
+			// compared by what it renders and by its blocks: a paragraph, not a heading.
+			if shape, want := blockKindsOf(back), blockKindsOf(doc); shape != want {
+				t.Fatalf("Parse(Render()) blocks = %s, want %s", shape, want)
+			}
+			if again := mustRender(t, back); again != markdown {
+				t.Fatalf("Render(Parse(Render())) = %q, want %q", again, markdown)
+			}
+		})
 	}
-	if again := mustRender(t, back); again != markdown {
-		t.Fatalf("Render(Parse(Render())) = %q, want %q", again, markdown)
+}
+
+// blockKindsOf is the block types of doc, depth first.
+func blockKindsOf(doc *Node) string {
+	var kinds []string
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if isInlineNodeType(n.Type) {
+			return
+		}
+		kinds = append(kinds, n.Type)
+		for _, child := range n.Children {
+			walk(child)
+		}
 	}
+	walk(doc)
+	return strings.Join(kinds, ",")
 }
 
 // Stored markdown that main already renders byte for byte must come back byte for byte: a changed
