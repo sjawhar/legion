@@ -829,6 +829,191 @@ func (m *Machine) LiveGrants(ctx context.Context, enrollmentID string) ([]Grant,
 	return grants, rows.Err()
 }
 
+// RecordKind reads a credential-request record's own kind ("agent_secret" or
+// "launcher_credential") — the one column api.decideRecord needs before it knows which service's
+// ApplyDecision a record id belongs to, and api.readRecord needs to decide what an already-read
+// detail means. pgx.ErrNoRows means no such record.
+func (m *Machine) RecordKind(ctx context.Context, recordID string) (string, error) {
+	var kind string
+	err := m.Store.Pool.QueryRow(ctx, `select kind from credential_requests where id=$1`, recordID).Scan(&kind)
+	return kind, err
+}
+
+// PendingSummary is one still-undecided credential-request record for GET /v1/pending: its id,
+// kind, the plain identifiers its request object names (secret names for agent_secret, the single
+// host for launcher_credential), and when it was requested.
+type PendingSummary struct {
+	RecordID    string
+	Kind        string
+	Identifiers []string
+	RequestedAt time.Time
+}
+
+// PendingForApprover lists every still-pending credential-request record — of either kind — that
+// names approver, newest first: GET /v1/pending's exact contract. A record counts as pending when
+// it carries no terminal decision event yet, matching credential_request_decision's own partial
+// index.
+func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]PendingSummary, error) {
+	rows, err := m.Store.Pool.Query(ctx, `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
+		where cr.approver=$1 and not exists (
+			select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event in ('approved','denied','expired','cancelled')
+		) order by cr.created_at desc`, record.CanonicalLogin(approver))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PendingSummary
+	for rows.Next() {
+		var id, kind, canonical string
+		var createdAt time.Time
+		if err := rows.Scan(&id, &kind, &canonical, &createdAt); err != nil {
+			return nil, err
+		}
+		body, err := record.ParseBody(canonical)
+		if err != nil {
+			return nil, err
+		}
+		obj, err := record.VerifyRequestObject(body.Request, m.Audience, m.Skew, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		identifiers := make([]string, len(obj.Details))
+		for i, d := range obj.Details {
+			identifiers[i] = d.Identifier
+		}
+		out = append(out, PendingSummary{RecordID: id, Kind: kind, Identifiers: identifiers, RequestedAt: createdAt})
+	}
+	return out, rows.Err()
+}
+
+// RecordDecision is a decided credential-request record's own terminal event, for
+// GET /v1/credential-requests/{id}'s "decided" field.
+type RecordDecision struct {
+	Event        string
+	At           time.Time
+	CredentialID string
+}
+
+// RecordDetail is a full credential-request record for GET /v1/credential-requests/{id}: its
+// decoded request object plus its current state, folding in a later grant revocation the record's
+// own decision events never overwrite (State becomes "revoked" while Decided keeps the original
+// approval). Enrollment is nil for a machine login (Kind == "launcher_credential"), which carries
+// no requesting enrollment at all.
+type RecordDetail struct {
+	RecordID        string
+	Kind            string
+	State           string
+	Approver        string
+	Enrollment      *record.Enrollment
+	Identifiers     []string
+	Service         string
+	Reason          string
+	LifetimeSeconds int
+	RulesVersion    string
+	ExpiresAt       time.Time
+	RequestedAt     time.Time
+	Decided         *RecordDecision
+}
+
+// ReadRecord reads a credential-request record's full detail by id, for GET
+// /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup (which adds
+// its own challenges on top). pgx.ErrNoRows means no such record.
+func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail, error) {
+	var canonical, approver, kind string
+	var createdAt, expiresAt time.Time
+	if err := m.Store.Pool.QueryRow(ctx, `select body, approver, kind, created_at, expires_at from credential_requests where id=$1`, recordID).
+		Scan(&canonical, &approver, &kind, &createdAt, &expiresAt); err != nil {
+		return RecordDetail{}, err
+	}
+	body, err := record.ParseBody(canonical)
+	if err != nil {
+		return RecordDetail{}, err
+	}
+	obj, err := record.VerifyRequestObject(body.Request, m.Audience, m.Skew, createdAt)
+	if err != nil {
+		return RecordDetail{}, err
+	}
+	var enr *record.Enrollment
+	if kind != "launcher_credential" {
+		e := body.Enrollment
+		enr = &e
+	}
+	identifiers := make([]string, len(obj.Details))
+	service := ""
+	for i, d := range obj.Details {
+		identifiers[i] = d.Identifier
+		if d.Service != "" {
+			service = d.Service
+		}
+	}
+	detail := RecordDetail{
+		RecordID: recordID, Kind: kind, State: "pending", Approver: approver, Enrollment: enr,
+		Identifiers: identifiers, Service: service, Reason: obj.Reason, LifetimeSeconds: body.LifetimeSeconds,
+		RulesVersion: body.RulesVersion, ExpiresAt: expiresAt, RequestedAt: createdAt,
+	}
+	var event, credID string
+	var decidedAt time.Time
+	err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,'') from credential_request_events
+		where record_id=$1 and event in ('approved','denied','expired','cancelled')`, recordID).Scan(&event, &decidedAt, &credID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return detail, nil
+	case err != nil:
+		return RecordDetail{}, err
+	}
+	detail.State = event
+	detail.Decided = &RecordDecision{Event: event, At: decidedAt, CredentialID: credID}
+	var revoked int
+	err = m.Store.Pool.QueryRow(ctx, `select 1 from credential_request_events where record_id=$1 and event='revoked' limit 1`, recordID).Scan(&revoked)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
+		return RecordDetail{}, err
+	default:
+		detail.State = "revoked"
+	}
+	return detail, nil
+}
+
+// ApproverGrant is one live, approval-granted grant an approver (or its enrollment's operator) may
+// revoke, for GET /v1/grants?approver=<login>.
+type ApproverGrant struct {
+	GrantID    string
+	RecordID   *string
+	Enrollment record.Enrollment
+	Names      []string
+	ExpiresAt  time.Time
+	CreatedAt  time.Time
+}
+
+// GrantsForApprover lists every live grant approver (or its enrollment's operator) may revoke:
+// only grants an approval actually decided — an automatic grant carries no approver and never
+// appears here — newest first.
+func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]ApproverGrant, error) {
+	login := record.CanonicalLogin(approver)
+	rows, err := m.Store.Pool.Query(ctx, `select g.id, r.record_id, e.kind, e.runtime_id, coalesce(e.operator,''), g.expires_at, g.created_at,
+		coalesce((select array_agg(rs.name order by rs.name) from request_secrets rs where rs.request_id=r.id and rs.decision<>'deny'), '{}')
+		from grants g
+		join requests r on r.id=g.request_id
+		join enrollments e on e.id=g.enrollment_id
+		where g.revoked_at is null and g.expires_at > now() and g.approver is not null and g.approver<>''
+		and (g.approver=$1 or e.operator=$1)
+		order by g.created_at desc`, login)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ApproverGrant
+	for rows.Next() {
+		var g ApproverGrant
+		if err := rows.Scan(&g.GrantID, &g.RecordID, &g.Enrollment.Kind, &g.Enrollment.RuntimeID, &g.Enrollment.Operator, &g.ExpiresAt, &g.CreatedAt, &g.Names); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
 // enrollment reads a live enrollment (not revoked, lease not lapsed); pgx.ErrNoRows otherwise.
 func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, error) {
 	var e enrollmentRow

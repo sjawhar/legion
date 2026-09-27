@@ -207,6 +207,21 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 	return thumbprint, true, nil
 }
 
+// Credential loads a launcher credential's own identity (operator, service, host) by its id, for
+// a handler that has already authenticated the caller via a launcher proof (proof.Subject's
+// LauncherID, verified live by AuthenticateLauncher through proof.Verifier.LookupLauncher) and
+// needs that identity to pass to Create or Revoke. err is a genuine dependency failure; a launcher
+// id a live proof just verified vanishing before this read is treated the same way (never
+// silently swallowed into an empty Credential).
+func (s *Service) Credential(ctx context.Context, id string) (Credential, error) {
+	var cred Credential
+	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host from launcher_credentials where id=$1`, id).
+		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host); err != nil {
+		return Credential{}, err
+	}
+	return cred, nil
+}
+
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
 	if in.Operator != nil {
 		in.Operator = new(record.CanonicalLogin(*in.Operator))

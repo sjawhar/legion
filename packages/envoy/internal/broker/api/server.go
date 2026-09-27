@@ -3,6 +3,7 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,16 +15,26 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
 type Deps struct {
 	PublicURL string
-	Enroll    *enroll.Service
-	Machine   *requests.Machine
-	Proof     *proof.Verifier
+	// UIOrigin is BROKER_UI_ORIGIN — Dispatch's origin, the WebAuthn rpId's host, embedded in
+	// every ceremony's PublicKeyCredential*Options this package builds.
+	UIOrigin string
+	// UIToken is BROKER_UI_TOKEN: the shared bearer uiAuth compares against (constant-time),
+	// authenticating Dispatch's server, never a human.
+	UIToken      string
+	Enroll       *enroll.Service
+	Machine      *requests.Machine
+	MachineLogin *machine.Service
+	Approvers    *approvers.Service
+	Proof        *proof.Verifier
 	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
 	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the launcher-credential
@@ -62,36 +73,58 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 	switch auth {
 	case authNone:
 		return caller{}, true
+	case authUI:
+		token := bearer(r)
+		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(s.deps.UIToken)) != 1 {
+			writeError(w, http.StatusUnauthorized, "UI_INVALID", "the UI bearer token is not valid")
+			return caller{}, false
+		}
+		return caller{}, true
 	case authLauncher:
-		cred, err := s.deps.Enroll.AuthenticateLauncher(r.Context(), bearer(r))
+		subject, err := s.proofSubject(r)
 		switch {
-		case errors.Is(err, enroll.ErrUnauthenticated):
+		case errors.Is(err, proof.ErrInvalid):
 			writeError(w, http.StatusUnauthorized, "LAUNCHER_INVALID", "the launcher credential is not valid")
 			return caller{}, false
 		case err != nil:
-			writeUnavailable(w, "DATABASE_UNAVAILABLE", "authenticate launcher credential", err)
+			writeUnavailable(w, "DATABASE_UNAVAILABLE", "verify launcher proof", err)
+			return caller{}, false
+		}
+		if subject.LauncherID == "" {
+			writeError(w, http.StatusUnauthorized, "LAUNCHER_INVALID", "this route needs a launcher proof, not a session proof")
+			return caller{}, false
+		}
+		cred, err := s.deps.Enroll.Credential(r.Context(), subject.LauncherID)
+		if err != nil {
+			writeUnavailable(w, "DATABASE_UNAVAILABLE", "read launcher credential", err)
 			return caller{}, false
 		}
 		return caller{launcher: cred}, true
 	case authProof:
-		id, ok := s.proof(w, r)
-		return caller{enrollment: id}, ok
+		subject, err := s.proofSubject(r)
+		switch {
+		case errors.Is(err, proof.ErrInvalid):
+			writeError(w, http.StatusUnauthorized, "PROOF_INVALID", err.Error())
+			return caller{}, false
+		case err != nil:
+			writeUnavailable(w, "DATABASE_UNAVAILABLE", "verify proof", err)
+			return caller{}, false
+		}
+		if subject.EnrollmentID == "" {
+			writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "this route needs a session proof, not a launcher proof")
+			return caller{}, false
+		}
+		return caller{enrollment: subject.EnrollmentID}, true
 	}
 	writeInternal(w, "authenticate", fmt.Errorf("route has unknown authentication %d", auth))
 	return caller{}, false
 }
 
-func (s *server) proof(w http.ResponseWriter, r *http.Request) (string, bool) {
-	id, err := s.deps.Proof.Verify(r.Context(), r.Header.Get("Proof"), r.Method, s.deps.PublicURL+r.URL.Path, time.Now())
-	switch {
-	case errors.Is(err, proof.ErrInvalid):
-		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", err.Error())
-		return "", false
-	case err != nil:
-		writeUnavailable(w, "DATABASE_UNAVAILABLE", "verify proof", err)
-		return "", false
-	}
-	return id, true
+// proofSubject verifies r's Proof header and returns who it authenticates, unwrapped: authLauncher
+// and authProof each translate a failure into their own vocabulary (LAUNCHER_INVALID vs
+// PROOF_INVALID, contract v9's Authentication §1/§2), so this reports only the raw error.
+func (s *server) proofSubject(r *http.Request) (proof.Subject, error) {
+	return s.deps.Proof.Verify(r.Context(), r.Header.Get("Proof"), r.Method, s.deps.PublicURL+r.URL.Path, time.Now())
 }
 
 func bearer(r *http.Request) string {
@@ -135,9 +168,21 @@ func pathUUID(w http.ResponseWriter, r *http.Request, name, code, what string) (
 	return id, true
 }
 
-// issueKey is a Dispatch issue key (internal/dispatch/api's issueKeyPattern). Every key the broker
-// puts into a Dispatch URL path from a request body is checked against it first.
-var issueKey = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[0-9]+$`)
+// recordIDPattern matches a credential-request record id: content-addressed lowercase-hex
+// SHA-256, never a UUID (record.Body.ID).
+var recordIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// pathRecordID reads the {name} path segment as a credential-request record id, or refuses it
+// with 400 code: record ids are lowercase-hex sha256 hashes, so pathUUID's check would wrongly
+// reject every valid one.
+func pathRecordID(w http.ResponseWriter, r *http.Request, name, code string) (string, bool) {
+	id := r.PathValue(name)
+	if !recordIDPattern.MatchString(id) {
+		writeError(w, http.StatusBadRequest, code, "record ids are lowercase-hex sha256 hashes")
+		return "", false
+	}
+	return id, true
+}
 
 func writeError(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
@@ -171,4 +216,25 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// isAssertionError reports whether err is a WebAuthn assertion failure the caller should see as
+// 403 ASSERTION_INVALID: a bad signature, wrong challenge, revoked or tombstoned key, wrong login,
+// replayed counter, or (finishEndorse only) an invalid endorsement assertion. The reason string is
+// safe to echo — approvers never puts key material in these errors.
+func isAssertionError(err error) bool {
+	return errors.Is(err, approvers.ErrAssertionInvalid) ||
+		errors.Is(err, approvers.ErrKeyNotFound) ||
+		errors.Is(err, approvers.ErrKeyNotLive) ||
+		errors.Is(err, approvers.ErrWrongLogin) ||
+		errors.Is(err, approvers.ErrCounterReplay) ||
+		errors.Is(err, approvers.ErrEndorsementInvalid)
+}
+
+// strPtr is nil for "" and &s otherwise, for an optional wire field that is null rather than "".
+func strPtr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }

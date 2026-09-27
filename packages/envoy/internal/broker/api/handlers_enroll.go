@@ -8,21 +8,20 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
-type approverBody struct {
-	Kind  string  `json:"kind"`
-	Issue *string `json:"issue"`
-}
-
+// createEnrollmentBody is POST /v1/enrollments's exact contract v9 shape: the v8 "approver" field
+// is gone — the rules pick a request's approver at request time, never at enrollment.
 type createEnrollmentBody struct {
-	Kind       string       `json:"kind"`
-	RuntimeID  string       `json:"runtime_id"`
-	Operator   *string      `json:"operator"`
-	Approver   approverBody `json:"approver"`
-	Thumbprint string       `json:"thumbprint"`
-	SessionID  *string      `json:"session_id"`
-	PodToken   *string      `json:"pod_token"`
+	Kind       string  `json:"kind"`
+	RuntimeID  string  `json:"runtime_id"`
+	Operator   *string `json:"operator"`
+	Thumbprint string  `json:"thumbprint"`
+	SessionID  *string `json:"session_id"`
+	PodToken   *string `json:"pod_token"`
 }
 
+// createEnrollment authenticates by launcher proof now (payload carries "lid"), never a bearer
+// token; cred is the launcher credential's own identity, read by server.authenticate from the
+// verified proof's launcher id.
 func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	var body createEnrollmentBody
 	if !readJSON(w, r, &body, "INVALID_ENROLLMENT") {
@@ -32,37 +31,14 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 		writeError(w, http.StatusBadRequest, "INVALID_KIND", `kind must be "box", "host", or "pod"`)
 		return
 	}
-	var approverIssue *string
-	switch body.Approver.Kind {
-	case "operator":
-		if body.Kind == "pod" {
-			writeError(w, http.StatusBadRequest, "INVALID_APPROVER", `a pod has no operator to approve its requests; approver.kind must be "issue_assignee"`)
-			return
-		}
-	case "issue_assignee":
-		if body.Approver.Issue == nil || *body.Approver.Issue == "" {
-			writeError(w, http.StatusBadRequest, "INVALID_APPROVER", `approver.issue is required when approver.kind is "issue_assignee"`)
-			return
-		}
-		if !issueKey.MatchString(*body.Approver.Issue) {
-			writeError(w, http.StatusBadRequest, "ISSUE_INPUT", "approver.issue must be a Dispatch issue key like PROJ-12")
-			return
-		}
-		approverIssue = body.Approver.Issue
-	default:
-		writeError(w, http.StatusBadRequest, "INVALID_APPROVER", `approver.kind must be "operator" or "issue_assignee"`)
-		return
-	}
 
 	result, err := s.deps.Enroll.Create(r.Context(), cred, enroll.Enrollment{
-		Kind:          body.Kind,
-		RuntimeID:     body.RuntimeID,
-		Operator:      body.Operator,
-		ApproverKind:  body.Approver.Kind,
-		ApproverIssue: approverIssue,
-		Thumbprint:    body.Thumbprint,
-		SessionID:     body.SessionID,
-		PodToken:      derefOr(body.PodToken, ""),
+		Kind:       body.Kind,
+		RuntimeID:  body.RuntimeID,
+		Operator:   body.Operator,
+		Thumbprint: body.Thumbprint,
+		SessionID:  body.SessionID,
+		PodToken:   derefOr(body.PodToken, ""),
 	})
 	switch {
 	case errors.Is(err, enroll.ErrOperatorMismatch):

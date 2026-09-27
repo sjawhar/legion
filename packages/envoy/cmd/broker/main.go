@@ -161,7 +161,8 @@ func main() {
 	go sweeper.Run(ctx)
 
 	mux := http.NewServeMux()
-	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, Enroll: enr, Machine: reqMachine,
+	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIOrigin: cfg.UIOrigin, UIToken: cfg.UIToken,
+		Enroll: enr, Machine: reqMachine, MachineLogin: mach, Approvers: approversSvc,
 		Proof:              &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		TrustedProxyHeader: cfg.TrustedProxyHeader})
 	srv := &http.Server{
