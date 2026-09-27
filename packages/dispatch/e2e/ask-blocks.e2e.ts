@@ -13,7 +13,14 @@ import {
   patchIssue,
   resolveAsk,
 } from "./api";
-import { type Clipboard, documentEditor, openWithCaret, paste, selectEditorText } from "./editor";
+import {
+  type Clipboard,
+  copy,
+  documentEditor,
+  openWithCaret,
+  paste,
+  selectEditorText,
+} from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -56,19 +63,11 @@ async function indexedBlockAsk(issueKey: string, blockId: string) {
   return blockAsk;
 }
 
-/** Copies the whole document through the editor's own copy handler: ProseMirror serializes the
- * selection into the copy event's clipboardData, which is what a browser's clipboard receives. */
+/** Copies the whole document through the editor's own copy handler. */
 async function copyWholeDocument(page: Page): Promise<Clipboard> {
-  const editor = documentEditor(page);
-  await editor.click();
+  await documentEditor(page).click();
   await page.keyboard.press("ControlOrMeta+A");
-  return editor.evaluate((root) => {
-    const data = new DataTransfer();
-    root.dispatchEvent(
-      new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData: data })
-    );
-    return { html: data.getData("text/html"), text: data.getData("text/plain") };
-  });
+  return copy(page);
 }
 
 /** Pastes clipboard contents at the start of the text `quote`. */

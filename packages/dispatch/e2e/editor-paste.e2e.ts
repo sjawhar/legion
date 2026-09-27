@@ -1,7 +1,7 @@
 import { type Browser, expect, type Page, test } from "@playwright/test";
 
 import { createIssue, createProject, getArtifactText, getIssue } from "./api";
-import { documentEditor, openWithCaret, paste } from "./editor";
+import { copy, documentEditor, openWithCaret, paste, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -137,19 +137,29 @@ for (const [cell, quote, stored] of [
   });
 }
 
-/** Opens the table as alice and selects the cells from the one holding `from` to the one holding
- * `to`, the way a person does: dragging across them, or clicking one and shift-clicking the other. */
-async function openWithCellsSelected(
-  browser: Browser,
-  from: string,
-  to: string,
-  how: "drag" | "shift-click"
-): Promise<{ alice: Awaited<ReturnType<typeof asUser>>; artifactId: string; page: Page }> {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", spec: table, title: "Cell selection paste" });
-  const alice = await asUser(browser, "alice");
-  const page = await alice.newPage();
-  await page.goto(`/issues/${issue.key}`);
+// Only a clipboard whose content all sits in table cells is a grid paste. HTML holding a paragraph
+// beside a table joins the caret's cell as text, like any other HTML, so the paragraph isn't lost.
+test("HTML holding a paragraph and a table, pasted into a body cell, stays in that cell", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openWithCaret(browser, "Mixed paste", table, "delta", "end");
+  try {
+    await paste(page, {
+      html: "<p>Intro</p><table><tr><td>c1</td><td>c2</td></tr></table>",
+      text: "Intro\nc1\tc2",
+    });
+
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toBe("| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaIntro c1 c2 four |\n");
+  } finally {
+    await alice.close();
+  }
+});
+
+/** Selects the cells from the one holding `from` to the one holding `to`, the way a person does:
+ * dragging across them, or clicking one and shift-clicking the other. */
+async function selectCells(page: Page, from: string, to: string, how: "drag" | "shift-click") {
   const editor = documentEditor(page);
   if (how === "drag") {
     const start = await editor.getByText(from).boundingBox();
@@ -163,6 +173,23 @@ async function openWithCellsSelected(
     await editor.getByText(from).click();
     await editor.getByText(to).click({ modifiers: ["Shift"] });
   }
+}
+
+/** Opens `spec` (the two-row table by default) as alice and selects the cells from `from` to `to`. */
+async function openWithCellsSelected(
+  browser: Browser,
+  from: string,
+  to: string,
+  how: "drag" | "shift-click",
+  spec: string = table
+): Promise<{ alice: Awaited<ReturnType<typeof asUser>>; artifactId: string; page: Page }> {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Cell selection paste" });
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  await page.goto(`/issues/${issue.key}`);
+  await expect(documentEditor(page)).toContainText(to);
+  await selectCells(page, from, to, how);
   return { alice, artifactId: issue.primary_artifact_id, page };
 }
 
@@ -188,6 +215,50 @@ for (const how of ["drag", "shift-click"] as const) {
       await expect
         .poll(async () => (await getArtifactText(artifactId)).markdown)
         .toBe("| H1 | H2 |\n| :--- | :--- |\n| B1 | B2 |\n");
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
+// Cells copied inside the editor paste back as the same cells, at a caret in another row's cell
+// and onto a selection of that row's cells. The copy is ProseMirror's own clipboard HTML, a table
+// marked with data-pm-slice. Parsed at the caret, that gained an empty leading row, and the paste
+// blanked the target row, or appended the copied one below it.
+const threeRows =
+  "| alpha one | beta two |\n| --- | --- |\n| gamma three | delta four |\n| eps five | zeta six |\n";
+for (const target of [
+  "a caret in another row's cell",
+  "a selection of another row's cells",
+] as const) {
+  test(`cells copied in the editor and pasted at ${target} arrive as the same cells`, async ({
+    browser,
+  }) => {
+    const { alice, artifactId, page } = await openWithCellsSelected(
+      browser,
+      "gamma three",
+      "delta four",
+      "drag",
+      threeRows
+    );
+    try {
+      await expect(page.locator(".selectedCell")).toHaveCount(2);
+      const copied = await copy(page);
+      if (target === "a caret in another row's cell") {
+        await selectEditorText(page, "eps");
+        await page.keyboard.press("ArrowRight");
+      } else {
+        await selectCells(page, "eps five", "zeta six", "shift-click");
+        await expect(page.locator(".selectedCell")).toHaveCount(2);
+      }
+
+      await paste(page, copied);
+
+      await expect
+        .poll(async () => (await getArtifactText(artifactId)).markdown)
+        .toBe(
+          "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | delta four |\n| gamma three | delta four |\n"
+        );
     } finally {
       await alice.close();
     }

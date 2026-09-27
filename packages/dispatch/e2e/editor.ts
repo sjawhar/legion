@@ -198,6 +198,18 @@ export interface Clipboard {
   text: string;
 }
 
+/** Copies the selection through the editor's own copy handler: ProseMirror serializes it into the
+ * copy event's clipboardData, which is what a browser's clipboard receives. */
+export async function copy(page: Page): Promise<Clipboard> {
+  return documentEditor(page).evaluate((root) => {
+    const data = new DataTransfer();
+    root.dispatchEvent(
+      new ClipboardEvent("copy", { bubbles: true, cancelable: true, clipboardData: data })
+    );
+    return { html: data.getData("text/html"), text: data.getData("text/plain") };
+  });
+}
+
 /** Pastes clipboard contents at the caret, through the editor's own paste handler. */
 export async function paste(page: Page, clipboard: Clipboard): Promise<void> {
   await documentEditor(page).evaluate((root, { html, text }) => {
