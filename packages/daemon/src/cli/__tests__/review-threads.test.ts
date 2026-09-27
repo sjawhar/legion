@@ -5,6 +5,8 @@ const PR = "https://github.com/sjawhar/legion/pull/993#discussion_r";
 
 interface Comment {
   login: string;
+  /** The author's account type (GitHub GraphQL's actor `__typename`); a person's unless named. */
+  type?: OpenerType;
   body: string;
   /** GitHub's `PullRequestReviewCommentState`; a PENDING comment is visible only to its author. */
   state?: "PENDING" | "SUBMITTED";
@@ -30,7 +32,11 @@ function thread(
     },
     newest: {
       nodes: [
-        { author: { login: newest.login }, body: newest.body, state: newest.state ?? "SUBMITTED" },
+        {
+          author: { __typename: newest.type ?? "User", login: newest.login },
+          body: newest.body,
+          state: newest.state ?? "SUBMITTED",
+        },
       ],
     },
   };
@@ -498,7 +504,8 @@ describe("legion threads resolve", () => {
     // reply (Fixed in, Declined) closes nothing. The review App's Accepted: counts only as the first
     // line of a submitted comment, after space, tab, CR or LF alone, whatever the login's case. A
     // thread either Legion App opened closes only on its opener's Accepted:, and a person's thread
-    // is unchanged.
+    // is unchanged. An account is its type and its login together: a User who registered the review
+    // App's bare slug is not the review App, nor the Bot opener of that name.
     const reviewer = "legion-reviewer";
     const author = "legion-implementer";
     const vectors: Array<[string, string, OpenerType, Comment]> = [
@@ -506,66 +513,97 @@ describe("legion threads resolve", () => {
         "reviewer-accepts",
         "claude",
         "Bot",
-        { login: reviewer, body: "Accepted: fixed in 1a2b3c4 — moved the guard" },
+        { login: reviewer, type: "Bot", body: "Accepted: fixed in 1a2b3c4 — moved the guard" },
       ],
       [
         "reviewer-accepts-any-case",
         "claude",
         "Bot",
-        { login: "Legion-Reviewer", body: " \t\r\nAccepted: not a defect — the loop is bounded" },
+        {
+          login: "Legion-Reviewer",
+          type: "Bot",
+          body: " \t\r\nAccepted: not a defect — the loop is bounded",
+        },
       ],
       [
         "author-declined",
         "claude",
         "Bot",
-        { login: author, body: "Declined: the loop is bounded" },
+        { login: author, type: "Bot", body: "Declined: the loop is bounded" },
       ],
       [
         "author-fixed",
         "claude",
         "Bot",
-        { login: author, body: "Fixed in 1a2b3c4: moved the guard" },
+        { login: author, type: "Bot", body: "Fixed in 1a2b3c4: moved the guard" },
       ],
-      ["author-accepts", "claude", "Bot", { login: author, body: "Accepted: my own fix" }],
+      [
+        "author-accepts",
+        "claude",
+        "Bot",
+        { login: author, type: "Bot", body: "Accepted: my own fix" },
+      ],
       [
         "reviewer-still-open",
         "claude",
         "Bot",
-        { login: reviewer, body: "Still open: the loop is not bounded" },
+        { login: reviewer, type: "Bot", body: "Still open: the loop is not bounded" },
       ],
-      ["reviewer-nbsp", "claude", "Bot", { login: reviewer, body: "\u00a0Accepted: fixed" }],
+      [
+        "reviewer-nbsp",
+        "claude",
+        "Bot",
+        { login: reviewer, type: "Bot", body: "\u00a0Accepted: fixed" },
+      ],
       [
         "reviewer-second-line",
         "claude",
         "Bot",
-        { login: reviewer, body: "Thanks.\nAccepted: fixed" },
+        { login: reviewer, type: "Bot", body: "Thanks.\nAccepted: fixed" },
       ],
       [
         "reviewer-draft",
         "claude",
         "Bot",
-        { login: reviewer, body: "Accepted: drafted", state: "PENDING" },
+        { login: reviewer, type: "Bot", body: "Accepted: drafted", state: "PENDING" },
       ],
       [
         "routed-person",
         "sjawhar-agent",
         "Bot",
-        { login: reviewer, body: "Accepted: fixed in 1a2b3c4 — moved the guard" },
+        { login: reviewer, type: "Bot", body: "Accepted: fixed in 1a2b3c4 — moved the guard" },
       ],
       [
         "routed-person-own",
         "sjawhar-agent",
         "Bot",
-        { login: "sjawhar-agent", body: "Accepted: fixed" },
+        { login: "sjawhar-agent", type: "Bot", body: "Accepted: fixed" },
       ],
       [
         "reviewer-thread",
         reviewer,
         "Bot",
-        { login: author, body: "Fixed in 1a2b3c4: moved the guard" },
+        { login: author, type: "Bot", body: "Fixed in 1a2b3c4: moved the guard" },
       ],
-      ["implementer-app-thread", author, "Bot", { login: reviewer, body: "Accepted: fine" }],
-      ["human", "octocat", "User", { login: reviewer, body: "Accepted: fixed" }],
+      [
+        "implementer-app-thread",
+        author,
+        "Bot",
+        { login: reviewer, type: "Bot", body: "Accepted: fine" },
+      ],
+      ["human", "octocat", "User", { login: reviewer, type: "Bot", body: "Accepted: fixed" }],
+      [
+        "impostor-reviewer",
+        "claude",
+        "Bot",
+        { login: reviewer, type: "User", body: "Accepted: fixed" },
+      ],
+      [
+        "impostor-opener",
+        reviewer,
+        "Bot",
+        { login: reviewer, type: "User", body: "Accepted: fixed" },
+      ],
     ];
     const github = fakeGitHub(
       {
@@ -611,6 +649,8 @@ describe("legion threads resolve", () => {
       `left open ${PR}12 — newest reply by ${author} is not an acceptance`,
       `left open ${PR}13 — newest reply by ${reviewer} is not an acceptance`,
       `left open ${PR}14 — newest reply by ${reviewer} is not an acceptance`,
+      `left open ${PR}15 — newest reply by ${reviewer} is ${notEither}`,
+      `left open ${PR}16 — newest reply by ${reviewer} is not an acceptance`,
     ]);
   });
 

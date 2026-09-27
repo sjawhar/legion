@@ -2093,6 +2093,46 @@ describe("Legion HTTP API", () => {
     expect(mismatched.response.status).toBe(403);
   });
 
+  it("logs a Legion App login it cannot read at most once a minute, and names no logins then", async () => {
+    // The failure turns legion threads resolve's bot-thread rule off for that answer, so it is
+    // logged; every `legion gh` call asks for a token, so not once per call.
+    await start({
+      getToken: async (role, owner) => {
+        if (role === "implement") throw new Error("GitHub answered 502");
+        return {
+          token: `minted-${role}-${owner}`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-review[bot]",
+            email: "42+legion-review[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const grant = await mintArchitectGrant(root);
+      for (let call = 0; call < 3; call++) {
+        const token = await json("/legion/v1/gh-token", { grantId: grant.grantId });
+        expect(token.response.status).toBe(200);
+        expect(token.body).toEqual({ token: "minted-review-acme", appLogin: "legion-review[bot]" });
+      }
+      const logged = warn.mock.calls.filter((call) =>
+        String(call[0]).includes("could not read a Legion App's login")
+      );
+      expect(logged.length).toBe(1);
+      now += 60_000;
+      await json("/legion/v1/gh-token", { grantId: (await mintArchitectGrant(root)).grantId });
+      expect(
+        warn.mock.calls.filter((call) =>
+          String(call[0]).includes("could not read a Legion App's login")
+        ).length
+      ).toBe(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("reissues a daemon-registered worker session capability and keeps grants short-lived", async () => {
     await start();
     const bootToken = await api?.mintBootToken(root, 3);

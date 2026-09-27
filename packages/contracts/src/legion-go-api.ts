@@ -297,14 +297,14 @@ export const LegionGoGrantResponse = z.strictObject({
   grantId: nonEmptyString,
   expiresAt: timestamp,
 });
+/** A GitHub App's git identity, `<slug>[bot]`, with a slug. */
+const appLogin = z.string().regex(/^[^[\]]+\[bot\]$/);
 export const LegionGoGitHubTokenResponse = z.strictObject({
   token: nonEmptyString,
   appLogin: z.string().endsWith("[bot]"),
   /** `api.GitHubTokenResponse.LegionAppLogins`: each Legion role App's login, keyed by its App role,
    * on gh-token alone; absent when the daemon could not read every one. */
-  legionAppLogins: z
-    .strictObject({ implement: z.string().endsWith("[bot]"), review: z.string().endsWith("[bot]") })
-    .optional(),
+  legionAppLogins: z.strictObject({ implement: appLogin, review: appLogin }).optional(),
 });
 export const LegionGoGitCredentialResponse = z.strictObject({
   username: z.literal("x-access-token"),

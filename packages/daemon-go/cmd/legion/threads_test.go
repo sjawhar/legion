@@ -191,10 +191,11 @@ func TestThreadsResolveRejectsInvalidArgumentsBeforeGrantRedemption(t *testing.T
 	}
 }
 
-// threadVector is one unresolved review thread as GitHub's GraphQL serves it: the opener's type
-// and login (a Bot's is its bare slug), and the newest comment's author, body and state.
+// threadVector is one unresolved review thread as GitHub's GraphQL serves it: the opener's type and
+// login (a Bot's is its bare slug), and the newest comment's author's type and login, body and
+// state.
 type threadVector struct {
-	id, openerType, opener, newest, body, state string
+	id, openerType, opener, newestType, newest, body, state string
 }
 
 func (v threadVector) node() string {
@@ -202,7 +203,7 @@ func (v threadVector) node() string {
 		encoded, _ := json.Marshal(value)
 		return string(encoded)
 	}
-	return `{"id":"` + v.id + `","isResolved":false,"opener":{"nodes":[{"author":{"__typename":"` + v.openerType + `","login":"` + v.opener + `"},"url":"https://github.test/thread/` + v.id + `"}]},"newest":{"nodes":[{"author":{"login":"` + v.newest + `"},"url":"https://github.test/thread/` + v.id + `","body":` + quote(v.body) + `,"state":"` + v.state + `"}]}}`
+	return `{"id":"` + v.id + `","isResolved":false,"opener":{"nodes":[{"author":{"__typename":"` + v.openerType + `","login":"` + v.opener + `"},"url":"https://github.test/thread/` + v.id + `"}]},"newest":{"nodes":[{"author":{"__typename":"` + v.newestType + `","login":"` + v.newest + `"},"url":"https://github.test/thread/` + v.id + `","body":` + quote(v.body) + `,"state":"` + v.state + `"}]}}`
 }
 
 // threadsPage is a reviewThreads page of the vectors' threads.
@@ -221,23 +222,26 @@ func threadsPage(vectors ...threadVector) string {
 // request author's reply (Fixed in, Declined) closes nothing. The review App's Accepted: counts
 // only as the first line of a submitted comment, after space, tab, CR or LF alone, whatever the
 // login's case. A thread either Legion App opened closes only on its opener's Accepted:, and a
-// person's thread is unchanged.
+// person's thread is unchanged. An account is its type and its login together: a User who
+// registered the review App's bare slug is not the review App, nor the Bot opener of that name.
 func TestThreadsResolveClosesABotsThreadOnTheLegionReviewersAcceptance(t *testing.T) {
 	vectors := []threadVector{
-		{id: "reviewer-accepts", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Accepted: fixed in 1a2b3c4 — moved the guard", state: "SUBMITTED"},
-		{id: "reviewer-accepts-any-case", openerType: "Bot", opener: "claude", newest: "Legion-Reviewer", body: " \t\r\nAccepted: not a defect — the loop is bounded", state: "SUBMITTED"},
-		{id: "author-declined", openerType: "Bot", opener: "claude", newest: "legion-implementer", body: "Declined: the loop is bounded", state: "SUBMITTED"},
-		{id: "author-fixed", openerType: "Bot", opener: "claude", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
-		{id: "author-accepts", openerType: "Bot", opener: "claude", newest: "legion-implementer", body: "Accepted: my own fix", state: "SUBMITTED"},
-		{id: "reviewer-still-open", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Still open: the loop is not bounded", state: "SUBMITTED"},
-		{id: "reviewer-nbsp", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "\u00a0Accepted: fixed", state: "SUBMITTED"},
-		{id: "reviewer-second-line", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Thanks.\nAccepted: fixed", state: "SUBMITTED"},
-		{id: "reviewer-draft", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Accepted: drafted", state: "PENDING"},
-		{id: "routed-person", openerType: "Bot", opener: "sjawhar-agent", newest: "legion-reviewer", body: "Accepted: fixed in 1a2b3c4 — moved the guard", state: "SUBMITTED"},
-		{id: "routed-person-own", openerType: "Bot", opener: "sjawhar-agent", newest: "sjawhar-agent", body: "Accepted: fixed", state: "SUBMITTED"},
-		{id: "reviewer-thread", openerType: "Bot", opener: "legion-reviewer", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
-		{id: "implementer-app-thread", openerType: "Bot", opener: "legion-implementer", newest: "legion-reviewer", body: "Accepted: fine", state: "SUBMITTED"},
-		{id: "human", openerType: "User", opener: "octocat", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
+		{id: "reviewer-accepts", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: fixed in 1a2b3c4 — moved the guard", state: "SUBMITTED"},
+		{id: "reviewer-accepts-any-case", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "Legion-Reviewer", body: " \t\r\nAccepted: not a defect — the loop is bounded", state: "SUBMITTED"},
+		{id: "author-declined", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-implementer", body: "Declined: the loop is bounded", state: "SUBMITTED"},
+		{id: "author-fixed", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
+		{id: "author-accepts", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-implementer", body: "Accepted: my own fix", state: "SUBMITTED"},
+		{id: "reviewer-still-open", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "Still open: the loop is not bounded", state: "SUBMITTED"},
+		{id: "reviewer-nbsp", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "\u00a0Accepted: fixed", state: "SUBMITTED"},
+		{id: "reviewer-second-line", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "Thanks.\nAccepted: fixed", state: "SUBMITTED"},
+		{id: "reviewer-draft", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: drafted", state: "PENDING"},
+		{id: "routed-person", openerType: "Bot", opener: "sjawhar-agent", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: fixed in 1a2b3c4 — moved the guard", state: "SUBMITTED"},
+		{id: "routed-person-own", openerType: "Bot", opener: "sjawhar-agent", newestType: "Bot", newest: "sjawhar-agent", body: "Accepted: fixed", state: "SUBMITTED"},
+		{id: "reviewer-thread", openerType: "Bot", opener: "legion-reviewer", newestType: "Bot", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
+		{id: "implementer-app-thread", openerType: "Bot", opener: "legion-implementer", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: fine", state: "SUBMITTED"},
+		{id: "human", openerType: "User", opener: "octocat", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
+		{id: "impostor-reviewer", openerType: "Bot", opener: "claude", newestType: "User", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
+		{id: "impostor-opener", openerType: "Bot", opener: "legion-reviewer", newestType: "User", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
 	}
 	github, resolved := fakeThreadsGitHub(t, threadsPage(vectors...))
 	code, stdout, stderr := runThreadsResolve(t, github)
@@ -259,7 +263,9 @@ func TestThreadsResolveClosesABotsThreadOnTheLegionReviewersAcceptance(t *testin
 		"resolved https://github.test/thread/routed-person-own — its opener's acceptance\n" +
 		"left open https://github.test/thread/reviewer-thread — newest reply by legion-implementer is not an acceptance\n" +
 		"left open https://github.test/thread/implementer-app-thread — newest reply by legion-reviewer is not an acceptance\n" +
-		"left open https://github.test/thread/human — newest reply by legion-reviewer is not an acceptance\n"
+		"left open https://github.test/thread/human — newest reply by legion-reviewer is not an acceptance\n" +
+		"left open https://github.test/thread/impostor-reviewer — newest reply by legion-reviewer is " + notEither +
+		"left open https://github.test/thread/impostor-opener — newest reply by legion-reviewer is not an acceptance\n"
 	if stdout != want {
 		t.Fatalf("stdout = %q\nwant     %q", stdout, want)
 	}
@@ -274,14 +280,14 @@ func TestThreadsResolveClosesABotsThreadOnTheLegionReviewersAcceptance(t *testin
 // rather than that the reply was not an acceptance. A daemon names every App or none: an answer
 // naming some is refused as invalid, as the contract refuses it.
 func TestThreadsResolveAppliesNoBotRuleWithoutLegionsAppLogins(t *testing.T) {
-	github, resolved := fakeThreadsGitHub(t, threadsPage(threadVector{id: "ci-bot", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"}))
+	github, resolved := fakeThreadsGitHub(t, threadsPage(threadVector{id: "ci-bot", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"}))
 	if code, stdout, stderr := runThreadsResolveNaming(t, github, `,"legionAppLogins":{"implement":"legion-implementer[bot]"}`); code != 1 || stdout != "" ||
-		stderr != "legion threads resolve: daemon returned an invalid GitHub credential response\n" || len(resolved()) != 0 {
+		!strings.HasPrefix(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response") || len(resolved()) != 0 {
 		t.Fatalf("a partial login answer = %d %q %q, resolved %v; want it refused as invalid", code, stdout, stderr, resolved())
 	}
 	github, resolved = fakeThreadsGitHub(t, threadsPage(
-		threadVector{id: "ci-bot", openerType: "Bot", opener: "claude", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
-		threadVector{id: "human", openerType: "User", opener: "octocat", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
+		threadVector{id: "ci-bot", openerType: "Bot", opener: "claude", newestType: "Bot", newest: "legion-reviewer", body: "Accepted: fixed", state: "SUBMITTED"},
+		threadVector{id: "human", openerType: "User", opener: "octocat", newestType: "Bot", newest: "legion-implementer", body: "Fixed in 1a2b3c4: moved the guard", state: "SUBMITTED"},
 	))
 	code, stdout, stderr := runThreadsResolveNaming(t, github, "")
 	if code != 0 {

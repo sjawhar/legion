@@ -372,7 +372,10 @@ export const LegionDaemonApi = {
        * out of its bot-thread rule and takes the review App's `Accepted:` on a bot's thread;
        * absent when the daemon could not read every one. */
       legionAppLogins: z
-        .object({ implement: z.string().endsWith("[bot]"), review: z.string().endsWith("[bot]") })
+        .object({
+          implement: z.string().regex(/^[^[\]]+\[bot\]$/),
+          review: z.string().regex(/^[^[\]]+\[bot\]$/),
+        })
         .optional(),
     }),
   },

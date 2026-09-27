@@ -96,16 +96,21 @@ export async function handleGhToken(
   );
 }
 
-/** When the daemon last logged that it could not read a Legion App's login, which it does at most
- * once a minute: every `legion gh` call in every pane asks for a token. */
-let loginsWarnedAt = 0;
-
 /** Each Legion role App's login for the issue's repository, keyed by its App role: the accounts
  * Legion's own roles post as. `legion threads resolve` keeps their threads out of its bot-thread
  * rule and takes the review App's `Accepted:` on a thread any other bot opened. Undefined when any
  * App's identity cannot be read: the command then cannot tell a Legion App from another bot, and a
  * bot's thread closes only on its opener's `Accepted:`. That turns the rule off for the answer, so
  * it is logged. */
+/** The contract names each App role's login by key. GITHUB_APP_ROLES and those keys must be one
+ * set: a role added to the list, or to the contract, alone fails to compile here, rather than a
+ * third App's login being dropped by the schema without a word. */
+type ContractAppLogins = NonNullable<
+  ReturnType<typeof LegionDaemonApi.GitHubToken.response.parse>["legionAppLogins"]
+>;
+type SameKeys<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+export const APP_ROLES_ARE_THE_CONTRACTS: SameKeys<GitHubAppRole, keyof ContractAppLogins> = true;
+
 async function legionAppLoginsFor(
   ctx: RouteContext,
   issue: string
@@ -119,8 +124,10 @@ async function legionAppLoginsFor(
     );
     return Object.fromEntries(leases) as Record<GitHubAppRole, string>;
   } catch (error) {
-    if (Date.now() - loginsWarnedAt >= 60_000) {
-      loginsWarnedAt = Date.now();
+    // Every `legion gh` call in every pane asks for a token, so the failure is logged at most once a
+    // minute.
+    if (ctx.now() - ctx.loginWarnings.lastAt >= 60_000) {
+      ctx.loginWarnings.lastAt = ctx.now();
       console.warn(
         "[legion] gh-token: could not read a Legion App's login, so legion threads resolve applies no bot-thread rule for this answer (logged at most once a minute):",
         error

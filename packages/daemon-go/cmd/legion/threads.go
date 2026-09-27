@@ -18,7 +18,7 @@ const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $after) {
-        nodes { id isResolved opener: comments(first: 1) { nodes { author { __typename login } url } } newest: comments(last: 1) { nodes { author { login } url body state } } }
+        nodes { id isResolved opener: comments(first: 1) { nodes { author { __typename login } url } } newest: comments(last: 1) { nodes { author { __typename login } url body state } } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -55,14 +55,17 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 	defer response.Body.Close()
 	var credential githubTokenResponse
-	// The daemon names every role App or none (the contract's legionAppLogins); a partial answer is
-	// an invalid response, not a session that knows some of Legion's Apps.
-	if err := json.NewDecoder(response.Body).Decode(&credential); err != nil || credential.Token == "" ||
-		credential.LegionAppLogins != nil && (len(credential.LegionAppLogins) != 2 || !strings.HasSuffix(credential.LegionAppLogins["implement"], "[bot]") || !strings.HasSuffix(credential.LegionAppLogins["review"], "[bot]")) {
+	var apps *legionApps
+	if err := json.NewDecoder(response.Body).Decode(&credential); err == nil && credential.Token != "" {
+		apps, err = legionAppsFrom(credential.LegionAppLogins)
+		if err != nil {
+			fmt.Fprintf(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response: %v\n", err)
+			return 1
+		}
+	} else {
 		fmt.Fprintln(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response")
 		return 1
 	}
-	apps := legionAppsFrom(credential.LegionAppLogins)
 	threads, err := unresolvedReviewThreads(ctx, credential.Token, repository, number)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
@@ -99,7 +102,7 @@ func threadFailure(stderr io.Writer, url string, err error) int {
 
 // reviewThread is an unresolved review thread reduced to the facts the rule reads.
 type reviewThread struct {
-	id, url, openerLogin, openerTypename, newestLogin, newestBody string
+	id, url, openerLogin, openerTypename, newestLogin, newestTypename, newestBody string
 	// newestPending marks a newest comment that is a draft in a pending, unsubmitted review.
 	newestPending bool
 }
@@ -112,16 +115,27 @@ type legionApps struct {
 	review string
 }
 
-// legionAppsFrom is the daemon's role-keyed logins as legionApps, nil when it named none.
-func legionAppsFrom(logins map[string]string) *legionApps {
+// legionAppsFrom is the daemon's role-keyed logins as legionApps, nil when it named none. The
+// daemon names every role App or none (the contract's legionAppLogins: an App's git identity,
+// "<slug>[bot]", for each of implement and review), so an answer naming some, or one whose login
+// is not an App's, is an invalid response rather than a session that knows some of Legion's Apps.
+func legionAppsFrom(logins map[string]string) (*legionApps, error) {
 	if logins == nil {
-		return nil
+		return nil, nil
 	}
-	apps := &legionApps{logins: map[string]bool{}, review: botSlug(logins["review"])}
-	for _, login := range logins {
-		apps.logins[botSlug(login)] = true
+	apps := &legionApps{logins: map[string]bool{}}
+	for _, role := range []string{"implement", "review"} {
+		slug := botSlug(logins[role])
+		if !strings.HasSuffix(logins[role], "[bot]") || slug == "" {
+			return nil, fmt.Errorf("legionAppLogins names no App login for %s", role)
+		}
+		apps.logins[slug] = true
 	}
-	return apps
+	if len(logins) != 2 {
+		return nil, fmt.Errorf("legionAppLogins names %d Apps, not implement and review", len(logins))
+	}
+	apps.review = botSlug(logins["review"])
+	return apps, nil
 }
 
 // botSlug is how both ends of every login comparison read an account: GitHub GraphQL names a Bot
@@ -145,7 +159,10 @@ func isAcceptance(body string) bool {
 }
 
 // resolution says whether thread is resolved and on whose acceptance, or, when it is left open,
-// why. The subject of a finding never closes it: a thread closes only on its newest submitted
+// why. Every account it compares is identified by what GitHub asserts about it, its type and its
+// login together, never a login alone: a login is a string anyone may register (the review App's
+// bare slug is a free username on a public repository), and every weaker proxy for "who wrote
+// this" was forgeable by someone who read the rule. The subject of a finding never closes it: a thread closes only on its newest submitted
 // comment being an Accepted: from its opener, or, on a thread a Bot that is none of Legion's role
 // Apps opened, from Legion's review App. GitHub cannot tell a CI bot from a person whose gh is
 // routed to an App, and such a bot may never accept, so the Legion reviewer is the independent
@@ -160,7 +177,8 @@ func resolution(thread reviewThread, apps *legionApps) (how, reason string) {
 		return "", "an unsubmitted draft in a pending review"
 	}
 	acceptance := isAcceptance(thread.newestBody)
-	if acceptance && thread.openerLogin != "" && botSlug(thread.openerLogin) == botSlug(thread.newestLogin) {
+	if acceptance && thread.openerLogin != "" && thread.newestLogin != "" && thread.openerTypename == thread.newestTypename &&
+		botSlug(thread.openerLogin) == botSlug(thread.newestLogin) {
 		return "its opener's acceptance", ""
 	}
 	if thread.openerTypename != "Bot" {
@@ -172,7 +190,7 @@ func resolution(thread reviewThread, apps *legionApps) (how, reason string) {
 	if apps.logins[botSlug(thread.openerLogin)] {
 		return "", "not an acceptance"
 	}
-	if acceptance && botSlug(thread.newestLogin) == apps.review {
+	if acceptance && thread.newestTypename == "Bot" && thread.newestLogin != "" && botSlug(thread.newestLogin) == apps.review {
 		return "the Legion reviewer's acceptance of a bot's thread", ""
 	}
 	return "", "not its opener's or the Legion reviewer's acceptance"
@@ -203,7 +221,7 @@ func unresolvedReviewThreads(ctx context.Context, token string, repository ghrep
 				return nil, fmt.Errorf("review thread %s: its newest comment carried state %q, not \"PENDING\" or \"SUBMITTED\"", node.ID, newest.State)
 			}
 			all = append(all, reviewThread{id: node.ID, url: opening.URL, openerLogin: opening.Author.Login, openerTypename: opening.Author.Typename,
-				newestLogin: newest.Author.Login, newestBody: newest.Body, newestPending: newest.State == "PENDING"})
+				newestLogin: newest.Author.Login, newestTypename: newest.Author.Typename, newestBody: newest.Body, newestPending: newest.State == "PENDING"})
 		}
 		info := page.Data.Repository.PullRequest.ReviewThreads.PageInfo
 		if !info.HasNextPage {

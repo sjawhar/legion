@@ -195,7 +195,10 @@ that is none of Legion's role Apps, the Legion review App's `Accepted:` (`resolu
 never closes it: the pull request author's reply (`Fixed in <commit>: …`, `Declined: …`) closes
 nothing. GitHub cannot tell a CI bot, which never accepts, from a person whose `gh` is routed to
 an App, so the reviewer adjudicates any such finding and may accept one an App-routed person
-raised; the resolved line says so. Which accounts are Legion's, and which is the review App, is
+raised; the resolved line says so. Every account the rule compares is its GraphQL type and login
+together, never a login alone: the review App's bare slug is a free username anyone could register
+on a public repository, so the review App's `Accepted:` counts only from a `Bot`, and an opener's
+only from an account of the opener's own type. Which accounts are Legion's, and which is the review App, is
 the daemon's to say: `/gh-token` names each role App's login keyed by App role
 (`legionAppLogins`), leasing each App to read it, and omits them when any cannot be read, logging
 that at most once a minute. The command then counts no thread as a bot's and says so on a bot's

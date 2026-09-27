@@ -25,6 +25,7 @@ interface UnresolvedThread {
   openerLogin: string | null;
   openerTypename: string | null;
   newestLogin: string | null;
+  newestTypename: string | null;
   newestBody: string;
   newestPending: boolean;
 }
@@ -79,7 +80,7 @@ const THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $af
           id
           isResolved
           opener: comments(first: 1) { nodes { url author { __typename login } } }
-          newest: comments(last: 1) { nodes { author { login } body state } }
+          newest: comments(last: 1) { nodes { author { __typename login } body state } }
         }
       }
     }
@@ -180,18 +181,23 @@ function isAcceptance(body: string): boolean {
 
 type Resolution = { how: string } | { reason: string };
 
-/** Whether a thread is resolved and on whose acceptance, or, when it is left open, why. The subject
- * of a finding never closes it: a thread closes only on its newest submitted comment being an
- * `Accepted:` from its opener, or, on a thread a Bot that is none of Legion's role Apps opened,
- * from Legion's review App. GitHub cannot tell a CI bot from a person whose `gh` is routed to an
- * App, and such a bot may never accept, so the Legion reviewer is the independent party who
- * adjudicates its finding; the reviewer may accept a finding an App-routed person raised, which
- * the resolved line then says. The pull request's author (the implementer, whose App the merger
- * shares) closes nothing: its reply is an answer, not an acceptance. The reviewer's acceptance need
- * not follow an answer from the author: accepting is the reviewer's judgement of the finding, and a
- * required prior reply would be a ceremony the implementer could satisfy with an empty one. A draft
- * in a pending review never counts, since GitHub shows it only to its author. The Go CLI applies the same rule
- * (`threads.go` resolution), and the two share their vectors. */
+/** Whether a thread is resolved and on whose acceptance, or, when it is left open, why. Every
+ * account it compares is identified by what GitHub asserts about it, its type and its login
+ * together, never a login alone: a login is a string anyone may register (the review App's bare
+ * slug is a free username on a public repository), and every weaker proxy for "who wrote this" was
+ * forgeable by someone who read the rule. The subject of a finding never closes it: a thread
+ * closes only on its newest submitted comment being an `Accepted:` from its opener, or, on a
+ * thread a Bot that is none of Legion's role Apps opened, from Legion's review App. GitHub cannot
+ * tell a CI bot from a person whose `gh` is routed to an App, and such a bot may never accept, so
+ * the Legion reviewer is the independent party who adjudicates its finding; the reviewer may
+ * accept a finding an App-routed person raised, which the resolved line then says. The pull
+ * request's author (the implementer, whose App the merger shares) closes nothing: its reply is an
+ * answer, not an acceptance. The reviewer's acceptance need not follow an answer from the author:
+ * accepting is the reviewer's judgement of the finding, and a required prior reply would be a
+ * ceremony the implementer could satisfy with an empty one. A draft in a pending review never
+ * counts, since GitHub shows it only to its author. The Go CLI applies the same rule (`threads.go`
+ * resolution), and the two share their vectors.
+ */
 function resolution(thread: UnresolvedThread, apps: LegionApps): Resolution {
   if (thread.newestPending) return { reason: "an unsubmitted draft in a pending review" };
   const acceptance = isAcceptance(thread.newestBody);
@@ -199,6 +205,7 @@ function resolution(thread: UnresolvedThread, apps: LegionApps): Resolution {
     acceptance &&
     thread.openerLogin !== null &&
     thread.newestLogin !== null &&
+    thread.openerTypename === thread.newestTypename &&
     botSlug(thread.openerLogin) === botSlug(thread.newestLogin)
   ) {
     return { how: "its opener's acceptance" };
@@ -213,7 +220,12 @@ function resolution(thread: UnresolvedThread, apps: LegionApps): Resolution {
   if (thread.openerLogin !== null && apps.logins.has(botSlug(thread.openerLogin))) {
     return { reason: "not an acceptance" };
   }
-  if (acceptance && thread.newestLogin !== null && botSlug(thread.newestLogin) === apps.review) {
+  if (
+    acceptance &&
+    thread.newestTypename === "Bot" &&
+    thread.newestLogin !== null &&
+    botSlug(thread.newestLogin) === apps.review
+  ) {
     return { how: "the Legion reviewer's acceptance of a bot's thread" };
   }
   return { reason: "not its opener's or the Legion reviewer's acceptance" };
@@ -256,6 +268,7 @@ async function listUnresolvedThreads(
         openerLogin: opener.author?.login ?? null,
         openerTypename: opener.author?.__typename ?? null,
         newestLogin: newest.author?.login ?? null,
+        newestTypename: newest.author?.__typename ?? null,
         newestBody: newest.body,
         newestPending: newest.state === "PENDING",
       });
