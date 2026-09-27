@@ -176,10 +176,13 @@ func differingSpan(wanted, read string) string {
 // holding what their markdown reads back as where the write left a shape the markdown cannot carry
 // but reads back unambiguously, touching only what the write wrote. With halves, an empty
 // paragraph without a block id that the renderer does not write goes, as Splice leaves the empty
-// halves of the textblock a block replacement lands in. A list or list item the write changed from
-// before (a block before holds under its id, unchanged, is not the write's) takes the spread its
-// markdown reads back with, paired as far down as misreads pairs blocks, so one in a list that
-// already reads back otherwise elsewhere takes it too. Blocks outside first to last are doc's own.
+// halves of the textblock a block replacement lands in. Each list and list item takes the spread
+// its markdown reads back with, paired as far down as misreads pairs blocks, so one in a list that
+// already reads back otherwise elsewhere takes it too, and so does an item the write left alone
+// in a list it made loose, since a list's looseness is its whole markdown's. The exception is one
+// before holds unchanged under its id whose spread already read back otherwise there (or when
+// before does not read back): that spread is not the write's, and it is kept. Blocks outside
+// first to last are doc's own.
 func AgreeWithReadBack(before, doc *Node, first, last int, halves bool) *Node {
 	out := &Node{Type: doc.Type, Attrs: doc.Attrs, Children: slices.Clone(doc.Children)}
 	for index := first; index <= last; index++ {
@@ -214,18 +217,41 @@ func AgreeWithReadBack(before, doc *Node, first, last int, halves bool) *Node {
 		}
 		return true
 	})
-	unchanged := func(node *Node) bool {
-		previous, ok := held[blockIDOf(node)]
-		return ok && blockIDOf(node) != "" && previous.Equal(node)
+	stale, known := staleSpreads(before)
+	settleSpreads(out, back, first, last, func(node *Node) bool {
+		id := blockIDOf(node)
+		previous, ok := held[id]
+		return id == "" || !ok || !previous.Equal(node) || known && !stale[id]
+	})
+	return out
+}
+
+// staleSpreads is the block ids of before's lists and list items whose spread its markdown already
+// reads back otherwise, and false when before does not read back.
+func staleSpreads(before *Node) (map[string]bool, bool) {
+	back, err := ReadBack(before)
+	if err != nil {
+		return nil, false
 	}
-	pairs, _ := pairChildren("doc", writtenChildren(StripAnchorMarks(out)), back.Children, spreadAside)
-	writtenIndex := writtenIndexes(out)
+	stale := map[string]bool{}
+	settleSpreads(before, back, 0, len(before.Children)-1, func(node *Node) bool {
+		stale[blockIDOf(node)] = true
+		return false
+	})
+	return stale, true
+}
+
+// settleSpreads pairs doc's document-level blocks first to last with back, doc's read-back, as
+// misreads does, and gives each list and list item under them whose spread back holds otherwise
+// that spread where take reports true.
+func settleSpreads(doc, back *Node, first, last int, take func(*Node) bool) {
+	pairs, _ := pairChildren("doc", writtenChildren(StripAnchorMarks(doc)), back.Children, spreadAside)
+	writtenIndex := writtenIndexes(doc)
 	for _, pair := range pairs {
 		if index := writtenIndex[pair[0]]; index >= first && index <= last {
-			adoptSpread(out.Children[index], back.Children[pair[1]], unchanged)
+			adoptSpread(doc.Children[index], back.Children[pair[1]], take)
 		}
 	}
-	return out
 }
 
 // spreadAside compares blocks leaving their spread aside.
@@ -247,13 +273,13 @@ func dropUnwrittenHalves(node *Node) {
 	node.Children = kept
 }
 
-// adoptSpread gives node's lists and list items, which AgreeWithReadBack cloned, the spread their
-// read-back holds, pairing their blocks as misreads does, where the write changed them.
-func adoptSpread(node, back *Node, unchanged func(*Node) bool) {
-	if node.Type != back.Type || isTextblock(node.Type) || unchanged(node) {
+// adoptSpread gives node's lists and list items the spread their read-back holds where it differs
+// and take reports true, pairing their blocks as misreads does.
+func adoptSpread(node, back *Node, take func(*Node) bool) {
+	if node.Type != back.Type || isTextblock(node.Type) {
 		return
 	}
-	if (node.Type == "bullet_list" || node.Type == "ordered_list" || node.Type == "list_item") && node.Attrs["spread"] != back.Attrs["spread"] {
+	if (node.Type == "bullet_list" || node.Type == "ordered_list" || node.Type == "list_item") && node.Attrs["spread"] != back.Attrs["spread"] && take(node) {
 		if node.Attrs == nil {
 			node.Attrs = Attrs{}
 		}
@@ -262,7 +288,7 @@ func adoptSpread(node, back *Node, unchanged func(*Node) bool) {
 	written := writtenChildren(node)
 	pairs, _ := pairChildren(node.Type, written, back.Children, spreadAside)
 	for _, pair := range pairs {
-		adoptSpread(written[pair[0]], back.Children[pair[1]], unchanged)
+		adoptSpread(written[pair[0]], back.Children[pair[1]], take)
 	}
 }
 

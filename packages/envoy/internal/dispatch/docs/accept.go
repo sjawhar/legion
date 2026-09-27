@@ -2,7 +2,9 @@ package docs
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf16"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -17,10 +19,11 @@ import (
 
 // settleAccepted makes what an accept wrote hold what its markdown reads back as where that is
 // unambiguous (pmdoc.AgreeWithReadBack): the empty halves a block replacement leaves of the
-// textblock it lands in go where the renderer does not write them, and a list or list item the
-// accept changed takes the spread its markdown reads back with. An empty replacement keeps the
-// paragraph it empties, which the renderer does not write beside other blocks. Everything else,
-// block, mark and node, stays as it was.
+// textblock it lands in go where the renderer does not write them, and the lists and list items in
+// the blocks it changed take the spread their markdown reads back with, except one it left
+// unchanged whose spread already read back otherwise. An empty replacement keeps the paragraph it
+// empties, which the renderer does not write beside other blocks. Everything else, block, mark and
+// node, stays as it was.
 func settleAccepted(before, after *pmdoc.Node, match pmdoc.Range, with string) (*pmdoc.Node, error) {
 	first, _, lastAfter, err := changedBlocks(before, after, match)
 	if err != nil {
@@ -29,34 +32,55 @@ func settleAccepted(before, after *pmdoc.Node, match pmdoc.Range, with string) (
 	return pmdoc.AgreeWithReadBack(before, after, first, lastAfter, with != ""), nil
 }
 
-// acceptedCode is the code text an accepted suggestion writes over match in the code block at,
-// as that code reads back, so the accept stores what reads back without touching code it does not
-// write. Markdown drops the line breaks that end code, so where the match reaches the code's end
-// the text loses them; in a list item's code a line holding only whitespace reads back empty, so a
-// whole line of the text holding only whitespace is written empty.
-func acceptedCode(with string, at pmdoc.TextblockAt, match pmdoc.Range) string {
-	if match.To == at.Content.To {
-		with = strings.TrimRight(with, "\n")
-	}
-	if with == "" || !insideListItem(at) {
-		return with
-	}
+// acceptedCode is the code text an accepted suggestion writes in the code block at, and the range
+// it writes it over, match or the lines around it, as that code reads back, so the accept stores
+// what reads back and changes nothing but the lines it writes. Markdown drops the line breaks that
+// end code, so where only line breaks follow the match the text loses its own. In a list item's
+// code a line holding only whitespace reads back empty, so a line the accept leaves holding only
+// whitespace is written empty, the whitespace the line keeps around the match included; a form
+// feed is not such whitespace, since both readers keep it.
+func acceptedCode(with string, at pmdoc.TextblockAt, match pmdoc.Range) (string, pmdoc.Range) {
 	var text strings.Builder
 	for _, child := range at.Node.Children {
 		text.WriteString(child.Text)
 	}
 	code := utf16.Encode([]rune(text.String()))
 	from, to := match.From-at.Content.From, match.To-at.Content.From
-	startsLine := from == 0 || code[from-1] == '\n'
-	endsLine := to == len(code) || code[to] == '\n'
+	if !slices.ContainsFunc(code[to:], func(unit uint16) bool { return unit != '\n' }) {
+		with = strings.TrimRight(with, "\n")
+	}
+	if !insideListItem(at) {
+		return with, match
+	}
+	lineStart, lineEnd := from, to
+	for lineStart > 0 && code[lineStart-1] != '\n' {
+		lineStart--
+	}
+	for lineEnd < len(code) && code[lineEnd] != '\n' {
+		lineEnd++
+	}
 	lines := strings.Split(with, "\n")
-	for index, line := range lines {
-		whole := (index > 0 || startsLine) && (index < len(lines)-1 || endsLine)
-		if whole && strings.TrimSpace(line) == "" {
-			lines[index] = ""
+	last := len(lines) - 1
+	for index := range lines {
+		line := lines[index]
+		if index == 0 {
+			line = string(utf16.Decode(code[lineStart:from])) + line
+		}
+		if index == last {
+			line += string(utf16.Decode(code[to:lineEnd]))
+		}
+		if strings.TrimFunc(line, func(r rune) bool { return r != '\f' && unicode.IsSpace(r) }) != "" {
+			continue
+		}
+		lines[index] = ""
+		if index == 0 {
+			match.From = at.Content.From + lineStart
+		}
+		if index == last {
+			match.To = at.Content.From + lineEnd
 		}
 	}
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), match
 }
 
 func insideListItem(at pmdoc.TextblockAt) bool {
