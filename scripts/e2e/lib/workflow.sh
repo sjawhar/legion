@@ -365,8 +365,8 @@ assert_handoff_committer() {
   note "$2 $3 round $4 handoff $commit authored and committed by $identity"
 }
 # post_bot_thread opens one file-level review thread on the proof's pull request as the proof human,
-# a GitHub App and so a bot account, as a CI bot is, with no Legion footer; it prints the thread's
-# first comment's node id.
+# a GitHub App and so a bot account, as a CI bot is, and none of Legion's role Apps; it prints the
+# thread's first comment's node id.
 post_bot_thread() {
   local head
   head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1

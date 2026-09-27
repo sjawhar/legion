@@ -20,7 +20,7 @@ const reviewThreadsQuery = `query($owner: String!, $name: String!, $number: Int!
     pullRequest(number: $number) {
       author { login }
       reviewThreads(first: 100, after: $after) {
-        nodes { id isResolved opener: comments(first: 1) { nodes { author { __typename login } url body pullRequestReview { body } } } newest: comments(last: 1) { nodes { author { login } url body state } } }
+        nodes { id isResolved opener: comments(first: 1) { nodes { author { __typename login } url } } newest: comments(last: 1) { nodes { author { login } url body state } } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -61,7 +61,7 @@ func runThreads(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		fmt.Fprintln(stderr, "legion threads resolve: daemon returned an invalid GitHub credential response")
 		return 1
 	}
-	threads, err := unresolvedReviewThreads(ctx, credential.Token, repository, number)
+	threads, err := unresolvedReviewThreads(ctx, credential.Token, repository, number, legionApps(credential.LegionAppLogins))
 	if err != nil {
 		fmt.Fprintf(stderr, "legion threads resolve: %v\n", err)
 		return 1
@@ -111,16 +111,25 @@ type reviewThread struct {
 	id, url, openerLogin, newestLogin, newestBody string
 	// newestPending marks a newest comment that is a draft in a pending, unsubmitted review.
 	newestPending bool
-	// botOpened marks a thread a bot account opened that is not a Legion role's: its opening
-	// comment and its review carry no Legion footer (<!-- legion: ... -->). A Legion reviewer's
-	// thread closes only on the reviewer's own Accepted:, a bot never posts one.
+	// botOpened marks a thread a bot account opened that is none of Legion's role Apps (legionApps).
+	// A thread either Legion App opened closes only on its opener's Accepted:; a bot never posts one.
 	botOpened bool
 	// author is the pull request's author, who answers a bot's thread with a disposition.
 	author string
 }
 
-// legionFooter marks what a Legion role posts on GitHub (the listener reads the same marker).
-const legionFooter = "<!-- legion:"
+// legionApps is the set of Legion's role Apps' logins, from the daemon's gh-token answer, as GitHub
+// GraphQL names a Bot: its bare slug, without "[bot]". It is empty when the daemon names none, and
+// then no thread counts as a bot's: which accounts are Legion's own is a fact the daemon holds, and
+// without it a Legion reviewer's footerless thread would read as a CI bot's and close on the
+// implementer's own reply.
+func legionApps(logins []string) map[string]bool {
+	apps := map[string]bool{}
+	for _, login := range logins {
+		apps[strings.TrimSuffix(login, "[bot]")] = true
+	}
+	return apps
+}
 
 // disposition is the pull request author's answer to a bot's thread, as its reply's first line:
 // `Fixed in <commit>: <what changed>` or `Declined: <reason>`, the implementer's reply grammar for
@@ -146,7 +155,7 @@ func disposedByAuthor(thread reviewThread) bool {
 		disposition.MatchString(firstLine(thread.newestBody))
 }
 
-func unresolvedReviewThreads(ctx context.Context, token string, repository ghrepo.Repository, number int) ([]reviewThread, error) {
+func unresolvedReviewThreads(ctx context.Context, token string, repository ghrepo.Repository, number int, legion map[string]bool) ([]reviewThread, error) {
 	var all []reviewThread
 	var after any
 	for {
@@ -170,8 +179,7 @@ func unresolvedReviewThreads(ctx context.Context, token string, repository ghrep
 			if newest.State != "PENDING" && newest.State != "SUBMITTED" {
 				return nil, fmt.Errorf("review thread %s: its newest comment carried state %q, not \"PENDING\" or \"SUBMITTED\"", node.ID, newest.State)
 			}
-			botOpened := opening.Author.Typename == "Bot" && !strings.Contains(opening.Body, legionFooter) &&
-				(opening.PullRequestReview == nil || !strings.Contains(opening.PullRequestReview.Body, legionFooter))
+			botOpened := len(legion) > 0 && opening.Author.Typename == "Bot" && !legion[strings.TrimSuffix(opening.Author.Login, "[bot]")]
 			all = append(all, reviewThread{id: node.ID, url: opening.URL, openerLogin: opening.Author.Login, newestLogin: newest.Author.Login, newestBody: newest.Body,
 				newestPending: newest.State == "PENDING", botOpened: botOpened, author: page.Data.Repository.PullRequest.Author.Login})
 		}
@@ -220,10 +228,6 @@ type reviewComment struct {
 		Typename string `json:"__typename"`
 		Login    string `json:"login"`
 	} `json:"author"`
-	// PullRequestReview is the review the comment belongs to, selected on the opener.
-	PullRequestReview *struct {
-		Body string `json:"body"`
-	} `json:"pullRequestReview"`
 }
 
 func graphql(ctx context.Context, token, query string, variables map[string]any, into any) error {

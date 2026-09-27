@@ -184,14 +184,18 @@ account that opened it, begins `Accepted:` after nothing but space, tab, CR or L
 by <login> is not an acceptance`, and exits 1 naming the first thread GitHub refuses; any newest
 comment that is not the opener's own `Accepted:` — a `Still open:` reply, a reply by another
 account, the opener's own later follow-up, or an `Accepted:` after a no-break space — leaves the
-thread open with exit 0. A newest comment that is a draft in a pending review never counts either
+thread open with exit 0, but for the bot's thread below. A newest comment that is a draft in a pending review never counts either
 (`left open <url> — newest reply by <login> is an unsubmitted draft in a pending review`). GitHub
 shows a draft only to its author, so a caller posting as the opener's account would otherwise
 resolve on an acceptance nobody submitted. For every caller, then, a thread is resolved only when
 its newest submitted comment is the opener's `Accepted:`, or, on a thread a bot account opened
-whose comment and review carry no Legion footer (`<!-- legion:`), the pull request author's
-disposition, `Fixed in <commit>: …` or `Declined: …` as its first line (`disposedByAuthor`; a bot
-never posts `Accepted:`, and a Legion reviewer's thread still needs its own). A caller's own draft
+that is none of Legion's role Apps, the pull request author's disposition, `Fixed in <commit>: …`
+or `Declined: …` as its first line (`disposedByAuthor`; a bot never posts `Accepted:`). Which
+accounts are Legion's is the daemon's to say: `/gh-token` names every role App's login
+(`legionAppLogins`), leasing each App to read it, and omits the list when either cannot be read.
+The command then counts no thread as a bot's, and so does `--gh`, which has no grant: a Legion
+reviewer's review often carries no footer, and the implementer's ordinary reply would otherwise
+close the reviewer's finding. A caller's own draft
 newer than that can only make it leave the thread open. A newest comment with no `state` (the query stopped selecting
 it), or an unresolved thread with no comments, exits 1 before anything is resolved. The Go CLI's
 `threads resolve` (`packages/daemon-go/cmd/legion/threads.go`) applies the same rule, whitespace,

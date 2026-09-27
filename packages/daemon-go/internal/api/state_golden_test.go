@@ -326,6 +326,7 @@ func TestTask310RouteGoldens(t *testing.T) {
 	})
 	golden(t, "github-token.json", GitHubTokenResponse{
 		Token: "installation-token", AppLogin: "legion-implementer[bot]",
+		LegionAppLogins: []string{"legion-implementer[bot]", "legion-reviewer[bot]"},
 	})
 	golden(t, "git-credential.json", GitCredentialResponse{
 		Username: "x-access-token", Password: "installation-token",

@@ -245,7 +245,10 @@ function isGitHubIssueWriteInvocation(args: string[]): boolean {
   );
 }
 
-async function redeemGitHubToken(deps: GrantRedemptionDeps, withoutGrant = ""): Promise<string> {
+async function redeemGitHubToken(
+  deps: GrantRedemptionDeps,
+  withoutGrant = ""
+): Promise<{ token: string; legionAppLogins: string[] }> {
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -271,7 +274,7 @@ async function redeemGitHubToken(deps: GrantRedemptionDeps, withoutGrant = ""): 
   if (!payload.success) {
     throw new CliError("Daemon returned an invalid GitHub credential response");
   }
-  return payload.data.token;
+  return { token: payload.data.token, legionAppLogins: payload.data.legionAppLogins ?? [] };
 }
 
 export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
@@ -285,7 +288,7 @@ export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> 
       `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on ${deps.env.LEGION_ISSUE || "the Dispatch issue"}`
     );
   }
-  const token = await redeemGitHubToken(deps);
+  const { token } = await redeemGitHubToken(deps);
   const childEnv = buildGitHubTokenEnv(token, deps.env);
   // Never the pane's own `gh` shim (first on its PATH for life) — see `pathWithoutWorkerBin`.
   if (childEnv.PATH !== undefined) childEnv.PATH = pathWithoutWorkerBin(childEnv.PATH);
@@ -319,16 +322,29 @@ export async function cmdThreadsResolve(
       "--gh is for a session outside a Legion pane; this pane names a grant (LEGION_GRANT_FILE), so run legion threads resolve without --gh"
     );
   }
-  const graphql = options.gh
-    ? ghGraphql(deps.runGh, deps.env, repo, deps.stderr)
-    : githubGraphql(
-        deps.fetch,
-        await redeemGitHubToken(
-          deps,
-          "; a session outside a Legion pane has no grant and adds --gh to resolve through its own gh"
-        )
-      );
-  await resolveAcceptedThreads(graphql, repo, number, deps.log);
+  // Which accounts are Legion's own role Apps is the daemon's to say, on the grant's gh-token
+  // answer. `--gh` has no grant, so it names none, and no thread then counts as a bot's.
+  if (options.gh) {
+    await resolveAcceptedThreads(
+      ghGraphql(deps.runGh, deps.env, repo, deps.stderr),
+      repo,
+      number,
+      [],
+      deps.log
+    );
+    return;
+  }
+  const credential = await redeemGitHubToken(
+    deps,
+    "; a session outside a Legion pane has no grant and adds --gh to resolve through its own gh"
+  );
+  await resolveAcceptedThreads(
+    githubGraphql(deps.fetch, credential.token),
+    repo,
+    number,
+    credential.legionAppLogins,
+    deps.log
+  );
 }
 
 export async function cmdCredential(deps: CredentialCommandDeps): Promise<void> {

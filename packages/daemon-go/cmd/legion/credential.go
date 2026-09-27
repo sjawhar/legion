@@ -22,6 +22,8 @@ type grantCredentialRequest struct {
 type githubTokenResponse struct {
 	Token    string `json:"token"`
 	AppLogin string `json:"appLogin"`
+	// LegionAppLogins is every Legion role App's login, which gh-token names beside the caller's.
+	LegionAppLogins []string `json:"legionAppLogins"`
 }
 
 // grantFromEnvironment follows the pane contract exactly: a set grant-file pointer is

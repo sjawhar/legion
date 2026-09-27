@@ -2199,11 +2199,14 @@ describe("Legion HTTP API", () => {
     const token = await json("/legion/v1/gh-token", {
       grantId: grant.body.grantId,
     });
+    // The answer also names both of Legion's role Apps, which `legion threads resolve` keeps out of
+    // its bot-thread rule; reading them leases each App once more.
     expect(token.body).toEqual({
       token: "minted-review-acme",
       appLogin: "legion-review[bot]",
+      legionAppLogins: ["legion-implement[bot]", "legion-review[bot]"],
     });
-    expect(tokenRoles).toEqual(["review", "review"]);
+    expect(tokenRoles).toEqual(["review", "review", "implement", "review"]);
 
     const credential = await curl("/legion/v1/git-credential", {
       grantId: grant.body.grantId,
@@ -2350,7 +2353,7 @@ describe("Legion HTTP API", () => {
     // architect acts as the review App — `appRoleForLegionRole`, LEGION-42).
     const survivor = await json("/legion/v1/gh-token", { grantId: architectGrant.body.grantId });
     expect(survivor.response.status).toBe(200);
-    expect(tokenRoles).toEqual(["review"]);
+    expect(tokenRoles).toEqual(["review", "implement", "review"]);
   });
   it("rejects gh-token/git-credential with 403 when the minting session's capability is revoked while the GitHub lease is in flight", async () => {
     const reachedLease = Promise.withResolvers<void>();

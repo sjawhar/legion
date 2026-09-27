@@ -317,11 +317,11 @@ this proof.
   In a Legion pane, the **implementer** runs the command before every push that answers a review
   (the corrective push and the final `.legion/` deletion push) and pastes its output into the
   `Threads` section. The command resolves each unresolved thread whose newest submitted comment is
-  the opener's own `Accepted:` reply. It also resolves each thread a bot account opened (a CI
-  bot's, whose comment and review carry no Legion footer, `<!-- legion:`) once the newest
+  the opener's own `Accepted:` reply. It also resolves each thread a bot account opened that is
+  none of Legion's role Apps (a CI bot's; the daemon names Legion's App logins) once the newest
   submitted comment is the pull request author's disposition, `Fixed in <commit>: …` or
-  `Declined: …` as its first line: a bot never posts `Accepted:`. A Legion reviewer's thread still
-  needs the reviewer's `Accepted:`. It makes one `resolveReviewThread` per thread, prints
+  `Declined: …` as its first line: a bot never posts `Accepted:`. A thread either Legion App
+  opened, a reviewer's finding included, still needs its opener's `Accepted:`. It makes one `resolveReviewThread` per thread, prints
   `resolved <url>` or `left open <url> — newest reply by <login> is …` naming why, and exits 1
   naming the thread's URL and GitHub's message when GitHub refuses one.
 
@@ -340,11 +340,9 @@ this proof.
   ```
 
   Resolve only when the newest comment is submitted, its `author { login }` equals the opener's,
-  and its `body`, after removing leading spaces, tabs, CR, and LF, begins `Accepted:`. A thread a
-  bot opened is resolved instead when the newest submitted comment is the pull request author's
-  and its first line is `Fixed in <commit>: …` or `Declined: …`; select the opener's
-  `author { __typename login }` and `body`, its review's `body`, and the pull request's
-  `author { login }` to tell. For each such thread:
+  and its `body`, after removing leading spaces, tabs, CR, and LF, begins `Accepted:`. Without a
+  grant nothing names Legion's own App logins, so this route resolves no bot's thread: leave one
+  for the implementer's or merger's run in a pane, or report it. For each such thread:
 
   ```graphql
   mutation($threadId: ID!) {

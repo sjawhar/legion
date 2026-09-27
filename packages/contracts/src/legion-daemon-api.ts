@@ -365,7 +365,13 @@ export const LegionDaemonApi = {
   },
   GitHubToken: {
     request: z.strictObject({ grantId: nonEmptyString }),
-    response: z.object({ token: nonEmptyString, appLogin: z.string().endsWith("[bot]") }),
+    response: z.object({
+      token: nonEmptyString,
+      appLogin: z.string().endsWith("[bot]"),
+      /** Every Legion role App's login, which `legion threads resolve` keeps out of its bot-thread
+       * rule; absent when the daemon could not read both. */
+      legionAppLogins: z.array(z.string().endsWith("[bot]")).optional(),
+    }),
   },
   GitCredential: {
     request: z.strictObject({ grantId: nonEmptyString }),

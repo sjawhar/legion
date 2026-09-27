@@ -1,4 +1,8 @@
 {
   "token": "installation-token",
-  "appLogin": "legion-implementer[bot]"
+  "appLogin": "legion-implementer[bot]",
+  "legionAppLogins": [
+    "legion-implementer[bot]",
+    "legion-reviewer[bot]"
+  ]
 }

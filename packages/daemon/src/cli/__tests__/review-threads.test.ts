@@ -10,11 +10,8 @@ interface Comment {
   state?: "PENDING" | "SUBMITTED";
 }
 
-/** How a thread's opener posted: a person, or a bot account whose review body is `review`. */
-interface Opener {
-  type: "User" | "Bot";
-  review: string;
-}
+/** Whether a thread's opener is a person or a bot account (GitHub GraphQL's actor `__typename`). */
+type OpenerType = "User" | "Bot";
 
 function thread(
   id: string,
@@ -22,20 +19,13 @@ function thread(
   opener: string,
   newest: Comment,
   isResolved = false,
-  by: Opener = { type: "User", review: "" }
+  by: OpenerType = "User"
 ) {
   return {
     id,
     isResolved,
     opener: {
-      nodes: [
-        {
-          url: `${PR}${n}`,
-          body: "raise",
-          author: { __typename: by.type, login: opener },
-          pullRequestReview: { body: by.review },
-        },
-      ],
+      nodes: [{ url: `${PR}${n}`, author: { __typename: by, login: opener } }],
     },
     newest: {
       nodes: [
@@ -50,7 +40,7 @@ function page(nodes: unknown[], endCursor: string | null) {
     data: {
       repository: {
         pullRequest: {
-          author: { login: "legion-implementer[bot]" },
+          author: { login: "legion-implementer" },
           reviewThreads: { pageInfo: { hasNextPage: endCursor !== null, endCursor }, nodes },
         },
       },
@@ -70,13 +60,17 @@ function served(query: string, page: unknown): unknown {
   return JSON.parse(JSON.stringify(page), (key, value) => (key === "state" ? undefined : value));
 }
 
-/** A fake daemon + GitHub: `/legion/v1/gh-token` redeems the grant; `api.github.com/graphql`
- * serves `reviewThreads` pages keyed by the `after` cursor ("null" for the first page) and
- * records every `resolveReviewThread` mutation. */
+/** The daemon's gh-token answer naming both of Legion's role Apps. */
+const LEGION_APP_LOGINS = ["legion-implementer[bot]", "legion-reviewer[bot]"];
+
+/** A fake daemon + GitHub: `/legion/v1/gh-token` redeems the grant, naming `legionAppLogins` (none
+ * when null); `api.github.com/graphql` serves `reviewThreads` pages keyed by the `after`
+ * cursor ("null" for the first page) and records every `resolveReviewThread` mutation. */
 function fakeGitHub(
   pages: Record<string, unknown>,
   mutation: (threadId: string) => unknown,
-  tokenStatus = 200
+  tokenStatus = 200,
+  legionAppLogins: string[] | null = LEGION_APP_LOGINS
 ) {
   const requests: Request[] = [];
   const graphqlBodies: Array<{ query: string; variables: Record<string, unknown> }> = [];
@@ -86,7 +80,11 @@ function fakeGitHub(
     requests.push(request);
     if (new URL(request.url).pathname === "/legion/v1/gh-token") {
       if (tokenStatus !== 200) return new Response("nope", { status: tokenStatus });
-      return Response.json({ token: "scoped-token", appLogin: "legion-implementer[bot]" });
+      return Response.json({
+        token: "scoped-token",
+        appLogin: "legion-implementer[bot]",
+        ...(legionAppLogins === null ? {} : { legionAppLogins }),
+      });
     }
     const body = (await request.json()) as { query: string; variables: Record<string, unknown> };
     graphqlBodies.push(body);
@@ -495,10 +493,10 @@ describe("legion threads resolve", () => {
   it("closes a bot's thread on the pull request author's disposition, as the Go CLI does", async () => {
     // The shared vector with threads_test.go: a bot never posts Accepted:, so its thread closes when
     // the pull request's author answers with `Fixed in <commit>: …` or `Declined: …` as its first
-    // line; a Legion
-    // reviewer's thread (its review carries the Legion footer) and a person's are unchanged.
-    const author = "legion-implementer[bot]";
-    const bot: Opener = { type: "Bot", review: "Automated review" };
+    // line. The bot must be none of Legion's own role Apps, which the daemon names: a thread
+    // legion-reviewer or legion-implementer opened closes only on its opener's Accepted:, so the
+    // implementer's ordinary reply never closes a reviewer's finding. A person's is unchanged.
+    const author = "legion-implementer";
     const github = fakeGitHub(
       {
         null: page(
@@ -506,65 +504,70 @@ describe("legion threads resolve", () => {
             thread(
               "fixed",
               1,
-              "claude[bot]",
+              "claude",
               { login: author, body: "Fixed in 1a2b3c4: moved the guard" },
               false,
-              bot
+              "Bot"
             ),
             thread(
               "declined",
               2,
-              "claude[bot]",
+              "claude",
               { login: author, body: " \t\r\nDeclined: the loop is bounded" },
               false,
-              bot
+              "Bot"
             ),
-            thread("vague", 3, "claude[bot]", { login: author, body: "Addressed it" }, false, bot),
+            thread("vague", 3, "claude", { login: author, body: "Addressed it" }, false, "Bot"),
             thread(
               "second-line",
               8,
-              "claude[bot]",
+              "claude",
               { login: author, body: "Thanks for the catch.\nDeclined: the loop is bounded" },
               false,
-              bot
+              "Bot"
             ),
             thread(
               "multiline",
               9,
-              "claude[bot]",
+              "claude",
               {
                 login: author,
                 body: "Declined: the loop is bounded\r\nThe bound is the page size.",
               },
               false,
-              bot
+              "Bot"
             ),
             thread(
               "not-author",
               4,
-              "claude[bot]",
-              { login: "legion-reviewer[bot]", body: "Declined: not ours" },
+              "claude",
+              { login: "legion-reviewer", body: "Declined: not ours" },
               false,
-              bot
+              "Bot"
             ),
             thread(
               "draft",
               5,
-              "claude[bot]",
+              "claude",
               { login: author, body: "Fixed in 1a2b3c4: drafted", state: "PENDING" },
               false,
-              bot
+              "Bot"
             ),
             thread(
               "reviewer",
               6,
-              "legion-reviewer[bot]",
+              "legion-reviewer",
               { login: author, body: "Fixed in 1a2b3c4: moved the guard" },
               false,
-              {
-                type: "Bot",
-                review: 'Round 2\n\n<!-- legion: {"phase":"review"} -->',
-              }
+              "Bot"
+            ),
+            thread(
+              "implementer-app",
+              10,
+              "legion-implementer",
+              { login: author, body: "Declined: my own note" },
+              false,
+              "Bot"
             ),
             thread("human", 7, "octocat", {
               login: author,
@@ -597,11 +600,75 @@ describe("legion threads resolve", () => {
       `left open ${PR}3 — newest reply by ${author} is ${botReason}`,
       `left open ${PR}8 — newest reply by ${author} is ${botReason}`,
       `resolved ${PR}9`,
-      `left open ${PR}4 — newest reply by legion-reviewer[bot] is ${botReason}`,
+      `left open ${PR}4 — newest reply by legion-reviewer is ${botReason}`,
       `left open ${PR}5 — newest reply by ${author} is an unsubmitted draft in a pending review`,
       `left open ${PR}6 — newest reply by ${author} is not an acceptance`,
+      `left open ${PR}10 — newest reply by ${author} is not an acceptance`,
       `left open ${PR}7 — newest reply by ${author} is not an acceptance`,
     ]);
+  });
+
+  it("applies no bot-thread rule when Legion's App logins are unknown: a daemon that names none, and --gh", async () => {
+    // Which accounts are Legion's own is the daemon's to say, on the grant's gh-token answer. A
+    // daemon that names none, and `--gh`, which has no grant, leave every bot's thread to the
+    // opener's-Accepted: rule: a CI bot's thread the author answered stays open rather than risk
+    // closing a Legion reviewer's.
+    const author = "legion-implementer";
+    const pages = {
+      null: page(
+        [
+          thread(
+            "ci-bot",
+            1,
+            "claude",
+            { login: author, body: "Fixed in 1a2b3c4: moved the guard" },
+            false,
+            "Bot"
+          ),
+          thread(
+            "reviewer",
+            2,
+            "legion-reviewer",
+            { login: author, body: "Fixed in 1a2b3c4: moved the guard" },
+            false,
+            "Bot"
+          ),
+        ],
+        null
+      ),
+    };
+    const expected = [
+      `left open ${PR}1 — newest reply by ${author} is not an acceptance`,
+      `left open ${PR}2 — newest reply by ${author} is not an acceptance`,
+    ];
+    const github = fakeGitHub(pages, resolvedOk, 200, null);
+    const daemonLines: string[] = [];
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993" },
+      {
+        env: { LEGION_GRANT: "grant-123" },
+        fetch: github.fetch,
+        ...noGh,
+        log: (line) => daemonLines.push(line),
+      }
+    );
+    expect(github.resolved).toEqual([]);
+    expect(daemonLines).toEqual(expected);
+
+    const gh = fakeGh(pages, resolvedOk);
+    const ghLines: string[] = [];
+    await cmdThreadsResolve(
+      { repo: "sjawhar/legion", pr: "993", gh: true },
+      {
+        env: {},
+        fetch: noFetch,
+        runGh: gh.runGh,
+        stderr: () => undefined,
+        log: (line) => ghLines.push(line),
+      }
+    );
+    expect(gh.resolved).toEqual([]);
+    expect(ghLines).toEqual(expected);
   });
 
   it("refuses a newest comment that carries no state, resolving nothing", async () => {

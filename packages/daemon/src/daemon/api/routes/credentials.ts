@@ -84,11 +84,29 @@ export async function handleGhToken(
     throw new HttpError(403, CONTROLLER_HAS_NO_REPOSITORY);
   }
   const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(grant.role), grant.issue);
+  const legionAppLogins = await legionAppLoginsFor(ctx, grant.issue);
   ctx.auth.resolveGrant(body);
   return Response.json(
     validateContractResponse(LegionDaemonApi.GitHubToken.response, {
       token: lease.token,
       appLogin: lease.gitIdentity.name,
+      ...(legionAppLogins === undefined ? {} : { legionAppLogins }),
     })
   );
+}
+
+/** Every Legion role App's login for the issue's repository, the accounts Legion's own roles post
+ * as. `legion threads resolve` keeps their threads out of its bot-thread rule, so a Legion
+ * reviewer's finding still closes only on the reviewer's own `Accepted:`. Undefined when either
+ * App's identity cannot be read: the command then cannot tell a Legion App from a CI bot and
+ * applies only the `Accepted:` rule. */
+async function legionAppLoginsFor(ctx: RouteContext, issue: string): Promise<string[] | undefined> {
+  try {
+    const leases = await Promise.all(
+      (["implement", "review"] as const).map((role) => ctx.github.tokenForIssue(role, issue))
+    );
+    return leases.map((lease) => lease.gitIdentity.name);
+  } catch {
+    return undefined;
+  }
 }

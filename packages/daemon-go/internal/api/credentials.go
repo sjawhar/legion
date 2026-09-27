@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -39,6 +40,9 @@ type GrantCredentialRequest struct {
 type GitHubTokenResponse struct {
 	Token    string `json:"token"`
 	AppLogin string `json:"appLogin"`
+	// LegionAppLogins, on gh-token alone, is the login of every role App this daemon leases for the
+	// repository owner: the accounts Legion's own roles post as (legionAppLogins).
+	LegionAppLogins []string `json:"legionAppLogins,omitempty"`
 }
 
 // GitCredentialResponse is the logical credential a git helper writes in the credential protocol.
@@ -132,7 +136,32 @@ func (s *server) githubToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, GitHubTokenResponse{Token: lease.Token, AppLogin: lease.Identity.Name})
+	logins := s.legionAppLogins(r.Context())
+	// The logins are read after the grant's claim was checked, so the claim is checked again before
+	// the token leaves, as leaseForGrant checks it after its own await.
+	if !s.claimHolds(grant) {
+		writeFailure(w, http.StatusForbidden, "GRANT_REVOKED", grantRevoked)
+		return
+	}
+	writeJSON(w, http.StatusOK, GitHubTokenResponse{Token: lease.Token, AppLogin: lease.Identity.Name, LegionAppLogins: logins})
+}
+
+// legionAppLogins is the login of each role App the daemon leases for the repository owner, the
+// accounts Legion's own roles post as. `legion threads resolve` keeps their threads out of its
+// bot-thread rule, which a CI bot's thread needs, so a Legion reviewer's finding still closes only
+// on the reviewer's own Accepted:. It is nil when either App's identity cannot be read: the
+// command then cannot tell a Legion App from a CI bot and applies only the Accepted: rule.
+func (s *server) legionAppLogins(ctx context.Context) []string {
+	var logins []string
+	for _, role := range []appauth.AppRole{appauth.Implement, appauth.Review} {
+		lease, err := s.tokens.Token(ctx, role, s.githubOwner)
+		if err != nil || lease.Identity.Name == "" {
+			s.log.Warn("api: read a Legion App's login for threads resolve", "role", role, "error", err)
+			return nil
+		}
+		logins = append(logins, lease.Identity.Name)
+	}
+	return logins
 }
 
 func (s *server) gitCredential(w http.ResponseWriter, r *http.Request) {

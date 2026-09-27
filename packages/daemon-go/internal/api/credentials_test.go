@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,18 +19,27 @@ import (
 type tokenSource struct {
 	started chan struct{}
 	release chan struct{}
+	once    sync.Once
 	role    appauth.AppRole
 	owner   string
 }
 
+// Token leases the role's App: the implement App is legion-implementer[bot], the review App
+// legion-reviewer[bot]. A source with started blocks its first lease until release closes.
 func (s *tokenSource) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
 	s.role = role
 	s.owner = owner
 	if s.started != nil {
-		close(s.started)
-		<-s.release
+		s.once.Do(func() {
+			close(s.started)
+			<-s.release
+		})
 	}
-	return appauth.Lease{Token: "installation-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: "legion-implementer[bot]"}}, nil
+	name := "legion-implementer[bot]"
+	if role == appauth.Review {
+		name = "legion-reviewer[bot]"
+	}
+	return appauth.Lease{Token: "installation-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: name}}, nil
 }
 func newCredentialHarness(t *testing.T, tokens appauth.Tokens) *harness {
 	return newCredentialHarnessWithGrants(t, tokens, credential.New(nil))
@@ -221,6 +233,45 @@ func TestAClaimLeavingItsRunningStatesRevokesItsSecretAndGrants(t *testing.T) {
 				http.StatusForbidden, "GRANT_REVOKED")
 			if stored := h.stored(token); len(stored.CapabilityHash) != 0 {
 				t.Fatalf("stored claim after %s keeps capability hash %x", exit, stored.CapabilityHash)
+			}
+		})
+	}
+}
+
+// reviewUnavailable is a token source whose review App cannot be leased.
+type reviewUnavailable struct{ tokenSource }
+
+func (s *reviewUnavailable) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	if role == appauth.Review {
+		return appauth.Lease{}, errors.New("the review App is not installed for acme")
+	}
+	return s.tokenSource.Token(ctx, role, owner)
+}
+
+// gh-token names both of Legion's role Apps beside the caller's own, so `legion threads resolve`
+// can tell a Legion App's review thread from a CI bot's. When either App's login cannot be read the
+// list is left out, and the command then applies no bot-thread rule; the caller's token still
+// comes back.
+func TestGitHubTokenNamesEveryLegionAppLogin(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source appauth.Tokens
+		want   []string
+	}{
+		{"both Apps leased", &tokenSource{}, []string{"legion-implementer[bot]", "legion-reviewer[bot]"}},
+		{"the review App unavailable", &reviewUnavailable{}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCredentialHarness(t, tc.source)
+			grant := liveGrant(t, h, claim.RoleImplementer)
+			recorder := h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: grant.GrantID}, nil)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("gh-token = %d: %s", recorder.Code, recorder.Body)
+			}
+			var got GitHubTokenResponse
+			decodeInto(t, recorder, &got)
+			if got.Token != "installation-token" || got.AppLogin != "legion-implementer[bot]" || !slices.Equal(got.LegionAppLogins, tc.want) {
+				t.Fatalf("gh-token = %+v, want the implementer's token and Legion App logins %v", got, tc.want)
 			}
 		})
 	}

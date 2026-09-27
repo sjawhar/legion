@@ -26,9 +26,8 @@ interface UnresolvedThread {
   newestLogin: string | null;
   newestBody: string;
   newestPending: boolean;
-  /** A thread a bot account opened that is not a Legion role's: neither its opening comment nor
-   * its review carries the Legion footer. A Legion reviewer's thread closes only on its own
-   * `Accepted:`; a bot never posts one. */
+  /** A thread a bot account opened that is none of Legion's role Apps (`legionApps`). A thread
+   * either Legion App opened closes only on its opener's `Accepted:`; a bot never posts one. */
   botOpened: boolean;
   /** The pull request's author, who answers a bot's thread with a disposition. */
   author: string | null;
@@ -51,9 +50,7 @@ interface ThreadsPage {
           opener: {
             nodes: Array<{
               url: string;
-              body: string;
               author: Actor | null;
-              pullRequestReview: { body: string } | null;
             }>;
           };
           newest: {
@@ -75,7 +72,7 @@ const THREADS_QUERY = `query($owner: String!, $name: String!, $number: Int!, $af
         nodes {
           id
           isResolved
-          opener: comments(first: 1) { nodes { url body author { __typename login } pullRequestReview { body } } }
+          opener: comments(first: 1) { nodes { url author { __typename login } } }
           newest: comments(last: 1) { nodes { author { login } body state } }
         }
       }
@@ -174,8 +171,14 @@ function acceptedByOpener(thread: UnresolvedThread): boolean {
   );
 }
 
-/** What a Legion role posts on GitHub carries this marker (the listener reads the same one). */
-const LEGION_FOOTER = "<!-- legion:";
+/** Legion's role Apps' logins, from the daemon's gh-token answer, as GitHub GraphQL names a Bot:
+ * its bare slug, without `[bot]`. Empty when the daemon names none (`--gh`, or a daemon that
+ * could not read both), and then no thread counts as a bot's: which accounts are Legion's own is
+ * a fact the daemon holds, and without it a Legion reviewer's thread would read as a CI bot's and
+ * close on the implementer's own reply. */
+function legionApps(logins: readonly string[]): ReadonlySet<string> {
+  return new Set(logins.map((login) => login.replace(/\[bot\]$/, "")));
+}
 
 /** The pull request author's answer to a bot's thread, as its reply's first line (after the same
  * leading space, tab, CR or LF `Accepted:` may follow): `Fixed in <commit>: <what changed>` or
@@ -204,7 +207,8 @@ function disposedByAuthor(thread: UnresolvedThread): boolean {
 async function listUnresolvedThreads(
   graphql: GraphqlCall,
   repo: GitHubRepo,
-  number: number
+  number: number,
+  legion: ReadonlySet<string>
 ): Promise<UnresolvedThread[]> {
   const threads: UnresolvedThread[] = [];
   let after: string | null = null;
@@ -239,9 +243,9 @@ async function listUnresolvedThreads(
         newestBody: newest.body,
         newestPending: newest.state === "PENDING",
         botOpened:
+          legion.size > 0 &&
           opener.author?.__typename === "Bot" &&
-          !opener.body.includes(LEGION_FOOTER) &&
-          !(opener.pullRequestReview?.body ?? "").includes(LEGION_FOOTER),
+          !legion.has(opener.author.login.replace(/\[bot\]$/, "")),
         author: pullRequest.author?.login ?? null,
       });
     }
@@ -281,9 +285,10 @@ export async function resolveAcceptedThreads(
   graphql: GraphqlCall,
   repo: GitHubRepo,
   number: number,
+  legionAppLogins: readonly string[],
   log: (line: string) => void
 ): Promise<void> {
-  const threads = await listUnresolvedThreads(graphql, repo, number);
+  const threads = await listUnresolvedThreads(graphql, repo, number, legionApps(legionAppLogins));
   if (threads.length === 0) {
     log("no unresolved threads");
     return;
