@@ -199,6 +199,37 @@ reference stays a reference). `move` relocates the block with
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
 anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
 
+A write runs on its transaction's fork of the room, so a browser change made while it is in flight
+merges with it rather than blocking it, and the merge can annihilate the write: `pmdoc.Update`
+splices a paragraph's text in place, a browser's paragraph delete is an element delete, and ygo's
+delete cascades over the element's children, so whichever side merges first the inserted run ends
+up tombstoned or live under a tombstoned element. The document outcome is right - the human's
+deletion wins - but the write used to commit, version and answer 200 anyway, telling the agent its
+edit applied (LEGION-269). Each write now records what its own Yjs update inserted and where
+(`docs/lostedit.go` `lossCheck`, over `pmdoc.AuthoredTextRuns`): per operation, the blocks whose own
+inline content it wrote (`pmdoc.BlocksGainingText`, the same `simpleDiff` insertion `pmdoc.Update`
+makes, so a block whose text only shrank, an attribute-only change, a `delete` with or without
+`find`, `delete_row`, `delete_column` and an unchanged operation all write nothing that a
+concurrent change could remove and are never reported lost), and the clocks of the text items the
+update left live in each of them. Two windows read it back. Before the version is rendered,
+`captureLiveTextAndAuthors` brings the fork up to date with the room and `refuseLostWrite` refuses
+the whole batch with `409 EDIT_LOST_TO_CONCURRENT_CHANGE`, naming the lost operations and the
+room's other connected participants; the transaction rolls back, so no version, durable update,
+room update or broadcast survives, and the caller re-reads and decides again. After the committed
+write reaches the room, `recordPublishedLoss` reads it again: nothing can be undone there, so the
+response is `200` with `lost_ops` naming the operations whose text the live document does not
+carry, `[]` when everything survived, and `null` when the publish failed and no verdict was
+reached. An operation's text counts as surviving while it is live inside an element carrying the
+block id it was written into - any such element, since a browser move can leave an id on two until
+`EnsureBlockIDs` repairs it - so a concurrent range delete around the agent's own insertion, or a
+keystroke in the same paragraph, is an ordinary success, while a deleted paragraph, a deleted
+ancestor and a browser move that strands the run in another block are all losses. Accepting a
+suggestion carries the same check under the comment's id instead of an operation index: a loss in
+the first window is the same `409` and leaves the suggestion open, and one in the second answers
+`200` with `lost: true`. That path stamps no block ids, because `EnsureBlockIDs` would also repair
+a repeat the live document carries, which is settlement's to repair and a write's to leave as it
+found it.
+
 Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
 splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range
 fitting (`pmdoc.Splice`). A replacement fitted into a typed block stays inside it, and a fit never

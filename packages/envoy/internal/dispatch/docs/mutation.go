@@ -728,6 +728,8 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	}
 	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
+		// Read before the Yjs transaction opens: the state vector takes the document lock.
+		since := authoredClock(ctx, artifactID, doc)
 		var mutationErr error
 		transact(func(transaction *crdt.Transaction) {
 			tree, err := treeOfTransaction(transaction, fragment)
@@ -767,7 +769,9 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			if outcome, mutationErr = batch.outcome(len(ops)); mutationErr != nil {
 				return
 			}
-			mutationErr = pmdoc.Update(transaction, fragment, next)
+			mutationErr = recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
+				return pmdoc.Update(transaction, fragment, next)
+			})
 		})
 		if mutationErr != nil {
 			return mutationErr
@@ -803,6 +807,7 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 	var outcome EditOutcome
 	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
+		since := authoredClock(ctx, artifactID, doc)
 		tree, err := treeOf(doc)
 		if err != nil {
 			return err
@@ -820,14 +825,13 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if outcome, err = batch.outcome(len(ops)); err != nil {
 			return err
 		}
-		var updateErr error
-		transact(func(transaction *crdt.Transaction) {
-			updateErr = pmdoc.Update(transaction, fragment, next)
-		})
-		if updateErr != nil {
+		return recordInsertedText(ctx, artifactID, "", fragment, since, batch.writes, func() error {
+			var updateErr error
+			transact(func(transaction *crdt.Transaction) {
+				updateErr = pmdoc.Update(transaction, fragment, next)
+			})
 			return updateErr
-		}
-		return nil
+		})
 	})
 	if err != nil {
 		if errors.Is(err, websocket.ErrNoChanges) {
@@ -951,9 +955,16 @@ func (s *Service) recordLastActor(room string, actor model.Actor) {
 	state.mu.Unlock()
 }
 
+// captureLiveTextAndAuthors is the tree a version records and whom it credits. joinRead brings
+// the calling transaction's fork up to date with the room, which is where a browser change made
+// while the transaction's write was in flight merges with it - and where a write whose text that
+// merge annihilated is refused rather than versioned as applied (refuseLostWrite, LEGION-269).
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (*pmdoc.Node, string, versionPending, []model.Actor, error) {
 	fork, err := s.joinRead(ctx, room)
 	if err != nil {
+		return nil, "", versionPending{}, nil, err
+	}
+	if err := s.refuseLostWrite(ctx, room, fork, actor); err != nil {
 		return nil, "", versionPending{}, nil, err
 	}
 	if write := joinedLiveWrite(ctx, room); fork != nil && write != nil && write.tree != nil && write.fork == fork {

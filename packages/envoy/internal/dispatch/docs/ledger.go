@@ -147,6 +147,19 @@ func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
 	return l.live[artifactID]
 }
 
+// LostOps reports which operations of this transaction's write to artifactID the live document
+// no longer held once the write was published, which the caller reads after Commit. The second
+// return is false when no verdict was reached - the transaction wrote nothing to that document,
+// or its publish failed and the room is reloading - which the caller reports as undetermined
+// rather than as survival (LEGION-269).
+func (l *Ledger) LostOps(artifactID string) ([]int, bool) {
+	write := l.liveWriteFor(artifactID)
+	if write == nil || !write.lostVerdict {
+		return nil, false
+	}
+	return write.lost, true
+}
+
 func (l *Ledger) addLiveWrite(write *liveWrite) {
 	if l.live == nil {
 		l.live = make(map[string]*liveWrite)

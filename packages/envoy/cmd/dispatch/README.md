@@ -279,7 +279,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/comments/{id}` | PATCH | cookie or trusted header | Edit a comment body. Human authors only. |
 | `/api/v1/comments/{id}/resolve` | POST | cookie, trusted header, or bearer | Resolve a comment. |
 | `/api/v1/comments/{id}/reopen` | POST | cookie or trusted header | Reopen a resolved thread-root comment. |
-| `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. |
+| `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and leaves the suggestion open; one removed after it answers `200` with `lost: true`. |
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
 | `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
@@ -288,7 +288,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/artifacts/{id}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{id}` must be a UUID. |
-| `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. |
+| `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | cookie, trusted header, or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | cookie, trusted header, or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | cookie, trusted header, or bearer | Read an unlinked document's events. |
@@ -297,12 +297,12 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/issues/{key}/artifacts/{slug}/text` | GET | cookie, trusted header, or bearer | Read an issue artifact's live document markdown. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions/{n}` | GET | cookie, trusted header, or bearer | Read an issue artifact version or download its blob. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions` | POST | cookie, trusted header, or bearer | Create a named issue-document version. |
-| `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | cookie, trusted header, or bearer | Apply issue-document edit operations. |
+| `/api/v1/issues/{key}/artifacts/{slug}/edits` | POST | cookie, trusted header, or bearer | Apply issue-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/api/v1/projects/{key}/artifacts/{slug}` | GET | cookie, trusted header, or bearer | Read an unlinked project artifact and its incoming references. `{slug}` is resolved within `{key}`. |
 | `/api/v1/projects/{key}/artifacts/{slug}/text` | GET | cookie, trusted header, or bearer | Read an unlinked project document's live markdown. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions/{n}` | GET | cookie, trusted header, or bearer | Read an unlinked project document version or download its blob. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions` | POST | cookie, trusted header, or bearer | Create a named project-document version. |
-| `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | cookie, trusted header, or bearer | Apply project-document edit operations. |
+| `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | cookie, trusted header, or bearer | Apply project-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
 | `/...` | GET | none | Serve the dashboard static files. |
 
 ## Dispatch topics

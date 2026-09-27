@@ -439,5 +439,20 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		return
 	}
 	s.publish(events...)
+	if action == "accept" {
+		// The accepted text may have gone the way an edit's can: removed by a concurrent browser
+		// change after this write's version was rendered and before it reached the room, which is
+		// past undoing (LEGION-269). The accept stands and says so.
+		lost, known := ledger.LostOps(comment.Anchor.ArtifactID)
+		WriteJSON(w, http.StatusOK, acceptedComment{Comment: comment, Lost: known && len(lost) > 0})
+		return
+	}
 	WriteJSON(w, http.StatusOK, comment)
+}
+
+// acceptedComment is the accept route's response: the comment, plus whether the live document
+// already lacks the text the accept wrote.
+type acceptedComment struct {
+	model.Comment
+	Lost bool `json:"lost"`
 }

@@ -792,8 +792,34 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		"version":       version,
 		"changed":       edit.Changed,
 		"unchanged_ops": unchanged,
-		"token":         edit.Token,
+		// Which operations the live document did not hold once this write reached it: a
+		// concurrent change that landed after the version was rendered and before the publish is
+		// past undoing, so the edit reports it rather than refusing (LEGION-269). null means the
+		// check reached no verdict - the publish failed and the room is reloading - which is not
+		// the same statement as the empty list.
+		"lost_ops": lostOps(ledger, artifact.ID),
+		"token":    edit.Token,
 	}, advice))
+}
+
+// lostOps is the edit response's lost_ops: the operations the live document did not hold after
+// the write was published, or null when the write reached no verdict.
+func lostOps(ledger *docs.Ledger, artifactID string) []int {
+	lost, known := ledger.LostOps(artifactID)
+	if !known {
+		return nil
+	}
+	if lost == nil {
+		return []int{}
+	}
+	return lost
+}
+
+func participantsOrEmpty(participants []model.Actor) []model.Actor {
+	if participants == nil {
+		return []model.Actor{}
+	}
+	return participants
 }
 
 func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {
