@@ -6,6 +6,8 @@
 
 - Added the shared nine-tool native Dispatch client, typed results, and per-issue event subscription details.
 - `setRole` takes `soft` and `previousSessionID` and returns `{ claimed: true, interest }` or `{ claimed: false, holder }`, so a caller can recover a role without displacing a live holder.
+- `resolveIssueDocumentId` resolves an issue's document reference (`spec`, or its id, slug or
+  filename) to the document's id as the Dispatch tools resolve an issue's `artifact` argument.
 
 ### Fixed
 

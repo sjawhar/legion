@@ -1,4 +1,8 @@
-import { LEGION_GO_WORKFLOW_PHASES, type LegionGoState } from "@legion/contracts/legion-go-api";
+import {
+  LEGION_GO_WORKFLOW_PHASES,
+  LegionGoGateRegisterRequest,
+  type LegionGoState,
+} from "@legion/contracts/legion-go-api";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
 import type { LegionGoDaemonClient } from "./go-daemon-client";
@@ -45,9 +49,6 @@ const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   rerun_child: ["issue"],
   read_record: ["issue"],
 };
-
-/** A Dispatch document id, which the daemon's gate registration takes as it is. */
-const DOCUMENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
   toolSuccess(JSON.stringify(details), details);
@@ -180,7 +181,8 @@ export function createGoLegionTool(deps: {
             // document however it knows it.
             const issue = requiredString(parameters, operation, "issue");
             const reference = requiredString(parameters, operation, "artifactId");
-            const artifactId = DOCUMENT_ID.test(reference) ? reference : await resolveDocument(issue, reference);
+            const isId = LegionGoGateRegisterRequest.shape.artifactId.safeParse(reference).success;
+            const artifactId = isId ? reference : await resolveDocument(issue, reference);
             const grantId = await grantFor(client, active);
             await client.gateRegister({ grantId, issue, artifactId, version });
             return jsonSuccess({});

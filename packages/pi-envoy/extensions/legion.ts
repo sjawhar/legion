@@ -1166,7 +1166,17 @@ export default function legionExtension(pi: PiApi): void {
               `register_gate cannot look up document "${reference}" on ${issue}: this pane has no Dispatch configured; pass the document's id`
             );
           }
-          return resolveIssueDocumentId(new DispatchClient(config.url, config.token, fetch), issue, reference);
+          try {
+            return await resolveIssueDocumentId(
+              new DispatchClient(config.url, config.token, fetch),
+              issue,
+              reference
+            );
+          } catch (error) {
+            throw new Error(
+              `register_gate could not look up document "${reference}" on ${issue} in Dispatch: ${messageFor(error)}`
+            );
+          }
         },
       })
     );
