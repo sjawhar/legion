@@ -350,6 +350,11 @@ func anyBlock(ast.Node) bool { return true }
 // a list or a footnote definition (startsContainer); elsewhere, before none (spreadsNothing).
 func blankBetweenBlocksBut(item ast.Node, listHolds func(ast.Node) bool) bool {
 	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
+		// Goldmark appends a backlink, an inline node, after a referenced footnote definition's
+		// last block when that block is not a paragraph; it is no block of the item's.
+		if _, backlink := child.(*extensionast.FootnoteBacklink); backlink {
+			continue
+		}
 		_, afterList := child.PreviousSibling().(*ast.List)
 		if child != item.FirstChild() && blankBefore(child) && !(afterList && listHolds(child)) {
 			return true
