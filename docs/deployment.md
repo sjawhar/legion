@@ -36,14 +36,15 @@ runner, `npm run`), a program whose name is itself a variable or a command's out
 evaluate (the `eval` tool's kernels included; known prefixes are still judged), and interpreters
 the guard does not read (`perl`, `ruby`, `awk`), commands outside the families above that overwrite
 a destination (`cp`, `dd`, `ln -f`, `install`), append writes (`>>`, `tee -a`, `sed -i`), a
-directory reached through a `cd` that failed, and the `write` and `edit` tools. The guard checks
-the destination of `rsync`, `tar`, and `unzip` when their command line names one. It also cannot
+directory reached through a `cd` that failed, and the `write` and `edit` tools. The guard checks a
+destination for `rsync`, extract-mode `tar`, and `unzip` when it can identify one. It also cannot
 distinguish one pane's allowed `/tmp` directory from another. A running shell started through `hub`
 can receive later unguarded input, and `xd://debug` can launch an unguarded program. The documented
 residuals are `git -C <path> clean`, Python loop values, an aliased CommonJS `require`, an `eval`
 trap whose outer exit timing is not modeled, an `xargs` replacement string inserted into code passed
-to an interpreter (the placeholder is evaluated relative to the pane unless the code itself names a
-forbidden prefix), and a `TMUX` value that begins with a comma and therefore names no socket path.
+to an interpreter unless the code independently constructs an outside prefix (for example,
+`os.environ["HOME"]`), an `rsync` destination followed by an unrecognised valued option, and a
+`TMUX` value that begins with a comma and therefore names no socket path.
 This is a mistake-guard, not a sandbox: it exists because an agent probe deleted the operator's home
 directory. LEGION-122 and the Kubernetes pod boundary are the hard isolation controls.
 
