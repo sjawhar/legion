@@ -101,7 +101,9 @@ func subscribeNoticeExceptions(conn *nats.Conn, rehold func(data []byte)) (*nats
 // forward only after its receipt window (two seconds, longer while forwards queue behind others on
 // its role lane). A notice to the same architect written before the report arrives is not held
 // behind the failed one, so it can arrive before the copy. A catch-up a newer one superseded
-// (catchUpSuperseded) is not queued again: its copy would arrive after the fresh catch-up.
+// (catchUpSuperseded) is not queued again: its copy would arrive after the fresh catch-up. That
+// check reads the claim from memory, outside ApplyFact's lock, which the ready handler holds, so a
+// copy can still lose the race to a ready; the notice executor checks again when it runs the row.
 func (r *outbox) rehold(ctx context.Context, data []byte) error {
 	if r.supervisor == nil {
 		return errors.New("notice re-hold has no claim supervisor")

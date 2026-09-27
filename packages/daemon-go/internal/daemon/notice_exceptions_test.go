@@ -701,3 +701,46 @@ func TestAReheldCatchUpNeverFollowsANewerOne(t *testing.T) {
 		})
 	}
 }
+
+// The re-hold reads the architect's claim from memory and writes its copy outside ApplyFact's
+// lock, so it can read the claim still launching, lose the race to that launch's ready, and commit
+// its copy of an older catch-up after the fresh one. The notice executor checks a catch-up against
+// the claim and the root it reads when it runs the row, so the stale copy finishes without a
+// publish and the architect is told the fresh catch-up alone.
+func TestACatchUpCopyCommittedAfterTheFreshOneIsNotPublished(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	if _, _, err := sup.Create(context.Background(), supervise.Claim{
+		Token: mustClaimToken(t, "LEGION-1", claim.RoleArchitect), Project: "legion", Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleArchitect,
+		State: supervise.StateReady, Session: "ses_arch", Generation: 3,
+	}, ""); err != nil {
+		t.Fatalf("create the architect claim: %v", err)
+	}
+	catchUp := func(launch uint64, resends int, resendOf int64) record.Notice {
+		return record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: fmt.Sprintf("launch %d", launch), Resends: resends, ResendOf: resendOf,
+			CatchUp: &record.CatchUp{Generation: 1, Launch: launch, Gate: record.CatchUpGate{Policy: "root-issues"}, Issues: []record.CatchUpIssue{}}}
+	}
+	clock := time.Now()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", catchUp(3, 0, 0), clock))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", catchUp(2, 1, 7), clock))
+	var logged bytes.Buffer
+	publisher := &holderPublisher{}
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
+		supervisor: sup, project: "legion", now: func() time.Time { return clock }}
+
+	for tick := range 2 {
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+	}
+	_, delivered := publisher.snapshot()
+	var got []string
+	for _, published := range delivered {
+		got = append(got, published.payload.(record.Notice).Reason)
+	}
+	if fmt.Sprint(got) != "[launch 3]" || outboxRows(t, pool) != 0 || !strings.Contains(logged.String(), `msg="outbox catch-up finished without publishing: a newer catch-up supersedes it"`) {
+		t.Fatalf("delivered %v with %d rows left, logged:\n%s\nwant the fresh catch-up alone and the stale copy finished", got, outboxRows(t, pool), logged.String())
+	}
+}

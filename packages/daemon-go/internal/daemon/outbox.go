@@ -292,7 +292,10 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // registered but no longer running, comes back as a role-lane exception and is queued again
 // (rehold, notice_exceptions.go). The runner executes a row it leased from memory, so a row deleted
 // under its lease since (a catch-up a newer ready dropped) is found gone in the tree's snapshot and
-// finishes without a publish.
+// finishes without a publish, and so does a catch-up a newer one superseded (catchUpSuperseded,
+// read against the snapshot's root and the claim as it runs now): the re-hold reads the claim
+// from memory and writes its copy outside ApplyFact's lock, so it can lose the race to a ready
+// and commit an older copy after the fresh catch-up.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -311,6 +314,17 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	if err != nil {
 		return err
+	}
+	if payload.CatchUp != nil {
+		root, err := claim.NewToken(tree.project, tree.root.Key, claim.RoleArchitect)
+		if err != nil {
+			return fmt.Errorf("the architect of %s: %w", tree.root.Key, err)
+		}
+		if catchUpSuperseded(*payload.CatchUp, r.supervisedClaim(root), &tree.root) {
+			r.log.Info("outbox catch-up finished without publishing: a newer catch-up supersedes it", "row", row.ID, "issue", row.Issue,
+				"generation", payload.CatchUp.Generation, "launch", payload.CatchUp.Launch)
+			return nil
+		}
 	}
 	runs := func(token claim.Token) bool { return claimRuns(r.claimState(token)) }
 	architect, err := owningArchitect(tree.project, tree.issues, issue, payload.Kind, runs)
