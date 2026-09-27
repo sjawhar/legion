@@ -460,6 +460,12 @@ func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusForbidden, "ROOT_REQUIRED", fmt.Sprintf("close_root ends the tree root %s; a child leaves with park_child", grant.Tree))
 		return
 	}
+	// The tree root's own architect only: a sub-architect of the tree holds a grant for the same
+	// tree and can name the root, as gateRegister refuses it too.
+	if !claim.IsTreeRoot(grant.Issue, grant.Tree) {
+		writeFailure(w, http.StatusForbidden, "ROOT_REQUIRED", fmt.Sprintf("close_root ends the tree root %s; its root architect closes it", grant.Tree))
+		return
+	}
 	s.applyFact(w, r, requestFactID("roots-close"), fact, RootCloseResponse{})
 }
 

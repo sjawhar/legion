@@ -943,7 +943,9 @@ no_change_close() {
   session_contains "$nochange_issue" architect '"close_root"' || fail "the architect of $nochange_issue did not call close_root"
   token=$(claim_token "$nochange_issue" architect)
   until_true 60 "the no-change tree's architect to be suspended" tree_suspended "$nochange_issue"
-  jq -c --arg issue "$nochange_issue" --arg token "$token" 'select(
+  # daemon.log carries the daemon's stderr too, so each line is parsed on its own, as every other
+  # reader of it does: one line that is not JSON must not end the run.
+  jq -R -c --arg issue "$nochange_issue" --arg token "$token" 'fromjson? | select(
       (.msg == "workflow: design gate changes requested" and .issue == $issue)
       or (.msg == "workflow: issue left the workflow" and .issue == $issue)
       or (.msg == "workflow: tree lingers" and .tree == $issue)

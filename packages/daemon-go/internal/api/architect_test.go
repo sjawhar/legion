@@ -678,10 +678,15 @@ func TestAnArchitectClosesItsAdmittedRoot(t *testing.T) {
 		t.Fatalf("close facts = %#v", got)
 	}
 
-	// A child is not the root, a phase worker is not the architect, and a reason too long for one
-	// message would never post.
+	// A child is not the root, a sub-architect of the tree is not the root's architect though it
+	// names the root, a phase worker is not the architect, and a reason too long for one message
+	// would never post.
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
 		"grantId": architect.grant(t), "issue": "LEGION-209", "reason": "moot",
+	}, nil), http.StatusForbidden, "ROOT_REQUIRED")
+	subArchitect := newLiveClaimIn(t, h, "LEGION-208", "LEGION-209", claim.RoleArchitect)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
+		"grantId": subArchitect.grant(t), "issue": "LEGION-208", "reason": "a sub-architect closing the root",
 	}, nil), http.StatusForbidden, "ROOT_REQUIRED")
 	worker := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/roots/close", map[string]any{
