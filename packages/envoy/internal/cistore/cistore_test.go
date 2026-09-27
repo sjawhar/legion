@@ -515,81 +515,6 @@ func TestRecordIgnoresOlderObservationForSameRunAndSuite(t *testing.T) {
 	}
 }
 
-func TestRecordHeadAndHead(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	const sha = "abcdef1234567890abcdef1234567890abcdef12"
-
-	if err := s.RecordHead("example-org", "example-repo", "42", sha, "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record head: %v", err)
-	}
-
-	deadline := time.After(5 * time.Second)
-	for {
-		head, ok := s.Head("example-org", "example-repo", "42")
-		if ok {
-			if head != sha {
-				t.Fatalf("head = %q, want %q", head, sha)
-			}
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("head never reached watch cache")
-		case <-time.After(15 * time.Millisecond):
-		}
-	}
-}
-
-func TestRecordHeadOrdersTimestampedUpdatesAndAcceptsMissingTimestamp(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	const (
-		owner = "example-org"
-		repo  = "example-repo"
-		pr    = "42"
-		headA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		headB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-		headC = "cccccccccccccccccccccccccccccccccccccccc"
-		headD = "dddddddddddddddddddddddddddddddddddddddd"
-	)
-	readHead := func(t *testing.T) headRecord {
-		t.Helper()
-		entry, err := s.watcher.KV().Get(headKey(owner, repo, pr))
-		if err != nil {
-			t.Fatalf("get durable head: %v", err)
-		}
-		var head headRecord
-		if err := json.Unmarshal(entry.Value(), &head); err != nil {
-			t.Fatalf("decode durable head: %v", err)
-		}
-		return head
-	}
-	if err := s.RecordHead(owner, repo, pr, headB, "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record current head: %v", err)
-	}
-	if err := s.RecordHead(owner, repo, pr, headA, "2026-09-07T02:00:00Z"); err != nil {
-		t.Fatalf("record delayed head: %v", err)
-	}
-	if got := readHead(t).SHA; got != headB {
-		t.Fatalf("older timestamp replaced head with %q, want %q", got, headB)
-	}
-	if err := s.RecordHead(owner, repo, pr, headD, "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record equal-timestamp head: %v", err)
-	}
-	if got := readHead(t).SHA; got != headD {
-		t.Fatalf("later equal-timestamp receipt did not replace head: got %q, want %q", got, headD)
-	}
-	if err := s.RecordHead(owner, repo, pr, headC, ""); err != nil {
-		t.Fatalf("record head without timestamp: %v", err)
-	}
-	if got := readHead(t); got.SHA != headC || got.UpdatedAt != "" {
-		t.Fatalf("untimestamped head = %+v, want SHA %q with no timestamp", got, headC)
-	}
-}
-
 func TestRewatchRestartsStoppedWatcher(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -682,47 +607,35 @@ func TestWatchEvictsMalformedState(t *testing.T) {
 	}
 }
 
-func TestWatchDistinguishesHeadRecordsFromStateKeys(t *testing.T) {
+// An earlier listener kept each pull request's head as a record of its own kind in the same bucket.
+// Nothing reads one now; one left in the bucket until its TTL is never cached as a commit's state.
+func TestWatchSkipsARetiredHeadRecord(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	s := openStore(t, conn)
 	const (
-		stateOwner = "head-x"
-		headOwner  = "x"
-		repo       = "example-repo"
-		number     = "42"
-		sha        = "abcdef1234567890abcdef1234567890abcdef12"
+		owner  = "example-org"
+		repo   = "example-repo"
+		number = "42"
+		sha    = "abcdef1234567890abcdef1234567890abcdef12"
 	)
-
-	if err := recordCheck(s, stateOwner, repo, number, sha, "build", "600", "https://example-host/checks/600", "completed", "success", ""); err != nil {
+	if _, err := s.watcher.KV().Put("head."+owner+"."+repo+"."+number,
+		[]byte(`{"kind":"head","sha":"`+sha+`","updated_at":"2026-09-07T03:00:00Z","generation":0}`)); err != nil {
+		t.Fatalf("put a retired head record: %v", err)
+	}
+	if err := recordCheck(s, owner, repo, number, sha, "build", "600", "https://example-host/checks/600", "completed", "success", ""); err != nil {
 		t.Fatalf("record state: %v", err)
 	}
-	waitCacheChecks(t, s, stateOwner, repo, number, sha, 1)
-	if err := s.RecordHead(headOwner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record head: %v", err)
-	}
-
-	waitHead(t, s, headOwner, repo, number, sha)
+	waitCacheChecks(t, s, owner, repo, number, sha, 1)
 	states := s.List()
-	if len(states) != 1 || states[0].Owner != stateOwner || states[0].SHA != sha {
-		t.Fatalf("head record or state key misclassified in cache: %+v", states)
-	}
-}
-
-func TestRecordHeadRejectsInvalidSHA(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-
-	if err := s.RecordHead("example-org", "example-repo", "42", "abcdef1234567", "2026-09-07T03:00:00Z"); err == nil {
-		t.Fatal("RecordHead accepted an invalid SHA")
+	if len(states) != 1 || states[0].Owner != owner || states[0].SHA != sha {
+		t.Fatalf("the retired head record reached the cache as state: %+v", states)
 	}
 }
 
 // A repository's name may begin with a dot, end with one, or hold two in a row (`sjawhar/.github`),
 // and a KV key's dots separate tokens that must not be empty, so the key writes a dot in the owner
-// or the name as `=`, which no GitHub name holds: the head and the checks of such a repository are
-// recorded, `a.b` and `a_b` keep distinct keys, and a name without a dot keys as it always has.
+// or the name as `=`, which no GitHub name holds: the checks of such a repository are recorded, `a.b` and `a_b` keep distinct keys, and a name without a dot keys as it always has.
 func TestDottedRepositoriesRecordUnderTheirOwnKeys(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -733,10 +646,6 @@ func TestDottedRepositoriesRecordUnderTheirOwnKeys(t *testing.T) {
 		sha    = "abcdef1234567890abcdef1234567890abcdef12"
 	)
 	for i, repo := range []string{".example", "a..b", "trailing.", "example.repo", "example_repo"} {
-		if err := s.RecordHead(owner, repo, number, sha, "2026-09-07T03:00:00Z"); err != nil {
-			t.Fatalf("record %s/%s's head: %v", owner, repo, err)
-		}
-		waitHead(t, s, owner, repo, number, sha)
 		if err := recordCheck(s, owner, repo, number, sha, "build", strconv.Itoa(700+i), "https://example-host/checks", "completed", "success", ""); err != nil {
 			t.Fatalf("record %s/%s's check: %v", owner, repo, err)
 		}
@@ -747,9 +656,6 @@ func TestDottedRepositoriesRecordUnderTheirOwnKeys(t *testing.T) {
 	}
 	if got, want := Key(owner, "example-repo", number, sha), "example-org.example-repo.pr42."+sha; got != want {
 		t.Fatalf("Key = %s, want %s", got, want)
-	}
-	if got, want := headKey(owner, "example-repo", number), "head.example-org.example-repo.42"; got != want {
-		t.Fatalf("headKey = %s, want %s", got, want)
 	}
 }
 
@@ -856,80 +762,6 @@ func TestRecordTimestamplessObservationUpdatesTimestamplessState(t *testing.T) {
 	}
 	if check := getState(t, s, "example-org", "example-repo", "42", "abcdef1234567").Checks["build"]; check.Status != "in_progress" {
 		t.Fatalf("timestamp-less observation did not apply: %+v", check)
-	}
-}
-
-func TestRecordHeadEqualTimestampUsesLatestObservation(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	const (
-		owner = "example-org"
-		repo  = "example-repo"
-		pr    = "42"
-		headA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		headB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-		when  = "2026-09-07T03:00:00Z"
-	)
-	if err := s.RecordHead(owner, repo, pr, headA, when); err != nil {
-		t.Fatalf("record first head: %v", err)
-	}
-	if err := s.RecordHead(owner, repo, pr, headB, when); err != nil {
-		t.Fatalf("record later same-time head: %v", err)
-	}
-	entry, err := s.watcher.KV().Get(headKey(owner, repo, pr))
-	if err != nil {
-		t.Fatalf("get durable head: %v", err)
-	}
-	var head headRecord
-	if err := json.Unmarshal(entry.Value(), &head); err != nil {
-		t.Fatalf("decode durable head: %v", err)
-	}
-	if head.SHA != headB {
-		t.Fatalf("head = %+v, want later SHA %q", head, headB)
-	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(entry.Value(), &raw); err != nil {
-		t.Fatalf("decode durable head fields: %v", err)
-	}
-	var generation uint64
-	if version, ok := raw["generation"]; !ok || json.Unmarshal(version, &generation) != nil || generation != 1 {
-		t.Fatalf("head generation = %s, want 1 after a head move", version)
-	}
-}
-
-func TestClaimSettlementRefusesWhenDurableHeadChanged(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	const (
-		owner = "example-org"
-		repo  = "example-repo"
-		pr    = "42"
-		shaA  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-		shaB  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	)
-	if err := recordCheck(s, owner, repo, pr, shaA, "build", "801", "https://example.test/801", "completed", "success", "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record check: %v", err)
-	}
-	state := getState(t, s, owner, repo, pr, shaA)
-	// The state must be claimable on its own merits, so the refusal below can
-	// only come from the durable head having moved.
-	if !settlementReady(state) {
-		t.Fatalf("fixture is not settlement-ready: %+v", state)
-	}
-	if err := s.RecordHead(owner, repo, pr, shaB, "2026-09-07T03:00:01Z"); err != nil {
-		t.Fatalf("record replacement head: %v", err)
-	}
-	_, claimed, err := s.ClaimSettlement(Key(owner, repo, pr, shaA), state.Hash(), state.Generation, time.Now().UnixMilli(), 0)
-	if err != nil {
-		t.Fatalf("claim settlement: %v", err)
-	}
-	if claimed {
-		t.Fatal("ClaimSettlement claimed a state whose durable head changed")
-	}
-	if getState(t, s, owner, repo, pr, shaA).Claim != nil {
-		t.Fatal("stale state gained a settlement claim")
 	}
 }
 
@@ -1180,36 +1012,6 @@ func TestMarkSettledCacheWriteDoesNotOverwriteNewerWatcherRevision(t *testing.T)
 	}
 	if cachedRevision != watcherRevision {
 		t.Fatalf("cached revision = %d, want watcher revision %d", cachedRevision, watcherRevision)
-	}
-}
-
-func TestWatchEvictsMalformedHead(t *testing.T) {
-	conn, cleanup := connectNATS(t)
-	defer cleanup()
-	s := openStore(t, conn)
-	const (
-		owner = "example-org"
-		repo  = "example-repo"
-		pr    = "42"
-		sha   = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	)
-	if err := s.RecordHead(owner, repo, pr, sha, "2026-09-07T03:00:00Z"); err != nil {
-		t.Fatalf("record head: %v", err)
-	}
-	waitHead(t, s, owner, repo, pr, sha)
-	if _, err := s.watcher.KV().Put(headKey(owner, repo, pr), []byte("{")); err != nil {
-		t.Fatalf("put malformed head: %v", err)
-	}
-	deadline := time.After(5 * time.Second)
-	for {
-		if _, ok := s.Head(owner, repo, pr); !ok {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatal("malformed head remained in cache")
-		case <-time.After(15 * time.Millisecond):
-		}
 	}
 }
 

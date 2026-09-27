@@ -46,10 +46,6 @@ func TestAHeadRecordRefusesACheckPastItsBoundsAndNeverSettles(t *testing.T) {
 				number = "42"
 				sha    = "abcdef1234567890abcdef1234567890abcdef12"
 			)
-			if err := store.RecordHead(owner, repo, number, sha, "2026-09-27T00:00:00Z"); err != nil {
-				t.Fatalf("record head: %v", err)
-			}
-			waitHead(t, store, owner, repo, number, sha)
 
 			// A job name at the envelope text cap.
 			name := func(i int) string { return fmt.Sprintf("%s%04d", strings.Repeat(tc.char, 2044), i) }
@@ -136,10 +132,6 @@ func TestASettlementNATSRefusesIsNotPublishedAgain(t *testing.T) {
 		number = "43"
 		sha    = "1234567890abcdef1234567890abcdef12345678"
 	)
-	if err := store.RecordHead(owner, repo, number, sha, "2026-09-27T00:00:00Z"); err != nil {
-		t.Fatalf("record head: %v", err)
-	}
-	waitHead(t, store, owner, repo, number, sha)
 	if err := recordCheck(store, owner, repo, number, sha, "build", "900", "https://github.com/example-org/example-repo/runs/900", "completed", "success", "2026-09-27T00:00:00Z"); err != nil {
 		t.Fatalf("record check: %v", err)
 	}

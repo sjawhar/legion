@@ -28,7 +28,10 @@ NATS `>` matches **one or more** trailing tokens, so it does not match the lifec
 subject and its child events.
 
 For a typical push, this receives `pr.42` with `synchronize`, then any comments or reviews, then
-one `pr.42.checks` event when that head's checks settle. The family is `pr.42` (lifecycle),
+one `pr.42.checks` event when that head's checks settle. A settlement is published for every
+commit of the pull request whose checks settle, the current head or not (a head pushed with
+GitHub's `skip-checks` trailer runs none, so the commit before it settles for it), and its `sha`
+names the commit: compare it with the head you are waiting on. The family is `pr.42` (lifecycle),
 `pr.42.comment`, `pr.42.review`, `pr.42.mention`, and `pr.42.checks`. A closed lifecycle payload
 carries `merged`, `merge_commit_sha`, `merged_by`, and `head_sha`.
 
@@ -147,7 +150,8 @@ advertises.
 ## Waiting for CI or a merge
 
 Subscribe to `notifications.github.example-org.example-repo.pr.42.>` and end the turn. The single
-`pr.42.checks` event wakes you when the current head settles; a `pr.42` `closed` event with
+`pr.42.checks` event whose `sha` is the current head wakes you when it settles (an earlier
+commit's settlement can arrive first); a `pr.42` `closed` event with
 `merged: true` tells you the PR merged. Do not create `gh` pollers.
 Settlement waits for the head to be quiet for a few seconds, every reported check run to finish,
 and every recorded GitHub check suite to be `completed`. It covers those reported checks and suites

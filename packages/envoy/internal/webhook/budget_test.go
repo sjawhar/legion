@@ -86,8 +86,8 @@ func TestGitHubHandlerReadsABodyUpToGitHubsPayloadCap(t *testing.T) {
 			if tc.want == http.StatusBadRequest && !strings.Contains(rr.Body.String(), "invalid json") {
 				t.Fatalf("body = %q, want the JSON decode's refusal: a body at the cap must be read whole", rr.Body.String())
 			}
-			if len(pub.published) != 0 || len(recorder.calls) != 0 || len(recorder.headCalls) != 0 {
-				t.Fatalf("published %d, recorded %d checks and %d heads; want nothing", len(pub.published), len(recorder.calls), len(recorder.headCalls))
+			if len(pub.published) != 0 || len(recorder.calls) != 0 {
+				t.Fatalf("published %d, recorded %d checks; want nothing", len(pub.published), len(recorder.calls))
 			}
 		})
 	}
