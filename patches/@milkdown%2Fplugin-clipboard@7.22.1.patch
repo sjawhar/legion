@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..e37e0e5b79d833e431491e7dba585f911a362da1 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..3c62a4a064f009e364bfb3d9541a6781ab71fde7 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,9 @@
@@ -13,7 +13,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..e37e0e5b79d833e431491e7dba585f91
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
  function isPureText(content) {
-@@ -24,6 +26,110 @@ function withMeta(plugin, meta) {
+@@ -24,6 +26,116 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
@@ -86,11 +86,17 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..e37e0e5b79d833e431491e7dba585f91
 +		})
 +	};
 +}
-+function holdsTableCells(html) {
-+	if (html.length === 0) return false;
++function htmlTableCells(html, schema) {
++	if (html.length === 0) return null;
 +	const template = document.createElement("template");
 +	template.innerHTML = html;
-+	return template.content.querySelector("td, th") !== null;
++	const rows = [...template.content.querySelectorAll("tr")];
++	if (rows.length === 0) return null;
++	for (const table of template.content.querySelectorAll("table")) table.remove();
++	if (template.content.textContent.trim() !== "" || template.content.querySelector("img") !== null) return null;
++	const { cell, row } = tableNodeTypes(schema);
++	const parser = DOMParser.fromSchema(schema);
++	return __pastedCells(new Slice(Fragment.from(rows.map((tr) => row.create(null, [...tr.children].filter((child) => child.matches("td, th")).map((td) => fitCell(cell, parser.parseSlice(td)))))), 0, 0));
 +}
 +function pasteIntoTable(view, event, slice, parsePlainText) {
 +	const { state } = view;
@@ -100,7 +106,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..e37e0e5b79d833e431491e7dba585f91
 +	const html = event.clipboardData.getData("text/html");
 +	if (selection instanceof CellSelection) {
 +		const rect = selectedRect(state);
-+		const pasted = html.length === 0 && text.includes("\t") ? tsvCells(text, schema) : __pastedCells(slice) ?? {
++		const pasted = (html.length === 0 && text.includes("\t") ? tsvCells(text, schema) : htmlTableCells(html, schema)) ?? __pastedCells(slice) ?? {
 +			width: 1,
 +			height: 1,
 +			rows: [Fragment.from(fitCell(tableNodeTypes(schema).cell, slice))]
@@ -109,7 +115,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..e37e0e5b79d833e431491e7dba585f91
 +		return true;
 +	}
 +	if (!inTableCell(selection.$from)) return false;
-+	const cells = holdsTableCells(html) ? __pastedCells(slice) : null;
++	const cells = htmlTableCells(html, schema);
 +	if (cells) {
 +		const rect = selectedRect(state);
 +		__insertCells(state, view.dispatch, rect.tableStart, rect, typedCells(cells, rect));
@@ -124,7 +130,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..e37e0e5b79d833e431491e7dba585f91
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -40,9 +146,15 @@ function dispatchPasteSlice(view, slice) {
+@@ -40,9 +152,15 @@ function dispatchPasteSlice(view, slice) {
  }
  var clipboard = $prose((ctx) => {
  	const schema = ctx.get(schemaCtx);
@@ -140,7 +146,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..e37e0e5b79d833e431491e7dba585f91
  		transformPastedHTML: (html, view) => {
  			const prevTransform = prev.transformPastedHTML;
  			if (prevTransform) html = prevTransform(html, view);
-@@ -58,7 +170,6 @@ var clipboard = $prose((ctx) => {
+@@ -58,7 +176,6 @@ var clipboard = $prose((ctx) => {
  		key,
  		props: {
  			handlePaste: (view, event, preProcessedSlice) => {
@@ -148,7 +154,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..e37e0e5b79d833e431491e7dba585f91
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -77,13 +188,13 @@ var clipboard = $prose((ctx) => {
+@@ -77,13 +194,13 @@ var clipboard = $prose((ctx) => {
  				}
  				const html = clipboardData.getData("text/html");
  				if (html.length === 0 && text.length === 0) return false;

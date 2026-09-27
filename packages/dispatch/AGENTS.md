@@ -174,14 +174,16 @@ handled before any plugin sees the paste, by a `handlePaste` the patch adds to t
 props (`pasteIntoTable`), since prosemirror-tables' plugin handler would otherwise overwrite the
 caret's cell and spread the pasted lines into new cells of the row. A paste with the caret in a
 cell's text, plain text or HTML, is flattened the same way, marks and links kept, since a GFM cell
-holds one line, unless the clipboard HTML holds table cells (`td` or `th`, as a copy from a table
-does). Those, and any paste onto a selection of whole cells (a `CellSelection`), are
-prosemirror-tables' grid paste (`__pastedCells`, `__clipCells`, `__insertCells`): from the caret's
-cell on, growing the table as needed, or clipped to the selection. There are two changes.
-Tab-separated text pasted onto selected cells fills them one value each. Every cell is retyped for
-the row it lands in, because Milkdown's header row holds only `table_header` cells and a body row
-only `table_cell` ones, and prosemirror-tables' own insert threw on a paste that put header cells in
-a body row or reached the header row. The patch applies to that one version: raising
+holds one line, unless everything in the clipboard HTML sits in a table (as in a copy of cells, the
+editor's own included). Those, and any paste onto a selection of whole cells (a `CellSelection`),
+are prosemirror-tables' grid paste (`__pastedCells`, `__clipCells`, `__insertCells`): from the
+caret's cell on, growing the table as needed, or clipped to the selection. There are three changes.
+Copied cells are read from the clipboard HTML's own rows and cells (`htmlTableCells`), because
+ProseMirror's parse at the caret gives body rows an empty leading header row, which Milkdown's table
+requires. Tab-separated text pasted onto selected cells fills them one value each. Every cell is
+retyped for the row it lands in, because Milkdown's header row holds only `table_header` cells and a
+body row only `table_cell` ones, and prosemirror-tables' own insert threw on a paste that put header
+cells in a body row or reached the header row. The patch applies to that one version: raising
 `@milkdown/plugin-clipboard` means carrying the patch to the new version, and the paste rows in
 `ask-blocks.e2e.ts` and `editor-paste.e2e.ts` fail without it.
 
