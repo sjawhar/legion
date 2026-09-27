@@ -59,11 +59,9 @@ const createdIssueLine =
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
+/** A project with no architecture source: the read answers null, never a refusal. */
 function sourceNotFound(): Response {
-  return new Response(JSON.stringify({ code: "SOURCE_NOT_FOUND", error: "source not found" }), {
-    status: 404,
-    headers: { "Content-Type": "application/json" },
-  });
+  return new Response("null", { headers: { "Content-Type": "application/json" } });
 }
 
 function architectureSource(project: string) {

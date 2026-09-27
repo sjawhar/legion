@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
-import { api, isSourceNotFound } from "../../api/client";
+import { api } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { type TabDefinition, Tabs } from "../../components/Tabs";
@@ -70,7 +70,7 @@ export function ProjectPage(): ReactNode {
     queryFn: () => api.getArchitectureSource(projectKey as string),
     enabled: projectKey !== undefined,
   });
-  const hasSource = source.isSuccess;
+  const hasSource = source.data != null;
   useKeymapScope("project");
   useKeymap("project", [
     {
@@ -107,29 +107,29 @@ export function ProjectPage(): ReactNode {
   }
   if (route.kind === "project") {
     // The open-on rule: a project with an architecture source opens on its Architecture; one
-    // without (404 SOURCE_NOT_FOUND, the only expected failure) opens on Issues, the filter
-    // parameters forwarded. Any other failure is shown, never quietly turned into Issues.
-    // `replace` keeps Back sane; sidebar links stay on the bare path.
+    // without (the read answers null) opens on Issues, the filter parameters forwarded. A failed
+    // read is shown, never quietly turned into Issues. `replace` keeps Back sane; sidebar links
+    // stay on the bare path.
     if (source.isPending) {
       return null;
     }
-    if (source.isSuccess) {
+    if (source.isError) {
+      return sourceError;
+    }
+    if (hasSource) {
       return (
         <Navigate replace to={buildProjectPath({ kind: "architecture", project: route.project })} />
       );
     }
-    if (isSourceNotFound(source.error)) {
-      return (
-        <Navigate
-          replace
-          to={{
-            pathname: buildProjectPath({ kind: "issues", project: route.project }),
-            search: location.search,
-          }}
-        />
-      );
-    }
-    return sourceError;
+    return (
+      <Navigate
+        replace
+        to={{
+          pathname: buildProjectPath({ kind: "issues", project: route.project }),
+          search: location.search,
+        }}
+      />
+    );
   }
   if (route.kind === "architecture") {
     // Like the bare path: nothing until the source lookup settles, so the tab strip never
@@ -137,9 +137,12 @@ export function ProjectPage(): ReactNode {
     if (source.isPending) {
       return null;
     }
+    if (source.isError) {
+      return sourceError;
+    }
     if (!hasSource) {
       // A direct link to /architecture on a project without a source: nothing to show there.
-      return isSourceNotFound(source.error) ? <NotFoundPage /> : sourceError;
+      return <NotFoundPage />;
     }
   }
 

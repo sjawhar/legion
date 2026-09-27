@@ -396,16 +396,11 @@ async function architectureGuidance(
   if (components.mode === "none" || components.ids.length > 0) return undefined;
 
   try {
-    await client.getArchitectureSource(project);
-    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
-  } catch (error) {
-    if (
-      error instanceof DispatchServiceError &&
-      error.status === 404 &&
-      error.code === "SOURCE_NOT_FOUND"
-    ) {
+    if ((await client.getArchitectureSource(project)) === null) {
       return undefined;
     }
+    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
+  } catch (error) {
     return `Could not check whether project ${project} has an architecture model: ${messageFor(error)}. ${architectureComponentsAction}`;
   }
 }

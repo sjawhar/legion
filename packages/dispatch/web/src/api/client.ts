@@ -116,9 +116,10 @@ export function isForbidden(error: unknown): boolean {
   return error instanceof ApiError && error.status === 403 && error.code === "LOGIN_NOT_ALLOWED";
 }
 
-// A project without an architecture source answers its architecture reads with this 404 —
-// definitive like an auth outcome (retrying changes nothing) and the one case the project page
-// and the issue header's component editor treat as "no model", never as a failure.
+// The architecture TREE read answers this 404 for a project with no source — definitive like an
+// auth outcome, since retrying changes nothing. The source read itself answers `null` instead:
+// the question it asks has "no source" as an ordinary answer, and a 404 made every reader of an
+// ordinary project page log a failed request.
 export function isSourceNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
 }
@@ -262,8 +263,9 @@ export class DispatchApiClient {
     return this.json<ArchitectureSource[]>("/api/v1/settings/architecture-sources");
   }
 
-  getArchitectureSource(project: string): Promise<ArchitectureSource> {
-    return this.json<ArchitectureSource>(
+  /** `null` when the project has no source: having none is the common answer, not a failure. */
+  getArchitectureSource(project: string): Promise<ArchitectureSource | null> {
+    return this.json<ArchitectureSource | null>(
       `/api/v1/projects/${pathSegment(project)}/architecture-source`
     );
   }

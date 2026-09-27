@@ -54,7 +54,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPut, "/api/v1/settings/repo-projects/{owner}/{repo}", authHuman, "Map a GitHub repository to a project.", s.putRepoProject},
 		{http.MethodDelete, "/api/v1/settings/repo-projects/{owner}/{repo}", authHuman, "Remove a repository mapping.", s.deleteRepoProject},
 		{http.MethodGet, "/api/v1/settings/architecture-sources", authHuman, "List every project's architecture source.", s.listArchitectureSources},
-		{http.MethodGet, "/api/v1/projects/{key}/architecture-source", authAny, "A project's architecture source, or 404 SOURCE_NOT_FOUND.", s.getArchitectureSource},
+		{http.MethodGet, "/api/v1/projects/{key}/architecture-source", authAny, "A project's architecture source, or null when it has none.", s.getArchitectureSource},
 		{http.MethodPut, "/api/v1/projects/{key}/architecture-source", authHuman, "Set a project's architecture source {repo, branch} after proving the GitHub App can read it.", s.putArchitectureSource},
 		{http.MethodDelete, "/api/v1/projects/{key}/architecture-source", authHuman, "Remove a project's architecture source.", s.deleteArchitectureSource},
 		{http.MethodPost, "/api/v1/projects/{key}/architecture-source/sync", authAny, "Import a project's architecture model from its source now; 200 carries the updated row (last_error set when the import failed), 409 SOURCE_ACCESS a credential or branch problem.", s.syncArchitectureSource},
