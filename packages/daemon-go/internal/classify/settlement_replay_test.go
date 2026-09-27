@@ -248,7 +248,7 @@ func TestAPassedCheckStaysRetiredWhileAnotherCheckSettlesRepeatedly(t *testing.T
 	}
 	for id := int64(21); id <= 30; id++ {
 		runs := []record.AttemptRun{{Name: "ci", ID: id}, {Name: "title", ID: 11}}
-		if id%2 == 0 {
+		if id%2 == 0 { // every other settlement comes from a recreated record holding only ci
 			runs = runs[:1]
 		}
 		settlements = append(settlements, timedSettlement{fmt.Sprintf("ci %d", id), SettlementCandidate{CheckRuns: runs, Verdict: "green", Failing: []string{}}})
