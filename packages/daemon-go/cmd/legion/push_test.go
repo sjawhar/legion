@@ -86,44 +86,39 @@ func (r pushRig) pushed() string {
 	return strings.TrimRight(string(output), "\n")
 }
 
-// A push is skipped by GitHub's CI only when every path it changes is under .legion/ and it leaves
-// .legion/ in the tree: a handoff push. The push that carries code, the .legion/ deletion that is
-// the merge head, and a push onto a branch whose last push was a handoff all run in full, and the
-// trailer a handoff push left on its commit never rides along on a later push of that commit
-// carrying more.
-func TestPushMarksOnlyAHandoffOnlyPushSkipChecks(t *testing.T) {
+// A push skips GitHub's CI only when it changes nothing but handoffs whose phase guarantees a later
+// push: the planner's plan, the tester's test, and a reviewer's request for changes. Every other push
+// may leave the head a human merges, so it runs in full: code, the implementer's handoff alone, a
+// reviewer round that approves or names no verdict, and the .legion/ deletion. The trailer a
+// skipped push left on its commit never rides along on a later push of that commit carrying more.
+func TestPushSkipsCIOnlyForHandoffsALaterPushFollows(t *testing.T) {
 	r := newPushRig(t)
 	skipped := func(message string) bool { return strings.HasSuffix(message, "\n\n\nskip-checks: true") }
-
-	r.commit("plan: record handoff", map[string]string{".legion/plan.json": "{}\n"})
-	if code, output := r.push(); code != 0 || !skipped(r.pushed()) {
-		t.Fatalf("the planner's first push = %d %q, pushed %q; want the new branch's handoff-only head skip-checks", code, output, r.pushed())
-	}
-
-	r.commit("widget: add the line", map[string]string{"widget.txt": "one\n"})
-	r.commit("implement: record handoff", map[string]string{".legion/implement.json": "{}\n"})
-	if code, output := r.push(); code != 0 || skipped(r.pushed()) {
-		t.Fatalf("the implementer's code and handoff push = %d %q, pushed %q; want it to run CI", code, output, r.pushed())
-	}
-
-	r.commit("test: record handoff", map[string]string{".legion/test.json": "{}\n"})
-	if code, output := r.push(); code != 0 || !skipped(r.pushed()) || !strings.HasPrefix(r.pushed(), "test: record handoff") {
-		t.Fatalf("the tester's handoff push = %d %q, pushed %q; want its handoff commit marked skip-checks", code, output, r.pushed())
-	}
-
-	r.commit("widget: fix the line", map[string]string{"widget.txt": "two\n"})
-	if code, output := r.push(); code != 0 || skipped(r.pushed()) {
-		t.Fatalf("a code push onto the handoff head = %d %q, pushed %q; want it to run CI", code, output, r.pushed())
-	}
-
-	r.commit("review: record handoff\n\n\nskip-checks: true", map[string]string{".legion/review.json": "{}\n", "widget.txt": "three\n"})
-	if code, output := r.push(); code != 0 || skipped(r.pushed()) || r.pushed() != "review: record handoff" {
-		t.Fatalf("a push carrying code on a commit that says skip-checks = %d %q, pushed %q; want the trailer removed", code, output, r.pushed())
-	}
-
-	r.commit("delete .legion/", map[string]string{".legion/plan.json": "", ".legion/implement.json": "", ".legion/test.json": "", ".legion/review.json": ""})
-	if code, output := r.push(); code != 0 || skipped(r.pushed()) {
-		t.Fatalf("the .legion/ deletion push = %d %q, pushed %q; want the merge head to run CI", code, output, r.pushed())
+	for _, step := range []struct {
+		name    string
+		files   map[string]string
+		message string
+		skip    bool
+	}{
+		{"the planner's first push", map[string]string{".legion/plan.json": "{}\n"}, "plan: record handoff", true},
+		{"the implementer's code and handoff", map[string]string{"widget.txt": "one\n", ".legion/implement.json": "{}\n"}, "implement: record handoff", false},
+		{"the tester's handoff", map[string]string{".legion/test.json": "{}\n"}, "test: record handoff", true},
+		{"a reviewer's request for changes", map[string]string{".legion/review.json": `{"verdict":"changes_requested"}` + "\n"}, "review: record handoff", true},
+		{"a code push onto a skipped head", map[string]string{"widget.txt": "two\n"}, "widget: fix the line", false},
+		{"the tester's second handoff", map[string]string{".legion/test.json": `{"round":2}` + "\n"}, "test: record handoff", true},
+		{"a reviewer's approval", map[string]string{".legion/review.json": `{"verdict":"approved"}` + "\n"}, "review: record handoff", false},
+		{"a reviewer round with no verdict", map[string]string{".legion/review.json": `{"round":3}` + "\n"}, "review: record handoff", false},
+		{"the implementer's handoff alone", map[string]string{".legion/implement.json": `{"round":3}` + "\n"}, "implement: record handoff", false},
+		{"code under a message that says skip-checks", map[string]string{".legion/review.json": `{"verdict":"changes_requested","round":4}` + "\n", "widget.txt": "three\n"}, "review: record handoff\n\n\nskip-checks: true", false},
+		{"a push deleting only the tester's handoff", map[string]string{".legion/test.json": ""}, "drop the test handoff", false},
+		{"the .legion/ deletion", map[string]string{".legion/plan.json": "", ".legion/implement.json": "", ".legion/review.json": ""}, "delete .legion/", false},
+	} {
+		r.commit(step.message, step.files)
+		code, output := r.push()
+		pushed := r.pushed()
+		if code != 0 || skipped(pushed) != step.skip || strings.HasSuffix(strings.TrimSpace(strings.TrimSuffix(pushed, "skip-checks: true")), "skip-checks: true") {
+			t.Fatalf("%s: legion push = %d %q, pushed %q; want skip-checks %t", step.name, code, output, pushed, step.skip)
+		}
 	}
 }
 
@@ -146,5 +141,32 @@ func TestPushRefusesAChainTheRemoteBranchIsAheadOf(t *testing.T) {
 	code, output := r.push()
 	if code != 1 || !strings.Contains(output, "which @- does not descend from") || r.pushed() != theirs {
 		t.Fatalf("a push behind the remote = %d %q, remote %q; want a refusal leaving %q", code, output, r.pushed(), theirs)
+	}
+}
+
+// A rewrite of pushed commits (a conflict-forced rebase, a squash into a pushed commit) is pushed
+// over the tip recorded before it. GitHub lists a forced push's commits since the merge base, so
+// the daemon carries no verdict across it: it runs in full, even when its head is a handoff a later
+// push follows, and the recorded tip is removed.
+func TestPushRunsARewriteInFull(t *testing.T) {
+	r := newPushRig(t)
+	r.commit("test: record handoff", map[string]string{".legion/test.json": "{}\n"})
+	if code, output := r.push(); code != 0 || !strings.HasSuffix(r.pushed(), "skip-checks: true") {
+		t.Fatalf("the tester's push = %d %q, pushed %q; want it skipped", code, output, r.pushed())
+	}
+	tipFile := filepath.Join(os.Getenv("TMPDIR"), "legion-LEGION-7-tester-rewritten-tip")
+	tip := r.run("log", "--no-graph", "-T", "commit_id", "-r", `remote_bookmarks(exact:"legion/LEGION-7", exact:"origin")`)
+	if err := os.WriteFile(tipFile, []byte(tip), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The rewritten chain replaces the pushed handoff commit with another on its parent.
+	r.run("new", "@--")
+	r.commit("test: record handoff again\n\n\nskip-checks: true", map[string]string{".legion/test.json": `{"rewritten":true}` + "\n"})
+	code, output := r.push()
+	if code != 0 || r.pushed() != "test: record handoff again" {
+		t.Fatalf("the rewrite's push = %d %q, pushed %q; want it run in full", code, output, r.pushed())
+	}
+	if _, err := os.Stat(tipFile); !os.IsNotExist(err) {
+		t.Fatalf("the recorded tip is still there after the push: %v", err)
 	}
 }

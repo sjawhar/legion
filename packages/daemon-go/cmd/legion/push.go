@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -23,19 +25,33 @@ const skipChecksTrailer = "skip-checks: true"
 
 var trailingSkipChecks = regexp.MustCompile(`(?:\s*\n)?skip-checks: ?true\s*$`)
 
-// runPush is `legion push`: the worker skill's push procedure for the issue branch
-// (skills/legion-worker/SKILL.md, "Every role pushes its own commits"), run by the pane rather than
-// typed by the agent, which also decides whether the push carries code. It refuses unless @-
-// descends from the remote branch (or from the tip a rewrite recorded), then pushes @- to
-// legion/<issue>. A fast-forward that changes only .legion/ and leaves .legion/ in the tree - a
-// handoff push - ends @-'s message with GitHub's skip-checks trailer, so the push starts no CI;
-// every other push, the .legion/ deletion and a rewrite among them, runs in full, and a trailer an
-// earlier push left on @- is removed.
+// pushHelp is `legion push`'s rule, as its help states it.
+const pushHelp = `usage: legion push [--workspace <dir>]
+
+Pushes @- to legion/<LEGION_ISSUE>, the worker skill's push of the issue branch: it refuses unless
+@- descends from legion/<issue>@origin, or from the tip recorded before rewriting pushed commits,
+then sets the bookmark and pushes.
+
+A push skips CI only when it changes nothing but handoffs whose phase guarantees a later push to
+the branch: the planner's .legion/plan.json, the tester's .legion/test.json, and a reviewer's
+.legion/review.json whose verdict is "changes_requested". Its head commit then ends with GitHub's
+"skip-checks: true" trailer, so the push starts no workflow, and the Go daemon carries the code
+head's verdict to it. Every other push runs CI in full: one carrying code, a reviewer round with
+any other verdict or none, the .legion/ deletion, and a rewrite. A trailer an earlier push left on
+@- is removed. Never add or remove the trailer yourself.
+`
+
+// runPush is `legion push`, whose rule pushHelp states: the pane decides whether a push skips CI,
+// from the paths it changes and the handoffs it carries, so no later push is ever missing and no
+// head a human may merge is left without checks.
 func runPush(_ context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("push", stderr)
+	flags.Usage = func() { fmt.Fprint(stderr, pushHelp) }
 	workspaceFlag := flags.String("workspace", "", "workspace directory (default $LEGION_WORKSPACE, else the current directory)")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: legion push [--workspace <dir>]")
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprint(stderr, pushHelp)
+		}
 		return 2
 	}
 	if err := push(*workspaceFlag, stdout, stderr); err != nil {
@@ -91,15 +107,15 @@ func push(workspaceFlag string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if head != pushed {
-		handoffOnly, err := handoffOnlyPush(jj, dir, pushed, rewritten)
+		skip, err := skipsCI(jj, dir, pushed, rewritten)
 		if err != nil {
 			return err
 		}
-		if err := markHead(jj, dir, handoffOnly); err != nil {
+		if err := markHead(jj, dir, skip); err != nil {
 			return err
 		}
-		if handoffOnly {
-			fmt.Fprintf(stdout, "legion push: the push changes only .legion/, so @- ends with %q and GitHub starts no CI for it\n", skipChecksTrailer)
+		if skip {
+			fmt.Fprintf(stdout, "legion push: the push carries only handoffs a later push follows, so @- ends with %q and GitHub starts no CI for it\n", skipChecksTrailer)
 		}
 	}
 	if _, err := pushJJ(jj, dir, "bookmark", "set", bookmark, "-r", "@-", "--allow-backwards"); err != nil {
@@ -117,11 +133,14 @@ func push(workspaceFlag string, stdout, stderr io.Writer) error {
 	return nil
 }
 
-// handoffOnlyPush is whether pushing @- onto the remote branch at pushed (none when the branch is
-// not on GitHub yet) changes only .legion/ and leaves .legion/ in the tree. A rewrite is not one:
-// GitHub lists a forced push's commits since the merge base, so the daemon carries no settlement
-// across it, and the head must run its own CI.
-func handoffOnlyPush(jj, dir, pushed, rewritten string) (bool, error) {
+// skipsCI is whether pushing @- onto the remote branch at pushed (none when the branch is not on
+// GitHub yet) changes nothing but handoffs whose phase guarantees a later push: the planner's plan
+// (the implementer's code follows), the tester's test (the reviewer's handoff or the implementer's
+// fix follows) and a reviewer's request for changes (the implementer's fix follows). Any other
+// push may leave the head a human merges, which must carry its own checks. A rewrite never skips:
+// GitHub lists a forced push's commits since the merge base, so the daemon carries nothing across
+// it.
+func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
 	if rewritten != "" {
 		return false, nil
 	}
@@ -130,35 +149,39 @@ func handoffOnlyPush(jj, dir, pushed, rewritten string) (bool, error) {
 		base = "heads(::@- & ::trunk())"
 	}
 	changed, err := pushJJ(jj, dir, "diff", "--name-only", "--from", base, "--to", "@-")
-	if err != nil {
+	if err != nil || changed == "" {
 		return false, err
-	}
-	if changed == "" {
-		return false, nil
 	}
 	for _, path := range strings.Split(changed, "\n") {
-		if !strings.HasPrefix(path, ".legion/") {
+		if path != ".legion/plan.json" && path != ".legion/test.json" && path != ".legion/review.json" {
 			return false, nil
 		}
+		// A deleted handoff is no handoff: `jj file show` of a path @- does not hold fails.
+		content, err := pushJJ(jj, dir, "file", "show", "-r", "@-", fmt.Sprintf("root:%q", path))
+		if err != nil {
+			return false, nil
+		}
+		if path == ".legion/review.json" {
+			var review struct {
+				Verdict string `json:"verdict"`
+			}
+			if json.Unmarshal([]byte(content), &review) != nil || review.Verdict != "changes_requested" {
+				return false, nil
+			}
+		}
 	}
-	// The .legion/ deletion is the merge head: every changed path is under .legion/, and it runs
-	// in full.
-	kept, err := pushJJ(jj, dir, "file", "list", "-r", "@-", `root:".legion"`)
-	if err != nil {
-		return false, err
-	}
-	return kept != "", nil
+	return true, nil
 }
 
-// markHead ends @-'s message with the skip-checks trailer when the push is handoff-only and
-// removes one otherwise, describing @- only when its message changes.
-func markHead(jj, dir string, handoffOnly bool) error {
+// markHead ends @-'s message with the skip-checks trailer when the push skips CI and removes one
+// otherwise, describing @- only when its message changes.
+func markHead(jj, dir string, skip bool) error {
 	message, err := pushJJ(jj, dir, "log", "--no-graph", "-T", "description", "-r", "@-")
 	if err != nil {
 		return err
 	}
 	want := strings.TrimRight(trailingSkipChecks.ReplaceAllString(message, ""), " \t\n")
-	if handoffOnly {
+	if skip {
 		want += "\n\n\n" + skipChecksTrailer
 	}
 	if want == strings.TrimRight(message, " \t\n") {
