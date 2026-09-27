@@ -15658,12 +15658,11 @@ async function architectureGuidance(client, project, components) {
   if (components.mode === "none" || components.ids.length > 0)
     return;
   try {
-    await client.getArchitectureSource(project);
-    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
-  } catch (error48) {
-    if (error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "SOURCE_NOT_FOUND") {
+    if (await client.getArchitectureSource(project) === null) {
       return;
     }
+    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
+  } catch (error48) {
     return `Could not check whether project ${project} has an architecture model: ${messageFor(error48)}. ${architectureComponentsAction}`;
   }
 }

@@ -56,7 +56,11 @@ func (s *server) getArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	`, r.PathValue("key")))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source configured for "+r.PathValue("key"))
+			// Whether a project has a source is a property of the project, and most projects do
+			// not have one. Answering the question with a 404 made the expected answer an error:
+			// every issue and project page logged a failed request for a read that worked, and
+			// every caller had to tell that 404 apart from a real one. The answer is null.
+			WriteJSON(w, http.StatusOK, nil)
 			return
 		}
 		s.writeHandlerError(w, err)
