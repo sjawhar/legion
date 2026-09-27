@@ -80,9 +80,6 @@ type RootCloseRequest struct {
 	Reason  string `json:"reason"`
 }
 
-// RootCloseResponse confirms the close committed.
-type RootCloseResponse struct{}
-
 // ChildRequest names the child of the architect's tree that park_child takes out of the workflow
 // or rerun_child runs again.
 type ChildRequest struct {
@@ -466,7 +463,7 @@ func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusForbidden, "ROOT_REQUIRED", fmt.Sprintf("close_root ends the tree root %s; its root architect closes it", grant.Tree))
 		return
 	}
-	s.applyFact(w, r, requestFactID("roots-close"), fact, RootCloseResponse{})
+	s.applyFact(w, r, requestFactID("roots-close"), fact, EmptyResponse{})
 }
 
 // parkChild takes a running child of the architect's tree out of the workflow by moving it to

@@ -295,14 +295,16 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // once nobody will hold that role for this notice — the claim has failed or retired, or its tree
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
-// notice either. A publish the listener accepts but then cannot forward, to a session that is
+// notice either, and, before any publish, a row whose architect stopped with its finished tree
+// (stoppedWithTree). A publish the listener accepts but then cannot forward, to a session that is
 // registered but no longer running, comes back as a role-lane exception and is queued again
-// (rehold, notice_exceptions.go). The runner executes a row it leased from memory, so a row deleted
-// under its lease since (a catch-up a newer ready dropped) is found gone in the tree's snapshot and
-// finishes without a publish, and so does a catch-up a newer one superseded (catchUpSuperseded,
-// read against the snapshot's root and the claim as it runs now): the re-hold reads the claim
-// from memory and writes its copy outside ApplyFact's lock, so it can lose the race to a ready
-// and commit an older copy after the fresh catch-up.
+// (rehold, notice_exceptions.go) unless its architect stopped with its finished tree. The runner
+// executes a row it leased from memory, so a row deleted under its lease since (a catch-up a newer
+// ready dropped) is found gone in the tree's snapshot and finishes without a publish, and so does a
+// catch-up a newer one superseded (catchUpSuperseded, read against the snapshot's root and the
+// claim as it runs now): the re-hold reads the claim from memory and writes its copy outside
+// ApplyFact's lock, so it can lose the race to a ready and commit an older copy after the fresh
+// catch-up.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
