@@ -860,7 +860,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			return nil, invalidMarkdownOp("markdown", err)
 		}
 		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
-			return out, err
+			return out, invalidSchemaOp("markdown", err)
 		}
 		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
 		if err != nil {

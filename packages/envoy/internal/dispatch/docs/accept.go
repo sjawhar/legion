@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -205,6 +206,25 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 		"replace_with %q leaves text the document reads back as another block where it lands (%v); reject the suggestion, or reply asking for the text inside a line",
 		with, broke,
 	)
+}
+
+// acceptSpliceRefusal words the refusal of an accept whose replacement Splice cannot fit, naming
+// what the person accepting can do: an inline replacement running into an ask or callout from the
+// text before it would join the two and leave the ask or callout empty; a replacement no level of
+// the document can hold where the suggestion sits; and any other join the document cannot hold.
+func acceptSpliceRefusal(err error) error {
+	switch {
+	case errors.Is(err, pmdoc.ErrJoinEmptiesTypedBlock):
+		return &ErrInvalidOp{Field: "anchor", Reason: "the suggestion runs into an ask or callout from the text before it, " +
+			"and replacing it would join the two and leave the ask or callout empty; suggest a change inside one of them"}
+	case errors.Is(err, pmdoc.ErrReplacementDoesNotFit):
+		return &ErrInvalidOp{Field: "replace_with", Reason: "no part of the document can hold it where the suggestion sits " +
+			"(a table cell's whole text, for one, can only be replaced by inline text)"}
+	case errors.Is(err, pmdoc.ErrSchema):
+		return &ErrInvalidOp{Field: "anchor", Reason: fmt.Sprintf("the suggestion runs across blocks that replacing it "+
+			"would join, which the document cannot hold together (%v); reject the suggestion, or suggest a change inside one block", err)}
+	}
+	return err
 }
 
 // refuseAcceptedCodeThatReshapes refuses an accept whose code changes how a block around the code

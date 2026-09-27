@@ -339,18 +339,35 @@ reject does (`rejectedInsert`): the insert's runs that meet across a block bound
 the boundary between them, are one range (`pmdoc.MarkSpans`), so the blocks join, which undoes the
 split an insert made (Enter typed while suggesting), and a table the range cuts is padded to its
 width as the editor's table plugin pads it (`pmdoc.PadTables`, after prosemirror-tables'
-`fixTables`: a header row takes header cells, and each new cell its column's alignment, so the
-column reads back as it was, where `fixTables` makes it left). Where the browser's result differs,
-the reject differs on purpose: text without the insert's mark between two of its runs, which the
-browser's reject deletes with them, is kept, each run deleted on its own (the editor leaves such
-text when someone suggests inside another person's insert, which marks their text with an insert
-of its own, or pastes into it outside suggestion mode); and a removal the document cannot hold is
-refused, `400 INVALID_OP` on `anchor`, advising accepting the suggestion or editing the document
-(`rejectRefusal`), with the document unchanged and the suggestion open. That is an insert running
-into an ask or callout from the text before it, whose join would leave the ask or callout empty
-(the browser drops it), and one running from one table into the next, which the browser joins into
-one table. A replacement no level of the document can hold where
-the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
+`fixTables`; an accept pads the tables it cuts the same way before it is read back). A removal the
+document cannot hold, one the schema refuses or the renderer cannot write, is refused, `400
+INVALID_OP` on `anchor`, advising accepting the suggestion or editing the document
+(`rejectSpliceRefusal`), with the document unchanged and the suggestion open. A reject is not read
+back. Where it stores otherwise than the browser's reject, or refuses what the browser stores:
+- Text without the insert's mark between two of its runs is kept, each run deleted on its own; the
+  browser deletes that text too, and the editor leaves it when someone suggests inside another
+  person's insert or pastes into it outside suggestion mode.
+- An insert running into an ask or callout from the text before it is refused; the browser drops
+  the emptied ask or callout.
+- One running from one table into the next is refused; the browser joins the tables.
+- One over a header cell and the body cell below it (`| QQ |\n| --- |\n| ZZ |`) is refused; the
+  browser stores the emptied cells.
+- `# HelloQQ` then `## ZZ world.` keeps two headings (`# Hello`, `## &#32;world.`); the browser's
+  delete joins them, and `Splice`, which makes ProseMirror's replace, keeps headings of two levels
+  apart.
+- A cell at a row's end into the next row's first cell keeps the rows apart and pads the next row;
+  the browser joins the rows and widens the table.
+- One into a one-column table's only header cell stores one empty header cell; the browser leaves
+  the header row empty and adds a row, which the schema cannot hold.
+- A padded cell takes its column's alignment, where `fixTables` makes it left, so the column reads
+  back as it was.
+- A paragraph's end into a footnote definition stores the reference reading back as literal text,
+  and a paragraph's end into code turns the code's line break into a soft break.
+- Since a reject is not read back, it can store a document that reads back otherwise: a table
+  column's alignment, an emptied paragraph beside other blocks (which is not written), a task item
+  emptied to `- [ ]` (which reads back as a plain item), and nested lists or footnote blocks.
+
+An accepted replacement no level of the document can hold where the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
 `replace_with` (`pmdoc.ErrReplacementDoesNotFit`), and inline text over a range that runs into an
 ask or callout from the text before it, at any depth (inside a blockquote, a list item or another
 callout too), is `400 INVALID_OP` on `anchor` (`pmdoc.ErrJoinEmptiesTypedBlock`): ProseMirror's

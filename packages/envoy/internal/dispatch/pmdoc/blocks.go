@@ -309,16 +309,7 @@ func padTable(table *Node) {
 	width := 0
 	var widest *Node
 	for index, row := range table.Children {
-		for _, cell := range row.Children {
-			span := 1
-			switch value := cell.Attrs["colspan"].(type) {
-			case int:
-				span = max(value, 1)
-			case float64:
-				span = max(int(value), 1)
-			}
-			widths[index] += span
-		}
+		widths[index] = len(row.Children)
 		if widest == nil || widths[index] > width {
 			widest = row
 		}
