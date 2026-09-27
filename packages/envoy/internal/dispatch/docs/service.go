@@ -857,7 +857,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	} else if lastActor != nil {
 		eventActor = *lastActor
 	}
-	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, tree, eventActor, latest.Number+1)
+	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, tree, eventActor)
 	if err != nil {
 		if stamped > 0 {
 			s.discardSuppressedPersistence(room, slot)
@@ -959,6 +959,13 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		}
 		return nil
 	}
+	// Settlement writes a version only when the document now reads differently from the latest
+	// one. Its own writes - stamping block ids, restoring an ask block's server-owned
+	// attributes, indexing a new ask - change the stored Proof state while rendering the same
+	// markdown, so a version they minted repeated the version before it, credited to nobody,
+	// and staled an approval pinned to what an agent had just written (LEGION-273, LEGION-229).
+	// contentChanged stays the first half of the test: a version an older renderer wrote is not
+	// this settlement's to canonicalise when nothing has touched the document since.
 	contentChanged, err := contentChangedSinceVersion(ctx, tx, room, latest.docUpdateVersion)
 	if err != nil {
 		if stamped > 0 {
@@ -969,7 +976,21 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.retrySettle(room, generation, err)
 		return
 	}
-	if contentChanged || reconciliation.changed || len(reconciliation.events) > 0 {
+	versioning := contentChanged && markdown != latest.markdown
+	settledVersion := latest.Number
+	if versioning {
+		settledVersion++
+	}
+	if err := reconciliation.nameVersion(ctx, tx, room, owner, settledVersion); err != nil {
+		if stamped > 0 {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, err)
+			return
+		}
+		s.retrySettle(room, generation, err)
+		return
+	}
+	if versioning {
 		result, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, eventActor, &versionWrite{
 			authors:          authors,
 			docUpdateVersion: &snapshotCursor,

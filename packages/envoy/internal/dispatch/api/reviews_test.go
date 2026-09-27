@@ -229,3 +229,27 @@ func TestHeaderChangesRequestedAnswersTheOpenApprovalAskAndNeedsAReason(t *testi
 		t.Fatalf("events = %s, want artifact.changes_requested with the reason", log.Body.String())
 	}
 }
+
+// An architect writes a spec whose decisions are ask blocks and a human approves it straight
+// away. Settlement indexes those blocks seconds later, over words nobody has touched since. A
+// version minted for that indexing stales an approval a human has just given, and Legion's
+// design gate - open exactly while the approved version is the latest - closes with nothing in
+// the event stream to explain it (LEGION-273).
+func TestApprovedSpecStaysApprovedThroughItsAskBlockSettlement(t *testing.T) {
+	handler, _ := blockAskHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Approve the decisions", "Context\n\n"+transportAsk)
+	approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews", map[string]any{"state": "approved"}, "alice")
+	if approved.Code != http.StatusCreated {
+		t.Fatalf("approve the spec: status=%d body=%s", approved.Code, approved.Body.String())
+	}
+	if got := readApproval(t, handler, issue.PrimaryArtifactID); got.Approval.State != "approved" || got.Approval.LatestVersion != 1 {
+		t.Fatalf("approval of the spec as written = %#v, want approved at version 1", got.Approval)
+	}
+
+	// The settlement has run once it has indexed the decision block.
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "decision", "Which transport?")
+	got := readApproval(t, handler, issue.PrimaryArtifactID)
+	if got.Approval.State != "approved" || got.Approval.LatestVersion != 1 || got.Approval.Version == nil || *got.Approval.Version != 1 {
+		t.Fatalf("approval after the settlement that indexed the block = %#v, want it still approved at version 1", got.Approval)
+	}
+}

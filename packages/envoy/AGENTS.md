@@ -62,7 +62,15 @@ Each `doc_updates` row records `content_changed` - whether the update changed th
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
 after; the one measure the room's update observer, `updateChangesMarkdown`, and a transactional live
 write in `applyLive` both apply) - and settlement writes a version only when a content-class row
-lies past the latest version's `doc_update_version` cursor or ask reconciliation changed something.
+lies past the latest version's `doc_update_version` cursor and the settled document renders
+differently from that version. Settlement's own writes fail that second half: stamping block ids,
+restoring an ask block's server-owned attributes and indexing a new ask block move the stored
+Proof state while rendering the same markdown, and a version for one of them repeated the version
+before it, credited to nobody - staling an approval pinned to what an agent had just written and
+closing Legion's design gate with nothing in the event stream to explain it (LEGION-273,
+LEGION-229 requirement 2). The version such a settlement leaves the document at is the one it
+found, and that is the number its `block.repaired`, `block.invalid` and retraction events name
+(`settlementReconciliation.nameVersion`).
 An update that changes only what no rendering carries therefore versions no document by that route:
 a margin projection, the attributes a reader's browser editor derives on its own - each heading's
 `id` when it opens the document, and each ordered list item's `label` and `listType` on the first
