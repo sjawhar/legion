@@ -51,7 +51,7 @@ export function IssueComponentsLine({
       <span className={`shrink-0 text-xs ${textMutedOnSurface}`}>
         inherited from{" "}
         <Link
-          className={`underline ${linkText} ${linkHoverText}`}
+          className={`dispatch-inline-link underline ${linkText} ${linkHoverText}`}
           to={buildIssuePath({ key: components.inherited_from, kind: "issue" })}
         >
           {components.inherited_from}
