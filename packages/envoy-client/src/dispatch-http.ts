@@ -29,6 +29,7 @@ import type {
   GraphReferences,
   Issue,
   IssueDetails,
+  IssuePriority,
   IssueRead,
   IssueReferences,
   IssueSummary,
@@ -73,6 +74,8 @@ export interface ListIssuesOptions {
   readonly status?: string;
   readonly parent?: string;
   readonly label?: string;
+  /** Each value repeats as `priority=`; `"none"` matches an issue with no priority. */
+  readonly priority?: readonly (IssuePriority | "none")[];
   readonly updated_since?: string;
 }
 
@@ -523,6 +526,8 @@ export class DispatchClient {
       for (const [name, value] of Object.entries(query)) {
         if (typeof value === "string" || typeof value === "number") {
           url.searchParams.set(name, String(value));
+        } else if (Array.isArray(value)) {
+          for (const item of value) url.searchParams.append(name, String(item));
         }
       }
     }

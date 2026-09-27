@@ -36933,13 +36933,14 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC" },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, and open-ask count, so you can see backlog shape without " + "opening every issue. Optionally filter by status, parent, label, or how recently it changed. Do " + "not use it to search by keyword or phrase; dispatch_search remains the keyword surface. Rows are " + "capped at limit (default 50, max 250), applied to the response here, not by the server.",
+    example: { project: "AGENTC", priority: [0, 1] },
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, and open-ask count, so you can see backlog shape without " + "opening every issue. Optionally filter by status, parent, label, priority, or how recently it " + "changed; priority takes one or more of 0-3 (P0-P3) and null for an issue with no priority, so " + "an owner's P0/P1 audit is priority [0, 1]. Do not use it to search by keyword or phrase; " + "dispatch_search remains the keyword surface. Rows are capped at limit (default 50, max 250), " + "applied to the response here, not by the server.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
       parent: z2.string().describe("Optional parent issue key filter.").optional(),
       label: z2.string().describe("Optional label filter.").optional(),
+      priority: z2.array(z2.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z2.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
       limit: z2.number({ int: true, min: 1, max: 250 }).describe("Maximum rows, 1-250; default 50.").optional()
     })
@@ -39085,6 +39086,9 @@ class DispatchClient {
       for (const [name, value] of Object.entries(query)) {
         if (typeof value === "string" || typeof value === "number") {
           url2.searchParams.set(name, String(value));
+        } else if (Array.isArray(value)) {
+          for (const item of value)
+            url2.searchParams.append(name, String(item));
         }
       }
     }
@@ -39361,6 +39365,10 @@ function optionalPriority(args, name) {
   if (value === null)
     return null;
   return typeof value === "number" ? value : undefined;
+}
+function optionalPriorityFilter(args, name) {
+  const value = args[name];
+  return Array.isArray(value) ? value.map((item) => item ?? "none") : undefined;
 }
 function optionalComponents(args, name) {
   const value = args[name];
@@ -40427,6 +40435,7 @@ async function executeDispatchTool(input) {
       const status = optionalString(args, "status");
       const parent = optionalString(args, "parent");
       const label = optionalString(args, "label");
+      const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
       const issues = await client.listIssues({
@@ -40434,6 +40443,7 @@ async function executeDispatchTool(input) {
         ...status === undefined ? {} : { status },
         ...parent === undefined ? {} : { parent },
         ...label === undefined ? {} : { label },
+        ...priority === undefined ? {} : { priority },
         ...updatedSince === undefined ? {} : { updated_since: updatedSince }
       });
       const rows = issues.slice(0, limit).map((row) => ({

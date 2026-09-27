@@ -31,11 +31,11 @@ var issueStatusCase = issueStatusOrderSQL()
 // where state = 'open' index instead of forcing a sequential scan of asks.
 // The components lateral yields one row per issue, so grouping by its columns
 // with the key adds no rows. listPinnedIssuesQuery is the same query joined
-// to the caller's pinned rows ($7 is the login).
+// to the caller's pinned rows ($9 is the login).
 var listIssuesQuery = issueSummaryHead + issueSummaryTail
 
 var listPinnedIssuesQuery = issueSummaryHead + `
-	join user_issue_state s on s.issue_key = i.key and s.login = $7 and s.pinned` + issueSummaryTail
+	join user_issue_state s on s.issue_key = i.key and s.login = $9 and s.pinned` + issueSummaryTail
 
 // issueClaimColumns is the claim half of an issue select, named once like
 // issueComponentsColumns so every read scans the two columns in one order.
@@ -57,6 +57,9 @@ var issueSummaryTail = `
 	  and ($4::timestamptz is null or i.updated_at >= $4)
 	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
 	  and (not $6::boolean or i.closed_at is null)
+	  and ((cardinality($7::smallint[]) = 0 and not $8::boolean)
+	       or i.priority = any($7::smallint[])
+	       or ($8::boolean and i.priority is null))
 	group by i.key, ` + issueComponentsColumns + `
 	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
 `
@@ -64,7 +67,29 @@ var issueSummaryTail = `
 const (
 	maxIssueLabels  = 20
 	maxIssueLabel16 = 40
+	// unsetPriorityFilter is the `priority` query value that matches an issue with no priority.
+	unsetPriorityFilter = "none"
 )
+
+// parsePriorityFilter reads the repeated `priority` query parameter: each value is 0..3, or
+// "none" for an issue with no priority. No values means no priority filter.
+func parsePriorityFilter(values []string) (priorities []int16, unset bool, err error) {
+	priorities = []int16{}
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == unsetPriorityFilter {
+			unset = true
+			continue
+		}
+		switch value {
+		case "0", "1", "2", "3":
+			priorities = append(priorities, int16(value[0]-'0'))
+		default:
+			return nil, false, errorf(http.StatusBadRequest, "INVALID_PRIORITY", "priority filter values must be 0 to 3 or %s, got %q", unsetPriorityFilter, raw)
+		}
+	}
+	return priorities, unset, nil
+}
 
 // claimScan reads an issue's two claim columns as one nullable claim. A row has both or
 // neither (the issues_claim_complete constraint), so either absent means unclaimed.
@@ -140,9 +165,14 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		}
 		updatedSince = &parsed
 	}
+	priorities, unsetPriority, err := parsePriorityFilter(query["priority"])
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	listQuery := listIssuesQuery
 	open := query.Get("open") == "true"
-	arguments := []any{project, status, parent, updatedSince, labels, open}
+	arguments := []any{project, status, parent, updatedSince, labels, open, priorities, unsetPriority}
 	if pinned {
 		listQuery = listPinnedIssuesQuery
 		arguments = append(arguments, login)
