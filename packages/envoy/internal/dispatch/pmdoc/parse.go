@@ -182,10 +182,7 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 	if err := browserListSpacing(root, source); err != nil {
 		return nil, err
 	}
-	if err := refuseBlocks(root, source); err != nil {
-		return nil, err
-	}
-	doc, err = parseBlock(root, source, footnoteLabels(root))
+	doc, err = convert(root, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
 	}
@@ -240,10 +237,7 @@ func parseInlineWithDefinitions(markdown string, labels []string) ([]*Node, erro
 	if !ok {
 		return nil, fmt.Errorf("%w: inline markdown does not read as a paragraph", ErrSchema)
 	}
-	if err := refuseBlocks(first, source); err != nil {
-		return nil, err
-	}
-	paragraph, err := parseBlock(first, source, footnoteLabels(root))
+	paragraph, err := convert(first, source, footnoteLabels(root))
 	if err != nil {
 		return nil, err
 	}
@@ -281,10 +275,7 @@ func ParseInline(markdown string) (nodes []*Node, err error) {
 	if dropped := textOutside(root.FirstChild(), source); dropped != "" {
 		return nil, fmt.Errorf("%w: inline markdown holds text outside its paragraph, %q, which would be lost", ErrSchema, dropped)
 	}
-	if err := refuseBlocks(root.FirstChild(), source); err != nil {
-		return nil, err
-	}
-	paragraph, err := parseBlock(root.FirstChild(), source, nil)
+	paragraph, err := convert(root.FirstChild(), source, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -474,6 +465,16 @@ func footnoteLabels(root ast.Node) map[int]string {
 	}
 	walk(root)
 	return labels
+}
+
+// convert is the one way into the tree's conversion: every block refusal first, in document order
+// (refuseBlocks), and then the conversion, which reads what they leave on the tree
+// (typedDirective.values).
+func convert(node ast.Node, source []byte, footnotes map[int]string) (*Node, error) {
+	if err := refuseBlocks(node, source); err != nil {
+		return nil, err
+	}
+	return parseBlock(node, source, footnotes)
 }
 
 func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, error) {
