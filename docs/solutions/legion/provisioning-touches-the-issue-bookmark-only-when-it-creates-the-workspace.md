@@ -133,11 +133,14 @@ not exist. In order:
      - no `main` at all: a repository whose default branch is another, with no way out printed.
 
      TypeScript still adds `main` by name.
-3. `git worktree prune`, then the add. On `already registered|exists` (jj still registers the
-   workspace but its directory is gone): `jj workspace forget <name> -R <clone>` (Go adds
-   `--ignore-working-copy`), prune,
-   the same add again at the same revision. A brand-new workspace and a forgotten registration
-   start from the same resolution — the two paths no longer differ in where they start.
+3. Delete this workspace's own stale git worktree entry, then the add. On `already
+   registered|exists` (jj still registers the workspace but its directory is gone):
+   `jj workspace forget <name> -R <clone>` (Go adds `--ignore-working-copy`), then the same add
+   again at the same revision. Once added, the workspace's git worktree entry is locked. The entry
+   is the one whose `gitdir` names the workspace; never a bare `git worktree prune`
+   (docs/solutions/daemon/jj-git-worktree-interop.md). A brand-new workspace and a forgotten
+   registration start from the same resolution — the two paths no longer differ in where they
+   start.
 4. `jj bookmark set legion/<KEY> -r @` in the new workspace **only when it starts at main**: when
    nothing resolved, or, in Go, when the bookmark was set aside (step 1), where main resolved and
    the bookmark is still created on the fresh working copy. In TypeScript, one `console.error` line

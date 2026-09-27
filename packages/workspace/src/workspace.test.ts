@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, watch } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -235,6 +235,33 @@ async function gitWorktrees(repoCloneDir: string): Promise<string[]> {
     .filter((line) => line.startsWith("worktree "))
     .map((line) => line.slice("worktree ".length));
 }
+/** Every linked worktree git registers in the clone, by path, and whether it is locked: git's own
+ * account (`git worktree list --porcelain`), one block per worktree, the clone's own left out. */
+async function gitWorktreeLocks(repoCloneDir: string): Promise<Record<string, boolean>> {
+  const listed = await runCommand([
+    SYSTEM_GIT,
+    `--git-dir=${path.join(repoCloneDir, ".git")}`,
+    "worktree",
+    "list",
+    "--porcelain",
+  ]);
+  expect(listed.exitCode, listed.stderr).toBe(0);
+  const locks: Record<string, boolean> = {};
+  for (const block of listed.stdout.trim().split("\n\n")) {
+    const [first = "", ...rest] = block.split("\n");
+    if (!first.startsWith("worktree ")) throw new Error(`git worktree list printed ${block}`);
+    const worktree = first.slice("worktree ".length);
+    if (worktree === repoCloneDir) continue;
+    locks[worktree] = rest.some((line) => line === "locked" || line.startsWith("locked "));
+  }
+  return locks;
+}
+/** What git answers for the top of the working tree in `dir`, failing the test when it cannot. */
+async function gitToplevel(dir: string): Promise<string> {
+  const toplevel = await runCommand([SYSTEM_GIT, "rev-parse", "--show-toplevel"], { cwd: dir });
+  expect(toplevel.exitCode, `git rev-parse in ${dir}: ${toplevel.stderr}`).toBe(0);
+  return toplevel.stdout.trim();
+}
 
 const JJ_BINARIES = [
   { name: "local Sami JJ", command: ["jj"] },
@@ -388,7 +415,6 @@ describe("provisionIssueWorkspace", () => {
       writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       bookmarkRowsCommand(bookmark, repoCloneDir),
-      ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "bookmark", "set", bookmark, "-r", "@"],
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
@@ -537,7 +563,6 @@ describe("provisionIssueWorkspace", () => {
       writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       bookmarkRowsCommand(bookmark, repoCloneDir),
-      ["git", `--git-dir=${repoCloneDir}/.git`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ...credentialConfigCommands(`${repoCloneDir}/.git`, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
@@ -1764,10 +1789,8 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
-      ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],
-      ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", commit, repoCloneDir),
       ...credentialConfigCommands(gitDir, credentialHelper),
       ...identityProbeCommands(repoCloneDir),
@@ -1824,10 +1847,8 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       writeKeepUnreachableCommitsCommand(repoCloneDir),
       ["jj", "git", "fetch", "-R", repoCloneDir],
       bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir),
-      ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "workspace", "forget", "widgets-42", "-R", repoCloneDir],
-      ["git", `--git-dir=${gitDir}`, "worktree", "prune"],
       workspaceAddCommand(workspaceDir, "widgets-42", "main", repoCloneDir),
       ["jj", "bookmark", "set", "legion/WIDGETS-42", "-r", "@"],
       ...credentialConfigCommands(gitDir, credentialHelper),
@@ -1876,7 +1897,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         `Keep one of its added commits: \`jj bookmark set legion/WIDGETS-42 -r <commit> -R ${repoCloneDir}\`. ` +
         `Start from main instead: \`jj bookmark delete legion/WIDGETS-42 -R ${repoCloneDir}\`, and the next provisioning starts at main.`
     );
-    // The resolution is the last command: no prune, no add, nothing registered for the next
+    // The resolution is the last command: no add, nothing registered for the next
     // resume to adopt.
     expect(calls.map((call) => call.cmd)).toEqual([
       readKeepUnreachableCommitsCommand(repoCloneDir),
@@ -1942,7 +1963,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       ).rejects.toThrow(
         refusal(bookmarkRowsCommand("legion/WIDGETS-42", repoCloneDir).join(" "), workspaceDir)
       );
-      // Nothing is guessed from a failed read: no prune, no add, no bookmark write.
+      // Nothing is guessed from a failed read: no add, no bookmark write.
       expect(
         calls.map((call) => call.cmd),
         name
@@ -2261,7 +2282,6 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           repoCloneDir,
         ],
         ["jj", "workspace", "forget", "widgets-42", "--ignore-working-copy", "-R", repoCloneDir],
-        ["git", `--git-dir=${path.join(repoCloneDir, ".git")}`, "worktree", "prune"],
       ]);
       expect(existsSync(workspaceDir), name).toBeFalse();
       expect(await workspaceNames(), name).not.toContain("widgets-42");
@@ -2359,7 +2379,7 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     }
   }, 60_000);
 
-  test("repairs the shape a crash between the directory deletion and the forget leaves: the next provisioning forgets, prunes, and re-adds the still-registered workspace", async () => {
+  test("repairs the shape a crash between the directory deletion and the forget leaves: the next provisioning forgets and re-adds the still-registered workspace", async () => {
     for (const { name, command } of JJ_BINARIES) {
       const stateDir = path.join(await temporaryDirectory(), "state");
       const { repoCloneDir, workspaceDir, calls, jj, commitOf, deps } = await realJjRig(
@@ -2384,8 +2404,8 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
         workspaceDir,
         bookmark,
       });
-      // `createWorkspace`'s `already registered|exists` branch on a real binary: forget, prune,
-      // add again at the bookmark's commit (the bookmark survived, so no bookmark write).
+      // `createWorkspace`'s `already registered|exists` branch on a real binary: forget, then add
+      // again at the bookmark's commit (the bookmark survived, so no bookmark write).
       expect(calls, name).toContainEqual([
         "jj",
         "workspace",
@@ -2401,5 +2421,43 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
       expect(existsSync(workspaceDir), name).toBeTrue();
       expect(await commitOf("@-", workspaceDir), name).toBe(bookmarkCommit);
     }
+  }, 60_000);
+
+  test("touches only its own git worktree in the shared clone, even another whose directory this process cannot see, and locks each workspace it adds", async () => {
+    // Stock jj 0.44 colocates no workspace, so there is no git worktree to lose.
+    const [{ name, command }] = JJ_BINARIES;
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const { repoCloneDir, workspaceDir, calls, deps } = await realJjRig(command, stateDir);
+    const other = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-41");
+    await provisionIssueWorkspace("WIDGETS-41", deps);
+    expect(await gitWorktreeLocks(repoCloneDir), name).toEqual({ [other]: true });
+    // An entry another process added carries no lock; this one is out of view, as another host's
+    // or another tree's is: a bare `git worktree prune` here would take it for stale.
+    const pointer = (await readFile(path.join(other, ".git"), "utf8")).trim();
+    expect(pointer, name).toStartWith("gitdir: ");
+    await rm(path.join(pointer.slice("gitdir: ".length), "locked"), { force: true });
+    const elsewhere = path.join(await temporaryDirectory(), "elsewhere");
+    await rename(other, elsewhere);
+
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    // Registered but gone, the shape a crash inside removal leaves: forgotten and added again.
+    await rm(workspaceDir, { recursive: true, force: true });
+    calls.length = 0;
+    await provisionIssueWorkspace("WIDGETS-42", deps);
+    expect(calls, name).toContainEqual([
+      "jj",
+      "workspace",
+      "forget",
+      "widgets-42",
+      "-R",
+      repoCloneDir,
+    ]);
+    expect((await gitWorktreeLocks(repoCloneDir))[workspaceDir], name).toBeTrue();
+    expect(await gitToplevel(workspaceDir), name).toBe(workspaceDir);
+    await removeIssueWorkspace("WIDGETS-42", deps);
+    expect(Object.keys(await gitWorktreeLocks(repoCloneDir)), name).not.toContain(workspaceDir);
+
+    await rename(elsewhere, other);
+    expect(await gitToplevel(other), name).toBe(other);
   }, 60_000);
 });

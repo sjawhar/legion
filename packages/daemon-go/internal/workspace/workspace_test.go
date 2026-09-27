@@ -632,6 +632,97 @@ func TestRemoveForgetsTheWorkspace(t *testing.T) {
 	}
 }
 
+// Every workspace of the shared clone has its own git worktree entry, and provisioning or removing
+// one workspace touches no other's, even one whose directory this process cannot see: another
+// tree's volume, or another host's mount of the clone. A bare `git worktree prune` takes such an
+// entry for stale and deletes it, and git then fails in that workspace while jj keeps working.
+// Each workspace provisioning adds is locked, so a bare prune anyone else runs skips it too.
+func TestProvisioningAndRemovalTouchOnlyTheirOwnGitWorktree(t *testing.T) {
+	run := newLocalRunner(t)
+	otherRequest := provisionRequest(t)
+	otherRequest.Issue = "WIDGETS-41"
+	other, err := Provision(context.Background(), run, otherRequest)
+	if err != nil {
+		t.Fatalf("provision the other workspace: %v", err)
+	}
+	if locked := gitWorktreeLocks(t, other.Clone); !locked[other.Dir] {
+		t.Errorf("provisioning left the new workspace's git worktree unlocked: %v", locked)
+	}
+	// An entry another process added carries no lock; this one is out of view, as another tree's is.
+	pointer, err := os.ReadFile(filepath.Join(other.Dir, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin, ok := strings.CutPrefix(strings.TrimSpace(string(pointer)), "gitdir: ")
+	if !ok {
+		t.Fatalf("the other workspace's .git names no git worktree: %q", pointer)
+	}
+	if err := os.Remove(filepath.Join(admin, "locked")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.Rename(other.Dir, elsewhere); err != nil {
+		t.Fatal(err)
+	}
+
+	request := otherRequest
+	request.Issue = "WIDGETS-42"
+	workspace, err := Provision(context.Background(), run, request)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// Registered but gone, the shape a crash inside Remove leaves: forgotten and added again.
+	if err := os.RemoveAll(workspace.Dir); err != nil {
+		t.Fatal(err)
+	}
+	before := len(run.Calls())
+	if _, err := Provision(context.Background(), run, request); err != nil {
+		t.Fatalf("re-provision the registered missing workspace: %v", err)
+	}
+	findCall(t, run.Calls()[before:], "jj", "workspace", "forget")
+	if locked := gitWorktreeLocks(t, workspace.Clone); !locked[workspace.Dir] {
+		t.Errorf("the re-added workspace's git worktree is unlocked: %v", locked)
+	}
+	if got := strings.TrimSpace(runSetup(t, workspace.Dir, "git", "rev-parse", "--show-toplevel")); got != workspace.Dir {
+		t.Errorf("git in the re-added workspace answers %q, want %q", got, workspace.Dir)
+	}
+	if err := Remove(context.Background(), run, workspace); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if locked, registered := gitWorktreeLocks(t, workspace.Clone)[workspace.Dir]; registered {
+		t.Errorf("Remove left the removed workspace's git worktree registered (locked: %v)", locked)
+	}
+
+	if err := os.Rename(elsewhere, other.Dir); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(runSetup(t, other.Dir, "git", "rev-parse", "--show-toplevel")); got != other.Dir {
+		t.Errorf("git in the other workspace answers %q, want %q", got, other.Dir)
+	}
+}
+
+// gitWorktreeLocks is every linked worktree git registers in clone, by path, and whether it is
+// locked: git's own account (`git worktree list --porcelain`), one block per worktree.
+func gitWorktreeLocks(t *testing.T, clone string) map[string]bool {
+	t.Helper()
+	listed := runSetup(t, clone, "git", "--git-dir="+filepath.Join(clone, ".git"), "worktree", "list", "--porcelain")
+	locks := map[string]bool{}
+	for _, block := range strings.Split(strings.TrimSpace(listed), "\n\n") {
+		lines := strings.Split(block, "\n")
+		path, ok := strings.CutPrefix(lines[0], "worktree ")
+		if !ok {
+			t.Fatalf("git worktree list printed a block with no worktree line: %q", block)
+		}
+		if path == clone {
+			continue
+		}
+		locks[path] = slices.ContainsFunc(lines[1:], func(line string) bool {
+			return line == "locked" || strings.HasPrefix(line, "locked ")
+		})
+	}
+	return locks
+}
+
 func TestLocationMatchesProvisionedWorkspacePath(t *testing.T) {
 	working, err := Location("/state", ghrepo.MustParse("acme/widgets"), "WIDGETS-42")
 	if err != nil {
