@@ -345,7 +345,8 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// as an edit's replacement does, and the suggestion's own mark goes with the text it
 		// replaced. Only text that stays in the textblock carries them: a block replacement can
 		// land a code block, which an ask's mark cannot cover.
-		if code || isInlineDocument(replacement) {
+		inline := code || isInlineDocument(replacement)
+		if inline {
 			pmdoc.AddMarks(replacement, slices.DeleteFunc(pmdoc.AnchorMarksCovering(tree, range_), func(mark pmdoc.Mark) bool {
 				return mark.Type == string(MarkSuggestion) && mark.Attrs["id"] == id
 			}))
@@ -357,7 +358,7 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// The browser editor's table plugin pads a table the accept cut to its width, as it does
 		// after a reject, before anything reads the accept back, where the browser's accept writes
 		// the replacement where Splice does (padsLikeTheBrowser).
-		if padsLikeTheBrowser(tree, range_, replacement, code) {
+		if padsLikeTheBrowser(tree, range_, at, inline) {
 			if next, err = padCutTables(tree, next, range_); err != nil {
 				return err
 			}

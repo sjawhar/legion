@@ -222,22 +222,25 @@ func padCutTables(before, after *pmdoc.Node, r pmdoc.Range) (*pmdoc.Node, error)
 // padsLikeTheBrowser reports whether an accept may pad the tables its splice cut: whether the
 // browser editor's accept writes the replacement where Splice does (proof-sdk marks.ts accept and
 // applyMarkdownReplace). A range running from one table into the next is never padded: the
-// browser joins the two tables, which Splice does not. Inline text, nothing, and code's literal
-// text replace the matched range there as here. Block content the browser takes across two
-// textblocks only when the range is aligned with them (pmdoc.MultiblockAligned), and then replaces
-// them from the start of the first, which lands where Splice puts it only when the first is a
-// document-level block, not one inside a callout, a quote, a list item or a table cell. Other block
-// content over a table, such as a list over one cell's whole text, is not padded either. An accept
-// that is not padded is judged by the read-back as it stands, which refuses one that cut a table.
-func padsLikeTheBrowser(tree *pmdoc.Node, match pmdoc.Range, replacement *pmdoc.Node, code bool) bool {
+// browser can join the two tables, which Splice does not. An inline replacement (text that stays
+// in the textblock, nothing, or code's literal text) replaces the matched range there as here.
+// Block content the browser takes across two textblocks only when the range is aligned with them
+// (pmdoc.MultiblockAligned), and then replaces both whole. Splice replaces what the browser does
+// only when the range covers them exactly, from the start of the textblock it starts in, at, to the
+// end of the one it ends in, and at is a document-level block, not one inside a callout, a quote,
+// a list item or a table cell. Other block content over a table, such as a list over one cell's
+// whole text, is not padded either. An accept that is not padded is judged as the splice left it,
+// which refuses one that cut a table.
+func padsLikeTheBrowser(tree *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, inline bool) bool {
 	if joinsTwoTables(tree, match) {
 		return false
 	}
-	if code || isInlineDocument(replacement) {
+	if inline {
 		return true
 	}
-	at, ok := pmdoc.ContainingTextblock(tree, match.From)
-	return ok && len(at.Ancestors) == 1 && pmdoc.MultiblockAligned(tree, match)
+	last, _ := pmdoc.ContainingTextblock(tree, match.To)
+	return len(at.Ancestors) == 1 && match.From == at.Content.From && match.To == last.Content.To &&
+		pmdoc.MultiblockAligned(tree, match)
 }
 
 // acceptSpliceRefusal words the refusal of an accept whose replacement Splice cannot fit, naming
