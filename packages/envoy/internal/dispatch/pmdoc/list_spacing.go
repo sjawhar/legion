@@ -479,7 +479,9 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 	// Blank lines after an item that ends in a list are that list's. In a typed block inside the
 	// quote, one after an item that ends in a quote is that quote's, and more spread the list.
 	// A blank line of a quote around the list's own holds fewer markers, and the list's quote has
-	// ended at it.
+	// ended at it; where the typed block the list's quote stands in stands in a quote itself and
+	// goes on past such lines, to a block inside it or to its fence, they are the list's too, after
+	// one of its own (blanksThroughOuterQuotes).
 	depth := quoteDepth(list)
 	blank := quoteBlankLineAt(depth)
 	least := func(item ast.Node) int {
@@ -523,7 +525,7 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 		need := 2
 		if typed, ok := within.(*typedDirective); ok {
 			if typed.Closed {
-				blanks = lines.blanksBefore(typed.closer, blank)
+				blanks = lines.blanksThroughOuterQuotes(typed.closer, depth)
 			} else {
 				need = 3
 			}
@@ -535,6 +537,9 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 		return blanks >= need, ""
 	}
 	blanks := lines.blanksBefore(startOf(next), blank)
+	if inDirective {
+		blanks = lines.blanksThroughOuterQuotes(startOf(next), depth)
+	}
 	switch {
 	case blanks == 0:
 		return false, ""
@@ -894,6 +899,25 @@ func (l sourceLines) blanksEnding(next ast.Node, past, blank func([]byte) bool) 
 		count++
 	}
 	return count
+}
+
+// blanksThroughOuterQuotes is how many blank lines come right before position's line in depth
+// quotes: those blank in them, and the blank lines of the quotes around them, with fewer markers,
+// that follow at least one of those.
+func (l sourceLines) blanksThroughOuterQuotes(position, depth int) int {
+	line := l.lineOf(position) - 1
+	outer := 0
+	for ; line >= 0 && quoteBlankLine(l.text(line)) && bytes.Count(l.text(line), []byte(">")) < depth; line-- {
+		outer++
+	}
+	inner := 0
+	for blank := quoteBlankLineAt(depth); line >= 0 && blank(l.text(line)); line-- {
+		inner++
+	}
+	if inner == 0 {
+		return 0
+	}
+	return inner + outer
 }
 
 // blankInside reports whether a line between typed block directive's opening and closing fences

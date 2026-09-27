@@ -803,7 +803,9 @@ definition goes on with; in a quote a blank line after an item spreads the list,
 lines after its last item, one before a quote or a list (or anything, in a typed block inside the
 quote) and two before anything else, or at a typed block's fence, three at the quote's end where
 no fence closes the typed block, and one more of each after an item ending in a quote in the typed
-block (`quotedListSpread`, `blanksEndingQuotedList`); blank lines after an item that ends in a quote or a list are
+block (`quotedListSpread`, `blanksEndingQuotedList`), and where the list's quote stands in a typed
+block in a quote that goes on past them, the blank lines of the quotes around it after one of its
+own count among them (`blanksThroughOuterQuotes`); blank lines after an item that ends in a quote or a list are
 that block's, and in a quote those after a footnote definition an item holds are the definition's -
 one spreads the item only before a quote, a list or a definition, and two before anything
 (`definitionBlanksInQuote`), the same after an item ending in one, where the next item and the
