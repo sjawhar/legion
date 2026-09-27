@@ -25349,6 +25349,1021 @@
     "rendered_by_milkdown": "| Left  | Center | Right |\n| :---- | :----: | ----: |\n| **a** |   *b*  |   `c` |\n\n| Plain | Also plain |\n| ----- | ---------- |\n| 1     | 2          |\n"
   },
   {
+    "name": "tables-then-empty-items",
+    "markdown": "Empty list items opening in a container on the line after a table.\n\nNext.\n\n| a | b |\n| - | - |\n* -\n\nNext.\n\n> | a | b |\n> | - | :-: |\n> > - \t*\n\nNext.\n\n*     indented code\n  | a | b |\n  | --- | --- |\n  * -\n\nNext.\n\n1.     indented code\n   | a | b |\n   | - | :-: |\n   1. *\n\nNext.\n\n:::callout{#c1 kind=\"note\" title=\"\"}\n1.\t| a | b |\n    | - | :-: |\n    > -\t-\n:::\n\nNext.\n\n| a | b |\n| - | - |\n> 2. x\n\nNext.\n\npara\n> 2. x\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Empty list items opening in a container on the line after a table."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "table_header_row",
+              "attrs": {
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000006"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000007"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000008"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000009"
+              }
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000010"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000011"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000012"
+                  }
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000013"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000014"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000015"
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000016"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000017"
+          },
+          "content": [
+            {
+              "type": "table",
+              "attrs": {
+                "blockId": "b-000018"
+              },
+              "content": [
+                {
+                  "type": "table_header_row",
+                  "attrs": {
+                    "blockId": "b-000019"
+                  },
+                  "content": [
+                    {
+                      "type": "table_header",
+                      "attrs": {
+                        "colspan": 1,
+                        "rowspan": 1,
+                        "colwidth": null,
+                        "alignment": null,
+                        "blockId": "b-000020"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000021"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "table_header",
+                      "attrs": {
+                        "colspan": 1,
+                        "rowspan": 1,
+                        "colwidth": null,
+                        "alignment": "center",
+                        "blockId": "b-000022"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000023"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "b"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_row",
+                  "attrs": {
+                    "blockId": "b-000024"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000025"
+              },
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000026"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000027"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000028"
+                          }
+                        },
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000029"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000030"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000031"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000032"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000033"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000034"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000035"
+                  }
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000036"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "indented code"
+                    }
+                  ]
+                },
+                {
+                  "type": "table",
+                  "attrs": {
+                    "blockId": "b-000037"
+                  },
+                  "content": [
+                    {
+                      "type": "table_header_row",
+                      "attrs": {
+                        "blockId": "b-000038"
+                      },
+                      "content": [
+                        {
+                          "type": "table_header",
+                          "attrs": {
+                            "colspan": 1,
+                            "rowspan": 1,
+                            "colwidth": null,
+                            "alignment": null,
+                            "blockId": "b-000039"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000040"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "table_header",
+                          "attrs": {
+                            "colspan": 1,
+                            "rowspan": 1,
+                            "colwidth": null,
+                            "alignment": null,
+                            "blockId": "b-000041"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000042"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "table_row",
+                      "attrs": {
+                        "blockId": "b-000043"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000044"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000045"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000046"
+                          }
+                        },
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000047"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000048"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000049"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000050"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 1,
+            "spread": false,
+            "blockId": "b-000051"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000052"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000053"
+                  }
+                },
+                {
+                  "type": "code_block",
+                  "attrs": {
+                    "language": null,
+                    "blockId": "b-000054"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "indented code"
+                    }
+                  ]
+                },
+                {
+                  "type": "table",
+                  "attrs": {
+                    "blockId": "b-000055"
+                  },
+                  "content": [
+                    {
+                      "type": "table_header_row",
+                      "attrs": {
+                        "blockId": "b-000056"
+                      },
+                      "content": [
+                        {
+                          "type": "table_header",
+                          "attrs": {
+                            "colspan": 1,
+                            "rowspan": 1,
+                            "colwidth": null,
+                            "alignment": null,
+                            "blockId": "b-000057"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000058"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "a"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "table_header",
+                          "attrs": {
+                            "colspan": 1,
+                            "rowspan": 1,
+                            "colwidth": null,
+                            "alignment": "center",
+                            "blockId": "b-000059"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000060"
+                              },
+                              "content": [
+                                {
+                                  "type": "text",
+                                  "text": "b"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "table_row",
+                      "attrs": {
+                        "blockId": "b-000061"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "ordered_list",
+                  "attrs": {
+                    "order": 1,
+                    "spread": false,
+                    "blockId": "b-000062"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000063"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000064"
+                          }
+                        },
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000065"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000066"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000067"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000068"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "callout",
+          "attrs": {
+            "kind": "note",
+            "title": "",
+            "blockId": "c1"
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": false,
+                "blockId": "b-000069"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000070"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000071"
+                      }
+                    },
+                    {
+                      "type": "table",
+                      "attrs": {
+                        "blockId": "b-000072"
+                      },
+                      "content": [
+                        {
+                          "type": "table_header_row",
+                          "attrs": {
+                            "blockId": "b-000073"
+                          },
+                          "content": [
+                            {
+                              "type": "table_header",
+                              "attrs": {
+                                "colspan": 1,
+                                "rowspan": 1,
+                                "colwidth": null,
+                                "alignment": null,
+                                "blockId": "b-000074"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000075"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "a"
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "type": "table_header",
+                              "attrs": {
+                                "colspan": 1,
+                                "rowspan": 1,
+                                "colwidth": null,
+                                "alignment": "center",
+                                "blockId": "b-000076"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000077"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "b"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "type": "table_row",
+                          "attrs": {
+                            "blockId": "b-000078"
+                          }
+                        }
+                      ]
+                    },
+                    {
+                      "type": "blockquote",
+                      "attrs": {
+                        "blockId": "b-000079"
+                      },
+                      "content": [
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000080"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000081"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000082"
+                                  }
+                                },
+                                {
+                                  "type": "bullet_list",
+                                  "attrs": {
+                                    "spread": false,
+                                    "blockId": "b-000083"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "list_item",
+                                      "attrs": {
+                                        "label": "•",
+                                        "listType": "bullet",
+                                        "spread": false,
+                                        "checked": null,
+                                        "blockId": "b-000084"
+                                      },
+                                      "content": [
+                                        {
+                                          "type": "paragraph",
+                                          "attrs": {
+                                            "blockId": "b-000085"
+                                          }
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000086"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "blockId": "b-000087"
+          },
+          "content": [
+            {
+              "type": "table_header_row",
+              "attrs": {
+                "blockId": "b-000088"
+              },
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000089"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000090"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000091"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000092"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000093"
+              }
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000094"
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 2,
+                "spread": false,
+                "blockId": "b-000095"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000096"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000097"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "x"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000098"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000099"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "para"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000100"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000101"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "2. x"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AdcCAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBQkVtcHR5IGxpc3QgaXRlbXMgb3BlbmluZyBpbiBhIGNvbnRhaW5lciBvbiB0aGUgbGluZSBhZnRlciBhIHRhYmxlLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAFFBgQAAUYFTmV4dC4oAAFFB2Jsb2NrSWQBdwhiLTAwMDAwMocBRQMFdGFibGUHAAFNAxB0YWJsZV9oZWFkZXJfcm93BwABTgMMdGFibGVfaGVhZGVyBwABTwMJcGFyYWdyYXBoBwABUAYEAAFRAWEoAAFQB2Jsb2NrSWQBdwhiLTAwMDAwNigAAU8HY29sc3BhbgF9ASgAAU8Hcm93c3BhbgF9ASgAAU8HYmxvY2tJZAF3CGItMDAwMDA1hwFPAwx0YWJsZV9oZWFkZXIHAAFXAwlwYXJhZ3JhcGgHAAFYBgQAAVkBYigAAVgHYmxvY2tJZAF3CGItMDAwMDA4KAABVwdjb2xzcGFuAX0BKAABVwdyb3dzcGFuAX0BKAABVwdibG9ja0lkAXcIYi0wMDAwMDcoAAFOB2Jsb2NrSWQBdwhiLTAwMDAwNIcBTgMJdGFibGVfcm93KAABYAdibG9ja0lkAXcIYi0wMDAwMDkoAAFNB2Jsb2NrSWQBdwhiLTAwMDAwM4cBTQMLYnVsbGV0X2xpc3QHAAFjAwlsaXN0X2l0ZW0HAAFkAwlwYXJhZ3JhcGgoAAFlB2Jsb2NrSWQBdwhiLTAwMDAxMocBZQMLYnVsbGV0X2xpc3QHAAFnAwlsaXN0X2l0ZW0HAAFoAwlwYXJhZ3JhcGgoAAFpB2Jsb2NrSWQBdwhiLTAwMDAxNSgAAWgFbGFiZWwBdwPigKIoAAFoCGxpc3RUeXBlAXcGYnVsbGV0KAABaAZzcHJlYWQBeSgAAWgHYmxvY2tJZAF3CGItMDAwMDE0KAABZwZzcHJlYWQBeSgAAWcHYmxvY2tJZAF3CGItMDAwMDEzKAABZAVsYWJlbAF3A+KAoigAAWQIbGlzdFR5cGUBdwZidWxsZXQoAAFkBnNwcmVhZAF5KAABZAdibG9ja0lkAXcIYi0wMDAwMTEoAAFjBnNwcmVhZAF5KAABYwdibG9ja0lkAXcIYi0wMDAwMTCHAWMDCXBhcmFncmFwaAcAAXcGBAABeAVOZXh0LigAAXcHYmxvY2tJZAF3CGItMDAwMDE2hwF3AwpibG9ja3F1b3RlBwABfwMFdGFibGUHAAGAAQMQdGFibGVfaGVhZGVyX3JvdwcAAYEBAwx0YWJsZV9oZWFkZXIHAAGCAQMJcGFyYWdyYXBoBwABgwEGBAABhAEBYSgAAYMBB2Jsb2NrSWQBdwhiLTAwMDAyMSgAAYIBB2NvbHNwYW4BfQEoAAGCAQdyb3dzcGFuAX0BKAABggEHYmxvY2tJZAF3CGItMDAwMDIwhwGCAQMMdGFibGVfaGVhZGVyBwABigEDCXBhcmFncmFwaAcAAYsBBgQAAYwBAWIoAAGLAQdibG9ja0lkAXcIYi0wMDAwMjMoAAGKAQdjb2xzcGFuAX0BKAABigEHcm93c3BhbgF9ASgAAYoBCWFsaWdubWVudAF3BmNlbnRlcigAAYoBB2Jsb2NrSWQBdwhiLTAwMDAyMigAAYEBB2Jsb2NrSWQBdwhiLTAwMDAxOYcBgQEDCXRhYmxlX3JvdygAAZQBB2Jsb2NrSWQBdwhiLTAwMDAyNCgAAYABB2Jsb2NrSWQBdwhiLTAwMDAxOIcBgAEDCmJsb2NrcXVvdGUHAAGXAQMLYnVsbGV0X2xpc3QHAAGYAQMJbGlzdF9pdGVtBwABmQEDCXBhcmFncmFwaCgAAZoBB2Jsb2NrSWQBdwhiLTAwMDAyOIcBmgEDC2J1bGxldF9saXN0BwABnAEDCWxpc3RfaXRlbQcAAZ0BAwlwYXJhZ3JhcGgoAAGeAQdibG9ja0lkAXcIYi0wMDAwMzEoAAGdAQVsYWJlbAF3A+KAoigAAZ0BCGxpc3RUeXBlAXcGYnVsbGV0KAABnQEGc3ByZWFkAXkoAAGdAQdibG9ja0lkAXcIYi0wMDAwMzAoAAGcAQZzcHJlYWQBeSgAAZwBB2Jsb2NrSWQBdwhiLTAwMDAyOSgAAZkBBWxhYmVsAXcD4oCiKAABmQEIbGlzdFR5cGUBdwZidWxsZXQoAAGZAQZzcHJlYWQBeSgAAZkBB2Jsb2NrSWQBdwhiLTAwMDAyNygAAZgBBnNwcmVhZAF5KAABmAEHYmxvY2tJZAF3CGItMDAwMDI2KAABlwEHYmxvY2tJZAF3CGItMDAwMDI1KAABfwdibG9ja0lkAXcIYi0wMDAwMTeHAX8DCXBhcmFncmFwaAcAAa4BBgQAAa8BBU5leHQuKAABrgEHYmxvY2tJZAF3CGItMDAwMDMyhwGuAQMLYnVsbGV0X2xpc3QHAAG2AQMJbGlzdF9pdGVtBwABtwEDCXBhcmFncmFwaCgAAbgBB2Jsb2NrSWQBdwhiLTAwMDAzNYcBuAEDCmNvZGVfYmxvY2sHAAG6AQYEAAG7AQ1pbmRlbnRlZCBjb2RlKAABugEHYmxvY2tJZAF3CGItMDAwMDM2hwG6AQMFdGFibGUHAAHKAQMQdGFibGVfaGVhZGVyX3JvdwcAAcsBAwx0YWJsZV9oZWFkZXIHAAHMAQMJcGFyYWdyYXBoBwABzQEGBAABzgEBYSgAAc0BB2Jsb2NrSWQBdwhiLTAwMDA0MCgAAcwBB2NvbHNwYW4BfQEoAAHMAQdyb3dzcGFuAX0BKAABzAEHYmxvY2tJZAF3CGItMDAwMDM5hwHMAQMMdGFibGVfaGVhZGVyBwAB1AEDCXBhcmFncmFwaAcAAdUBBgQAAdYBAWIoAAHVAQdibG9ja0lkAXcIYi0wMDAwNDIoAAHUAQdjb2xzcGFuAX0BKAAB1AEHcm93c3BhbgF9ASgAAdQBB2Jsb2NrSWQBdwhiLTAwMDA0MSgAAcsBB2Jsb2NrSWQBdwhiLTAwMDAzOIcBywEDCXRhYmxlX3JvdygAAd0BB2Jsb2NrSWQBdwhiLTAwMDA0MygAAcoBB2Jsb2NrSWQBdwhiLTAwMDAzN4cBygEDC2J1bGxldF9saXN0BwAB4AEDCWxpc3RfaXRlbQcAAeEBAwlwYXJhZ3JhcGgoAAHiAQdibG9ja0lkAXcIYi0wMDAwNDaHAeIBAwtidWxsZXRfbGlzdAcAAeQBAwlsaXN0X2l0ZW0HAAHlAQMJcGFyYWdyYXBoKAAB5gEHYmxvY2tJZAF3CGItMDAwMDQ5KAAB5QEFbGFiZWwBdwPigKIoAAHlAQhsaXN0VHlwZQF3BmJ1bGxldCgAAeUBBnNwcmVhZAF5KAAB5QEHYmxvY2tJZAF3CGItMDAwMDQ4KAAB5AEGc3ByZWFkAXkoAAHkAQdibG9ja0lkAXcIYi0wMDAwNDcoAAHhAQVsYWJlbAF3A+KAoigAAeEBCGxpc3RUeXBlAXcGYnVsbGV0KAAB4QEGc3ByZWFkAXkoAAHhAQdibG9ja0lkAXcIYi0wMDAwNDUoAAHgAQZzcHJlYWQBeSgAAeABB2Jsb2NrSWQBdwhiLTAwMDA0NCgAAbcBBWxhYmVsAXcD4oCiKAABtwEIbGlzdFR5cGUBdwZidWxsZXQoAAG3AQZzcHJlYWQBeSgAAbcBB2Jsb2NrSWQBdwhiLTAwMDAzNCgAAbYBBnNwcmVhZAF5KAABtgEHYmxvY2tJZAF3CGItMDAwMDMzhwG2AQMJcGFyYWdyYXBoBwAB+gEGBAAB+wEFTmV4dC4oAAH6AQdibG9ja0lkAXcIYi0wMDAwNTCHAfoBAwxvcmRlcmVkX2xpc3QHAAGCAgMJbGlzdF9pdGVtBwABgwIDCXBhcmFncmFwaCgAAYQCB2Jsb2NrSWQBdwhiLTAwMDA1M4cBhAIDCmNvZGVfYmxvY2sHAAGGAgYEAAGHAg1pbmRlbnRlZCBjb2RlKAABhgIHYmxvY2tJZAF3CGItMDAwMDU0hwGGAgMFdGFibGUHAAGWAgMQdGFibGVfaGVhZGVyX3JvdwcAAZcCAwx0YWJsZV9oZWFkZXIHAAGYAgMJcGFyYWdyYXBoBwABmQIGBAABmgIBYSgAAZkCB2Jsb2NrSWQBdwhiLTAwMDA1OCgAAZgCB2NvbHNwYW4BfQEoAAGYAgdyb3dzcGFuAX0BKAABmAIHYmxvY2tJZAF3CGItMDAwMDU3hwGYAgMMdGFibGVfaGVhZGVyBwABoAIDCXBhcmFncmFwaAcAAaECBgQAAaICAWIoAAGhAgdibG9ja0lkAXcIYi0wMDAwNjAoAAGgAgdjb2xzcGFuAX0BKAABoAIHcm93c3BhbgF9ASgAAaACCWFsaWdubWVudAF3BmNlbnRlcigAAaACB2Jsb2NrSWQBdwhiLTAwMDA1OSgAAZcCB2Jsb2NrSWQBdwhiLTAwMDA1NocBlwIDCXRhYmxlX3JvdygAAaoCB2Jsb2NrSWQBdwhiLTAwMDA2MSgAAZYCB2Jsb2NrSWQBdwhiLTAwMDA1NYcBlgIDDG9yZGVyZWRfbGlzdAcAAa0CAwlsaXN0X2l0ZW0HAAGuAgMJcGFyYWdyYXBoKAABrwIHYmxvY2tJZAF3CGItMDAwMDY0hwGvAgMLYnVsbGV0X2xpc3QHAAGxAgMJbGlzdF9pdGVtBwABsgIDCXBhcmFncmFwaCgAAbMCB2Jsb2NrSWQBdwhiLTAwMDA2NygAAbICBWxhYmVsAXcD4oCiKAABsgIIbGlzdFR5cGUBdwZidWxsZXQoAAGyAgZzcHJlYWQBeSgAAbICB2Jsb2NrSWQBdwhiLTAwMDA2NigAAbECBnNwcmVhZAF5KAABsQIHYmxvY2tJZAF3CGItMDAwMDY1KAABrgIFbGFiZWwBdwPigKIoAAGuAghsaXN0VHlwZQF3BmJ1bGxldCgAAa4CBnNwcmVhZAF5KAABrgIHYmxvY2tJZAF3CGItMDAwMDYzKAABrQIFb3JkZXIBfQEoAAGtAgZzcHJlYWQBeSgAAa0CB2Jsb2NrSWQBdwhiLTAwMDA2MigAAYMCBWxhYmVsAXcD4oCiKAABgwIIbGlzdFR5cGUBdwZidWxsZXQoAAGDAgZzcHJlYWQBeSgAAYMCB2Jsb2NrSWQBdwhiLTAwMDA1MigAAYICBW9yZGVyAX0BKAABggIGc3ByZWFkAXkoAAGCAgdibG9ja0lkAXcIYi0wMDAwNTGHAYICAwlwYXJhZ3JhcGgHAAHJAgYEAAHKAgVOZXh0LigAAckCB2Jsb2NrSWQBdwhiLTAwMDA2OIcByQIDB2NhbGxvdXQHAAHRAgMMb3JkZXJlZF9saXN0BwAB0gIDCWxpc3RfaXRlbQcAAdMCAwlwYXJhZ3JhcGgoAAHUAgdibG9ja0lkAXcIYi0wMDAwNzGHAdQCAwV0YWJsZQcAAdYCAxB0YWJsZV9oZWFkZXJfcm93BwAB1wIDDHRhYmxlX2hlYWRlcgcAAdgCAwlwYXJhZ3JhcGgHAAHZAgYEAAHaAgFhKAAB2QIHYmxvY2tJZAF3CGItMDAwMDc1KAAB2AIHY29sc3BhbgF9ASgAAdgCB3Jvd3NwYW4BfQEoAAHYAgdibG9ja0lkAXcIYi0wMDAwNzSHAdgCAwx0YWJsZV9oZWFkZXIHAAHgAgMJcGFyYWdyYXBoBwAB4QIGBAAB4gIBYigAAeECB2Jsb2NrSWQBdwhiLTAwMDA3NygAAeACB2NvbHNwYW4BfQEoAAHgAgdyb3dzcGFuAX0BKAAB4AIJYWxpZ25tZW50AXcGY2VudGVyKAAB4AIHYmxvY2tJZAF3CGItMDAwMDc2KAAB1wIHYmxvY2tJZAF3CGItMDAwMDczhwHXAgMJdGFibGVfcm93KAAB6gIHYmxvY2tJZAF3CGItMDAwMDc4KAAB1gIHYmxvY2tJZAF3CGItMDAwMDcyhwHWAgMKYmxvY2txdW90ZQcAAe0CAwtidWxsZXRfbGlzdAcAAe4CAwlsaXN0X2l0ZW0HAAHvAgMJcGFyYWdyYXBoKAAB8AIHYmxvY2tJZAF3CGItMDAwMDgyhwHwAgMLYnVsbGV0X2xpc3QHAAHyAgMJbGlzdF9pdGVtBwAB8wIDCXBhcmFncmFwaCgAAfQCB2Jsb2NrSWQBdwhiLTAwMDA4NSgAAfMCBWxhYmVsAXcD4oCiKAAB8wIIbGlzdFR5cGUBdwZidWxsZXQoAAHzAgZzcHJlYWQBeSgAAfMCB2Jsb2NrSWQBdwhiLTAwMDA4NCgAAfICBnNwcmVhZAF5KAAB8gIHYmxvY2tJZAF3CGItMDAwMDgzKAAB7wIFbGFiZWwBdwPigKIoAAHvAghsaXN0VHlwZQF3BmJ1bGxldCgAAe8CBnNwcmVhZAF5KAAB7wIHYmxvY2tJZAF3CGItMDAwMDgxKAAB7gIGc3ByZWFkAXkoAAHuAgdibG9ja0lkAXcIYi0wMDAwODAoAAHtAgdibG9ja0lkAXcIYi0wMDAwNzkoAAHTAgVsYWJlbAF3A+KAoigAAdMCCGxpc3RUeXBlAXcGYnVsbGV0KAAB0wIGc3ByZWFkAXkoAAHTAgdibG9ja0lkAXcIYi0wMDAwNzAoAAHSAgVvcmRlcgF9ASgAAdICBnNwcmVhZAF5KAAB0gIHYmxvY2tJZAF3CGItMDAwMDY5KAAB0QIEa2luZAF3BG5vdGUoAAHRAgV0aXRsZQF3ACgAAdECB2Jsb2NrSWQBdwJjMYcB0QIDCXBhcmFncmFwaAcAAY0DBgQAAY4DBU5leHQuKAABjQMHYmxvY2tJZAF3CGItMDAwMDg2hwGNAwMFdGFibGUHAAGVAwMQdGFibGVfaGVhZGVyX3JvdwcAAZYDAwx0YWJsZV9oZWFkZXIHAAGXAwMJcGFyYWdyYXBoBwABmAMGBAABmQMBYSgAAZgDB2Jsb2NrSWQBdwhiLTAwMDA5MCgAAZcDB2NvbHNwYW4BfQEoAAGXAwdyb3dzcGFuAX0BKAABlwMHYmxvY2tJZAF3CGItMDAwMDg5hwGXAwMMdGFibGVfaGVhZGVyBwABnwMDCXBhcmFncmFwaAcAAaADBgQAAaEDAWIoAAGgAwdibG9ja0lkAXcIYi0wMDAwOTIoAAGfAwdjb2xzcGFuAX0BKAABnwMHcm93c3BhbgF9ASgAAZ8DB2Jsb2NrSWQBdwhiLTAwMDA5MSgAAZYDB2Jsb2NrSWQBdwhiLTAwMDA4OIcBlgMDCXRhYmxlX3JvdygAAagDB2Jsb2NrSWQBdwhiLTAwMDA5MygAAZUDB2Jsb2NrSWQBdwhiLTAwMDA4N4cBlQMDCmJsb2NrcXVvdGUHAAGrAwMMb3JkZXJlZF9saXN0BwABrAMDCWxpc3RfaXRlbQcAAa0DAwlwYXJhZ3JhcGgHAAGuAwYEAAGvAwF4KAABrgMHYmxvY2tJZAF3CGItMDAwMDk3KAABrQMFbGFiZWwBdwPigKIoAAGtAwhsaXN0VHlwZQF3BmJ1bGxldCgAAa0DBnNwcmVhZAF5KAABrQMHYmxvY2tJZAF3CGItMDAwMDk2KAABrAMFb3JkZXIBfQIoAAGsAwZzcHJlYWQBeSgAAawDB2Jsb2NrSWQBdwhiLTAwMDA5NSgAAasDB2Jsb2NrSWQBdwhiLTAwMDA5NIcBqwMDCXBhcmFncmFwaAcAAboDBgQAAbsDBU5leHQuKAABugMHYmxvY2tJZAF3CGItMDAwMDk4hwG6AwMJcGFyYWdyYXBoBwABwgMGBAABwwMEcGFyYSgAAcIDB2Jsb2NrSWQBdwhiLTAwMDA5OYcBwgMDCmJsb2NrcXVvdGUHAAHJAwMJcGFyYWdyYXBoBwABygMGBAABywMEMi4geCgAAcoDB2Jsb2NrSWQBdwhiLTAwMDEwMSgAAckDB2Jsb2NrSWQBdwhiLTAwMDEwMAA=",
+    "rendered_by_milkdown": "Empty list items opening in a container on the line after a table.\n\nNext.\n\n| a | b |\n| - | - |\n\n*\n  *\n\nNext.\n\n> | a |  b  |\n> | - | :-: |\n>\n> > *\n> >   *\n\nNext.\n\n*\n  ```\n  indented code\n  ```\n  | a | b |\n  | - | - |\n  *\n    *\n\nNext.\n\n1.\n   ```\n   indented code\n   ```\n   | a |  b  |\n   | - | :-: |\n   1.\n      *\n\nNext.\n\n:::callout{#c1 kind=\"note\" title}\n1.\n   | a |  b  |\n   | - | :-: |\n   > *\n   >   *\n:::\n\nNext.\n\n| a | b |\n| - | - |\n\n> 2. x\n\nNext.\n\npara\n\n> 2\\. x\n"
+  },
+  {
     "name": "task-markers",
     "markdown": "Task markers.\n\n- [x](https://u.test)b\n\nPara.\n\n- [x]b\n\nPara.\n\n- [X](u) b\n\nPara.\n\n- [x]\n\nPara.\n\n- [x]   \n\nPara.\n\n- [x] \tb\n\nPara.\n\n- [x]  b\n\nPara.\n\n- [x]\n  b\n\nPara.\n\n- [x]*b*\n\nPara.\n\n- [x]\\\n\nPara.\n\n- [ ] b\n\nPara.\n\n- [x] b\n\nPara.\n\n- [x]\tb\n\nPara.\n\n1. [x](u)\n\nPara.\n\n- [ ] \n  a\n\nPara.\n\n- [x] \n  a\n\nPara.\n\n- [ ]\t\n  a\n\nPara.\n\n- [ ]  \n  a\n",
     "pm_json": {

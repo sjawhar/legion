@@ -461,7 +461,8 @@ func columnOf(text []byte) int {
 // interruptsOpenBlock reports whether a list opening in parent on the line starting at start
 // interrupts a block the browser editor's parser holds open there, other than a paragraph parent
 // holds, which goldmark names: a paragraph ending on the line before, reached across the containers
-// the line opens first, or an indented code block with only blank lines after it. That parser
+// the line opens first, that forms no table, or an indented code block with only blank lines after
+// it. That parser
 // decides once per line whether it interrupts, from the construct it holds open, before opening the
 // containers the line starts with, and keeps indented code open to the line - except code right
 // after a list. That list stays open across the blank lines before the code and does not continue
@@ -477,7 +478,9 @@ func interruptsOpenBlock(parent ast.Node, source []byte, start int) bool {
 	}
 	switch previous := previous.(type) {
 	case *ast.Paragraph:
-		if !opensContainers || previous.Lines().Len() == 0 {
+		// A table goldmark makes of the paragraph is no paragraph to that parser, and holds
+		// nothing open a line could interrupt.
+		if !opensContainers || previous.Lines().Len() == 0 || formsTable(previous, source) {
 			return false
 		}
 		last := previous.Lines().At(previous.Lines().Len() - 1)

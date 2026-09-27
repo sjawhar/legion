@@ -151,7 +151,7 @@ type underlineAfterTable struct{ parser.BlockParser }
 func (p underlineAfterTable) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	line, _ := reader.PeekLine()
 	if paragraph, ok := pc.LastOpenedBlock().Node.(*ast.Paragraph); ok && paragraph.Parent() == parent &&
-		!bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && formsTable(paragraph, reader) {
+		!bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && formsTable(paragraph, reader.Source()) {
 		return nil, parser.NoChildren
 	}
 	return p.BlockParser.Open(parent, reader, pc)
@@ -159,12 +159,12 @@ func (p underlineAfterTable) Open(parent ast.Node, reader gmtext.Reader, pc pars
 
 // formsTable reports whether goldmark's table transformer reads a table in paragraph's lines,
 // trying it on a copy apart from the document.
-func formsTable(paragraph *ast.Paragraph, reader gmtext.Reader) bool {
+func formsTable(paragraph *ast.Paragraph, source []byte) bool {
 	trial := ast.NewParagraph()
-	trial.SetLines(tabExpandedLines(paragraph.Lines(), reader.Source()))
+	trial.SetLines(tabExpandedLines(paragraph.Lines(), source))
 	holder := ast.NewDocument()
 	holder.AppendChild(holder, trial)
-	tableTransformer.Transform(trial, reader, parser.NewContext())
+	tableTransformer.Transform(trial, gmtext.NewReader(source), parser.NewContext())
 	for child := holder.FirstChild(); child != nil; child = child.NextSibling() {
 		if _, ok := child.(*extensionast.Table); ok {
 			return true
