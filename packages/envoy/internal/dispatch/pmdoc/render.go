@@ -242,28 +242,7 @@ func (r *renderer) block(n *Node, prefix string) {
 	case "paragraph":
 		r.inline(n.Children, prefix)
 	case "heading":
-		level := int(num(n.Attrs["level"], 1))
-		if !holdsHardBreak(n.Children) {
-			r.writeSyntax(strings.Repeat("#", level) + " ")
-			r.headingInline(n.Children, prefix)
-			break
-		}
-		// An ATX heading is one line, so a heading holding a line break is written setext, its
-		// lines as a paragraph's and an underline after them, as the browser editor writes it.
-		// Only levels one and two have that form; past them the break is written as a space,
-		// as the browser editor also writes it.
-		switch level {
-		case 1, 2:
-			underline := "---"
-			if level == 1 {
-				underline = "==="
-			}
-			r.inline(n.Children, prefix)
-			r.writeSyntax("\n" + prefix + underline)
-		default:
-			r.writeSyntax(strings.Repeat("#", level) + " ")
-			r.headingInline(hardBreaksAsSpaces(n.Children), prefix)
-		}
+		r.heading(n, prefix)
 	case "blockquote":
 		r.writeSyntax("> ")
 		r.enter(n)
@@ -413,6 +392,31 @@ func holdsOnlyAnEmptyParagraph(n *Node) bool {
 // (closingColons). A renderer prefix is spaces and `> `, so its length is that column.
 func typedFence(n *Node, column int) int {
 	return max(3, closingColons(n, column)+1)
+}
+
+// heading writes heading n. An ATX heading is one line, so a heading holding a line break is
+// written setext, its lines as a paragraph's and an underline after them, as the browser editor
+// writes it. Only levels one and two have that form; past them the break is written as a space, as
+// the browser editor also writes it.
+func (r *renderer) heading(n *Node, prefix string) {
+	level := int(num(n.Attrs["level"], 1))
+	if !holdsHardBreak(n.Children) {
+		r.writeSyntax(strings.Repeat("#", level) + " ")
+		r.headingInline(n.Children, prefix)
+		return
+	}
+	switch level {
+	case 1, 2:
+		underline := "---"
+		if level == 1 {
+			underline = "==="
+		}
+		r.inline(n.Children, prefix)
+		r.writeSyntax("\n" + prefix + underline)
+	default:
+		r.writeSyntax(strings.Repeat("#", level) + " ")
+		r.headingInline(hardBreaksAsSpaces(n.Children), prefix)
+	}
 }
 
 func (r *renderer) list(n *Node, prefix string) {
