@@ -949,7 +949,7 @@ no_change_close() {
       or (.msg == "supervise: suspended" and .claim == $token))
     | {msg, issue, tree, status, reason, slots, cap}' "$evidence/logs/daemon.log" >"$evidence/nochange-journal.txt"
   for line in "design gate changes requested" "issue left the workflow" "tree lingers" "admission: slot released" "supervise: suspended"; do
-    grep -qF "\"$line" "$evidence/nochange-journal.txt" || fail "the journal has no \"$line\" line for $nochange_issue; see $evidence/nochange-journal.txt"
+    grep -qF "$line\"" "$evidence/nochange-journal.txt" || fail "the journal has no \"$line\" line for $nochange_issue; see $evidence/nochange-journal.txt"
   done
   grep -F '"workflow: issue left the workflow"' "$evidence/nochange-journal.txt" | grep -qF '"status":"done"' ||
     fail "the close line of $nochange_issue does not name done"
