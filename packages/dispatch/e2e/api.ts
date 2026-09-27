@@ -494,10 +494,10 @@ export function replyToCommentDelivery(
 /** The signed-in human's own per-agent conversation state, as another of their devices sets it. */
 export function putAgentState(
   sessionID: string,
-  input: { cleared_before: string },
+  input: { cleared_before?: string; read_through?: string },
   options: ApiOptions = {}
-): Promise<{ cleared_before: string }> {
-  return request<{ cleared_before: string }>(
+): Promise<{ cleared_before?: string; read_through?: string; unread_replies: number }> {
+  return request<{ cleared_before?: string; read_through?: string; unread_replies: number }>(
     `/api/v1/me/agents/${encodeURIComponent(sessionID)}/state`,
     "PUT",
     input,
