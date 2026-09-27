@@ -353,9 +353,10 @@ inherited (no directory listing per save); the one listing prune `index.ts` runs
 anything a crash left behind and seeds the steady-state set with its survivors, so an inherited
 file is reaped the moment its locator clears. Every further secret the daemon delivers travels the
 same way — one more 0600 file per pane, `<role token>-<lowercased name>` (`extraSecretName`), one
-more `<NAME>_FILE` pointer, tracked and pruned with the pane's others: today `ENVOY_TOKEN` →
-`<role token>-envoy_token` / `ENVOY_TOKEN_FILE` whenever `config.envoyToken` is set
-(`ProcessManager.sharedProcessSecrets`). A launch in flight holds its files exempt from
+more `<NAME>_FILE` pointer, tracked and pruned with the pane's others: `ENVOY_TOKEN` →
+`<role token>-envoy_token` / `ENVOY_TOKEN_FILE` whenever `config.envoyToken` is set, and
+`NATS_NKEY_SEED` → `<role token>-nats_nkey_seed` / `NATS_NKEY_SEED_FILE` whenever
+`config.natsNkeySeed` is set (`ProcessManager.sharedProcessSecrets`). A launch in flight holds its files exempt from
 pruning (`holdProcessSecret`, a refcount: two generations of one root can be launching at once) from
 before the write until its locator is in state. A boot token doubles as the pane's recovery token
 after a daemon restart, so its file lives exactly as long as the pane's locator. Consumers
@@ -482,7 +483,12 @@ plugin-minted UUID `requestId` to `spawn_worker` and `workerAdmission` to the st
 the operator-launched controller's external record on `/legion/v1/state`'s `controllerLocator`
 (`{runtime:"kubernetes", external:true, sessionId, registeredAt}`) and
 `POST /legion/v1/controller/secret`. Contract 7 removes merge intent from `/gh-token`; a
-contract-6 release is refused as `speaks daemon API contract 6; this daemon requires 7`.
+contract-6 release is refused as `speaks daemon API contract 6; this daemon requires 7`. Contract 9
+adds `NATS_NKEY_SEED_FILE` to the pane contract (LEGION-279): with `nats_nkey_seed_file` /
+`NATS_NKEY_SEED_FILE` / `NATS_NKEY_SEED` set, the daemon connects its own NATS as that
+`legion-pane` nkey user and `ProcessManager.sharedProcessSecrets` adds `NATS_NKEY_SEED`, which
+each runtime delivers exactly like `ENVOY_TOKEN` (tmux: a 0600 `<role token>-nats_nkey_seed` file;
+kubernetes: the providers mount's own `NATS_NKEY_SEED` file); unset changes nothing.
 `legion gh` refuses every merge-shaped command, while the repository's GitHub branch protection,
 CODEOWNERS requirements, and human merge enforce the merge fence.
 

@@ -47,7 +47,7 @@ import {
   WORKSPACE_LOST_EXIT_CODE,
   workspaceRecoveryPrompt,
 } from "./runtime";
-import { grantSecretName } from "./secrets";
+import { grantSecretName, isSharedSecretName } from "./secrets";
 import { workerBinDir } from "./worker-bin";
 import type { WorkerRpcClient } from "./worker-rpc";
 import type { WorkerStreamListener } from "./worker-stream-listener";
@@ -234,13 +234,13 @@ export class KubernetesRuntime implements Runtime {
     if (issue === undefined || tree === undefined || generation === undefined) {
       throw new Error(`spawn ${kind} requires spec.issue, spec.tree, and spec.generation`);
     }
-    // Every secret in the spec but the shared `ENVOY_TOKEN` goes into the per-pod Secret and is
-    // projected into the main container as `<NAME>_FILE` (`podSecrets`); the boot token is the one
-    // the shim itself reads (`--boot-token-file`), so it must be among them. `ENVOY_TOKEN` is the
-    // providers Secret's contract, like `DISPATCH_TOKEN`: every pod mounts that Secret, so its
-    // `ENVOY_TOKEN_FILE` is the mount's own file and the token is never copied per pod — the
-    // deployment (an in-cluster daemon reading `envoy_token_file` from that mount, or an
-    // out-of-cluster kubeconfig daemon whose operator put the same token in the providers Secret)
+    // Every secret in the spec but the shared ones (`ENVOY_TOKEN`, `NATS_NKEY_SEED`) goes into the
+    // per-pod Secret and is projected into the main container as `<NAME>_FILE` (`podSecrets`); the
+    // boot token is the one the shim itself reads (`--boot-token-file`), so it must be among them.
+    // A shared secret is the providers Secret's contract, like `DISPATCH_TOKEN`: every pod mounts
+    // that Secret, so its `<NAME>_FILE` is the mount's own file and the value is never copied per
+    // pod — the deployment (an in-cluster daemon reading its `*_file` key from that mount, or an
+    // out-of-cluster kubeconfig daemon whose operator put the same value in the providers Secret)
     // owns the one copy.
     const secretNames = Object.keys(spec.secrets);
     if (!secretNames.includes(BOOT_TOKEN_KEY)) {
@@ -866,12 +866,13 @@ export class KubernetesRuntime implements Runtime {
  *   main container's `workingDir`.
  * - `<NAME>_FILE` for every secret in the spec (`secretPointers`, from `podSecrets`):
  *   `LEGION_BOOT_TOKEN_FILE` always, the per-pod Secret's projection into `BOOT_DIR`;
- *   `ENVOY_TOKEN_FILE` when the daemon has an Envoy bearer — the providers mount's own file.
+ *   `ENVOY_TOKEN_FILE` when the daemon has an Envoy bearer and `NATS_NKEY_SEED_FILE` when it has
+ *   the `legion-pane` nkey seed — each the providers mount's own file.
  * Everything else passes through unchanged.
  */
 /** The per-pod Secret's keys (`projected`) and each secret's `<NAME>_FILE` value (`pointers`):
- * every spec secret is projected under `BOOT_DIR`, except `ENVOY_TOKEN`, which is the providers
- * mount's own file (see `spawn`). */
+ * every spec secret is projected under `BOOT_DIR`, except the shared ones (`SHARED_SECRET_NAMES`:
+ * `ENVOY_TOKEN`, `NATS_NKEY_SEED`), each the providers mount's own file (see `spawn`). */
 export function podSecrets(secrets: SpawnSpec["secrets"]): {
   projected: Record<string, string>;
   pointers: Record<string, string>;
@@ -879,8 +880,8 @@ export function podSecrets(secrets: SpawnSpec["secrets"]): {
   const projected: Record<string, string> = {};
   const pointers: Record<string, string> = {};
   for (const [name, value] of Object.entries(secrets)) {
-    if (name === "ENVOY_TOKEN") {
-      pointers.ENVOY_TOKEN_FILE = `${PROVIDERS_DIR}/ENVOY_TOKEN`;
+    if (isSharedSecretName(name)) {
+      pointers[`${name}_FILE`] = `${PROVIDERS_DIR}/${name}`;
       continue;
     }
     projected[name] = value;
