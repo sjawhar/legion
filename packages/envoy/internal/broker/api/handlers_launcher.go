@@ -1,17 +1,16 @@
-// packages/envoy/internal/broker/api/handlers_launcher.go
-//
 // POST /v1/launcher-credentials and GET /v1/launcher-credentials/{pending} are authNone per the
 // routes table: a launcher has no credential yet when it asks for one. Both go straight to
-// launcher.Service, which opens (or reuses) a Dispatch ask on the operator's standing
-// "agent-secrets" issue and hands the raw token back exactly once, on whichever read first
-// observes state "issued" (launcher.Service.Read).
+// launcher.Service, which opens a Dispatch ask on the operator's standing "agent-secrets" issue
+// and hands the raw token back exactly once, on whichever read first observes state "issued"
+// (launcher.Service.Read). Because anyone can call the POST, it is rate limited per source address
+// and per operator, and its ask carries a confirmation code the requesting terminal alone prints.
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
+	"github.com/sjawhar/envoy/internal/broker/dispatch"
 	"github.com/sjawhar/envoy/internal/broker/launcher"
 )
 
@@ -21,22 +20,29 @@ type requestLauncherCredentialBody struct {
 	Service  *string `json:"service"`
 }
 
+type requestLauncherCredentialResponse struct {
+	PendingID        string `json:"pending_id"`
+	ConfirmationCode string `json:"confirmation_code"`
+}
+
 func (s *server) requestLauncherCredential(w http.ResponseWriter, r *http.Request) {
 	var body requestLauncherCredentialBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "body must be valid JSON")
+	if !readJSON(w, r, &body, "INVALID_REQUEST") {
 		return
 	}
 	if body.Operator == "" || body.Host == "" {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "operator and host are required")
 		return
 	}
-	pendingID, err := s.deps.Launcher.Request(r.Context(), body.Operator, body.Host, body.Service)
+	if s.launcherLimiter.refuse(w, r, dispatch.CanonicalLogin(body.Operator)) {
+		return
+	}
+	pending, err := s.deps.Launcher.Request(r.Context(), body.Operator, body.Host, body.Service)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "open launcher credential request failed")
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"pending_id": pendingID})
+	writeJSON(w, http.StatusAccepted, requestLauncherCredentialResponse{PendingID: pending.ID, ConfirmationCode: pending.ConfirmationCode})
 }
 
 // readLauncherCredentialResponse omits token entirely, rather than sending it as JSON null, once

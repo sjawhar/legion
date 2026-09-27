@@ -3,7 +3,7 @@ package launcher
 import (
 	"context"
 	"fmt"
-	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -11,16 +11,8 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/dispatch"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
-	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
-
-func testDatabaseURL(t *testing.T) string {
-	url := os.Getenv("BROKER_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("BROKER_TEST_DATABASE_URL must be set to run Postgres launcher tests")
-	}
-	return url
-}
 
 // createCall records one CreateAsk invocation for a test to assert against.
 type createCall struct {
@@ -32,10 +24,9 @@ type createCall struct {
 // fakeDispatch is launcher.Service's dispatchClient: it opens and answers asks entirely
 // in-memory (askID -> *dispatch.Ask, mutated by answer between Request and Reconcile) and keeps a
 // project's issues in a slice, following the same fake-over-httptest-server precedent as
-// requests.fakeOpener and requests.fakeAskReader. mu guards every field: TestStanding
-// SerializesConcurrentCreateForNewOperator drives Standing from multiple goroutines to prove
-// Postgres's own advisory lock — not this fake — is what serializes the find-or-create race, and
-// listIssuesDelay widens that race window so the test would fail without the lock.
+// requests.fakeOpener and requests.fakeAskReader. mu guards every field. listIssuesDelay widens
+// the find-or-create race window; listGate, when set, holds every ListIssues call until it is
+// closed, announcing each call on listEntered first.
 type fakeDispatch struct {
 	mu              sync.Mutex
 	nextAsk         int
@@ -45,6 +36,8 @@ type fakeDispatch struct {
 	issues          []dispatch.IssueSummary
 	createIssueN    int
 	listIssuesDelay time.Duration
+	listGate        chan struct{}
+	listEntered     chan struct{}
 }
 
 func (f *fakeDispatch) CreateAsk(_ context.Context, issue, question string, options []dispatch.Option, urgency string) (dispatch.Ask, error) {
@@ -74,10 +67,14 @@ func (f *fakeDispatch) GetAsk(_ context.Context, id string) (dispatch.Ask, error
 
 func (f *fakeDispatch) ListIssues(_ context.Context, _, _ string) ([]dispatch.IssueSummary, error) {
 	f.mu.Lock()
-	delay := f.listIssuesDelay
+	delay, gate, entered := f.listIssuesDelay, f.listGate, f.listEntered
 	out := make([]dispatch.IssueSummary, len(f.issues))
 	copy(out, f.issues)
 	f.mu.Unlock()
+	if gate != nil {
+		entered <- struct{}{}
+		<-gate
+	}
 	if delay > 0 {
 		time.Sleep(delay)
 	}
@@ -108,20 +105,12 @@ func (f *fakeDispatch) answer(askID, user string, selected ...string) {
 	a.Answer = &dispatch.Answer{User: user, Selected: selected, At: time.Now()}
 }
 
-// newTestService opens a migrated store and returns a Service wired to a fresh fakeDispatch and a
-// real enroll.Service against the same store, so AuthenticateLauncher exercises the genuine
-// credential Reconcile minted rather than a stub.
-func newTestService(t *testing.T) (*Service, *fakeDispatch) {
+// newTestService opens a store on a fresh schema (params are extra connection parameters) and
+// returns a Service wired to a fresh fakeDispatch and a real enroll.Service against the same
+// store, so AuthenticateLauncher exercises the genuine credential Reconcile minted.
+func newTestService(t *testing.T, params ...string) (*Service, *fakeDispatch) {
 	t.Helper()
-	ctx := context.Background()
-	st, err := store.Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { st.Pool.Close() })
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	st := storetest.Open(t, params...)
 	fake := &fakeDispatch{}
 	svc := &Service{
 		Store:    st,
@@ -131,6 +120,8 @@ func newTestService(t *testing.T) (*Service, *fakeDispatch) {
 	}
 	return svc, fake
 }
+
+var confirmationCodeShape = regexp.MustCompile(`^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$`)
 
 // TestLauncherRequestApprovalAndDenial pins Task 12's Step 1 scenario end to end: Request opens
 // one ask on the operator's standing issue naming the host; Read reports pending; once the fake
@@ -142,7 +133,7 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 	ctx := context.Background()
 	svc, fake := newTestService(t)
 
-	pendingID, err := svc.Request(ctx, "sjawhar", "sami-agents", nil)
+	pending, err := svc.Request(ctx, "sjawhar", "sami-agents", nil)
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
@@ -153,6 +144,9 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 	if !strings.Contains(call.question, "sami-agents") {
 		t.Fatalf("question = %q, want it to name the host", call.question)
 	}
+	if !confirmationCodeShape.MatchString(pending.ConfirmationCode) || !strings.Contains(call.question, pending.ConfirmationCode) {
+		t.Fatalf("confirmation code %q, question %q: want an XXXX-XXXX code the question names", pending.ConfirmationCode, call.question)
+	}
 	if len(fake.issues) != 1 || fake.issues[0].Title != "Secret requests: sjawhar" {
 		t.Fatalf("standing issue = %+v, want one titled %q", fake.issues, "Secret requests: sjawhar")
 	}
@@ -160,7 +154,7 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 		t.Fatalf("ask opened on issue %q, want the standing issue %q", call.issue, fake.issues[0].Key)
 	}
 
-	state, token, err := svc.Read(ctx, pendingID)
+	state, token, err := svc.Read(ctx, pending.ID)
 	if err != nil || state != "pending" || token != "" {
 		t.Fatalf("Read (pending) = state=%q token_present=%v err=%v, want pending/empty/nil", state, token != "", err)
 	}
@@ -170,13 +164,13 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 		t.Fatalf("Reconcile: %v", err)
 	}
 
-	state, token, err = svc.Read(ctx, pendingID)
+	state, token, err = svc.Read(ctx, pending.ID)
 	if err != nil || state != "issued" || token == "" {
 		t.Fatalf("Read (issued, first) = state=%q token_present=%v err=%v, want issued with a token", state, token != "", err)
 	}
 	firstToken := token
 
-	state, token, err = svc.Read(ctx, pendingID)
+	state, token, err = svc.Read(ctx, pending.ID)
 	if err != nil || state != "issued" || token != "" {
 		t.Fatalf("Read (issued, second) = state=%q token_present=%v err=%v, want issued with no token", state, token != "", err)
 	}
@@ -191,7 +185,7 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 
 	// A second, independent request on the same standing issue, answered by someone other than
 	// the operator, must be denied rather than issued.
-	pendingID2, err := svc.Request(ctx, "sjawhar", "another-host", nil)
+	pending2, err := svc.Request(ctx, "sjawhar", "another-host", nil)
 	if err != nil {
 		t.Fatalf("Request (2nd): %v", err)
 	}
@@ -200,9 +194,58 @@ func TestLauncherRequestApprovalAndDenial(t *testing.T) {
 	if err := svc.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile (2nd): %v", err)
 	}
-	state, token, err = svc.Read(ctx, pendingID2)
+	state, token, err = svc.Read(ctx, pending2.ID)
 	if err != nil || state != "denied" || token != "" {
 		t.Fatalf("Read (2nd, denied) = state=%q token_present=%v err=%v, want denied/empty", state, token != "", err)
+	}
+}
+
+// TestRequestFloodHoldsNoPooledConnectionAcrossDispatch pins that no Postgres connection is held
+// while Request waits on Dispatch. Eight requests for eight operators, against a two-connection
+// pool, all reach Dispatch's ListIssues and park there; while they wait, nothing is checked out
+// of the pool and a ping still gets a connection at once. Holding a connection (or the
+// transaction an advisory lock needs) across the call stops the third request at the pool and
+// starves every other caller.
+func TestRequestFloodHoldsNoPooledConnectionAcrossDispatch(t *testing.T) {
+	ctx := context.Background()
+	svc, fake := newTestService(t, "pool_max_conns=2")
+	const n = 8
+	fake.listGate = make(chan struct{})
+	fake.listEntered = make(chan struct{}, n)
+	errs := make(chan error, n)
+	for i := range n {
+		go func() {
+			_, err := svc.Request(ctx, fmt.Sprintf("flood-operator-%d", i), "flood-host", nil)
+			errs <- err
+		}()
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(fake.listGate)
+		}
+	}()
+	for i := range n {
+		select {
+		case <-fake.listEntered:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of %d requests reached Dispatch; the rest are stuck waiting for a pooled connection", i, n)
+		}
+	}
+	if acquired := svc.Store.Pool.Stat().AcquiredConns(); acquired != 0 {
+		t.Fatalf("%d pooled connections checked out while every request waits on Dispatch, want 0", acquired)
+	}
+	pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := svc.Store.Pool.Ping(pingCtx); err != nil {
+		t.Fatalf("the pool refused a ping while requests wait on Dispatch: %v", err)
+	}
+	close(fake.listGate)
+	released = true
+	for range n {
+		if err := <-errs; err != nil {
+			t.Fatalf("Request: %v", err)
+		}
 	}
 }
 
@@ -214,7 +257,7 @@ func TestLauncherRequestServiceCredentialHasNilOperator(t *testing.T) {
 	ctx := context.Background()
 	svc, fake := newTestService(t)
 
-	pendingID, err := svc.Request(ctx, "sjawhar", "cluster", new("legion-daemon"))
+	pending, err := svc.Request(ctx, "sjawhar", "cluster", new("legion-daemon"))
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
@@ -230,7 +273,7 @@ func TestLauncherRequestServiceCredentialHasNilOperator(t *testing.T) {
 	if err := svc.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	_, token, err := svc.Read(ctx, pendingID)
+	_, token, err := svc.Read(ctx, pending.ID)
 	if err != nil || token == "" {
 		t.Fatalf("Read (issued): token_present=%v err=%v", token != "", err)
 	}
@@ -284,11 +327,11 @@ func TestLauncherRequestExpiresAfterTTL(t *testing.T) {
 	ctx := context.Background()
 	svc, fake := newTestService(t)
 
-	pendingID, err := svc.Request(ctx, "sjawhar", "stale-host", nil)
+	pending, err := svc.Request(ctx, "sjawhar", "stale-host", nil)
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
-	if _, err := svc.Store.Pool.Exec(ctx, `update launcher_credential_requests set expires_at = now() - interval '1 minute' where pending_id_hash=$1`, hashPendingID(pendingID)); err != nil {
+	if _, err := svc.Store.Pool.Exec(ctx, `update launcher_credential_requests set expires_at = now() - interval '1 minute' where pending_id_hash=$1`, hashPendingID(pending.ID)); err != nil {
 		t.Fatalf("backdate expires_at: %v", err)
 	}
 
@@ -298,7 +341,7 @@ func TestLauncherRequestExpiresAfterTTL(t *testing.T) {
 	if len(fake.getAskCalls) != 0 {
 		t.Fatalf("GetAsk calls = %v, want none for an already-expired row", fake.getAskCalls)
 	}
-	state, token, err := svc.Read(ctx, pendingID)
+	state, token, err := svc.Read(ctx, pending.ID)
 	if err != nil || state != "expired" || token != "" {
 		t.Fatalf("Read (expired) = state=%q token_present=%v err=%v, want expired/empty", state, token != "", err)
 	}
@@ -319,7 +362,7 @@ func TestReconcileLeavesRequestPendingOnUnrecognizedAskState(t *testing.T) {
 	ctx := context.Background()
 	svc, fake := newTestService(t)
 
-	pendingID, err := svc.Request(ctx, "sjawhar", "odd-state-host", nil)
+	pending, err := svc.Request(ctx, "sjawhar", "odd-state-host", nil)
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
@@ -328,18 +371,18 @@ func TestReconcileLeavesRequestPendingOnUnrecognizedAskState(t *testing.T) {
 	if err := svc.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	state, token, err := svc.Read(ctx, pendingID)
+	state, token, err := svc.Read(ctx, pending.ID)
 	if err != nil || state != "pending" || token != "" {
 		t.Fatalf("Read = state=%q token_present=%v err=%v, want still pending", state, token != "", err)
 	}
 }
 
-// TestStandingSerializesConcurrentCreateForNewOperator pins the fix for the find-or-create race:
-// Dispatch's own issue creation has no unique constraint on (project, title, label), so two
-// concurrent Standing calls for the same never-before-seen operator could otherwise each observe
-// zero matching issues and each create one. listIssuesDelay widens the window between ListIssues
-// and CreateIssue so this test would reliably fail (two created issues) if Standing's advisory
-// lock were removed; with it, exactly one goroutine creates the issue and the other reuses it.
+// TestStandingSerializesConcurrentCreateForNewOperator pins the find-or-create race: Dispatch's
+// own issue creation has no unique constraint on (project, title, label), so two concurrent
+// Standing calls for the same never-before-seen operator could otherwise each observe zero
+// matching issues and each create one. listIssuesDelay widens the window between ListIssues and
+// CreateIssue so this test would reliably fail (several created issues) if concurrent callers for
+// one operator did not share one lookup; with sharing, exactly one issue is created.
 func TestStandingSerializesConcurrentCreateForNewOperator(t *testing.T) {
 	ctx := context.Background()
 	svc, fake := newTestService(t)
@@ -384,12 +427,13 @@ func TestLauncherRequestEmptyServiceStringNormalizedToOperatorCredential(t *test
 	svc, fake := newTestService(t)
 
 	emptyService := new(string)
-	pendingID, err := svc.Request(ctx, "sjawhar", "empty-service-host", emptyService)
+	pending, err := svc.Request(ctx, "sjawhar", "empty-service-host", emptyService)
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
 	call := fake.createCalls[0]
-	wantQuestion := "Issue a launcher credential for host empty-service-host?"
+	wantQuestion := "Issue a launcher credential for host empty-service-host? Approve only if you started this login yourself and your terminal shows confirmation code " +
+		pending.ConfirmationCode + ": anyone can open a request that reads like this one."
 	if call.question != wantQuestion {
 		t.Fatalf("question = %q, want %q (empty service must read exactly like no service)", call.question, wantQuestion)
 	}
@@ -398,7 +442,7 @@ func TestLauncherRequestEmptyServiceStringNormalizedToOperatorCredential(t *test
 	if err := svc.Reconcile(ctx); err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	_, token, err := svc.Read(ctx, pendingID)
+	_, token, err := svc.Read(ctx, pending.ID)
 	if err != nil || token == "" {
 		t.Fatalf("Read (issued): token_present=%v err=%v", token != "", err)
 	}

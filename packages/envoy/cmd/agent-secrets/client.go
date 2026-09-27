@@ -306,23 +306,25 @@ type requestLauncherCredentialBody struct {
 	Service  *string `json:"service,omitempty"`
 }
 
-// RequestLauncherCredential opens a launcher-credential request and returns its pending id.
-func (c *client) RequestLauncherCredential(ctx context.Context, operator, host string, service *string) (string, error) {
+// RequestLauncherCredential opens a launcher-credential request and returns its pending id and
+// the confirmation code its Dispatch ask shows.
+func (c *client) RequestLauncherCredential(ctx context.Context, operator, host string, service *string) (pendingID, code string, err error) {
 	body, err := json.Marshal(requestLauncherCredentialBody{Operator: operator, Host: host, Service: service})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	raw, err := c.doBearer(ctx, "", http.MethodPost, "/v1/launcher-credentials", body)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	var result struct {
-		PendingID string `json:"pending_id"`
+		PendingID        string `json:"pending_id"`
+		ConfirmationCode string `json:"confirmation_code"`
 	}
 	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", fmt.Errorf("decode launcher credential request response: %w", err)
+		return "", "", fmt.Errorf("decode launcher credential request response: %w", err)
 	}
-	return result.PendingID, nil
+	return result.PendingID, result.ConfirmationCode, nil
 }
 
 // ReadLauncherCredential polls a pending launcher-credential request. token is non-empty exactly

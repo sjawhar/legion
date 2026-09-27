@@ -4,41 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 const testAudience = "broker"
 
-func testDatabaseURL(t *testing.T) string {
-	url := os.Getenv("BROKER_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("BROKER_TEST_DATABASE_URL must be set to run Postgres enroll tests")
-	}
-	return url
-}
-
-// newService opens a migrated store and returns a Service with no pod verifier configured. Tests
-// that need a pod verifier call withPodVerifier instead.
-func newService(t *testing.T) *Service {
+// newService opens a store on a fresh schema (params are extra connection parameters) and returns
+// a Service with no pod verifier configured. Tests that need a pod verifier call withPodVerifier.
+func newService(t *testing.T, params ...string) *Service {
 	t.Helper()
-	ctx := context.Background()
-	s, err := store.Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { s.Pool.Close() })
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	return &Service{Store: s, Lease: time.Hour}
+	return &Service{Store: storetest.Open(t, params...), Lease: time.Hour}
 }
 
 // withPodVerifier wires svc to a real K8sPodVerifier backed by a fresh local OIDC issuer, and
@@ -236,6 +218,38 @@ func TestCreateIsIdempotentAndRefusesConflictingThumbprint(t *testing.T) {
 	})
 	if !errors.Is(err, ErrAlreadyEnrolled) {
 		t.Fatalf("Create(retry, different thumbprint) = %v, want ErrAlreadyEnrolled", err)
+	}
+}
+
+// TestIdempotentRetryNeedsOnlyOneConnection pins that the conflict-recovery path of Create never
+// holds one pooled connection while asking for a second. On a one-connection pool, a retried
+// enrollment must come back as Existing; holding the aborted insert's connection while the
+// recovery lookup waits for another deadlocks, and enough concurrent retries deadlock any pool.
+func TestIdempotentRetryNeedsOnlyOneConnection(t *testing.T) {
+	svc := newService(t, "pool_max_conns=1")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, token, err := svc.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-one-conn")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	in := Enrollment{Kind: "box", RuntimeID: "box-one-conn", Operator: str("sjawhar"), ApproverKind: "operator", Thumbprint: "tp-one-conn"}
+	first, err := svc.Create(ctx, cred, in)
+	if err != nil {
+		t.Fatalf("Create(first): %v", err)
+	}
+	retryCtx, retryCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer retryCancel()
+	again, err := svc.Create(retryCtx, cred, in)
+	if err != nil {
+		t.Fatalf("Create(retry) on a one-connection pool: %v", err)
+	}
+	if !again.Existing || again.ID != first.ID {
+		t.Fatalf("Create(retry) = %+v, want Existing with ID %s", again, first.ID)
 	}
 }
 

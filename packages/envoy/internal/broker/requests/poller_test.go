@@ -3,7 +3,6 @@ package requests
 import (
 	"context"
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
@@ -25,62 +24,6 @@ func (f *fakeAskReader) GetAsk(_ context.Context, id string) (dispatch.Ask, erro
 	return ask, nil
 }
 
-// knownFixtureEnrollments accumulates, for the lifetime of this test binary process, every
-// enrollment id this package's own test fixtures have created (registerFixtureEnrollment is
-// called from newFixture and from TestPodRequestIssueComesFromEnrollment's own extra pod
-// enrollments). It is what clearStalePendingRequests scopes its sweep to.
-var (
-	knownFixtureEnrollmentsMu sync.Mutex
-	knownFixtureEnrollments   []string
-)
-
-// registerFixtureEnrollment records enrollment ids this process's own test fixtures minted, so
-// clearStalePendingRequests can later recognize them as "this process's own, possibly stale"
-// rather than "some other test's, or some other package's, currently in-flight" pending rows.
-func registerFixtureEnrollment(ids ...string) {
-	knownFixtureEnrollmentsMu.Lock()
-	defer knownFixtureEnrollmentsMu.Unlock()
-	knownFixtureEnrollments = append(knownFixtureEnrollments, ids...)
-}
-
-// clearStalePendingRequests deletes pending rows (and their children) left behind by an earlier
-// or interrupted run of a test against the shared BROKER_TEST_DATABASE_URL database -- the
-// requests package has no per-test database isolation, and RunOnce's own query is deliberately
-// unscoped ("every pending row"), so a poller test must start from a clean slate. Two disjoint
-// sources of stale rows exist, and this sweep clears both:
-//
-//  1. This package's own sibling tests (in machine_test.go) deliberately leave a request pending
-//     as their own final assertion and never resolve it. registerFixtureEnrollment records every
-//     enrollment id this test binary process's own fixtures have minted, so by the time any
-//     poller test runs, that accumulator already names every earlier sibling test's own
-//     enrollments in this same process -- scoping the sweep to it, rather than to just the
-//     calling test's own two enrollments, is what actually catches those siblings' leftovers.
-//  2. Other packages' own test doubles (api_test.go's fakeOpener, launcher_test.go's fakeOpener)
-//     mint asks under the exact same "ask-<N>" convention this package's own fakeOpener uses, and
-//     when their process is running concurrently with this one (the normal case under `go test
-//     ./...`, which runs different packages' test binaries in parallel) their own pending rows
-//     land in the same shared table under enrollment ids this process never registered. No real
-//     Dispatch ask id is ever shaped like "ask-3" -- that pattern appears nowhere but in this
-//     codebase's own test doubles -- so matching on it, regardless of enrollment_id, safely
-//     identifies "some test double's fixture row" without ever risking a real production row or
-//     a concurrently running suite that (like internal/broker/e2e) mints unique ask ids instead.
-func clearStalePendingRequests(t *testing.T, m *Machine) {
-	t.Helper()
-	ctx := context.Background()
-	knownFixtureEnrollmentsMu.Lock()
-	ids := append([]string(nil), knownFixtureEnrollments...)
-	knownFixtureEnrollmentsMu.Unlock()
-	for _, stmt := range []string{
-		`delete from request_secrets where request_id in (select id from requests where state='pending' and (enrollment_id = any($1) or ask_id ~ '^ask-[0-9]+$'))`,
-		`delete from grants where request_id in (select id from requests where state='pending' and (enrollment_id = any($1) or ask_id ~ '^ask-[0-9]+$'))`,
-		`delete from requests where state='pending' and (enrollment_id = any($1) or ask_id ~ '^ask-[0-9]+$')`,
-	} {
-		if _, err := m.Store.Pool.Exec(ctx, stmt, ids); err != nil {
-			t.Fatalf("clearStalePendingRequests: %v", err)
-		}
-	}
-}
-
 // wakeCall records one Poller.Wake invocation for a test to assert against.
 type wakeCall struct{ enrollmentID, requestID, state string }
 
@@ -98,7 +41,6 @@ func recordingWake(calls *[]wakeCall) func(context.Context, string, string, stri
 // wakes exactly once with "denied" -- the already-decided first request is never touched again.
 func TestPollerRunOnceGrantsAndDeniesAcrossPolls(t *testing.T) {
 	m, _, _, enrA, enrB := newFixture(t)
-	clearStalePendingRequests(t, m)
 	ctx := context.Background()
 
 	reqA, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
@@ -160,7 +102,6 @@ func TestPollerRunOnceGrantsAndDeniesAcrossPolls(t *testing.T) {
 // Dispatch (the fake has no registered ask, so a stray GetAsk call fails the test), and never wakes.
 func TestPollerRunOnceExpiresPending(t *testing.T) {
 	m, _, _, enrA, _ := newFixture(t)
-	clearStalePendingRequests(t, m)
 	ctx := context.Background()
 
 	req, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
@@ -198,7 +139,6 @@ func TestPollerRunOnceExpiresPending(t *testing.T) {
 // in-memory state.
 func TestPollerRunOnceOnFreshMachineReadsPendingFromStore(t *testing.T) {
 	m, _, _, enrA, _ := newFixture(t)
-	clearStalePendingRequests(t, m)
 	ctx := context.Background()
 
 	req, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")

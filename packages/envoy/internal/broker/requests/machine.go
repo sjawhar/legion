@@ -8,8 +8,11 @@ package requests
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,6 +28,7 @@ import (
 
 var (
 	ErrNotYours       = errors.New("this request or grant belongs to another session")
+	ErrNotApprover    = errors.New("only the grant's approver or its enrollment's operator may revoke it")
 	ErrTerminal       = errors.New("request is already decided")
 	ErrGrantNotLive   = errors.New("grant is expired, revoked, or its session ended")
 	ErrMixedApprovers = errors.New("the requested secrets need different approvers; request them separately")
@@ -143,61 +147,189 @@ func (m *Machine) Create(ctx context.Context, enrollmentID string, names []strin
 	if state != "denied" && needsApproval {
 		state = "pending"
 	}
-	if existing, ok, err := m.coalesce(ctx, enrollmentID, names); err != nil {
-		return Request{}, err
-	} else if ok && state == "pending" {
-		existing.Coalesced = true
-		return existing, nil
+	r := newRequest{
+		id: uuid.NewString(), enrollmentID: enrollmentID, issueKey: issueKey, reason: reason, state: state,
+		approver: approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: lifetime, decisions: decisions,
 	}
-	req := Request{ID: uuid.NewString(), State: state, IssueKey: issueKey, Secrets: decisions}
+	if state == "pending" {
+		return m.createPending(ctx, enr, r)
+	}
+	req := Request{ID: r.id, State: state, IssueKey: issueKey, Secrets: decisions}
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return Request{}, err
 	}
 	defer tx.Rollback(ctx)
-	var pendingExpires *time.Time
-	if state == "pending" {
-		t := time.Now().Add(m.PendingTTL)
-		pendingExpires = &t
-	}
-	_, err = tx.Exec(ctx, `insert into requests (id, enrollment_id, issue_key, reason, state, allowed_approver, rules_version, lifetime_seconds, pending_expires_at, session_id, decided_at, decision_detail)
-		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, case when $5 in ('granted','denied') then now() end, case when $5='denied' then 'policy denies at least one requested secret' end)`,
-		req.ID, enrollmentID, issueKey, reason, state, nullable(approver), set.Version, int(lifetime.Seconds()), pendingExpires, nullable(sessionID))
-	if err != nil {
+	if err := m.insertRequest(ctx, tx, r); err != nil {
 		return Request{}, err
 	}
-	for _, d := range decisions {
-		if _, err := tx.Exec(ctx, `insert into request_secrets (request_id, name, decision, delivery, source) values ($1,$2,$3,$4,$5)`, req.ID, d.Name, d.Decision, d.Delivery, d.Source); err != nil {
-			return Request{}, err
-		}
-	}
 	if state == "granted" {
-		grantID, err := insertGrant(ctx, tx, req.ID, enrollmentID, "", lifetime)
+		grantID, err := insertGrant(ctx, tx, r.id, enrollmentID, "", lifetime)
 		if err != nil {
 			return Request{}, err
 		}
 		req.GrantID = &grantID
 	}
-	if state == "pending" {
-		question := question(enr, decisions, reason, lifetime)
-		ask, err := m.Dispatch.CreateAsk(ctx, issueKey, question, []dispatch.Option{
-			{Label: "Approve", Description: "Release these secrets to this one session until its end or the lifetime shown."},
-			{Label: "Deny", Description: "Refuse; the agent is told the request was denied."},
-		}, "med")
-		if err != nil {
-			return Request{}, fmt.Errorf("open Dispatch ask: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `update requests set ask_id=$2, ask_edited_at=$3 where id=$1`, req.ID, ask.ID, ask.EditedAt); err != nil {
-			return Request{}, err
-		}
-		ref := "dispatch://" + issueKey + "/ask/" + ask.ID
-		req.AskRef = &ref
+	return req, tx.Commit(ctx)
+}
+
+// newRequest is one request row as Create writes it.
+type newRequest struct {
+	id, enrollmentID, issueKey, reason, state, approver, rulesVersion, sessionID string
+	lifetime                                                                     time.Duration
+	decisions                                                                    []SecretDecision
+}
+
+func (r newRequest) names() []string {
+	names := make([]string, len(r.decisions))
+	for i, d := range r.decisions {
+		names[i] = d.Name
 	}
-	if err := audit(ctx, tx, "request.created", enrollmentID, req.ID, req.GrantID, "session:"+enrollmentID,
-		fmt.Sprintf(`{"state":%q,"secrets":%q}`, state, strings.Join(names, ","))); err != nil {
+	return names
+}
+
+// insertRequest writes the request row, its per-secret decisions, and its request.created audit
+// row. A pending row starts with no ask; createPending records it once Dispatch has opened one.
+func (m *Machine) insertRequest(ctx context.Context, tx pgx.Tx, r newRequest) error {
+	var pendingExpires *time.Time
+	if r.state == "pending" {
+		t := time.Now().Add(m.PendingTTL)
+		pendingExpires = &t
+	}
+	if _, err := tx.Exec(ctx, `insert into requests (id, enrollment_id, issue_key, reason, state, allowed_approver, rules_version, lifetime_seconds, pending_expires_at, session_id, decided_at, decision_detail)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, case when $5 in ('granted','denied') then now() end, case when $5='denied' then 'policy denies at least one requested secret' end)`,
+		r.id, r.enrollmentID, r.issueKey, r.reason, r.state, nullable(r.approver), r.rulesVersion, int(r.lifetime.Seconds()), pendingExpires, nullable(r.sessionID)); err != nil {
+		return err
+	}
+	for _, d := range r.decisions {
+		if _, err := tx.Exec(ctx, `insert into request_secrets (request_id, name, decision, delivery, source) values ($1,$2,$3,$4,$5)`, r.id, d.Name, d.Decision, d.Delivery, d.Source); err != nil {
+			return err
+		}
+	}
+	return audit(ctx, tx, "request.created", r.enrollmentID, r.id, nil, "session:"+r.enrollmentID,
+		auditDetail{"state": r.state, "secrets": r.names()})
+}
+
+// createPending records a pending request and opens its Dispatch ask without ever holding a
+// transaction or pooled connection across the Dispatch call. The row is written first, with no
+// ask, in one short transaction that serializes identical requests from one enrollment on an
+// advisory lock, so a concurrent twin coalesces onto it instead of opening a second ask. The ask
+// is then opened with nothing held and its id recorded in a second statement. An open that fails
+// cancels the row; a row whose ask was never recorded (the broker stopped in between) is
+// cancelled by CancelUnopened.
+func (m *Machine) createPending(ctx context.Context, enr enrollmentRow, r newRequest) (Request, error) {
+	sorted := sortedCopy(r.names())
+	tx, err := m.Store.Pool.Begin(ctx)
+	if err != nil {
 		return Request{}, err
 	}
-	return req, tx.Commit(ctx)
+	defer tx.Rollback(ctx)
+	lockKey, err := json.Marshal([]any{r.enrollmentID, sorted})
+	if err != nil {
+		return Request{}, err
+	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, string(lockKey)); err != nil {
+		return Request{}, fmt.Errorf("lock identical pending requests: %w", err)
+	}
+	existingID, err := matchingRequest(ctx, tx, `select r.id, array_agg(s.name) from requests r join request_secrets s on s.request_id=r.id
+		where r.enrollment_id=$1 and r.state='pending' group by r.id`, r.enrollmentID, sorted)
+	if err != nil {
+		return Request{}, err
+	}
+	if existingID != "" {
+		if err := tx.Commit(ctx); err != nil {
+			return Request{}, err
+		}
+		existing, err := m.Get(ctx, existingID)
+		existing.Coalesced = true
+		return existing, err
+	}
+	if err := m.insertRequest(ctx, tx, r); err != nil {
+		return Request{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Request{}, err
+	}
+
+	// The row exists now: finish opening its ask even if the caller goes away, so a disconnect
+	// never strands it half-made. The Dispatch client's own timeout bounds the call.
+	ctx = context.WithoutCancel(ctx)
+	ask, err := m.Dispatch.CreateAsk(ctx, r.issueKey, question(enr, r.decisions, r.reason, r.lifetime), []dispatch.Option{
+		{Label: "Approve", Description: "Release these secrets to this one session until its end or the lifetime shown."},
+		{Label: "Deny", Description: "Refuse; the agent is told the request was denied."},
+	}, "med")
+	if err != nil {
+		if cancelErr := m.cancelByBroker(ctx, r.id, r.enrollmentID, "the Dispatch ask could not be opened"); cancelErr != nil {
+			slog.Error("broker: cancel a request whose ask could not be opened", "request", r.id, "error", cancelErr)
+		}
+		return Request{}, fmt.Errorf("open Dispatch ask: %w", err)
+	}
+	// Recorded even if the row has left pending meanwhile (the session cancelled it), so the ask
+	// stays tied to its request.
+	if _, err := m.Store.Pool.Exec(ctx, `update requests set ask_id=$2, ask_edited_at=$3 where id=$1 and ask_id is null`, r.id, ask.ID, ask.EditedAt); err != nil {
+		return Request{}, err
+	}
+	ref := "dispatch://" + r.issueKey + "/ask/" + ask.ID
+	return Request{ID: r.id, State: "pending", IssueKey: r.issueKey, Secrets: r.decisions, AskRef: &ref}, nil
+}
+
+// cancelByBroker cancels a still-pending request the broker itself can no longer carry forward,
+// writing the transition and its audit row together.
+func (m *Machine) cancelByBroker(ctx context.Context, id, enrollmentID, detail string) error {
+	tx, err := m.Store.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `update requests set state='cancelled', decided_at=now(), decided_by='broker', decision_detail=$2 where id=$1 and state='pending'`, id, detail)
+	if err != nil || tag.RowsAffected() != 1 {
+		return err
+	}
+	if err := audit(ctx, tx, "request.cancelled", enrollmentID, id, nil, "broker", auditDetail{"reason": detail}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// unopenedAskGrace is how long a pending request may go without a recorded ask before
+// CancelUnopened treats it as stranded: comfortably longer than one Dispatch call can take.
+const unopenedAskGrace = 2 * time.Minute
+
+// CancelUnopened cancels every pending request whose Dispatch ask was never recorded within
+// unopenedAskGrace of its creation — a request whose broker stopped between writing the row and
+// opening its ask — each with its own audit row, in one transaction.
+func (m *Machine) CancelUnopened(ctx context.Context, now time.Time) (int, error) {
+	tx, err := m.Store.Pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+	const detail = "the Dispatch ask was never opened"
+	rows, err := tx.Query(ctx, `update requests set state='cancelled', decided_at=$1, decided_by='broker', decision_detail=$2
+		where state='pending' and ask_id is null and created_at < $3 returning id, enrollment_id`, now, detail, now.Add(-unopenedAskGrace))
+	if err != nil {
+		return 0, err
+	}
+	type cancelledRow struct{ id, enrollmentID string }
+	var cancelled []cancelledRow
+	for rows.Next() {
+		var c cancelledRow
+		if err := rows.Scan(&c.id, &c.enrollmentID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		cancelled = append(cancelled, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, c := range cancelled {
+		if err := audit(ctx, tx, "request.cancelled", c.enrollmentID, c.id, nil, "broker", auditDetail{"reason": detail}); err != nil {
+			return 0, err
+		}
+	}
+	return len(cancelled), tx.Commit(ctx)
 }
 
 // ApplyAnswer moves a pending request on a Dispatch ask read. It is idempotent: a request that is
@@ -259,7 +391,7 @@ func (m *Machine) ApplyAnswer(ctx context.Context, id string, ask dispatch.Ask) 
 		}
 		grantID = &g
 	}
-	if err := audit(ctx, tx, "request."+next, enrollmentID, id, grantID, "human:"+by, fmt.Sprintf(`{"detail":%q,"ask_id":%q}`, detail, ask.ID)); err != nil {
+	if err := audit(ctx, tx, "request."+next, enrollmentID, id, grantID, "human:"+by, auditDetail{"detail": detail, "ask_id": ask.ID}); err != nil {
 		return false, err
 	}
 	return true, tx.Commit(ctx)
@@ -284,7 +416,7 @@ func (m *Machine) Cancel(ctx context.Context, id, enrollmentID string) error {
 	if _, err := tx.Exec(ctx, `update requests set state='cancelled', decided_at=now(), decided_by=$2, decision_detail='cancelled by the requesting session' where id=$1 and state='pending'`, id, "session:"+enrollmentID); err != nil {
 		return err
 	}
-	if err := audit(ctx, tx, "request.cancelled", enrollmentID, id, nil, "session:"+enrollmentID, "{}"); err != nil {
+	if err := audit(ctx, tx, "request.cancelled", enrollmentID, id, nil, "session:"+enrollmentID, auditDetail{}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -324,6 +456,8 @@ func (m *Machine) ExpirePending(ctx context.Context, now time.Time) (int, error)
 
 // Values releases the inject-mode values of a live grant to its own enrollment. It re-checks the
 // enrollment, the grant, and that every name is still an inject-mode secret in the current rules.
+// It holds no pooled connection across a Secrets Manager read: the grant's names are read into
+// memory before the first value is fetched.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, []string, time.Time, error) {
 	var owner string
 	var expires time.Time
@@ -343,63 +477,108 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	if !live {
 		return nil, nil, time.Time{}, ErrGrantNotLive
 	}
-	rows, err := m.Store.Pool.Query(ctx, `select name, source from request_secrets where request_id=$1 and decision <> 'deny'`, requestID)
+	type grantedSecret struct{ name, source string }
+	var granted []grantedSecret
+	rows, err := m.Store.Pool.Query(ctx, `select name, source from request_secrets where request_id=$1 and decision <> 'deny' order by name`, requestID)
 	if err != nil {
 		return nil, nil, time.Time{}, err
 	}
-	defer rows.Close()
+	for rows.Next() {
+		var g grantedSecret
+		if err := rows.Scan(&g.name, &g.source); err != nil {
+			rows.Close()
+			return nil, nil, time.Time{}, err
+		}
+		granted = append(granted, g)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, time.Time{}, err
+	}
 	set := m.Rules.Get()
 	values := map[string]string{}
 	var proxyOnly, released []string
-	for rows.Next() {
-		var name, source string
-		if err := rows.Scan(&name, &source); err != nil {
-			return nil, nil, time.Time{}, err
-		}
-		current, ok := set.Secrets[name]
+	for _, g := range granted {
+		current, ok := set.Secrets[g.name]
 		if !ok {
-			return nil, nil, time.Time{}, fmt.Errorf("%w: %s is no longer in the rules", ErrGrantNotLive, name)
+			return nil, nil, time.Time{}, fmt.Errorf("%w: %s is no longer in the rules", ErrGrantNotLive, g.name)
 		}
 		if current.Delivery == "proxy" {
-			proxyOnly = append(proxyOnly, name)
+			proxyOnly = append(proxyOnly, g.name)
 			continue
 		}
-		value, err := m.Secrets.Read(ctx, source)
+		value, err := m.Secrets.Read(ctx, g.source)
 		if err != nil {
-			return nil, nil, time.Time{}, fmt.Errorf("read %s: %w", name, err)
+			return nil, nil, time.Time{}, fmt.Errorf("read %s: %w", g.name, err)
 		}
-		values[name] = value
-		released = append(released, name)
+		values[g.name] = value
+		released = append(released, g.name)
 	}
-	if _, err := m.Store.Pool.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ('grant.used',$1,$2,$3,$4, jsonb_build_object('names',$5::text))`,
-		enrollmentID, requestID, grantID, "session:"+enrollmentID, strings.Join(released, ",")); err != nil {
+	if _, err := m.Store.Pool.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ('grant.used',$1,$2,$3,$4,$5)`,
+		enrollmentID, requestID, grantID, "session:"+enrollmentID, auditDetail{"names": released}); err != nil {
 		return nil, nil, time.Time{}, err
 	}
 	return values, proxyOnly, expires, nil
 }
 
-// RevokeGrant ends a grant. enrollmentID non-nil means the session itself is revoking and must own
-// the grant; nil means a human (already authenticated by the caller) is revoking.
-func (m *Machine) RevokeGrant(ctx context.Context, grantID, by string, enrollmentID *string) error {
+// Revoker is who is ending a grant: exactly one of a session (EnrollmentID, authenticated by its
+// proof) or a human (Login, a Dispatch login the caller authenticated).
+type Revoker struct {
+	EnrollmentID string
+	Login        string
+}
+
+// actor is the Revoker in the audit trail's actor convention.
+func (r Revoker) actor() string {
+	if r.EnrollmentID != "" {
+		return "session:" + r.EnrollmentID
+	}
+	return "human:" + dispatch.CanonicalLogin(r.Login)
+}
+
+// RevokeGrant ends a grant. A session may end only its own grants; a human only a grant they
+// approved or one whose enrollment they operate, so a signed-in human of one operator can never
+// end another operator's grant.
+func (m *Machine) RevokeGrant(ctx context.Context, grantID string, by Revoker) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
 	var owner, requestID string
-	if err := tx.QueryRow(ctx, `select enrollment_id, request_id from grants where id=$1 for update`, grantID).Scan(&owner, &requestID); err != nil {
+	var approver, operator *string
+	if err := tx.QueryRow(ctx, `select g.enrollment_id, g.request_id, g.approver, e.operator
+		from grants g join enrollments e on e.id=g.enrollment_id where g.id=$1 for update of g`, grantID).Scan(&owner, &requestID, &approver, &operator); err != nil {
 		return err
 	}
-	if enrollmentID != nil && *enrollmentID != owner {
-		return ErrNotYours
+	if by.EnrollmentID != "" {
+		if by.EnrollmentID != owner {
+			return ErrNotYours
+		}
+	} else if !mayRevoke(by.Login, approver, operator) {
+		return ErrNotApprover
 	}
-	if _, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where id=$1 and revoked_at is null`, grantID, by); err != nil {
+	if _, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where id=$1 and revoked_at is null`, grantID, by.actor()); err != nil {
 		return err
 	}
-	if err := audit(ctx, tx, "grant.revoked", owner, requestID, &grantID, by, "{}"); err != nil {
+	if err := audit(ctx, tx, "grant.revoked", owner, requestID, &grantID, by.actor(), auditDetail{}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// mayRevoke reports whether the human login is the grant's approver or its enrollment's operator.
+func mayRevoke(login string, approver, operator *string) bool {
+	login = dispatch.CanonicalLogin(login)
+	if login == "" {
+		return false
+	}
+	for _, allowed := range []*string{approver, operator} {
+		if allowed != nil && dispatch.CanonicalLogin(*allowed) == login {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Machine) Get(ctx context.Context, id string) (Request, error) {
@@ -489,60 +668,49 @@ func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, err
 	return e, err
 }
 
-func (m *Machine) coalesce(ctx context.Context, enrollmentID string, names []string) (Request, bool, error) {
-	sorted := append([]string(nil), names...)
-	sortStrings(sorted)
-	rows, err := m.Store.Pool.Query(ctx, `select r.id, string_agg(s.name, ',' order by s.name) from requests r join request_secrets s on s.request_id=r.id
-		where r.enrollment_id=$1 and r.state='pending' group by r.id`, enrollmentID)
+// matchingRequest runs query (whose rows are a request id and that request's secret names, with
+// $1 bound to enrollmentID) and answers the first request whose names are exactly sorted, or ""
+// when none is. Names are compared as sets of whole strings, never as one joined string, so a
+// name containing a separator cannot pass for two names.
+func matchingRequest(ctx context.Context, q interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}, query, enrollmentID string, sorted []string) (string, error) {
+	rows, err := q.Query(ctx, query, enrollmentID)
 	if err != nil {
-		return Request{}, false, err
+		return "", err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id, joined string
-		if err := rows.Scan(&id, &joined); err != nil {
-			return Request{}, false, err
+		var id string
+		var names []string
+		if err := rows.Scan(&id, &names); err != nil {
+			return "", err
 		}
-		if joined == strings.Join(sorted, ",") {
-			rows.Close()
-			r, err := m.Get(ctx, id)
-			return r, err == nil, err
+		sort.Strings(names)
+		if slices.Equal(names, sorted) {
+			return id, nil
 		}
 	}
-	return Request{}, false, rows.Err()
+	return "", rows.Err()
 }
 
 // reuseLiveGrant answers Create's own "request (or reuse the live grant)" contract: an exact
-// name-set match (never a subset or superset — the same matching rule coalesce uses for pending
+// name-set match (never a subset or superset — the same matching rule coalescing uses for pending
 // requests) against a still-live grant (not revoked, not expired) under this enrollment is
-// returned as-is, with no rules re-evaluation, no new request row, and no Dispatch ask — exactly
-// how Values() already treats a live grant as authoritative regardless of a later rules change.
-// Called before any policy evaluation in Create, so a caller that already holds a live grant for
-// these exact names never re-asks a human who already approved it once.
+// returned as-is, with no new request row and no Dispatch ask. Called before any policy
+// evaluation in Create, so a caller that already holds a live grant for these exact names never
+// re-asks a human who already approved it once.
 func (m *Machine) reuseLiveGrant(ctx context.Context, enrollmentID string, names []string) (Request, bool, error) {
-	sorted := append([]string(nil), names...)
-	sortStrings(sorted)
-	rows, err := m.Store.Pool.Query(ctx, `select r.id, string_agg(s.name, ',' order by s.name) from requests r
+	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
 		join request_secrets s on s.request_id=r.id
 		join grants g on g.request_id=r.id
 		where r.enrollment_id=$1 and r.state='granted' and g.revoked_at is null and g.expires_at > now()
-		group by r.id`, enrollmentID)
-	if err != nil {
+		group by r.id`, enrollmentID, sortedCopy(names))
+	if err != nil || id == "" {
 		return Request{}, false, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, joined string
-		if err := rows.Scan(&id, &joined); err != nil {
-			return Request{}, false, err
-		}
-		if joined == strings.Join(sorted, ",") {
-			rows.Close()
-			r, err := m.Get(ctx, id)
-			return r, err == nil, err
-		}
-	}
-	return Request{}, false, rows.Err()
+	r, err := m.Get(ctx, id)
+	return r, err == nil, err
 }
 
 func insertGrant(ctx context.Context, tx pgx.Tx, requestID, enrollmentID, approver string, lifetime time.Duration) (string, error) {
@@ -552,8 +720,11 @@ func insertGrant(ctx context.Context, tx pgx.Tx, requestID, enrollmentID, approv
 	return id, err
 }
 
-func audit(ctx context.Context, tx pgx.Tx, kind, enrollmentID, requestID string, grantID *string, actor, detail string) error {
-	_, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ($1,$2,$3,$4,$5,$6::jsonb)`, kind, enrollmentID, requestID, grantID, actor, detail)
+// auditDetail is an audit row's non-secret detail object; audit writes it as JSON.
+type auditDetail map[string]any
+
+func audit(ctx context.Context, tx pgx.Tx, kind, enrollmentID, requestID string, grantID *string, actor string, detail auditDetail) error {
+	_, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ($1,$2,$3,$4,$5,$6)`, kind, enrollmentID, requestID, grantID, actor, detail)
 	return err
 }
 
@@ -589,4 +760,8 @@ func nullable(s string) *string {
 	return &s
 }
 
-func sortStrings(s []string) { sort.Strings(s) }
+func sortedCopy(s []string) []string {
+	sorted := append([]string(nil), s...)
+	sort.Strings(sorted)
+	return sorted
+}

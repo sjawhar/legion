@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -23,9 +24,14 @@ type Deps struct {
 	Proof     *proof.Verifier
 	Dispatch  *dispatch.Client
 	Launcher  *launcher.Service
+	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
+	LauncherLimits *LauncherLimits
 }
 
-type server struct{ deps Deps }
+type server struct {
+	deps            Deps
+	launcherLimiter *launcherLimiter
+}
 
 type ctxKey int
 
@@ -36,7 +42,11 @@ const (
 )
 
 func Register(mux *http.ServeMux, deps Deps) {
-	s := &server{deps: deps}
+	limits := DefaultLauncherLimits
+	if deps.LauncherLimits != nil {
+		limits = *deps.LauncherLimits
+	}
+	s := &server{deps: deps, launcherLimiter: newLauncherLimiter(limits)}
 	for _, r := range routes() {
 		r := r
 		mux.HandleFunc(r.Method+" "+r.Pattern, func(w http.ResponseWriter, req *http.Request) {
@@ -84,6 +94,7 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 		if who.Kind == "agent" && who.Owner != nil {
 			login = *who.Owner
 		}
+		login = dispatch.CanonicalLogin(login)
 		if login == "" {
 			writeError(w, http.StatusForbidden, "HUMAN_REQUIRED", "this route needs a human identity")
 			return nil, false
@@ -108,6 +119,32 @@ func (s *server) proof(w http.ResponseWriter, r *http.Request) (string, bool) {
 
 func bearer(r *http.Request) string {
 	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+}
+
+// maxJSONBodyBytes caps every JSON request body the broker reads, as Dispatch's own decodeJSON does.
+const maxJSONBodyBytes = 1 << 20
+
+// readJSON decodes r's body as exactly one JSON value into v: at most maxJSONBodyBytes (413
+// REQUEST_TOO_LARGE), no field v does not declare and nothing after the value (400 with
+// invalidCode). It writes the refusal itself and reports whether decoding succeeded.
+func readJSON(w http.ResponseWriter, r *http.Request, v any, invalidCode string) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	err := decoder.Decode(v)
+	if err == nil && decoder.More() {
+		err = errors.New("body must contain one JSON value")
+	}
+	var tooLarge *http.MaxBytesError
+	switch {
+	case err == nil:
+		return true
+	case errors.As(err, &tooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", fmt.Sprintf("request body exceeds %d bytes", maxJSONBodyBytes))
+	default:
+		writeError(w, http.StatusBadRequest, invalidCode, "body must be one valid JSON object: "+err.Error())
+	}
+	return false
 }
 
 func writeError(w http.ResponseWriter, status int, code, msg string) {

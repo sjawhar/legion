@@ -2,7 +2,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -27,8 +26,7 @@ type createEnrollmentBody struct {
 
 func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request) {
 	var body createEnrollmentBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_ENROLLMENT", "body must be valid JSON")
+	if !readJSON(w, r, &body, "INVALID_ENROLLMENT") {
 		return
 	}
 	if body.Kind != "box" && body.Kind != "host" && body.Kind != "pod" {

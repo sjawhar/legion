@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -21,18 +21,30 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
-	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
-func testDatabaseURL(t *testing.T) string {
-	url := os.Getenv("BROKER_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("BROKER_TEST_DATABASE_URL must be set to run Postgres api tests")
-	}
-	return url
-}
-
 func str(s string) *string { return &s }
+
+// whoamiDispatch serves Dispatch's GET /api/v1/whoami the way Dispatch answers it for personal
+// agent tokens — {kind: agent, owner: <lowercase login>} — for each bearer in owners, and 401 for
+// any other.
+func whoamiDispatch(t *testing.T, owners map[string]string) *dispatch.Client {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/whoami", func(w http.ResponseWriter, r *http.Request) {
+		owner, ok := owners[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		if !ok {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"kind": "agent", "owner": owner, "service": nil})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return dispatch.New(srv.URL, "broker-token", srv.Client())
+}
 
 // fakeOpener is the machine's askOpener for these tests: no test here answers an ask (that's
 // requests.Machine's own test suite), only opens one so a "needs approval" secret reaches
@@ -69,18 +81,10 @@ func signProof(t *testing.T, enr enrolledAgent, method, url string) string {
 func fixture(t *testing.T) (srv *httptest.Server, enrA, enrB enrolledAgent, launcherToken string, machine *requests.Machine, enr *enroll.Service) {
 	t.Helper()
 	ctx := context.Background()
-
-	st, err := store.Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { st.Pool.Close() })
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	st := storetest.Open(t)
 
 	enr = &enroll.Service{Store: st, Lease: time.Hour}
-	_, launcherToken, err = enr.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-enroll")
+	_, launcherToken, err := enr.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-enroll")
 	if err != nil {
 		t.Fatalf("MintLauncherCredential: %v", err)
 	}
@@ -141,7 +145,7 @@ func fixture(t *testing.T) (srv *httptest.Server, enrA, enrB enrolledAgent, laun
 		Enroll:    enr,
 		Machine:   machine,
 		Proof:     &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, Replay: enr.Replay},
-		Dispatch:  dispatch.New("http://127.0.0.1:0", "unused-in-these-tests", http.DefaultClient),
+		Dispatch:  whoamiDispatch(t, map[string]string{"sjawhar-token": "sjawhar", "mallory-token": "mallory"}),
 	})
 	return srv, enrA, enrB, launcherToken, machine, enr
 }
@@ -623,10 +627,11 @@ func TestReadSelfListsGrantsAndRenewEnforcesOwnID(t *testing.T) {
 // fake (an unexported type this package cannot reach). It structurally satisfies launcher.Service's
 // unexported Dispatch field type without needing to name it.
 type fakeLauncherDispatch struct {
-	mu     sync.Mutex
-	nextID int
-	asks   map[string]*dispatch.Ask
-	issues []dispatch.IssueSummary
+	mu        sync.Mutex
+	nextID    int
+	asks      map[string]*dispatch.Ask
+	issues    []dispatch.IssueSummary
+	listDelay time.Duration
 }
 
 func (f *fakeLauncherDispatch) CreateAsk(_ context.Context, _, _ string, _ []dispatch.Option, _ string) (dispatch.Ask, error) {
@@ -654,9 +659,11 @@ func (f *fakeLauncherDispatch) GetAsk(_ context.Context, id string) (dispatch.As
 
 func (f *fakeLauncherDispatch) ListIssues(_ context.Context, _, _ string) ([]dispatch.IssueSummary, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	out := make([]dispatch.IssueSummary, len(f.issues))
 	copy(out, f.issues)
+	delay := f.listDelay
+	f.mu.Unlock()
+	time.Sleep(delay)
 	return out, nil
 }
 
@@ -678,44 +685,50 @@ func (f *fakeLauncherDispatch) approve(user string) {
 	}
 }
 
-// TestLauncherCredentialRoutesIssueAndReadTokenOnce is Important Finding 3's regression: the two
-// real authNone routes, exercised over real HTTP with a real launcher.Service (Postgres-backed)
-// instead of the deleted 501 stub. POST opens a request and returns 202 with a pending_id; GET on
-// an unknown pending id is 404; GET while still pending reports state "pending"; once the fake
-// Dispatch answers Approve and Reconcile runs, the first GET returns the token and the second GET
-// returns state "issued" with the "token" key entirely absent from the JSON body (not present-but-
-// null), which is what makes the token single-use on the wire.
-func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
-	ctx := context.Background()
-	st, err := store.Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { st.Pool.Close() })
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	fakeLD := &fakeLauncherDispatch{}
+// launcherServer serves the broker's routes with a real launcher.Service over fake's Dispatch, on a
+// store opened with params; limits nil keeps the default launcher rate limits.
+func launcherServer(t *testing.T, fake *fakeLauncherDispatch, limits *LauncherLimits, params ...string) (*httptest.Server, *launcher.Service) {
+	t.Helper()
+	st := storetest.Open(t, params...)
 	enr := &enroll.Service{Store: st, Lease: time.Hour}
-	ls := &launcher.Service{Store: st, Dispatch: fakeLD, Enroll: enr, Project: "PROJ"}
-
+	ls := &launcher.Service{Store: st, Dispatch: fake, Enroll: enr, Project: "PROJ"}
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	Register(mux, Deps{
-		PublicURL: srv.URL,
-		Enroll:    enr,
-		Proof:     &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, Replay: enr.Replay},
-		Dispatch:  dispatch.New("http://127.0.0.1:0", "unused-in-this-test", http.DefaultClient),
-		Launcher:  ls,
+		PublicURL:      srv.URL,
+		Enroll:         enr,
+		Proof:          &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, Replay: enr.Replay},
+		Dispatch:       dispatch.New("http://127.0.0.1:0", "unused-in-this-test", http.DefaultClient),
+		Launcher:       ls,
+		LauncherLimits: limits,
 	})
+	return srv, ls
+}
 
-	postResp, err := srv.Client().Post(srv.URL+"/v1/launcher-credentials", "application/json",
-		bytes.NewReader([]byte(`{"operator":"sjawhar","host":"sami-agents"}`)))
+func postLauncherCredential(t *testing.T, srv *httptest.Server, body string) *http.Response {
+	t.Helper()
+	resp, err := srv.Client().Post(srv.URL+"/v1/launcher-credentials", "application/json", strings.NewReader(body))
 	if err != nil {
-		t.Fatalf("POST: %v", err)
+		t.Errorf("POST /v1/launcher-credentials: %v", err)
+		return nil
 	}
+	return resp
+}
+
+// TestLauncherCredentialRoutesIssueAndReadTokenOnce exercises the two real authNone routes over
+// real HTTP with a real launcher.Service (Postgres-backed). POST opens a request and returns 202
+// with a pending_id and the confirmation code its ask names; GET on an unknown pending id is 404;
+// GET while still pending reports state "pending"; once the fake Dispatch answers Approve and
+// Reconcile runs, the first GET returns the token and the second GET returns state "issued" with
+// the "token" key entirely absent from the JSON body (not present-but-null), which is what makes
+// the token single-use on the wire.
+func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
+	ctx := context.Background()
+	fakeLD := &fakeLauncherDispatch{}
+	srv, ls := launcherServer(t, fakeLD, nil)
+
+	postResp := postLauncherCredential(t, srv, `{"operator":"sjawhar","host":"sami-agents"}`)
 	if postResp.StatusCode != http.StatusAccepted {
 		t.Fatalf("POST status = %d, want 202", postResp.StatusCode)
 	}
@@ -724,6 +737,9 @@ func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
 	pendingID, _ := postOut["pending_id"].(string)
 	if pendingID == "" {
 		t.Fatalf("POST response missing pending_id; response keys = %v", mapKeys(postOut))
+	}
+	if code, _ := postOut["confirmation_code"].(string); len(code) != 9 {
+		t.Fatalf("POST response confirmation_code = %v, want an XXXX-XXXX code", postOut["confirmation_code"])
 	}
 
 	unknownResp, err := srv.Client().Get(srv.URL + "/v1/launcher-credentials/does-not-exist")
@@ -777,5 +793,154 @@ func TestLauncherCredentialRoutesIssueAndReadTokenOnce(t *testing.T) {
 	}
 	if _, ok := secondOut["token"]; ok {
 		t.Fatalf("GET issued (2nd) unexpectedly carries a %q key; response keys = %v", "token", mapKeys(secondOut))
+	}
+}
+
+// TestLauncherCredentialFloodIsRateLimited pins the per-address and per-operator limits on the one
+// write route anyone can call: past its burst, a flood gets 429 RATE_LIMITED with a Retry-After,
+// and asks stop being opened.
+func TestLauncherCredentialFloodIsRateLimited(t *testing.T) {
+	fakeLD := &fakeLauncherDispatch{}
+	limits := &LauncherLimits{PerAddress: Limit{Every: time.Hour, Burst: 3}, PerOperator: Limit{Every: time.Hour, Burst: 100}}
+	srv, _ := launcherServer(t, fakeLD, limits)
+	var accepted, limited int
+	for i := range 10 {
+		resp := postLauncherCredential(t, srv, fmt.Sprintf(`{"operator":"op-%d","host":"h"}`, i))
+		var out map[string]any
+		decodeJSON(t, resp, &out)
+		switch resp.StatusCode {
+		case http.StatusAccepted:
+			accepted++
+		case http.StatusTooManyRequests:
+			limited++
+			if out["code"] != "RATE_LIMITED" || resp.Header.Get("Retry-After") == "" {
+				t.Fatalf("429 body %v Retry-After %q, want RATE_LIMITED with a Retry-After", out, resp.Header.Get("Retry-After"))
+			}
+		default:
+			t.Fatalf("POST %d status = %d (%v)", i, resp.StatusCode, out)
+		}
+	}
+	if accepted != 3 || limited != 7 || fakeLD.nextID != 3 {
+		t.Fatalf("accepted %d, limited %d, asks opened %d; want 3 accepted, 7 limited, 3 asks", accepted, limited, fakeLD.nextID)
+	}
+
+	perOperator := &LauncherLimits{PerAddress: Limit{Every: time.Hour, Burst: 100}, PerOperator: Limit{Every: time.Hour, Burst: 2}}
+	srv2, _ := launcherServer(t, &fakeLauncherDispatch{}, perOperator)
+	for i, want := range []int{http.StatusAccepted, http.StatusAccepted, http.StatusTooManyRequests} {
+		resp := postLauncherCredential(t, srv2, `{"operator":"SJawhar","host":"h"}`)
+		resp.Body.Close()
+		if resp.StatusCode != want {
+			t.Fatalf("POST %d naming one operator: status %d, want %d", i, resp.StatusCode, want)
+		}
+	}
+}
+
+// TestLauncherCredentialFloodKeepsBrokerResponsive is the connection-exhaustion regression: a
+// flood of unauthenticated launcher-credential requests, each parked on a slow Dispatch, must not
+// drain the Postgres pool, so /healthz (which needs a connection) keeps answering at once.
+func TestLauncherCredentialFloodKeepsBrokerResponsive(t *testing.T) {
+	fakeLD := &fakeLauncherDispatch{listDelay: 3 * time.Second}
+	unlimited := &LauncherLimits{PerAddress: Limit{Every: time.Millisecond, Burst: 1000}, PerOperator: Limit{Every: time.Millisecond, Burst: 1000}}
+	srv, ls := launcherServer(t, fakeLD, unlimited, "pool_max_conns=3")
+	const n = 12
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() {
+			if resp := postLauncherCredential(t, srv, fmt.Sprintf(`{"operator":"flood-%d","host":"h"}`, i)); resp != nil {
+				resp.Body.Close()
+			}
+		})
+	}
+	time.Sleep(500 * time.Millisecond)
+	acquired := ls.Store.Pool.Stat().AcquiredConns()
+	start := time.Now()
+	resp, err := srv.Client().Get(srv.URL + "/healthz")
+	elapsed := time.Since(start)
+	wg.Wait()
+	if err != nil {
+		t.Fatalf("GET /healthz during the flood: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || elapsed > time.Second {
+		t.Fatalf("/healthz during the flood answered %d after %s, want 200 at once", resp.StatusCode, elapsed)
+	}
+	if acquired != 0 {
+		t.Fatalf("%d pooled connections checked out while every request waited on Dispatch, want 0", acquired)
+	}
+}
+
+// TestJSONBodiesAreBoundedAndStrict pins readJSON on every JSON route: a body over 1 MiB is 413
+// REQUEST_TOO_LARGE, and a field the route does not define is a 400.
+func TestJSONBodiesAreBoundedAndStrict(t *testing.T) {
+	srv, _ := launcherServer(t, &fakeLauncherDispatch{}, nil)
+	huge := `{"operator":"sjawhar","host":"` + strings.Repeat("h", 2<<20) + `"}`
+	resp := postLauncherCredential(t, srv, huge)
+	var out map[string]any
+	decodeJSON(t, resp, &out)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge || out["code"] != "REQUEST_TOO_LARGE" {
+		t.Fatalf("2 MiB body: status %d %v, want 413 REQUEST_TOO_LARGE", resp.StatusCode, out)
+	}
+	resp = postLauncherCredential(t, srv, `{"operator":"sjawhar","host":"h","hostname":"typo"}`)
+	decodeJSON(t, resp, &out)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown field: status %d %v, want 400", resp.StatusCode, out)
+	}
+	resp = postLauncherCredential(t, srv, `{"operator":"sjawhar","host":"h"} {"operator":"again"}`)
+	decodeJSON(t, resp, &out)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("two JSON values: status %d %v, want 400", resp.StatusCode, out)
+	}
+}
+
+// TestHumanRevokeByAnotherOperatorIsRefused is the cross-tenant regression: a Dispatch bearer
+// belonging to a different operator must not end this operator's grant (403 NOT_APPROVER, grant
+// still live); the operator's own bearer can, and the audit row names them as human:<login>.
+func TestHumanRevokeByAnotherOperatorIsRefused(t *testing.T) {
+	srv, enrA, _, _, machine, _ := fixture(t)
+	createURL := srv.URL + "/v1/requests"
+	req, _ := http.NewRequest(http.MethodPost, createURL, strings.NewReader(`{"secrets":["AUTO_TOKEN"],"reason":"need it"}`))
+	req.Header.Set("Proof", signProof(t, enrA, http.MethodPost, createURL))
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var created map[string]any
+	decodeJSON(t, resp, &created)
+	grantID, _ := created["grant_id"].(string)
+	if grantID == "" {
+		t.Fatalf("create response carries no grant_id: %v", created)
+	}
+
+	revoke := func(bearer string) (int, map[string]any) {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/grants/"+grantID+"/revoke", nil)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatalf("revoke: %v", err)
+		}
+		var out map[string]any
+		decodeJSON(t, resp, &out)
+		return resp.StatusCode, out
+	}
+	if status, out := revoke("mallory-token"); status != http.StatusForbidden || out["code"] != "NOT_APPROVER" {
+		t.Fatalf("revoke with another operator's bearer: %d %v, want 403 NOT_APPROVER", status, out)
+	}
+	valuesURL := srv.URL + "/v1/grants/" + grantID + "/values"
+	vreq, _ := http.NewRequest(http.MethodPost, valuesURL, nil)
+	vreq.Header.Set("Proof", signProof(t, enrA, http.MethodPost, valuesURL))
+	vresp, err := srv.Client().Do(vreq)
+	if err != nil {
+		t.Fatalf("values: %v", err)
+	}
+	vresp.Body.Close()
+	if vresp.StatusCode != http.StatusOK {
+		t.Fatalf("values after a refused revoke: status %d, want 200 (grant still live)", vresp.StatusCode)
+	}
+	if status, out := revoke("sjawhar-token"); status != http.StatusOK {
+		t.Fatalf("revoke with the operator's own bearer: %d %v, want 200", status, out)
+	}
+	var actor string
+	if err := machine.Store.Pool.QueryRow(context.Background(), `select actor from audit where kind='grant.revoked' and grant_id=$1`, grantID).Scan(&actor); err != nil || actor != "human:sjawhar" {
+		t.Fatalf("grant.revoked actor = %q, %v, want human:sjawhar", actor, err)
 	}
 }

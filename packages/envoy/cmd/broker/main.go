@@ -88,12 +88,45 @@ func main() {
 	mux := http.NewServeMux()
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, Enroll: enr, Machine: machine, Dispatch: dc, Launcher: ls,
 		Proof: &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, Replay: enr.Replay}})
-	srv := &http.Server{Addr: cfg.ListenAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	go func() { <-ctx.Done(); srv.Shutdown(context.Background()) }()
-	slog.Info("broker listening", "addr", cfg.ListenAddr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		fatal(err)
+	srv := &http.Server{
+		Addr:              cfg.ListenAddr,
+		Handler:           withRequestDeadline(mux, requestDeadline),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      requestDeadline + 15*time.Second,
+		IdleTimeout:       2 * time.Minute,
 	}
+	go func() {
+		slog.Info("broker listening", "addr", cfg.ListenAddr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("broker: listen", "error", err)
+			stop()
+		}
+	}()
+
+	<-ctx.Done()
+	slog.Info("broker shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("broker: shutdown", "error", err)
+	}
+}
+
+// requestDeadline bounds every request's own context, so no handler outlives its caller by more
+// than a Dispatch call's worth of time; WriteTimeout sits past it so a handler that honours its
+// context always gets to write its answer.
+const requestDeadline = 45 * time.Second
+
+// shutdownTimeout is how long SIGTERM waits for in-flight requests before the process exits.
+const shutdownTimeout = 10 * time.Second
+
+func withRequestDeadline(next http.Handler, deadline time.Duration) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), deadline)
+		defer cancel()
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 func fatal(err error) {

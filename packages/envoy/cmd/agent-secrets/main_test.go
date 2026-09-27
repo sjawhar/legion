@@ -449,3 +449,65 @@ func TestSelfJSONPrintsExactlyOneContractObjectNamingTheIssuedEnrollment(t *test
 		t.Fatalf("enrollment_id = %v, want %q (the id the fake issued)", obj["enrollment_id"], testEnrollmentID)
 	}
 }
+
+// launcherBroker serves POST /v1/launcher-credentials with a fixed pending id and confirmation
+// code, and answers GET /v1/launcher-credentials/{pending} as state "issued" carrying token, or
+// with no token field at all when token is empty (another reader already collected it).
+func launcherBroker(t *testing.T, token string) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/launcher-credentials", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		writeJSON(w, map[string]any{"pending_id": "pending-1", "confirmation_code": "KQ7M-X4PZ"})
+	})
+	mux.HandleFunc("GET /v1/launcher-credentials/pending-1", func(w http.ResponseWriter, r *http.Request) {
+		body := map[string]any{"state": "issued"}
+		if token != "" {
+			body["token"] = token
+		}
+		writeJSON(w, body)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestLauncherLoginPrintsConfirmationCodeAndWritesToken pins the successful login: the terminal
+// shows the confirmation code the ask carries, and the token lands in --out.
+func TestLauncherLoginPrintsConfirmationCodeAndWritesToken(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker := launcherBroker(t, "launcher-token-value")
+	out := filepath.Join(t.TempDir(), "launcher-token")
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, t.TempDir(), nil,
+		"launcher", "login", "--operator", "sjawhar", "--host", "devbox", "--out", out)
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "KQ7M-X4PZ") {
+		t.Fatalf("stdout = %q, want it to show the confirmation code", stdout)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil || strings.TrimSpace(string(data)) != "launcher-token-value" {
+		t.Fatalf("token file: err=%v, matches the issued token=%v", err, strings.TrimSpace(string(data)) == "launcher-token-value")
+	}
+}
+
+// TestLauncherLoginRefusesAnAlreadyCollectedToken pins that "issued" with no token — the one-time
+// token already went to another reader of this pending id — is a loud failure, never an empty
+// token file and exit 0.
+func TestLauncherLoginRefusesAnAlreadyCollectedToken(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker := launcherBroker(t, "")
+	out := filepath.Join(t.TempDir(), "launcher-token")
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, t.TempDir(), nil,
+		"launcher", "login", "--operator", "sjawhar", "--host", "devbox", "--out", out)
+	if exit == 0 {
+		t.Fatalf("exit = 0, want a failure: stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "did NOT succeed") {
+		t.Fatalf("stderr = %q, want it to say the login did not succeed", stderr)
+	}
+	if _, err := os.Stat(out); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("token file stat = %v, want no file written", err)
+	}
+}

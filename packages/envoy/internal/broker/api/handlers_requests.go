@@ -2,7 +2,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
@@ -38,8 +37,7 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	enrollmentID := ctx.Value(ctxEnrollment).(string)
 	var body createRequestBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "body must be valid JSON")
+	if !readJSON(w, r, &body, "INVALID_REQUEST") {
 		return
 	}
 	req, err := s.deps.Machine.Create(ctx, enrollmentID, body.Secrets, body.Reason, derefOr(body.Issue, ""), derefOr(body.SessionID, ""))
@@ -173,30 +171,30 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request) {
 }
 
 // revokeGrant is authHumanOrProof: server.authenticate has already put exactly one of ctxEnrollment
-// (a session revoking its own grant through its proof) or ctxHuman (a Dispatch-authenticated human,
-// bearer or cookie-equivalent) on ctx. Machine.RevokeGrant's enrollmentID *string tells the two
-// apart: non-nil (and equal to by) means a session revoking its own grant, nil means an
-// already-authenticated human revoking any grant.
+// (a session revoking its own grant through its proof) or ctxHuman (a Dispatch-authenticated
+// human's canonical login) on ctx. A session may end only its own grants; a human only a grant
+// they approved or one whose enrollment they operate.
 func (s *server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id := r.PathValue("id")
 
-	var by string
-	var enrollmentIDPtr *string
+	var by requests.Revoker
 	if enrollmentID, ok := ctx.Value(ctxEnrollment).(string); ok {
-		by = enrollmentID
-		enrollmentIDPtr = &enrollmentID
+		by.EnrollmentID = enrollmentID
 	} else if human, ok := ctx.Value(ctxHuman).(string); ok {
-		by = human
+		by.Login = human
 	} else {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "no authenticated actor")
 		return
 	}
 
-	err := s.deps.Machine.RevokeGrant(ctx, id, by, enrollmentIDPtr)
+	err := s.deps.Machine.RevokeGrant(ctx, id, by)
 	switch {
 	case errors.Is(err, requests.ErrNotYours):
 		writeError(w, http.StatusForbidden, "NOT_YOURS", err.Error())
+		return
+	case errors.Is(err, requests.ErrNotApprover):
+		writeError(w, http.StatusForbidden, "NOT_APPROVER", err.Error())
 		return
 	case errors.Is(err, pgx.ErrNoRows):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "no such grant")

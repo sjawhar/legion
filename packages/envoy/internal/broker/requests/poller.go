@@ -53,6 +53,9 @@ func (p *Poller) RunOnce(ctx context.Context) error {
 	if _, err := p.Machine.ExpirePending(ctx, time.Now()); err != nil {
 		return err
 	}
+	if _, err := p.Machine.CancelUnopened(ctx, time.Now()); err != nil {
+		return err
+	}
 	if p.Launcher != nil {
 		// Reconcile owns its own errors per pending row (it logs and skips a row it can't read
 		// from Dispatch); a failure here means something broader went wrong (e.g. Postgres is

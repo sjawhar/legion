@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,7 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/rules"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
-	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -24,14 +25,6 @@ import (
 const testAudience = "broker"
 
 func str(s string) *string { return &s }
-
-func testDatabaseURL(t *testing.T) string {
-	url := os.Getenv("BROKER_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("BROKER_TEST_DATABASE_URL must be set to run Postgres requests tests")
-	}
-	return url
-}
 
 // openCall records one askOpener.CreateAsk invocation for a test to assert against.
 type openCall struct {
@@ -53,6 +46,53 @@ func (f *fakeOpener) CreateAsk(_ context.Context, issue, question string, option
 	return dispatch.Ask{ID: fmt.Sprintf("ask-%d", f.next), State: "open"}, nil
 }
 
+// gatedOpener is an askOpener for concurrency tests: every CreateAsk announces itself on entered,
+// then waits for gate to close before answering with err, or with a fresh open ask when err is nil.
+type gatedOpener struct {
+	entered chan struct{}
+	gate    chan struct{}
+	err     error
+	mu      sync.Mutex
+	calls   int
+}
+
+func (g *gatedOpener) CreateAsk(context.Context, string, string, []dispatch.Option, string) (dispatch.Ask, error) {
+	g.mu.Lock()
+	g.calls++
+	n := g.calls
+	g.mu.Unlock()
+	g.entered <- struct{}{}
+	<-g.gate
+	if g.err != nil {
+		return dispatch.Ask{}, g.err
+	}
+	return dispatch.Ask{ID: fmt.Sprintf("gated-ask-%d", n), State: "open"}, nil
+}
+
+// gatedReader is a secrets.Reader that announces each Read on entered and answers from its Fake
+// only once gate is closed.
+type gatedReader struct {
+	secrets.Fake
+	entered chan struct{}
+	gate    chan struct{}
+}
+
+func (g gatedReader) Read(ctx context.Context, source string) (string, error) {
+	g.entered <- struct{}{}
+	<-g.gate
+	return g.Fake.Read(ctx, source)
+}
+
+// awaitEntered waits for one announcement on entered, failing t after five seconds.
+func awaitEntered(t *testing.T, entered <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s never started", what)
+	}
+}
+
 // mintPodToken mints a projected service-account token bound to podUID, the shape
 // enroll.K8sPodVerifier.Verify reads.
 func mintPodToken(t *testing.T, issuer *oidctest.Issuer, key *oidctest.Key, subject, podUID string) string {
@@ -70,23 +110,15 @@ func mintPodToken(t *testing.T, issuer *oidctest.Issuer, key *oidctest.Key, subj
 	return issuer.Mint(t, key, merged)
 }
 
-// newFixture opens a migrated store, builds an enroll.Service and two live box/sjawhar
-// enrollments (enrA, enrB) through it, and wires a Machine against rules.Current loaded from
-// testdata/rules.yaml (DEEL_API_KEY needs approval for box/sjawhar and pod/issue_assignee,
-// AUTO_TOKEN is automatic for box/sjawhar, DENIED_KEY matches no requester and always denies), a
-// secrets.Fake with the inject-mode values, and the fakeOpener.
-func newFixture(t *testing.T) (m *Machine, opener *fakeOpener, svc *enroll.Service, enrA, enrB enroll.Enrollment) {
+// newFixture opens a store on a fresh schema (params are extra connection parameters), builds an
+// enroll.Service and two live box/sjawhar enrollments (enrA, enrB) through it, and wires a
+// Machine against rules.Current loaded from testdata/rules.yaml (DEEL_API_KEY needs approval for
+// box/sjawhar and pod/issue_assignee, AUTO_TOKEN is automatic for box/sjawhar, DENIED_KEY matches
+// no requester and always denies), a secrets.Fake with the inject-mode values, and the fakeOpener.
+func newFixture(t *testing.T, params ...string) (m *Machine, opener *fakeOpener, svc *enroll.Service, enrA, enrB enroll.Enrollment) {
 	t.Helper()
 	ctx := context.Background()
-
-	st, err := store.Open(ctx, testDatabaseURL(t))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { st.Pool.Close() })
-	if err := st.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
+	st := storetest.Open(t, params...)
 
 	svc = &enroll.Service{Store: st, Lease: time.Hour}
 	_, token, err := svc.MintLauncherCredential(ctx, str("sjawhar"), nil, "devbox", "ask-enroll")
@@ -111,7 +143,6 @@ func newFixture(t *testing.T) (m *Machine, opener *fakeOpener, svc *enroll.Servi
 	if err != nil {
 		t.Fatalf("Create(enrB): %v", err)
 	}
-	registerFixtureEnrollment(enrA.ID.String(), enrB.ID.String())
 
 	cctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -471,7 +502,6 @@ func TestPodRequestIssueComesFromEnrollment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(pod enrollment b): %v", err)
 	}
-	registerFixtureEnrollment(podA.ID.String(), podB.ID.String())
 
 	req, err := m.Create(ctx, podA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "LEGION-9", "")
 	if err != nil {
@@ -517,7 +547,7 @@ func TestRevokeStopsValues(t *testing.T) {
 	if req.GrantID == nil {
 		t.Fatal("want a grant id")
 	}
-	if err := m.RevokeGrant(ctx, *req.GrantID, "sjawhar", nil); err != nil {
+	if err := m.RevokeGrant(ctx, *req.GrantID, Revoker{Login: "sjawhar"}); err != nil {
 		t.Fatalf("RevokeGrant: %v", err)
 	}
 	if _, _, _, err := m.Values(ctx, *req.GrantID, enrA.ID.String()); !errors.Is(err, ErrGrantNotLive) {
@@ -747,7 +777,7 @@ func TestCreateDoesNotReuseAnExpiredOrRevokedGrant(t *testing.T) {
 		t.Fatalf("fresh = %+v, want a brand-new request+grant, not the expired one %+v", fresh, granted)
 	}
 
-	if err := m.RevokeGrant(ctx, *fresh.GrantID, "test", nil); err != nil {
+	if err := m.RevokeGrant(ctx, *fresh.GrantID, Revoker{EnrollmentID: enrA.ID.String()}); err != nil {
 		t.Fatalf("RevokeGrant: %v", err)
 	}
 	again, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it a third time", "", "")
@@ -756,5 +786,307 @@ func TestCreateDoesNotReuseAnExpiredOrRevokedGrant(t *testing.T) {
 	}
 	if again.ID == fresh.ID || again.GrantID == nil || *again.GrantID == *fresh.GrantID {
 		t.Fatalf("again = %+v, want a brand-new request+grant, not the revoked one %+v", again, fresh)
+	}
+}
+
+// podEnrollment enrolls a pod through svc whose requests are approved by LEGION-9's assignee
+// (the fixture's IssueAssignee answers "alice").
+func podEnrollment(t *testing.T, svc *enroll.Service, runtimeID string) enroll.Enrollment {
+	t.Helper()
+	ctx := context.Background()
+	issuer := oidctest.New(t)
+	key := issuer.PublishKey(t, "signing-key")
+	verifier, err := oidc.New(ctx, issuer.URL(), testAudience)
+	if err != nil {
+		t.Fatalf("oidc.New: %v", err)
+	}
+	svc.Pod = enroll.K8sPodVerifier{Verifier: verifier}
+	_, token, err := svc.MintLauncherCredential(ctx, nil, str("legion-daemon"), "cluster", "ask-pod")
+	if err != nil {
+		t.Fatalf("MintLauncherCredential: %v", err)
+	}
+	cred, err := svc.AuthenticateLauncher(ctx, token)
+	if err != nil {
+		t.Fatalf("AuthenticateLauncher: %v", err)
+	}
+	pod, err := svc.Create(ctx, cred, enroll.Enrollment{
+		Kind: "pod", RuntimeID: runtimeID, ApproverKind: "issue_assignee", ApproverIssue: str("LEGION-9"),
+		Thumbprint: "tp-" + runtimeID, PodToken: mintPodToken(t, issuer, key, "system:serviceaccount:legion:worker", runtimeID),
+	})
+	if err != nil {
+		t.Fatalf("Create(pod enrollment): %v", err)
+	}
+	return pod
+}
+
+// TestCreateHoldsNoPooledConnectionWhileOpeningAsk pins that Create holds no transaction, and so
+// no pooled connection, while Dispatch opens the ask.
+func TestCreateHoldsNoPooledConnectionWhileOpeningAsk(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	gated := &gatedOpener{entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	m.Dispatch = gated
+	done := make(chan error, 1)
+	var req Request
+	go func() {
+		var err error
+		req, err = m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+		done <- err
+	}()
+	awaitEntered(t, gated.entered, "CreateAsk")
+	acquired := m.Store.Pool.Stat().AcquiredConns()
+	close(gated.gate)
+	if err := <-done; err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if acquired != 0 {
+		t.Fatalf("%d pooled connections checked out while Dispatch opened the ask, want 0", acquired)
+	}
+	if req.State != "pending" || req.AskRef == nil || !strings.HasSuffix(*req.AskRef, "/ask/gated-ask-1") {
+		t.Fatalf("req = %+v, want pending with the opened ask recorded", req)
+	}
+	got, err := m.Get(ctx, req.ID)
+	if err != nil || got.AskRef == nil || *got.AskRef != *req.AskRef {
+		t.Fatalf("Get = %+v, %v, want the ask recorded on the row", got, err)
+	}
+}
+
+// TestCreateCancelsRequestWhoseAskCannotBeOpened pins that a Dispatch failure while opening the
+// ask leaves no half-made pending row: Create reports the failure and the row is cancelled by the
+// broker with its own audit row.
+func TestCreateCancelsRequestWhoseAskCannotBeOpened(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	gated := &gatedOpener{entered: make(chan struct{}, 1), gate: make(chan struct{}), err: errors.New("dispatch is down")}
+	close(gated.gate)
+	m.Dispatch = gated
+	if _, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", ""); err == nil || !strings.Contains(err.Error(), "dispatch is down") {
+		t.Fatalf("Create = %v, want the Dispatch failure", err)
+	}
+	var state, decidedBy string
+	var askID *string
+	if err := m.Store.Pool.QueryRow(ctx, `select state, decided_by, ask_id from requests where enrollment_id=$1`, enrA.ID).Scan(&state, &decidedBy, &askID); err != nil {
+		t.Fatalf("read the request row: %v", err)
+	}
+	if state != "cancelled" || decidedBy != "broker" || askID != nil {
+		t.Fatalf("row state=%s decided_by=%s ask_id=%v, want cancelled by broker with no ask", state, decidedBy, askID)
+	}
+	var audits int
+	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from audit where kind='request.cancelled' and actor='broker' and enrollment_id=$1`, enrA.ID).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("request.cancelled audit rows = %d, %v, want 1", audits, err)
+	}
+}
+
+// TestCancelUnopenedCancelsOnlyStrandedPendingRequests pins the sweep for a pending row whose ask
+// was never recorded: past the grace period it is cancelled and audited; a row still inside the
+// grace period (an ask being opened right now) and a row with an ask are left alone.
+func TestCancelUnopenedCancelsOnlyStrandedPendingRequests(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	stranded, fresh := uuid.NewString(), uuid.NewString()
+	for id, age := range map[string]string{stranded: "10 minutes", fresh: "0 seconds"} {
+		if _, err := m.Store.Pool.Exec(ctx, `insert into requests (id, enrollment_id, issue_key, reason, state, rules_version, lifetime_seconds, pending_expires_at, created_at)
+			values ($1,$2,'AGENTC-1','r','pending','v',60, now() + interval '1 hour', now() - $3::interval)`, id, enrA.ID, age); err != nil {
+			t.Fatalf("insert pending row: %v", err)
+		}
+	}
+	withAsk, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := m.Store.Pool.Exec(ctx, `update requests set created_at = now() - interval '10 minutes' where id=$1`, withAsk.ID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	n, err := m.CancelUnopened(ctx, time.Now())
+	if err != nil || n != 1 {
+		t.Fatalf("CancelUnopened = %d, %v, want 1", n, err)
+	}
+	for id, want := range map[string]string{stranded: "cancelled", fresh: "pending", withAsk.ID: "pending"} {
+		got, err := m.Get(ctx, id)
+		if err != nil || got.State != want {
+			t.Fatalf("request %s = %+v, %v, want %s", id, got, err, want)
+		}
+	}
+}
+
+// TestConcurrentIdenticalRequestsOpenOneAsk pins that two identical requests from one enrollment
+// racing each other open one Dispatch ask between them: the second waits on the first's row,
+// sees it, and coalesces onto it instead of opening its own.
+func TestConcurrentIdenticalRequestsOpenOneAsk(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	gated := &gatedOpener{entered: make(chan struct{}, 2), gate: make(chan struct{})}
+	m.Dispatch = gated
+	first := make(chan Request, 1)
+	go func() {
+		req, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "first", "", "")
+		if err != nil {
+			t.Errorf("Create(first): %v", err)
+		}
+		first <- req
+	}()
+	awaitEntered(t, gated.entered, "the first request's CreateAsk")
+	second := make(chan Request, 1)
+	go func() {
+		req, err := m.Create(ctx, enrA.ID.String(), []string{"DEEL_API_KEY"}, "second", "", "")
+		if err != nil {
+			t.Errorf("Create(second): %v", err)
+		}
+		second <- req
+	}()
+	var coalesced Request
+	select {
+	case coalesced = <-second:
+	case <-gated.entered:
+		close(gated.gate)
+		t.Fatal("the second identical request opened a Dispatch ask of its own")
+	case <-time.After(5 * time.Second):
+		close(gated.gate)
+		t.Fatal("the second identical request did not coalesce while the first was opening its ask")
+	}
+	close(gated.gate)
+	opened := <-first
+	if !coalesced.Coalesced || coalesced.ID != opened.ID {
+		t.Fatalf("second = %+v, want coalesced onto %s", coalesced, opened.ID)
+	}
+	if gated.calls != 1 {
+		t.Fatalf("CreateAsk calls = %d, want 1", gated.calls)
+	}
+}
+
+// TestValuesHoldsNoPooledConnectionWhileReadingSecrets pins that Values reads a grant's names into
+// memory before fetching the first value, so no cursor (and its pooled connection) stays open
+// across a Secrets Manager read.
+func TestValuesHoldsNoPooledConnectionWhileReadingSecrets(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	req, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
+	if err != nil || req.GrantID == nil {
+		t.Fatalf("Create = %+v, %v, want an automatic grant", req, err)
+	}
+	reader := gatedReader{Fake: m.Secrets.(secrets.Fake), entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	m.Secrets = reader
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := m.Values(ctx, *req.GrantID, enrA.ID.String())
+		done <- err
+	}()
+	awaitEntered(t, reader.entered, "the secret read")
+	acquired := m.Store.Pool.Stat().AcquiredConns()
+	close(reader.gate)
+	if err := <-done; err != nil {
+		t.Fatalf("Values: %v", err)
+	}
+	if acquired != 0 {
+		t.Fatalf("%d pooled connections checked out during the secret read, want 0", acquired)
+	}
+}
+
+// TestHumanRevokeIsLimitedToTheApproverOrOperator pins that a human may end only a grant they
+// approved or one whose enrollment they operate: any other signed-in human is refused and the
+// grant stays live, and login case never matters.
+func TestHumanRevokeIsLimitedToTheApproverOrOperator(t *testing.T) {
+	m, _, svc, enrA, _ := newFixture(t)
+	ctx := context.Background()
+
+	automatic, err := m.Create(ctx, enrA.ID.String(), []string{"AUTO_TOKEN"}, "need it", "", "")
+	if err != nil || automatic.GrantID == nil {
+		t.Fatalf("Create(automatic) = %+v, %v", automatic, err)
+	}
+	if err := m.RevokeGrant(ctx, *automatic.GrantID, Revoker{Login: "mallory"}); !errors.Is(err, ErrNotApprover) {
+		t.Fatalf("RevokeGrant(mallory) = %v, want ErrNotApprover", err)
+	}
+	if _, _, _, err := m.Values(ctx, *automatic.GrantID, enrA.ID.String()); err != nil {
+		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
+	}
+	if err := m.RevokeGrant(ctx, *automatic.GrantID, Revoker{Login: "SJawhar"}); err != nil {
+		t.Fatalf("RevokeGrant(the operator, other casing) = %v", err)
+	}
+
+	pod := podEnrollment(t, svc, "pod-revoke-approver")
+	pending, err := m.Create(ctx, pod.ID.String(), []string{"DEEL_API_KEY"}, "need it", "", "")
+	if err != nil {
+		t.Fatalf("Create(pod) = %v", err)
+	}
+	if _, err := m.ApplyAnswer(ctx, pending.ID, dispatch.Ask{ID: "ask-1", State: "answered",
+		Answer: &dispatch.Answer{User: "alice", Selected: []string{"Approve"}, At: time.Now()}}); err != nil {
+		t.Fatalf("ApplyAnswer: %v", err)
+	}
+	approved, err := m.Get(ctx, pending.ID)
+	if err != nil || approved.GrantID == nil {
+		t.Fatalf("Get = %+v, %v, want a grant", approved, err)
+	}
+	if err := m.RevokeGrant(ctx, *approved.GrantID, Revoker{Login: "sjawhar"}); !errors.Is(err, ErrNotApprover) {
+		t.Fatalf("RevokeGrant(a human who neither approved nor operates it) = %v, want ErrNotApprover", err)
+	}
+	if err := m.RevokeGrant(ctx, *approved.GrantID, Revoker{Login: "Alice"}); err != nil {
+		t.Fatalf("RevokeGrant(the approver) = %v", err)
+	}
+	var actor string
+	if err := m.Store.Pool.QueryRow(ctx, `select actor from audit where kind='grant.revoked' and grant_id=$1`, *approved.GrantID).Scan(&actor); err != nil || actor != "human:alice" {
+		t.Fatalf("grant.revoked actor = %q, %v, want human:alice", actor, err)
+	}
+}
+
+// withRules points m at a rules file holding yaml.
+func withRules(t *testing.T, m *Machine, yaml string) {
+	t.Helper()
+	path := t.TempDir() + "/rules.yaml"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("write rules: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	cur, err := rules.NewCurrent(ctx, rules.FileLoader{Path: path}, time.Hour, func(error) {})
+	if err != nil {
+		t.Fatalf("rules.NewCurrent: %v", err)
+	}
+	m.Rules = cur
+}
+
+// TestCoalescingComparesWholeNames pins that a request for the one name "PAIR_A,PAIR_B" is never
+// mistaken for a pending request for the two names PAIR_A and PAIR_B.
+func TestCoalescingComparesWholeNames(t *testing.T) {
+	m, opener, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	rule := `
+    source: dev1/agent-secrets/%s
+    owner: sjawhar
+    delivery: inject
+    max_lifetime_seconds: 3600
+    requesters:
+      - {kind: box, operator: sjawhar, decision: approval, approver: operator}
+`
+	withRules(t, m, "version: 1\nsecrets:\n  PAIR_A:"+fmt.Sprintf(rule, "a")+"  PAIR_B:"+fmt.Sprintf(rule, "b")+"  \"PAIR_A,PAIR_B\":"+fmt.Sprintf(rule, "ab"))
+	pair, err := m.Create(ctx, enrA.ID.String(), []string{"PAIR_A", "PAIR_B"}, "need both", "", "")
+	if err != nil || pair.State != "pending" {
+		t.Fatalf("Create(pair) = %+v, %v, want pending", pair, err)
+	}
+	joined, err := m.Create(ctx, enrA.ID.String(), []string{"PAIR_A,PAIR_B"}, "need the joined one", "", "")
+	if err != nil || joined.State != "pending" {
+		t.Fatalf("Create(joined) = %+v, %v, want pending", joined, err)
+	}
+	if joined.Coalesced || joined.ID == pair.ID || len(opener.calls) != 2 {
+		t.Fatalf("joined = %+v (asks opened %d), want its own request and ask, never the pair's", joined, len(opener.calls))
+	}
+}
+
+// TestAuditSurvivesControlCharactersInSecretNames pins that a caller-supplied secret name holding a
+// control character is written to the audit trail as a JSON string like any other: the request is
+// decided (denied, the name matching no rule) and audited, never failed.
+func TestAuditSurvivesControlCharactersInSecretNames(t *testing.T) {
+	m, _, _, enrA, _ := newFixture(t)
+	ctx := context.Background()
+	name := "BELL\aNAME\vTAB"
+	req, err := m.Create(ctx, enrA.ID.String(), []string{name}, "odd name", "", "")
+	if err != nil || req.State != "denied" {
+		t.Fatalf("Create = %+v, %v, want denied", req, err)
+	}
+	var recorded []string
+	if err := m.Store.Pool.QueryRow(ctx, `select array(select jsonb_array_elements_text(detail->'secrets')) from audit where kind='request.created' and request_id=$1`, req.ID).Scan(&recorded); err != nil {
+		t.Fatalf("read request.created audit row: %v", err)
+	}
+	if len(recorded) != 1 || recorded[0] != name {
+		t.Fatalf("audited secrets = %q, want [%q]", recorded, name)
 	}
 }

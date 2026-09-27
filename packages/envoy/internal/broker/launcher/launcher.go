@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sjawhar/envoy/internal/broker/dispatch"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
@@ -55,15 +56,29 @@ type Service struct {
 	Dispatch dispatchClient
 	Enroll   *enroll.Service
 	Project  string
+
+	// standing collapses concurrent Standing calls for one operator into one Dispatch lookup.
+	standing singleflight.Group
+}
+
+// Pending is an opened launcher-credential request as its launcher sees it.
+type Pending struct {
+	// ID is the opaque capability the launcher polls Read with.
+	ID string
+	// ConfirmationCode is shown both in the launcher's own terminal and in the Dispatch ask, so
+	// the approving human can tell the login they started from an identical-looking request
+	// anyone else could open on this unauthenticated route.
+	ConfirmationCode string
 }
 
 // Request opens a launcher-credential request: it finds or creates the operator's standing issue
 // (Standing), opens an Approve/Deny ask on it naming the host (and, for a service credential, the
-// service), and records a pending row keyed by the sha256 of a freshly minted opaque pending id —
-// the same "never store the bearer capability itself" shape enroll.Service uses for tokens. The
-// pending id is returned to the caller (the launcher CLI), which polls Read with it; nothing about
-// it identifies the eventual credential, so leaking a pending id before it is issued reveals
-// nothing but "someone can watch whether this specific request gets approved".
+// service) and a fresh confirmation code, and records a pending row keyed by the sha256 of a
+// freshly minted opaque pending id — the same "never store the bearer capability itself" shape
+// enroll.Service uses for tokens. The pending id is returned to the caller (the launcher CLI),
+// which polls Read with it; nothing about it identifies the eventual credential. No Postgres
+// connection is held across either Dispatch call: the row is written in one short transaction
+// once the ask exists.
 //
 // service, when non-nil and non-empty, requests a service credential (like the Legion daemon's
 // shared enrollment authority) rather than a personal one: the ask still opens on operator's own
@@ -75,45 +90,50 @@ type Service struct {
 // ask text that only ever mentions the host; every other use of service in this file
 // (launcherQuestion, the service column, and applyAsk's own defensive re-check) sees this same
 // normalized value.
-func (s *Service) Request(ctx context.Context, operator, host string, service *string) (string, error) {
+func (s *Service) Request(ctx context.Context, operator, host string, service *string) (Pending, error) {
 	if service != nil && *service == "" {
 		service = nil
 	}
+	operator = dispatch.CanonicalLogin(operator)
+	code, err := confirmationCode()
+	if err != nil {
+		return Pending{}, err
+	}
 	issueKey, err := s.Standing(ctx, operator)
 	if err != nil {
-		return "", fmt.Errorf("find standing issue: %w", err)
+		return Pending{}, fmt.Errorf("find standing issue: %w", err)
 	}
-	ask, err := s.Dispatch.CreateAsk(ctx, issueKey, launcherQuestion(host, service), []dispatch.Option{
+	ask, err := s.Dispatch.CreateAsk(ctx, issueKey, launcherQuestion(host, service, code), []dispatch.Option{
 		{Label: "Approve", Description: "Issue this launcher credential."},
 		{Label: "Deny", Description: "Refuse; the launcher is told the request was denied."},
 	}, "med")
 	if err != nil {
-		return "", fmt.Errorf("open Dispatch ask: %w", err)
+		return Pending{}, fmt.Errorf("open Dispatch ask: %w", err)
 	}
 	pendingID, err := randomToken()
 	if err != nil {
-		return "", err
+		return Pending{}, err
 	}
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
-		return "", err
+		return Pending{}, err
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `insert into launcher_credential_requests
 		(pending_id_hash, operator, host, service, ask_id, ask_edited_at, state, expires_at)
 		values ($1,$2,$3,$4,$5,$6,'pending',$7)`,
 		hashPendingID(pendingID), operator, host, service, ask.ID, ask.EditedAt, time.Now().Add(pendingTTL)); err != nil {
-		return "", err
+		return Pending{}, err
 	}
 	if err := auditLauncher(ctx, tx, "launcher_request.created", "launcher:"+host, auditDetail(map[string]any{
-		"operator": operator, "host": host, "service": service, "ask_id": ask.ID,
+		"operator": operator, "host": host, "service": service, "ask_id": ask.ID, "confirmation_code": code,
 	})); err != nil {
-		return "", err
+		return Pending{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return "", err
+		return Pending{}, err
 	}
-	return pendingID, nil
+	return Pending{ID: pendingID, ConfirmationCode: code}, nil
 }
 
 // Read answers the launcher's poll: "pending", "denied", "expired", or "issued" with the raw
@@ -327,49 +347,65 @@ func (s *Service) expirePending(ctx context.Context, now time.Time) error {
 }
 
 // Standing finds operator's standing secrets issue (title "Secret requests: <login>", labeled
-// agent-secrets) in s.Project, creating it once when it doesn't exist yet. It is a method value,
-// not a struct field, so Task 14's requests.Machine.StandingIssue field (func(ctx, operator
-// string) (string, error)) can be wired directly as ls.Standing.
+// agent-secrets) in s.Project, creating it once when it doesn't exist yet. requests.Machine's
+// StandingIssue field is wired to this method.
 //
-// Dispatch's issue creation has no unique constraint on (project, title, label), so two
-// concurrent Request calls for the same never-before-seen operator could each see zero matching
-// issues and each create one. A Postgres advisory transaction lock keyed on project+operator
-// (the same pattern internal/dispatch/api/issue_rank.go's lockProjectRankAllocation uses for its
-// own find/allocate race) serializes concurrent broker-process callers around the whole
-// list-then-create pair; it protects no row of this transaction's own, so the transaction is held
-// open across the Dispatch HTTP calls purely to hold the lock; the tests recreate that race with a
-// fake ListIssues delay to prove exactly one issue gets created.
+// It touches no Postgres connection: every step is a Dispatch call, and a connection held across
+// one (as a lock would be) lets a flood of slow calls on the unauthenticated launcher route drain
+// the broker's whole pool. Dispatch's issue creation has no unique constraint on (project, title,
+// label), so concurrent callers for the same never-before-seen operator could each see zero
+// matches and each create one; s.standing collapses concurrent callers for one operator in this
+// process into one list-then-create. The shared call is detached from the first caller's
+// cancellation, so one caller going away cannot fail the others; the Dispatch client's own
+// timeout bounds it.
 func (s *Service) Standing(ctx context.Context, operator string) (string, error) {
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('launcher-standing:' || $1))`, s.Project+":"+operator); err != nil {
-		return "", fmt.Errorf("lock standing issue allocation: %w", err)
-	}
-	title := "Secret requests: " + operator
-	issues, err := s.Dispatch.ListIssues(ctx, s.Project, standingLabel)
-	if err != nil {
-		return "", err
-	}
-	for _, issue := range issues {
-		if issue.Title == title {
-			return issue.Key, tx.Commit(ctx)
+	operator = dispatch.CanonicalLogin(operator)
+	shared := context.WithoutCancel(ctx)
+	key, err, _ := s.standing.Do(s.Project+"\x00"+operator, func() (any, error) {
+		title := "Secret requests: " + operator
+		issues, err := s.Dispatch.ListIssues(shared, s.Project, standingLabel)
+		if err != nil {
+			return "", err
 		}
-	}
-	key, err := s.Dispatch.CreateIssue(ctx, s.Project, title, &operator, []string{standingLabel})
+		for _, issue := range issues {
+			if issue.Title == title {
+				return issue.Key, nil
+			}
+		}
+		return s.Dispatch.CreateIssue(shared, s.Project, title, &operator, []string{standingLabel})
+	})
 	if err != nil {
 		return "", err
 	}
-	return key, tx.Commit(ctx)
+	return key.(string), nil
 }
 
-func launcherQuestion(host string, service *string) string {
+func launcherQuestion(host string, service *string, code string) string {
+	subject := "a launcher credential for host " + host
 	if service != nil && *service != "" {
-		return fmt.Sprintf("Issue a launcher credential for service %q on host %s?", *service, host)
+		subject = fmt.Sprintf("a launcher credential for service %q on host %s", *service, host)
 	}
-	return fmt.Sprintf("Issue a launcher credential for host %s?", host)
+	return fmt.Sprintf("Issue %s? Approve only if you started this login yourself and your terminal shows confirmation code %s: anyone can open a request that reads like this one.", subject, code)
+}
+
+// confirmationAlphabet has 32 symbols, none easily confused with another (no 0/O, no 1/I), so a
+// random byte maps onto it without bias.
+const confirmationAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+// confirmationCode is eight random symbols from confirmationAlphabet as XXXX-XXXX.
+func confirmationCode() (string, error) {
+	raw := make([]byte, 8)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	code := make([]byte, 0, 9)
+	for i, b := range raw {
+		if i == 4 {
+			code = append(code, '-')
+		}
+		code = append(code, confirmationAlphabet[int(b)%len(confirmationAlphabet)])
+	}
+	return string(code), nil
 }
 
 func sameEdit(a, b *string) bool {

@@ -163,6 +163,12 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 		in.ID, in.Kind, in.RuntimeID, in.Operator, in.ApproverKind, in.ApproverIssue, in.Thumbprint, in.SessionID, cred.ID, in.LeaseExpires)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		// The failed insert aborted tx, which still holds its pooled connection. Release it before
+		// the lookup below asks the pool for one: holding one connection while waiting for a
+		// second is how enough concurrent retries of one enrollment deadlock the whole pool.
+		if err := tx.Rollback(ctx); err != nil {
+			return Enrollment{}, false, err
+		}
 		if s.testConflictHook != nil {
 			s.testConflictHook()
 		}

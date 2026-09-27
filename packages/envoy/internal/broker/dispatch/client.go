@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -90,6 +91,14 @@ func AsError(err error) (*Error, bool) {
 	var dispatchErr *Error
 	ok := errors.As(err, &dispatchErr)
 	return dispatchErr, ok
+}
+
+// CanonicalLogin is Dispatch's own comparison form of a GitHub login (internal/dispatch/api's
+// canonicalLogin): trimmed and lowercased. Dispatch stores assignees and token owners this way
+// but records an answering human's login with the display casing GitHub gave it, so every login
+// comparison the broker makes goes through this form on both sides.
+func CanonicalLogin(login string) string {
+	return strings.ToLower(strings.TrimSpace(login))
 }
 
 func New(baseURL, token string, client *http.Client) *Client {

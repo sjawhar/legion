@@ -406,11 +406,12 @@ func cmdLauncher(args []string, stdout, stderr io.Writer) int {
 
 	c := newClient(base)
 	ctx := context.Background()
-	pendingID, err := c.RequestLauncherCredential(ctx, *operator, *host, servicePtr)
+	pendingID, code, err := c.RequestLauncherCredential(ctx, *operator, *host, servicePtr)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
 		return 1
 	}
+	fmt.Fprintf(stdout, "confirmation code: %s\napprove the Dispatch ask on %s's standing secrets issue only if it shows this code\n", code, *operator)
 	backoff := 2 * time.Second
 	for {
 		state, token, err := c.ReadLauncherCredential(ctx, pendingID)
@@ -420,6 +421,12 @@ func cmdLauncher(args []string, stdout, stderr io.Writer) int {
 		}
 		switch state {
 		case "issued":
+			if token == "" {
+				// The one-time token was already handed to another reader of this pending id:
+				// whoever holds it, it is not this process, so this login did not succeed.
+				fmt.Fprintln(stderr, "agent-secrets launcher login: the credential was issued but its one-time token was already collected by another reader; this login did NOT succeed and nothing was written. Revoke that launcher credential and log in again.")
+				return 1
+			}
 			if err := os.MkdirAll(filepath.Dir(*out), 0o700); err != nil {
 				fmt.Fprintf(stderr, "agent-secrets launcher login: %v\n", err)
 				return 1
