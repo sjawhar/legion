@@ -519,20 +519,20 @@ every daemon gets it and restarts, and each boot line must name the daemon user;
 `legion-pane` seed written. `legion-pane` is never granted the daemon's subjects. On NATS the
 TypeScript daemon uses exactly these subjects, verified live against a server granting only them:
 it subscribes `notifications.slack.*.*.mention` and
-`notifications.envoy.exceptions.notifications.role.>` (`events.ts:1007-1012`) and `_INBOX.>` (its
+`notifications.envoy.exceptions.notifications.role.>` (`startEventPump`) and `_INBOX.>` (its
 request replies and pull deliveries). For its two durable pull consumers on `ENVOY_NOTIFICATIONS`,
-`legion-<project>-github` and `legion-<primary project key>-dispatch` (`events.ts:991-1006`), it
-publishes `$JS.API.INFO` (the API check every `jetstreamManager()` makes, `nats-transport.ts`),
+`legion-<project>-github` and `legion-<primary project key>-dispatch` (`startEventPump`), it
+publishes `$JS.API.INFO` (the API check each `jetstreamManager()` call in `consumeDurable` makes),
 `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.DURABLE.CREATE.ENVOY_NOTIFICATIONS.>`
 (nats.js 2.29.3 creates a consumer with `filter_subjects` there),
 `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>`; it never uses
 `$JS.API.STREAM.INFO` or `$JS.API.CONSUMER.CREATE`, which the Go daemon uses instead. It publishes
 `legion.ctl.>`: a request on `legion.ctl.<tree>.<generation>` reaches a root architect
-(`processes.ts:3444-3445`; reclaim-architect, shutdown). It makes no role publishes on NATS:
-`publishRole` goes to the Envoy listener over HTTP (`index.ts:570-575`). A clean boot line does
-not prove the `legion.ctl` grant, since the server refuses that publish only when the daemon first
-sends a control directive: the rollout's check sends one to a live root and confirms it is
-acknowledged with no refusal line. Reversed, a daemon holding only the `legion-pane`
+(`ProcessManager.controlDirective`; reclaim-architect, shutdown). It makes no role publishes on
+NATS: the `publishRole` dependency `index.ts` hands the process manager posts to the Envoy listener
+over HTTP. A clean boot line does not prove the `legion.ctl` grant, since the server refuses that
+publish only when the daemon first sends a control directive: the rollout's check sends one to a
+live root and confirms it is acknowledged with no refusal line. Reversed, a daemon holding only the `legion-pane`
 seed connects as `legion-pane` and each refused subject logs the error line above. nats.js drops a
 subscription the server refuses and never sends it again, so after granting a missing subject,
 restart the daemon.
