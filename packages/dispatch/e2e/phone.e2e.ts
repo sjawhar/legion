@@ -12,6 +12,7 @@ import {
   createProjectDocument,
   editArtifact,
   getAsk,
+  patchIssue,
 } from "./api";
 import { actionBar, barAction, documentEditor, selectEditorText } from "./editor";
 import { insertExternalLink, resetDatabase } from "./seed";
@@ -443,7 +444,7 @@ async function expectEllipsis(link: Locator): Promise<void> {
   }
 }
 
-test("a long name ends in an ellipsis wherever a link truncates it", async ({
+test("a long name ends in an ellipsis wherever a link or control truncates it", async ({
   browser,
 }, testInfo) => {
   const longName =
@@ -451,8 +452,10 @@ test("a long name ends in an ellipsis wherever a link truncates it", async ({
   const longQuestion =
     "Which checkpoint gates the sandbox tree before the daemon restarts mid-tree: the fence, the node release, or the linger close that follows both of them?";
   const longUrl = `https://docs.example.com/runbooks/legion/go-coordinator/stage-4b/${"sandbox-tree-".repeat(4)}checkpoints`;
+  const longRoute = "role:merge-queue-controller-for-legion";
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Stage 4b runbook" });
+  await patchIssue(issue.key, { route: longRoute });
   await createIssueArtifact(issue.key, { content: "# Runbook\n", name: longName });
   const document = await createProjectDocument("CORE", { content: "# Runbook\n", name: longName });
   await createArtifactAsk(
@@ -495,12 +498,21 @@ test("a long name ends in an ellipsis wherever a link truncates it", async ({
       return { kind: kind.getBoundingClientRect().top, time: time.getBoundingClientRect().top };
     });
     expect(Math.abs(details.kind - details.time)).toBeLessThanOrEqual(4);
+    // The cut name is still readable: the full name is the truncated text's title.
+    await expect(row.getByRole("link", { name: longName }).locator("[title]")).toHaveAttribute(
+      "title",
+      longName
+    );
 
     await page.goto(`/issues/${issue.key}/artifacts`);
-    await expectEllipsis(page.getByRole("link", { exact: true, name: longName }));
+    const artifactLink = page.getByRole("link", { exact: true, name: longName });
+    await expectEllipsis(artifactLink);
+    await expect(artifactLink.locator("[title]")).toHaveAttribute("title", longName);
 
     await page.goto("/?view=everyone");
-    await expectEllipsis(page.locator("[data-inbox-owner]", { hasText: longName }));
+    const inboxOwner = page.locator("[data-inbox-owner]", { hasText: longName });
+    await expectEllipsis(inboxOwner);
+    await expect(inboxOwner.locator("[title]")).toHaveAttribute("title", `CORE · ${longName}`);
 
     await page.goto(`/issues/${issue.key}`);
     await expectEllipsis(page.getByRole("link", { name: longUrl }));
@@ -509,6 +521,8 @@ test("a long name ends in an ellipsis wherever a link truncates it", async ({
         .getByRole("navigation", { name: "Open decisions" })
         .getByRole("link", { name: longQuestion })
     );
+    // A button that is inline-flex by its own classes is the same case as a link below 1280 px.
+    await expectEllipsis(page.locator(`button[title="${longRoute}"]`));
   } finally {
     await context.close();
   }

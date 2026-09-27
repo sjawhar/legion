@@ -89,7 +89,7 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
         href={href}
         title={link.url}
       >
-        <TruncatedText>{link.url}</TruncatedText>
+        <TruncatedText title={null}>{link.url}</TruncatedText>
       </a>
     );
   }
@@ -121,9 +121,9 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
       }
     >
       <span className="shrink-0 font-medium">{number}</span>
-      <span className="max-w-[18ch] truncate sm:max-w-[32ch]">
+      <TruncatedText className="max-w-[18ch] sm:max-w-[32ch]" title={null}>
         {reference === undefined ? repository : reference.title}
-      </span>
+      </TruncatedText>
       {state === undefined ? null : (
         <span
           className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${badgeLow.bg} ${badgeLow.text}`}

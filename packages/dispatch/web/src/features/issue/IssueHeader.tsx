@@ -17,6 +17,7 @@ import { userStateQuery } from "../../api/queries";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import { QueryError } from "../../components/QueryError";
+import { TruncatedText } from "../../components/TruncatedText";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   badgePrimary,
@@ -480,7 +481,9 @@ export function IssueHeader({
                 title={drafts.route === "" ? undefined : drafts.route}
                 type="button"
               >
-                {drafts.route === "" ? "No route" : drafts.route}
+                <TruncatedText title={null}>
+                  {drafts.route === "" ? "No route" : drafts.route}
+                </TruncatedText>
               </button>
             </div>
           )}

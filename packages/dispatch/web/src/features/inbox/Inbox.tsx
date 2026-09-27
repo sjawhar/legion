@@ -200,7 +200,7 @@ function InboxItem({
                 {...referenceTriggerProps({ key: owner, kind: "issue" })}
               >
                 <span className="shrink-0 font-semibold">{owner}</span>
-                <span className="truncate">{title}</span>
+                <TruncatedText>{title}</TruncatedText>
               </Link>
             )
           ) : (
