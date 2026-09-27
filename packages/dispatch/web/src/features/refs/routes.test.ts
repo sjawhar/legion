@@ -13,6 +13,7 @@ import {
   parseInboxSearch,
   parseIssuePath,
   parseProjectPath,
+  routeHasMargin,
 } from "./routes";
 
 function browserPath(path: string): string {
@@ -297,4 +298,35 @@ test("inbox view round-trips through the query string and ignores unknown views"
     view: "mine",
   });
   expect(parseInboxSearch("?view=theirs")).toEqual({});
+});
+
+// The shell reserves its right gutter from this, and `features/margin/Margin.tsx` renders from
+// it, so the two cannot disagree: an 80 px gutter beside a rail that is not there is exactly
+// what two separate answers produced.
+test("routeHasMargin is true for issue and project-document routes and false for the rest", () => {
+  const withMargin = [
+    "/issues/CORE-1",
+    "/issues/CORE-1/conversation",
+    "/issues/CORE-1/children",
+    "/issues/CORE-1/artifacts",
+    "/issues/CORE-1/artifacts/notes",
+    "/projects/CORE/documents/design-language",
+  ];
+  const withoutMargin = [
+    "/",
+    "/agents",
+    "/agents/session-1/live",
+    "/settings",
+    "/projects/CORE",
+    "/projects/CORE/issues",
+    "/projects/CORE/documents",
+    "/projects/CORE/architecture",
+    "/nope",
+  ];
+  for (const pathname of withMargin) {
+    expect([pathname, routeHasMargin(pathname)]).toEqual([pathname, true]);
+  }
+  for (const pathname of withoutMargin) {
+    expect([pathname, routeHasMargin(pathname)]).toEqual([pathname, false]);
+  }
 });
