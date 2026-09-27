@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..25401246a6df9701cd00a4d6a4c267baf8331cf5 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..192085982e241e239a37779bb49da8b0d7dad0e7 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,9 @@
@@ -13,11 +13,16 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..25401246a6df9701cd00a4d6a4c267ba
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
  function isPureText(content) {
-@@ -24,6 +26,112 @@ function withMeta(plugin, meta) {
+@@ -24,6 +26,121 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
-+//#region legion: a pasted plain-text slice keeps its isolating blocks closed where they fit
++//#region legion: a paste keeps typed blocks and table cells whole
++// A paste that would split the caret's isolating block (an ask's question, a callout) is flattened
++// into the caret's text, and so is one with the caret in a table cell's text. Flattened text takes
++// the caret's marks only when the paste is one unmarked line, as an unflattened paste does.
++// Clipboard HTML that is only a copy of cells is a grid paste from the caret's cell, as a paste onto
++// selected cells is (tab-separated text included), each cell retyped for the row it lands in.
 +function isolatingAncestorType($pos) {
 +	for (let depth = $pos.depth; depth > 0; depth--) {
 +		const type = $pos.node(depth).type;
@@ -58,8 +63,13 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..25401246a6df9701cd00a4d6a4c267ba
 +	});
 +	return new Slice(Fragment.from(inline), 0, 0);
 +}
-+function pastableSlice(state, slice, schema) {
-+	return splitsIsolatingAncestor(state, slice) ? inlineSlice(slice.content, schema) : slice;
++function pasteFlattened(view, slice, schema) {
++	if (isTextOnlySlice(slice)) return dispatchPasteSlice(view, slice);
++	view.dispatch(view.state.tr.replaceSelection(inlineSlice(slice.content, schema)));
++	return true;
++}
++function pasteKeepingIsolating(view, slice, schema) {
++	return splitsIsolatingAncestor(view.state, slice) ? pasteFlattened(view, slice, schema) : dispatchPasteSlice(view, slice);
 +}
 +function tsvCells(text, schema) {
 +	const { cell, row } = tableNodeTypes(schema);
@@ -117,16 +127,15 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..25401246a6df9701cd00a4d6a4c267ba
 +		__insertCells(state, view.dispatch, rect.tableStart, rect, typedCells(cells, rect));
 +		return true;
 +	}
-+	const content = html.length === 0 ? parsePlainText(text)?.content : slice.content;
-+	if (!content) return false;
-+	view.dispatch(state.tr.replaceSelection(inlineSlice(content, schema)).scrollIntoView());
-+	return true;
++	const pasted = html.length === 0 ? parsePlainText(text) : slice;
++	if (!pasted) return false;
++	return pasteFlattened(view, pasted, schema);
 +}
 +//#endregion
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -40,9 +148,15 @@ function dispatchPasteSlice(view, slice) {
+@@ -40,9 +157,15 @@ function dispatchPasteSlice(view, slice) {
  }
  var clipboard = $prose((ctx) => {
  	const schema = ctx.get(schemaCtx);
@@ -142,7 +151,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..25401246a6df9701cd00a4d6a4c267ba
  		transformPastedHTML: (html, view) => {
  			const prevTransform = prev.transformPastedHTML;
  			if (prevTransform) html = prevTransform(html, view);
-@@ -58,7 +172,6 @@ var clipboard = $prose((ctx) => {
+@@ -58,7 +181,6 @@ var clipboard = $prose((ctx) => {
  		key,
  		props: {
  			handlePaste: (view, event, preProcessedSlice) => {
@@ -150,12 +159,12 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..25401246a6df9701cd00a4d6a4c267ba
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -77,13 +190,13 @@ var clipboard = $prose((ctx) => {
+@@ -77,13 +199,13 @@ var clipboard = $prose((ctx) => {
  				}
  				const html = clipboardData.getData("text/html");
  				if (html.length === 0 && text.length === 0) return false;
 -				if (html.length > 0 && preProcessedSlice) return dispatchPasteSlice(view, preProcessedSlice);
-+				if (html.length > 0 && preProcessedSlice) return dispatchPasteSlice(view, pastableSlice(view.state, preProcessedSlice, schema));
++				if (html.length > 0 && preProcessedSlice) return pasteKeepingIsolating(view, preProcessedSlice, schema);
  				const domParser = DOMParser.fromSchema(schema);
  				let dom;
  				if (html.length === 0) {
@@ -164,7 +173,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..25401246a6df9701cd00a4d6a4c267ba
 -					dom = DOMSerializer.fromSchema(schema).serializeFragment(slice.content);
 +					const opened = parsePlainText(text);
 +					if (!opened) return false;
-+					return dispatchPasteSlice(view, pastableSlice(view.state, Slice.maxOpen(opened.content, false), schema));
++					return pasteKeepingIsolating(view, Slice.maxOpen(opened.content, false), schema);
  				} else {
  					const template = document.createElement("template");
  					template.innerHTML = html;
