@@ -57,15 +57,27 @@ type DispatchArtifact struct {
 
 func (DispatchArtifact) isFact() {}
 
-// DispatchObserver is told about every message the Dispatch consumer delivers, decoded into a
-// fact or not, terminated as poison or applied: intake calls it once per delivery, outside any
-// fact's own transaction, so a caller (admission) can track its own consumer-position bookkeeping
-// — how many more deliveries a boot read is still owed before a hold it placed releases — without
-// every routine Dispatch event (a comment, an ask, a claim) paying for a transaction and the
-// global fact lock the way a fact-producing one does.
+// DispatchObserver reports, without any I/O of its own, whether a caller (admission) currently
+// holds anything back waiting for the Dispatch consumer to catch up to a boot read's target
+// stream position. Intake calls it once after every message the Dispatch consumer delivers —
+// decoded into a fact or not, terminated as poison or applied — so it can skip reading the
+// consumer's own position and applying a synthetic DispatchConsumerPosition fact once nothing is
+// held, the cost that check would otherwise add to every routine Dispatch event.
 type DispatchObserver interface {
-	NoteDelivery()
+	Held() bool
 }
+
+// DispatchConsumerPosition is a synthesized report of the Dispatch consumer's own position,
+// applied by intake through ApplyFact after a delivery while something is held — never decoded
+// from a real Dispatch event. Admission is the only handler that acts on it: it releases every
+// hold whose target stream sequence the ack floor has reached, or whose project's consumer has
+// nothing left pending or unacknowledged to reach it with, and promotes in the same transaction.
+type DispatchConsumerPosition struct {
+	AckFloorStream int64
+	Idle           bool
+}
+
+func (DispatchConsumerPosition) isFact() {}
 
 // PullRequestOpened registers a pull request whose branch or body identifies a Dispatch issue.
 type PullRequestOpened struct {

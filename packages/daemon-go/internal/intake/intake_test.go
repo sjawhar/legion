@@ -974,22 +974,26 @@ func TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder(t *testing.T) {
 	}
 }
 
-// The Dispatch consumer's every delivery reaches a DispatchObserver, decoded into a fact or not:
-// intake calls it once for a real issue.updated (a fact) and once for a comment (none), never for
-// the GitHub consumer's own delivery of an unrelated event.
-func TestConsumeNotesEveryDispatchDeliveryRegardlessOfFact(t *testing.T) {
+// The Dispatch consumer's every delivery checks a DispatchObserver's Held, decoded into a fact or
+// not: while held, the position check applies a synthetic DispatchConsumerPosition fact through
+// the same handlers every other fact reaches; while not held, nothing is checked and no such fact
+// is ever applied - and never for the GitHub consumer's own delivery either way.
+func TestConsumeAppliesDispatchConsumerPositionOnlyWhileHeld(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
 	js, _ := testJetStream(t)
 	spec := consumerSpec(&lockedBuffer{})
-	observer := &deliveryCounter{}
+	observer := &heldStub{}
+	positions := &positionRecorder{}
 	consumers, err := OpenConsumers(context.Background(), js, spec)
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- consumers.Run(ctx, pool, observer, writeHandler("applied", nil)) }()
+	go func() {
+		done <- consumers.Run(ctx, pool, observer, writeHandler("applied", nil), positions.handler())
+	}()
 	defer func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -1001,27 +1005,53 @@ func TestConsumeNotesEveryDispatchDeliveryRegardlessOfFact(t *testing.T) {
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.comment.created", envelopeJSON(t, "dispatch-comment", "dispatch",
 		`{"id":2,"issue_key":"CAPTURE-3","seq":9,"notify":true,"type":"comment.created","payload":{"body":"hi"}}`))
 	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
-
-	testwait.Eventually(t, "both Dispatch deliveries noted", func() bool { return observer.count() == 2 })
+	testwait.Eventually(t, "the Dispatch issue.updated applied", func() bool { return len(writeHandlers(t, pool)) == 1 })
 	time.Sleep(3 * spec.AckWait)
-	if got := observer.count(); got != 2 {
-		t.Fatalf("Dispatch deliveries noted = %d, want exactly 2 (never the GitHub one)", got)
+	if got := positions.count(); got != 0 {
+		t.Fatalf("Dispatch consumer positions applied while not held = %d, want 0", got)
 	}
+
+	observer.setHeld(true)
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.comment.created", envelopeJSON(t, "dispatch-comment", "dispatch",
+		`{"id":3,"issue_key":"CAPTURE-3","seq":10,"notify":true,"type":"comment.created","payload":{"body":"bye"}}`))
+	testwait.Eventually(t, "a Dispatch consumer position applied once held", func() bool { return positions.count() > 0 })
 }
 
-type deliveryCounter struct {
+type heldStub struct {
+	mu   sync.Mutex
+	held bool
+}
+
+func (h *heldStub) Held() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.held
+}
+
+func (h *heldStub) setHeld(v bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.held = v
+}
+
+type positionRecorder struct {
 	mu sync.Mutex
 	n  int
 }
 
-func (d *deliveryCounter) NoteDelivery() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.n++
+func (p *positionRecorder) handler() Handler {
+	return handlerFunc(func(_ context.Context, _ pgx.Tx, fact Fact) (Result, error) {
+		if _, ok := fact.(DispatchConsumerPosition); ok {
+			p.mu.Lock()
+			p.n++
+			p.mu.Unlock()
+		}
+		return Result{}, nil
+	})
 }
 
-func (d *deliveryCounter) count() int {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.n
+func (p *positionRecorder) count() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.n
 }

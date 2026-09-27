@@ -233,21 +233,26 @@ func (w *workflowRuntime) recordedIssue(ctx context.Context, key string) (*recor
 // reconcile takes Dispatch's bounded boot read to admission. Only admission acts on a snapshot:
 // a move a human made while the daemon was down carries its own event, which the durable stream
 // consumer still holds and delivers with the actor that made it, so nothing here re-derives one.
-// The consumer's own backlog is read first, the same ordering OpenConsumers already keeps between
-// opening it and reading this listing, so a record the listing shows behind the log is held only
-// until the consumer has delivered that many more messages — never for a specific one, which may
-// never itself carry any fact admission would otherwise see.
+// The listing is read first, then the notification stream's own current position (target), then
+// the Dispatch consumer's ack floor: a message published between the listing and target would
+// land in the listing but go uncounted by target, and reading the consumer's own position last
+// catches it up as far as this call can before deciding what a record behind target must still
+// wait for.
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
-	backlog, err := w.consumers.DispatchPending(ctx)
-	if err != nil {
-		return fmt.Errorf("read Dispatch consumer backlog: %w", err)
-	}
 	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, []string{"todo", "in_progress", "testing", "needs_review", "retro"})
 	if err != nil {
 		return fmt.Errorf("list Dispatch issues for admission: %w", err)
 	}
+	target, err := w.consumers.DispatchTarget(ctx)
+	if err != nil {
+		return fmt.Errorf("read notification stream target: %w", err)
+	}
+	ackFloor, idle, err := w.consumers.DispatchAckFloor(ctx)
+	if err != nil {
+		return fmt.Errorf("read Dispatch consumer position: %w", err)
+	}
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		return w.admission.Reconcile(ctx, tx, issues, backlog)
+		return w.admission.Reconcile(ctx, tx, issues, target, ackFloor, idle)
 	}); err != nil {
 		return fmt.Errorf("reconcile admission: %w", err)
 	}

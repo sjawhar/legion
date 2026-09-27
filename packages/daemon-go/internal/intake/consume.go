@@ -37,6 +37,7 @@ type ConsumerSpec struct {
 // daemon whose stream is missing refuses to boot instead of booting with no intake.
 type Consumers struct {
 	spec     ConsumerSpec
+	stream   jetstream.Stream
 	dispatch jetstream.Consumer
 	github   jetstream.Consumer
 }
@@ -75,7 +76,7 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
-	return &Consumers{spec: spec, dispatch: dispatch, github: github}, nil
+	return &Consumers{spec: spec, stream: stream, dispatch: dispatch, github: github}, nil
 }
 
 // openConsumer updates the durable consumer config names, keeping the start position it was created
@@ -94,17 +95,33 @@ func openConsumer(ctx context.Context, stream jetstream.Stream, config jetstream
 	return stream.UpdateConsumer(ctx, config)
 }
 
-// DispatchPending is the count of matching messages the Dispatch consumer has not yet delivered,
-// read fresh from JetStream. Boot reads it before Reconcile's own Dispatch listing, the same
-// ordering OpenConsumers already keeps between opening the consumer and reading that listing, so
-// the count taken here is at least the backlog the listing's snapshot needs the stream to still
-// deliver.
-func (c *Consumers) DispatchPending(ctx context.Context) (int64, error) {
+// DispatchTarget is the notification stream's own current last sequence, read fresh from
+// JetStream. Boot reads it after Reconcile's own Dispatch listing (not before: a message
+// published between an earlier read and the listing would be in the listing but not counted),
+// so any record the listing shows behind Dispatch's log is caught up only once the Dispatch
+// consumer's ack floor reaches this position — a stream position, not a per-issue or per-message
+// count, so it needs no correction for redelivery, a nak, or messages the consumer's filter never
+// matches.
+func (c *Consumers) DispatchTarget(ctx context.Context) (int64, error) {
+	info, err := c.stream.Info(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read notification stream info: %w", err)
+	}
+	return int64(info.State.LastSeq), nil
+}
+
+// DispatchAckFloor is the Dispatch consumer's own current ack floor stream sequence — the point
+// before which every matching message is acknowledged, redeliveries and naks included — and
+// whether it has nothing left pending or unacknowledged at all. The notification stream also
+// carries GitHub subjects the Dispatch consumer's filter never matches, so a target set past the
+// consumer's own last matching message would otherwise never be reached by the ack floor alone;
+// idle covers that case.
+func (c *Consumers) DispatchAckFloor(ctx context.Context) (ackFloorStream int64, idle bool, err error) {
 	info, err := c.dispatch.Info(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("read Dispatch consumer info: %w", err)
+		return 0, false, fmt.Errorf("read Dispatch consumer info: %w", err)
 	}
-	return int64(info.NumPending), nil
+	return int64(info.AckFloor.Stream), info.NumPending == 0 && info.NumAckPending == 0, nil
 }
 
 // Run consumes both durable consumers until ctx ends, and returns the error of either one that
@@ -124,7 +141,7 @@ func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, dispatchObserve
 
 func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec ConsumerSpec, pool *pgxpool.Pool, observer DispatchObserver, handlers []Handler) error {
 	consuming, err := consumer.Consume(func(message jetstream.Msg) {
-		consumeMessage(ctx, message, spec, pool, observer, handlers)
+		consumeMessage(ctx, message, consumer, spec, pool, observer, handlers)
 	})
 	if err != nil {
 		return err
@@ -142,9 +159,9 @@ func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec Cons
 	}
 }
 
-func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, observer DispatchObserver, handlers []Handler) {
+func consumeMessage(ctx context.Context, message jetstream.Msg, consumer jetstream.Consumer, spec ConsumerSpec, pool *pgxpool.Pool, observer DispatchObserver, handlers []Handler) {
 	if observer != nil {
-		defer observer.NoteDelivery()
+		defer notePosition(ctx, consumer, pool, spec, observer, handlers)
 	}
 	decoded, err := decodeMessage(message.Subject(), spec.Project, spec.Repositories, message.Data())
 	if err != nil {
@@ -179,6 +196,29 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		)
 	}
 	ackMessage(spec.Logger, message)
+}
+
+// notePosition applies a synthetic DispatchConsumerPosition fact through ApplyFact — a real
+// transaction under the fact lock, so a release it unblocks is promoted in the same commit — with
+// the Dispatch consumer's current ack floor and idle state, but only while the observer holds
+// something back: reading consumer info costs a JetStream call, paid only while a hold exists.
+// The event id keys on the values themselves, so repeated checks that find the same position
+// (ack floor unmoved, still not idle) are idempotent no-ops, not wasted transactions.
+func notePosition(ctx context.Context, consumer jetstream.Consumer, pool *pgxpool.Pool, spec ConsumerSpec, observer DispatchObserver, handlers []Handler) {
+	if !observer.Held() {
+		return
+	}
+	info, err := consumer.Info(ctx)
+	if err != nil {
+		spec.Logger.Error("read Dispatch consumer info for a held release", "error", err)
+		return
+	}
+	ackFloor := int64(info.AckFloor.Stream)
+	idle := info.NumPending == 0 && info.NumAckPending == 0
+	eventID := fmt.Sprintf("dispatch-position:%d:%t", ackFloor, idle)
+	if _, err := ApplyFact(ctx, pool, "dispatch", eventID, DispatchConsumerPosition{AckFloorStream: ackFloor, Idle: idle}, handlers...); err != nil {
+		spec.Logger.Warn("apply Dispatch consumer position failed", "error", err)
+	}
 }
 
 func ackMessage(logger *slog.Logger, message jetstream.Msg) {

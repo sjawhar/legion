@@ -27,20 +27,21 @@ type Admission struct {
 	log     *slog.Logger
 	now     func() time.Time
 
-	// mu guards pending and backlogRemaining, the only Admission state a caller outside its own
-	// transactions touches: NoteDelivery runs from the intake consume loop for a message that
-	// never opens a transaction at all (a comment, an ask, a claim), concurrently with whatever
-	// Apply or Reconcile call currently holds the database's own advisory fact lock.
+	// mu guards pending and target, the only Admission state a caller outside its own
+	// transactions touches: intake calls Held for every Dispatch delivery, outside any
+	// transaction and the database's own advisory fact lock, concurrently with whatever release
+	// call currently holds both while it clears them.
 	mu sync.Mutex
 	// pending holds every key the last Reconcile found Dispatch's own log ahead of the record for,
-	// still waiting for the boot backlog Reconcile measured to clear. It empties all at once, not
-	// key by key: the backlog is one position in one stream, not a per-issue property, so nothing
+	// still waiting for the Dispatch consumer to reach target. It empties all at once, not key by
+	// key: target is one position in one stream, not a per-issue property, so nothing
 	// distinguishes one held key's own catching-up from another's.
 	pending map[string]struct{}
-	// backlogRemaining is the count of Dispatch consumer deliveries still owed before every key in
-	// pending releases: what Reconcile measured the consumer's backlog at, at the moment it found
-	// something behind. Zero means nothing is held.
-	backlogRemaining int64
+	// target is the notification stream's own last sequence Reconcile captured when it found the
+	// first record behind: every key in pending releases once the Dispatch consumer's ack floor
+	// reaches it, or once the consumer has nothing left pending or unacknowledged to reach it
+	// with. Zero means nothing is held.
+	target int64
 }
 
 var _ intake.Handler = (*Admission)(nil)
@@ -62,6 +63,13 @@ func New(store record.Store, cap int, project string, log *slog.Logger) *Admissi
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	if err := a.releaseDoneSlots(ctx, tx); err != nil {
 		return intake.Result{}, err
+	}
+
+	if position, ok := fact.(intake.DispatchConsumerPosition); ok {
+		if err := a.release(ctx, tx, position.AckFloorStream, position.Idle); err != nil {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, nil
 	}
 
 	observation, ok := fact.(intake.DispatchIssue)
@@ -120,11 +128,13 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 // The read is a snapshot with no actor on it: in it, an agent's own status write during a restart
 // looks exactly like a human's move. Dispatch says how far each issue's event log has run, so a
 // record behind that sequence is left alone — the stream still holds those events, and delivers
-// them with the actor that made each one. backlog is the Dispatch consumer's own backlog the
-// caller measured before this read: every key this call defers waits together, not individually,
-// for that many deliveries — an empty backlog means nothing is owed, so a deferred key here is
-// promoted or dequeued in this same call instead of waiting for a count that will never arrive.
-func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispatch.IssueSummary, backlog int64) error {
+// them with the actor that made each one — unless the Dispatch consumer has already caught up to
+// target when this call measured it (its ack floor reaching target, or idle: nothing left pending
+// or unacknowledged to reach it with). Then nothing more is coming for that record ever, so this
+// applies the listing's own snapshot to it directly instead of deferring a key nothing will later
+// release. target, ackFloorStream and idle are the caller's own single measurement of the stream
+// and the Dispatch consumer, taken once for the whole call, not per issue.
+func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispatch.IssueSummary, target, ackFloorStream int64, idle bool) error {
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("list admission slots: %w", err)
@@ -134,6 +144,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		slotted[slot.Issue] = struct{}{}
 	}
 
+	caughtUp := ackFloorStream >= target || idle
 	var deferred []string
 	for _, summary := range summaries {
 		stored, err := a.store.Issue(ctx, tx, summary.Key)
@@ -156,17 +167,21 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 			}
 			continue
 		}
+		seq := stored.LastDispatchSeq
 		if summary.LastSeq > stored.LastDispatchSeq {
-			a.log.Info("admission reconcile: the stream holds newer events for this issue; leaving it to them",
-				"issue", stored.Key, "applied", stored.LastDispatchSeq, "dispatch", summary.LastSeq)
-			if backlog > 0 {
+			if !caughtUp {
+				a.log.Info("admission reconcile: the stream holds newer events for this issue; leaving it to them",
+					"issue", stored.Key, "applied", stored.LastDispatchSeq, "dispatch", summary.LastSeq)
 				deferred = append(deferred, stored.Key)
+				continue
 			}
-			continue
+			a.log.Info("admission reconcile: the Dispatch consumer has nothing more to deliver for this issue; applying the boot listing's own snapshot",
+				"issue", stored.Key, "applied", stored.LastDispatchSeq, "dispatch", summary.LastSeq)
+			seq = summary.LastSeq
 		}
 
 		if summary.Status == "todo" && handed && readmittable(*stored) {
-			if err := a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, stored.LastDispatchSeq); err != nil {
+			if err := a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, seq); err != nil {
 				return err
 			}
 			continue
@@ -178,7 +193,7 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		}
 		if err := a.recordObservation(ctx, tx, *stored, observed{
 			Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank,
-			Status: summary.Status, HandedOver: handed, Seq: stored.LastDispatchSeq,
+			Status: summary.Status, HandedOver: handed, Seq: seq,
 		}); err != nil {
 			return err
 		}
@@ -189,10 +204,12 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 		for _, key := range deferred {
 			a.pending[key] = struct{}{}
 		}
-		if backlog > a.backlogRemaining {
-			a.backlogRemaining = backlog
+		if target > a.target {
+			a.target = target
 		}
 		a.mu.Unlock()
+		a.log.Info("admission reconcile: holding roots for the Dispatch consumer to reach a stream position",
+			"count", len(deferred), "target", target)
 	}
 
 	if err := a.releaseInactiveSlots(ctx, tx); err != nil {
@@ -389,9 +406,10 @@ func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
-// waiting line empties. A candidate a.pending still names is held back: the boot backlog Reconcile
-// measured when it deferred that key has not yet cleared. NoteDelivery, not promote, is what clears
-// pending — it empties the whole set at once, so this need only check membership.
+// waiting line empties. A candidate a.pending still names is held back: the Dispatch consumer has
+// not yet reached the stream position Reconcile captured when it deferred that key. release, not
+// promote, is what clears pending — it empties the whole set at once, so this need only check
+// membership.
 func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 	if a.cap <= 0 {
 		return nil
@@ -442,21 +460,36 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-// NoteDelivery counts one message the Dispatch consumer delivered, decoded into a fact or not: the
-// intake consume loop calls it once per message, outside any transaction. Reconcile's boot read
-// captured the consumer's own backlog at the moment it found the first record behind; once that
-// many deliveries have been counted, every key Reconcile deferred releases at once, whichever later
-// promote call notices the pending set is now empty starts admitting them like any other candidate.
-func (a *Admission) NoteDelivery() {
+// Held reports whether any key currently waits on the Dispatch consumer reaching the stream
+// position Reconcile captured for it. The intake consume loop calls it once per Dispatch message,
+// outside any transaction, to decide whether a JetStream Info call and a synthetic position fact
+// are worth their cost at all: once nothing is held, every later delivery is a lock check and
+// nothing else.
+func (a *Admission) Held() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.backlogRemaining <= 0 {
-		return
-	}
-	a.backlogRemaining--
-	if a.backlogRemaining <= 0 {
+	return len(a.pending) > 0
+}
+
+// release applies the Dispatch consumer's current stream position: once its ack floor reaches
+// target, or it has nothing left pending or unacknowledged to reach it with (idle covers a target
+// set past the consumer's own filter, on a stream that also carries subjects it never matches),
+// every key Reconcile deferred releases at once, and this call's own promote is what admits them -
+// a release always promotes in the same transaction it clears pending in, so nothing waits on a
+// later, unrelated fact to notice.
+func (a *Admission) release(ctx context.Context, tx pgx.Tx, ackFloorStream int64, idle bool) error {
+	a.mu.Lock()
+	count := len(a.pending)
+	caughtUp := count > 0 && (ackFloorStream >= a.target || idle)
+	if caughtUp {
 		a.pending = make(map[string]struct{})
 	}
+	a.mu.Unlock()
+	if caughtUp {
+		a.log.Info("admission: the Dispatch consumer has caught up; releasing held roots",
+			"count", count, "ack_floor", ackFloorStream, "idle", idle)
+	}
+	return a.promote(ctx, tx)
 }
 
 // ownSlots is the slots of issues, this project's. The slots table is shared by every project's

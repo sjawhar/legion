@@ -970,40 +970,41 @@ func TestReadmissionReentersAChildStrandedTodoWithoutTheLabel(t *testing.T) {
 }
 
 // Reconcile's boot read defers a record behind Dispatch's own log to the stream, holding it back
-// from promote's waiting line until the consumer's own backlog at boot has cleared — not until any
-// one matching event arrives, since the event that put the record behind may be a comment or
-// another type intake never turns into a fact at all. Three unrelated deliveries release it; two
-// do not.
-func TestReconcileHoldsARootUntilTheConsumerDeliversItsBootBacklog(t *testing.T) {
+// from promote's waiting line until the Dispatch consumer's own ack floor reaches the stream
+// position Reconcile measured at boot — not until any one matching event arrives, since the event
+// that put the record behind may be a comment or another type intake never turns into a fact at
+// all, and not while an unrelated fact runs in between. Only a synthetic DispatchConsumerPosition
+// fact whose ack floor has actually reached target releases it.
+func TestReconcileHoldsARootUntilTheDispatchConsumerReachesTheStreamPosition(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 
-	reconcileWithBacklog(t, pool, admission, []dispatch.IssueSummary{
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-EDGE", Title: "LEGION-EDGE", Status: "todo", Rank: "A", LastSeq: 2},
-	}, 3)
+	}, 5, 2, false)
 	assertSlots(t, pool, nil)
 
-	admission.NoteDelivery()
-	admission.NoteDelivery()
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "position-short", intake.DispatchConsumerPosition{AckFloorStream: 4}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact position-short: %v", err)
+	}
 	if _, err := intake.ApplyFact(context.Background(), pool, "timer", "unrelated", intake.LingerExpired{Issue: "LEGION-UNRELATED", Generation: 1}, engineStub{}, admission); err != nil {
 		t.Fatalf("ApplyFact unrelated: %v", err)
 	}
 	assertSlots(t, pool, nil)
 
-	admission.NoteDelivery()
-	if _, err := intake.ApplyFact(context.Background(), pool, "timer", "unrelated-2", intake.LingerExpired{Issue: "LEGION-UNRELATED", Generation: 1}, engineStub{}, admission); err != nil {
-		t.Fatalf("ApplyFact unrelated-2: %v", err)
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "position-reached", intake.DispatchConsumerPosition{AckFloorStream: 5}, engineStub{}, admission); err != nil {
+		t.Fatalf("ApplyFact position-reached: %v", err)
 	}
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-EDGE", Index: 0, AdmittedAt: fixedNow}})
 }
 
 // The deferred set holds every key Reconcile placed in it back across any number of unrelated
 // facts — a non-Dispatch one, or another recorded tree's Dispatch event — since ordinary fact
-// processing is not what clears the boot backlog; only NoteDelivery, called for every message the
-// Dispatch consumer delivers regardless of source, does. Once the backlog empties, the next
-// promote-triggering call admits the deferred candidate.
-func TestPromotionHoldsADeferredRootAcrossUnrelatedFactsUntilTheBacklogClears(t *testing.T) {
+// processing is not what clears the held set; only a DispatchConsumerPosition fact whose ack floor
+// reaches Reconcile's own target does. Once it does, the next promote-triggering call admits the
+// deferred candidate.
+func TestPromotionHoldsADeferredRootAcrossUnrelatedFactsUntilTheStreamPositionCatchesUp(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		replay func(t *testing.T, pool *pgxpool.Pool, admission *Admission)
@@ -1029,60 +1030,64 @@ func TestPromotionHoldsADeferredRootAcrossUnrelatedFactsUntilTheBacklogClears(t 
 			seedSlotted(t, pool, "LEGION-OTHER", "Z")
 			putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 
-			reconcileWithBacklog(t, pool, admission, []dispatch.IssueSummary{
+			reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 				{Key: "LEGION-EDGE", Title: "LEGION-EDGE", Status: "todo", Rank: "A", LastSeq: 2},
-			}, 1)
+			}, 3, 1, false)
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-OTHER", Index: 0, AdmittedAt: fixedNow}})
 
 			tc.replay(t, pool, admission)
 
 			if got := issue(t, pool, "LEGION-EDGE"); got.Status != "todo" {
-				t.Fatalf("LEGION-EDGE promoted by an unrelated fact while the backlog was still owed = %#v", got)
+				t.Fatalf("LEGION-EDGE promoted by an unrelated fact while the stream position was still owed = %#v", got)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-OTHER", Index: 0, AdmittedAt: fixedNow}})
 
-			admission.NoteDelivery()
+			if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "position-reached", intake.DispatchConsumerPosition{AckFloorStream: 3}, engineStub{}, admission); err != nil {
+				t.Fatalf("ApplyFact position-reached: %v", err)
+			}
 			if _, err := intake.ApplyFact(context.Background(), pool, "timer", "another-unrelated", intake.LingerExpired{Issue: "LEGION-UNRELATED-2", Generation: 1}, engineStub{}, admission); err != nil {
 				t.Fatalf("ApplyFact another-unrelated: %v", err)
 			}
 			assertWaiting(t, pool, nil)
 			if got := issue(t, pool, "LEGION-EDGE"); got.Status != "in_progress" {
-				t.Fatalf("LEGION-EDGE = %#v, want in_progress once the backlog clears", got)
+				t.Fatalf("LEGION-EDGE = %#v, want in_progress once the stream position catches up", got)
 			}
 		})
 	}
 }
 
-// A restart whose boot backlog is empty releases every root the same boot read would otherwise
-// defer immediately, in that same Reconcile call, rather than wait for a delivery count that can
-// never arrive: a fresh consumer with nothing pending has already delivered everything it owes.
+// A restart whose Dispatch consumer is idle releases every root the same boot read would
+// otherwise defer immediately, in that same Reconcile call, rather than wait for an ack floor that
+// can never reach a target past the consumer's own last matching message: a fresh consumer with
+// nothing pending or unacknowledged has already delivered everything it owes.
 // B is discovered by an earlier boot's Reconcile — whose own putNewRoot records no sequence — so
-// this restart's boot read finds Dispatch's log ahead of B's record; with no backlog behind it,
-// that must not hold B back once A's slot frees.
-func TestReconcileReleasesImmediatelyWhenTheBootBacklogIsEmpty(t *testing.T) {
+// this restart's boot read finds Dispatch's log ahead of B's record; with the consumer idle, that
+// must not hold B back once A's slot frees.
+func TestReconcileReleasesImmediatelyWhenTheDispatchConsumerIsIdle(t *testing.T) {
 	pool := migratedPool(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	admission := newAdmission(t, 1, log)
 
-	reconcileWithBacklog(t, pool, admission, []dispatch.IssueSummary{
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-A", Title: "A", Status: "todo", Rank: "A", Labels: handed, LastSeq: 5},
 		{Key: "LEGION-B", Title: "B", Status: "todo", Rank: "B", Labels: handed, LastSeq: 7},
-	}, 0)
+	}, 0, 0, true)
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-A", Index: 0, AdmittedAt: fixedNow}})
 	assertWaiting(t, pool, []string{"LEGION-B"})
 
 	// Restart before A leaves: a fresh Admission, the same boot read. A still holds its slot; B's
 	// record — from the first boot's own putNewRoot, which records no sequence — reads behind
-	// Dispatch's log again, but the consumer has no backlog at all.
+	// Dispatch's log again, but the consumer is idle.
 	admission = newAdmission(t, 1, log)
-	reconcileWithBacklog(t, pool, admission, []dispatch.IssueSummary{
+	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-A", Title: "A", Status: "in_progress", Rank: "A", Labels: handed, LastSeq: 5},
 		{Key: "LEGION-B", Title: "B", Status: "todo", Rank: "B", Labels: handed, LastSeq: 7},
-	}, 0)
+	}, 0, 0, true)
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-A", Index: 0, AdmittedAt: fixedNow}})
 
-	// A leaves after the restart: B must not still be waiting.
-	apply(t, pool, admission, "a-done", intake.DispatchIssue{Key: "LEGION-A", Seq: 1, Type: "issue.updated", Status: "done", Title: "A", Rank: "A"}, engineStub{})
+	// A leaves after the restart: B must not still be waiting. Seq 6 is newer than the 5 the idle
+	// reconcile already applied to A's record, as a real subsequent live event would be.
+	apply(t, pool, admission, "a-done", intake.DispatchIssue{Key: "LEGION-A", Seq: 6, Type: "issue.updated", Status: "done", Title: "A", Rank: "A"}, engineStub{})
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-B", Index: 0, AdmittedAt: fixedNow}})
 }
 

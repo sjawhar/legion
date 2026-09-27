@@ -294,13 +294,18 @@ func testJetStream(t *testing.T) jetstream.JetStream {
 
 func reconcile(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries []dispatch.IssueSummary) {
 	t.Helper()
-	reconcileWithBacklog(t, pool, admission, summaries, 0)
+	// target=1, ackFloorStream=0, idle=false never satisfies the release condition: a caller that
+	// never measured a real stream position makes no claim of having caught up, so a summary found
+	// behind a stored record is deferred exactly as production would, leaving the record alone -
+	// matching every test built before Reconcile took a stream position at all. Tests exercising
+	// the hold or its release use reconcileWithPosition directly.
+	reconcileWithPosition(t, pool, admission, summaries, 1, 0, false)
 }
 
-func reconcileWithBacklog(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries []dispatch.IssueSummary, backlog int64) {
+func reconcileWithPosition(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries []dispatch.IssueSummary, target, ackFloorStream int64, idle bool) {
 	t.Helper()
 	inTx(t, pool, func(tx pgx.Tx) {
-		if err := admission.Reconcile(context.Background(), tx, summaries, backlog); err != nil {
+		if err := admission.Reconcile(context.Background(), tx, summaries, target, ackFloorStream, idle); err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
 	})
