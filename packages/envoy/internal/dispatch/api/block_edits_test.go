@@ -447,6 +447,9 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 		// accept stores its code without them, as it reads back.
 		{"code text ending in a backslash and a line break", code, "x\\\n", "Intro.\n\n```\nx\\\n```\n"},
 		{"code text ending in spaces and a line break", code, "x  \n", "Intro.\n\n```\nx  \n```\n"},
+		// A line holding only whitespace in a list item's code reads back empty, so an accept
+		// writes the line it brings so.
+		{"a whitespace line in a list item's code", "- ```\n  Body.\n  ```\n", " ", "- ```\n  \n  ```\n"},
 		// An emptied footnote definition holds one empty paragraph, which reads back as the
 		// definition, so its reference stays a reference.
 		{"nothing in a footnote definition", footnote, "", "x[^1]\n\n[^1]: \n"},
@@ -498,10 +501,10 @@ func TestAcceptingASuggestionStoresBlocksTheDocumentReadsBack(t *testing.T) {
 	}
 }
 
-// acceptCase is a suggestion of with over quote in a document seeded with spec, after emptying
-// emptied's text through the edit route (as an edit can leave a document that already reads back
-// otherwise), and what accepting it does: refused naming says, or stored as want.
-type acceptCase struct{ name, spec, quote, with, emptied, says, want string }
+// acceptCase is a suggestion of with over quote in a document seeded with spec, after replacing
+// emptied's text with refill through the edit route (as an edit can leave a document that already
+// reads back otherwise), and what accepting it does: refused naming says, or stored as want.
+type acceptCase struct{ name, spec, quote, with, emptied, refill, says, want string }
 
 // checkAccept accepts test's suggestion and checks the outcome. A refusal is 400 INVALID_OP naming
 // test.says, with the document unchanged and the suggestion open. A stored accept reads back as
@@ -513,7 +516,7 @@ func checkAccept(t *testing.T, handler http.Handler, documentService *docs.Servi
 	issue := createInteractionIssue(t, handler, key, test.name, test.spec)
 	if test.emptied != "" {
 		edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-			"ops": []map[string]any{{"op": "replace", "find": test.emptied, "with": ""}},
+			"ops": []map[string]any{{"op": "replace", "find": test.emptied, "with": test.refill}},
 		}, "alice")
 		if edited.Code != http.StatusOK || !strings.Contains(edited.Body.String(), `"changed":true`) {
 			t.Fatalf("empty %q: status=%d body=%s", test.emptied, edited.Code, edited.Body.String())
@@ -600,6 +603,7 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 		{name: "text beside a task item already read back as plain, in its list", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "Changed.", want: "- [ ] \n- [x] Changed.\n\nAfter.\n"},
 		{name: "nothing in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n", quote: "Body.", emptied: "Gone.", says: task},
 		{name: "two paragraphs in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "two\n\nparas", want: "- [ ] \n- [x] two\n\n  paras\n\nAfter.\n"},
+		{name: "text beside code the document already writes with ending breaks", spec: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nBody.\n\n```\nc\n```\n:::\n", quote: "Body.", emptied: "c", refill: "c\n\n", with: "Changed.", want: "Intro.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\nChanged.\n\n```\nc\n\n\n```\n:::\n"},
 		{name: "text in a paragraph already reading back with a literal backslash", spec: "Body. more\\\nxyz\n\nAfter.\n", quote: "Body.", emptied: "xyz", with: "Changed.", want: "Changed. more\\\n\n\nAfter.\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
