@@ -1132,9 +1132,6 @@ describe("TmuxRuntime", () => {
 
   it.each([
     ["no server running on /tmp/tmux-1000/legion-omp"],
-    // Tmux's third way of saying the server is gone: it exited while this client's command ran
-    // (LEGION-174 — the retry gate did not recognize this shape, so `spawnController` threw
-    // "tmux window ownership marker failed" instead of retrying).
     ["server exited unexpectedly"],
   ])("recreates a server that exits after opening the creator's first window but before its ownership marker: %s", async (stderr) => {
     const harness = await tmuxHarness();

@@ -81,8 +81,6 @@ describe("lookupPane", () => {
     ["can't find pane: %1533"],
     ["no server running on /tmp/tmux-1000/legion-omp"],
     ["error connecting to /tmp/tmux-1000/legion-omp (No such file or directory)"],
-    // Tmux's third way of saying the server is gone: it exited while this client's command ran,
-    // which is what releasing the server's last pane does to a probe just behind it (LEGION-174).
     ["server exited unexpectedly"],
   ])("reports a nonzero exit whose stderr says the pane or server is not there as absent: %s", async (stderr) => {
     expect(await lookupPane(server({ stdout: "", stderr, exitCode: 1 }), "%1533")).toEqual({

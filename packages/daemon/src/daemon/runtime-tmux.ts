@@ -316,9 +316,11 @@ export class TmuxRuntime implements Runtime {
    * A caller that created the session does not retry a failure while that session survives; it
    * does retry a `no server running` failure, including after the new window was created but
    * before its ownership marker could be recorded. A window whose own pane exited before the
-   * marker reached it (`no such window`) is never retried: the pane's command already ran once,
-   * and retrying would run it again (LEGION-189, closed as delivered by #1204 -- see that PR's
-   * body for why a dead launch must be reported, not silently relaunched). */
+   * marker reached it (`no such window`) is a launch that already ran once, so retrying would run
+   * the same command again; that failure never matches `no server running`, so a creator's own
+   * attempt throws at once instead of retrying it, while a caller that only joined an existing
+   * session's creation still rechecks after any failure and retries solely when that recheck
+   * finds the session itself gone too -- never merely because the window vanished. */
   private async openWindow(
     name: string,
     paneArgv: string[]
