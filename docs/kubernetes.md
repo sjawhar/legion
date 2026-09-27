@@ -390,9 +390,15 @@ name, and `pod.env` may not set `NATS_NKEY_SEED_FILE`.
 The daemon's own NATS seed is optional too, and no pod ever gets it: `nats_daemon_nkey_seed_file`
 (relative to `legion.yaml`'s directory), else `NATS_DAEMON_NKEY_SEED_FILE`, else
 `NATS_DAEMON_NKEY_SEED` in the daemon's environment, is the `legion-daemon` user the daemon's
-connection authenticates as, whose grants (the daemon's JetStream consumers, the exceptions lane,
-role publishes) `legion-pane` does not hold. It is read by the same rule and refusals as the pane
-seed, the group-readable mount included, and neither seed falls back to the other: an unusable
+connection authenticates as. That user's grants, which `legion-pane` does not hold, are exactly
+what the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
+`$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
+`$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (its two
+durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`), and subscribe
+`notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>`. It publishes on no core
+subject: role and controller notices go to the Envoy listener over HTTP, and control directives
+over the worker stream. It is read by the same rule and refusals as the pane seed, the
+group-readable mount included, and neither seed falls back to the other: an unusable
 daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane
 seed, and with neither, with no credential. Keep it out of the providers Secret, which every pod
 mounts: in-cluster, put it in a Secret of its own, mounted into the daemon's pod alone with
@@ -402,9 +408,10 @@ variables with every other credential-shaped name. Every command the daemon itse
 jj in a managed repository's checkout, `mise where`, a key command) runs without
 `NATS_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED`, so a seed passed by value never reaches a repository's
 tooling; still, prefer the file forms (`nats_nkey_seed_file`, `nats_daemon_nkey_seed_file`, or the
-`_FILE` variables), since a value stays in the daemon's own process environment. At boot the daemon logs, once, `legion daemon
-connects to NATS` with `user=U…` (the public key, never the seed), `paneUser=true|false`, and
-`seed=daemon|pane|none`. `legion start --check-config` reads it as boot does and adds
+`_FILE` variables), since a value stays in the daemon's own process environment. At boot the
+daemon logs, once, `legion daemon connects to NATS` with `user=U…` (the public key, never the
+seed), `paneUser=true|false`, and `seed=daemon|pane|none`. `legion start --check-config` reads it
+as boot does and adds
 `nats-daemon-nkey-user=U…` to its OK line. Every permission the server refuses the daemon's
 connection, a subscription or a publish (its JetStream consumers' API requests included), is logged
 at error as `NATS refused the daemon a permission: its NATS user lacks that grant` with its
@@ -414,10 +421,9 @@ otherwise be silent.
 Rollout order for the server's `legion-daemon` user (AGENTC-759): the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
 every daemon gets it and restarts, and each boot line must read `paneUser=false`; only then is the
-`legion-pane` seed written. `legion-pane` is never granted the daemon's subjects (its JetStream
-consumers, the exceptions lane, role publishes). Reversed, a daemon holding only the `legion-pane`
-seed connects as `legion-pane`, and each refused subject logs the error line above (a refused
-consumer or subscription never delivers).
+`legion-pane` seed written. `legion-pane` is never granted the daemon's subjects above. Reversed,
+a daemon holding only the `legion-pane` seed connects as `legion-pane`, and each refused subject
+logs the error line above (a refused consumer or subscription never delivers).
 
 ### Anatomy of a Sandbox pod
 
