@@ -249,9 +249,12 @@ func TestAgentStreamRefusesASessionIdThatIsNotAUUID(t *testing.T) {
 	}
 }
 
-// A slow viewer must keep the newest snapshot of a message, never the oldest: an older snapshot
-// is superseded content, and losing the newest leaves a message half-rendered forever.
-func TestAgentStreamDropsSupersededFramesNotTheNewest(t *testing.T) {
+// A viewer that falls behind ends its stream rather than losing a frame. The relay never parses
+// a frame, so it cannot tell a superseded snapshot from a tool result or from the settled frame
+// of an earlier message; dropping the wrong one would leave a tool call reading "running…" with
+// nothing later to correct it. Ending the response costs a reconnect, and the reconnect rebuilds
+// from the session's own replay.
+func TestAgentStreamEndsTheStreamWhenAViewerFallsBehind(t *testing.T) {
 	source := agentstream.NewMemory()
 	handler, _, _ := newTestServer(t, testServerOptions{agentStream: source})
 	server := httptest.NewServer(handler)
@@ -259,21 +262,17 @@ func TestAgentStreamDropsSupersededFramesNotTheNewest(t *testing.T) {
 
 	response, reader := openAgentStream(t, server, plannerSessionID, "cookie")
 	defer response.Body.Close()
-	// No replay was set, so the first thing the stream carries is a frame. Overrun the buffer
-	// before reading anything.
+	// Overrun the buffer without reading anything.
 	for index := range agentStreamBuffer * 4 {
 		source.Publish(plannerSessionID, agentstream.Frame(fmt.Sprintf(`{"seq":%d}`, index)))
 	}
-	last := agentStreamBuffer*4 - 1
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		event, data := readStreamEvent(t, reader)
-		if event != "frame" {
-			continue
-		}
-		if data == fmt.Sprintf(`{"seq":%d}`, last) {
+		line, err := reader.ReadString('\n')
+		if err != nil {
 			return
 		}
+		_ = line
 	}
-	t.Fatalf("the newest frame (seq %d) never arrived", last)
+	t.Fatal("the stream stayed open after the viewer fell behind")
 }

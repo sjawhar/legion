@@ -118,22 +118,28 @@ test("the conversation view replays what the session held, streams its next turn
     await tool.getByRole("button").click();
     await expect(page.getByTestId("agent-tool-result")).toContainText("- the relay");
 
-    // The next turn arrives as snapshots of one message, and a frame that lost its race is
-    // dropped rather than rewinding the text a later snapshot already showed.
+    // The next turn arrives as snapshots of one message. The host delivers a message's last few
+    // updates AFTER its end, so the late streaming snapshot carries the HIGHER sequence number;
+    // it must not rewind the settled text or leave the turn looking like it is still running,
+    // which is what disables the composer.
     await publishAgentStreamFrame(planner.session_id, assistantFrame(4, "Ther", true));
     await expect(page.getByTestId("agent-message-assistant").last()).toContainText("Ther");
-    await publishAgentStreamFrame(planner.session_id, assistantFrame(6, "There are two.", false));
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(5, "There are two.", false));
     await expect(page.getByTestId("agent-message-assistant").last()).toContainText(
       "There are two."
     );
-    await publishAgentStreamFrame(planner.session_id, assistantFrame(5, "There are", true));
+    await publishAgentStreamFrame(planner.session_id, assistantFrame(6, "There are", true));
     await expect(page.getByTestId("agent-message-assistant")).toHaveCount(2);
     await expect(page.getByTestId("agent-message-assistant").last()).toContainText(
       "There are two."
     );
 
     // Talking to the agent is the delivery the Agents page already uses, not a new write path.
+    // Send being usable here is also what the late-snapshot rule above buys: a thread left
+    // looking like it is still running disables the composer, and a viewer who opens a finished
+    // session cannot talk to it.
     await page.getByTestId("agent-composer").locator("textarea").fill("try the other branch");
+    await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
     await page.getByRole("button", { name: "Send" }).click();
     await expect
       .poll(async () => (await getSentMessages()).map((sent) => sent.message))

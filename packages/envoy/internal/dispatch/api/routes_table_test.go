@@ -85,8 +85,8 @@ func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
 			t.Fatalf("route %q has auth %q", key, route.Auth)
 		}
 	}
-	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+2 {
-		t.Fatalf("test hooks add two routes: got %d, want %d", got, registeredRoutes+2)
+	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+3 {
+		t.Fatalf("test hooks add three routes: got %d, want %d", got, registeredRoutes+3)
 	}
 }
 

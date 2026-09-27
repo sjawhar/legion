@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -73,20 +74,20 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 	// Subscribing before anything else is what makes the replay below safe to stitch on: a frame
 	// published while the replay request is in flight lands in this buffer rather than falling
 	// between the two.
+	//
+	// A viewer that cannot keep up ends its stream rather than losing a frame. The relay never
+	// parses a frame, so it cannot tell a superseded snapshot from a tool result or the settled
+	// frame of an earlier message, and dropping the wrong one leaves a tool call reading
+	// "running…" until the page is reloaded. Closing here costs a reconnect, and the reconnect
+	// rebuilds from the session's own replay, which is exactly the state that was lost.
 	frames := make(chan agentstream.Frame, agentStreamBuffer)
+	overflow := make(chan struct{})
+	var overflowOnce sync.Once
 	stop, err := source.Subscribe(sessionID, func(frame agentstream.Frame) {
 		select {
 		case frames <- frame:
-			return
 		default:
-		}
-		select {
-		case <-frames:
-		default:
-		}
-		select {
-		case frames <- frame:
-		default:
+			overflowOnce.Do(func() { close(overflow) })
 		}
 	})
 	if err != nil {
@@ -126,6 +127,11 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-overflow:
+			// The viewer fell behind far enough to lose a frame. Draining what is buffered
+			// first would stitch a gap into the middle of the conversation; the reconnect's
+			// replay is the honest answer.
 			return
 		case frame := <-frames:
 			if err := writeStreamEvent(w, "frame", frame); err != nil {

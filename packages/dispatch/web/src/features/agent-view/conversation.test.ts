@@ -81,3 +81,67 @@ describe("the live conversation", () => {
     expect(toThreadMessages(state)[0]?.status).toEqual({ type: "running" });
   });
 });
+
+describe("a settled message in the thread", () => {
+  test("is not reopened by a later streaming snapshot, whatever its sequence number", () => {
+    // The host delivers a message's last few updates after its end, so the late streaming
+    // snapshot is the one with the HIGHER number. Letting it win leaves a finished turn
+    // rendered as running, and assistant-ui then disables the composer.
+    const state = applyFrames(EMPTY_CONVERSATION, [
+      message(58, "a50", 50, "Hello there", false),
+      message(59, "a50", 50, "Hello", true),
+      message(60, "a50", 50, "Hello", true),
+    ]);
+    expect(state.messages).toHaveLength(1);
+    expect(isRunning(state)).toBe(false);
+    expect(toThreadMessages(state)[0]?.content).toEqual([{ text: "Hello there", type: "text" }]);
+  });
+});
+
+describe("a frame this build cannot render", () => {
+  test("is dropped rather than taken to assistant-ui", () => {
+    // Every one of these throws inside assistant-ui's own conversion, which takes the whole
+    // page to the route's error screen — on every load, because the session's replay serves
+    // the same frame again.
+    const bad = [
+      { kind: "message", message: undefined, seq: 1, v: 1 },
+      {
+        kind: "message",
+        message: { at: 10, id: "s10", parts: [], role: "system", streaming: false },
+        seq: 2,
+        v: 1,
+      },
+      {
+        kind: "message",
+        message: {
+          at: 20,
+          id: "u20",
+          parts: [{ argsText: "{}", toolCallId: "c", toolName: "bash", type: "tool-call" }],
+          role: "user",
+          streaming: false,
+        },
+        seq: 3,
+        v: 1,
+      },
+      {
+        kind: "message",
+        message: { at: 30, id: "a30", parts: [{ type: "video" }], role: "assistant" },
+        seq: 4,
+        v: 1,
+      },
+      {
+        kind: "message",
+        message: { at: 40, id: "a40", parts: [], role: "assistant" },
+        seq: 5,
+        v: 2,
+      },
+    ] as unknown as AgentStreamFrame[];
+    const state = applyFrames(EMPTY_CONVERSATION, bad);
+    expect(state.messages).toEqual([]);
+    expect(() => toThreadMessages(state)).not.toThrow();
+
+    // A good frame still applies after them.
+    const good = applyFrames(state, [message(9, "a90", 90, "fine", false)]);
+    expect(good.messages).toHaveLength(1);
+  });
+});

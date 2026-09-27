@@ -188,8 +188,101 @@ describe("AgentStreamPublisher", () => {
   test("a message the host did not stamp carries no identity and is dropped", () => {
     const { published, publisher } = harness();
     publisher.noteViewer();
-    expect(publisher.record(SUBJECT, { content: "hi", role: "user" }, false)).toBeNull();
-    expect(publisher.record(SUBJECT, "not a message", false)).toBeNull();
+    expect(publisher.record(SUBJECT, { content: "hi", role: "user" }, false)).toBe(false);
+    expect(publisher.record(SUBJECT, "not a message", false)).toBe(false);
     expect(published).toEqual([]);
+  });
+});
+
+/**
+ * Oh My Pi 18.3.2 hands `message_update` to extensions through its own queue while
+ * `message_start` and `message_end` are emitted directly, so a message's last few updates arrive
+ * after it has already settled — measured at about three per assistant message. Nothing below
+ * may let one of those turn a finished turn back into a running one.
+ */
+describe("a message the host has settled", () => {
+  test("is not reopened by the updates that arrive after its end", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.record(SUBJECT, assistant(50, [{ text: "Hello there", type: "text" }]), false);
+    for (let index = 0; index < 3; index += 1) {
+      const late = publisher.record(
+        SUBJECT,
+        assistant(50, [{ text: "Hello", type: "text" }]),
+        true
+      );
+      expect(late).toBe(false);
+    }
+
+    // Nothing late reached the wire, and the replay a viewer opening this session gets shows
+    // the turn finished. A streaming replay here is what disables assistant-ui's composer.
+    expect(published).toHaveLength(1);
+    const replayed = publisher.replay("s1").frames;
+    expect(replayed).toHaveLength(1);
+    const frame = replayed[0];
+    expect(frame?.kind === "message" && frame.message.streaming).toBe(false);
+    expect(frame?.kind === "message" && frame.message.parts).toEqual([
+      { text: "Hello there", type: "text" },
+    ]);
+  });
+});
+
+describe("the session this publisher serves", () => {
+  test("takes none of the previous session's conversation into the next one", () => {
+    const { publisher } = harness();
+    publisher.noteViewer();
+    publisher.record(SUBJECT, assistant(50, [{ text: "the old session", type: "text" }]), false);
+    expect(publisher.replay("s1").frames).toHaveLength(1);
+
+    // What `/new`, `/resume`, a fork or a tree navigation does to the extension instance.
+    publisher.reset();
+    expect(publisher.watched).toBe(false);
+    publisher.noteViewer();
+    expect(publisher.replay("s2").frames).toEqual([]);
+  });
+});
+
+describe("an unwatched session", () => {
+  test("does not read a streaming message's content until someone asks for it", () => {
+    const { publisher } = harness();
+    let reads = 0;
+    const parts = [{ text: "x".repeat(4_000), type: "text" }];
+    // The host replaces a streaming message's content on every delta; this counts the reads a
+    // delta costs. Building a frame per delta serialises the whole growing message each time,
+    // which is quadratic in its size and was measured at 1.2 s of CPU for one 100 KB tool call.
+    const message = {
+      role: "assistant",
+      timestamp: 50,
+      get content() {
+        reads += 1;
+        return parts;
+      },
+    };
+    for (let index = 0; index < 500; index += 1) {
+      publisher.record(SUBJECT, message, true);
+    }
+    expect(reads).toBe(0);
+
+    publisher.noteViewer();
+    expect(publisher.replay("s1").frames).toHaveLength(1);
+    expect(reads).toBe(1);
+  });
+});
+
+describe("the replay budget", () => {
+  test("is measured in the bytes NATS counts, not in characters", () => {
+    const { publisher } = harness();
+    // Box-drawing and CJK text is three UTF-8 bytes per character, so a character budget lets
+    // through a reply three times its measured size — past the server's 1 MiB max_payload,
+    // which the publish then throws on, killing the control pump with it.
+    const wide = "\u2500\u4e2d".repeat(AGENT_STREAM_LIMITS.partChars / 2);
+    for (let index = 0; index < 60; index += 1) {
+      publisher.record(SUBJECT, assistant(index + 1, [{ text: wide, type: "text" }]), false);
+    }
+    publisher.noteViewer();
+    const frames = publisher.replay("s1").frames;
+    const bytes = new TextEncoder().encode(JSON.stringify(frames)).length;
+    expect(bytes).toBeLessThanOrEqual(AGENT_STREAM_LIMITS.historyBytes);
+    expect(frames.length).toBeGreaterThan(0);
   });
 });

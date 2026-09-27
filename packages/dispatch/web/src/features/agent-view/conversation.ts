@@ -28,7 +28,46 @@ export const EMPTY_CONVERSATION: AgentConversation = {
   results: {},
 };
 
+/**
+ * Whether a frame is one this build can render. Frames arrive as JSON off a bus any client can
+ * publish on, and from a publisher that ships separately from this dashboard, so a shape this
+ * code does not expect is a live possibility rather than a theoretical one. assistant-ui throws
+ * on a tool-call or reasoning part attached to a user message and on any unknown role, and that
+ * throw takes the whole page to the route's error screen — on every load, because the session's
+ * ring serves the same frame again. A frame that does not check out is dropped instead.
+ */
+export function isRenderableFrame(frame: AgentStreamFrame): boolean {
+  if (frame.v !== 1 || typeof frame.seq !== "number") return false;
+  if (frame.kind === "tool-result") {
+    const { result } = frame;
+    return (
+      typeof result?.toolCallId === "string" &&
+      typeof result.toolName === "string" &&
+      typeof result.output === "string" &&
+      typeof result.at === "number"
+    );
+  }
+  if (frame.kind !== "message") return false;
+  const { message } = frame;
+  if (message === undefined || message === null) return false;
+  if (typeof message.id !== "string" || typeof message.at !== "number") return false;
+  if (message.role !== "user" && message.role !== "assistant") return false;
+  if (!Array.isArray(message.parts)) return false;
+  return message.parts.every((part) => {
+    if (part.type === "text" || part.type === "reasoning") return typeof part.text === "string";
+    if (part.type !== "tool-call") return false;
+    // assistant-ui accepts a tool call on an assistant message only.
+    return (
+      message.role === "assistant" &&
+      typeof part.toolCallId === "string" &&
+      typeof part.toolName === "string" &&
+      typeof part.argsText === "string"
+    );
+  });
+}
+
 export function applyFrame(state: AgentConversation, frame: AgentStreamFrame): AgentConversation {
+  if (!isRenderableFrame(frame)) return state;
   if (frame.kind === "tool-result") {
     const key = `t:${frame.result.toolCallId}`;
     if ((state.applied[key] ?? 0) >= frame.seq) return state;
@@ -40,6 +79,16 @@ export function applyFrame(state: AgentConversation, frame: AgentStreamFrame): A
   }
   const key = `m:${frame.message.id}`;
   if ((state.applied[key] ?? 0) >= frame.seq) return state;
+  // A settled message is final, whatever sequence number a later snapshot carries. The host
+  // hands the extension a message's last few `message_update`s after its `message_end`, so the
+  // late streaming snapshot is the one with the higher number; letting it win leaves a finished
+  // turn rendered as running, and assistant-ui then disables the composer.
+  const settled = state.messages.find(
+    (message) => message.id === frame.message.id && !message.streaming
+  );
+  if (settled !== undefined && frame.message.streaming) {
+    return { ...state, applied: { ...state.applied, [key]: frame.seq } };
+  }
   const others = state.messages.filter((message) => message.id !== frame.message.id);
   const messages = [...others, frame.message].sort((left, right) =>
     left.at === right.at ? left.id.localeCompare(right.id) : left.at - right.at

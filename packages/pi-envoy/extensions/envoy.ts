@@ -726,24 +726,32 @@ export default function envoyExtension(pi: PiApi): void {
   ): Promise<void> => {
     try {
       for await (const message of subscription) {
-        let request: AgentStreamControlMessage;
+        // Everything a control message can do runs inside this guard. Any client on the bus can
+        // publish here, and an unhandled throw ends the `for await` — nats.js unsubscribes, and
+        // the session goes deaf to watch and replay until the resubscribe delay below. A `null`
+        // payload parses cleanly and then throws on `.type`; a reply over the server's
+        // max_payload throws out of the publish.
         try {
-          request = JSON.parse(codec.decode(message.data)) as AgentStreamControlMessage;
-        } catch {
-          // A control frame this build cannot read arms nothing; the viewer asks again.
-          continue;
+          const parsed: unknown = JSON.parse(codec.decode(message.data));
+          if (typeof parsed !== "object" || parsed === null) continue;
+          const request = parsed as AgentStreamControlMessage;
+          if (request.type !== "replay" && request.type !== "watch") continue;
+          // The answer is taken before this message arms anything, so a bare replay request
+          // from a client that never attached a viewer gets an empty history, not the ring.
+          const reply = message.reply;
+          const answer =
+            request.type === "replay" && reply !== undefined
+              ? JSON.stringify(agentStream.replay(session))
+              : undefined;
+          agentStream.noteViewer();
+          if (answer === undefined || reply === undefined) continue;
+          connection?.publish(reply, codec.encode(answer));
+        } catch (error) {
+          logger.warn("envoy: agent stream control message failed", {
+            error: messageFor(error),
+            sessionID: session,
+          });
         }
-        if (request.type !== "replay" && request.type !== "watch") continue;
-        // The answer is taken before this message arms anything, so a bare replay request from
-        // a client that never attached a viewer gets an empty history rather than the ring.
-        const reply = message.reply;
-        const answer =
-          request.type === "replay" && reply !== undefined
-            ? JSON.stringify(agentStream.replay(session))
-            : undefined;
-        agentStream.noteViewer();
-        if (answer === undefined || reply === undefined) continue;
-        connection?.publish(reply, codec.encode(answer));
       }
     } catch {
       // A dead iterator is a dropped connection, handled by the resubscribe below.
@@ -760,6 +768,9 @@ export default function envoyExtension(pi: PiApi): void {
     if (agentStreamControlSession === session && agentStreamControl !== undefined) return;
     agentStreamControl?.unsubscribe();
     agentStreamControl = undefined;
+    // A different session under the same extension instance is a different conversation: the
+    // ring still holds the previous one, and a viewer opening the new id must not be served it.
+    if (agentStreamControlSession !== session) agentStream.reset();
     agentStreamControlSession = session;
     const active = await ensureConnection();
     const subscription = active.subscribe(agentStreamControlSubject(session));

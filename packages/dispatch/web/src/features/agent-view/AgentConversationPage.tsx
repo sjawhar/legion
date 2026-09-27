@@ -21,6 +21,7 @@ import {
 } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
+import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentThread } from "./AgentThread";
 import { isRunning, toThreadMessages } from "./conversation";
@@ -154,9 +155,14 @@ export function AgentConversationPage(): ReactNode {
           Could not send: {sendError}
         </p>
       )}
-      <AssistantRuntimeProvider runtime={runtime}>
-        <AgentThread placeholder={`Message ${label} — delivered as ${mode}…`} />
-      </AssistantRuntimeProvider>
+      {/* A frame this build renders wrongly must cost the thread, not the page: without this the
+          route's boundary replaces the whole view, including the header that says which session
+          it is and the composer that could still reach it. */}
+      <ErrorBoundary region="this conversation" resetKey={sessionId}>
+        <AssistantRuntimeProvider runtime={runtime}>
+          <AgentThread placeholder={`Message ${label} — delivered as ${mode}…`} />
+        </AssistantRuntimeProvider>
+      </ErrorBoundary>
     </div>
   );
 }
