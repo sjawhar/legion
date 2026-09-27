@@ -256,22 +256,24 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 subagents: the check runs in the `tool_call` hook ahead of the subagent exemption, beside
 `PANE_RULES`) to the boundary `docs/deployment.md` "The pane guard" describes: no deletion, move,
 truncation, overwrite of an existing file, or recursive mode or owner change outside
-`LEGION_WORKSPACE` and a directory of the pane's own under `/tmp` (a TypeScript-daemon root, which
-has no `LEGION_WORKSPACE` and whose bash is one `legion` command, gets the `/tmp` root alone), and no signal to a process that is not a descendant of the pane's Oh My
-Pi process (`/proc` read at check time). It reads the variables both daemons set on every pane
-(`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify, `LEGION_WORKSPACE`, `HOME`), so it adds
-nothing to either daemon contract. Commands are parsed with `unbash` (a bash parser, bundled into
-`dist/legion.js`) and walked as bash would run them: word expansion with quoting, tilde, variables
-assigned earlier (`$(mktemp -d)` is a fresh `/tmp` path), `cd`, brace expansion, command
-substitutions, subshells and branches, functions, wrappers (`sudo`, `env`, `timeout`, ...), and the
-scripts a command runs, whose refusal names the script and line. `src/legion/pane-guard-code.ts`
+`LEGION_WORKSPACE` and any directory below `/tmp` except `/tmp` itself, a glob over it, and the
+tmux and ssh socket directories. The guard cannot tell which allowed `/tmp` directory belongs to
+the pane. A TypeScript-daemon root, which has no `LEGION_WORKSPACE` and whose bash is one `legion`
+command, gets the `/tmp` root alone. No signal reaches a process that is not a descendant of the
+pane's Oh My Pi process (`/proc` read at check time). It reads the variables both daemons set on
+every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify, `LEGION_WORKSPACE`, `HOME`), so
+it adds nothing to either daemon contract. Commands are parsed with `unbash` (a bash parser,
+bundled into `dist/legion.js`) and walked as bash would run them: word expansion with quoting,
+tilde, variables assigned earlier (`$(mktemp -d)` is a fresh `/tmp` path), `cd`, brace expansion,
+command substitutions, subshells and branches, functions, wrappers (`sudo`, `env`, `timeout`, ...),
+and the scripts a command runs, whose refusal names the script and line. `src/legion/pane-guard-code.ts`
 tokenizes Python and JavaScript for known deletion, move, overwrite, signal, and shell-out calls
 whose arguments it can evaluate; an argument it cannot evaluate is let through, where a shell
-target it cannot resolve, and a command `unbash` reports as malformed, are refused. Command
-tables are `Set`/`Map`, never object literals, since their keys come from the command
-(`constructor` would otherwise match). `src/legion/pane-guard.test.ts` holds the family matrix,
-the incident's script, the signal cases, and the eval tool; `extensions/legion.test.ts` proves the
-hook refuses the incident's script through a booted worker.
+target it cannot resolve, and a command `unbash` reports as malformed, are refused. Command tables
+are `Set`/`Map`, never object literals, since their keys come from the command (`constructor` would
+otherwise match). `src/legion/pane-guard.test.ts` holds the family matrix, the incident's script,
+the signal cases, and the eval tool; `extensions/legion.test.ts` proves the hook refuses the
+incident's script through a booted worker.
 
 ## Native Dispatch tools
 

@@ -7,9 +7,10 @@
  * starts to this module before they run.
  *
  * A pane may delete, move, truncate, overwrite, or recursively change the mode or owner of paths
- * under its writable roots only: its issue workspace (`LEGION_WORKSPACE`, `.jj` included) and a
- * directory of its own under `/tmp` (never `/tmp` itself, a glob over it, or the tmux and ssh
- * socket directories there). A pane signals only processes descended from its own Oh My Pi process.
+ * under its writable roots only: its issue workspace (`LEGION_WORKSPACE`, `.jj` included) and any
+ * directory below `/tmp` except `/tmp` itself, a glob over it, or the tmux and ssh socket
+ * directories there. The guard cannot tell which permitted `/tmp` directory belongs to the pane. A
+ * pane signals only processes descended from its own Oh My Pi process.
  *
  * Commands are parsed by `unbash`, a bash parser, and the guard follows what bash would do with
  * them: quoting, `$HOME`, `~`, variables assigned earlier in the same command (`$(mktemp -d)`
@@ -95,6 +96,27 @@ interface State {
   readonly nested: boolean;
   readonly depth: number;
   /** The source the current script's node positions index, for snippets and line numbers. */
+  readonly source: string;
+  /** Absolute path of the file this shell is reading, when it has one. */
+  readonly script: string | undefined;
+  /** The `$0` a `bash -c` invocation supplies; a script otherwise names itself. */
+  argv0: Expansion | undefined;
+  /** Functions available in this shell, with their definition source for diagnostic locations. */
+  functions: Map<string, FunctionDefinition>;
+  /** EXIT handlers run when this shell finishes, after its last assignment. */
+  /** Functions whose current body walk has not returned; recursive calls add no new code to check. */
+  readonly runningFunctions: Set<string>;
+  traps: readonly Trap[];
+}
+
+interface FunctionDefinition {
+  readonly body: Node;
+  readonly source: string;
+}
+
+interface Trap {
+  readonly text: string;
+  readonly site: Site;
   readonly source: string;
 }
 
@@ -348,7 +370,7 @@ function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][
     return st.positional.length === 0 ? [[literal("")]] : st.positional.map((p) => [...p]);
   }
   if (/^[0-9]+$/.test(name)) {
-    if (name === "0") return [[literal("bash")]];
+    if (name === "0") return [[...(st.argv0 ?? [literal(st.script ?? "bash")])]];
     const value = st.positional?.[Number(name) - 1];
     if (value !== undefined) return [[...value]];
     return [[unknown(`\`$${name}\` (a positional parameter)`)]];
@@ -383,6 +405,9 @@ function parameterExpansion(
   ctx: Ctx
 ): Piece[][] {
   const name = part.parameter;
+  if (name === "BASH_SOURCE" && part.index === "0" && st.script !== undefined) {
+    return [[literal(st.script)]];
+  }
   if (part.length || part.indirect || part.slice || part.replace || part.index !== undefined) {
     return [[unknown(`\`${part.text}\``)]];
   }
@@ -417,7 +442,8 @@ function parameterExpansion(
 }
 
 /** A command substitution's value: `$(mktemp ...)` is a fresh path in its directory and
- * `$(pwd)` the working directory; anything else is a command's output, unknown. */
+ * `$(pwd)` the working directory; script-location helpers resolve while the guard reads a script.
+ * Anything else is a command's output, unknown. */
 function substitution(
   script: ParsedScript | undefined,
   text: string,
@@ -425,12 +451,52 @@ function substitution(
   ctx: Ctx
 ): Piece[] {
   const only = script?.commands.length === 1 ? script.commands[0]?.command : undefined;
-  if (only?.type === "Command" && only.name !== undefined && only.prefix.length === 0) {
-    const name = only.name.value;
-    if (name === "pwd" && st.cwd !== undefined) return [literal(st.cwd)];
-    if (name === "mktemp") return mktempPath(only, st, ctx);
+  const invocation = substitutionInvocation(only, st, ctx);
+  if (invocation !== undefined) {
+    if (invocation.base === "pwd" && invocation.rest.length === 0 && st.cwd !== undefined) {
+      return [literal(st.cwd)];
+    }
+    if (invocation.base === "mktemp") return mktempPath(invocation.command, st, ctx);
+    const resolved = substitutionPath(invocation.base, invocation.rest, st);
+    if (resolved !== undefined) return [literal(resolved)];
+  }
+  if (only?.type === "AndOr" && only.operators.length === 1 && only.operators[0] === "&&") {
+    const [left, right] = only.commands;
+    const cd = substitutionInvocation(left, st, ctx);
+    const pwd = substitutionInvocation(right, st, ctx);
+    if (cd?.base === "cd" && pwd?.base === "pwd" && pwd.rest.length === 0 && cd.rest.length === 1) {
+      const target = literalText(cd.rest[0]?.exp);
+      if (target !== undefined && st.cwd !== undefined) {
+        return [literal(path.resolve(st.cwd, target))];
+      }
+    }
   }
   return [unknown(`\`${text}\` (a command's output)`)];
+}
+
+function substitutionInvocation(
+  node: Node | undefined,
+  st: State,
+  ctx: Ctx
+): { readonly base: string; readonly command: Command; readonly rest: readonly Arg[] } | undefined {
+  if (node?.type !== "Command" || node.name === undefined || node.prefix.length !== 0)
+    return undefined;
+  const argv = args([node.name, ...node.suffix], st, ctx);
+  const name = literalText(argv[0]?.exp);
+  if (name === undefined) return undefined;
+  return { base: path.basename(name), command: node, rest: argv.slice(1) };
+}
+
+function substitutionPath(base: string, list: readonly Arg[], st: State): string | undefined {
+  if (!["dirname", "basename", "realpath", "readlink"].includes(base)) return undefined;
+  const target = literalText(operands(list, "").operands.at(-1)?.exp);
+  if (target === undefined || st.cwd === undefined) return undefined;
+  const abs = path.resolve(st.cwd, target);
+  if (base === "dirname") return path.dirname(abs);
+  if (base === "basename") return path.basename(abs);
+  if (base === "readlink" && !list.some((arg) => literalText(arg.exp)?.includes("f")))
+    return undefined;
+  return realExisting(abs);
 }
 
 function mktempPath(command: Command, st: State, ctx: Ctx): Piece[] {
@@ -514,7 +580,9 @@ function product(left: Piece[][], right: Piece[][]): Piece[][] {
   const out: Piece[][] = [];
   for (const a of left) {
     for (const b of right) {
-      if (out.length >= MAX_ALTERNATIVES) return out;
+      if (out.length >= MAX_ALTERNATIVES) {
+        return [[unknown(`a brace expansion with more than ${MAX_ALTERNATIVES} alternatives`)]];
+      }
       out.push([...a, ...b]);
     }
   }
@@ -674,6 +742,9 @@ function clone(st: State): State {
     ...st,
     vars: new Map(st.vars),
     exported: new Set(st.exported),
+    functions: new Map(st.functions),
+    traps: [...st.traps],
+    runningFunctions: new Set(st.runningFunctions),
   };
 }
 
@@ -735,6 +806,15 @@ function walkScript(script: ParsedScript, st: State, ctx: Ctx): void {
     );
   }
   for (const statement of script.commands) walkNode(statement, st, ctx, false);
+  for (const trap of st.traps) {
+    runText(
+      trap.text,
+      "the EXIT trap",
+      { ...clone(st), source: trap.source, traps: [] },
+      ctx,
+      trap.site
+    );
+  }
 }
 
 function walkList(statements: readonly Statement[], st: State, ctx: Ctx): void {
@@ -829,15 +909,10 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       merge(st, branches);
       return;
     }
-    case "Function": {
-      // The body is checked where it is defined, with unknown arguments, since the guard does not
-      // follow calls.
-      const body = clone(st);
-      body.positional = undefined;
-      walkNode(node.body, body, ctx, false);
+    case "Function":
+      st.functions.set(node.name.value, { body: node.body, source: st.source });
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
       return;
-    }
     case "Coproc":
       walkNode(node.body, clone(st), ctx, false);
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
@@ -1024,7 +1099,11 @@ function unwrap(
         if (text === undefined || !text.startsWith("-") || text === "-") break;
         if (text.startsWith("--")) {
           if (!text.includes("=") && longValued.includes(text)) i += 1;
-        } else if (valued.includes(text.charAt(text.length - 1)) && text.length === 2) i += 1;
+        } else {
+          const flags = text.slice(1);
+          const takesValue = [...flags].findIndex((flag) => valued.includes(flag));
+          if (takesValue === flags.length - 1) i += 1;
+        }
       }
       return rest.slice(i);
     };
@@ -1103,6 +1182,30 @@ function unwrap(
   return { argv: list, st: state };
 }
 
+function runFunction(
+  name: string,
+  definition: FunctionDefinition,
+  args: readonly Arg[],
+  outer: State,
+  ctx: Ctx
+): void {
+  if (outer.runningFunctions.has(name)) return;
+  const child: State = {
+    ...clone(outer),
+    positional: args.map((arg) => arg.exp),
+    source: definition.source,
+  };
+  child.runningFunctions.add(name);
+  walkNode(definition.body, child, ctx, false);
+  outer.vars = child.vars;
+  outer.exported = child.exported;
+  outer.cwd = child.cwd;
+  outer.cwdWhy = child.cwdWhy;
+  outer.functions = child.functions;
+  outer.traps = child.traps;
+  outer.backgroundStarted ||= child.backgroundStarted;
+}
+
 function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
   const unwrapped = unwrap(invocation.args, outer, ctx, invocation.site);
   const argv = unwrapped.argv;
@@ -1114,6 +1217,11 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
   const base = path.basename(name);
   const rest = argv.slice(1);
   const site = invocation.site;
+  const functionDefinition = outer.functions.get(base);
+  if (functionDefinition !== undefined) {
+    runFunction(base, functionDefinition, rest, outer, ctx);
+    return;
+  }
   switch (base) {
     case "cd":
     case "pushd": {
@@ -1185,8 +1293,10 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     }
     case "trap": {
       const text = literalText(rest[0]?.exp);
-      if (text !== undefined && !text.startsWith("-")) {
-        runText(text, "the `trap` text", clone(outer), ctx, site);
+      if (text === "-") {
+        outer.traps = [];
+      } else if (text !== undefined && !text.startsWith("-")) {
+        outer.traps = [...outer.traps, { text, site, source: outer.source }];
       }
       return;
     }
@@ -1447,20 +1557,39 @@ function checkFind(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void 
       break;
     starts.push(list[i] as Arg);
   }
+  const targets = starts.length > 0 ? starts : [{ text: ".", exp: [literal(".")] }];
   const expression = list.slice(i).map((arg) => literalText(arg.exp));
   let action: string | undefined;
-  expression.forEach((word, index) => {
+  let shell: readonly Arg[] | undefined;
+  for (const [index, word] of expression.entries()) {
     if (word === "-delete") action = "find -delete";
-    if (word === "-exec" || word === "-execdir" || word === "-ok" || word === "-okdir") {
-      const program = path.basename(expression[index + 1] ?? "");
-      if (FILE_COMMANDS.has(program)) action = `find ${word} ${program}`;
+    if (word !== "-exec" && word !== "-execdir" && word !== "-ok" && word !== "-okdir") continue;
+    const end = expression.findIndex(
+      (value, offset) => offset > index && (value === ";" || value === "\\;" || value === "+")
+    );
+    if (end === -1) continue;
+    const inner = unwrap(list.slice(i + index + 1, i + end), st, ctx, site);
+    const program = path.basename(literalText(inner.argv[0]?.exp) ?? "");
+    if (FILE_COMMANDS.has(program) || program === "xargs") action = `find ${word} ${program}`;
+    if (SHELLS.has(program)) {
+      action = `find ${word} ${program}`;
+      shell = inner.argv;
     }
-  });
+  }
   if (action === undefined) return;
-  const targets = starts.length > 0 ? starts : [{ text: ".", exp: [literal(".")] }];
   checkTargets(action, "delete or change what it finds under", targets, false, st, ctx, site);
+  if (shell === undefined) return;
+  const found = targets.length === 1 ? (targets[0]?.exp ?? []) : [unknown("a path `find` found")];
+  const argv = shell.map((arg) =>
+    literalText(arg.exp) === "{}" ? { text: arg.text, exp: found } : arg
+  );
+  runShell(
+    argv.slice(1),
+    { args: argv, site, overlay: new Map(), redirects: [], pipeIn: false },
+    st,
+    ctx
+  );
 }
-
 function checkXargs(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void {
   const found = operands(list, "nLIPdsEa", [
     "--max-args",
@@ -1506,7 +1635,7 @@ function checkKill(list: readonly Arg[], ctx: Ctx, site: Site): void {
   for (const arg of list.slice(i)) {
     const text = literalText(arg.exp);
     if (arg.exp.some((p) => p.lenient)) continue;
-    if (arg.exp.length === 1 && arg.exp[0]?.descendantPid) continue;
+    if (arg.exp.length > 0 && arg.exp.every((piece) => piece.descendantPid)) continue;
     if (text?.startsWith("%")) continue;
     if (text === undefined || !/^-?[0-9]+$/.test(text)) {
       throw new Refusal(
@@ -1579,6 +1708,11 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
     nested: true,
     depth: st.depth + 1,
     source: "",
+    script: undefined,
+    argv0: undefined,
+    functions: new Map(),
+    traps: [],
+    runningFunctions: new Set(),
   };
 }
 
@@ -1630,6 +1764,7 @@ function runShell(list: readonly Arg[], invocation: Invocation, st: State, ctx: 
   }
   const operand = list.slice(i);
   const child = childState(st, invocation.overlay);
+  child.argv0 = operand[1]?.exp;
   if (command) {
     const text = operand[0] === undefined ? "" : runtimeText(operand[0].exp);
     child.positional = operand.slice(2).map((arg) => arg.exp);
@@ -1834,7 +1969,7 @@ function runFile(
           "the guard stops following scripts this deep; run the inner script directly"
         );
       }
-      const child: State = { ...st, source: content, depth: st.depth + 1 };
+      const child: State = { ...st, source: content, script: abs, depth: st.depth + 1 };
       child.positional = positional.map((arg) => arg.exp);
       walkScript(parse(content), child, ctx);
     } else checkCode(language, content, st, ctx);
@@ -2039,6 +2174,11 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     nested: false,
     depth: 0,
     source,
+    runningFunctions: new Set(),
+    script: undefined,
+    argv0: undefined,
+    functions: new Map(),
+    traps: [],
   });
   const run = (attempt: () => void, fallback: string): string | undefined => {
     try {

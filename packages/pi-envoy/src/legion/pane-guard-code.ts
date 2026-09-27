@@ -478,10 +478,13 @@ function evaluatePrimary(span: readonly Token[], scope: Scope): Value {
   let value: Value;
   const name = dotted.join(".");
   const next = span[k];
+  let required: string | undefined;
   if (next?.text === "(") {
     const end = closing(span, k);
     const args = splitArguments(span, k + 1, end);
-    value = evaluateCall(name, args, scope);
+    required =
+      name === "require" ? commonJsModule(evaluate(args.positional[0] ?? [], scope)) : undefined;
+    value = required === undefined ? evaluateCall(name, args, scope) : undefined;
     k = end + 1;
   } else if (next?.text === "[") {
     const end = closing(span, k);
@@ -508,7 +511,11 @@ function evaluatePrimary(span: readonly Token[], scope: Scope): Value {
       args = splitArguments(span, k + 1, end);
       k = end + 1;
     }
-    value = evaluateMethod(value, method, args, scope);
+    value =
+      required === undefined
+        ? evaluateMethod(value, method, args, scope)
+        : evaluateCall(`${required}.${method}`, args, scope);
+    required = undefined;
   }
   return value;
 }
@@ -715,6 +722,25 @@ for (const [base, call] of [
   }
 }
 
+function commonJsModule(value: Value): string | undefined {
+  switch (value) {
+    case "fs":
+    case "node:fs":
+      return "fs";
+    case "fs/promises":
+    case "node:fs/promises":
+      return "fs.promises";
+    case "child_process":
+    case "node:child_process":
+      return "child_process";
+    case "os":
+    case "node:os":
+      return "os";
+    default:
+      return undefined;
+  }
+}
+
 const PY_METHOD_SINKS = new Map<string, PathVerb>([
   ["unlink", "delete"],
   ["rmdir", "delete"],
@@ -782,15 +808,32 @@ export function scanCode(
       }
       continue;
     }
-    if (token.kind !== "name" || tokens[k - 1]?.text === ".") continue;
-    // The dotted callee starting here.
+    if (token.kind !== "name") continue;
     let j = k;
-    const parts = [token.text];
-    while (tokens[j + 1]?.text === "." && tokens[j + 2]?.kind === "name") {
-      parts.push(tokens[j + 2]?.text ?? "");
-      j += 2;
+    let callee: string;
+    if (tokens[k - 1]?.text === ".") {
+      if (language !== "js" || tokens[k + 1]?.text !== "(") continue;
+      const receiver = receiverSpan(tokens, k - 1);
+      if (
+        receiver[0]?.text !== "require" ||
+        receiver[1]?.text !== "(" ||
+        receiver.at(-1)?.text !== ")"
+      ) {
+        continue;
+      }
+      const [module] = splitArguments(receiver, 2, receiver.length - 1).positional;
+      const resolved = commonJsModule(evaluate(module ?? [], scope));
+      if (resolved === undefined) continue;
+      callee = `${resolved}.${token.text}`;
+    } else {
+      // The dotted callee starting here.
+      const parts = [token.text];
+      while (tokens[j + 1]?.text === "." && tokens[j + 2]?.kind === "name") {
+        parts.push(tokens[j + 2]?.text ?? "");
+        j += 2;
+      }
+      callee = parts.join(".");
     }
-    const callee = parts.join(".");
     const after = tokens[j + 1];
     // `Bun.$\`...\`` / `$\`...\``: a tagged template is shell text.
     if (language === "js" && after?.template === true && (callee === "$" || callee === "Bun.$")) {

@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -15,6 +16,10 @@ let state = "";
 let workspace = "";
 let guard: PaneGuard;
 let env: NodeJS.ProcessEnv;
+
+const repository = path.resolve(import.meta.dir, "../../../..");
+let repositoryGuard: PaneGuard;
+let repositoryEnv: NodeJS.ProcessEnv;
 
 beforeAll(() => {
   base = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-"));
@@ -42,6 +47,8 @@ beforeAll(() => {
     TMPDIR: scratch,
     PATH: "/usr/bin:/bin",
   };
+  repositoryGuard = createPaneGuard({ workspace: repository, ompPid: process.pid, scratch });
+  repositoryEnv = { ...env, LEGION_WORKSPACE: repository };
 });
 
 afterAll(() => {
@@ -146,14 +153,35 @@ describe("resolution", () => {
   test("follows command substitutions, subshells, functions, and wrappers", () => {
     expect(bash("echo $(rm -rf ~)")).toContain("`~`");
     expect(bash("ls `rm -rf ~`")).toContain("`~`");
-    expect(bash("f() { rm -rf ~; }")).toContain("`~`");
+    expect(bash("f() { rm -rf ~; }; f")).toContain("`~`");
     expect(bash("if true; then rm -rf ~; fi")).toContain("`~`");
     expect(bash("sudo -n rm -rf ~")).toContain("`~`");
+
     expect(bash("env FOO=1 nice -n 5 timeout 10 rm -rf ~")).toContain("`~`");
     expect(bash("find . -name x | xargs rm -rf")).toContain("standard input");
     expect(bash("echo hi 2>&1 >/dev/null | tee -a ~/.bashrc")).toBeUndefined();
     expect(bash("echo hi >> ~/.bashrc")).toBeUndefined();
     expect(bash("echo hi > ~/new-file-that-does-not-exist")).toBeUndefined();
+  });
+  test("follows find -exec through a shell and execution wrappers", () => {
+    for (const command of [
+      "find ~ -type d -exec sh -c 'rm -rf \"$1\"' _ {} \\;",
+      "find ~ -type f -exec bash -c 'rm -f \"$0\"' {} \\;",
+      "find ~ -exec sudo rm -rf {} +",
+      "find ~ -exec env rm -rf {} +",
+      "sudo rm -rf ~",
+    ]) {
+      expect(bash(command), command).toContain(home);
+    }
+    expect(bash('find "$LEGION_WORKSPACE" -exec sh -c \'rm -rf "$HOME"\' _ {} \\;')).toContain(
+      home
+    );
+  });
+
+  test("refuses a brace expansion it cannot enumerate completely", () => {
+    expect(bash(`rm -rf {a,b,c,d,e,f,g,h,~}{/x,/y,/z,/w,/v,/u,/t,/s}`)).toContain(
+      "more than 64 alternatives"
+    );
   });
 
   test("leaves ordinary work alone", () => {
@@ -177,6 +205,33 @@ describe("scripts a command runs", () => {
     writeFileSync(file, content);
     return file;
   };
+
+  test("checks deferred functions and traps against later assignments", () => {
+    expect(bash('d=; f() { rm -rf "$d"; }; d=$HOME; f')).toContain(home);
+    expect(bash("work=; trap 'rm -rf \"$work\"' EXIT; work=$HOME")).toContain(home);
+    expect(
+      bash('work=/tmp/x; cleanup() { rm -rf "$work"; }; trap cleanup EXIT; work="$HOME"')
+    ).toContain(home);
+    const deferred = script(
+      "deferred.sh",
+      'set -euo pipefail\nwork=\ncleanup() { rm -rf "$work"; }\ntrap cleanup EXIT\nwork=$HOME\n'
+    );
+    expect(bash(`bash ${deferred}`)).toContain(home);
+    expect(bash('f() { rm -rf "$1"; }; f "$LEGION_WORKSPACE/build"')).toBeUndefined();
+  });
+
+  test("reads every tracked shell script from its repository workspace", () => {
+    const listed = spawnSync("jj", ["file", "list", "-r", "@-", "glob:**/*.sh"], {
+      cwd: repository,
+      encoding: "utf8",
+    });
+    if (listed.status !== 0) throw new Error(listed.stderr);
+    const scripts = listed.stdout.split("\n").filter((file) => file !== "");
+    const unreadable = scripts
+      .map((file) => repositoryGuard.bash(`bash ${file}`, repository, repositoryEnv))
+      .filter((reason) => reason?.includes("cannot resolve the script"));
+    expect(unreadable).toEqual([]);
+  });
 
   test("refuses the incident's shape: a probe script whose last line removes its work dir and $HOME", () => {
     const probe = script(
@@ -302,6 +357,17 @@ describe("the eval tool", () => {
     expect(code("js", `await Bun.$\`rm -rf \${dir}\``)).toBeUndefined();
     expect(code("py", 'print(read(".legion/plan.json"))')).toBeUndefined();
     expect(code("py", 'open(os.path.expanduser("~/.bashrc")).read()')).toBeUndefined();
+  });
+  test("recognizes CommonJS filesystem, process, and home-directory receivers", () => {
+    for (const [source, target] of [
+      ['require("fs").rmSync("/home/ubuntu/.ssh", { recursive: true })', "/home/ubuntu/.ssh"],
+      ['require("node:fs").rmSync(process.env.HOME, { recursive: true })', home],
+      ['require("fs/promises").rm(process.env.HOME, { recursive: true })', home],
+      ['require("child_process").execSync("rm -rf ~/.ssh")', home],
+      ['require("fs").rmSync(require("os").homedir(), { recursive: true })', home],
+    ]) {
+      expect(code("js", source), source).toContain(target);
+    }
   });
 });
 
