@@ -14,7 +14,7 @@ import (
 // so with an empty list rather than with silence, so a caller can tell "nothing was lost" from a
 // Dispatch that predates the check (LEGION-269). An edit that inserts nothing - a delete, a
 // replace that only shortens, a retype - has nothing a concurrent change could take, and answers
-// the same way rather than telling the agent its edit could not be confirmed (Rev1468, P1-a).
+// the same way rather than telling the agent its edit could not be confirmed.
 func TestAnEditReportsThatTheLiveDocumentKeptIt(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Lost edit",

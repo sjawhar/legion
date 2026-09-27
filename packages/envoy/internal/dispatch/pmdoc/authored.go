@@ -141,16 +141,14 @@ func subtractRuns(runs, from []ClockRun) []ClockRun {
 // the write pmdoc.Update makes: updateYText diffs a textblock's own text and inserts what the
 // diff adds, so a block whose text only shrank, or that changed only its attributes, writes
 // nothing a concurrent change could then remove. A block after holds under an id prior did not
-// is a block the write created, and counts whatever its text says. unidentified counts the
-// blocks after holds with text and no id yet, which the caller resolves once EnsureBlockIDs has
-// stamped them. text is after's own map, for the next comparison.
-func BlocksGainingText(prior map[string]string, after *Node) (ids []string, unidentified int, text map[string]string) {
+// is a block the write created, and counts whatever its text says. A block with no id is named
+// by nothing and so is named here by nothing either; a caller that must answer for such text
+// answers for it as the batch's (docs.editBatch.writes). text is after's own map, for the next
+// comparison.
+func BlocksGainingText(prior map[string]string, after *Node) (ids []string, text map[string]string) {
 	text = map[string]string{}
 	forEachBlockText(after, func(id, own string) {
 		if id == "" {
-			if own != "" {
-				unidentified++
-			}
 			return
 		}
 		text[id] = own
@@ -165,7 +163,7 @@ func BlocksGainingText(prior map[string]string, after *Node) (ids []string, unid
 			ids = append(ids, id)
 		}
 	})
-	return ids, unidentified, text
+	return ids, text
 }
 
 // BlockText is every block's own inline content by block id.

@@ -490,7 +490,7 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 			unchanged = append(unchanged, index)
 		}
 		if tellOperationsApart {
-			written[index].ids, _, blockText = pmdoc.BlocksGainingText(blockText, next)
+			written[index].ids, blockText = pmdoc.BlocksGainingText(blockText, next)
 		}
 		for _, blockID := range removedIDs {
 			removed[blockID] = batchRemoval{

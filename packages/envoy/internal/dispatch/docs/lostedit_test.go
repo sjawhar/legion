@@ -419,8 +419,8 @@ func TestABatchNamesOnlyTheOperationsWhoseTextWentMissing(t *testing.T) {
 // pmdoc.Update rewrites a block it passes over in place when an operation inserts or removes a
 // block above it, so a batch's own update re-inserts the text of paragraphs no operation names -
 // and a concurrent deletion takes that text exactly as it takes an operation's own. The batch
-// wrote it, so the batch answers for it: the paragraph must not vanish while the edit reports
-// success (Rev1468, P1-b).
+// wrote it, so the batch answers for it: such a block belongs to every operation of the batch,
+// and the paragraph never vanishes while the edit reports success.
 func TestABatchAnswersForTheBlocksItsUpdateRewroteInPassing(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -481,8 +481,8 @@ func TestABatchAnswersForTheBlocksItsUpdateRewroteInPassing(t *testing.T) {
 }
 
 // An edit that inserts nothing - a delete, a replace that only shortens, a retype - has nothing a
-// concurrent change could remove, so it reaches the empty verdict rather than leaving the caller
-// unable to tell survival from an unanswered check (Rev1468, P1-a).
+// concurrent change could remove, so it reaches the empty verdict. Only a publish that failed
+// leaves none, so the caller can always tell survival from an unanswered check.
 func TestAnEditThatInsertsNothingStillReachesAVerdict(t *testing.T) {
 	for _, test := range []struct {
 		name string
