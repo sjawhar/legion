@@ -655,6 +655,32 @@ func distance(left, right int) int {
 	return left - right
 }
 
+// MarkSpans is the text a mark identity covers as ranges, in document order: its text runs, each
+// joined to the next when no text without the mark lies between them, so a run at a textblock's
+// end and one at the next textblock's start are one span across the boundary between them, as the
+// browser editor takes them, while text without the mark ends a span.
+func MarkSpans(doc *Node, markType, id string) []Range {
+	var spans []Range
+	between := false
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if node.Type != "text" {
+			return true
+		}
+		if nodeMarkID(node, markType) != id {
+			between = true
+			return true
+		}
+		if last := len(spans) - 1; last >= 0 && !between {
+			spans[last].To = end
+		} else {
+			spans = append(spans, Range{From: pos, To: end})
+		}
+		between = false
+		return true
+	})
+	return spans
+}
+
 // FindMark finds the first document-contiguous range covered by a mark identity.
 func FindMark(doc *Node, markType, id string) (Range, string, bool) {
 	var quote strings.Builder

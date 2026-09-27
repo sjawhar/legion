@@ -115,6 +115,78 @@ func TableDescendantIDs(doc *Node) (map[string][]string, error) {
 // list item, or blockquote the removal empties goes with it, and an emptied
 // document or footnote definition keeps one empty paragraph; any other container
 // the removal leaves outside its content rule rejects the delete with that rule.
+// PadTables is doc with each table in its document-level blocks first to last given a full width
+// of cells in every row, as the browser editor's table plugin pads a table after any change
+// (prosemirror-tables' fixTables): a Splice, like ProseMirror's own replace, can leave a row short,
+// which would be written narrower than the table and read back so. The rows that need cells get
+// empty ones of their row's kind, with the attributes that plugin gives a new cell; the last such
+// row takes them at its start when it is the table's first row, or follows the first such row,
+// and every other row takes them at its end, as fixTables places them.
+func PadTables(doc *Node, first, last int) *Node {
+	out := &Node{Type: doc.Type, Attrs: doc.Attrs, Children: append([]*Node(nil), doc.Children...)}
+	for index := first; index <= last && index < len(out.Children); index++ {
+		block := cloneNode(out.Children[index])
+		Walk(block, func(node *Node) bool {
+			if node.Type == "table" {
+				padTable(node)
+				return false
+			}
+			return true
+		})
+		out.Children[index] = block
+	}
+	return out
+}
+
+func padTable(table *Node) {
+	widths := make([]int, len(table.Children))
+	width := 0
+	for index, row := range table.Children {
+		for _, cell := range row.Children {
+			span := 1
+			switch value := cell.Attrs["colspan"].(type) {
+			case int:
+				span = max(value, 1)
+			case float64:
+				span = max(int(value), 1)
+			}
+			widths[index] += span
+		}
+		width = max(width, widths[index])
+	}
+	firstShort, lastShort := -1, -1
+	for index := range table.Children {
+		if widths[index] < width {
+			if firstShort < 0 {
+				firstShort = index
+			}
+			lastShort = index
+		}
+	}
+	for index, row := range table.Children {
+		if widths[index] == width {
+			continue
+		}
+		kind := "table_cell"
+		if len(row.Children) > 0 && row.Children[0].Type == "table_header" {
+			kind = "table_header"
+		}
+		cells := make([]*Node, 0, width-widths[index])
+		for range width - widths[index] {
+			cells = append(cells, &Node{
+				Type:     kind,
+				Attrs:    Attrs{"alignment": "left", "colspan": 1, "colwidth": nil, "rowspan": 1},
+				Children: []*Node{{Type: "paragraph"}},
+			})
+		}
+		if (index == 0 || firstShort == index-1) && lastShort == index {
+			row.Children = append(cells, row.Children...)
+		} else {
+			row.Children = append(row.Children, cells...)
+		}
+	}
+}
+
 func DeleteBlock(doc *Node, blockID string) (*Node, error) {
 	if err := wantDocument(doc, "DeleteBlock"); err != nil {
 		return nil, err

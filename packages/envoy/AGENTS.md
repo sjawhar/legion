@@ -332,9 +332,17 @@ block-id check (`400 INVALID_MARKDOWN`, the block-id paragraph above). An id the
 (a browser edit can leave one, and an upload can carry it on) does not refuse an accept, whether the
 accept leaves that ask alone or writes into it, unless the accept adds a second ask under it: an id
 that gains an ask is refused whatever it held, since the id repair would hand the held ask's row
-and answer to whichever comes first. A reject's asks (`POST /api/v1/comments/{id}/reject`,
-the same `applySuggestion`) are never checked, since removing the text a browser insert added gives
-back the document the insert started from. A replacement no level of the document can hold where
+and answer to whichever comes first. A reject (`POST /api/v1/comments/{id}/reject`, the same
+`applySuggestion`) is never checked, its asks included, since removing the text a browser insert
+added gives back the document the insert started from. It deletes that text as the browser editor's
+reject does (`rejectedInsert`): the insert's runs that meet across a block boundary, nothing but
+the boundary between them, are one range (`pmdoc.MarkSpans`), so the blocks join, which undoes the
+split an insert made (Enter typed while suggesting), and a table the range cuts is padded to its
+width as the editor's table plugin pads it (`pmdoc.PadTables`, after prosemirror-tables'
+`fixTables`). The one difference from the browser is text without the insert's mark between two of
+its runs, which the browser's reject deletes with them: here each run is deleted and that text is
+kept. The editor leaves such text when someone suggests inside another person's insert, which marks
+their text with an insert of its own, or pastes into it outside suggestion mode. A replacement no level of the document can hold where
 the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
 `replace_with` (`pmdoc.ErrReplacementDoesNotFit`), and inline text over a range that runs into an
 ask or callout from the text before it, at any depth (inside a blockquote, a list item or another

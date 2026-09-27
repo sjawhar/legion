@@ -297,21 +297,45 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return nil
 		}
 
+		// An accept is one implicit operation, so every run its own update inserts is its own and
+		// no tree diff tells them apart: recordInsertedText reads the blocks it inserted into and
+		// this hands them straight back (editBatch.writes, LEGION-269). It stamps no block ids -
+		// a replacement's blocks are minted by pmdoc.Parse already, and EnsureBlockIDs would also
+		// repair a repeat the live document carries, which is settlement's to repair and a
+		// write's to leave as it found it (TestWritesBesideALiveRepeatedBlockIDAreTaken). Text
+		// left in a block with no id at all - the far half of a split, which no caller can
+		// address either - is simply not tracked, so the check under-reports there rather than
+		// naming a block nobody can name.
+		write := func(next *pmdoc.Node) error {
+			written := editBatch{tree: next, operations: 1}
+			return recordInsertedText(ctx, artifactID, id, fragment, since, written.writes, func() error {
+				var updateErr error
+				transact(func(txn *crdt.Transaction) {
+					updateErr = pmdoc.Update(txn, fragment, next)
+				})
+				return updateErr
+			})
+		}
+		// A reject is not checked: it removes the text a browser insert added, which gives back
+		// the document the insert started from.
+		if !accept {
+			next, err := rejectedInsert(tree, id)
+			if err != nil {
+				return err
+			}
+			return write(next)
+		}
+
 		// A suggestion's text reaches the document with line feeds alone (pmdoc.LineFeeds). It is
 		// stored so when the suggestion is created, but one created before that holds its text as
 		// sent.
 		with := pmdoc.LineFeeds(replaceWith)
-		if !accept {
-			with = ""
-		}
 		at, _ := pmdoc.ContainingTextblock(tree, range_.From)
 		code := at.Node.Type == "code_block"
 		var replacement *pmdoc.Node
 		if code {
-			codeText := with
-			if accept {
-				codeText, range_ = acceptedCode(tree, with, at, range_)
-			}
+			var codeText string
+			codeText, range_ = acceptedCode(tree, with, at, range_)
 			replacement = codeReplacement(codeText)
 		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From)); err != nil {
 			return err
@@ -328,55 +352,66 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err != nil {
 			return err
 		}
-		if code && accept {
+		if code {
 			if err := refuseAcceptedCodeThatReshapes(tree, next, range_, at, with); err != nil {
 				return err
 			}
 		}
-		if accept {
-			if next, err = settleAccepted(tree, next, range_, with); err != nil {
+		if next, err = settleAccepted(tree, next, range_, with); err != nil {
+			return err
+		}
+		if !insideAsk(at) {
+			if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
 				return err
 			}
-			if !insideAsk(at) {
-				if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
-					return err
-				}
-				if err := refuseReshapedAccept(tree, next, range_, at, with, replacement); err != nil {
-					return err
-				}
+			if err := refuseReshapedAccept(tree, next, range_, at, with, replacement); err != nil {
+				return err
 			}
 		}
 		if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
 		}
-		// A reject's ask is not checked: it removes the text a browser insert added, which gives
-		// back the document the insert started from.
-		if accept {
-			if err := refuseBrokenAsks(tree, next); err != nil {
-				return err
-			}
-			if err := refuseMisreadAccept(tree, next, with); err != nil {
-				return err
+		if err := refuseBrokenAsks(tree, next); err != nil {
+			return err
+		}
+		if err := refuseMisreadAccept(tree, next, with); err != nil {
+			return err
+		}
+		return write(next)
+	})
+}
+
+// rejectedInsert is tree with the text of the insert suggestion id deleted span by span
+// (pmdoc.MarkSpans), last first so the earlier spans keep their positions, each with nothing
+// spliced over it. Runs that meet across a block boundary are one span, as the browser editor's
+// reject deletes them, so the blocks join: that undoes the split an insert made, and a table the
+// span cuts is padded to its width afterwards (pmdoc.PadTables), as the browser's table plugin pads
+// it. Text without the mark between two runs ends a span, so it is kept, where the browser's reject
+// deletes it with them.
+func rejectedInsert(tree *pmdoc.Node, id string) (*pmdoc.Node, error) {
+	spans := pmdoc.MarkSpans(tree, string(MarkSuggestion), id)
+	next := tree
+	for index := len(spans) - 1; index >= 0; index-- {
+		span := spans[index]
+		at, _ := pmdoc.ContainingTextblock(next, span.From)
+		nothing := codeReplacement("")
+		if at.Node.Type != "code_block" {
+			var err error
+			if nothing, err = inlineAware("", edgesOf(at, span), opensDocument(next, span.From)); err != nil {
+				return nil, err
 			}
 		}
-		// An accept is one implicit operation, so every run its own update inserts is its own and
-		// no tree diff tells them apart: recordInsertedText reads the blocks it inserted into and
-		// this hands them straight back (editBatch.writes, LEGION-269). It stamps no block ids -
-		// a replacement's blocks are minted by pmdoc.Parse already, and EnsureBlockIDs would also
-		// repair a repeat the live document carries, which is settlement's to repair and a
-		// write's to leave as it found it (TestWritesBesideALiveRepeatedBlockIDAreTaken). Text
-		// left in a block with no id at all - the far half of a split, which no caller can
-		// address either - is simply not tracked, so the check under-reports there rather than
-		// naming a block nobody can name.
-		written := editBatch{tree: next, operations: 1}
-		return recordInsertedText(ctx, artifactID, id, fragment, since, written.writes, func() error {
-			var updateErr error
-			transact(func(txn *crdt.Transaction) {
-				updateErr = pmdoc.Update(txn, fragment, next)
-			})
-			return updateErr
-		})
-	})
+		spliced, err := pmdoc.Splice(next, span, nothing)
+		if err != nil {
+			return nil, err
+		}
+		first, _, lastAfter, err := changedBlocks(next, spliced, span)
+		if err != nil {
+			return nil, err
+		}
+		next = pmdoc.PadTables(spliced, first, lastAfter)
+	}
+	return next, nil
 }
 
 // refuseBrokenAsks refuses the first ask a write left unreadable whose id the document could read
