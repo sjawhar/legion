@@ -226,8 +226,15 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
   });
 
   try {
+    const streamResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/events"
+    );
     const reloaded = page.reload();
-    await listRequested.promise;
+    // A reload is a cold client: the server starts its stream at the current head and replays
+    // nothing. Posting the hidden reply before that stream is open means the frame never
+    // reaches the page, no pending marker is ever set, and everything below passes without
+    // testing anything. Wait for the stream as the sibling above does.
+    await Promise.all([listRequested.promise, streamResponse]);
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
