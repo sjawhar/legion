@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..2ef10e473b215f26f80c672a30e98c8d35da3457 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..041ebe4a231a86b8787ab59464ebe0549fba9f68 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,9 @@
@@ -13,7 +13,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..2ef10e473b215f26f80c672a30e98c8d
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
  function isPureText(content) {
-@@ -24,6 +26,135 @@ function withMeta(plugin, meta) {
+@@ -24,6 +26,149 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
@@ -146,17 +146,31 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..2ef10e473b215f26f80c672a30e98c8d
 +	return pasteFlattened(view, pasted, schema);
 +}
 +//#endregion
++//#region legion: a pasted soft line break is a hard break
++// Milkdown's markdown parser keeps a soft line break as hardbreak{isInline: true}, which it draws as
++// a space and every markdown writer stores as a line break. A pasted "alpha\nbeta" keeps its line
++// break, so the plain-text parse makes each soft break a hard one, which the editor shows as the
++// break that is stored.
++function withHardBreaks(fragment) {
++	const children = [];
++	fragment.forEach((node) => {
++		if (node.type.name === "hardbreak" && node.attrs.isInline) children.push(node.type.create({ ...node.attrs, isInline: false }, null, node.marks));
++		else children.push(node.isLeaf ? node : node.copy(withHardBreaks(node.content)));
++	});
++	return Fragment.from(children);
++}
++//#endregion
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -40,9 +171,15 @@ function dispatchPasteSlice(view, slice) {
+@@ -40,9 +185,15 @@ function dispatchPasteSlice(view, slice) {
  }
  var clipboard = $prose((ctx) => {
  	const schema = ctx.get(schemaCtx);
 +	const parsePlainText = (text) => {
 +		const doc = ctx.get(parserCtx)(text);
 +		if (!doc || typeof doc === "string") return null;
-+		return DOMParser.fromSchema(schema).parseSlice(DOMSerializer.fromSchema(schema).serializeFragment(doc.content));
++		return DOMParser.fromSchema(schema).parseSlice(DOMSerializer.fromSchema(schema).serializeFragment(withHardBreaks(doc.content)));
 +	};
  	ctx.update(editorViewOptionsCtx, (prev) => ({
  		...prev,
@@ -165,7 +179,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..2ef10e473b215f26f80c672a30e98c8d
  		transformPastedHTML: (html, view) => {
  			const prevTransform = prev.transformPastedHTML;
  			if (prevTransform) html = prevTransform(html, view);
-@@ -58,7 +195,6 @@ var clipboard = $prose((ctx) => {
+@@ -58,7 +209,6 @@ var clipboard = $prose((ctx) => {
  		key,
  		props: {
  			handlePaste: (view, event, preProcessedSlice) => {
@@ -173,7 +187,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..2ef10e473b215f26f80c672a30e98c8d
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -77,13 +213,13 @@ var clipboard = $prose((ctx) => {
+@@ -77,13 +227,13 @@ var clipboard = $prose((ctx) => {
  				}
  				const html = clipboardData.getData("text/html");
  				if (html.length === 0 && text.length === 0) return false;

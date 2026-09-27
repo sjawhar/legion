@@ -195,7 +195,11 @@ the paste is one unmarked line, as a paste that isn't flattened does (`pasteFlat
 or a list pasted into a question adds its text to that question. HTML pasted outside a table follows
 the same rule. So a lone typed block pasted beside a paragraph's text stays a block, while the first
 and last paragraphs or list items of other pasted text still join the text on either side of the
-caret.
+caret. The patch also makes each soft line break the markdown parse produces a hard break
+(`withHardBreaks`). Milkdown keeps a soft break as `hardbreak{isInline: true}` and draws it as a
+space, although the stored markdown has a line break there. So a pasted "alpha\nbeta" keeps its line
+break, as the editor shows, and only markdown import turns soft breaks into spaces
+(`packages/proof-editor/src/lib.ts`).
 
 Tables are handled before any plugin sees the paste, by a `handlePaste` the patch adds to the
 editor's own view props (`pasteIntoTable`), since prosemirror-tables' plugin handler would otherwise
@@ -209,11 +213,13 @@ cell on, growing the table as needed, or clipped to the selection. That grid pas
 prosemirror-tables' own paste handler in three ways. Copied cells are read from the clipboard HTML's
 own rows and cells (`htmlTableCells`), because ProseMirror's parse at the caret gives body rows an
 empty leading header row, which Milkdown's table requires. Tab-separated text pasted onto selected
-cells fills them one value each. Every cell is retyped for the row it lands in, because Milkdown's
-header row holds only `table_header` cells and a body row only `table_cell` ones, and
-prosemirror-tables' own insert threw on a paste that put header cells in a body row or reached the
-header row. The patch applies to that one version: raising `@milkdown/plugin-clipboard` means
-carrying the patch to the new version, and the paste rows in `ask-blocks.e2e.ts` and
+cells fills them one value each. Every cell is retyped for the row it lands in and kept to one line
+(`fitCells`). The retyping is because Milkdown's header row holds only `table_header` cells and a
+body row only `table_cell` ones, and prosemirror-tables' own insert threw on a paste that put header
+cells in a body row or reached the header row. A cell holding more than one block or a line break (a
+`<br>`, a code block's newline) is flattened as the caret path flattens, because a hard break stored
+in a table ends its row. The patch applies to that one version: raising `@milkdown/plugin-clipboard`
+means carrying the patch to the new version, and the paste rows in `ask-blocks.e2e.ts` and
 `editor-paste.e2e.ts` fail without it.
 
 `ask` is the host-rendered decision type. A live document's open block decisions appear in one compact, cycling `#b-<blockId>` navigation link beneath the tab row. There is one ask component on every surface: a decision block *hosts* the Inbox's `AskCard` (compact variant, thread collapsed, `frame="block"`) for its indexed ask row, so answering, **Ask back** (a clarification posted as a reply on the ask — `createComment` on an issue document's ask, `createArtifactComment` on a project document's — which leaves the decision open), the folded reply-count disclosure over the exchange, the question-shaped-answer prompt, the `ASK_EDITED` reload, the answered and resolved records (`AskCompletionCard`), and the retryable save error all behave exactly as they do in the Inbox, and a reply or answer made in either place shows in the other. An ask block marked `invalid`, or one with a missing question or option label, renders its raw content as a malformed decision without a card until the block text is repaired. The editor library supplies its schema-aware Insert and Turn into block-menu entries; Dispatch passes the server schema rather than duplicating those commands.
