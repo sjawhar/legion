@@ -137,6 +137,41 @@ for (const [cell, quote, stored] of [
   });
 }
 
+// A spreadsheet's copy is a table too, although Google Sheets and Excel put a style block beside it:
+// pasted with the caret in the header cell, it fills the table from there. Its CSS once counted as
+// text outside the table, and the copy was joined into the one cell.
+for (const [source, html] of [
+  [
+    "Google Sheets",
+    '<google-sheets-html-origin><style type="text/css"><!--td {border: 1px solid #cccccc;}--></style><table><tbody><tr><td>S1</td><td>S2</td></tr><tr><td>T1</td><td>T2</td></tr></tbody></table></google-sheets-html-origin>',
+  ],
+  [
+    "Excel",
+    "<html><head><meta name=ProgId content=Excel.Sheet><style><!--td {mso-number-format:General;}--></style></head><body><table><!--StartFragment--><tr><td>S1</td><td>S2</td></tr><tr><td>T1</td><td>T2</td></tr><!--EndFragment--></table></body></html>",
+  ],
+] as const) {
+  test(`a copy from ${source} pasted into a header cell fills the table from there`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } = await openWithCaret(
+      browser,
+      "Sheet paste",
+      table,
+      "alpha",
+      "end"
+    );
+    try {
+      await paste(page, { html, text: "S1\tS2\nT1\tT2" });
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toBe("| S1 | S2 |\n| :--- | :--- |\n| T1 | T2 |\n");
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
 // Only a clipboard whose content all sits in table cells is a grid paste. HTML holding a paragraph
 // beside a table joins the caret's cell as text, like any other HTML, so the paragraph isn't lost.
 test("HTML holding a paragraph and a table, pasted into a body cell, stays in that cell", async ({
