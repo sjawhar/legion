@@ -15,8 +15,10 @@
 
 ### Fixed
 
-- The bundled Dispatch tools refuse a document reference that is one document's slug and another's
-  filename, naming both ids, where they took the slug's document.
+- The bundled Dispatch tools refuse a bare document reference that is one document's slug and
+  another's filename, on an issue or a project, naming both ids, where they took the slug's
+  document; on a project an id also outranks another document's slug. A `dispatch://` document
+  reference, or a dashboard document URL, still resolves by its slug.
 - Oh My Pi no longer launches the channel server. Every omp session that had this plugin installed opened with `Failed: claude-envoy-bridge:envoy [...]: MCP subprocess closed stdout before responding.`, because the server needs Claude Code's session identity and exits without it. A new `.omp-plugin/plugin.json` declares an empty `mcpServers`, which omp reads before `.claude-plugin/plugin.json` and applies instead of `.mcp.json`; Claude Code reads only `.claude-plugin/plugin.json` and still launches the server. omp gets Envoy and Dispatch from `@sjawhar/pi-legion-envoy`. Skills are unaffected in both harnesses.
 
 ## [0.3.0]

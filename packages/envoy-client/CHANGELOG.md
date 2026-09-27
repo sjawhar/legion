@@ -14,9 +14,14 @@
 
 ### Fixed
 
-- A document reference that is one document's slug and another's filename on the same issue or
-  project (Dispatch suffixes a slug two documents would share, so `spec-v2` can be both) is refused
-  as naming two documents, with each one's id, instead of silently taking the slug's document.
+- A bare document reference (an `artifact` argument that is not a `dispatch://` reference's own
+  document) that is one document's slug and another's filename on the same issue or project
+  (Dispatch suffixes a slug two documents would share, so `spec-v2` can be both) is refused as
+  naming two documents, with each one's id, instead of silently taking the slug's document. On a
+  project the slug route's answer is now checked against the project's unlinked documents, so an id
+  also outranks another project document's slug there, as it does on an issue. The document part of
+  a `dispatch://<issue>/artifact/<slug>` or `dispatch://<PROJECT>/artifact/<slug>` reference, and
+  of a dashboard document URL, is a slug and resolves by slug, never refused for a clash.
 - Non-creation tools resolve external issue references to linked native issues without creating
   them, and `dispatch_read` follows ask and comment references to their targeted results.
 - Suggestions without a rationale omit `body` from their request.

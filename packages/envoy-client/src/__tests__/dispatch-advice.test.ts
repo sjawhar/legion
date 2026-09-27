@@ -115,6 +115,8 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
         )
       );
     }
+    if (target.pathname === "/api/v1/projects/DSP/artifacts" && method === "GET")
+      return response([]);
     if (target.pathname === "/api/v1/projects/DSP/artifacts/spec" && method === "GET") {
       return response({
         id: "artifact-42",
