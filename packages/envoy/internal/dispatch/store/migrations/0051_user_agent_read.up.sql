@@ -14,3 +14,16 @@ create table user_agent_read (
   read_through timestamptz not null,
   primary key (login, session_id)
 );
+
+-- Every direct conversation that already exists is read as of this migration. Before it there
+-- was no read mark to count against, so without this every reply ever stored would turn unread
+-- at the deploy, for sessions long gone as well as live ones. The keys match the unread count's
+-- own: the human who wrote an issue-less root (author->>'id', the raw actor id) and the session
+-- it targets. A reply stored after this moment, by either image during a rolling deploy, is newer
+-- than the mark and counts.
+insert into user_agent_read (login, session_id, read_through)
+select author->>'id', substr(target, length('session:') + 1), now()
+from messages
+where issue_key is null and in_reply_to is null and target like 'session:%'
+  and author->>'kind' = 'user'
+group by 1, 2;
