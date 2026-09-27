@@ -406,9 +406,11 @@ test("Conversation coalesces answered asks and toggles activity without remounti
     const card = conversation.getByTestId(`ask-${ask.id}`);
     await expect(card.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(card.getByRole("radio", { name: "Hold" })).toBeVisible();
-    await expect(card.getByRole("button", { name: "Answer" })).toBeVisible();
+    // The timeline carries the compact density (the margin shows this same ask in full), so
+    // Answer appears with the choice rather than above an always-open composer.
     await card.getByRole("radio", { name: "Ship" }).check();
-    await card.getByRole("button", { name: "Answer" }).click();
+    await expect(card.getByRole("button", { exact: true, name: "Answer" })).toBeVisible();
+    await card.getByRole("button", { exact: true, name: "Answer" }).click();
     await expect(
       card.getByRole("list", { name: "Options" }).locator('li[data-selected="true"]')
     ).toContainText("Ship");

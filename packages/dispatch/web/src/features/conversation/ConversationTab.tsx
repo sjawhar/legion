@@ -1346,7 +1346,12 @@ export function ConversationTab({
                 ref={registerObserved}
               >
                 <div className="min-w-0 flex-1">
-                  <AskCard ask={item.ask} thread="collapsed" />
+                  {/* The margin shows this same open ask beside the document, so a full
+                      two-row composer here is the question, its options and its answer
+                      controls twice on one screen. The timeline is the record: it carries the
+                      compact density, whose options answer in one click and whose note field
+                      is one disclosure away. */}
+                  <AskCard ask={item.ask} thread="collapsed" variant="compact" />
                 </div>
                 <TurnPin disabled={hasFailedOps} onPin={onPin} pinned={pinned} />
               </li>
@@ -1354,17 +1359,29 @@ export function ConversationTab({
           }
           return (
             <li
-              className={`flex items-baseline gap-2 px-2 text-xs ${textMutedOnCanvas}`}
+              className={`flex flex-wrap items-baseline gap-x-2 px-2 text-xs ${textMutedOnCanvas}`}
               data-event-seq={item.lastSeq}
               data-kind="activity"
               data-turn={item.id}
               key={item.id}
               ref={registerObserved}
             >
-              <span className="font-medium">{resolveAuthor(item.author, titles).label}</span>
-              <ActivityLine description={item.description} event={item.event} issueKey={issueKey} />
+              {/* The author and the time are short and fixed; only the description may wrap,
+                  so neither of them is broken across two lines to make room for it. */}
+              <span className="shrink-0 font-medium whitespace-nowrap">
+                {resolveAuthor(item.author, titles).label}
+              </span>
+              <span className="min-w-0 flex-1">
+                <ActivityLine
+                  description={item.description}
+                  event={item.event}
+                  issueKey={issueKey}
+                />
+              </span>
               <span aria-hidden="true">·</span>
-              <Timestamp at={item.at} />
+              <span className="shrink-0 whitespace-nowrap">
+                <Timestamp at={item.at} />
+              </span>
             </li>
           );
         })}
