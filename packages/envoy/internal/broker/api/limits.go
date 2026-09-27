@@ -12,9 +12,10 @@ import (
 )
 
 // LauncherLimits bounds POST /v1/launcher-credentials, the one route an unauthenticated caller
-// can use to make the broker call Dispatch. Every source address and every named operator has its
-// own token bucket: a flood from one address cannot keep the broker busy opening asks, and a
-// flood naming one operator cannot bury that operator's standing issue in asks.
+// can use to make the broker do work on their behalf. Every source address and every named
+// operator has its own token bucket: a flood from one address cannot keep the broker busy
+// verifying and recording machine-login requests, and a flood naming one operator cannot bury
+// that operator's pending machine logins.
 type LauncherLimits struct {
 	PerAddress  Limit
 	PerOperator Limit
