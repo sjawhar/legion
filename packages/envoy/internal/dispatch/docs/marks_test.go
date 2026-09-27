@@ -787,7 +787,7 @@ func TestAcceptSuggestionInAFootnoteDefinitionWhoseReferenceIsGone(t *testing.T)
 
 // An accept changes only the text it writes. Code beside it keeps the line break that ends it and
 // the comment anchored on that break, and code whose ending breaks a mark splits takes an accept
-// over its text.
+// over its text, with or without a break of its own.
 func TestAcceptSuggestionLeavesCodeItDoesNotWrite(t *testing.T) {
 	codeWithMarkedBreak := func(text string) func(*pmdoc.Node) *pmdoc.Node {
 		return func(tree *pmdoc.Node) *pmdoc.Node {
@@ -804,6 +804,7 @@ func TestAcceptSuggestionLeavesCodeItDoesNotWrite(t *testing.T) {
 	for _, test := range []struct{ name, spec, code, quote, with string }{
 		{"text beside code in the same list", "- Body.\n- ```\n  c\n  ```\n", "c", "Body.", "Changed."},
 		{"text over code whose ending breaks a mark splits", "Intro.\n\n```\nabc\n```\n", "abc\n", "abc", "xyz"},
+		{"text ending in a break over code a marked break ends", "Intro.\n\n```\nabc\n```\n", "abc", "abc", "xyz\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := newTestService(t)
