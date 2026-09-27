@@ -34,6 +34,7 @@ import {
 } from "@legion/envoy-client/dispatch-subscribe";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
+import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -497,6 +498,7 @@ export default function envoyExtension(pi: PiApi): void {
     connection = await connect({
       servers: [...defaults.natsUrls],
       name: `omp-${sessionID || "unknown"}`,
+      ...natsAuthOptions(process.env),
       // Survive NATS drops after the first connection: nats.js re-subscribes
       // existing subscriptions on its own once reconnected.
       reconnect: true,

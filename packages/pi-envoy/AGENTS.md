@@ -6,8 +6,13 @@ Tracked Oh My Pi (`pi-*`) extension package for Envoy messaging.
 
 This package owns Pi-specific tool registration, direct NATS subscriptions, targeted Dispatch
 delivery, and self-subscription registration for every session. HTTP transport, tool metadata, and
-subject construction come from the Envoy core packages. `@legion/envoy-client/delivery` is the sole
-inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
+subject construction come from the Envoy core packages. Both NATS connections (the agent subjects
+in `extensions/envoy.ts`, Legion's control subject in `extensions/legion.ts`) connect as the nkey
+user `@legion/envoy-client/nats-auth` reads from `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, and
+without a credential when neither is set; an unusable seed fails the connect naming the variable,
+and a Legion daemon strips both from every pane it launches, handing it instead the `legion-pane`
+seed file it holds as `NATS_NKEY_SEED_FILE` when it has one. `@legion/envoy-client/delivery` is
+the sole inbound renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
 Dispatch **BTW** frame runs `pi.askEphemeral` and posts its body or error to the correlated delivery
 attempt; **Aside** and **Steer** call `pi.sendMessage` with their respective delivery mode. Role claims
 are routed by the listener: this extension receives a receipt-backed request on its direct agent
@@ -37,13 +42,14 @@ per daemon.
 
 ### The TypeScript daemon: `legion.daemonApiVersion`
 
-`legion.daemonApiVersion` (currently 8) covers the `LegionDaemonApi` HTTP request and response
+`legion.daemonApiVersion` (currently 9) covers the `LegionDaemonApi` HTTP request and response
 shapes the extension validates strictly (`@legion/contracts`), and the pane contract — every
 environment variable the TypeScript daemon sets on a pane that this extension reads or writes:
 `LEGION_GRANT_FILE`, `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`,
 `LEGION_CONTROL_SUBJECT`, `LEGION_DAEMON_URL`, `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`,
 `ENVOY_NATS_URL`, `ENVOY_URL`, `ENVOY_TOKEN_FILE` (the listener bearer, read by
-`@legion/envoy-client` ahead of `ENVOY_TOKEN`; contract 3, LEGION-25), and the `LEGION_*` identity
+`@legion/envoy-client` ahead of `ENVOY_TOKEN`; contract 3, LEGION-25), `NATS_NKEY_SEED_FILE` (the
+`legion-pane` NATS nkey seed; contract 9, LEGION-279), and the `LEGION_*` identity
 variables `LEGION_TREE`/`LEGION_ISSUE`/`LEGION_ROLE`/`LEGION_GENERATION`/`LEGION_WORKSPACE`/
 `LEGION_STATE_DIR`/`LEGION_CONTROLLER` (read by `src/legion/classify.ts` and
 `extensions/legion.ts`; the Dispatch and Envoy variables by `@legion/envoy-client`; the grant
@@ -71,7 +77,9 @@ recorded when a `legion controller start` session calls `/controller/ready` agai
 and `POST /legion/v1/controller/secret` (the CLI's call, never this extension's). Contract 7 removes
 `merge` from `/gh-token`: Legion never merges (LEGION-19). Contract 8 adds `pluginVersion` to
 `/process/started`, `/worker/started`, and `/controller/ready`, and a tree's or role's
-`workspaceLost` record to the state response (#1167). The number is re-read against `main` at every
+`workspaceLost` record to the state response (#1167). Contract 9 adds `NATS_NKEY_SEED_FILE` to the
+pane contract: the `legion-pane` NATS nkey seed file every pane and pod gets when the daemon has one
+(`nats_nkey_seed_file`), which `@legion/envoy-client/nats-auth` reads (LEGION-279). The number is re-read against `main` at every
 rebase: two branches that each change a surface both take the next number, and the second to land
 renumbers above the first.
 
@@ -132,8 +140,9 @@ daemon registers both on one route, a root being the claim whose issue is its tr
 transcript; `claims/register` with the pane's boot token and this build's `goDaemonApiVersion`
 (`pluginContract`), where any 4xx exits the process with one log line naming the route, status,
 and daemon sentence (`exitOnGoRegistrationRefusal`) and a 5xx or transport failure propagates
-without exiting; jj session attribution; the Envoy role, which is the claim token; a persisted
-notice-topic subscription (the architect's tree root or a worker's issue); and `claims/ready`,
+without exiting; jj session attribution; the Envoy role, which is the claim token and the topic
+the Go daemon sends an architect every notice on (no claim subscribes to an issue's notice topic,
+so no phase worker is woken by an architect's notice); and `claims/ready`,
 retried three times a second apart on a 5xx or transport failure only. The tool-call hook mints a
 fresh grant into the pane's `LEGION_GRANT_FILE` before every call that redeems one (see the grant
 file row below). It also registers the Go `legion` tool: architects register gates, release

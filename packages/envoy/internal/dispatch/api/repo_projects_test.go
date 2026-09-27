@@ -133,6 +133,34 @@ func TestExternalIssueUsesPersistedRepoProject(t *testing.T) {
 		t.Fatalf("reject mismatched external project: status=%d body=%s", mismatch.Code, mismatch.Body.String())
 	}
 
+	linked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "CORE", "title": "Linked pull request",
+	}, "alice")
+	if linked.Code != http.StatusCreated {
+		t.Fatalf("create linked issue: status=%d body=%s", linked.Code, linked.Body.String())
+	}
+	linkedKey := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, linked).Key
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+linkedKey, map[string]any{
+		"external_links": []map[string]string{{
+			"url": "https://github.com/mapped/repository/pull/2",
+		}},
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("link pull request: status=%d body=%s", response.Code, response.Body.String())
+	}
+	mismatchedLinked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"external": "mapped/repository#2",
+		"project":  "DEFAULT",
+	}, "alice")
+	if mismatchedLinked.Code != http.StatusBadRequest ||
+		!strings.Contains(mismatchedLinked.Body.String(), `"code":"EXTERNAL_PROJECT_MISMATCH"`) {
+		t.Fatalf(
+			"reject mismatched linked external project: status=%d body=%s",
+			mismatchedLinked.Code,
+			mismatchedLinked.Body.String(),
+		)
+	}
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
 		"external": "mapped/repository#1",
 	}, "alice")
@@ -143,7 +171,7 @@ func TestExternalIssueUsesPersistedRepoProject(t *testing.T) {
 		Key    string   `json:"key"`
 		Labels []string `json:"labels"`
 	}](t, created)
-	if issue.Key != "CORE-1" || len(issue.Labels) != 0 {
+	if issue.Key != "CORE-2" || len(issue.Labels) != 0 {
 		t.Fatalf("persisted mapping external issue: got %#v", issue)
 	}
 }

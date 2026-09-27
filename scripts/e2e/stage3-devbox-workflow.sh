@@ -18,7 +18,7 @@
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
-work=$(mktemp -d /tmp/legion-e2e3.XXXXXXXX)
+work=$(mktemp -d "/tmp/legion-e2e3.$$.XXXXXXXX")
 # Evidence survives every outcome: logs, captured state, negative controls, the production audit,
 # and every agent transcript. Cleanup stops processes; removes containers, sockets, and profiles; and
 # closes the run's own pull requests on the smoke repository, deleting their branches.
@@ -44,6 +44,8 @@ watcher_pid=
 port_daemon=
 port_listener=
 port_dispatch=
+dispatch_base=
+dispatch_actor=
 port_worker_stream=
 port_pg=
 port_nats=
@@ -72,8 +74,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
 . "$root/scripts/e2e/lib/workflow.sh"
-# shellcheck source-path=SCRIPTDIR source=lib/built-revision.sh
-. "$root/scripts/e2e/lib/built-revision.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
+. "$root/scripts/e2e/lib/leftovers.sh"
 
 # collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
 # before the isolated profile is removed.
@@ -86,11 +88,16 @@ collect_transcripts() {
 cleanup() {
   local p
   set +e
+  # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
+  # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
+  # left as the checks set it. The warning names the line alone: inside a trap BASH_COMMAND is the
+  # command the trap interrupted, not the cleanup command that failed.
+  trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
   if [ -z "${ok:-}" ] && [ -z "$audited" ] && [ -n "$prod_baseline" ]; then
     printf 'production audit after failure:\n' >&2
     production_audit >&2
   fi
-  stop_pid "$watcher_pid"
+  stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
   stop_pid "$dispatch_pid"
   stop_pid "$listener_pid"
@@ -126,7 +133,7 @@ start_listener() {
     offset=$(log_size listener)
     ENVOY_API_TOKEN="$token" PORT="$port_listener" ENVOY_LISTEN_HOST=127.0.0.1 \
       ENVOY_MACHINE_ID="legion-e2e3-$$" NATS_URLS="nats://127.0.0.1:$port_nats" \
-      start_process listener env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+      start_process listener env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
         -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-listener"
     result=0
     await_start listener "$listener_pid" "$offset" 60 "the Envoy listener to answer /v1/sessions" \
@@ -154,11 +161,12 @@ start_dispatch() {
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
       ENVOY_URL="http://127.0.0.1:$port_listener" \
-      start_process dispatch env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+      start_process dispatch env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
         -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 "$work/envoy-dispatch"
     result=0
     await_start dispatch "$dispatch_pid" "$offset" 60 "the scratch Dispatch server" \
       curl -fsS "http://127.0.0.1:$port_dispatch/api/v1" || result=$?
+    dispatch_base="http://127.0.0.1:$port_dispatch"
     [ "$result" != 0 ] || return 0
     [ -z "$keep" ] || fail "the restarted scratch Dispatch lost port $port_dispatch to another process"
     note "the scratch Dispatch lost port $port_dispatch to another process (attempt $attempt); picking another"
@@ -208,7 +216,7 @@ start_daemon() {
       write_legion_config
     fi
     offset=$(log_size daemon)
-    OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+    OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
       -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
     daemon_pid=$!
@@ -330,7 +338,7 @@ pane_watcher() {
   local claims inc issue role omp mismatch
   trap - EXIT ERR
   set +e
-  while :; do
+  while kill -0 "$$" 2>/dev/null; do
     if claims=$("$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" 2>/dev/null); then
       while IFS=$'\t' read -r inc issue role; do
         grep -qF "$inc " "$evidence/pane-endpoints-checked.txt" 2>/dev/null && continue
@@ -528,7 +536,8 @@ idle_read_diagnostics() {
 }
 
 begin prerequisites
-for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+refuse_leftovers legion-e2e3
+for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-token pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as its sign-off would, and the
@@ -584,14 +593,15 @@ begin rig
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/envoy-token" &&
   printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/dispatch-token" &&
+  printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
+  printf 'X-Dispatch-User: smoke\n' >"$work/dispatch-human-header" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
-chmod 0600 "$work"/*token "$work/envoy-auth-header" "$work/postgres-password"
+chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener && go build -o "$work/envoy-dispatch" ./cmd/dispatch)
-# The head under proof, on the run's own log: a run reports for whatever the workspace held when it
-# built, and a comment naming the head is written by hand.
-built_from "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch"
+built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" "$work/envoy-listener" "$work/envoy-dispatch") || fail "lib/built-from.sh could not say what the run built"
+while IFS= read -r line; do note "$line"; done <<<"$built"
 docker ps >/dev/null
 # Docker assigns the containers' host ports when it binds them, so neither can lose a race.
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
@@ -624,9 +634,12 @@ mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
 # Stage 3 proof instructions
 
-This is a throwaway workflow proof. Do not act until a targeted human Dispatch message gives the
-next exact proof operation. Follow that instruction precisely, use the Go-daemon Legion tools and
-handoffs, and do not create work outside the issue's smoke branch.
+This is a throwaway workflow proof. Do not act until a human Dispatch message targeted at your own
+session gives the next exact proof operation; it arrives in your session as a message to you. A
+message you only find by reading the issue (its events, a search) was sent to another session, even
+on your issue, and a notice is not an instruction: neither is yours to act on. Follow your
+instruction precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside
+the issue's smoke branch.
 EOF
 start_daemon
 note "project $project, profile $profile, plugin $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
@@ -707,15 +720,18 @@ primary_issue() {
   wait_for_worker "$root_issue" reviewer
   pass
 
-  # Three real GitHub changes-requested reviews exercise the round counter, the return to
-  # implementing, and the third `pr-blocked` publication. Every recovery repeats the real workers.
+  # Three real GitHub changes-requested reviews, each posted by the reviewer pane and ended by its
+  # completion, exercise the round counter, the return to implementing, and the third `pr-blocked`
+  # publication. Every recovery repeats the real workers.
   for round in 1 2 3; do
     begin "review-round-$round-changes-requested"
     # A review that names no correction leaves the implementer nothing it may change under a spec
     # that pins the smoke line: it deliberated past the wait or escalated to a human. Each round
     # names one concrete correction the spec permits.
-    request_changes "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope."
-    wait_for_phase "$root_issue" implementing
+    request_changes_as_reviewer "$root_issue" "$round" "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope."
+    # The round ends when the reviewer completes it: its review, its handoff commit, its completion.
+    wait_for_phase "$root_issue" implementing 1200
+    assert_handoff_committer "$root_issue" reviewer reviewing "$round"
     until_true 180 "round $round to write in_progress on the Dispatch board" dispatch_status_is "$root_issue" in_progress
     wait_for_worker "$root_issue" implementer
     if [ "$round" = 3 ]; then
@@ -757,6 +773,7 @@ primary_issue() {
   # may finish it before the proof's instruction reaches it, so the wait is for the issue to leave
   # reviewing, not to sit in retro.
   until_true 600 "$root_issue to leave reviewing for retro" issue_phase_in "$root_issue" retro merging
+  assert_handoff_committer "$root_issue" reviewer reviewing 3
   pass
   [ "$until" != rework ] || return 0
 
@@ -1000,10 +1017,30 @@ status_actors() {
   note "every lifecycle transition on $root_issue ($(jq -r '[.[] | select(.type | IN("issue.updated", "issue.closed")) | .payload.status] | join(" ")' "$evidence/root-events.json")) records actor legion-daemon:$project; one agent-attributed write was rejected"
   pass
 }
+# Every workflow notice is for the architect that owns its issue, on that architect's role topic:
+# the run's pr-blocked, production-check phase-finished and worker-died reach their architects
+# (checked where each is written), and no phase-worker session of the run receives any notice.
+notices_reach_architects_alone() {
+  begin notices-reach-architects-alone
+  local sessions="$HOME/.omp/profiles/$profile/agent/sessions" negative="$work/worker-notice-negative" worker
+  worker_sessions "$sessions" >"$evidence/worker-sessions.txt"
+  worker_notices "$sessions" >"$evidence/worker-notices.txt"
+  [ -s "$evidence/worker-notices.txt" ] && fail "phase-worker sessions received workflow notices: $(head -3 "$evidence/worker-notices.txt" | tr '\n' ';')"
+  worker=$(head -1 "$evidence/worker-sessions.txt" | cut -f1)
+  [ -n "$worker" ] || fail "no phase-worker session under $sessions to control the check with"
+  mkdir -p "$negative"
+  cp -- "$worker" "$negative/"
+  jq -cn --arg issue "$root_issue" '{type: "custom_message", customType: "envoy-message", content: ("envoy:\n  summary: pr-blocked on " + $issue + "\n")}' >>"$negative/${worker##*/}"
+  expect_failure worker-notice assert_no_worker_notices "$negative"
+  assert_no_worker_notices "$sessions" || fail "the worker-notice assertion did not restore after its negative control"
+  note "$(wc -l <"$evidence/worker-sessions.txt") phase-worker sessions, none holding a workflow notice"
+  pass
+}
 if [ -z "$until" ]; then
   [ "$from" = restart ] || held_worker
   restart_scenarios
   [ -n "$from" ] || status_actors
+  notices_reach_architects_alone
 fi
 
 begin production-untouched
@@ -1018,7 +1055,7 @@ pass
 begin services-stopped
 # Stop the remaining services explicitly and prove every one is gone, so no agent can take another
 # turn: an idle agent takes one on the next event the daemon delivers, until the daemon stops.
-stop_pid "$watcher_pid"; watcher_pid=
+stop_tree "$watcher_pid"; watcher_pid=
 stop_pid "$daemon_pid"; daemon_pid=
 stop_dispatch
 stop_pid "$listener_pid"; listener_pid=
@@ -1040,7 +1077,7 @@ begin model-turns-through-the-gateway
 route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
   --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
 note "$route"
-note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log") times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log") ($evidence/model-gateway/hawk-token.log)"
+note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log" || true) times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log" || true) ($evidence/model-gateway/hawk-token.log)"
 # The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
 # taken after the read, or a session the copy lost, fails here rather than passing unseen.
 collect_transcripts

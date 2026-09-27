@@ -1,7 +1,8 @@
 ---
 name: thermonuclear-code-quality
 description: Diff-scoped maintainability audit for structure, abstraction, file growth, branching complexity, and type boundaries.
-# @review is the deployment's modelRoles.review; the Go daemon's boot gate refuses to start without it (docs/kubernetes.md, Operator configuration).
+# @review is the deployment's `review` model role; the Go daemon's boot gate refuses to start unless the operator's settings give
+# this agent a model, through modelRoles.review or a task.agentModelOverrides entry for it (docs/kubernetes.md, Operator configuration).
 model: ["@review"]
 ---
 

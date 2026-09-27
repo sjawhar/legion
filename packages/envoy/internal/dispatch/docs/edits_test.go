@@ -1564,7 +1564,6 @@ func TestApplyOperationReplaceKeepsAMarkAroundTextEndingInABackslash(t *testing.
 		t.Fatalf("the bold is gone: %q (%#v)", markdown, first)
 	}
 }
-
 func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
 	// The refusal is where an agent learns what to do instead, and each half of it is for a
 	// different `with`: paragraphs are rewritten one replace each, keeping their block ids - so a
@@ -1793,20 +1792,24 @@ func TestApplyOperationReplaceSetsAHeadingLevelOnlyFromALevelNamingFind(t *testi
 
 // The refusal quotes the marker the reader will see in the document, not a stand-in: AGENTC-193's
 // item was `7.`, and telling that reader the block renders `1.` sends them looking for a
-// different bullet.
+// different bullet. A list beside a list of its kind is written with the kind's other marker.
 func TestApplyOperationReplaceRefusalQuotesTheBlocksRealMarker(t *testing.T) {
-	tree, err := parseInput("7. Launcher contract\n8. Acceptance\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range []struct{ find, want string }{
-		{find: "Launcher contract", want: `"7. "`},
-		{find: "Acceptance", want: `"8. "`},
+	for _, test := range []struct{ markdown, find, with, want string }{
+		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Launcher contract", with: "9. Launcher contract", want: `"7. "`},
+		{markdown: "7. Launcher contract\n8. Acceptance\n", find: "Acceptance", with: "9. Acceptance", want: `"8. "`},
+		{markdown: "0. Launcher contract\n1. Acceptance\n", find: "Launcher contract", with: "9. Launcher contract", want: `"0. "`},
+		{markdown: "- a\n\n* b\n", find: "b", with: "* c", want: `"* "`},
+		{markdown: "1. a\n\n1) b\n2) c\n", find: "c", with: "2) d", want: `"2) "`},
+		{markdown: "- outer\n  - x\n  * y\n", find: "y", with: "- z", want: `"* "`},
 	} {
-		_, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: "9. " + test.find})
+		tree, err := parseInput(test.markdown)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
 		var invalid *ErrInvalidOp
 		if !errors.As(err, &invalid) {
-			t.Fatalf("replace in %q = %v, want invalid with", test.find, err)
+			t.Fatalf("replace %q in %q = %v, want invalid with", test.find, test.markdown, err)
 		}
 		if !strings.Contains(invalid.Reason, test.want) {
 			t.Fatalf("reason = %q, want it to quote %s", invalid.Reason, test.want)
@@ -2180,6 +2183,7 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 		{"an ask's question", "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nBody.\n\n- A\n- B\n:::\n"},
 		{"a footnote definition's first paragraph of two", "x[^1]\n\n[^1]: Body.\n\n    More.\n"},
 		{"a table body cell", "Intro.\n\n| h |\n| --- |\n| Body. |\n"},
+		{"a footnote definition's only paragraph", "x[^1]\n\n[^1]: Body.\n"},
 		{"a table header cell", "Intro.\n\n| Body. |\n| --- |\n| c |\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2228,6 +2232,83 @@ func TestApplyOperationReplaceWithNothingEmptiesTheParagraph(t *testing.T) {
 	}
 	if back, err := parseInput(markdown); err != nil || !back.Equal(next) {
 		t.Fatalf("replace leaving \"---\" stored %q, which does not read back as written (%v)", markdown, err)
+	}
+}
+
+// Emptying the paragraph a callout holds in a footnote definition is taken: the callout reads back
+// holding one empty paragraph, as the browser editor's parser reads it, so the definition keeps
+// its callout and its reference stays a footnote reference rather than literal text.
+func TestApplyOperationEmptyingACalloutInAFootnoteKeepsTheCallout(t *testing.T) {
+	tree, err := parseInput("x[^1]\n\n[^1]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    Body.\n    :::\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pmdoc.EnsureBlockIDs(tree)
+	next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: ""})
+	if err != nil {
+		t.Fatalf("emptying the callout's paragraph = %v, want it taken", err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := parseInput(markdown)
+	if err != nil || !back.Equal(next) {
+		t.Fatalf("after emptying, %q does not read back as written (%v)", markdown, err)
+	}
+	var references, callouts int
+	pmdoc.Walk(back, func(node *pmdoc.Node) bool {
+		switch node.Type {
+		case "footnote_reference":
+			references++
+		case "callout":
+			callouts++
+		}
+		return true
+	})
+	if references != 1 || callouts != 1 {
+		t.Fatalf("after emptying, %q holds %d footnote references and %d callouts, want 1 and 1", markdown, references, callouts)
+	}
+}
+
+// A code span keeps the whitespace that starts its next line, as the browser editor's parser reads
+// it; only the prefix of the containers around it is not the code's. A replace writing one stores
+// that code and reads it back.
+func TestApplyOperationReplaceKeepsACodeSpansLineIndent(t *testing.T) {
+	for _, test := range []struct{ name, markdown, with, code string }{
+		{"after a line feed", "Intro.\n\nBody.\n\nAfter.\n", "x `a\n  b` y", "a\n  b"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: test.with})
+			if err != nil {
+				t.Fatalf("replace with %q = %v, want it taken", test.with, err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			back, err := parseInput(markdown)
+			if err != nil || !back.Equal(next) {
+				t.Fatalf("replace with %q stored %q, which does not read back as written (%v)", test.with, markdown, err)
+			}
+			var code []string
+			pmdoc.Walk(back, func(node *pmdoc.Node) bool {
+				for _, mark := range node.Marks {
+					if node.Type == "text" && mark.Type == "inlineCode" {
+						code = append(code, node.Text)
+					}
+				}
+				return true
+			})
+			if len(code) != 1 || code[0] != test.code {
+				t.Fatalf("replace with %q stored %q, whose code reads back %q, want %q", test.with, markdown, code, test.code)
+			}
+		})
 	}
 }
 

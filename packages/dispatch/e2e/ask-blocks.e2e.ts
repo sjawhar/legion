@@ -608,11 +608,9 @@ test("decision blocks read as urgency-accented cards in the document and its ver
   }
 });
 
-// A typed block goes onto the clipboard as its content. The editor's block renderer draws the
-// block's attributes as a header inside its DOM, and the clipboard once carried it: pasted back,
-// the block's parse rule read the header too, so a copied decision's question became its
-// attribute list ("ask urgency med multiple false state answered ... blockId decision Which
-// one?"). HTML an older tab copied still carries that header, and a paste drops it.
+// A typed block's rendered DOM includes a header above its content hole. When a browser copies
+// that rendered block, the parse rule must read the content hole rather than treat the header as
+// its first paragraphs.
 test("a copied decision block carries its content, not its attribute header", async ({
   browser,
 }) => {
@@ -627,16 +625,112 @@ test("a copied decision block carries its content, not its attribute header", as
       '<header data-proof-block-summary=""><span data-proof-block-name="">ask</span>' +
       '<dl data-proof-block-attributes=""><dt>urgency</dt><dd data-proof-block-attribute="urgency">med</dd>' +
       '<dt>answer</dt><dd data-proof-block-attribute="answer">Go A.</dd></dl></header>';
-    const olderTab = clipboard.html.replace(
-      /(<section[^>]*data-proof-block-type="ask"[^>]*>)/,
-      `$1${header}`
+    const rendered = clipboard.html.replace(
+      /(<section[^>]*data-proof-block-type="ask"[^>]*>)([\s\S]*?)(<\/section>)/,
+      `$1${header}<div data-proof-block-content="">$2</div>$3`
     );
-    expect(olderTab).toContain("data-proof-block-summary");
-    await pasteBefore(page, "Intro.", { html: olderTab, text: clipboard.text });
+    expect(rendered).toContain("data-proof-block-summary");
+    expect(rendered).toContain("data-proof-block-content");
+    await pasteBefore(page, "Intro.", { html: rendered, text: clipboard.text });
 
     await expect
       .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
       .toEqual(["Which one?"]);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A real clipboard copy holds the typed blocks' client-owned DOM attributes. A rendered page also
+// adds a header above each content hole. Pasting that rendered form must retain a callout's
+// attributes and each block's exact content, while the existing answered decision keeps its id
+// and server-owned answer.
+test("a pasted rendered callout and decision keep attributes, content, and the original answer", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec:
+      'Intro.\n\n:::callout{#callout kind="warning" title="Risk"}\nCareful.\n:::\n\n' +
+      ':::ask{#decision urgency="med" multiple="false"}\nWhich one?\n\n- A\n- B\n:::\n\nAfter.\n',
+    title: "Copied typed blocks",
+  });
+  const originalAsk = await indexedBlockAsk(issue.key, "decision");
+  await answerAsk(originalAsk.id, {
+    expected_edited_at: null,
+    selected: ["A"],
+    text: "Go A.",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    const clipboard = await copyWholeDocument(page);
+    expect(clipboard.html).toContain('data-proof-block-attr-kind="warning"');
+    expect(clipboard.html).toContain('data-proof-block-attr-title="Risk"');
+
+    const rendered = await page.evaluate((html) => {
+      const template = document.createElement("template");
+      template.innerHTML = html;
+      for (const section of template.content.querySelectorAll<HTMLElement>(
+        "section[data-proof-block-type]"
+      )) {
+        const header = document.createElement("header");
+        header.dataset.proofBlockSummary = "";
+        header.textContent = "This rendered header must not become document content.";
+        const content = document.createElement("div");
+        content.dataset.proofBlockContent = "";
+        while (section.firstChild !== null) {
+          content.append(section.firstChild);
+        }
+        section.append(header, content);
+      }
+      return template.innerHTML;
+    }, clipboard.html);
+    expect(rendered).toContain("data-proof-block-content");
+    await pasteBefore(page, "Intro.", { html: rendered, text: clipboard.text });
+
+    await expect
+      .poll(async () => (await getIssue(issue.key)).open_asks.map((ask) => ask.question))
+      .toEqual(["Which one?"]);
+    const stored = (await getArtifactText(issue.primary_artifact_id)).markdown;
+    const callouts = [...stored.matchAll(/:::callout\{#([^ }]+)([^}]*)\}\n([\s\S]*?)\n:::/g)];
+    const decisions = [...stored.matchAll(/:::ask\{#([^ }]+)([^}]*)\}\n([\s\S]*?)\n:::/g)];
+    expect(callouts).toHaveLength(2);
+    expect(callouts.map((match) => match[1])).toEqual([
+      expect.not.stringMatching(/^callout$/),
+      "callout",
+    ]);
+    expect(callouts.map((match) => match[2])).toEqual([
+      expect.stringContaining('kind="warning"'),
+      expect.stringContaining('kind="warning"'),
+    ]);
+    expect(callouts.map((match) => match[2])).toEqual([
+      expect.stringContaining('title="Risk"'),
+      expect.stringContaining('title="Risk"'),
+    ]);
+    expect(callouts.map((match) => match[3])).toEqual(["Careful.", "Careful."]);
+    expect(decisions).toHaveLength(2);
+    expect(decisions.map((match) => match[1])).toEqual([
+      expect.not.stringMatching(/^decision$/),
+      "decision",
+    ]);
+    expect(decisions.map((match) => match[3])).toEqual([
+      "Which one?\n\n- A\n- B",
+      "Which one?\n\n- A\n- B",
+    ]);
+    expect(stored).not.toContain("This rendered header must not become document content.");
+    await expect
+      .poll(async () => getAsk(originalAsk.id))
+      .toMatchObject({
+        ask: {
+          answer: { selected: ["A"], text: "Go A." },
+          block_id: "decision",
+          state: "answered",
+        },
+      });
+    await page.close();
   } finally {
     await alice.close();
   }
@@ -678,7 +772,7 @@ test("a copy of an answered decision pasted above it leaves the answer on the or
 
 // The editor's own HTML cleanup still runs on a paste: a paste from Google Docs arrives wrapped in
 // <b id="docs-internal-guid-…">, which the editor unwraps, so the text pastes as written rather
-// than bold. The typed-block header strip runs after it and replaced it once.
+// than bold.
 test("a paste from Google Docs keeps the editor's own cleanup of its wrapper", async ({
   browser,
 }) => {

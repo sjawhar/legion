@@ -5,6 +5,7 @@ package supervise
 // releases it.
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -192,12 +193,16 @@ func TestTreeCloseReleasesALiveRoot(t *testing.T) {
 // set, and under a sandbox the sweep would then delete its Sandbox and the tree volume with it,
 // every child's workspace included. A stop that is not the tree's close — the operator's — is
 // refused in every state and changes nothing. The refusal is ErrRootStop, whatever the state, and
-// says what stops the root's process where one runs: suspend, once its agent has registered.
+// says what stops the root's process where one runs: suspend, once its agent has registered. What
+// ends a tree no workflow issue backs is the operator's close, so its refusal names that too; a
+// workflow issue's tree ends when its linger expires, and its refusal does not.
 func TestAStopThatIsNotTheTreesCloseNeverRetiresItsRoot(t *testing.T) {
 	const (
-		suspendIt = "stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process"
-		booting   = "stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered"
-		nothing   = "stop refused: the tree's root claim ends only when its tree closes; no process of this claim is running"
+		refused   = "stop refused: the tree's root claim ends only when its tree closes; "
+		closeIt   = "; no workflow issue backs its tree, so legion claims close ends it"
+		suspendIt = refused + "suspend it to stop its process" + closeIt
+		booting   = refused + "suspend it to stop its process once its agent has registered" + closeIt
+		nothing   = refused + "no process of this claim is running" + closeIt
 	)
 	wantRefused := func(t *testing.T, h *harness, state ClaimState, want string) {
 		t.Helper()
@@ -240,6 +245,36 @@ func TestAStopThatIsNotTheTreesCloseNeverRetiresItsRoot(t *testing.T) {
 		}
 		h.wantState(StateFailed)
 		wantRefused(t, h, StateFailed, nothing)
+	})
+	t.Run("a workflow issue's tree", func(t *testing.T) {
+		h := newBareHarness(t)
+		h.deps.TreeClosable = func(context.Context, Claim) (bool, error) { return false, nil }
+		root := rootClaim()
+		h.token = root.Token
+		if err := h.store.PutClaim(h.ctx, root); err != nil {
+			t.Fatal(err)
+		}
+		h.start(root)
+		h.reach(StateReady)
+		wantRefused(t, h, StateReady, refused+"suspend it to stop its process")
+	})
+	// The read that picks the refusal's last clause can fail. That failure is the stop's, the
+	// request the operator made, and it changes nothing; no close was asked for.
+	t.Run("an unreadable tree", func(t *testing.T) {
+		h := newBareHarness(t)
+		h.deps.TreeClosable = func(context.Context, Claim) (bool, error) { return false, errors.New("store down") }
+		root := rootClaim()
+		h.token = root.Token
+		if err := h.store.PutClaim(h.ctx, root); err != nil {
+			t.Fatal(err)
+		}
+		h.start(root)
+		h.reach(StateReady)
+		if err := h.handle(RequestStop{Claim: rootToken}); err == nil || err.Error() != "stop "+string(rootToken)+": store down" {
+			t.Fatalf("stop with the tree unreadable returned %v, want the stop's own failure", err)
+		}
+		h.wantCalls("Release", 0)
+		h.wantState(StateReady)
 	})
 }
 

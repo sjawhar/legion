@@ -25,6 +25,7 @@ events to the right session.
 | Webhook config         | `internal/webhook/config.go`                     | ENVOY_WEBHOOKS parsing, startup validation         |
 | Listener behavior      | `cmd/listener/main.go`                    | subscribe/match/deliver flow                       |
 | NATS client            | `internal/bus/nats.go`                    | reconnect/self-heal logic                          |
+| NATS credential        | `internal/bus/nkey.go`                    | every bus connection's nkey user: `NATS_NKEY_SEED_FILE` (wins) or `NATS_NKEY_SEED`; unusable refuses, neither set connects without one |
 | Stream definition      | `internal/bus/stream.go`                  | `ENVOY_NOTIFICATIONS` subjects, retention and duplicate window, and their reconciliation at start |
 | Session delivery       | `internal/session/session.go`             | hot delivery via prompt_async                      |
 | Interest storage       | `internal/store/kv.go`                    | JetStream KV subscriptions                         |
@@ -60,9 +61,22 @@ settlement repairs it) refuse anything. Only a typed block's markdown can name i
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
-after; the one measure the room's update observer, `updateChangesMarkdown`, and a transactional live
-write in `applyLive` both apply) - and settlement writes a version only when a content-class row
-lies past the latest version's `doc_update_version` cursor or ask reconciliation changed something.
+after; the one measure the room's update observer, `updateChangesMarkdown`, a transactional live
+write in `applyLive` and settlement's own closure, `closureChangedMarkdown`, all apply) - and
+settlement writes a version only when a content-class row lies past the latest version's
+`doc_update_version` cursor and the settled document renders differently from that version.
+Indexing an ask block fails the second half: it writes an `asks` row and an `ask.opened` event
+over words the edit that wrote the block already versioned, and settlement used to version the
+document for that event alone - a byte-identical version credited to nobody, staling an approval
+pinned to what an agent had just written and closing Legion's design gate with nothing in the
+event stream to explain it (LEGION-273). Settlement's tree writes - stamping block ids, restoring
+an ask block's server-owned attributes - move the stored Proof state and usually render the same
+markdown, and a version for one of those repeated the version before it too (LEGION-229
+requirement 2); their `doc_updates` row now records what they rendered rather than `true`, so a
+repair that changed no text leaves nothing past the cursor for a later settlement to version.
+The version a settlement that writes none leaves the document at is the one it found, and that is
+the number its `block.repaired`, `block.invalid` and retraction events name
+(`settlementReconciliation.nameVersion`).
 An update that changes only what no rendering carries therefore versions no document by that route:
 a margin projection, the attributes a reader's browser editor derives on its own - each heading's
 `id` when it opens the document, and each ordered list item's `label` and `listType` on the first
@@ -114,7 +128,10 @@ flushes and compacts under the advisory lock, so no transaction waits for a fail
 either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
 fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`), the transaction rolls back, and
 the caller retries once the room has reloaded; so does a write whose room fails before its first
-append, since the reloaded room may lack it.
+append, since the reloaded room may lack it. A room's own load never waits for that recovery
+either - the eviction waits in ygo's `CloseRoom` for the load's ready barrier, so the two would
+hold each other - and refuses instead, which ends the eviction; the replacement room's load then
+runs the one settlement the failure dropped.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
@@ -143,24 +160,24 @@ Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOpera
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
 (`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
 breaks at the end of the code's text and a line holding only whitespace in a list item's code read
-back without them; and a line of three or more colons in code inside a typed block, starting less
-than four columns past the column the typed block's own lines start at on the written line, is
-refused (`refuseCodeThatEndsItsBlock`), because the browser editor's parser ends the typed block at
-it even inside fenced code. That measure counts the width of the list markers and `> ` around the
-code, advances a tab to the next multiple of four from the column it stands at, so a tab in a
-callout two columns in advances two, trims only spaces, tabs and a line-ending carriage return around
-the colons, and finds nothing closing in a blockquote inside the typed block (`pmdoc.TypedFenceLineInCode`, held to the engine's
-own verdicts in `pmdoc/testdata/typed-fence-lines.json`, which the fixture generator writes for a
-callout at the top and inside a blockquote, list items and a footnote definition); the advice is
-four spaces, which no layout closes. Text a `replace` writes that would read as block syntax at a
-line start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::`
-over a paragraph is stored `\---` and so on (the renderer's line-start escapes), beside an
-emptied paragraph as anywhere else, since an empty paragraph is not written. Everywhere else `replace` is
+back without them. A line of colons in code inside a typed block is kept: the browser editor's
+parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
+them, starting less than four columns
+past where the typed block's own lines start on the written line, even inside fenced code -
+counting the width of the list markers and `> ` around the code, advancing a tab to the next
+multiple of four from the column it stands at, and finding nothing closing in a blockquote inside
+the typed block - so the renderer writes the typed block's fence longer than every such line
+(below). The engine's reading of each shape is `pmdoc/testdata/typed-fence-lines.json`, which the
+fixture generator writes for a callout at the top and inside a blockquote, list items, a footnote
+definition and another callout. Text a `replace` writes that would read as block syntax at a line
+start is written escaped, so it reads back as the characters: `---`, `***`, `~~~` or `::::` over a
+paragraph is stored `\---` and so on (the renderer's line-start escapes). Beside an emptied
+paragraph it is written the same way, since an empty paragraph is not written. Everywhere else `replace` is
 inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a multi-paragraph
 `with` is `INVALID_OP`, so is any non-empty `with` that renders to no inline content (a line
 indented four spaces or a tab, which markdown reads as a code block, or whitespace alone — an
-empty `with` deletes the match on purpose, except where the block holding it cannot be written
-without that paragraph, which is refused naming the `delete` that removes it instead; refusing the rest is LEGION-280, since
+empty `with` deletes the match on purpose, and a container left holding only the emptied paragraph
+reads back holding it; refusing the rest is LEGION-280, since
 splicing nothing over the match silently deleted the caller's text), and a leading marker of a
 *different* kind from the matched block's own is
 literal escaped text. A `with` opening with a marker of the *same* kind as that block's own would
@@ -193,9 +210,42 @@ prose off them. `delete` takes `find` or
 (`pmdoc.DeleteTextblock`: it also drops a list, list item, or blockquote it empties, hoists a nested
 list into the place of a bullet whose text goes, and refuses a bullet with other content with
 `ErrListItemContent` naming `delete {block:"<item id>"}`; `pmdoc.DeleteBlock` serves `block` and
-reports any emptied container's content rule as `INVALID_OP`). `move` relocates the block with
+reports any emptied container's content rule as `INVALID_OP`; both leave an emptied footnote
+definition holding one empty paragraph, which both parsers read back as the definition, so its
+reference stays a reference). `move` relocates the block with
 `block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
 anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
+
+A write runs on its transaction's fork of the room, so a browser change made while it is in flight
+merges with it rather than blocking it, and the merge can annihilate the write: `pmdoc.Update`
+splices a paragraph's text in place, a browser's paragraph delete is an element delete, and ygo's
+delete cascades over the element's children, so whichever side merges first the inserted run ends
+up tombstoned or live under a tombstoned element. The document outcome is right - the human's
+deletion wins - but the write used to commit, version and answer 200 anyway, telling the agent its
+edit applied (LEGION-269). Each write now records what its own Yjs update inserted and where
+(`docs/lostedit.go` `lossCheck`, over `pmdoc.AuthoredTextRuns`): per operation, the blocks whose own
+inline content it wrote (`pmdoc.BlocksGainingText`, the same `simpleDiff` insertion `pmdoc.Update`
+makes, so a block whose text only shrank, an attribute-only change, a `delete` with or without
+`find`, `delete_row`, `delete_column` and an unchanged operation all write nothing that a
+concurrent change could remove and are never reported lost), and the clocks of the text items the
+update left live in each of them. Two windows read it back. Before the version is rendered,
+`captureLiveTextAndAuthors` brings the fork up to date with the room and `refuseLostWrite` refuses
+the whole batch with `409 EDIT_LOST_TO_CONCURRENT_CHANGE`, naming the lost operations and the
+room's other connected participants; the transaction rolls back, so no version, durable update,
+room update or broadcast survives, and the caller re-reads and decides again. After the committed
+write reaches the room, `recordPublishedLoss` reads it again: nothing can be undone there, so the
+response is `200` with `lost_ops` naming the operations whose text the live document does not
+carry, `[]` when everything survived, and `null` when the publish failed and no verdict was
+reached. An operation's text counts as surviving while it is live inside an element carrying the
+block id it was written into - any such element, since a browser move can leave an id on two until
+`EnsureBlockIDs` repairs it - so a concurrent range delete around the agent's own insertion, or a
+keystroke in the same paragraph, is an ordinary success, while a deleted paragraph, a deleted
+ancestor and a browser move that strands the run in another block are all losses. Accepting a
+suggestion carries the same check under the comment's id instead of an operation index: a loss in
+the first window is the same `409` and leaves the suggestion open, and one in the second answers
+`200` with `lost: true`. That path stamps no block ids, because `EnsureBlockIDs` would also repair
+a repeat the live document carries, which is settlement's to repair and a write's to leave as it
+found it.
 
 Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
 splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range
@@ -450,7 +500,7 @@ after a receipt timeout safe: the listener publishes the envelope before it answ
 answer that misses the client's window says nothing about whether the message landed, and only
 the same key can be recognised as the repeat it is. **This holds for as long as the stream's
 duplicate window, which equals its retention by construction (both are `streamDuplicateWindow`,
-`internal/bus/stream.go`) and is reconciled on every `bus.Connect` by `ensureStreamWithConfig`.**
+`internal/bus/stream.go`) and is reconciled on every `bus.ConnectOwningStream` by `ensureStreamWithConfig`.**
 A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what
 the dashboard's retry row says: its **Retry** re-sends the attempt's own mode, and the two
 mode-change actions say "instead". A mode change never rides on a stranded attempt - resuming it
@@ -518,10 +568,86 @@ exists, and refuses to run without `dispatch.server_url`.
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive
-syntax: `:::name{#block-id key="value"}` followed by block children and a matching `:::`. There is
+syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of exactly as
+many colons as the opener. The browser editor's parser closes it at a line of at least as many
+colons indented less than four columns, even inside a fenced code block it holds, so the renderer
+writes three colons, or one more than the longest such line inside the typed block
+(`closingColons`): a nested typed block's fence, or a line of code, measured in the written line's
+columns - the width of the list markers and `> ` around it, and a tab advancing to the next
+multiple of four from the column it stands at. A callout nested directly in a callout is written `::::callout{…}` …
+`::::`, as the browser editor writes it. There is
 no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and text directives are
 invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
 inside another block runs to that parent’s end.
+
+Text a caller writes reaches the parser with line feeds alone: `pmdoc.LineFeeds` writes each CR LF
+and each lone carriage return as a line feed, as CommonMark and the browser editor's parser read
+both, in `ParseForWrite` (a spec, an upload, an insert) and `ParseInline`; in every edit
+operation's text before any check reads it (`applyOperation`: a replace's `with`, an insert's
+markdown whether it becomes blocks or table rows, a retype's attributes); in a suggestion's
+`replace_with` when it is created and when it is accepted; in the attributes written onto a
+typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its
+ask block carries; and in a block ask's edited question and options. The browser editor's own
+updates cannot carry a carriage return. No stored document holds one, and `pmdoc` handles line
+feeds alone. A code span keeps the whitespace that
+starts each of its later lines past the prefix of the containers around it, as the browser editor's
+parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
+trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
+such a span sheds at each end (`codeSpanPadded`), and the writer pads a span whose text starts and
+ends with one. A lazy continuation line - one that
+continues a paragraph in a list item, a quote or a footnote definition without the container's
+prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
+A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
+the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
+the line, or by a line ending the paragraph continues past, and it takes only the one character
+after it. Goldmark's took the marker with anything after it, so it read a link opening a list item
+(`- [x](https://…)`) as a checked task.
+
+Front matter is read as the browser editor's parser reads it (`pmdoc.parseFrontmatterBlock`): a
+first line that is `---`, with any spaces or tabs after it, opens it, the first later line that is
+the same closes it, and its text is stored between plain `---` fences with line feeds between its
+lines. A `---` opener nothing closes is a thematic break. That parser, having tried such an opener
+as front matter to the document's end, reads no list, quote or footnote definition at the
+document's level in the rest. So the renderer writes a rule that opens a document as `***` where
+`---` would be misread - a later `---` line would close front matter, or the document holds a
+list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
+everywhere else.
+
+Two lists of one kind side by side read back as one when written with one marker, so the
+renderer writes a list whose kind matches the block before it - past an empty paragraph, which
+it writes as nothing - with its kind's other marker, `*` after `-` and `)` after `.`, alternating
+as the browser editor does (`otherListMarkers`); a list anywhere else keeps `-` or `.`. An edit
+that leaves two lists side by side (deleting or emptying what stood between them, inserting or
+accepting a list beside one) therefore stores the two lists it made, and a `replace` refusal that
+names a list item's marker names the one it is written with (`BlockMarker.Other`).
+
+A container that holds nothing is read as the browser editor's parser reads it, holding one empty
+paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
+definition, and a list item that opens with another block (`- # h`) holds an empty paragraph ahead
+of it. A table with no body row holds one empty row, which the renderer writes as nothing. The
+renderer writes a list item's empty first paragraph as nothing, with the next block on the
+marker's line, a rule there with the other character from the marker's, `***`, and `---` after
+`* ` (`- ---` and `* ***` are thematic breaks at the list's level). A task
+item cannot be written so, since its marker's line would carry the next block as the task's text
+and the browser reads no other form of it as a task: a task item whose emptied first paragraph has
+another block after it does not render, and an edit that would leave one is refused.
+An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
+whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
+
+A document holding one of those shapes, or a footnote definition that ends in a block other than
+a paragraph, has its lists' spacing read as that parser reads it (`browserListSpacing`): outside
+quotes and footnote definitions a blank line between two items spreads the list, and one between
+an item's blocks spreads the item; in a footnote definition a list is never spread and only an
+item's own blank lines spread it; in a quote a list is read only when no blank line lies at or
+after it but the one before flow content the quote goes on with, and then nothing is spread. Where
+that parser's spread depends on more - a blank line after an item in a footnote definition, any
+other blank line in a quote, a typed block holding one in a list item - the document is refused,
+and so it is where goldmark reads its blocks otherwise: an empty list item and a blank line before
+a block its outer item holds, and a footnote definition inside another block, ahead of another
+block, out of the order of its first references, or referred to by nothing, which goldmark moves
+or drops. Every other document keeps goldmark's looseness - a loose list's items holding more
+than one block are spread, the list when none is - which is how the documents Dispatch stores were
+read.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node
@@ -580,7 +706,7 @@ canonical markdown.
 - Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON — and `issues.claimed_at`, migration `0045`, both set or both null by `issues_claim_complete`). It is on every issue read (`Issue.claim`, `IssueSummary.claim`, so the detail, the listing and the board rows all carry it) and is neither the `route` (where messages go) nor the `assignee` (the human who answers the asks). The whole rule lives in `api/issue_claim.go`. `POST /api/v1/issues/{key}/claim` (any authenticated actor) claims it: the claimant is the request's own actor, the same identity every other write carries — a human's login from their signed cookie (a body naming a session is ignored for a cookie caller), or, for a bearer, the session the caller declares in `actor`, since a token proves its owner or service subject and not which session it runs. A bearer can therefore name another session here exactly as on any other write; what makes a claim trustworthy is that `dispatch_claim` fills `actor` from the host's own runtime, so no model picks it, and that there is no second parameter for claiming on someone's behalf. The body rejects unknown fields, so an invented one is refused rather than ignored. It succeeds when the issue is unclaimed, when this actor already holds it (idempotent: the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener no longer lists as live (`fetchLiveSessions` takes that snapshot of the same live list `GET /api/v1/agents` serves, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place — decides from it under the issue's row lock), which records the takeover. Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message; a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all. `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force — a refusal on the release route never offers one. An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`. A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows: nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`. `DELETE /api/v1/issues/{key}/claim` releases it: the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op. Both answer the issue. Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it) (Sami, 2026-09-24, verbatim: "Keep them separate — Separate because humans might be using them to keep track of work"); closing an issue is the one write that clears a claim, in the same `PATCH` (`issue_patch.go`) that closes it. `issue.claimed` and `issue.released` carry `IssueClaimEventPayload {key, status, claim, previous_claim?, reason}`; the outbox publishes both to the previous claimant's own `notifications.agent.<session_id>` topic (`publishPreviousClaimant`), whatever the issue's route and regardless of `notify`, so a session learns it no longer holds the work.
 
 - Open asks accept `PATCH /api/v1/asks/{id}` from their asking session or any human. Each edit carries the full current ask, prior mutable fields, and its editor in an `ask.edited` event; `edited_at` is nullable until the first edit. Ask anchors are set on creation and are not editable through this route. `GET /api/v1/asks/{id}` returns `edits`, every rewording read back from those events oldest first (`{previous, edited_by, at}`). A human answer must carry the `edited_at` revision it reviewed; a mismatch returns `409 ASK_EDITED` without closing the ask.
-- Every document version or transactional live mutation refreshes each open anchored ask and comment from the current tree, once per tree: a version written in the transaction whose own live mutation produced that tree inherits that mutation's refresh rather than repeating it, and a version with no live mutation of its own - settlement, a standalone named version - refreshes for itself. A changed persisted anchor emits its own full `ask.anchor_refreshed` or `comment.anchor_refreshed` event in that same transaction; an unchanged row emits none. Refresh events are retained and sequenced on the row's owner topic but never notify or author/follower-route a session: the mutation is a side effect, not an interaction addressed to someone.
+- Every document version or transactional live mutation refreshes each open anchored ask and comment from the current tree, once per tree: a version written in the transaction whose own live mutation produced that tree inherits that mutation's refresh rather than repeating it, and a version with no live mutation of its own - settlement, a standalone named version - refreshes for itself. A changed persisted anchor emits its own full `ask.anchor_refreshed` or `comment.anchor_refreshed` event in that same transaction; an unchanged row emits none. Refresh events are retained and sequenced on the row's owner topic but never notify or author/follower-route a session: the mutation is a side effect, not an interaction addressed to someone. The refresh writes only the two fields it owns, the quote and the orphan flag, never the whole `anchor` column: it reads every open row up front and writes each one back after the lookups and event appends the rows before it cost, so a whole-column write would erase what another writer put in that anchor in between - the block id `BackfillAnchorBlocks` pins (LEGION-149).
 - `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks` create questions: the asker supplies the options and no option label carries a server rule (a human to-do is the to-do phrased as the question, with whatever options fit it). `kind` may be absent or `question`; `kind: "action"` (removed; migration 0035 folded every stored action ask into a question keeping its options and its answer) and `kind: "approval"` (server-created by the document-approval route only) answer `400 ASK_KIND_INPUT`.
 - Document approval is a human review pinned to a version, the way a pull-request review is pinned to a commit. `POST /api/v1/artifacts/{id}/approval-requests` (any actor) opens - or returns the open - ask of `kind: "approval"` with the fixed options `Approve` / `Request changes`, naming the document and its latest settled version in `ask.approval`; its wording cannot be edited. Answering it (humans only; `Request changes` requires text) writes an `artifact_reviews` row pinned to the document's latest settled version at answer time and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`. `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header and answers the open approval ask if there is one (`ask_id` null otherwise). Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id`, and `requested_by` while awaiting); `stale` is derived from versions, so a new version emits nothing approval-specific. Legion's design gate is the consumer; it is the exception path, not an every-issue step.
 - `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept up to 20 labels. Dispatch trims labels, preserves case, removes case-insensitive duplicates, and returns `400 LABELS_INPUT` for blank or over-40-character labels; every label update emits `issue.updated` with its labels. `GET /api/v1/issues?label=<label>` is repeatable, normalizes filter labels identically, and case-insensitively matches every supplied label.
@@ -640,7 +766,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 - If a session is not live in the registry, delivery fails and the message is NAK'd for retry (up to MaxDeliver attempts over the stream's MaxAge window).
 - The `ENVOY_NOTIFICATIONS` duplicate window is 72 hours, matching the retained notification lifetime. Startup reconciles that setting with `UpdateStream`, so a Dispatch outbox retry after a post-publish crash cannot create another retained message while the original remains available.
 - An envelope publishes under a JetStream MsgId of its dedupe key and topic when that key names the upstream event itself: `contracts.DedupeKeyNamesTheUpstreamEvent`, which asks the envelope rather than its source name, and holds for a `github`, `slack` or `ghostwispr` key that is the source plus the envelope's own `SourceEventID` (the webhook normalizers' shape) and for every `dispatch` envelope (LEGION-271). A webhook redelivery of an event the stream already holds (GitHub's and Ghost Wispr's resend under the original delivery id, Slack's retry under the original `event_id`) is dropped at publish and still answered 200, and each topic of one delivery's fan-out lands once. The case this covers is a first attempt that reached the stream but that the sender recorded as failed: a reply slower than GitHub's 10-second limit, or a 503 after part of a fan-out published. GitHub redelivers only the past three days, which lies inside the window. The rule reads the key because a source name proves nothing: the MCP bridge publishes under the source its configuration names, `github` included, with a key that is a hash of the resource URI and the summary, which two distinct events on one URI share whenever the read returns no text; and a CI settlement carries a key of the head and the record's generation, which a record recreated under that head can reuse with a different snapshot. Neither is a redelivery, and neither is deduped. Agent-sourced envelopes carry no MsgId.
-- Every `bus.Connect` caller (the listener, Dispatch, `natstail` and the MCP server, including the on-prem fleet's listeners and any ad-hoc run pointed at production's NATS) reconciles `ENVOY_NOTIFICATIONS`'s subjects at start by adding its own to the deployed list. Once every writer runs a build with this reconciliation, a restart during a rollout cannot drop a subject another deployment needs, except when two writers with different lists start within one read-update round trip (JetStream's stream update has no compare-and-swap). A start removes a deployed subject only when it overlaps a role lane (`notifications.role.>` or its exceptions twin) or one of the binary's own subjects (a widened, narrowed or split subject, which JetStream refuses beside it). In the second case the binary's shape wins, and a WARN names the dropped subject and every subject that replaced it. Each start also logs, at INFO, the deployed subjects it keeps without compiling them, which is the list the retire step works from. Retiring a subject is an operator step once no deployment compiled with it can start: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f` (`docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md`).
+- A `bus.ConnectOwningStream` caller reconciles `ENVOY_NOTIFICATIONS`'s subjects at start by adding its own to the deployed list. Only the deployed services call it: the listener (including the on-prem fleet's) and Dispatch's server. A caller that only publishes or only tails - `natstail`, the MCP server, `envoy-dispatch`'s operator commands - uses `bus.Connect`, which neither creates the stream nor updates it. **Either connect refuses a NATS server that is not this machine's unless the run sets `ENVOY_ALLOW_REMOTE_NATS=1`**, decided from the URL before anything dials, because nothing distinguishes the deployed Dispatch from the same binary run out of a checkout: both read `natsUrls` from `~/.config/opencode/envoy.json`, which on an agent machine names production. Each deployment states its reach instead (`deploy/compose/*.compose.yml`, agent-c's listener and Dispatch task definitions, the on-prem fleet's Pulumi), and each must carry it **before** an image whose binaries read it runs there, or that start refuses the shared NATS its deployment names and exits; setting it early is free, because a binary built before the variable ignores it (LEGION-249). Once every writer runs a build with this reconciliation, a restart during a rollout cannot drop a subject another deployment needs, except when two writers with different lists start within one read-update round trip (JetStream's stream update has no compare-and-swap). A start removes a deployed subject only when it overlaps a role lane (`notifications.role.>` or its exceptions twin) or one of the binary's own subjects (a widened, narrowed or split subject, which JetStream refuses beside it). In the second case the binary's shape wins, and a WARN names the dropped subject and every subject that replaced it. Each start also logs, at INFO, the deployed subjects it keeps without compiling them, which is the list the retire step works from. Retiring a subject is an operator step once no deployment compiled with it can start: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f` (`docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md`).
 - Cross-machine route correctness depends on valid session registry entries with non-null ports.
 
 ## Listener API

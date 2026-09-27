@@ -553,7 +553,7 @@ func TestClaimsPrintsTheDaemonsRefusalAndFails(t *testing.T) {
 			args: func(d *operatorDaemon) []string {
 				return append(append([]string{"stop"}, d.reach()...), "--claim", string(architectClaim))
 			},
-			want: "the daemon answered 409 Conflict: stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered",
+			want: "the daemon answered 409 Conflict: stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered; no workflow issue backs its tree, so legion claims close ends it",
 		},
 		{
 			name: "a spawn the daemon cannot name",

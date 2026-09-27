@@ -28,7 +28,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	lingering := make(map[string]bool)
 	for _, issue := range issues {
 		knownIssues[issue.Key] = struct{}{}
-		if issue.LingerUntil != nil {
+		if issue.Lingers() {
 			lingering[issue.Key] = true
 		}
 	}
@@ -88,7 +88,11 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		if err != nil {
 			return api.State{}, err
 		}
+		reviewDecision := ""
 		for _, item := range phases {
+			if item.Role == claim.RoleReviewer && item.Decision != nil {
+				reviewDecision = item.Decision.State
+			}
 			claimView, live := claimViews[item.Claim]
 			if !live {
 				continue
@@ -113,7 +117,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 				Number:         pr.Number,
 				Head:           pr.HeadSHA,
 				ChecksVerdict:  pr.Verdict,
-				ReviewDecision: pr.ReviewDecision,
+				ReviewDecision: reviewDecision,
 				FixAttempts:    pr.FixAttempts,
 			}
 		}

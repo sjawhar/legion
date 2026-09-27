@@ -1594,7 +1594,7 @@ export async function executeDispatchTool(
     ownerArguments.owner?.kind === "issue"
       ? {
           kind: "issue" as const,
-          issue: await ensureIssue(client, ownerArguments.owner.issue, actor),
+          issue: await resolveExistingIssue(client, ownerArguments.owner.issue),
         }
       : ownerArguments.owner;
   const issue = () => {
@@ -2158,7 +2158,18 @@ export async function executeDispatchTool(
         unchangedOps.length === 0
           ? ""
           : `; ${unchangedOps.length === 1 ? "operation" : "operations"} ${unchangedOps.join(", ")} changed nothing`;
-      const applied = `${head}${unchangedText}`;
+      // A change the live document no longer carries: a browser deletion that landed after this
+      // edit's version was rendered and before it reached the room, which is past undoing, so the
+      // version records text the live document does not have (LEGION-269). `null` is a check that
+      // reached no verdict; an older server omits the field and reads as it always did.
+      const lostOps = edited.lost_ops;
+      const lostText =
+        lostOps === undefined || (lostOps !== null && lostOps.length === 0)
+          ? ""
+          : lostOps === null
+            ? "; could not confirm this edit survived, because the live document is being reloaded — re-read it"
+            : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote — re-read the document`;
+      const applied = `${head}${unchangedText}${lostText}`;
       const adviceLines = renderAdvice(
         input.tool,
         resolvedTopic(resolved).label,
@@ -2179,6 +2190,7 @@ export async function executeDispatchTool(
           applied: edited.applied,
           ...(edited.version === null ? {} : { version: edited.version.number }),
           ...(nothingChanged ? { changed: false } : {}),
+          ...(lostOps === undefined ? {} : { lost_ops: lostOps }),
           ...(edited.token === undefined ? {} : { token: edited.token }),
           ...(edited.advice === undefined ? {} : { advice: edited.advice }),
         }),
@@ -2444,18 +2456,17 @@ export async function executeDispatchTool(
   }
 }
 
-async function ensureIssue(
+async function resolveExistingIssue(
   client: DispatchClient,
-  issueReference: string,
-  actor: Actor
+  issueReference: string
 ): Promise<string> {
   try {
-    return await client.ensureIssue(issueReference, actor);
+    return await client.resolveIssue(issueReference);
   } catch (error) {
-    if (error instanceof DispatchServiceError && error.code === "PROJECT_UNMAPPED") {
-      const repository = issueReference.slice(0, issueReference.lastIndexOf("#"));
+    if (error instanceof DispatchServiceError && error.status === 404) {
       throw new Error(
-        `repository ${repository} is not mapped in repository settings and no DISPATCH_DEFAULT_PROJECT is configured`
+        `no Dispatch issue is linked to ${issueReference}; create it first with ` +
+          `dispatch_issue({ external: "${issueReference}", ... })`
       );
     }
     throw error;

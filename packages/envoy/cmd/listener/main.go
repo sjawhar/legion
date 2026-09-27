@@ -618,8 +618,9 @@ func main() {
 	}()
 	logger.Info("envoy-listener listening", slog.String("addr", addr))
 
-	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here).
-	client, err := bus.Connect(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
+	// Phase 5: Connect to NATS (main goroutine — log.Fatal is safe here). The listener owns
+	// ENVOY_NOTIFICATIONS: this start reconciles the stream (bus.ConnectOwningStream).
+	client, err := bus.ConnectOwningStream(cfg.NATSURLs, bus.WithReplicas(cfg.NATSReplicas))
 	if err != nil {
 		log.Fatal(err)
 	}

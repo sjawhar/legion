@@ -2955,6 +2955,75 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  // A concurrent browser deletion that lands after the version is written is past undoing, so the
+  // edit reports it: the version records text the live document no longer has (LEGION-269). An
+  // edit that survives reads exactly as it always did.
+  test("names the operations whose text the live document no longer has", async () => {
+    const editResponse = (body: Record<string, unknown>) => {
+      return async (url: RequestInfo | URL): Promise<Response> => {
+        const path = new URL(String(url)).pathname;
+        if (path === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            primary_artifact_id: "artifact-42",
+            artifacts: [{ id: "artifact-42", slug: "spec", name: "spec.md", primary: true }],
+          });
+        }
+        if (path === "/api/v1/artifacts/artifact-42/edits") return response(body);
+        throw new Error(`unexpected request: ${path}`);
+      };
+    };
+    const edit = async (body: Record<string, unknown>) =>
+      await executeDispatchTool({
+        tool: "dispatch_doc_edit",
+        args: {
+          issue: "DSP-42",
+          artifact: "spec",
+          ops: [{ op: "replace", find: "draft", with: "final" }],
+        },
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-42",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: editResponse(body) as typeof fetch,
+      });
+
+    const lost = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: [0],
+    });
+    expect(lost.text).toContain(
+      "; version 7 carries text the live document no longer has: a concurrent change removed what operation 0 wrote — re-read the document"
+    );
+    expect(lost.details).toMatchObject({ lost_ops: [0] });
+
+    const survived = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: [],
+    });
+    expect(survived.text).toContain("Applied 1 ops (version 7)");
+    expect(survived.text).not.toContain("no longer has");
+
+    const undetermined = await edit({
+      applied: 1,
+      version: { number: 7 },
+      changed: true,
+      unchanged_ops: [],
+      lost_ops: null,
+    });
+    expect(undetermined.text).toContain(
+      "; could not confirm this edit survived, because the live document is being reloaded — re-read it"
+    );
+  });
+
   // A Dispatch server predating the edit token returns none, and the result reads as it always
   // did: no trailer to mistake for a token, and nothing in details to pass as a precondition.
   test("omits the document token when the server returns none", async () => {
@@ -3483,84 +3552,84 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow("Exactly one of path or content is required.");
   });
 
-  test("creates an unlinked external issue once, then resolves it for later tool calls", async () => {
+  for (const input of [
+    {
+      tool: "dispatch_message" as const,
+      args: { issue: "owner/repo#999", body: "Proceed" },
+    },
+    {
+      tool: "dispatch_read" as const,
+      args: { issue: "owner/repo#999" },
+    },
+  ]) {
+    test(`${input.tool} refuses an unlinked external reference without creating an issue`, async () => {
+      const requests: Array<{ url: string; init: RequestInit }> = [];
+      const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const request = { url: String(url), init: init ?? {} };
+        requests.push(request);
+        const target = new URL(request.url);
+        if (target.pathname === "/api/v1/issues/resolve") {
+          return new Response(JSON.stringify({ code: "NOT_FOUND", error: "issue not found" }), {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (target.pathname === "/api/v1/issues") return response({ key: "DSP-42" });
+        if (target.pathname === "/api/v1/issues/DSP-42/messages") {
+          return response({ id: "message-42", issue_key: "DSP-42" });
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+
+      await expect(
+        executeDispatchTool({
+          tool: input.tool,
+          args: input.args,
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        })
+      ).rejects.toThrow('dispatch_issue({ external: "owner/repo#999", ... })');
+      expect(
+        requests.filter(
+          (request) =>
+            request.init.method === "POST" && new URL(request.url).pathname === "/api/v1/issues"
+        )
+      ).toEqual([]);
+    });
+  }
+
+  test("dispatch_issue creates an issue from an external reference", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
-    let resolves = 0;
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const request = { url: String(url), init: init ?? {} };
       requests.push(request);
       const target = new URL(request.url);
-      if (target.pathname === "/api/v1/issues/resolve") {
-        resolves += 1;
-        return resolves === 1
-          ? new Response(JSON.stringify({ code: "NOT_FOUND", error: "issue not found" }), {
-              status: 404,
-              headers: { "Content-Type": "application/json" },
-            })
-          : response({ key: "DSP-42" });
-      }
-      if (target.pathname === "/api/v1/issues") return response({ key: "DSP-42" });
-      if (target.pathname === "/api/v1/issues/DSP-42/messages") {
-        return response({ id: `message-${resolves}`, issue_key: "DSP-42" });
-      }
-      throw new Error(`unexpected request: ${target.pathname}`);
-    };
-    const input = {
-      tool: "dispatch_message",
-      args: { issue: "owner/repo#42", body: "Proceed" },
-      cwd: "/workspace",
-      host: "omp" as const,
-      sessionId: "session-42",
-      config,
-      env: {},
-      exec: repoExec("owner/repo"),
-      fetchImpl: fetchImpl as typeof fetch,
-    };
-
-    await executeDispatchTool(input);
-    await executeDispatchTool(input);
-
-    expect(
-      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
-    ).toEqual([
-      "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
-      "/api/v1/issues",
-      "/api/v1/issues/DSP-42/messages",
-      "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
-      "/api/v1/issues/DSP-42/messages",
-    ]);
-    expect(JSON.parse(requests[1]?.init.body as string)).toMatchObject({
-      external: "owner/repo#42",
-      actor: { kind: "session", id: "session-42" },
-    });
-  });
-
-  test("names the unmapped external repository and both project env vars", async () => {
-    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
-      const path = new URL(String(url)).pathname;
-      if (path === "/api/v1/issues/resolve") {
-        return new Response(JSON.stringify({ code: "NOT_FOUND", error: "issue not found" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
+      if (target.pathname === "/api/v1/issues") {
+        return response({
+          key: "TEST-1",
+          title: "External issue",
+          project: "TEST",
+          components: issueComponents("inherit", []),
         });
       }
-      if (path === "/api/v1/issues") {
-        return new Response(
-          JSON.stringify({
-            code: "PROJECT_UNMAPPED",
-            error:
-              "repository is not mapped in repository settings and DISPATCH_DEFAULT_PROJECT is not configured",
-          }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        );
+      if (target.pathname === "/api/v1/projects/TEST/architecture-source") {
+        return sourceNotFound();
       }
-      throw new Error(`unexpected request: ${path}`);
+      throw new Error(`unexpected request: ${target.pathname}`);
     };
 
     await expect(
       executeDispatchTool({
-        tool: "dispatch_message",
-        args: { issue: "owner/repo#42", body: "Proceed" },
+        tool: "dispatch_issue",
+        args: {
+          project: "TEST",
+          title: "External issue",
+          external: "owner/repo#999",
+        },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -3568,9 +3637,15 @@ describe("executeDispatchTool", () => {
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
       })
-    ).rejects.toThrow(
-      "repository owner/repo is not mapped in repository settings and no DISPATCH_DEFAULT_PROJECT is configured"
-    );
+    ).resolves.toMatchObject({ details: { issue: "TEST-1" } });
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual(["/api/v1/issues", "/api/v1/projects/TEST/architecture-source"]);
+    expect(JSON.parse(requests[0]?.init.body as string)).toMatchObject({
+      project: "TEST",
+      title: "External issue",
+      external: "owner/repo#999",
+    });
   });
 
   test("does not send a blank body when posting a suggestion without a rationale", async () => {
