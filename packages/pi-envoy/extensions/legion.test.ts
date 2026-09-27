@@ -2474,7 +2474,7 @@ describe("Legion OMP extension", () => {
       requests.filter((request) => request.path === "/legion/v1/grants").length;
     const mintsBefore = mints();
     // The spec's negatives plus the exact commands the legion-worker skill has every role run:
-    // the rebase revset, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
+    // the conflict merge, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
     const allowed = [
       "jj restore src/x.ts",
       'jj -R "$LEGION_WORKSPACE" restore packages/pi-envoy/extensions/legion.ts',
@@ -2482,7 +2482,7 @@ describe("Legion OMP extension", () => {
       'jj -R "$LEGION_WORKSPACE" op log -n 5',
       "jj op show",
       'jj describe -m "undo this"',
-      "jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin",
+      'jj -R "$LEGION_WORKSPACE" new legion/LEGION-1 main@origin -m "merge: resolve conflict against main@origin"',
       'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | abc123)" --to abc123 --git --context 0 \'~(.legion | docs/solutions)\' | sed -e \'/^@@/d\' -e \'/^index /d\' | sha256sum',
       'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
       'jj -R "$LEGION_WORKSPACE" log -r \'description(glob:"undo*")\'',

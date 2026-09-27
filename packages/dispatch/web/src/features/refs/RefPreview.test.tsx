@@ -11,6 +11,8 @@ import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-pre
 
 function issue(key: string, title: string): IssueDetails {
   return {
+    route_status: null,
+    route_holder: null,
     artifacts: [],
     children: [],
     closed_at: null,

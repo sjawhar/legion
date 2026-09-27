@@ -275,6 +275,58 @@ func TestANoticeIsQueuedAgainAtMostThreeTimes(t *testing.T) {
 	}
 }
 
+// A finished tree spends no copies on its architect: the close suspended it, or its claim failed
+// or retired, and re-admission starts it with the tree's record rather than the notices of its
+// close. The stopped session's Envoy registration can outlive its process, so the listener
+// accepts a publish it then cannot forward. A report of such a forward queues no copy, and a copy
+// queued before the close finishes without publishing when it runs. Each says so in one line
+// naming the notice, and neither reports a forwarding failure.
+func TestANoticeToAnArchitectStoppedWithItsFinishedTreeIsNotSentAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state supervise.ClaimState
+	}{
+		{"the close suspended the architect", supervise.StateSuspended},
+		{"the architect's claim retired", supervise.StateRetired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			noticeTree(t, pool, records, true)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			architectClaimOn(t, sup, "LEGION-1", tc.state, "ses_arch")
+			var logged bytes.Buffer
+			publisher := &holderPublisher{}
+			runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
+				project: "legion", now: time.Now}
+			notice := record.Notice{Kind: "phase-finished", Role: claim.RoleImplementer, Phase: phase.ProductionCheck, Summary: "checked in production"}
+			report := laneReport{"evt-exception", "delivery_failed", architectTopic(t, "LEGION-1"), "phase-finished on LEGION-2", notice, "legion-outbox:78", "ses_arch"}
+
+			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+				t.Fatalf("rehold: %v", err)
+			}
+			if got := queuedNotices(t, pool); len(got) != 0 {
+				t.Fatalf("queued %v for an architect stopped with its finished tree, want no copy", got)
+			}
+			copied := notice
+			copied.Resends, copied.ResendOf = 1, 78
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", copied, time.Now()))
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("run the copy queued before the close: %v", err)
+			}
+			_, delivered := publisher.snapshot()
+			lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
+			named := func(line string) bool {
+				return strings.Contains(line, "kind=phase-finished") && strings.Contains(line, "issue=LEGION-2") && !strings.Contains(line, "could not forward")
+			}
+			if len(delivered) != 0 || outboxRows(t, pool) != 0 || len(lines) != 2 || !named(lines[0]) || !named(lines[1]) {
+				t.Fatalf("delivered %+v, %d rows left, log %q; want nothing sent, the copy finished, and one line for each naming phase-finished on LEGION-2 and no forwarding failure",
+					delivered, outboxRows(t, pool), logged.String())
+			}
+		})
+	}
+}
+
 // The report arrives over core NATS on the original role topic's exceptions subject; the
 // subscription hears it there and queues the notice again.
 func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {
@@ -699,5 +751,48 @@ func TestAReheldCatchUpNeverFollowsANewerOne(t *testing.T) {
 				t.Fatalf("queued %v, logged:\n%s\nwant re-held %t", queued, logged.String(), tc.reheld)
 			}
 		})
+	}
+}
+
+// The re-hold reads the architect's claim from memory and writes its copy outside ApplyFact's
+// lock, so it can read the claim still launching, lose the race to that launch's ready, and commit
+// its copy of an older catch-up after the fresh one. The notice executor checks a catch-up against
+// the claim and the root it reads when it runs the row, so the stale copy finishes without a
+// publish and the architect is told the fresh catch-up alone.
+func TestACatchUpCopyCommittedAfterTheFreshOneIsNotPublished(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	if _, _, err := sup.Create(context.Background(), supervise.Claim{
+		Token: mustClaimToken(t, "LEGION-1", claim.RoleArchitect), Project: "legion", Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleArchitect,
+		State: supervise.StateReady, Session: "ses_arch", Generation: 3,
+	}, ""); err != nil {
+		t.Fatalf("create the architect claim: %v", err)
+	}
+	catchUp := func(launch uint64, resends int, resendOf int64) record.Notice {
+		return record.Notice{Kind: "catch-up", Role: claim.RoleArchitect, Reason: fmt.Sprintf("launch %d", launch), Resends: resends, ResendOf: resendOf,
+			CatchUp: &record.CatchUp{Generation: 1, Launch: launch, Gate: record.CatchUpGate{Policy: "root-issues"}, Issues: []record.CatchUpIssue{}}}
+	}
+	clock := time.Now()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", catchUp(3, 0, 0), clock))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", catchUp(2, 1, 7), clock))
+	var logged bytes.Buffer
+	publisher := &holderPublisher{}
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher,
+		supervisor: sup, project: "legion", now: func() time.Time { return clock }}
+
+	for tick := range 2 {
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+	}
+	_, delivered := publisher.snapshot()
+	var got []string
+	for _, published := range delivered {
+		got = append(got, published.payload.(record.Notice).Reason)
+	}
+	if fmt.Sprint(got) != "[launch 3]" || outboxRows(t, pool) != 0 || !strings.Contains(logged.String(), `msg="outbox catch-up finished without publishing: a newer catch-up supersedes it"`) {
+		t.Fatalf("delivered %v with %d rows left, logged:\n%s\nwant the fresh catch-up alone and the stale copy finished", got, outboxRows(t, pool), logged.String())
 	}
 }

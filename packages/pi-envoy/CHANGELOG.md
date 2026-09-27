@@ -34,6 +34,19 @@
 
 ### Changed
 
+- `legion.goDaemonApiVersion` is 10. Contract 9 adds the daemon's own agent-secrets machine login
+  state (`agentSecretsLogin`) to `GET /legion/v1/state` (AGENTC-393). Contract 10 adds
+  `POST /legion/v1/roots/close`, the Go `legion` tool's `close_root`: a tree root's own architect
+  ends its admitted tree before any phase has started, and the daemon posts the architect's reason
+  on the issue before it writes `done` (LEGION-208).
+- The worker skill gives a reviewer round that writes a handoff one order: write, commit and push
+  the handoff, submit the review of that head by its SHA, then complete. An approval waits for the
+  CI verdict to settle green at that head first, and a red that settles there makes the round a
+  request for changes naming the failing checks; a request for changes does not wait. A review of a
+  head the handoff push then replaces named a head the pull request no longer had (LEGION-208).
+- The worker skill says which GitHub App each role pushes as, and it, the retro skill and the
+  implementer and reviewer role texts each say once that every path they cite is in sjawhar/legion
+  (LEGION-208).
 - The `envoy` skill says a `pr.<n>.checks` settlement is published for every commit of the pull
   request whose checks settle and names its `sha`, so an agent waiting on CI compares it with its
   head (LEGION-208).

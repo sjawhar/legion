@@ -170,6 +170,26 @@ type Issue struct {
 	LastSeq           int             `json:"last_seq"`
 }
 
+// Route statuses: whether an issue's route reaches a running session right now.
+const (
+	// RouteLive is a role with a live holder, or a session the listener lists as live.
+	RouteLive = "live"
+	// RouteNoHolder is a role nobody live holds (unclaimed, or its holder's session lapsed), or
+	// a session the listener does not list.
+	RouteNoHolder = "no_holder"
+	// RouteUnknown is a route read while the listener did not answer; it is never read as live.
+	RouteUnknown = "unknown"
+)
+
+// IssueRouteReach is whether an issue's route reaches anyone: resolved on read from one
+// listener roster per request, stored nowhere, and never part of an event payload, which is
+// why it sits beside Issue in a read response rather than in it. Both fields are null for an
+// issue with no route; RouteHolder names the session only when RouteStatus is RouteLive.
+type IssueRouteReach struct {
+	RouteStatus *string `json:"route_status"`
+	RouteHolder *string `json:"route_holder"`
+}
+
 // IssueSummary is the lightweight issue listing representation.
 type IssueSummary struct {
 	Key        string          `json:"key"`
@@ -182,9 +202,11 @@ type IssueSummary struct {
 	Assignee   *string         `json:"assignee"`
 	Claim      *IssueClaim     `json:"claim"`
 	Components IssueComponents `json:"components"`
-	UpdatedAt  time.Time       `json:"updated_at"`
-	LastSeq    int             `json:"last_seq"`
-	OpenAsks   int             `json:"open_asks"`
+	Route      *string         `json:"route"`
+	IssueRouteReach
+	UpdatedAt time.Time `json:"updated_at"`
+	LastSeq   int       `json:"last_seq"`
+	OpenAsks  int       `json:"open_asks"`
 }
 
 // SearchOwner identifies the issue or standalone project document that owns a search result.

@@ -1003,7 +1003,6 @@ describe("ProcessManager", () => {
         "-R",
         repo,
       ],
-      ["git", `--git-dir=${repo}/.git`, "worktree", "prune"],
       [
         "jj",
         "workspace",

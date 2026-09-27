@@ -233,7 +233,7 @@ func deliverEvent(w http.ResponseWriter, r *http.Request, c supervise.Claim) (su
 }
 
 func suspendEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
-	return supervise.RequestSuspend{Claim: c.Token}, true
+	return supervise.RequestSuspend{Claim: c.Token, Reason: "the operator suspended it"}, true
 }
 
 func resumeEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {

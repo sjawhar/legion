@@ -126,8 +126,12 @@ type RequestReady struct {
 	Session    string
 }
 
-// RequestSuspend stops the claim's process and keeps its session.
-type RequestSuspend struct{ Claim claim.Token }
+// RequestSuspend stops the claim's process and keeps its session. Reason is why, for the line the
+// suspension logs.
+type RequestSuspend struct {
+	Claim  claim.Token
+	Reason string
+}
 
 // RequestResume relaunches a suspended claim's session.
 type RequestResume struct{ Claim claim.Token }
@@ -862,11 +866,22 @@ func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPend
 // transport) is retired with it (settle): the next resume is started with its new phase's task,
 // never handed the finished one's. A task of no phase — an operator's own, an architect's — is
 // not the workflow's to end, and goes on that resume.
-func suspend(m *Machine, ctx context.Context, _ Event) error {
+func suspend(m *Machine, ctx context.Context, ev Event) error {
+	// The table routes only RequestSuspend here (eventKindOf's onSuspend). Another event is a wiring
+	// error, refused before anything is stopped, rather than a panic or a journal line with no
+	// reason.
+	request, ok := ev.(RequestSuspend)
+	if !ok {
+		return fmt.Errorf("suspend %s: the suspend action was handed %T, not a RequestSuspend", m.claim.Token, ev)
+	}
 	if err := m.suspendProcess(ctx); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
 	}
-	return m.suspended(ctx)
+	if err := m.suspended(ctx); err != nil {
+		return err
+	}
+	m.log.Info("supervise: suspended", "reason", request.Reason)
+	return nil
 }
 
 // suspended moves the claim to suspended: its session kept, and the process it stopped let go for
