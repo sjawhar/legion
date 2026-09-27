@@ -296,14 +296,14 @@ jobs:
       - name: Check dispatch dashboard CSS classes
         run: bun run check:classes
         working-directory: packages/dispatch
-      - name: Install Playwright Chromium
+      - name: Install Playwright Chromium and WebKit
         # The runner image preconfigures Google's chrome-stable apt source, whose
         # index intermittently fails `apt-get update` with a hash-sum mismatch and
         # takes `--with-deps` down with it. Chrome is already installed there; the
         # source only serves upgrades, so drop it before installing our deps.
         run: |
           grep -rl dl.google.com /etc/apt/sources.list.d | xargs -r sudo rm -f
-          bunx playwright install --with-deps chromium
+          bunx playwright install --with-deps chromium webkit
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
         # `bun run e2e` builds the SPA itself, which would rebuild it a second time in this job.

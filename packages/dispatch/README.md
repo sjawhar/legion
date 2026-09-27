@@ -92,7 +92,9 @@ docker rmi ghcr.io/sjawhar/legion/envoy:pr4-local
 `e2e/seed.ts` truncates its database before each scenario. Always set
 `PLAYWRIGHT_DATABASE_URL` to an isolated test database when using a deployed URL.
 The suite has `chromium` and `iphone` projects; the iPhone project uses Chromium
-with iPhone 13 viewport, touch, and user-agent emulation.
+with iPhone 13 viewport, touch, and user-agent emulation. A `webkit` project runs
+`e2e/collab-cursor.e2e.ts` alone, since where a caret lands beside a
+collaborator's cursor differs by engine; `bun run e2e:install` installs both browsers.
 
 ## Phone check
 

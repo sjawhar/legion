@@ -45,7 +45,8 @@ import { listener } from '@milkdown/plugin-listener';
 import { cursor } from '@milkdown/plugin-cursor';
 import { clipboard } from '@milkdown/plugin-clipboard';
 import { nord } from '@milkdown/theme-nord';
-import { yCursorPlugin, yCursorPluginKey, ySyncPluginKey } from 'y-prosemirror';
+import { yCursorPluginKey, ySyncPluginKey } from 'y-prosemirror';
+import { collabCursorPlugin } from './collab-cursor-plugin';
 import type { Awareness } from 'y-protocols/awareness';
 import type * as Y from 'yjs';
 import type { EditorView } from '@milkdown/kit/prose/view';
@@ -211,11 +212,7 @@ function installCollabCursorsWhenReady(
     }
 
     try {
-      const cursorPlugin = yCursorPlugin(
-        awareness,
-        { cursorBuilder: collabCursorBuilder, selectionBuilder: collabSelectionBuilder },
-        undefined,
-      );
+      const cursorPlugin = collabCursorPlugin(awareness);
       const nextPlugins = view.state.plugins.concat(cursorPlugin);
       ctx.set(prosePluginsCtx, nextPlugins);
       view.updateState(view.state.reconfigure({ plugins: nextPlugins }));

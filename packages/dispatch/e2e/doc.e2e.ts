@@ -17,6 +17,7 @@ import {
   documentTransport,
   openDocumentSockets,
   openSpecAndAwaitHeadingIds,
+  placeCaret,
   selectEditorText,
   typeAtEnd,
 } from "./editor";
@@ -195,7 +196,9 @@ test("two users edit the same spec, see each other's text and cursor, and settle
     await expect(aliceEditor).toContainText("hello from bob");
 
     if (testInfo.project.name === "chromium") {
-      await bobEditor.click();
+      // Somewhere other than Alice's caret: a peer's caret on the focused local caret is not
+      // drawn, and a bare click can land at the end of her line.
+      await placeCaret(bobPage, "after", "Use SQLite");
       await expect(cursorLabel(alicePage, "bob")).toBeVisible();
       await expect(cursorLabel(bobPage, "alice")).toBeVisible();
     }
