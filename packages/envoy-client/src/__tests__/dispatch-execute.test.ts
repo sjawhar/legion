@@ -776,13 +776,14 @@ describe("executeDispatchTool", () => {
   });
 
   // A human's direct message belongs to no issue, so a session reads that conversation back by
-  // the message id alone - even in a Legion pane, where LEGION_ISSUE names unrelated work.
+  // the message id alone - even in a Legion pane, where LEGION_ISSUE names unrelated work - as
+  // itself, since Dispatch lets a bearer read only a conversation its session is in.
   test("dispatch_read reads a direct-message conversation by message id", async () => {
     const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
     const paths: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
-      paths.push(target.pathname);
+      paths.push(`${target.pathname}${target.search}`);
       if (target.pathname !== `/api/v1/messages/${parent}`) throw new Error("unexpected request");
       return response({
         message: {
@@ -825,7 +826,7 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(paths).toEqual([`/api/v1/messages/${parent}`]);
+    expect(paths).toEqual([`/api/v1/messages/${parent}?session=ses_reader`]);
     expect(result.details).toMatchObject({ message: parent });
     expect(result.text).toContain(`${parent} · user sami`);
     expect(result.text).toContain("Body: Where is the dashboard?");

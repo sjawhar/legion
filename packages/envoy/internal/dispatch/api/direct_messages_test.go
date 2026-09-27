@@ -96,7 +96,7 @@ func TestGetMessageReadsTheConversationAMessageBelongsTo(t *testing.T) {
 	human := decodeBody[model.Message](t, followUp)
 
 	for _, id := range []string{root.ID, first.ID, human.ID} {
-		read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+id, nil)
+		read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+id+"?session=s1", nil)
 		if read.Code != http.StatusOK {
 			t.Fatalf("GET /api/v1/messages/%s: status=%d body=%s", id, read.Code, read.Body.String())
 		}
@@ -116,17 +116,59 @@ func TestGetMessageReadsTheConversationAMessageBelongsTo(t *testing.T) {
 		decodeBody[messageRead](t, read).Message.ID != onIssue.ID {
 		t.Fatalf("issue message by id: status=%d body=%s", read.Code, read.Body.String())
 	}
-	if missing := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/5a660655-04ad-4ce0-8a9b-93dd03c412b7", nil); missing.Code != http.StatusNotFound {
+	if missing := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/5a660655-04ad-4ce0-8a9b-93dd03c412b7?session=s1", nil); missing.Code != http.StatusNotFound {
 		t.Fatalf("missing message: status=%d body=%s", missing.Code, missing.Body.String())
 	}
-	if malformed := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/7430fab3", nil); malformed.Code != http.StatusBadRequest ||
+	if malformed := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/7430fab3?session=s1", nil); malformed.Code != http.StatusBadRequest ||
 		!strings.Contains(malformed.Body.String(), `"code":"MESSAGE_ID_INPUT"`) {
 		t.Fatalf("malformed message id: status=%d body=%s", malformed.Code, malformed.Body.String())
 	}
 }
 
+// A direct message is between a human and one session: a bearer reads a conversation only as a
+// session in it - the one its root targets, or one that replied in it - and knowing a message id
+// opens it to no other session.
+func TestBearerReadsOnlyAConversationItsSessionIsIn(t *testing.T) {
+	handler, root, reply, _ := directConversation(t)
+	first := decodeBody[model.Message](t, reply("On it."))
+
+	for _, id := range []string{root.ID, first.ID} {
+		read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+id+"?session=s2", nil)
+		if read.Code != http.StatusForbidden || !strings.Contains(read.Body.String(), `"code":"THREAD_FORBIDDEN"`) ||
+			strings.Contains(read.Body.String(), "Where is the dashboard?") || strings.Contains(read.Body.String(), "On it.") {
+			t.Fatalf("s2 reading s1's direct conversation by %s: status=%d body=%s, want 403 THREAD_FORBIDDEN with no text", id, read.Code, read.Body.String())
+		}
+	}
+	if unnamed := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+root.ID, nil); unnamed.Code != http.StatusBadRequest ||
+		!strings.Contains(unnamed.Body.String(), `"code":"SESSION_REQUIRED"`) {
+		t.Fatalf("bearer read naming no session: status=%d body=%s, want 400 SESSION_REQUIRED", unnamed.Code, unnamed.Body.String())
+	}
+	if human := dispatchRequest(t, handler, http.MethodGet, "/api/v1/messages/"+first.ID, nil, "bob"); human.Code != http.StatusOK ||
+		decodeBody[messageRead](t, human).Message.ID != root.ID {
+		t.Fatalf("a human reading the conversation: status=%d body=%s, want 200", human.Code, human.Body.String())
+	}
+
+	// On an issue thread no session is the root's target, so a session is in it by replying.
+	issue := createInteractionIssue(t, handler, "TEST", "Issue thread", "before")
+	onIssue := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "Who owns this?"}, "alice")
+	answered := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "I do.", "in_reply_to": onIssue.ID, "actor": map[string]any{"kind": "session", "id": "s2"},
+	})
+	if answered.Code != http.StatusCreated {
+		t.Fatalf("s2 replying on the issue: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	if read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+onIssue.ID+"?session=s2", nil); read.Code != http.StatusOK ||
+		len(decodeBody[messageRead](t, read).Replies) != 1 {
+		t.Fatalf("s2 reading a thread it replied in: status=%d body=%s, want 200 with its reply", read.Code, read.Body.String())
+	}
+	if read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+onIssue.ID+"?session=s1", nil); read.Code != http.StatusForbidden {
+		t.Fatalf("s1 reading an issue thread it is not in: status=%d body=%s, want 403", read.Code, read.Body.String())
+	}
+}
+
 // unreadAgentState is the part of GET /api/v1/me/agents/state a viewer's unread signal reads.
 type unreadAgentState struct {
+	ClearedBefore *string `json:"cleared_before"`
 	ReadThrough   *string `json:"read_through"`
 	UnreadReplies int     `json:"unread_replies"`
 }
@@ -140,9 +182,9 @@ func unreadReplies(t *testing.T, handler http.Handler, login, sessionID string) 
 	return decodeBody[map[string]unreadAgentState](t, response)[sessionID]
 }
 
-// A session's reply to a human's direct message is unread for that human until they read it:
-// the count is theirs alone, their own messages never count, and marking a conversation read
-// never moves backwards.
+// A session's reply to a human's direct message is unread for that human until they read it or
+// clear the conversation: the count is theirs alone, their own messages never count, marking a
+// conversation read never moves backwards, and a Clear keeps the read mark beside it.
 func TestAgentRepliesToADirectMessageAreUnreadForItsSenderUntilRead(t *testing.T) {
 	handler, _, reply, _ := directConversation(t)
 	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
@@ -190,5 +232,20 @@ func TestAgentRepliesToADirectMessageAreUnreadForItsSenderUntilRead(t *testing.T
 	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 || got.ReadThrough == nil ||
 		!parseTimestamp(t, *got.ReadThrough).Equal(second.CreatedAt) {
 		t.Fatalf("after a stale mark: %#v, want it still read through %s", got, second.CreatedAt)
+	}
+
+	third := decodeBody[model.Message](t, reply("Also: the old URL redirects."))
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 1 {
+		t.Fatalf("after a third reply: %#v, want one unread reply", got)
+	}
+	if cleared := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"cleared_before": third.CreatedAt,
+	}, "alice"); cleared.Code != http.StatusOK {
+		t.Fatalf("clear: status=%d body=%s", cleared.Code, cleared.Body.String())
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 || got.ClearedBefore == nil ||
+		!parseTimestamp(t, *got.ClearedBefore).Equal(third.CreatedAt) || got.ReadThrough == nil ||
+		!parseTimestamp(t, *got.ReadThrough).Equal(second.CreatedAt) {
+		t.Fatalf("after a Clear: %#v, want nothing unread, cleared before %s, still read through %s", got, third.CreatedAt, second.CreatedAt)
 	}
 }

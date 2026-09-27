@@ -172,10 +172,11 @@ type userAgentState struct {
 const clearedBeforeSkew = time.Minute
 
 // userAgentStatesQuery reads a viewer's per-session state ($1 is the login), narrowed to one
-// session when $2 is not null: every stored row, and every session with a reply the viewer has
-// not read. A reply is unread when a session wrote it anywhere under a direct message this
-// viewer sent that session (an issue-less message targeted at it, a broadcast's copy included)
-// and it is newer than the viewer's read mark and Clear, whichever is later.
+// session when $2 is not null: every session with a Clear (user_agent_state) or a read mark
+// (user_agent_read), and every session with a reply the viewer has not read. A reply is unread
+// when a session wrote it anywhere under a direct message this viewer sent that session (an
+// issue-less message targeted at it, a broadcast's copy included) and it is newer than the
+// viewer's read mark and Clear, whichever is later.
 const userAgentStatesQuery = `
 	with recursive roots as (
 		select id, substr(target, length('session:') + 1) as session_id
@@ -192,9 +193,15 @@ const userAgentStatesQuery = `
 		from messages m join replies on m.in_reply_to = replies.id
 	),
 	state as (
-		select session_id, cleared_before, read_through
-		from user_agent_state
-		where login = $1 and ($2::text is null or session_id = $2::text)
+		select coalesce(cleared.session_id, marked.session_id) as session_id, cleared.cleared_before, marked.read_through
+		from (
+			select session_id, cleared_before from user_agent_state
+			where login = $1 and ($2::text is null or session_id = $2::text)
+		) cleared
+		full join (
+			select session_id, read_through from user_agent_read
+			where login = $1 and ($2::text is null or session_id = $2::text)
+		) marked on marked.session_id = cleared.session_id
 	),
 	unread as (
 		select replies.session_id, count(*)::int as unread
@@ -300,13 +307,34 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("session_id")
-	if _, err := s.deps.Store.Pool.Exec(r.Context(), `
-		insert into user_agent_state (login, session_id, cleared_before, read_through)
-		values ($1, $2, $3, $4)
-		on conflict (login, session_id) do update set
-			cleared_before = coalesce(excluded.cleared_before, user_agent_state.cleared_before),
-			read_through = greatest(user_agent_state.read_through, excluded.read_through)
-	`, actor.ID, sessionID, clearedBefore, readThrough); err != nil {
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if clearedBefore != nil {
+		if _, err := tx.Exec(r.Context(), `
+			insert into user_agent_state (login, session_id, cleared_before)
+			values ($1, $2, $3)
+			on conflict (login, session_id) do update set cleared_before = excluded.cleared_before
+		`, actor.ID, sessionID, *clearedBefore); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if readThrough != nil {
+		if _, err := tx.Exec(r.Context(), `
+			insert into user_agent_read (login, session_id, read_through)
+			values ($1, $2, $3)
+			on conflict (login, session_id) do update set
+				read_through = greatest(user_agent_read.read_through, excluded.read_through)
+		`, actor.ID, sessionID, *readThrough); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

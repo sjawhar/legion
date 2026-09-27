@@ -388,9 +388,11 @@ export class DispatchClient {
 
   /** `GET /api/v1/messages/{id}`: the conversation a message belongs to, by any message id in
    *  it - the root and every reply. It takes no issue, so it reads a human's direct message to
-   *  a session and the replies to it, which belong to none. */
-  async getMessageThread(id: string): Promise<MessageRead> {
-    return this.#json("GET", ["api", "v1", "messages", id]);
+   *  a session and the replies to it, which belong to none. A bearer reads it as `session`, which
+   *  must be in the conversation (its root targets it, or it replied in it); another session is
+   *  403 THREAD_FORBIDDEN. */
+  async getMessageThread(id: string, session: string): Promise<MessageRead> {
+    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
   }
 
   async artifact(

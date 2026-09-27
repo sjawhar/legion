@@ -80,7 +80,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/issues/{key}/artifacts", authAny, "Upload an issue document or file (JSON or multipart).", s.uploadArtifact},
 		{http.MethodPost, "/api/v1/issues/{key}/messages", authAny, "Post an issue message; target and delivery address a session or role.", s.createMessage},
 		{http.MethodGet, "/api/v1/issues/{key}/messages/{id}", authAny, "Read one message with its deliveries and replies.", s.getMessage},
-		{http.MethodGet, "/api/v1/messages/{id}", authAny, "Read the conversation a message belongs to by any message id in it, issue-less or not: the thread root with its deliveries and every reply, oldest first.", s.getMessageThread},
+		{http.MethodGet, "/api/v1/messages/{id}", authAny, "Read the conversation a message belongs to by any message id in it, issue-less or not: the thread root with its deliveries and every reply, oldest first. A bearer names its session in ?session= and reads only a thread whose root targets that session or that it replied in (403 THREAD_FORBIDDEN).", s.getMessageThread},
 		{http.MethodPost, "/api/v1/messages/{id}/deliveries", authAny, "Retry delivering a targeted message.", s.createDelivery},
 		{http.MethodPost, "/api/v1/messages/{id}/reply", authBearer, "The targeted session's reply to a delivery; the session names itself in actor. Once the attempt is answered, a reply with other text is the session's follow-up, threaded under its first reply; the same text again posts nothing.", s.replyMessage},
 		{http.MethodGet, "/api/v1/inbox", authHuman, "Open asks waiting on the caller, grouped by whose turn it is; ?project= and ?assignee=me|unassigned|<login> filter (unassigned includes document asks; an unlisted login is 400 ASSIGNEE_NOT_ALLOWED).", s.listInbox},

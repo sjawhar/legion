@@ -15237,8 +15237,8 @@ class DispatchClient {
       id
     ]);
   }
-  async getMessageThread(id) {
-    return this.#json("GET", ["api", "v1", "messages", id]);
+  async getMessageThread(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
   }
   async artifact(issue2, input) {
     const artifactPath = ["api", "v1", "issues", await this.#resolveIssue(issue2), "artifacts"];
@@ -17170,7 +17170,10 @@ ${trailer.join(`
     case "dispatch_read": {
       const message = optionalString(args, "message");
       if (message !== undefined) {
-        const thread = await client.getMessageThread(messageIdOf(message));
+        const sessionId = input.sessionId?.trim();
+        if (!sessionId)
+          throw new Error("host session id is required for dispatch_read({message})");
+        const thread = await client.getMessageThread(messageIdOf(message), sessionId);
         const issueKey2 = thread.message.issue_key;
         return {
           text: messageSummary(thread, issueKey2 === null ? [] : await graphSections(client, dispatchChildRef(dispatchIssueRef(issueKey2), "message", thread.message.id))),

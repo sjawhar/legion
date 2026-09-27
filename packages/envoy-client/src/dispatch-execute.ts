@@ -2249,10 +2249,11 @@ export async function executeDispatchTool(
         const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor });
         // Once the attempt is answered, Dispatch posts new text as this session's follow-up,
         // threaded under its first reply, and answers the same text again with the reply it
-        // stored. A Dispatch that keeps one reply per attempt answers any second call with the
-        // stored reply - often the host's own automatic BTW answer, sent before the model got
-        // here - and posts nothing; the stored body is how that reads apart from a send, so
-        // say what happened instead of reporting a send that did not occur.
+        // stored. A Dispatch that predates follow-ups keeps one reply per attempt: it answers
+        // any second call with the stored reply - often the host's own automatic BTW answer,
+        // sent before the model got here - and posts nothing. The stored body is how that reads
+        // apart from a send, so this says what happened instead of reporting a send that did
+        // not occur.
         if (reply.body !== body) {
           return {
             text:
@@ -2509,7 +2510,9 @@ export async function executeDispatchTool(
     case "dispatch_read": {
       const message = optionalString(args, "message");
       if (message !== undefined) {
-        const thread = await client.getMessageThread(messageIdOf(message) as string);
+        const sessionId = input.sessionId?.trim();
+        if (!sessionId) throw new Error("host session id is required for dispatch_read({message})");
+        const thread = await client.getMessageThread(messageIdOf(message) as string, sessionId);
         const issueKey = thread.message.issue_key;
         return {
           text: messageSummary(

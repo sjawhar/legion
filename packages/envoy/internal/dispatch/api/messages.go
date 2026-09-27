@@ -465,9 +465,21 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 // getMessageThread reads the conversation a message belongs to by the id of any message in it:
 // the thread root with its deliveries, and every reply, oldest first. It takes no issue, so it
 // is how a session reads back a human's direct message and its own replies to it, which belong
-// to no issue.
+// to no issue. A human reads any thread. A bearer names its session in ?session= and reads only
+// a thread that session is in: the one the root targets, or one it authored a reply in. A direct
+// message is between a human and one session, so knowing a message id opens it to no other.
 func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "message") {
+	_, human, err := s.optionalActor(r)
+	if err != nil {
+		s.writeAuthenticationError(w, err)
+		return
+	}
+	if !requireUUIDPath(w, r, "message") {
+		return
+	}
+	session := strings.TrimSpace(r.URL.Query().Get("session"))
+	if !human && session == "" {
+		writeError(w, "SESSION_REQUIRED", http.StatusBadRequest, "a bearer names its own session in ?session=")
 		return
 	}
 	var rootID string
@@ -482,7 +494,26 @@ func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if !human && !read.hasSession(session) {
+		writeError(w, "THREAD_FORBIDDEN", http.StatusForbidden,
+			"session "+session+" may read only a conversation it is in: one whose root targets it, or one it replied in")
+		return
+	}
 	WriteJSON(w, http.StatusOK, read)
+}
+
+// hasSession reports whether session is in this conversation: the root targets it, or it
+// authored a reply.
+func (read messageRead) hasSession(session string) bool {
+	if messageTarget(read.Message.Target) == "session:"+session {
+		return true
+	}
+	for _, reply := range read.Replies {
+		if reply.Author.Kind == "session" && reply.Author.ID == session {
+			return true
+		}
+	}
+	return false
 }
 
 // readMessage is one message, on issueKey when it is not empty, with its deliveries and every
