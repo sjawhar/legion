@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +15,7 @@ import (
 
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // A broadcast is one human's message to many sessions. It is a grouping over the targeted
@@ -36,11 +39,12 @@ import (
 // session list, so this is a runaway guard rather than a product limit.
 const maxBroadcastRecipients = 100
 
-// Recipients are delivered to one after another, never in parallel. Dispatch's shared pool
-// refuses one caller a second connection while it holds one (store.ErrNestedAcquire) - the
-// invariant that keeps a request from deadlocking the pool against itself - and every
-// delivery takes one, so a broadcast's sends are serialised by the same rule every other
-// handler obeys rather than by a budget of its own.
+// broadcastDeliveryWorkers is how many recipients are delivered to at once, once the create
+// request has already answered. Each worker takes a tracking context of its own: the pool's
+// one-connection guard is per context (store.WithTransactionTracking), so workers sharing one
+// would both trip it and race on its flag. Four keeps a large send's wall time down without
+// holding more than four of the shared pool's connections for one broadcast.
+const broadcastDeliveryWorkers = 4
 
 // broadcast is what a send's recipients share: who sent it, the body they were all sent, the
 // mode it was sent in, and when.
@@ -66,10 +70,6 @@ type broadcastRecipient struct {
 	SessionID string          `json:"session_id"`
 	Message   model.Message   `json:"message"`
 	Replies   []model.Message `json:"replies"`
-	// SendError is set only when Dispatch could not record the delivery attempt at all, so
-	// the message exists with no attempt to show. A send the listener refused is an ordinary
-	// failed attempt on the message and is reported there.
-	SendError string `json:"send_error,omitempty"`
 }
 
 // broadcastRead is a broadcast with every recipient's state.
@@ -160,7 +160,17 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 	for _, event := range events {
 		s.publish(event)
 	}
-	s.deliverBroadcast(r.Context(), created.Recipients, input.Delivery, actor)
+	// The send answers as soon as the messages are committed, and delivery runs behind it.
+	// Tying delivery to the request meant a request cut off partway - a closed tab, a deploy's
+	// five-second shutdown, the load balancer's idle timeout - left one attempt stranded
+	// pending and every later recipient with a message and no attempt at all, which nothing
+	// recovers. Every recipient's attempt, receipt and reply reaches an open broadcast view
+	// over the event stream, so nothing is lost by answering first.
+	messages := make([]model.Message, 0, len(created.Recipients))
+	for _, recipient := range created.Recipients {
+		messages = append(messages, recipient.Message)
+	}
+	go s.deliverBroadcast(messages, input.Delivery, actor)
 	WriteJSON(w, http.StatusCreated, broadcastCreated{broadcastRead: created, Excluded: excluded})
 }
 
@@ -299,22 +309,44 @@ func (s *server) writeBroadcast(
 	return sent, events, nil
 }
 
-// deliverBroadcast sends each recipient's message in turn and records what each send did on
-// its recipient. One recipient's failure never stops another's: a send the listener refused
-// lands as a failed attempt on that message, and a failure to record the attempt at all is
-// reported as that recipient's send_error, leaving the message with no attempt to show.
-func (s *server) deliverBroadcast(
-	ctx context.Context, recipients []broadcastRecipient, delivery string, actor model.Actor,
-) {
-	for index := range recipients {
-		recipient := &recipients[index]
-		attempt, err := s.deliverMessage(ctx, recipient.Message, delivery, nil, actor, nil)
-		if err != nil {
-			recipient.SendError = err.Error()
-			continue
-		}
-		recipient.Message.Deliveries = []model.MessageDelivery{attempt}
+// deliverBroadcast sends each recipient's message after the create request has answered,
+// broadcastDeliveryWorkers at a time. It runs on the server's lifetime rather than the
+// request's, so a browser that goes away cannot strand a recipient, and a shutdown cancels it
+// rather than leaving the goroutine behind. One recipient's failure never stops another's: a
+// send the listener refused lands as a failed attempt on that message, and a delivery this
+// cannot record at all leaves the message with no attempt, which the broadcast view shows as
+// not sent and offers a retry for.
+func (s *server) deliverBroadcast(messages []model.Message, delivery string, actor model.Actor) {
+	workers := min(broadcastDeliveryWorkers, len(messages))
+	pending := make(chan model.Message)
+	var wait sync.WaitGroup
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for message := range pending {
+				ctx := store.WithTransactionTracking(s.lifetime())
+				if _, err := s.deliverMessage(ctx, message, delivery, nil, actor, nil); err != nil {
+					slog.Error("dispatch: broadcast delivery",
+						"message", message.ID, "target", messageTarget(message.Target), "error", err)
+				}
+			}
+		}()
 	}
+	for _, message := range messages {
+		pending <- message
+	}
+	close(pending)
+	wait.Wait()
+}
+
+// lifetime is the process context background work runs on: cancelled when the server shuts
+// down, unbounded in a test that configured none.
+func (s *server) lifetime() context.Context {
+	if s.deps.Lifetime == nil {
+		return context.Background()
+	}
+	return s.deps.Lifetime
 }
 
 // GET /api/v1/broadcasts
@@ -324,7 +356,10 @@ func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select b.id::text, b.author, b.body, b.delivery, b.created_at,
-		       count(distinct m.id), count(distinct d.reply_id)
+		       count(distinct m.id),
+		       -- Recipients who answered, not answered attempts: one recipient that answered a
+		       -- retry as well as the original attempt is one answer, never two.
+		       count(distinct m.id) filter (where d.reply_id is not null)
 		from broadcasts b
 		left join messages m on m.broadcast_id = b.id
 		left join message_deliveries d on d.message_id = m.id and d.reply_id is not null

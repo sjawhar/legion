@@ -1,4 +1,4 @@
--- 0049_broadcasts.up.sql
+-- 0050_broadcasts.up.sql
 -- One message a human sent to many sessions at once. A broadcast is a grouping, not a new
 -- delivery mechanism: each recipient gets an ordinary issue-less targeted message of its own,
 -- carrying this id, so every recipient's thread, retry and reply behave exactly as they do for

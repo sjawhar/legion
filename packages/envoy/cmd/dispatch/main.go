@@ -231,6 +231,7 @@ func main() {
 		GitHubAPIBase:  boot.GitHubAPIBase,
 		OIDC:           serviceTokens,
 		AgentStream:    agentStream,
+		Lifetime:       ctx,
 
 		TestHooksEnabled: boot.TestHooksEnabled,
 	})

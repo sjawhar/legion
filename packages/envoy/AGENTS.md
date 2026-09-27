@@ -852,8 +852,12 @@ exactly a single targeted message's. Recipients are judged against one listener 
 selected session that is not live, or does not advertise the chosen mode, is excluded before
 anything is written and named in the response's `excluded`, never switched to another mode
 (the mode is part of what the sender said). Exclusions are not stored; a send with no
-reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. Deliveries run one after
-another because the shared pool refuses one caller a second connection while it holds one.
+reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. The send answers 201 as soon
+as the messages are committed and delivers behind the request, four recipients at a time, each
+worker on its own `store.WithTransactionTracking` context derived from the server's lifetime
+(the pool's one-connection guard is per context, and a request's context would strand every
+recipient after the one in flight when a tab closes or a deploy shuts the server down). A
+recipient therefore starts with no attempt, and one still carrying none was not sent to.
 `GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and
 `GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies; all
 three routes are human-only, like the one-session route they are built from.

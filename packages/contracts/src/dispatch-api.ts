@@ -1584,14 +1584,12 @@ export interface BroadcastSummary extends Broadcast {
 }
 
 /** One session's copy of a broadcast: the message it was sent, with its delivery attempts,
- *  and the replies threaded under it. */
+ *  and the replies threaded under it. Delivery runs behind the create response, so a recipient
+ *  starts with no attempt; a recipient still carrying none has not been sent to. */
 export interface BroadcastRecipient {
   readonly session_id: string;
   readonly message: Message;
   readonly replies: Message[];
-  /** Set only when Dispatch could not record a delivery attempt at all, so the message has
-   *  none to show. A send the listener refused is an ordinary failed attempt on the message. */
-  readonly send_error?: string;
 }
 
 export interface BroadcastRead extends Broadcast {

@@ -1,9 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useLocation, useParams } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { BroadcastRecipient } from "../../api/types";
+import type {
+  Agent,
+  BroadcastExclusion,
+  BroadcastRecipient,
+  MessageDeliveryMode,
+} from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
@@ -18,7 +23,12 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
-import { DeliveryStatus } from "../conversation/TargetedMessageCard";
+import {
+  capabilitiesForTarget,
+  DeliveryRetry,
+  DeliveryStatus,
+  offersSafeRetry,
+} from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
@@ -34,29 +44,69 @@ export function answeredCount(recipients: readonly BroadcastRecipient[]): number
   ).length;
 }
 
+/** The sessions the send left out, handed over by the composer when it navigated here.
+ *  Exclusions are not stored - they are a fact about one send, not about the broadcast - so
+ *  this is the only place they can be shown, and only to the human who sent it. */
+export function exclusionsFromState(state: unknown): readonly BroadcastExclusion[] {
+  if (typeof state !== "object" || state === null) return [];
+  const excluded = Reflect.get(state, "excluded");
+  return Array.isArray(excluded) ? (excluded as BroadcastExclusion[]) : [];
+}
+
 function BroadcastRecipientRow({
+  delivery,
+  liveAgents,
   recipient,
   titles,
 }: {
+  delivery: MessageDeliveryMode;
+  liveAgents: readonly Agent[];
   recipient: BroadcastRecipient;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
+  const queryClient = useQueryClient();
+  const retry = useMutation({
+    mutationFn: (mode: MessageDeliveryMode) =>
+      api.createMessageDelivery(recipient.message.id, mode),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["broadcast"] }),
+  });
   const label = sessionLabel(recipient.session_id, titles.get(recipient.session_id) ?? "");
   const answer = recipient.replies.find((reply) => reply.author.kind === "session");
+  const answeredBy = answer === undefined ? undefined : resolveAuthor(answer.author, titles).label;
+  const attempts = deliveryAttempts(recipient.message.deliveries, label);
+  const latest = attempts.at(-1);
+  // Only a delivered attempt is settled news. A recipient with no attempt was never sent to -
+  // delivery runs behind the send, and a shutdown can cut it - and an attempt still pending is
+  // a send whose outcome nobody learned. Both are retryable, in the attempt's own mode safely.
+  const retryable = answeredBy === undefined && latest?.state !== "sent";
+  const capabilities = capabilitiesForTarget(recipient.message.target, liveAgents);
   return (
     <article aria-label={label} className={`rounded-xl border p-3 ${card} ${borderDefault}`}>
       <h3 className={`text-sm font-semibold ${textPrimaryOnCanvas}`}>{label}</h3>
-      {recipient.send_error === undefined || recipient.send_error === "" ? (
+      {latest === undefined ? (
+        <p className={`mt-2 text-sm font-semibold ${dangerText}`}>
+          Not sent to {label}: no delivery attempt was recorded.
+        </p>
+      ) : (
         <DeliveryStatus
-          answeredBy={answer === undefined ? undefined : resolveAuthor(answer.author, titles).label}
-          deliveries={deliveryAttempts(recipient.message.deliveries, label)}
+          answeredBy={answeredBy}
+          deliveries={attempts}
+          retryOffered={offersSafeRetry(attempts, retryable)}
           targetName={label}
         />
-      ) : (
-        <p className={`mt-2 text-sm font-semibold ${dangerText}`}>
-          Not delivered: {recipient.send_error}
-        </p>
       )}
+      {retryable ? (
+        <DeliveryRetry
+          canAside={capabilities?.includes("aside") !== false}
+          canBtw={capabilities?.includes("btw") !== false}
+          canSteer={capabilities?.includes("steer") !== false}
+          mode={latest?.delivery ?? delivery}
+          onRetry={retry.mutate}
+          retrying={retry.isPending}
+          sameModeRetry={offersSafeRetry(attempts, true)}
+          targetName={label}
+        />
+      ) : null}
       {recipient.replies.map((reply) => (
         <div className={`mt-2 border-t pt-2 ${borderDefault}`} key={reply.id}>
           <p className={`flex items-baseline gap-2 text-xs ${textSecondaryOnCanvas}`}>
@@ -75,7 +125,9 @@ function BroadcastRecipientRow({
 /** One broadcast: what was sent, and where every recipient's copy of it got to. */
 export function BroadcastPage(): ReactNode {
   const { id = "" } = useParams<{ id: string }>();
-  const { titles } = useAgents(true, true);
+  const location = useLocation();
+  const excluded = exclusionsFromState(location.state);
+  const { agents, titles } = useAgents(true, true);
   const broadcast = useQuery({
     queryFn: () => api.getBroadcast(id),
     // Keyed under ["broadcast"], the prefix every issue-less message event invalidates, so a
@@ -115,6 +167,15 @@ export function BroadcastPage(): ReactNode {
         <div className={`mt-2 ${textPrimaryOnCanvas}`}>
           <MarkdownBody markdown={sent.body} variant="inline" />
         </div>
+        {excluded.length === 0 ? null : (
+          <p className={`mt-2 text-sm ${dangerText}`}>
+            Excluded:{" "}
+            {excluded
+              .map((item) => `${sessionLabel(item.session_id, item.title)} (${item.reason})`)
+              .join(", ")}
+            . Nothing was sent to them.
+          </p>
+        )}
       </header>
       {sent.recipients.length === 0 ? (
         <EmptyState label="Broadcast empty state" message="This broadcast reached no agent." />
@@ -122,7 +183,9 @@ export function BroadcastPage(): ReactNode {
         <div className="space-y-3">
           {sent.recipients.map((recipient) => (
             <BroadcastRecipientRow
+              delivery={sent.delivery}
               key={recipient.session_id}
+              liveAgents={agents}
               recipient={recipient}
               titles={titles}
             />

@@ -974,7 +974,9 @@ function BroadcastComposer({
         });
       }
       void queryClient.invalidateQueries({ queryKey: ["broadcast"] });
-      void navigate(`/agents/broadcasts/${created.id}`);
+      // The exclusions travel with the navigation: they are a fact about this send, not about
+      // the broadcast, so the server stores none and this is the only place they can be shown.
+      void navigate(`/agents/broadcasts/${created.id}`, { state: { excluded: created.excluded } });
     },
   });
 

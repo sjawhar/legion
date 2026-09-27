@@ -1,14 +1,22 @@
 import { expect, test } from "@playwright/test";
 
-import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
+import {
+  type FakeSession,
+  getSentMessages,
+  setLiveSessions,
+  setSessionLive,
+  setSessionSendStatus,
+} from "./agents";
 import { getBroadcast, listBroadcasts, replyToMessageDelivery } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
+// No `last_seen`: the fixture stamps one at seeding time. A literal computed when this module
+// is imported ages with the whole suite, and a session ten minutes "old" folds under Inactive
+// rather than under the fold this spec opens - which is how long a full run takes to reach here.
 const planner: FakeSession = {
   capabilities: ["aside", "btw", "steer"],
   dir: "/workspaces/planner",
-  last_seen: Date.now() - 30_000,
   machine_id: "build-host",
   roles: ["planner"],
   session_id: "planner-session",
@@ -17,7 +25,6 @@ const planner: FakeSession = {
 const tester: FakeSession = {
   capabilities: ["aside", "btw", "steer"],
   dir: "/workspaces/tester",
-  last_seen: Date.now() - 20_000,
   machine_id: "build-host",
   roles: ["tester"],
   session_id: "tester-session",
@@ -26,11 +33,21 @@ const tester: FakeSession = {
 const reviewer: FakeSession = {
   capabilities: ["aside"],
   dir: "/workspaces/reviewer",
-  last_seen: Date.now() - 10_000,
   machine_id: "review-host",
   roles: ["reviewer"],
   session_id: "reviewer-session",
   title: "Reviewer",
+};
+
+// A third session for the race below: it advertises the mode, so the browser counts it as a
+// recipient and only the server can exclude it.
+const observer: FakeSession = {
+  capabilities: ["btw"],
+  dir: "/workspaces/observer",
+  machine_id: "build-host",
+  roles: [],
+  session_id: "observer-session",
+  title: "Observer",
 };
 
 test.beforeEach(async () => {
@@ -56,7 +73,7 @@ test("one message reaches every selected agent that advertises the mode, and the
     await quiet.click();
 
     for (const title of ["Planner", "Tester", "Reviewer"]) {
-      await agents.getByRole("checkbox", { name: `Select ${title} for broadcast` }).check();
+      await page.getByRole("checkbox", { name: `Select ${title} for broadcast` }).check();
     }
     const composer = page.getByRole("region", { name: "Broadcast" });
     await composer.getByRole("combobox", { name: "Delivery mode" }).selectOption("steer");
@@ -90,7 +107,7 @@ test("one message reaches every selected agent that advertises the mode, and the
 
     // One message per recipient: the listener was asked to send twice, once to each.
     const sends = await getSentMessages();
-    expect(sends.map((send) => send.target_session).sort()).toEqual([
+    expect(sends.map((entry) => entry.target_session).sort()).toEqual([
       "planner-session",
       "tester-session",
     ]);
@@ -122,6 +139,55 @@ test("one message reaches every selected agent that advertises the mode, and the
     await expect(list.getByText("Stand down and report status.")).toBeVisible();
     await expect(list.getByText("1 of 2 answered")).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("broadcast-list.png"), fullPage: true });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a session that goes away before the send is excluded by the server and named on the broadcast, and a failed recipient can be retried there", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the broadcast flow");
+  await setLiveSessions([planner, tester, observer]);
+  await setSessionSendStatus(tester.session_id, 404);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    await agents.getByRole("button", { name: "No Dispatch activity (3)" }).click();
+    for (const title of ["Planner", "Tester", "Observer"]) {
+      await page.getByRole("checkbox", { name: `Select ${title} for broadcast` }).check();
+    }
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    await composer.getByRole("combobox", { name: "Delivery mode" }).selectOption("btw");
+    await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Report status.");
+    const send = composer.getByRole("button", { name: "Send to 3" });
+    await expect(send).toBeEnabled();
+    // The Observer goes away after the browser judged the selection and before the send lands:
+    // the race the server re-checks for, and the only exclusion the browser cannot predict.
+    await setSessionLive(observer.session_id, false);
+    await send.click();
+    await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
+
+    await expect(
+      page.getByText(/Excluded: .*\(no live session\)\. Nothing was sent to them\./)
+    ).toBeVisible();
+    await expect(page.getByRole("article", { name: "Observer" })).toHaveCount(0);
+
+    const failed = page.getByRole("article", { name: "Tester" });
+    await expect(failed.getByText(/^Failed:/)).toBeVisible();
+    await expect(
+      page.getByRole("article", { name: "Planner" }).getByText("Asking Planner (BTW)")
+    ).toBeVisible();
+
+    // The listener takes the Tester again; the row's own Retry sends it without leaving the
+    // broadcast for that agent's card.
+    await setSessionSendStatus(tester.session_id, 200);
+    await failed.getByRole("button", { name: "Retry" }).click();
+    await expect(failed.getByText("Asking Tester (BTW)")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("broadcast-retry.png"), fullPage: true });
   } finally {
     await alice.close();
   }
