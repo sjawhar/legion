@@ -141,8 +141,11 @@ type State struct {
 	EmittedCount   uint64           `json:"emitted_count"`
 	SettledEmitted bool             `json:"settled_emitted"`
 	Claim          *SettlementClaim `json:"claim,omitempty"`
-	// Overflowed says a check was refused because the record had no room left for it
-	// (maxRecordBytes): the record no longer holds the whole head, so it never settles.
+	// Overflowed says the listener never settles this head again, because the head is past what it
+	// can publish: a check was refused because it would take the record past maxRecordBytes or the
+	// record's settlement past maxSettlementBytes (write), or NATS refused the settlement itself
+	// (markOverflowed, from the summary loop). A head that settled before it overflowed keeps its
+	// last settlement; nothing supersedes it.
 	Overflowed bool `json:"overflowed,omitempty"`
 }
 

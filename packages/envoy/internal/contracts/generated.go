@@ -167,7 +167,9 @@ func SlackSubject(team string, channel string, kind string) string {
 
 // SanitizeSubjectSegment makes a value one NATS subject segment: a dot, which a subject splits on,
 // and whitespace and the wildcards * and >, which a published subject may not hold, each become an
-// underscore. A slash is kept. Mirrored on the TS side as `sanitizeSubjectSegment`.
+// underscore. A slash is kept. Generated from SUBJECT_SEGMENT_REPLACED in packages/contracts, which
+// `sanitizeSubjectSegment` reads too, so what the listener publishes and what a consumer expects
+// cannot drift apart.
 func SanitizeSubjectSegment(value string) string {
 	return subjectSegmentSanitizer.Replace(value)
 }

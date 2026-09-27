@@ -2208,30 +2208,66 @@ func TestAGithubEnvelopeStaysUnderNATSMaxPayloadWhateverItsFieldsHold(t *testing
 	}
 }
 
-// A check's name is the one text a repository chooses in a CI observation (a workflow's job names
-// it), and the listener writes the observation to its CI store with a publish, so the name is capped
-// like an envelope's text.
-func TestACheckRunNameIsCappedAtTheEnvelopeTextCap(t *testing.T) {
-	for _, tc := range []struct{ name, check, want string }{
-		{"a name past the cap is cut", strings.Repeat("c", 3000), strings.Repeat("c", 2048) + "…"},
-		{"a real name is kept whole", "envoy-go / test (ubuntu-latest)", "envoy-go / test (ubuntu-latest)"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			observations := GithubCIObservations("check_run", map[string]any{
-				"repository": map[string]any{"name": "widgets", "owner": map[string]any{"login": "acme"}},
-				"check_run": map[string]any{
-					"id": float64(7), "name": tc.check, "head_sha": strings.Repeat("a", 40), "status": "completed",
-					"pull_requests": []any{map[string]any{"number": float64(3)}},
-				},
-			})
-			if len(observations) != 1 {
-				t.Fatalf("observations = %d, want 1", len(observations))
-			}
-			if got := observations[0].CheckName; got != tc.want {
-				t.Fatalf("check name has %d runes, want %d", len([]rune(got)), len([]rune(tc.want)))
-			}
+// What a CI observation copies from its check run goes to the listener's CI store, which writes the
+// record with a publish, so each text is capped like an envelope's.
+func TestACheckRunIsCappedAtTheEnvelopeTextCap(t *testing.T) {
+	observe := func(t *testing.T, checkRun map[string]any) CIObservation {
+		t.Helper()
+		fields := map[string]any{
+			"id": float64(7), "name": "build", "head_sha": strings.Repeat("a", 40), "status": "completed",
+			"pull_requests": []any{map[string]any{"number": float64(3)}},
+		}
+		for key, value := range checkRun {
+			fields[key] = value
+		}
+		observations := GithubCIObservations("check_run", map[string]any{
+			"repository": map[string]any{"name": "widgets", "owner": map[string]any{"login": "acme"}},
+			"check_run":  fields,
 		})
+		if len(observations) != 1 {
+			t.Fatalf("observations = %d, want 1", len(observations))
+		}
+		return observations[0]
 	}
+	name := func(t *testing.T, check string) string {
+		t.Helper()
+		return observe(t, map[string]any{"name": check}).CheckName
+	}
+
+	t.Run("a real name is kept whole", func(t *testing.T) {
+		if got := name(t, "envoy-go / test (ubuntu-latest)"); got != "envoy-go / test (ubuntu-latest)" {
+			t.Fatalf("check name = %q, want it whole", got)
+		}
+	})
+	// The CI record is keyed by check name, so two names that share the text the cap keeps must
+	// stay two checks, and one name must key the same entry on every observation.
+	t.Run("a name past the cap is cut and stays its own", func(t *testing.T) {
+		shared := strings.Repeat("c", 3000)
+		first, second := name(t, shared+" / lint"), name(t, shared+" / test")
+		if first == second {
+			t.Fatalf("two names sharing their first %d runes capped to one: %.60q", maxEnvelopeTextRunes, first)
+		}
+		if again := name(t, shared+" / lint"); again != first {
+			t.Fatalf("one name capped two ways: %.60q and %.60q", first, again)
+		}
+		for _, got := range []string{first, second} {
+			if !strings.HasPrefix(got, strings.Repeat("c", 2048)+"…") {
+				t.Fatalf("capped name %.60q does not keep the name's first 2,048 runes and an ellipsis", got)
+			}
+			if runes := len([]rune(got)); runes > 2048+32 {
+				t.Fatalf("capped name has %d runes, want at most %d", runes, 2048+32)
+			}
+		}
+	})
+	t.Run("every other copied text is capped", func(t *testing.T) {
+		long := strings.Repeat("u", 600_000)
+		got := observe(t, map[string]any{"html_url": long, "status": long, "conclusion": long, "completed_at": long})
+		for field, value := range map[string]string{"URL": got.URL, "Status": got.Status, "Conclusion": got.Conclusion, "ObservedAt": got.ObservedAt} {
+			if value != strings.Repeat("u", 2048)+"…" {
+				t.Fatalf("%s has %d runes, want the first 2,048 and an ellipsis", field, len([]rune(value)))
+			}
+		}
+	})
 }
 
 // A workflow's file name is whatever the repository named the file, and a published NATS subject

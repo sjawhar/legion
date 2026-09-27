@@ -1559,6 +1559,61 @@ func TestMessageHandlersAnswerAMessageNATSCannotTakeWholeWith413(t *testing.T) {
 	}
 }
 
+// A session id or role a caller names becomes a KV key, and a key NATS would refuse (one long enough
+// to take its subject past the server's protocol line, which would close the connection every
+// subscription and watcher of the listener runs on, or one holding an empty token, which no stream
+// matches) is the caller's to fix: every /v1 route that reads or writes one answers 413 or 400, as
+// for a message NATS cannot take, and the connection stays up.
+func TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx(t *testing.T) {
+	client, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	resetListenerTestState(t, client.Conn)
+	registry, err := store.Open(client.Conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open registry: %v", err)
+	}
+	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	if err := sessions.Put("ses_live", session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register ses_live: %v", err)
+	}
+	mux := http.NewServeMux()
+	registerV1Routes(mux, &listenerDeps{client: client, registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+
+	long := strings.Repeat("s", 5000)
+	longRole := strings.Repeat("r", 4100)
+	for _, tc := range []struct {
+		name, method, path, body string
+		want                     int
+	}{
+		{"subscribe a long session id", http.MethodPost, "/v1/interests/subscribe", `{"session_id":"` + long + `","self_subscribed":true}`, http.StatusRequestEntityTooLarge},
+		{"subscribe a session id holding an empty token", http.MethodPost, "/v1/interests/subscribe", `{"session_id":"sess..x","self_subscribed":true}`, http.StatusBadRequest},
+		{"unsubscribe a long session id", http.MethodPost, "/v1/interests/unsubscribe", `{"session_id":"` + long + `","topics":["notifications.agent.x"]}`, http.StatusRequestEntityTooLarge},
+		{"read a long session id's interests", http.MethodGet, "/v1/interests/" + long, "", http.StatusRequestEntityTooLarge},
+		{"remove a long session id's interests", http.MethodDelete, "/v1/interests/" + long, "", http.StatusRequestEntityTooLarge},
+		{"remove a long session id", http.MethodDelete, "/v1/sessions/" + long, "", http.StatusRequestEntityTooLarge},
+		{"read a long role", http.MethodGet, "/v1/roles/" + long, "", http.StatusRequestEntityTooLarge},
+		{"claim a long role", http.MethodPost, "/v1/roles/set", `{"session_id":"ses_live","role":"` + longRole + `"}`, http.StatusRequestEntityTooLarge},
+		{"publish to a long role", http.MethodPost, "/v1/messages/publish", `{"topic":"notifications.role.` + longRole + `","message":"hi"}`, http.StatusRequestEntityTooLarge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			mux.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body)))
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body = %.300s", recorder.Code, tc.want, recorder.Body.String())
+			}
+			if !client.Conn.IsConnected() {
+				t.Fatalf("the refusal left the connection %v, want it connected", client.Conn.Status())
+			}
+		})
+	}
+}
+
 func TestPublishHandler_DedupeKeySelection(t *testing.T) {
 	client := setupPublishTestClient(t)
 	state := &listenerDeps{client: client}

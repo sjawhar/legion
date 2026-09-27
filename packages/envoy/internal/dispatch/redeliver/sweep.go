@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 )
 
@@ -80,7 +81,7 @@ func OpenState(js nats.JetStreamContext) (nats.KeyValue, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s KV bucket: %w", Bucket, err)
 	}
-	return kv, nil
+	return bus.CheckedKeyValue(kv), nil
 }
 
 // Outcome is what a sweep did, or in a dry run would do, with one delivery.

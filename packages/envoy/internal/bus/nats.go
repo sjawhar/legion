@@ -674,19 +674,23 @@ func usesCoreTransport(topic string) bool {
 		strings.HasPrefix(topic, "notifications.envoy.exceptions."+contracts.RoleTopicPrefix)
 }
 
-// ErrRefused is returned for an envelope NATS refuses the same way however often it is published,
-// so a caller answers it as a refusal rather than a failure to retry. It is ErrTooLarge or
-// ErrInvalidSubject.
-var ErrRefused = errors.New("bus: refused by NATS")
+// ErrRefused is returned for an envelope that is refused the same way however often it is
+// published, so a caller answers it as a refusal rather than a failure to retry. It is ErrTooLarge
+// or ErrInvalidSubject.
+var ErrRefused = errors.New("refused")
 
-// ErrTooLarge is the ErrRefused of an envelope NATS cannot take whole: a message past the
-// server's max payload, which nats.go refuses before sending it, or a subject past
-// maxSubjectBytes. Its error names the size.
-var ErrTooLarge = fmt.Errorf("%w, too large to take whole", ErrRefused)
+// ErrTooLarge is the ErrRefused of an envelope too large to publish whole: a message past the NATS
+// server's max payload, which nats.go refuses before sending it, a subject past maxSubjectBytes, a
+// KV key whose subject would be, or a CI record or settlement past the bound its store keeps below
+// those. Its error names the size and the bound.
+var ErrTooLarge = fmt.Errorf("%w: too large to publish whole", ErrRefused)
 
-// ErrInvalidSubject is the ErrRefused of a subject nats.go does not accept, one holding
-// whitespace. Its error names the subject.
-var ErrInvalidSubject = fmt.Errorf("%w, not a subject it accepts", ErrRefused)
+// ErrInvalidSubject is the ErrRefused of a subject NATS does not accept: an empty one or one holding
+// whitespace, which nats.go refuses, or one holding an empty token (`a..b`, or a leading or trailing
+// dot), which no stream's subjects match, so a JetStream publish waits out its deadline for an
+// answer that never comes and a core publish is dropped. Its error names the subject, or the KV key
+// that would have made it.
+var ErrInvalidSubject = fmt.Errorf("%w: not a subject NATS accepts", ErrRefused)
 
 // maxSubjectBytes bounds a subject the bus publishes on. The server closes a connection whose
 // protocol line runs past its max control line (4 KiB by default) and nats.go does not check it,
@@ -695,24 +699,32 @@ var ErrInvalidSubject = fmt.Errorf("%w, not a subject it accepts", ErrRefused)
 // besides, which 128 bytes covers.
 const maxSubjectBytes = 4<<10 - 128
 
-// checkSubject refuses a subject the server would close the connection over.
+// checkSubject refuses, before anything is sent, a subject the server would close the connection
+// over (ErrTooLarge) and one NATS does not accept (ErrInvalidSubject).
 func checkSubject(subject string) error {
 	if len(subject) > maxSubjectBytes {
 		return fmt.Errorf("%w: a subject of %d bytes, past %d", ErrTooLarge, len(subject), maxSubjectBytes)
 	}
+	if !validSubject(subject) {
+		return fmt.Errorf("%w: %q", ErrInvalidSubject, subject)
+	}
 	return nil
 }
 
-// refused names nats.go's refusals of a message it will never take as the ErrRefused they are: one
-// past the server's max payload, whose envelope of size bytes it names, and a subject nats.go does
-// not accept.
-func (c *Client) refused(err error, subject string, size int) error {
-	switch {
-	case errors.Is(err, nats.ErrMaxPayload):
+// validSubject reports whether NATS accepts subject: it is not empty, holds no whitespace, and has
+// no empty token.
+func validSubject(subject string) bool {
+	return subject != "" && subject[0] != '.' && subject[len(subject)-1] != '.' &&
+		!strings.Contains(subject, "..") && !strings.ContainsAny(subject, " \t\r\n")
+}
+
+// refused names nats.go's refusal of a message past the server's max payload as the ErrTooLarge it
+// is, naming its envelope of size bytes. checkSubject has already refused every subject nats.go
+// would.
+func (c *Client) refused(err error, size int) error {
+	if errors.Is(err, nats.ErrMaxPayload) {
 		return fmt.Errorf("%w: an envelope of %d bytes against the server's max payload of %d bytes",
 			ErrTooLarge, size, c.Conn.MaxPayload())
-	case errors.Is(err, nats.ErrBadSubject):
-		return fmt.Errorf("%w: %q", ErrInvalidSubject, subject)
 	}
 	return err
 }
@@ -773,7 +785,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 		ack, err = c.js.Publish(item.Topic, data, options...)
 	}
 	if err != nil {
-		return false, c.refused(err, item.Topic, len(data))
+		return false, c.refused(err, len(data))
 	}
 	return ack.Duplicate, nil
 }
@@ -800,7 +812,7 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	return c.refused(c.Conn.Publish(subject, data), subject, len(data))
+	return c.refused(c.Conn.Publish(subject, data), len(data))
 }
 
 // ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
@@ -838,7 +850,7 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 	}
 	defer receipt.Unsubscribe()
 	if err := c.Conn.PublishRequest(subject, inbox, data); err != nil {
-		return c.refused(err, subject, len(data))
+		return c.refused(err, len(data))
 	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {

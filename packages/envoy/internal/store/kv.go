@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/routing"
@@ -105,7 +106,7 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 		return nil, err
 	}
 	r := &Registry{
-		roleKV:                roleKV,
+		roleKV:                bus.CheckedKeyValue(roleKV),
 		cache:                 map[string]Interest{},
 		cacheRevisions:        map[string]uint64{},
 		now:                   opts.now,
@@ -290,7 +291,7 @@ func (r *Registry) Rewatch(conn *nats.Conn) error {
 		return err
 	}
 	r.kvMu.Lock()
-	r.roleKV = roleKV
+	r.roleKV = bus.CheckedKeyValue(roleKV)
 	r.kvMu.Unlock()
 	return nil
 }

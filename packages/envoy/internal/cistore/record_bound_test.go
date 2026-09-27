@@ -85,16 +85,12 @@ func TestAHeadRecordRefusesACheckPastItsBoundsAndNeverSettles(t *testing.T) {
 			// Every check the store accepted still settles in one publish.
 			accepted := stored
 			accepted.Overflowed = false
-			env, err := settlementEnvelope(accepted, contracts.NowMillis())
+			settlement, err := settlementSize(accepted)
 			if err != nil {
-				t.Fatalf("settlement envelope: %v", err)
+				t.Fatalf("settlement size: %v", err)
 			}
-			data, err := json.Marshal(env)
-			if err != nil {
-				t.Fatalf("encode settlement: %v", err)
-			}
-			if len(data)+len(env.Topic) > natsDefaultMaxPayload {
-				t.Fatalf("the %d checks the store accepted settle in %d bytes, past NATS's default max payload (%d)", recorded, len(data), natsDefaultMaxPayload)
+			if settlement > natsDefaultMaxPayload {
+				t.Fatalf("the %d checks the store accepted settle in %d bytes, past NATS's default max payload (%d)", recorded, settlement, natsDefaultMaxPayload)
 			}
 
 			waitCacheChecks(t, store, owner, repo, number, sha, recorded)

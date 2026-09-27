@@ -16,11 +16,10 @@ type Publisher interface {
 }
 
 // deliveryFailed answers a delivery whose envelope, or CI observation, the listener did not publish,
-// and logs `<action> refused` or `<action> failed`. What NATS refuses however often it is sent
-// (bus.ErrRefused: too large to take whole, or a subject it does not accept) is refused the same way
-// on every redelivery, so it is a 422, which a redelivery sweep takes as terminal, and its error says
-// why. Any other failure may pass on a redelivery, so it is a 503; `github publish failed` is the
-// line an alert pages on.
+// and logs `<action> refused` or `<action> failed`. A refusal (bus.ErrRefused: too large to publish
+// whole, or a subject NATS does not accept) is refused the same way on every redelivery, so it is a
+// 422, which a redelivery sweep takes as terminal, and its error says why. Any other failure may
+// pass on a redelivery, so it is a 503; `github publish failed` is the line an alert pages on.
 func deliveryFailed(w http.ResponseWriter, action string, err error) {
 	if errors.Is(err, bus.ErrRefused) {
 		log.Printf("%s refused: %v", action, err)

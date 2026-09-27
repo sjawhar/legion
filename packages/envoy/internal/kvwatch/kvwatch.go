@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // Watcher is one cache's KV watcher, from New.
@@ -52,8 +54,10 @@ type Watcher struct {
 // one at a time; an entry from a watcher already replaced is dropped rather than applied. reset
 // empties the cache and its revision fence: a recreated bucket numbers its revisions from 1
 // again, so the old fence would drop every entry the new bucket delivers. New watches nothing
-// until Start.
+// until Start. Every handle it keeps, kv and each a Rewatch opens, checks the keys the store passes
+// it (bus.CheckedKeyValue).
 func New(name string, kv nats.KeyValue, apply func(nats.KeyValueEntry), reset func()) *Watcher {
+	kv = bus.CheckedKeyValue(kv)
 	return &Watcher{
 		name:   name,
 		bucket: kv.Bucket(),
@@ -104,7 +108,7 @@ func (w *Watcher) Rewatch(conn *nats.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open %s KV bucket: %w", w.name, err)
 	}
-	if err := w.watch(kv); err != nil {
+	if err := w.watch(bus.CheckedKeyValue(kv)); err != nil {
 		return fmt.Errorf("watch %s KV bucket: %w", w.name, err)
 	}
 	return nil

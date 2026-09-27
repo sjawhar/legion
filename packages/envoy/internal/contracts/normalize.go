@@ -1,6 +1,8 @@
 package contracts
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -114,13 +116,18 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 		return nil
 	}
 	owner, repo := githubRepo(body)
+	// The listener writes an observation to its CI store with a publish, so each text it copies is
+	// capped like an envelope's.
+	text := func(path ...string) string {
+		return truncateWithEllipsis(nestedString(body, append([]string{key}, path...)...), maxEnvelopeTextRunes)
+	}
 	obs := CIObservation{
 		Owner:      owner,
 		Repo:       repo,
 		SHA:        sha,
 		AppID:      nestedNumberString(body, key, "app", "id"),
-		Status:     nestedString(body, key, "status"),
-		Conclusion: nestedString(body, key, "conclusion"),
+		Status:     text("status"),
+		Conclusion: text("conclusion"),
 	}
 	if event == "check_run" {
 		checkRunID := githubPositiveUint64(nested(body, key, "id"))
@@ -128,21 +135,19 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 			log.Printf("github ci check run skipped: invalid id=%v", nested(body, key, "id"))
 			return nil
 		}
-		// The one text a repository chooses here (a workflow's job names it); the listener writes the
-		// observation to its CI store with a publish, so it is capped like an envelope's text.
-		obs.CheckName = truncateWithEllipsis(nestedString(body, key, "name"), maxEnvelopeTextRunes)
+		obs.CheckName = checkName(nestedString(body, key, "name"))
 		obs.CheckRunID = checkRunID
-		obs.URL = nestedString(body, key, "html_url")
-		obs.ObservedAt = nestedString(body, key, "completed_at")
+		obs.URL = text("html_url")
+		obs.ObservedAt = text("completed_at")
 		if obs.ObservedAt == "" {
-			obs.ObservedAt = nestedString(body, key, "started_at")
+			obs.ObservedAt = text("started_at")
 		}
 		if obs.CheckName == "" {
 			return nil
 		}
 	} else {
 		obs.SuiteID = nestedNumberString(body, key, "id")
-		obs.ObservedAt = nestedString(body, key, "updated_at")
+		obs.ObservedAt = text("updated_at")
 		if obs.SuiteID == "" {
 			return nil
 		}
@@ -153,6 +158,18 @@ func GithubCIObservations(event string, body map[string]any) []CIObservation {
 		out = append(out, obs)
 	}
 	return out
+}
+
+// checkName is a check's name as the CI store keys it: whole, or past maxEnvelopeTextRunes its first
+// maxEnvelopeTextRunes runes and an ellipsis followed by a digest of the whole name, so two names
+// that share the kept text stay two checks and one name keys the same entry every time. The name is
+// the one text a repository chooses in an observation (a workflow's job names it).
+func checkName(name string) string {
+	if utf8.RuneCountInString(name) <= maxEnvelopeTextRunes {
+		return name
+	}
+	digest := sha256.Sum256([]byte(name))
+	return truncateWithEllipsis(name, maxEnvelopeTextRunes) + " " + hex.EncodeToString(digest[:8])
 }
 
 func GithubIsBotSender(body map[string]any) bool {

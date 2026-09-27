@@ -12,10 +12,11 @@ import (
 // NATS takes a message only whole, and two limits decide what whole can be: nats.go refuses a
 // message past the server's max payload before sending it, and the server closes the connection
 // over a protocol line past its max control line (4 KiB by default), which a long enough subject
-// makes. Both are ErrTooLarge, which names the size, and a subject nats.go does not accept (one
-// holding whitespace) is ErrInvalidSubject; each is an ErrRefused, which a caller answers as a
-// refusal rather than a failure to retry, and none may close the connection every subscription and
-// watcher of the client runs on.
+// makes. Both are ErrTooLarge, which names the size. A subject NATS does not accept, one holding
+// whitespace or an empty token (which no stream's subjects match, so a JetStream publish waits out
+// its deadline for an answer that never comes), is ErrInvalidSubject. Each is an ErrRefused, which
+// a caller answers as a refusal rather than a failure to retry, and none may close the connection
+// every subscription and watcher of the client runs on.
 func TestPublishRefusesAnEnvelopeNATSCannotTakeWhole(t *testing.T) {
 	client, err := Connect([]string{testnats.URL(t)})
 	if err != nil {
@@ -47,6 +48,9 @@ func TestPublishRefusesAnEnvelopeNATSCannotTakeWhole(t *testing.T) {
 		{"a payload past the server's max payload", envelope(push+"main", strings.Repeat("p", 1<<20)), ErrTooLarge, "max payload of 1048576 bytes"},
 		{"a core subject past the server's protocol line", envelope(contracts.RoleTopicPrefix+strings.Repeat("r", 5000), "{}"), ErrTooLarge, "a subject of 5019 bytes"},
 		{"a subject holding a space", envelope(push+"ci yml", "{}"), ErrInvalidSubject, `"notifications.github.acme.widgets.push.branch.ci yml"`},
+		{"a subject holding an empty token", envelope(contracts.AgentSubject("sess..x"), "{}"), ErrInvalidSubject, `"notifications.agent.sess..x"`},
+		{"a subject ending in an empty token", envelope(push+"main.", "{}"), ErrInvalidSubject, `"notifications.github.acme.widgets.push.branch.main."`},
+		{"a core subject holding an empty token", envelope(contracts.RoleTopicPrefix+"a..b", "{}"), ErrInvalidSubject, `"notifications.role.a..b"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := client.Publish(tc.envelope)

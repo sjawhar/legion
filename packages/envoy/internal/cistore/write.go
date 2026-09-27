@@ -19,8 +19,8 @@ import (
 // ordinary names fit. The settlement needs its own bound, because a name costs more there: a
 // failing check is named three times to the record's two, inside a JSON string in the envelope's
 // JSON, so a `"` costs 12 bytes a character in the settlement against 4 in the record. Its bound
-// leaves room under 1 MiB for the topic and the few bytes a later settlement of the same record
-// adds (a generation, `superseded_settlement`).
+// is 64 KiB under the 1 MiB default, room for what a later settlement of the same record adds (a
+// longer generation, `superseded_settlement`).
 const (
 	maxRecordBytes     = 384 << 10
 	maxSettlementBytes = 1<<20 - 64<<10
@@ -83,16 +83,10 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 		if err != nil {
 			return err
 		}
-		var refused error
-		switch {
-		case len(buf) > maxRecordBytes:
-			refused = fmt.Errorf("%w: head %s's record would be %d bytes, past its %d-byte bound",
-				bus.ErrTooLarge, key, len(buf), maxRecordBytes)
-		case settlement > maxSettlementBytes:
-			refused = fmt.Errorf("%w: head %s's settlement would be %d bytes, past its %d-byte bound",
-				bus.ErrTooLarge, key, settlement, maxSettlementBytes)
-		}
+		refused := boundsRefusal(key, len(buf), settlement)
 		if refused != nil {
+			// Decoded afresh rather than copied: mutate changed st in place, and the maps a shallow
+			// copy of the read would share are the ones it changed.
 			stored := identity
 			if rev != 0 {
 				if err := json.Unmarshal(entry.Value(), &stored); err != nil {
@@ -127,8 +121,23 @@ func (s *Store) write(identity State, mutate func(*State) bool) error {
 	}
 }
 
-// settlementSize is the size of the settlement st would publish, encoded with its topic as the
-// summary loop sends it.
+// boundsRefusal is the refusal of a write to key's record of record bytes whose settlement is
+// settlement bytes, when either is past its bound (maxRecordBytes, maxSettlementBytes), and nil
+// otherwise.
+func boundsRefusal(key string, record, settlement int) error {
+	switch {
+	case record > maxRecordBytes:
+		return fmt.Errorf("%w: head %s's record would be %d bytes, past its %d-byte bound",
+			bus.ErrTooLarge, key, record, maxRecordBytes)
+	case settlement > maxSettlementBytes:
+		return fmt.Errorf("%w: head %s's settlement would be %d bytes, past its %d-byte bound",
+			bus.ErrTooLarge, key, settlement, maxSettlementBytes)
+	}
+	return nil
+}
+
+// settlementSize is the size of the settlement st would publish, encoded as the summary loop sends
+// it; its topic travels in the protocol line, which a server's max payload does not count.
 func settlementSize(st State) (int, error) {
 	env, err := settlementEnvelope(st, time.Now().UnixMilli())
 	if err != nil {
@@ -138,7 +147,7 @@ func settlementSize(st State) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return len(data) + len(env.Topic), nil
+	return len(data), nil
 }
 
 // errKVRewatched is what a KV call answers when the store was rewatched before its answer came.
@@ -209,8 +218,9 @@ func (s *Store) nextRewatch() <-chan struct{} {
 // (authorization, an expired credential, a permissions violation); the bucket is not there when
 // the handle is taken; JetStream is not enabled for the server or the account, which JetStream
 // reports as a 503 but which is configuration no retry within the budget changes, unlike the 503
-// of a server restarting; or JetStream refuses the request itself (any other 4xx, an invalid key,
-// a record over the payload limit). Anything else is transient, and what the retry actually
+// of a server restarting; JetStream refuses the request itself (any other 4xx, an invalid key,
+// a record over the payload limit); or the handle refuses the key before sending anything
+// (bus.ErrRefused, bus.CheckedKeyValue). Anything else is transient, and what the retry actually
 // rescues is a NATS reconnect (ErrReconnectBufExceeded, a request refused while the connection
 // reconnects, and errKVRewatched, a request given up on at the rewatch that follows it), a
 // JetStream 503 while a server restarts, and no responders, which a request gets whenever no
@@ -249,5 +259,5 @@ var lastingKVErrors = []error{
 	nats.ErrAuthorization, nats.ErrAuthExpired, nats.ErrPermissionViolation,
 	nats.ErrBucketNotFound,
 	nats.ErrJetStreamNotEnabled, nats.ErrJetStreamNotEnabledForAccount,
-	nats.ErrInvalidKey, nats.ErrMaxPayload,
+	nats.ErrInvalidKey, nats.ErrMaxPayload, bus.ErrRefused,
 }

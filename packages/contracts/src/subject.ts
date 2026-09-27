@@ -106,20 +106,29 @@ export function slackSubject(team: string, channel: string, kind: string) {
 }
 
 /**
- * Makes a value one NATS subject segment: a dot, which a subject splits on, and whitespace and the
- * wildcards `*` and `>`, which a published subject may not hold, each become an underscore. A slash
- * is kept. Mirrored on the Go side as `SanitizeSubjectSegment`, and in the Go coordinator's intake
- * (`packages/daemon-go/internal/intake`), which filters on the GitHub subjects' owner and name,
- * where only a dot can occur.
+ * The characters a subject segment writes as `_`: a dot, which a NATS subject splits on, and
+ * whitespace and the wildcards `*` and `>`, which a published subject may not hold. The one list
+ * `sanitizeSubjectSegment`, its type and the Go side's `SanitizeSubjectSegment` (generated from it
+ * by `scripts/gen-go.ts`) all read, so what the listener publishes and what a consumer expects
+ * cannot drift apart.
+ */
+export const SUBJECT_SEGMENT_REPLACED = [".", " ", "\t", "\r", "\n", "*", ">"] as const;
+
+type SubjectSegmentReplaced = (typeof SUBJECT_SEGMENT_REPLACED)[number];
+
+const subjectSegmentReplaced: ReadonlySet<string> = new Set(SUBJECT_SEGMENT_REPLACED);
+
+/**
+ * Makes a value one NATS subject segment, writing each of `SUBJECT_SEGMENT_REPLACED` as `_`; a
+ * slash is kept. The Go coordinator's intake (`packages/daemon-go/internal/intake`) mirrors it for
+ * the GitHub subjects' owner and name, where only a dot can occur.
  *
  * Note: this is intentionally lossy; subscribers needing the exact identifier
  * should inspect the envelope payload.
  */
 export function sanitizeSubjectSegment(value: string): string {
-  return value.replace(/[. \t\r\n*>]/g, "_");
+  return Array.from(value, (char) => (subjectSegmentReplaced.has(char) ? "_" : char)).join("");
 }
-
-type SubjectSegmentReplaced = "." | " " | "\t" | "\r" | "\n" | "*" | ">";
 
 // Tail-recursive through an accumulator, so the compiler takes a literal of any practical length
 // rather than stopping at its instantiation depth after about 100 characters.
