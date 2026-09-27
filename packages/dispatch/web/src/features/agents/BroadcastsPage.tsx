@@ -6,6 +6,7 @@ import { api } from "../../api/client";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
   card,
@@ -63,8 +64,13 @@ export function BroadcastsPage(): ReactNode {
         <ul className="space-y-3">
           {broadcasts.data.map((sent) => (
             <li className={`rounded-xl border ${card} ${borderDefault}`} key={sent.id}>
-              <Link className="block p-3" to={`/agents/broadcasts/${sent.id}`}>
-                <p className={`flex flex-wrap items-center gap-2 text-xs ${textMutedOnCanvas}`}>
+              {/* Below `xl` every link is `inline-flex` with centred items (styles.css's touch
+                  rule, unlayered, so it beats `block` and `items-*`): the row stacks its two lines
+                  explicitly and each stretches to the row's width. */}
+              <Link className="flex w-full flex-col p-3" to={`/agents/broadcasts/${sent.id}`}>
+                <p
+                  className={`flex flex-wrap items-center gap-2 self-stretch text-xs ${textMutedOnCanvas}`}
+                >
                   <LabelPill>{sent.delivery}</LabelPill>
                   <span>{resolveAuthor(sent.author, titles).label}</span>
                   <Timestamp at={sent.created_at} />
@@ -72,9 +78,9 @@ export function BroadcastsPage(): ReactNode {
                     {sent.replies} of {sent.recipients} answered
                   </span>
                 </p>
-                <p className={`mt-1 truncate text-sm ${textPrimaryOnCanvas}`}>
+                <TruncatedText className={`mt-1 self-stretch text-sm ${textPrimaryOnCanvas}`}>
                   {firstLine(sent.body)}
-                </p>
+                </TruncatedText>
               </Link>
             </li>
           ))}

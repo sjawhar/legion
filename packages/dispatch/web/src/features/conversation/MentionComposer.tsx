@@ -999,17 +999,22 @@ export function MentionComposer({
           role="listbox"
         >
           {filteredOptions.map((option) => (
+            // Below `xl` every button is `inline-flex` with centred items (styles.css's touch
+            // rule, unlayered, so it beats `block`): the title and detail stack explicitly and
+            // each stretches to the row's width.
             <button
               aria-label={option.title}
-              className={`block min-h-11 w-full rounded-lg px-3 py-2 text-left text-sm ${surfaceMutedHoverBg}`}
+              className={`flex min-h-11 w-full flex-col rounded-lg px-3 py-2 text-left text-sm ${surfaceMutedHoverBg}`}
               key={option.target}
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => addMention(option)}
               role="option"
               type="button"
             >
-              <span className={`block font-medium ${textPrimaryOnSurface}`}>{option.title}</span>
-              <TruncatedText className={`block text-xs ${textMutedOnSurface}`}>
+              <span className={`self-stretch font-medium ${textPrimaryOnSurface}`}>
+                {option.title}
+              </span>
+              <TruncatedText className={`self-stretch text-xs ${textMutedOnSurface}`}>
                 {option.detail}
               </TruncatedText>
             </button>

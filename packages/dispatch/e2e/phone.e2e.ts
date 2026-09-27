@@ -4,6 +4,7 @@ import { setLiveSessions } from "./agents";
 import {
   createArtifactAsk,
   createAsk,
+  createBroadcast,
   createComment,
   createIssue,
   createIssueArtifact,
@@ -444,6 +445,24 @@ async function expectEllipsis(link: Locator): Promise<void> {
   }
 }
 
+/** A control whose lines are meant to stack: each child starts at the same left edge, below the
+ *  one before it. Below 1280 px `styles.css` makes every link and button an inline-flex row,
+ *  which puts a `block` control's lines side by side. */
+async function expectStacked(control: Locator): Promise<void> {
+  const rows = await control.evaluate((node) =>
+    [...node.children].map((child) => {
+      const box = child.getBoundingClientRect();
+      return { bottom: box.bottom, left: box.left, top: box.top };
+    })
+  );
+  expect(rows.length).toBeGreaterThan(1);
+  for (const [index, row] of rows.entries()) {
+    if (index === 0) continue;
+    expect(Math.abs(row.left - rows[0].left)).toBeLessThanOrEqual(1);
+    expect(row.top).toBeGreaterThanOrEqual(rows[index - 1].bottom - 1);
+  }
+}
+
 test("a long name ends in an ellipsis wherever a link or control truncates it", async ({
   browser,
 }, testInfo) => {
@@ -455,6 +474,8 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
   const longRoute = "role:merge-queue-controller-for-legion";
   // A label's 40-character cap is still wider than the label picker's 256 px popover.
   const longLabel = "sandbox-tree-checkpoint-evidence-runbook";
+  const longBroadcast =
+    "Please rebase every open pull request onto main before the stage 4b sandbox tree run, and post the new head in this thread once its checks have gone green again";
   const longTitle =
     "LEGION-67 implementer: long names end in an ellipsis wherever a link or a control truncates them, on a 390 px phone and in a 280 px margin as much as on a 1280 px desktop";
   const longTitledSession = {
@@ -501,6 +522,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     },
     session
   );
+  await createBroadcast({ body: longBroadcast, delivery: "btw", session_ids: ["e2e-long-title"] });
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -563,6 +585,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
       .getByRole("listbox", { name: "Mention suggestions" })
       .getByRole("option", { exact: true, name: "legion-implementer" });
     await expectEllipsis(roleOption);
+    await expectStacked(roleOption);
     const detail = roleOption.getByText(new RegExp(`^${longTitle} · /w/legion · `));
     await expect(detail).toHaveAttribute("title", (await detail.textContent()) ?? "");
 
@@ -581,6 +604,19 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     const agentName = page.getByRole("heading", { name: longTitle }).getByRole("button");
     await expectEllipsis(agentName);
     await expect(agentName).toHaveAttribute("title", longTitle);
+
+    // A sent broadcast's row: the metadata line, then the message's first line under it.
+    await page.goto("/agents/broadcasts");
+    const broadcastRow = page
+      .getByRole("region", { name: "Broadcasts" })
+      .getByRole("listitem")
+      .getByRole("link");
+    await expectEllipsis(broadcastRow);
+    await expectStacked(broadcastRow);
+    await expect(broadcastRow.getByText(longBroadcast, { exact: true })).toHaveAttribute(
+      "title",
+      longBroadcast
+    );
   } finally {
     await context.close();
     await setLiveSessions([]);
