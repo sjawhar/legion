@@ -42,6 +42,12 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			readable: "x[^n]\n\n[^n]: :::callout{#c1 kind=\"note\" title=\"T\"}\n    > - c\n    > p\n    :::\n",
 		},
 		{
+			// Goldmark ends the quote and the items around the empty item there, and re-opens the
+			// quote for the next line, which the browser editor keeps in the inner list.
+			name:    "an empty list item followed by a blank line in a list in a quote in a list item",
+			refused: "- > 1. - a\n  >\n  >    -\n  >\n  >    - c\n",
+		},
+		{
 			name:    "an empty list item before a paragraph its outer item holds",
 			refused: "- t\n\n  -\n\n  para\n",
 		},

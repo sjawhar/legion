@@ -97,8 +97,35 @@ func emptyItemEndsOuterItem(item *ast.ListItem, lines sourceLines) bool {
 		return false
 	}
 	next := nextBlock(item)
-	return next != nil && lines.blanksBefore(startOf(next), markersOrWhitespace) > 0 && !isAncestor(outer, next) &&
-		lines.textColumn(startOf(next)) >= browserTextColumn(outer.FirstChild(), lines)
+	if next == nil {
+		return false
+	}
+	// Goldmark ends the quotes around the item there too, and re-opens one for the next line, whose
+	// text the browser editor's parser measures past the markers of the quotes it goes on with.
+	start := startOf(next)
+	if _, quote := next.(*ast.Blockquote); quote {
+		start = lines.pastQuoteMarkers(start, quoteDepth(item))
+	}
+	return lines.blanksBefore(startOf(next), markersOrWhitespace) > 0 && !isAncestor(outer, next) &&
+		lines.textColumn(start) >= browserTextColumn(outer.FirstChild(), lines)
+}
+
+// pastQuoteMarkers is position past count quote markers on its line, each with the spaces and tabs
+// before it and the space after it.
+func (l sourceLines) pastQuoteMarkers(position, count int) int {
+	for ; count > 0; count-- {
+		for position < len(l.source) && (l.source[position] == ' ' || l.source[position] == '\t') {
+			position++
+		}
+		if position >= len(l.source) || l.source[position] != '>' {
+			break
+		}
+		position++
+		if position < len(l.source) && l.source[position] == ' ' {
+			position++
+		}
+	}
+	return position
 }
 
 // browserTextColumn is the column block's text starts at as the browser editor's parser measures
