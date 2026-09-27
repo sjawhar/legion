@@ -161,12 +161,12 @@ func restoreGitWorktree(ctx context.Context, run Runner, workspace Workspace, lo
 	if err != nil || present {
 		return err
 	}
-	gitDir, err := filepath.EvalSymlinks(filepath.Join(workspace.Clone, ".git"))
+	worktrees, err := resolvedPath(filepath.Join(workspace.Clone, ".git", "worktrees"))
 	if err != nil {
-		return fmt.Errorf("resolve the shared clone's git directory: %w", err)
+		return fmt.Errorf("resolve the shared clone's git worktrees: %w", err)
 	}
-	if name := filepath.Base(target); filepath.Dir(target) != filepath.Join(gitDir, "worktrees") || name == "." || name == ".." {
-		return fmt.Errorf("workspace %s names git worktree %s, outside the shared clone's %s; its git side was not restored", workspace.Dir, target, filepath.Join(gitDir, "worktrees"))
+	if name := filepath.Base(target); filepath.Dir(target) != worktrees || name == "." || name == ".." {
+		return fmt.Errorf("workspace %s names git worktree %s, outside the shared clone's %s; its git side was not restored", workspace.Dir, target, worktrees)
 	}
 	parents, err := RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `parents.map(|c| c.commit_id()).join("\n")`}, nil, workspace.Dir)
 	if err != nil {

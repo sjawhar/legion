@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import {
   chmod,
-  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -364,6 +363,10 @@ async function createWorkspace(
   await runChecked(deps, ["jj", "bookmark", "set", bookmark, "-r", "@"], { cwd: workspaceDir });
 }
 
+/** A commit id as jj prints it: 40 lowercase hex characters. Shared by `readBookmark`'s row check
+ * and `restoreGitWorktree`'s parent-commit check, the Go twin's (`commitID`). */
+const COMMIT_ID = /^[0-9a-f]{40}$/;
+
 /** The `jj bookmark list -T` template of `createWorkspace`'s one read, the Go twin's
  * (`bookmarkRowTemplate`): one line per row, its fields separated by `|` — where it is (`local`,
  * `origin`, `git`, any other remote), then present, conflict and tracked as 1 or 0, then the
@@ -429,7 +432,7 @@ async function readBookmark(
     if (
       fields.length !== 6 ||
       ![present, conflict, tracked].every((flag) => flag === "0" || flag === "1") ||
-      ![...row.added, ...row.removed].every((commit) => /^[0-9a-f]{40}$/.test(commit)) ||
+      ![...row.added, ...row.removed].every((commit) => COMMIT_ID.test(commit)) ||
       (row.conflict && row.added.length === 0) ||
       (row.present && !row.conflict && (row.added.length !== 1 || row.removed.length !== 0)) ||
       rows[where] !== undefined
@@ -764,11 +767,7 @@ export async function removeIssueWorkspace(
     ]);
     abandoned = own.stdout.split("\n").filter((line) => line.trim() !== "");
   }
-  if (!registered && !existsSync(workspaceDir)) {
-    if (cloneExists) await removeGitWorktree(cloneDir, workspaceDir);
-    return { workspaceDir, removed: false, abandoned: [] };
-  }
-
+  const removed = registered || existsSync(workspaceDir);
   await rm(workspaceDir, { recursive: true, force: true });
   if (registered) {
     if (abandoned.length > 0) {
@@ -777,7 +776,7 @@ export async function removeIssueWorkspace(
     await runChecked(deps, ["jj", "workspace", "forget", workspaceName, ...repoArgs]);
   }
   if (cloneExists) await removeGitWorktree(cloneDir, workspaceDir);
-  return { workspaceDir, removed: true, abandoned };
+  return { workspaceDir, removed, abandoned };
 }
 
 /** The reason each workspace's git worktree is locked with, the Go twin's
@@ -874,8 +873,8 @@ async function restoreGitWorktree(
   }
   const dir = await realpath(workspaceDir);
   const target = await resolvedPath(path.resolve(dir, trimmed.slice("gitdir: ".length)));
-  if ((await lstat(target).catch(missingAsUndefined)) !== undefined) return;
-  const worktrees = path.join(await realpath(path.join(cloneDir, ".git")), "worktrees");
+  if (existsSync(target)) return;
+  const worktrees = await resolvedPath(path.join(cloneDir, ".git", "worktrees"));
   const name = path.basename(target);
   if (path.dirname(target) !== worktrees || name === "." || name === "..") {
     throw new Error(
@@ -897,7 +896,7 @@ async function restoreGitWorktree(
     { cwd: workspaceDir }
   );
   const head = parents.stdout.trim().split("\n")[0] ?? "";
-  if (!/^[0-9a-f]{40}$/.test(head)) {
+  if (!COMMIT_ID.test(head)) {
     throw new Error(
       `Workspace ${workspaceDir}: jj printed no parent commit for its working copy: ${JSON.stringify(parents.stdout)}`
     );
