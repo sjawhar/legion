@@ -1,0 +1,53 @@
+version: 1
+secrets:
+  DEEL_API_KEY:                 # rule keys are UPPER_SNAKE, the name the agent asks for
+    source: production/agent-secrets/deel-api-key   # Secrets Manager names are lowercase-hyphenated
+    owner: sjawhar
+    delivery: inject            # inject | proxy; no proxy block when inject
+    max_lifetime_seconds: 43200 # ≤ 43200
+    requesters:                 # required; an empty list means deny everyone
+      - kind: box               # box | host | pod
+        operator: sjawhar       # required for box and host; forbidden for pod
+        decision: approval      # automatic | approval | deny
+        approver: operator      # operator | login:<name>; required unless decision is automatic or deny
+      - kind: pod
+        decision: approval
+        approver: login:alice
+  SLACK_MCP_XOXP_TOKEN:
+    source: production/agent-secrets/slack-mcp-xoxp-token
+    owner: sjawhar
+    delivery: proxy
+    max_lifetime_seconds: 43200
+    requesters:
+      - kind: host
+        operator: sjawhar
+        decision: automatic
+    proxy:                      # required when delivery is proxy, forbidden otherwise (Plan E consumes it)
+      scheme: https
+      host: slack.com
+      port: 443
+      path_prefix: /api/
+      methods: [GET, POST]
+      header: Authorization
+      header_format: "Bearer {value}"
+approvers:                      # the WebAuthn origin, AAGUID allowlist, and per-login attested
+                                 # key material every approver: operator/login:<name> resolves to;
+                                 # never cryptographically verified here (see rules.go)
+  origin: https://dispatch.test
+  aaguids:
+    - "ee882879-721c-4913-9775-3dfcce97072a"
+  logins:
+    sjawhar:
+      keys:
+        - credential_id: "sjawhar-cred-1"
+          registration:
+            challenge_nonce: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            response: {id: "sjawhar-cred-1"}
+          seed: true
+    alice:
+      keys:
+        - credential_id: "alice-cred-1"
+          registration:
+            challenge_nonce: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            response: {id: "alice-cred-1"}
+          seed: true

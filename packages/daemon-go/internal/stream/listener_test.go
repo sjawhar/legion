@@ -91,11 +91,11 @@ func TestHelloRejectionsCloseLogAndChangeNothing(t *testing.T) {
 		{"not json", "not json", "nope\n", nil, 0},
 		{"a JSON value that is not an object", "malformed hello", "123\n", nil, 0},
 		{"another frame type", "malformed hello", `{"type":"hi","bootToken":"boot-token-1"}` + "\n", nil, 0},
-		{"no boot token", "malformed hello", `{"type":"hello"}` + "\n", nil, 0},
-		{"an empty boot token", "malformed hello", `{"type":"hello","bootToken":""}` + "\n", nil, 0},
-		{"a boot token that is not a string", "malformed hello", `{"type":"hello","bootToken":7}` + "\n", nil, 0},
-		{"an unknown boot token", "unknown boot token", `{"type":"hello","bootToken":"boot-token-2"}` + "\n", nil, 1},
-		{"a stale generation", "stale worker generation", `{"type":"hello","bootToken":"boot-token-1"}` + "\n", stale, 1},
+		{"no boot token", "malformed hello", `{"type":"hello2"}` + "\n", nil, 0},
+		{"an empty boot token", "malformed hello", `{"type":"hello2","bootToken":""}` + "\n", nil, 0},
+		{"a boot token that is not a string", "malformed hello", `{"type":"hello2","bootToken":7}` + "\n", nil, 0},
+		{"an unknown boot token", "unknown boot token", `{"type":"hello2","bootToken":"boot-token-2"}` + "\n", nil, 1},
+		{"a stale generation", "stale worker generation", `{"type":"hello2","bootToken":"boot-token-1"}` + "\n", stale, 1},
 		{"no newline within MaxHelloBytes", "hello too long", strings.Repeat("a", shimwire.MaxHelloBytes+1), nil, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -125,7 +125,7 @@ func TestHelloRejectionsCloseLogAndChangeNothing(t *testing.T) {
 func TestAHelloAtTheByteBoundIsRead(t *testing.T) {
 	h := startListener(t, harnessOptions{})
 	p := dial(t, h.listener.Addr())
-	line := `{"type":"hello","bootToken":"boot-token-1"}`
+	line := `{"type":"hello2","bootToken":"boot-token-1"}`
 	p.writeRaw(line + strings.Repeat(" ", shimwire.MaxHelloBytes-len(line)) + "\n")
 	p.expect(shimwire.TypeHelloAck)
 	if lines := h.logs.Lines(); len(lines) != 0 {
@@ -226,7 +226,7 @@ func TestAHelloReplacesABindingWhoseConnectionClosed(t *testing.T) {
 func TestFramesInTheHellosOwnWriteAreRead(t *testing.T) {
 	h := startListener(t, harnessOptions{})
 	p := dial(t, h.listener.Addr())
-	p.writeRaw(`{"type":"hello","bootToken":"boot-token-1"}` + "\n" + `{"type":"agent_start"}` + "\n")
+	p.writeRaw(`{"type":"hello2","bootToken":"boot-token-1"}` + "\n" + `{"type":"agent_start"}` + "\n")
 	p.expect(shimwire.TypeHelloAck)
 	if event := h.next(); event != (Hello{Claim: testClaim, Generation: testGeneration}) {
 		t.Fatalf("event = %#v, want Hello", event)
@@ -337,5 +337,57 @@ func TestAUnixSocketLeftByADeadListenerIsTakenOver(t *testing.T) {
 	}
 	if content, err := os.ReadFile(regular); err != nil || string(content) != "not a socket" {
 		t.Fatalf("the regular file was touched: %q, %v", content, err)
+	}
+}
+
+var testIdentity = shimwire.AgentSecretsHello{Thumbprint: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs", PodToken: "eyJhbGciOiJSUzI1NiJ9.e30.sig"}
+
+func TestAHello2WithAnIdentityRegistersAndReportsIt(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := dial(t, h.listener.Addr())
+	identity := testIdentity
+	p.send(shimwire.Hello2{BootToken: testToken, AgentSecrets: &identity})
+	p.expect(shimwire.TypeHelloAck)
+	hello, ok := h.next().(Hello)
+	if !ok || hello.Claim != testClaim || hello.Generation != testGeneration || hello.AgentSecrets == nil ||
+		*hello.AgentSecrets != (AgentSecretsIdentity{Thumbprint: identity.Thumbprint, PodToken: identity.PodToken}) {
+		t.Fatalf("event = %#v, want a Hello carrying the identity", hello)
+	}
+	if lines := h.logs.Lines(); len(lines) != 0 {
+		t.Fatalf("an accepted hello2 logged %q", lines)
+	}
+}
+
+func TestAHello2WithoutAnIdentityRegistersWithNone(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := dial(t, h.listener.Addr())
+	p.send(shimwire.Hello2{BootToken: testToken})
+	p.expect(shimwire.TypeHelloAck)
+	if event := h.next(); event != (Hello{Claim: testClaim, Generation: testGeneration}) {
+		t.Fatalf("event = %#v, want Hello{%s, %d} with no identity", event, testClaim, testGeneration)
+	}
+}
+
+func TestAV1HelloIsRefusedByName(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := dial(t, h.listener.Addr())
+	p.send(shimwire.Hello{BootToken: testToken})
+	p.awaitClosed()
+	lines := h.logs.Lines()
+	if len(lines) != 1 || !strings.Contains(lines[0], "rejected hello (hello v1: the shim predates hello2") {
+		t.Fatalf("log = %q, want one refusal naming the v1 hello", lines)
+	}
+	if _, ok := h.listener.Conn(testClaim); ok {
+		t.Fatal("the v1 hello registered")
+	}
+}
+
+func TestAHello2WithAMalformedIdentityIsRefused(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := dial(t, h.listener.Addr())
+	p.writeRaw(`{"type":"hello2","bootToken":"` + testToken + `","agentSecrets":{"thumbprint":"short","podToken":"a.b.c"}}` + "\n")
+	p.awaitClosed()
+	if lines := h.logs.Lines(); len(lines) != 1 || !strings.Contains(lines[0], "rejected hello (malformed hello)") {
+		t.Fatalf("log = %q", lines)
 	}
 }

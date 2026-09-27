@@ -13,12 +13,21 @@ import (
 // prompt is the one that learns it was taken (B4).
 type Event interface{ isEvent() }
 
+// AgentSecretsIdentity is the pod's session identity a hello2 carried (shimwire.AgentSecretsHello):
+// the thumbprint of the key the pod generated and its projected token for the secrets broker's
+// audience. Nil for a pane, or a pod whose runtime does not enroll.
+type AgentSecretsIdentity struct {
+	Thumbprint, PodToken string
+}
+
 // Hello is a shim's hello accepted: the claim's connection is registered, at the generation its
-// boot token was minted for. Under always-dial the shim says hello before it spawns Oh My Pi, so
-// a Hello says the pane's bridge is up, not that the agent is.
+// boot token was minted for, with the identity the hello carried, if any. Under always-dial the
+// shim says hello before it spawns Oh My Pi, so a Hello says the pane's bridge is up, not that the
+// agent is.
 type Hello struct {
-	Claim      claim.Token
-	Generation uint64
+	Claim        claim.Token
+	Generation   uint64
+	AgentSecrets *AgentSecretsIdentity
 }
 
 // TurnStart is OMP's agent_start. DeliveryID is set only when the frame carried one — the shim's

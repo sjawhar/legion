@@ -1,4 +1,8 @@
-import { LEGION_GO_WORKFLOW_PHASES, type LegionGoState } from "@legion/contracts/legion-go-api";
+import {
+  LEGION_GO_WORKFLOW_PHASES,
+  LegionGoGateRegisterRequest,
+  type LegionGoState,
+} from "@legion/contracts/legion-go-api";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
 import type { LegionGoDaemonClient } from "./go-daemon-client";
@@ -64,7 +68,10 @@ function toolSchema(pi: PiApi): unknown {
       ...HANDOFF_OPERATIONS,
     ]),
     issue: z.string().optional(),
-    artifactId: z.string().optional(),
+    artifactId: z
+      .string()
+      .describe("register_gate's root spec document: its artifact id, slug, or filename, as the Dispatch tools take it")
+      .optional(),
     version: z.number().optional(),
     issues: z.array(z.string()).optional(),
     to: z.enum(LEGION_GO_WORKFLOW_PHASES).optional(),
@@ -121,8 +128,12 @@ export function createGoLegionTool(deps: {
   readonly session: (context: SessionContext) => GoLegionToolSession;
   /** Told of each `handoff_complete` that succeeded: the session's phase is complete. */
   readonly onPhaseCompleted: (context: SessionContext) => void;
+  /** The id of the document `issue` carries under `reference` (`spec`, a slug, or a filename),
+   * looked up in Dispatch as the Dispatch tools do; throws naming the reference when none matches,
+   * or when it names two documents. */
+  readonly resolveDocument: (issue: string, reference: string) => Promise<string>;
 }): RegisteredTool {
-  const { pi, daemon, session, onPhaseCompleted } = deps;
+  const { pi, daemon, session, onPhaseCompleted, resolveDocument } = deps;
   return {
     name: "legion",
     label: "legion",
@@ -166,13 +177,27 @@ export function createGoLegionTool(deps: {
             ) {
               throw new Error("register_gate requires a positive integer version");
             }
+            // The gate is the tree root's, registered by the root's own architect, as the daemon
+            // requires: anyone else is refused before a lookup could answer for the wrong issue.
+            const issue = requiredString(parameters, operation, "issue");
+            if (active.issue !== active.tree) {
+              throw new Error(
+                `the design gate belongs to the tree root ${active.tree}; its root architect registers it`
+              );
+            }
+            if (issue !== active.issue) {
+              throw new Error(
+                `the design gate belongs to the tree root ${active.tree}; register it there`
+              );
+            }
+            // The daemon takes the document's id alone; `spec`, a slug or a filename, the
+            // references the Dispatch tools accept, is looked up first, so the architect's first
+            // call names the document however it knows it.
+            const reference = requiredString(parameters, operation, "artifactId");
+            const isId = LegionGoGateRegisterRequest.shape.artifactId.safeParse(reference).success;
+            const artifactId = isId ? reference : await resolveDocument(issue, reference);
             const grantId = await grantFor(client, active);
-            await client.gateRegister({
-              grantId,
-              issue: requiredString(parameters, operation, "issue"),
-              artifactId: requiredString(parameters, operation, "artifactId"),
-              version,
-            });
+            await client.gateRegister({ grantId, issue, artifactId, version });
             return jsonSuccess({});
           }
           case "release_children": {

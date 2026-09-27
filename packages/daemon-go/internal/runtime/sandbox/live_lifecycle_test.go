@@ -854,6 +854,11 @@ func (r *liveRig) checkReleaseTree() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
 	}
+	for _, c := range r.claims {
+		if err := r.revoke(c); err != nil {
+			return err
+		}
+	}
 	var released []string
 	// The roster in reverse, so each tree's root, whose Sandbox owns the tree volume, goes last.
 	for _, c := range slices.Backward(r.claims) {

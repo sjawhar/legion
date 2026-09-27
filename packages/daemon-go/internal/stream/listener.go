@@ -301,8 +301,22 @@ func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, string) {
 		return nil, "not json"
 	}
 	frame, err := shimwire.Decode(line)
-	hello, ok := frame.(shimwire.Hello)
-	if err != nil || !ok || hello.Validate() != nil {
+	if err != nil {
+		return nil, "malformed hello"
+	}
+	var hello shimwire.Hello2
+	switch f := frame.(type) {
+	case shimwire.Hello2:
+		hello = f
+	case shimwire.Hello:
+		// The shim that sent it predates GoDaemonAPIVersion 8 (hello2): the worker image or the pane's
+		// legion binary is older than this daemon. The image probe refuses such an image at boot; a
+		// pane's shim is this daemon's own binary. Either way the fix is the newer build, named here.
+		return nil, "hello v1: the shim predates hello2 (daemon API contract 8); rebuild the worker image or the pane's legion binary from this daemon's commit"
+	default:
+		return nil, "malformed hello"
+	}
+	if hello.Validate() != nil {
 		return nil, "malformed hello"
 	}
 	token, generation, stale, known := l.resolve(hello.BootToken)
@@ -312,13 +326,17 @@ func (l *Listener) hello(nc net.Conn, src *bufio.Reader) (*Conn, string) {
 	case stale:
 		return nil, "stale worker generation"
 	}
-	return l.register(nc, token, generation)
+	var identity *AgentSecretsIdentity
+	if hello.AgentSecrets != nil {
+		identity = &AgentSecretsIdentity{Thumbprint: hello.AgentSecrets.Thumbprint, PodToken: hello.AgentSecrets.PodToken}
+	}
+	return l.register(nc, token, generation, identity)
 }
 
 // register binds the claim to this connection, unless a live connection already holds it — the
 // shim of a pane that has not died is not displaced by a second dial. A claim whose connection
 // has closed is free again, which is the reconnect case.
-func (l *Listener) register(nc net.Conn, token claim.Token, generation uint64) (*Conn, string) {
+func (l *Listener) register(nc net.Conn, token claim.Token, generation uint64, identity *AgentSecretsIdentity) (*Conn, string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed {
@@ -342,7 +360,7 @@ func (l *Listener) register(nc net.Conn, token claim.Token, generation uint64) (
 		return nil, "connection closed before hello_ack"
 	}
 	l.conns[token] = conn
-	l.events.push(Hello{Claim: token, Generation: generation})
+	l.events.push(Hello{Claim: token, Generation: generation, AgentSecrets: identity})
 	close(l.registered)
 	l.registered = make(chan struct{})
 	return conn, ""

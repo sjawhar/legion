@@ -1,0 +1,271 @@
+// packages/envoy/cmd/broker/main_test.go
+//
+// main() calls fatal on every failure, which calls os.Exit — so it cannot be driven directly by a
+// test. refuseDevAttestationRootInProduction is main's own -dev-attestation-root/BROKER_RULES_S3_URI
+// refusal (ruling 10), extracted so this test can drive it without exiting the test process.
+package main
+
+import (
+	"bufio"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+)
+
+func TestDevAttestationRootRefusedWithRulesS3URI(t *testing.T) {
+	err := refuseDevAttestationRootInProduction("/tmp/dev-ca.pem", "s3://bucket/agent-secret-rules.yaml")
+	if err == nil {
+		t.Fatal("-dev-attestation-root with BROKER_RULES_S3_URI set: want an error, got nil")
+	}
+	const want = "-dev-attestation-root is a development flag; production loads rules from S3 and trusts the embedded Yubico roots"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+// TestMainRefusesDevAttestationRootWithRulesS3URI drives the REAL compiled binary's main(), not
+// refuseDevAttestationRootInProduction directly — the prior three tests below prove only that the
+// helper function itself is correct, and a commit already once deleted its only call site from
+// main() while every one of those tests, go build, and go vet all stayed green, because none of
+// them exercises the actual boot wiring. This builds cmd/broker once, execs it with both
+// -dev-attestation-root and BROKER_RULES_S3_URI set (plus just enough other required BROKER_*
+// variables for config.Load to succeed — the refusal runs immediately after config.Load and
+// before store.Open, so no real Postgres or AWS credential is ever needed), and asserts the
+// process exits non-zero naming the refusal reason on stderr. A future regression that drops the
+// fatal(refuseDevAttestationRootInProduction(...)) call again would make this test time out
+// waiting for a process that instead tries to open a nonexistent database, or exit 0/with an
+// unrelated error — either way, it fails here where the unit tests above cannot catch it.
+func TestMainRefusesDevAttestationRootWithRulesS3URI(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "broker")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.1")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
+	}
+
+	caFile := filepath.Join(t.TempDir(), "dev-ca.pem")
+	if err := os.WriteFile(caFile, []byte("not a real certificate, never read: refused before any PEM parse"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(binPath, "-dev-attestation-root", caFile)
+	cmd.Env = append(os.Environ(),
+		"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
+		"BROKER_PUBLIC_URL=https://broker.invalid",
+		"BROKER_UI_ORIGIN=https://dispatch.invalid",
+		"BROKER_UI_TOKEN=test-token-0123456789abcdef0123456789abcdef",
+		"BROKER_RULES_S3_URI=s3://bucket/agent-secret-rules.yaml",
+	)
+	out, err := cmd.CombinedOutput()
+	exitErr, isExit := err.(*exec.ExitError)
+	if err == nil || !isExit || exitErr.ExitCode() == 0 {
+		t.Fatalf("broker -dev-attestation-root with BROKER_RULES_S3_URI set: want a nonzero exit, got err=%v output=%s", err, out)
+	}
+	const wantSubstring = "-dev-attestation-root is a development flag; production loads rules from S3 and trusts the embedded Yubico roots"
+	if !strings.Contains(string(out), wantSubstring) {
+		t.Fatalf("broker refused to boot (exit %d) but its output didn't name the reason: %s\nwant it to contain: %s",
+			exitErr.ExitCode(), out, wantSubstring)
+	}
+}
+
+func TestDevAttestationRootAloneIsFine(t *testing.T) {
+	if err := refuseDevAttestationRootInProduction("/tmp/dev-ca.pem", ""); err != nil {
+		t.Fatalf("-dev-attestation-root with no BROKER_RULES_S3_URI: want nil, got %v", err)
+	}
+}
+
+func TestNoDevAttestationRootIsFineEvenWithRulesS3URI(t *testing.T) {
+	if err := refuseDevAttestationRootInProduction("", "s3://bucket/agent-secret-rules.yaml"); err != nil {
+		t.Fatalf("no -dev-attestation-root: want nil, got %v", err)
+	}
+}
+
+func TestPortZeroPublicURLRefusedInProduction(t *testing.T) {
+	err := refusePortZeroPublicURLInProduction("http://127.0.0.1:0", "s3://bucket/agent-secret-rules.yaml")
+	if err == nil {
+		t.Fatal("BROKER_PUBLIC_URL port 0 with BROKER_RULES_S3_URI set: want an error, got nil")
+	}
+	const want = `BROKER_PUBLIC_URL "http://127.0.0.1:0": port 0 is never dialable in production (BROKER_RULES_S3_URI is set); only a local run may use it as dev-broker.sh's derive-from-bind convention`
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestPortZeroPublicURLAloneIsFine(t *testing.T) {
+	if err := refusePortZeroPublicURLInProduction("http://127.0.0.1:0", ""); err != nil {
+		t.Fatalf("BROKER_PUBLIC_URL port 0 with no BROKER_RULES_S3_URI: want nil, got %v", err)
+	}
+}
+
+func TestNonZeroPortPublicURLIsFineEvenWithRulesS3URI(t *testing.T) {
+	if err := refusePortZeroPublicURLInProduction("https://broker.invalid", "s3://bucket/agent-secret-rules.yaml"); err != nil {
+		t.Fatalf("a real BROKER_PUBLIC_URL: want nil, got %v", err)
+	}
+}
+
+// TestMainRefusesPortZeroPublicURLWithRulesS3URI drives the REAL compiled binary's main(), not
+// refusePortZeroPublicURLInProduction directly, for the same reason
+// TestMainRefusesDevAttestationRootWithRulesS3URI does: a commit once moved this guard's only
+// call site to run after st.Migrate, two S3 reads, and net.Listen, so a misconfigured production
+// boot would migrate the production database and bind a socket before ever refusing. This builds
+// cmd/broker once, execs it with BROKER_PUBLIC_URL=http://127.0.0.1:0 and BROKER_RULES_S3_URI set
+// (plus an unreachable BROKER_DATABASE_URL and just enough other required BROKER_* variables for
+// config.Load to succeed — the refusal must run before store.Open, so no real Postgres or AWS
+// credential, and no successful bind, is ever needed), and asserts the process exits non-zero
+// naming the port-0 refusal on stderr and never logs "broker listening": a regression that runs
+// the guard after Listen would still refuse eventually, but only after already printing that
+// line and binding a real socket.
+func TestMainRefusesPortZeroPublicURLWithRulesS3URI(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "broker")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.1")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(binPath)
+	cmd.Env = append(os.Environ(),
+		"BROKER_DATABASE_URL=postgres://nonexistent-host-this-test-must-never-reach/db",
+		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
+		"BROKER_UI_ORIGIN=https://dispatch.invalid",
+		"BROKER_UI_TOKEN=test-token-0123456789abcdef0123456789abcdef",
+		"BROKER_RULES_S3_URI=s3://bucket/agent-secret-rules.yaml",
+	)
+	out, err := cmd.CombinedOutput()
+	exitErr, isExit := err.(*exec.ExitError)
+	if err == nil || !isExit || exitErr.ExitCode() == 0 {
+		t.Fatalf("broker BROKER_PUBLIC_URL=http://127.0.0.1:0 with BROKER_RULES_S3_URI set: want a nonzero exit, got err=%v output=%s", err, out)
+	}
+	const wantSubstring = `port 0 is never dialable in production`
+	if !strings.Contains(string(out), wantSubstring) {
+		t.Fatalf("broker refused to boot (exit %d) but its output didn't name the reason: %s\nwant it to contain: %s",
+			exitErr.ExitCode(), out, wantSubstring)
+	}
+	if strings.Contains(string(out), "broker listening") {
+		t.Fatalf(`broker refused to boot but still logged "broker listening" first — the guard ran after binding: %s`, out)
+	}
+}
+
+// addrLogPattern extracts the value of a slog key=value pair named addr. A bare host:port never
+// contains a space, so slog's TextHandler (which quotes only values that do) never quotes it.
+var addrLogPattern = regexp.MustCompile(`addr=(\S+)`)
+
+// waitForBoundAddress scans the broker's stderr for its "broker listening" log line — the AGENTC-833
+// fix's whole point: a real bind is reported once, synchronously, only after Listen has already
+// succeeded — and returns the addr it names. Fails the test if the process exits or 10s pass
+// without that line ever appearing.
+func waitForBoundAddress(t *testing.T, stderr io.Reader) string {
+	t.Helper()
+	scanner := bufio.NewScanner(stderr)
+	done := make(chan string, 1)
+	go func() {
+		defer close(done)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.Contains(line, "broker listening") {
+				continue
+			}
+			if m := addrLogPattern.FindStringSubmatch(line); m != nil {
+				done <- m[1]
+				return
+			}
+		}
+	}()
+	select {
+	case addr, ok := <-done:
+		if !ok || addr == "" {
+			t.Fatal(`broker exited without ever logging "broker listening"`)
+		}
+		return addr
+	case <-time.After(10 * time.Second):
+		t.Fatal(`timed out waiting for the "broker listening" log line`)
+	}
+	return ""
+}
+
+// TestMainLogsRealBoundAddress drives the REAL compiled binary with BROKER_LISTEN_ADDR=127.0.0.1:0
+// (dev-broker.sh's own setting after the AGENTC-833 fix) and BROKER_PUBLIC_URL=http://127.0.0.1:0
+// (dev-broker.sh's "derive my public URL from whatever I actually bind" convention, see
+// cmd/broker/main.go's own comment beside its url.Parse check). It asserts the "broker listening"
+// log line names a real, nonzero port on 127.0.0.1 — never the configured placeholder — and then
+// proves that exact logged address is the one actually serving, by getting /healthz there and
+// requiring 200. Before this fix, a losing instance in a port collision could print "ready" while
+// a completely different, already-running instance answered its healthz check; binding
+// synchronously before logging anything means the address this test reads can only ever name this
+// process's own listener.
+func TestMainLogsRealBoundAddress(t *testing.T) {
+	databaseURL := storetest.URL(t)
+
+	binPath := filepath.Join(t.TempDir(), "broker")
+	build := exec.Command("go", "build", "-o", binPath, ".")
+	build.Env = append(os.Environ(), "GOTOOLCHAIN=go1.26.1")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/broker: %v\n%s", err, out)
+	}
+
+	rulesFile := filepath.Join(t.TempDir(), "agent-secret-rules.yaml")
+	const rulesYAML = "version: 1\n" +
+		"approvers:\n" +
+		"  origin: https://agent-secrets.invalid\n" +
+		"  aaguids: [\"00000000-0000-0000-0000-000000000000\"]\n"
+	if err := os.WriteFile(rulesFile, []byte(rulesYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.env")
+	if err := os.WriteFile(fakeSecretsFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(binPath)
+	cmd.Env = append(os.Environ(),
+		"BROKER_DATABASE_URL="+databaseURL,
+		"BROKER_LISTEN_ADDR=127.0.0.1:0",
+		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
+		"BROKER_UI_ORIGIN=https://agent-secrets.invalid",
+		"BROKER_UI_TOKEN=test-token-0123456789abcdef0123456789abcdef",
+		"BROKER_RULES_FILE="+rulesFile,
+		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
+	)
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start broker: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	})
+
+	addr := waitForBoundAddress(t, stderr)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("logged address %q did not parse as host:port: %v", addr, err)
+	}
+	if host != "127.0.0.1" {
+		t.Fatalf("logged address %q: want host 127.0.0.1, got %q", addr, host)
+	}
+	if port == "" || port == "0" {
+		t.Fatalf("logged address %q: want a real, nonzero port, got %q", addr, port)
+	}
+
+	resp, err := http.Get("http://" + addr + "/healthz")
+	if err != nil {
+		t.Fatalf("GET http://%s/healthz: %v", addr, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET http://%s/healthz: status %d, want 200", addr, resp.StatusCode)
+	}
+}

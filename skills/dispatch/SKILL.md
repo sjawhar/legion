@@ -286,15 +286,73 @@ distinction from the named issue, citing it (`dispatch://KEY`), for whoever read
 
 To see the shape of a project rather than find a phrase, list its issues:
 ```ts
-dispatch_issues({ project, status?, parent?, label?, updated_since?, limit? })
+dispatch_issues({ project, status?, parent?, label?, priority?, route_status?, updated_since?, limit? })
 ```
 Each row carries the issue key, title, status, priority, parent, labels, its open-ask count, and
 when it last changed — a roadmap or backlog pass without opening every issue. Filter with `status`
-(a lifecycle status), `parent` (one issue's children), `label`, or `updated_since` (an RFC3339
-timestamp, for "what moved this week"). `limit` caps the rows at 50 by default and 250 at most.
+(a lifecycle status), `parent` (one issue's children), `label`, `priority` (a list of `0`–`3`, with
+`null` for an issue with no priority: `[0, 1]` is every P0 and P1), `route_status` (below), or
+`updated_since` (an RFC3339 timestamp, for "what moved this week"). `limit` caps the rows at 50 by
+default and 250 at most.
 
 This is not search: it matches no text. Use `dispatch_search` for a keyword or phrase, and
 `dispatch_issues` when you want every issue in a project and its current state.
+
+### The owner audit
+
+As the owner of a surface, list your area's P0 and P1 issues and staff or close each one nobody
+has started:
+```ts
+dispatch_issues({ project, priority: [0, 1], limit: 250 })
+```
+Every unclaimed row in `triage`, `icebox`, `backlog` or `todo` is a decision: someone takes it and
+builds it, or it closes. A row in `in_progress`, `testing`, `needs_review` or `retro`, or one that
+carries a claim, is work under way ([Issue status is yours to move](#issue-status-is-yours-to-move))
+and is not re-staffed. A todo with a finished spec reads as queued work that nobody is doing
+(LEGION-173 sat in todo for two weeks with a complete spec; AGENTC-1010's v4 plan sat in backlog
+with nobody building it).
+
+The audit finds four shapes:
+
+- **Unstaffed work.** A plan or measurement exists, and no one is building it.
+- **Unrecorded delivery.** An issue not yet in `testing` or `done`, claimed or not, has a merged PR
+  naming it. Check the change live, then move the issue (AGENTC-1033 sat at `triage` after its fix,
+  agent-c #20367, merged).
+- **Unrecorded practice.** Someone does the issue's work by hand, more than once, while the issue
+  sits in backlog (OPS-132, done by hand on every migration merge). It leaves no plan and no PR to
+  find; the tell is your own messages. Doing something by hand more than once means an issue is
+  wearing the wrong status.
+- **Unreachable route.** An open issue whose route names a role nobody holds, or a session that is
+  not running, reaches nobody, whatever its priority, and the priority filter above never finds
+  it. List it on its own:
+  ```ts
+  dispatch_issues({ project, route_status: "no_holder", limit: 250 })
+  ```
+  Each row reads `route role:sre (nobody holds it right now)` or `route session:<id> (that session
+  is not running right now)`. That is one read of the listener, and one read is a restart gap as
+  often as a vacancy: an agent box that restarts or resumes keeps the session id, but the session
+  is absent from the listener for minutes, and its role with it. On 2026-09-27, 58 of 63 session
+  routes one read showed as unreachable pointed at a single session that was moving between boxes.
+  So a route is unowned only when it is `no_holder` on two reads at least ten minutes apart: list
+  again after ten minutes and act on the issues both lists name. Confirm with the second
+  `dispatch_issues` read, not `envoy_role_get`: a role lookup releases the claim of a holder whose
+  session is absent from the registry as it answers. Then staff the role, re-route the
+  issue to a live holder, or clear the route and assign it (AGENTC-1065, a P2 production listener
+  503, sat routed to an unheld `role:sre` with no assignee). `route_status: "unknown"` means the
+  listener did not answer, so a route could not be judged; a `no_holder` filter refuses rather
+  than answer an empty list then.
+
+Run the audit as a step of a coordinator's loop, at each checkpoint, not as a habit: these shapes
+are found by running the check, not by noticing them.
+
+### Symptom versus cause
+
+When a symptom and its cause sit on different issues, the work accrues to the cause's issue, and
+the symptom's issue carries a pointer to it. Before posting a measurement or finding, search
+Dispatch for the failing identity's or component's name, and post on the issue whose title names
+the fix, not the one naming the symptom. A symptom issue gathering messages with no human response
+is the tell. (The production freeze was iterated on AGENTC-546, the failing gate, while its cause
+and answer sat on AGENTC-1010.)
 
 ## Asking
 
@@ -565,7 +623,8 @@ dispatch_doc_read({ issue?, project?, artifact?, version?, ref? })
 ```
 It returns live or versioned markdown with open marks. A live read ends with a document token; `issue` with an
 omitted `artifact` reads the issue specification; a project needs `artifact`; and a
-`dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the id, slug, or filename.
+`dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the slug (an id or a
+filename resolves when no document has that slug).
 
 Editing one is [Editing a document](references/document-edits.md): the shape of `dispatch_doc_edit`,
 how to quote the text you mean, one `replace` per paragraph, preconditions against a stale edit, and
@@ -703,7 +762,9 @@ Exactly one of `path` and `content` is required. It returns issue or project-doc
 Uploading the same `name` creates its next version — so uploading `spec.md` **replaces the issue's own specification**
 with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [Editing a document](references/document-edits.md)). Address an existing
 artifact by the slug shown in the upload result or by its filename, and a project document by its artifact id, slug, or filename; the
-slug also arrives on `artifact.created` events.
+slug also arrives on `artifact.created` events. Dispatch suffixes a slug two documents would share, so one document's
+filename can be another's slug (`plan v2` takes `plan-v2`, then a document named `plan-v2` takes `plan-v2-2`): a bare
+`artifact` that names both is refused with each one's id, while a `dispatch://` reference's document part is always the slug.
 
 **Where a deliverable goes.** Text the human must read to decide — a draft message, a proposal,
 a summary — goes in the spec as a section: the spec is the one document they open. A separate

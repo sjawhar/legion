@@ -173,6 +173,9 @@ export function isIssueStatus(value: string): value is IssueStatus {
   return (ISSUE_STATUSES as readonly string[]).includes(value);
 }
 
+/** Whether an issue's route reaches a running session (`model.RouteLive` and siblings). */
+export const ISSUE_ROUTE_STATUSES = ["live", "no_holder", "unknown"] as const;
+
 /** Document edit operations the Dispatch server applies. */
 export const DOC_EDIT_OPS = [
   "replace",
@@ -880,21 +883,41 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC" },
+    example: { project: "AGENTC", route_status: "no_holder" },
     description:
       "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " +
-      "its status, priority, parent, labels, and open-ask count, so you can see backlog shape without " +
-      "opening every issue. Optionally filter by status, parent, label, or how recently it changed. Do " +
-      "not use it to search by keyword or phrase; dispatch_search remains the keyword surface. Rows are " +
-      "capped at limit (default 50, max 250), applied to the response here, not by the server.",
+      "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " +
+      "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " +
+      "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " +
+      "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " +
+      'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' +
+      "session that is not running at the moment of the read, whatever its priority. A restarting " +
+      "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " +
+      "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " +
+      "Rows are capped at limit (default 50, max 250), applied to the response here, not by the server.",
     arguments: (z) => ({
       project: z.string().describe("Project key to list issues from."),
       status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
       parent: z.string().describe("Optional parent issue key filter.").optional(),
       label: z.string().describe("Optional label filter.").optional(),
+      priority: z
+        .array(z.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 })
+        .describe(
+          "Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " +
+            "for an issue with no priority; an issue matching any listed value is returned."
+        )
+        .optional(),
       updated_since: z
         .string()
         .describe("Optional RFC3339 timestamp; only issues updated at or after it.")
+        .optional(),
+      route_status: z
+        .enum(ISSUE_ROUTE_STATUSES)
+        .describe(
+          "Optional: only open issues whose route is in this state. live: a running session holds " +
+            "the role or is the routed session. no_holder: nobody running holds the role, or the " +
+            "session is not running, right now. unknown: the Envoy listener did not answer."
+        )
         .optional(),
       limit: z
         .number({ int: true, min: 1, max: 250 })

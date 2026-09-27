@@ -206,3 +206,12 @@ func TestMaterializeProviderKeysRefuses(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderKeysMayNotNameAnAgentSecretsVariable(t *testing.T) {
+	for _, name := range []string{"AGENT_SECRETS_URL", "AGENT_SECRETS_KEY_DIR", "AGENT_SECRETS_LAUNCHER_TOKEN"} {
+		_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"provider_keys:\n  "+name+": x\n"), noEnv)
+		if err == nil || !strings.Contains(err.Error(), "provider_keys names "+name) || !strings.Contains(err.Error(), "AGENT_SECRETS_") {
+			t.Fatalf("%s: err %v, want the agent-secrets refusal", name, err)
+		}
+	}
+}

@@ -786,6 +786,31 @@ claim's pod and the image probe's.
   check. [`scripts/e2e/fixtures/operator-route/pod.yml`](../scripts/e2e/fixtures/operator-route/pod.yml)
   is a complete one, the live harnesses': a `models.yml` and a settings overlay from a ConfigMap, and
   a projected token its key command reads.
+- **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
+  (AGENTC-393 Plan C), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only
+  that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
+  address); `operator` is the login that approves this daemon's own machine logins on the Dispatch
+  credential page — there is no launcher-token file and no manual CLI step. The daemon runs its own
+  login at boot, on a background context, and logs the confirmation code exactly once:
+  `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
+  <operator>); pod enrollment is held until approved`. The same code and the login's current status
+  ("none", "pending", "issued", "denied", or "expired") are on `GET /legion/v1/state`'s
+  `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a human
+  approves the code there. On expiry or revocation the daemon starts a fresh login and logs a new
+  code. `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
+  `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, agent-c's admission cap)
+  shape the one projected token every pod carries for the broker, alone in its volume beside the
+  operator's middleman token. With the block, the worker container mounts that token read-only at
+  `/var/run/legion/agent-secrets-token/token`, a memory-backed key directory at
+  `/var/run/legion/agent-secrets`, and is told `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`; the
+  shim generates the pod's key there before it dials, its `hello2` carries the key's thumbprint and
+  the token, and the daemon enrolls the pod under its own won credential once the agent has
+  registered — naming the pod UID it recorded at spawn (the enrollment carries no issue or
+  approver at all; the broker's rules pick the approver for the pod's later credential requests at
+  request time) — hands the enrollment id back to the shim, and revokes it wherever it lets the pod
+  go (a death, the registration deadline, a suspension, a stop, the tree's close). Without the
+  block, pods carry none of this. An older worker image is refused at the image probe: the block's
+  pod variables are daemon API contract 8.
 - **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of the providers
   Secret, `legion-<project>-providers`, which the operator creates. Every pod mounts the keys
   `provider_keys` names and no other key of the Secret, each at a file named for its variable, and

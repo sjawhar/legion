@@ -48,9 +48,15 @@ second renumbers.
 
 ## The renumber, as a checklist
 
-Done in the working copy after `jj rebase -s <first commit> -d main@origin`, then squashed into
-the first conflicted commit (`jj squash --from @ --into <it> -u -- <the two files>`), which cleared
-the conflict from all fourteen descendants at once:
+**Superseded 2026-09-27 (LEGION-118):** a rebase rooted at the branch's fork point also rewrites
+another tree's branch when one is stacked on it; resolve with a forward merge instead, from the
+bookmark rather than `@` (`jj new legion/<KEY> main@origin -m "<message>"`,
+`skills/legion-worker/SKILL.md`; a handoff split leaves `@` empty and undescribed, and `jj git
+push` refuses a commit with no description). What follows records the earlier mechanism: done in
+the working copy after
+`jj rebase -s <first commit> -d main@origin`, then squashed into the first conflicted commit
+(`jj squash --from @ --into <it> -u -- <the two files>`), which cleared the conflict from all
+fourteen descendants at once:
 
 1. Keep main's step **verbatim** (body, doc comment, position) — its "why a pure bump is fine"
    comment is what the next author audits (`../daemon/webhook-rule-across-listener-and-daemon.md`

@@ -69,13 +69,15 @@ moved before deciding a conflict is new.
 
 ## What a conflict-only rebase may change
 
-`jj rebase -s 'roots(main@origin..@)' -d main@origin` moves the whole chain — plan doc, plan
-handoff, fix, comment sweep, every later handoff — so the rebase carries other roles'
-commits too. Resolve inside the working copy and `jj squash --from @
---into <owning commit> <paths>` so each resolution lands in the commit that owns the file; the
-descendants re-apply. The rebase and those squashes rewrite pushed commits, so record the pushed
-tip before the rebase and push with `skills/legion-worker/SKILL.md`'s push procedure (*Rewriting pushed commits*). The rules for what
-the resolution may contain:
+**Superseded 2026-09-27 (LEGION-118):** `jj rebase -s 'roots(main@origin..@)' -d main@origin`
+rewrites every descendant of the chain's fork point, including another tree's branch when one is
+stacked on it. Resolve with a forward merge instead — `jj new legion/<KEY> main@origin -m
+"<message>"`, merging from the bookmark rather than `@` (a handoff split leaves `@` empty and
+undescribed, and `jj git push` refuses a commit with no description) — and resolve the conflict
+directly in that one merge commit: there are no descendants to re-apply, so there is nothing to
+squash, and nothing was rewritten, so the push is the ordinary push procedure in
+`skills/legion-worker/SKILL.md`, never *Rewriting pushed commits*. The rules for what the
+resolution may contain:
 
 1. **Executable lines: none.** If `main` moved code around the block, the block goes where
    `main`'s own comments say its neighbours belong (see the boot-order note: placement before

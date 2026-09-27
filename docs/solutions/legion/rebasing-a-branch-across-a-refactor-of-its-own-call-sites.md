@@ -26,6 +26,15 @@ symptoms:
 
 # Rebasing an issue branch across a refactor of the code it changed
 
+**Superseded 2026-09-27 (LEGION-118):** the legion-worker skill's own conflict/retarget step is
+now a forward merge (`jj new legion/<KEY> <destination> -m "<message>"`, one new commit, never a
+rebase of the whole chain), so §5's rebase/squash mechanics and the "Rewriting pushed commits"
+reference no longer apply there — the merge is a genuine fast-forward and needs no pushed-tip
+bookkeeping. The reasoning below (re-anchor the invariant, resolve the conflict once bottom-up,
+type-check untouched fixtures, distrust `jj diff --from main`) is about *how to resolve* a
+conflict against a moved call site, independent of whether it arrives as one merge commit or a
+rebased chain, and stays current for that.
+
 PR #956 (LEGION-17) was rebased onto `main` twice in one round. The second rebase crossed 61
 commits, including LEGION-21's runtime boundary (#962), which had rewritten the exact region of
 `processes.ts` this branch had changed. Nothing about jj was hard; what was hard was deciding
@@ -82,6 +91,12 @@ only and never conflict; a rebase over them is safe to do without re-running the
 is cheap enough (40 s here) that it was re-run anyway.
 
 ## 5. jj housekeeping specific to a rebased worker branch
+
+**Superseded 2026-09-27 (LEGION-118):** this housekeeping is for a rebased chain (divergent
+empty siblings from repeated rebases, the undescribed-working-copy push refusal, recording a
+pushed tip before a rewrite). The worker's own conflict/retarget step is now a forward merge —
+one new commit, nothing rewritten, no tip to record — so none of it applies there. Still useful
+for a genuine multi-commit rebase outside that step.
 
 - Before LEGION-58 the daemon-provisioned `.omp/config.yml` lived in the empty working-copy
   commit. Two rebases of the chain made that change divergent (two empty siblings of the head).

@@ -10,6 +10,6 @@ Implement the acceptance criteria. Open the PR; write the PR body as you go. Dis
 
 After the merge, drive the changed path in production through the user's own access path and record what you observed on the pull request and the issue; a staging pass is not that check. A deploy you cannot perform yourself is a question to a human naming the exact step.
 
-Rebase only when GitHub reports the pull request conflicting; record the unchanged-diff fingerprint at the tip before and after, post both, and rebase the whole chain so other work moves with yours.
+Resolve only when GitHub reports the pull request conflicting; record the unchanged-diff fingerprint at the tip before and after, post both, and merge the branch's bookmark forward with the destination (`jj new legion/<KEY> <destination> -m "<message>"`) rather than rebasing — a rebase rewrites every descendant of the chain's fork point, including another tree's branch stacked on it, while the merge touches nothing existing and is a genuine fast-forward.
 
 Report the implementation evidence, all files changed, tests and real-surface checks, and any deviations or unanswered questions.
