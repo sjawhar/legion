@@ -175,10 +175,11 @@ props (`pasteIntoTable`), since prosemirror-tables' plugin handler would otherwi
 caret's cell and spread the pasted lines into new cells of the row. A paste with the caret in a
 cell's text, plain text or HTML, is flattened the same way, marks and links kept, since a GFM cell
 holds one line, unless everything in the clipboard HTML sits in a table (as in a copy of cells, the
-editor's own included). Those, and any paste onto a selection of whole cells (a `CellSelection`),
-are prosemirror-tables' grid paste (`__pastedCells`, `__clipCells`, `__insertCells`): from the
-caret's cell on, growing the table as needed, or clipped to the selection. There are three changes.
-Copied cells are read from the clipboard HTML's own rows and cells (`htmlTableCells`), because
+editor's own included; a spreadsheet's `<style>` block and head elements such as `<meta>` don't
+count). Those, and any paste onto a selection of whole cells (a `CellSelection`), are
+prosemirror-tables' grid paste (`__pastedCells`, `__clipCells`, `__insertCells`): from the caret's
+cell on, growing the table as needed, or clipped to the selection. There are three changes. Copied
+cells are read from the clipboard HTML's own rows and cells (`htmlTableCells`), because
 ProseMirror's parse at the caret gives body rows an empty leading header row, which Milkdown's table
 requires. Tab-separated text pasted onto selected cells fills them one value each. Every cell is
 retyped for the row it lands in, because Milkdown's header row holds only `table_header` cells and a
