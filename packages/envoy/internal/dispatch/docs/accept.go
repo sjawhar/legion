@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -181,19 +182,26 @@ func changedBlocks(before, after *pmdoc.Node, match pmdoc.Range) (first, last, l
 
 // replacementBroke is what check says of a document-level block the write changed
 // (changedBlocks), when it said nothing of the blocks the match lay in before: a block that already
-// failed the check, or another block that does, is no reason to refuse this write.
+// failed the check, or another block that does, is no reason to refuse this write. A panic in the
+// check (pmdoc.ErrPanic) is no verdict on either side, but pmdoc's bug, and is its error.
 func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (broke, err error) {
 	first, last, lastAfter, err := changedBlocks(before, after, match)
 	if err != nil {
 		return nil, err
 	}
 	for index := first; index <= last; index++ {
-		if check(before.Children[index]) != nil {
+		if err := check(before.Children[index]); err != nil {
+			if errors.Is(err, pmdoc.ErrPanic) {
+				return nil, err
+			}
 			return nil, nil
 		}
 	}
 	for index := first; index <= lastAfter; index++ {
 		if broke = check(after.Children[index]); broke != nil {
+			if errors.Is(broke, pmdoc.ErrPanic) {
+				return nil, broke
+			}
 			return broke, nil
 		}
 	}

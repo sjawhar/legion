@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -2454,5 +2455,42 @@ func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
 	}
 	if opening["---"] != opening["***"] {
 		t.Fatalf("inserting `---` at the start = %q, want what `***` writes, %q", opening["---"], opening["***"])
+	}
+}
+
+// A panic in the check a write's changed blocks go through is this package's bug, never the
+// caller's text, so replacementBroke passes it on as its error, answered as an internal one:
+// read as a verdict before the write it would wave the write through, and after it it would
+// refuse the caller's text with the panic's message.
+func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
+	before, err := pmdoc.Parse("Intro.\n\nBody.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := pmdoc.Parse("Intro.\n\nChanged.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	panicked := fmt.Errorf("%w: reading markdown: boom", pmdoc.ErrPanic)
+	// "Body." is the second paragraph's text, from position 9.
+	match := pmdoc.Range{From: 9, To: 14}
+	for _, test := range []struct {
+		name  string
+		check func(*pmdoc.Node) error
+	}{
+		{"before the write", func(*pmdoc.Node) error { return panicked }},
+		{"after the write", func(block *pmdoc.Node) error {
+			if block == after.Children[1] {
+				return panicked
+			}
+			return nil
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			broke, err := replacementBroke(before, after, match, test.check)
+			if broke != nil || !errors.Is(err, pmdoc.ErrPanic) {
+				t.Fatalf("replacementBroke = (%v, %v), want an ErrPanic error and no verdict", broke, err)
+			}
+		})
 	}
 }
