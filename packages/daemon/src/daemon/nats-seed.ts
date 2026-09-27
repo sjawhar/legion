@@ -8,7 +8,7 @@ const seedKeys: { fromSeed(seed: Uint8Array): { getPublicKey(): string } } = nke
 export function validateNatsUserSeed(seed: string, source: string): void {
   let publicKey: string;
   try {
-    publicKey = seedKeys.fromSeed(new TextEncoder().encode(seed)).getPublicKey();
+    publicKey = natsUserPublicKey(seed);
   } catch (error) {
     throw new Error(
       `${source} does not hold a valid nkey seed: ${error instanceof Error ? error.message : String(error)}`
@@ -17,4 +17,10 @@ export function validateNatsUserSeed(seed: string, source: string): void {
   if (!publicKey.startsWith("U")) {
     throw new Error(`${source} holds an nkey seed that is not a user's (public key ${publicKey})`);
   }
+}
+
+/** The public key of the nkey user `seed` (a seed `validateNatsUserSeed` accepted) is the seed
+ * of: what the daemon may say about a seed it holds without the seed leaving it. */
+export function natsUserPublicKey(seed: string): string {
+  return seedKeys.fromSeed(new TextEncoder().encode(seed)).getPublicKey();
 }

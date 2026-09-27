@@ -980,3 +980,101 @@ test("issue header reassigns through the Assignee picker; a personal token's iss
     await context.close();
   }
 });
+
+test("a clamped title shows two lines and no fragment of the third", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the clamp only bites where the title wraps");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    title:
+      "Whole-app visual polish pass: information hierarchy and a coherent conversation across every document surface",
+  });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    const title = page.getByRole("heading", { level: 1 });
+    await expect(title).toBeVisible();
+    // How many lines of the title a reader can see: the line boxes that start above the bottom of
+    // whatever clips them. A clamped element with vertical padding clips below the line it cut, so
+    // the top of the third line was drawn inside that padding.
+    // Polled, not sampled once: the clamp is a layout the browser settles into, and a single
+    // immediate measurement caught the frame before it (1 run in 9 locally).
+    await expect
+      .poll(() =>
+        title.evaluate((element) => {
+          const text = element.firstChild?.firstChild ?? element.firstChild;
+          if (text === null || text === undefined) {
+            return -1;
+          }
+          const range = document.createRange();
+          range.selectNodeContents(text);
+          let clip: Element | null = text.parentElement;
+          while (clip !== null && getComputedStyle(clip).overflowY === "visible") {
+            clip = clip.parentElement;
+          }
+          if (clip === null) {
+            return -1;
+          }
+          const box = clip.getBoundingClientRect();
+          const bottom = box.bottom - Number.parseFloat(getComputedStyle(clip).borderBottomWidth);
+          return Array.from(range.getClientRects()).filter((rect) => rect.top < bottom - 0.5)
+            .length;
+        })
+      )
+      .toBe(2);
+  } finally {
+    await context.close();
+  }
+});
+
+test("the details rail fades its trailing edge only while it has somewhere to scroll", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the rail only overflows at a phone width");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Rail fade" });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    const rail = page.getByTestId("issue-metadata-rail");
+    const masked = () => rail.evaluate((element) => getComputedStyle(element).maskImage !== "none");
+    const overflow = () => rail.evaluate((element) => element.scrollWidth - element.clientWidth);
+
+    // A bare issue's details fit a desktop rail: nothing to scroll to, so nothing to fade.
+    await page.setViewportSize({ height: 900, width: 1920 });
+    await page.goto(`/issues/${issue.key}`);
+    await expect(rail).toBeVisible();
+    await expect.poll(overflow).toBe(0);
+    expect(await masked()).toBe(false);
+
+    // At a phone width the same details run past the rail, and the cut lands inside a control -
+    // the Labels button alone is wider than the rail is.
+    await patchIssue(issue.key, {
+      labels: ["frontend", "documentation", "needs-design", "observability"],
+    });
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.reload();
+    await expect(page.getByTestId("issue-labels")).toBeVisible();
+    await expect.poll(overflow).toBeGreaterThan(0);
+    await expect.poll(masked).toBe(true);
+
+    // At the end of the scroll the last item is all there is; a fade there would hide it.
+    await rail.evaluate((element) => {
+      element.scrollLeft = element.scrollWidth;
+    });
+    await expect.poll(masked).toBe(false);
+
+    // Scrolling back re-arms it.
+    await rail.evaluate((element) => {
+      element.scrollLeft = 0;
+    });
+    await expect.poll(masked).toBe(true);
+  } finally {
+    await context.close();
+  }
+});

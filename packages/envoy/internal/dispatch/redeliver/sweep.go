@@ -93,15 +93,16 @@ const (
 	RequestRefused Outcome = "request-refused"
 	// Waiting: the last redelivery failed and the next one's backoff has not passed.
 	Waiting Outcome = "waiting"
-	// Pending: GitHub accepted the last request and has recorded no failure since: it has not
-	// attempted it yet, or its OK attempt is older than the window.
+	// Pending: GitHub accepted the last request and its log holds no attempt since: it has not made
+	// the redelivery yet. Once it has, the listing carries that newer attempt, which decides it.
 	Pending Outcome = "pending"
 	// Terminal: the receiver answered 4xx, refusing the request itself; the same bytes would fail
 	// the same way, so it is never redelivered.
 	Terminal Outcome = "terminal"
 	// Exhausted: MaxAttempts redeliveries failed, or MaxAttempts requests were refused.
 	Exhausted Outcome = "exhausted"
-	// Closed: an earlier sweep marked the delivery terminal, exhausted or delivered.
+	// Closed: an earlier sweep settled the delivery (GitHub recorded it OK, or it was terminal or
+	// exhausted). Its failed attempt is still listed, and counted, until it is older than the window.
 	Closed Outcome = "closed"
 	// ClaimedElsewhere: another sweeper claimed this attempt first.
 	ClaimedElsewhere Outcome = "claimed-elsewhere"
@@ -112,6 +113,15 @@ const (
 	// against the delivery; it is asked again once the limit has passed.
 	RateLimited Outcome = "rate-limited"
 )
+
+// Outcomes is every outcome, in the order a sweep's summary counts them.
+var Outcomes = []Outcome{
+	Redelivered, WouldRedeliver, RequestRefused, RateLimited, Waiting, Pending, Delivered, Terminal,
+	Exhausted, Closed, ClaimedElsewhere,
+}
+
+// logKey is the outcome's name as a log attribute key: request-refused is request_refused.
+func (o Outcome) logKey() string { return strings.ReplaceAll(string(o), "-", "_") }
 
 // Decision is one delivery the sweep listed and what became of it.
 type Decision struct {
@@ -209,7 +219,8 @@ type limitRecord struct {
 	Strikes int `json:"strikes"`
 }
 
-// Run sweeps now and then every interval until ctx ends, logging each sweep.
+// Run sweeps now and then every interval until ctx ends, logging each sweep's counts: the failed
+// attempts listed, the deliveries they belong to, and how many deliveries had each outcome.
 func (s *Sweeper) Run(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -222,14 +233,11 @@ func (s *Sweeper) Run(ctx context.Context, interval time.Duration) {
 				"since", report.Since.Format(time.RFC3339),
 				"failed_attempts", report.Listed,
 				"deliveries", len(report.Decisions),
-				"redelivered", report.Count(Redelivered),
-				"delivered", report.Count(Delivered),
-				"request_refused", report.Count(RequestRefused),
-				"waiting", report.Count(Waiting),
-				"terminal", report.Count(Terminal),
-				"exhausted", report.Count(Exhausted),
-				"complete", report.Complete,
 			}
+			for _, outcome := range Outcomes {
+				attrs = append(attrs, outcome.logKey(), report.Count(outcome))
+			}
+			attrs = append(attrs, "complete", report.Complete)
 			if !report.RateLimitedUntil.IsZero() {
 				attrs = append(attrs, "rate_limited_until", report.RateLimitedUntil.Format(time.RFC3339))
 			}

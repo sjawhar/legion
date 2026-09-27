@@ -80,6 +80,22 @@ func TestRunRefusesAConfigurationItCannotSuperviseUnder(t *testing.T) {
 		{"NATS_NKEY_SEED holding no seed", func(_ *config.Config, o *overrides) {
 			o.environ = []string{"NATS_NKEY_SEED=hunter2"}
 		}, "NATS_NKEY_SEED does not hold a valid nkey seed"},
+		{"a daemon NATS nkey seed file that is not there, beside a usable pane seed", func(c *config.Config, _ *overrides) {
+			c.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
+			c.NatsDaemonNkeySeedFile = filepath.Join(c.StateDir, "absent")
+		}, "nats_daemon_nkey_seed_file names {state}/absent, which could not be read"},
+		{"a daemon NATS nkey seed file holding an account's seed", func(c *config.Config, _ *overrides) {
+			c.NatsDaemonNkeySeedFile = filepath.Join(c.StateDir, "daemon.seed")
+			if err := os.WriteFile(c.NatsDaemonNkeySeedFile, []byte(testnats.Account(t)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "nats_daemon_nkey_seed_file ({state}/daemon.seed) holds an nkey seed that is not a user's"},
+		{"NATS_DAEMON_NKEY_SEED_FILE set but empty", func(_ *config.Config, o *overrides) {
+			o.environ = []string{"NATS_DAEMON_NKEY_SEED_FILE=", "NATS_DAEMON_NKEY_SEED=" + testnats.UserSeed(t)}
+		}, "NATS_DAEMON_NKEY_SEED_FILE is set but empty"},
+		{"NATS_DAEMON_NKEY_SEED holding no seed", func(_ *config.Config, o *overrides) {
+			o.environ = []string{"NATS_DAEMON_NKEY_SEED=hunter2"}
+		}, "NATS_DAEMON_NKEY_SEED does not hold a valid nkey seed"},
 		{"no omp_invocation and no LEGION_OMP_PATH", func(c *config.Config, o *overrides) {
 			c.OmpInvocation = ""
 			o.runtime = nil

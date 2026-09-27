@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
-import { publishAgentStreamFrame } from "./api";
+import { publishAgentStreamFrame, setAgentStreamResponder } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -152,15 +152,69 @@ test("the conversation view replays what the session held, streams its next turn
 test("a session that has published nothing renders as empty, not as a conversation", async ({
   browser,
 }) => {
+  // A session of its own: the relay's frames are process-global, so a session another test
+  // seeded would carry that test's replay into this one. It answers the relay with no history,
+  // which is what a live session that has not spoken yet is.
+  const sessionID = "01a0e0c1-0000-7000-8000-00000000beef";
+  await setAgentStreamResponder(sessionID, true);
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   try {
-    // A session of its own: the relay's frames are process-global, so a session another test
-    // seeded would carry that test's replay into this one.
-    await page.goto("/agents/01a0e0c1-0000-7000-8000-00000000beef/live");
+    await page.goto(`/agents/${sessionID}/live`);
     await expect(page.getByTestId("agent-conversation")).toBeVisible();
-    await expect(page.getByText("Nothing yet.")).toBeVisible();
+    await expect(page.getByTestId("agent-thread-empty")).toHaveText(
+      "Nothing yet. This session's next turn appears here as it happens."
+    );
     await expect(page.getByText("Nothing here is stored")).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("a session nobody answers for is told so, and recovers when a responder appears", async ({
+  browser,
+}) => {
+  // Nobody on the session's control subject: a plugin that predates the live view, or a session
+  // that is no longer running. The relay cannot tell those apart and does not claim to.
+  const sessionID = "01a0e0c1-0000-7000-8000-00000000cafe";
+  await setAgentStreamResponder(sessionID, false);
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${sessionID}/live`);
+    const empty = page.getByTestId("agent-thread-empty");
+    await expect(empty).toHaveText(/not answering the live view/);
+    await expect(empty).toContainText("no longer running");
+    // Delivery never went through the stream, so the composer is live either way.
+    await expect(page.getByTestId("agent-composer")).toBeVisible();
+
+    // The session restarts onto a plugin that streams. The relay re-asks on every watch tick
+    // (AGENT_STREAM_WATCH_INTERVAL_MS), so this page recovers with no reload and no reconnect.
+    await publishAgentStreamFrame(
+      sessionID,
+      {
+        frames: [
+          {
+            kind: "message",
+            message: {
+              at: 5_000,
+              id: "u5000",
+              parts: [{ text: "Back on a newer plugin", type: "text" }],
+              role: "user",
+              streaming: false,
+            },
+            seq: 1,
+            v: 1,
+          },
+        ],
+        session_id: sessionID,
+        v: 1,
+      },
+      "replay"
+    );
+    await expect(page.getByText("Back on a newer plugin")).toBeVisible({ timeout: 20_000 });
+    await expect(empty).toHaveCount(0);
   } finally {
     await context.close();
   }

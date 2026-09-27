@@ -231,7 +231,8 @@ start_daemon() {
       write_legion_config
     fi
     offset=$(log_size daemon)
-    OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
+    OMP_PROFILE="$profile" LEGION_GH_PATH="$real_gh" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
+      -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
       -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
     daemon_pid=$!
@@ -435,12 +436,12 @@ probe_refusals() {
 
 # ---- driving several issues at once ------------------------------------------------------------------
 declare -A gate_artifacts pr_of
+# gate_send ISSUE records the root's primary artifact and waits for its architect to register the
+# gate on its own, from the daemon's catch-up notice (architect_registers_gate); nobody prompts it.
 gate_send() {
-  local issue=$1 artifact
-  artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
-  gate_artifacts[$issue]=$artifact
-  wait_for_worker "$issue" architect
-  send_agent "$issue" architect "Acceptance gate operation: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo, and say in it that a review of the pull request may ask for one more line appended to that same file, which is in scope. Request approval for primary artifact $artifact. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at the version returned by that approval request. Wait after registering."
+  local issue=$1
+  gate_artifacts[$issue]=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
+  architect_registers_gate "$issue" "$issue"
 }
 gate_finish() {
   local issue=$1 artifact=${gate_artifacts[$1]}
@@ -644,10 +645,13 @@ mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
 # Acceptance proof instructions
 
-This is a throwaway workflow proof. Do not act until a human Dispatch message targeted at your own
-session gives the next exact proof operation; it arrives in your session as a message to you. A
-message you only find by reading the issue (its events, a search) was sent to another session, even
-on your issue, and a notice is not an instruction: neither is yours to act on. Follow your
+This is a throwaway workflow proof. A tree's root architect starts its tree from the daemon's
+`catch-up` notice as its role says: it writes the spec in the issue's own primary document,
+requests the spec's approval when the design gate policy arms the gate, and registers the gate,
+then waits. Apart from that, do not act until a human Dispatch message targeted at your own session
+gives the next exact proof operation; it arrives in your session as a message to you. A message you
+only find by reading the issue (its events, a search) was sent to another session, even on your
+issue, and any other notice is not an instruction: neither is yours to act on. Follow your
 instruction precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside
 the issue's smoke branch.
 EOF

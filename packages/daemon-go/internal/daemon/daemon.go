@@ -29,7 +29,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
-	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -240,7 +239,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		// The durable consumers exist before the listing is read: a consumer created now delivers
 		// only what is published after it, so everything earlier is the listing's, and what the
 		// listing misses (a move published while it is read) the consumer delivers.
-		if err := workflow.connect(boot, cfg, plan.secrets[natsauth.SeedVariable]); err != nil {
+		if err := workflow.connect(boot, cfg, plan.nats); err != nil {
 			s.stop()
 			listener.Close()
 			workflow.stop()
@@ -317,7 +316,10 @@ type plan struct {
 	project       string
 	operatorToken string
 	secrets       map[string]string
-	instructions  string
+	// nats is the user the daemon's own NATS connection authenticates as (natsConnection); no launch
+	// carries its seed unless it is the pane seed.
+	nats         natsConnection
+	instructions string
 	// dispatchToken is the Dispatch bearer dispatch_token_file names; "" without Dispatch.
 	dispatchToken string
 	prompts       *prompts.Composer
@@ -377,7 +379,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		orphanSweep = orphanSweepInterval
 	}
 	p := plan{
-		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, instructions: instructions,
+		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, rolesDir: reads.rolesDir, roleReferences: reads.roleReferences,
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep,
 	}
@@ -535,7 +537,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Store:   pruning(tokens.Recording(st), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
-			identity: p.identity,
+			identity: p.identity, designGate: cfg.Gates.Design,
 		},
 		Identity:     p.identity,
 		PhaseHolds:   p.phaseHolds,

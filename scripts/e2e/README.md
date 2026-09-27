@@ -233,8 +233,9 @@ domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-co
 either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
 neither value. The bridge connects to that upstream as the nkey user `NATS_NKEY_SEED_FILE` or
 `NATS_NKEY_SEED` in the operator's environment names, and without a credential when neither is set. Every process the rigs start against their own no-auth NATS (the listener, the Envoy Dispatch
-server, the Go daemon; stage 2 and the other local rigs unset both variables outright) runs without
-`NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
+server, the Go daemon; stage 2 and the other local rigs unset every variable below outright) runs without
+`NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, and the Go daemon also without the daemon seed's
+`NATS_DAEMON_NKEY_SEED`/`NATS_DAEMON_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
 users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, keeps the operator's seed. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
@@ -271,7 +272,9 @@ that names the rig's project key, then reads the operator's Envoy listener (`GET
 audit uses the Dispatch token already in `~/.config/opencode/envoy.json` and writes nothing.
 
 It proves admission order and slotless children, then drives a root from `todo` through an
-architect's spec and gate registration, the human approval, planner, implementer pull request,
+architect's spec and gate registration, which the architect does on its own (the proof never
+prompts it: its first turn is the daemon's `catch-up` notice, and the root's primary document is
+the proof's one-file smoke spec), the human approval, planner, implementer pull request,
 tester, reviewer, retro, merger READY, the ordinary human squash merge, production check, and
 architect sign-off. It also proves three changes-requested rounds, each posted by the reviewer
 pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
@@ -603,7 +606,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`fixtures/operator-route`](fixtures/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
-| `spec-posted` | each admitted architect posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
+| `spec-posted` | each admitted architect, prompted by nothing but the daemon's `catch-up` notice, posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
 | `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node |
 | `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
 | `issue-cap-moves` | tree 2 to backlog frees its slot, tree 3 is admitted, and tree 2's pods are gone |

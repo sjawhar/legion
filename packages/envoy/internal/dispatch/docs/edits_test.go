@@ -85,8 +85,9 @@ func TestApplyOpsReportsABatchThatWroteUpdatesAndNoMarkdownAsUnchanged(t *testin
 }
 
 // Canonical markdown renders no anchor mark, so a `replace` whose `with` equals its `find` reads
-// as identical text while the human comment anchor it covered is gone. That is a change, and the
-// version that records it must still be minted (Deep1326).
+// as identical text while the human comment anchor it covered is gone - a replace that runs past
+// an anchor's edge writes its text outside that anchor. That is a change, and the version that
+// records it must still be minted (Deep1326).
 func TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "Keep anchored words here.")
@@ -96,7 +97,7 @@ func TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged(t *testing.T) {
 		t.Fatalf("anchor a comment: %v", err)
 	}
 	result, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
-		{Op: "replace", Find: "anchored words", With: "anchored words"},
+		{Op: "replace", Find: "Keep anchored words", With: "Keep anchored words"},
 	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	if err != nil {
 		t.Fatalf("replace over the anchor: %v", err)
@@ -397,6 +398,25 @@ func TestApplyOpsRejectsMarkdownOutsideProofSchema(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "keep\n")
+}
+
+// Table rows inserted before a table's header cell, which the table cannot hold there, are an
+// invalid insert naming its markdown, never an error the handler answers 500.
+func TestApplyOperationRefusesTableRowsBeforeAHeaderCell(t *testing.T) {
+	for _, test := range []struct{ spec, markdown string }{
+		{"| a | b |\n| --- | --- |\n| c | d |\n", "| x | y |"},
+		{"| a |\n| --- |\n| c |\n", "| a |\n| - |\n| b |"},
+	} {
+		tree, err := parseInput(test.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = applyOperation(tree, model.EditOp{Op: "insert", Before: "a", Markdown: test.markdown})
+		var invalid *ErrInvalidOp
+		if !errors.As(err, &invalid) || invalid.Field != "markdown" {
+			t.Fatalf("insert %q before a header cell: %v, want an invalid op on markdown", test.markdown, err)
+		}
+	}
 }
 
 func TestApplyOperationInsertsParagraphAfterTableContainingCellAnchor(t *testing.T) {
@@ -2487,9 +2507,9 @@ func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			broke, err := replacementBroke(before, after, match, test.check)
-			if broke != nil || !errors.Is(err, pmdoc.ErrPanic) {
-				t.Fatalf("replacementBroke = (%v, %v), want an ErrPanic error and no verdict", broke, err)
+			block, broke, err := replacementBroke(before, after, match, test.check)
+			if block != -1 || broke != nil || !errors.Is(err, pmdoc.ErrPanic) {
+				t.Fatalf("replacementBroke = (%d, %v, %v), want an ErrPanic error and no verdict", block, broke, err)
 			}
 		})
 	}

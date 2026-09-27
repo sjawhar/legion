@@ -334,7 +334,7 @@ function NotArchitecturalRow({
           <span className={`text-xs ${textMutedOnSurface}`}>
             inherited from{" "}
             <Link
-              className={`underline ${linkText} ${linkHoverText}`}
+              className={`dispatch-inline-link underline ${linkText} ${linkHoverText}`}
               to={buildIssuePath({ key: issue.inherited_from, kind: "issue" })}
             >
               {issue.inherited_from}

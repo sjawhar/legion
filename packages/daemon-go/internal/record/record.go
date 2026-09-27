@@ -239,6 +239,15 @@ type Store interface {
 	WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error)
 	// ExpediteOutbox makes row id due at now if it was due later.
 	ExpediteOutbox(ctx context.Context, tx pgx.Tx, id int64, now time.Time) error
+	// DropCatchUps deletes every catch-up notice row of issue the outbox still holds, a re-held copy
+	// and a row the runner has leased included. A leased row may be mid-publish: the runner executes
+	// it from memory, and the notice executor publishes it only while OutboxLeased still finds it,
+	// so a dropped row is delivered only when the drop lands during its publish, a duplicate the
+	// fresh catch-up follows.
+	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error
+	// OutboxLeased reports whether row id is still in the outbox under leaseToken: false once
+	// another transaction deleted it while the runner held it (DropCatchUps).
+	OutboxLeased(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) (bool, error)
 	// TreeIssues is every issue of tree, the root included, by key.
 	TreeIssues(ctx context.Context, tx pgx.Tx, tree string) ([]Issue, error)
 	// EarlierNotices is every unfinished notice row of tree's issues written before row id, oldest

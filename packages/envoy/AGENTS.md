@@ -165,9 +165,17 @@ that end it. A line holding only spaces and tabs is written as sent: a list item
 than its own columns from a blank line, as the browser editor's parser does (`listItemColumns`),
 so both readers keep what the line holds past them. A footnote definition takes none, and a blank
 code line inside one is written without the definition's indentation (`writeCodeLinePrefix`). A
-suggestion that runs past the
-code into the next block is written as sent, the rest of that block joining it. Code on other
-lines stays as it was. A line of colons in code inside a typed block is kept: the browser editor's
+suggestion can run past the code into the blocks after it. One that takes all of the text of the
+textblock it ends in leaves nothing after its own text, as at the code's end, so the same rule
+applies. One that ends inside that text is written as sent, and the rest of that text joins the
+code after it. Code on other lines stays as it was. An accept whose code changes how a block
+around it reads back is refused, advising rejecting the suggestion
+(`refuseAcceptedCodeThatReshapes`). It names the typed block holding the code when the
+document-level block that reads back otherwise is the one holding the code, and otherwise names
+that block, such as the list of a task item the suggestion empties ahead of its nested list. The
+edit route's refusal of the same shape advises moving the code out of the typed block instead,
+and a reject in code, like any reject, is not read back. A line of colons in code inside a typed
+block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
 them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -
@@ -182,7 +190,26 @@ paragraph is stored `\---` and so on (the renderer's line-start escapes). Beside
 paragraph it is written the same way, since an empty paragraph is not written. Accepting a
 suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`, its checks in
 `docs/accept.go`) writes blocks, so it stores what reads back as the live document, and refuses
-what cannot, naming `replace_with`. It first settles the blocks it changed (`settleAccepted`,
+what cannot, naming `replace_with`. A table the splice cut is padded to its width as the browser
+editor's table plugin pads it (`padCutTables`, `pmdoc.PadTables`), where the browser's accept
+writes the replacement where `Splice` does (`padsLikeTheBrowser`): inline text, code's literal
+text, an empty replacement (which deletes the matched text, by this accept's own rule, where the
+browser's accept of an empty suggestion only clears its mark), or block content over exactly the
+two textblocks the browser's accept replaces whole (`pmdoc.MultiblockRange`, which reads each
+textblock one position short of its end as the editor does), the first of them a document-level
+block. Other block content over a table, such as a list over one cell's whole text, or one
+running from a paragraph in a callout, a quote or a list item, or from one character into a
+paragraph or heading, is not padded. Nor is anything running from one table into the next, or
+from one body row into another (`joinsTwo`), which the browser can join into one table or row,
+even where the browser's result would read as the padded one would; the reject refuses a join of two tables the same way. A range from the
+header row into the first body row is padded, since those rows cannot join. An accept that is not
+padded is judged as the splice left it, and the checks below refuse one that cut a table. Block
+content the browser takes whose range ends short of the last textblock's end, within the editor's
+tolerance (`- a` over `abc Next` with the cell holding `Next e`), keeps the rest of that textblock
+(` e`), which the browser's accept drops with the textblock; the cell keeps text, so nothing there
+is cut or padded. `pmdoc/multiblock_test.go`'s table is all that pins `pmdoc.MultiblockRange` to
+the editor, so a proof-sdk pin bump that changes `resolveStructuralMultiblockRange` re-checks it.
+It then settles the blocks it changed (`settleAccepted`,
 `pmdoc.AgreeWithReadBack`): the empty halves a block replacement leaves of the textblock it lands
 in, which carry no block id, go where the renderer does not write them, and each list and list
 item takes the spread its markdown reads back with, paired as far down as the read-back check
@@ -324,10 +351,43 @@ block-id check (`400 INVALID_MARKDOWN`, the block-id paragraph above). An id the
 (a browser edit can leave one, and an upload can carry it on) does not refuse an accept, whether the
 accept leaves that ask alone or writes into it, unless the accept adds a second ask under it: an id
 that gains an ask is refused whatever it held, since the id repair would hand the held ask's row
-and answer to whichever comes first. A reject's asks (`POST /api/v1/comments/{id}/reject`,
-the same `applySuggestion`) are never checked, since removing the text a browser insert added gives
-back the document the insert started from. A replacement no level of the document can hold where
-the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
+and answer to whichever comes first. A reject (`POST /api/v1/comments/{id}/reject`, the same
+`applySuggestion`) is never checked, its asks included, since removing the text a browser insert
+added gives back the document the insert started from. It deletes that text as the browser editor's
+reject does (`rejectedInsert`): the insert's runs that meet across a block boundary, nothing but
+the boundary between them, are one range (`pmdoc.MarkSpans`), so the blocks join, which undoes the
+split an insert made (Enter typed while suggesting), and a table the range cuts is padded to its
+width as the editor's table plugin pads it (`pmdoc.PadTables`, after prosemirror-tables'
+`fixTables`). A removal the
+document cannot hold, one the schema refuses or the renderer cannot write, is refused, `400
+INVALID_OP` on `anchor`, advising accepting the suggestion or editing the document
+(`rejectSpliceRefusal`), with the document unchanged and the suggestion open. A reject is not read
+back. Where it stores otherwise than the browser's reject, or refuses what the browser stores:
+- Text without the insert's mark between two of its runs is kept, each run deleted on its own; the
+  browser deletes that text too, and the editor leaves it when someone suggests inside another
+  person's insert or pastes into it outside suggestion mode.
+- An insert running into an ask or callout from the text before it is refused; the browser drops
+  the emptied ask or callout.
+- One running from one table into the next is refused; the browser joins the tables.
+- One over a header cell and the body cell below it (`| QQ |\n| --- |\n| ZZ |`) is refused; the
+  browser stores the emptied cells.
+- `# HelloQQ` then `## ZZ world.` keeps two headings (`# Hello`, `## &#32;world.`); the browser's
+  delete joins them, and `Splice`, which makes ProseMirror's replace, keeps headings of two levels
+  apart.
+- A cell at a row's end into the next row's first cell keeps the rows apart and pads the next row,
+  whose remaining cells move one column left keeping their own alignment, so each reads back with
+  its new column's; the browser joins the rows and widens the table.
+- One into a one-column table's only header cell stores one empty header cell; the browser leaves
+  the header row empty and adds a row, which the schema cannot hold.
+- A padded cell takes its column's alignment, where `fixTables` makes it left, so the column reads
+  back as it was.
+- A paragraph's end into a footnote definition stores the reference reading back as literal text,
+  and a paragraph's end into code turns the code's line break into a soft break.
+- Since a reject is not read back, it can store a document that reads back otherwise: a table
+  column's alignment, an emptied paragraph beside other blocks (which is not written), a task item
+  emptied to `- [ ]` (which reads back as a plain item), and nested lists or footnote blocks.
+
+An accepted replacement no level of the document can hold where the suggestion sits, such as a code block over a table cell's whole text, is `400 INVALID_OP` on
 `replace_with` (`pmdoc.ErrReplacementDoesNotFit`), and inline text over a range that runs into an
 ask or callout from the text before it, at any depth (inside a blockquote, a list item or another
 callout too), is `400 INVALID_OP` on `anchor` (`pmdoc.ErrJoinEmptiesTypedBlock`): ProseMirror's
@@ -809,6 +869,7 @@ canonical markdown.
 
 - Open asks accept `PATCH /api/v1/asks/{id}` from their asking session or any human. Each edit carries the full current ask, prior mutable fields, and its editor in an `ask.edited` event; `edited_at` is nullable until the first edit. Ask anchors are set on creation and are not editable through this route. `GET /api/v1/asks/{id}` returns `edits`, every rewording read back from those events oldest first (`{previous, edited_by, at}`). A human answer must carry the `edited_at` revision it reviewed; a mismatch returns `409 ASK_EDITED` without closing the ask.
 - Every document version or transactional live mutation refreshes each open anchored ask and comment from the current tree, once per tree: a version written in the transaction whose own live mutation produced that tree inherits that mutation's refresh rather than repeating it, and a version with no live mutation of its own - settlement, a standalone named version - refreshes for itself. A changed persisted anchor emits its own full `ask.anchor_refreshed` or `comment.anchor_refreshed` event in that same transaction; an unchanged row emits none. Refresh events are retained and sequenced on the row's owner topic but never notify or author/follower-route a session: the mutation is a side effect, not an interaction addressed to someone. The refresh writes only the two fields it owns, the quote and the orphan flag, never the whole `anchor` column: it reads every open row up front and writes each one back after the lookups and event appends the rows before it cost, so a whole-column write would erase what another writer put in that anchor in between - the block id `BackfillAnchorBlocks` pins (LEGION-149).
+- The quote a refresh reads is the first contiguous run of the row's mark (`pmdoc.FindMark`), so text written inside an anchor must carry its mark. A `replace` through the edit route, and the text an accepted suggestion writes inline or into code, takes every comment, suggestion and ask mark that covers all of the text it replaces (`pmdoc.AnchorMarksCovering`, the accepted suggestion's own mark excepted): replacing a word, the first or last word, or the whole quote leaves the anchor over the new text, and the refreshed quote is its whole current extent. A replace that runs past an anchor's edge rewrote text outside it too, so that anchor keeps only the text the replace left alone, and one covering the whole anchor and more orphans it. A block replacement from an accepted suggestion takes no mark, since it can land a code block an ask's mark cannot cover.
 - `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks` create questions: the asker supplies the options and no option label carries a server rule (a human to-do is the to-do phrased as the question, with whatever options fit it). `kind` may be absent or `question`; `kind: "action"` (removed; migration 0035 folded every stored action ask into a question keeping its options and its answer) and `kind: "approval"` (server-created by the document-approval route only) answer `400 ASK_KIND_INPUT`.
 - Document approval is a human review pinned to a version, the way a pull-request review is pinned to a commit. `POST /api/v1/artifacts/{id}/approval-requests` (any actor) opens - or returns the open - ask of `kind: "approval"` with the fixed options `Approve` / `Request changes`, naming the document and its latest settled version in `ask.approval`; its wording cannot be edited. Answering it (humans only; `Request changes` requires text) writes an `artifact_reviews` row pinned to the document's latest settled version at answer time and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`. `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header and answers the open approval ask if there is one (`ask_id` null otherwise). Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id`, and `requested_by` while awaiting); `stale` is derived from versions, so a new version emits nothing approval-specific. Legion's design gate is the consumer; it is the exception path, not an every-issue step.
 - `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept up to 20 labels. Dispatch trims labels, preserves case, removes case-insensitive duplicates, and returns `400 LABELS_INPUT` for blank or over-40-character labels; every label update emits `issue.updated` with its labels. `GET /api/v1/issues?label=<label>` is repeatable, normalizes filter labels identically, and case-insensitively matches every supplied label.
@@ -866,6 +927,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 
   The listener's next start stamps the rest of its policy onto the recreated durable and binds it. A message past the ack floor that was already acknowledged out of order is delivered again.
 - If a session is not live in the registry, delivery fails and the message is NAK'd for retry (up to MaxDeliver attempts over the stream's MaxAge window).
+- A check_run or check_suite webhook writes the CI record of its commit in each pull request it names, so every check of a head writes one record, and the CI store combines concurrent observations of a record into one compare-and-swap write (`update`), and a burst of a pull request's checks costs far fewer writes than it has observations. A write retries a lost compare-and-swap, or a transient KV error, from a fresh read for up to two seconds (`recordBudget`). One that runs out answers every delivery in its batch 503, which Dispatch's redelivery sweep resends, and logs one JSON line at ERROR, `ci record exceeded its retry budget`, carrying `owner`, `repo`, `number`, `sha`, `checks` (the record's checks with the batch applied, or 0 when no attempt could read the record), `attempts`, `observations` (the deliveries it answered 503) and `error` (`cistore: record exceeded CAS budget` when the last attempt lost its compare-and-swap). It is an ERROR because each one means GitHub was answered 503, and it is meant for an alarm on the CI-record budget to count. The CI store's other lines go through the same JSON logger, so they carry the listener's `machine_id`.
 - The `ENVOY_NOTIFICATIONS` duplicate window is 72 hours, matching the retained notification lifetime. Startup reconciles that setting with `UpdateStream`, so a Dispatch outbox retry after a post-publish crash cannot create another retained message while the original remains available.
 - An envelope publishes under a JetStream MsgId of its dedupe key and topic when that key names the upstream event itself: `contracts.DedupeKeyNamesTheUpstreamEvent`, which asks the envelope rather than its source name, and holds for a `github`, `slack` or `ghostwispr` key that is the source plus the envelope's own `SourceEventID` (the webhook normalizers' shape) and for every `dispatch` envelope (LEGION-271). A webhook redelivery of an event the stream already holds (GitHub's and Ghost Wispr's resend under the original delivery id, Slack's retry under the original `event_id`) is dropped at publish and still answered 200, and each topic of one delivery's fan-out lands once. The case this covers is a first attempt that reached the stream but that the sender recorded as failed: a reply slower than GitHub's 10-second limit, or a 503 after part of a fan-out published. GitHub redelivers only the past three days, which lies inside the window. The rule reads the key because a source name proves nothing: the MCP bridge publishes under the source its configuration names, `github` included, with a key that is a hash of the resource URI and the summary, which two distinct events on one URI share whenever the read returns no text; and a CI settlement carries a key of the head and the record's generation, which a record recreated under that head can reuse with a different snapshot. Neither is a redelivery, and neither is deduped. Agent-sourced envelopes carry no MsgId.
 - A `bus.ConnectOwningStream` caller reconciles `ENVOY_NOTIFICATIONS`'s subjects at start by adding its own to the deployed list. Only the deployed services call it: the listener (including the on-prem fleet's) and Dispatch's server. A caller that only publishes or only tails - `natstail`, the MCP server, `envoy-dispatch`'s operator commands - uses `bus.Connect`, which neither creates the stream nor updates it. **Either connect refuses a NATS server that is not this machine's unless the run sets `ENVOY_ALLOW_REMOTE_NATS=1`**, decided from the URL before anything dials, because nothing distinguishes the deployed Dispatch from the same binary run out of a checkout: both read `natsUrls` from `~/.config/opencode/envoy.json`, which on an agent machine names production. Each deployment states its reach instead (`deploy/compose/*.compose.yml`, agent-c's listener and Dispatch task definitions, the on-prem fleet's Pulumi), and each must carry it **before** an image whose binaries read it runs there, or that start refuses the shared NATS its deployment names and exits; setting it early is free, because a binary built before the variable ignores it (LEGION-249). Once every writer runs a build with this reconciliation, a restart during a rollout cannot drop a subject another deployment needs, except when two writers with different lists start within one read-update round trip (JetStream's stream update has no compare-and-swap). A start removes a deployed subject only when it overlaps a role lane (`notifications.role.>` or its exceptions twin) or one of the binary's own subjects (a widened, narrowed or split subject, which JetStream refuses beside it). In the second case the binary's shape wins, and a WARN names the dropped subject and every subject that replaced it. Each start also logs, at INFO, the deployed subjects it keeps without compiling them, which is the list the retire step works from. Retiring a subject is an operator step once no deployment compiled with it can start: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f` (`docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md`).

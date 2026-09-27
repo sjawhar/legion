@@ -91,6 +91,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.merged(ctx, tx, fact)
 	case intake.PullRequestClosed:
 		return e.closed(ctx, tx, fact)
+	case intake.ClaimReady:
+		return e.claimReady(ctx, tx, fact)
 	case intake.ClaimFailed:
 		return e.claimFailed(ctx, tx, fact)
 	case intake.RetryOrEscalate:
@@ -237,62 +239,6 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 		return e.transition(ctx, tx, child, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
 	}
 	return nil
-}
-
-func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered) (intake.Result, error) {
-	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil {
-		return intake.Result{}, err
-	}
-	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: fact.Version}
-	if e.cfg.DesignGate == config.DesignGateOff {
-		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.Version)
-	}
-	if err := e.store.PutGate(ctx, tx, gate); err != nil {
-		return intake.Result{}, err
-	}
-	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: fact.Version, Generation: issue.Generation}); err != nil {
-		return intake.Result{}, err
-	}
-	if !classify.DesignGateOpen(gate) {
-		return intake.Result{}, nil
-	}
-	if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: fact.Version}); err != nil {
-		return intake.Result{}, err
-	}
-	return intake.Result{}, e.advanceAdmittedTree(ctx, tx, *issue, gate)
-}
-
-func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.DispatchArtifact) (intake.Result, error) {
-	gate, err := e.store.Gate(ctx, tx, fact.Key)
-	if err != nil || gate == nil || gate.ArtifactID != fact.ArtifactID {
-		return intake.Result{}, err
-	}
-	wasOpen := classify.DesignGateOpen(*gate)
-	kind := classify.DesignGateEventKind(fact.Kind)
-	updated := classify.ApplyDesignGateEvent(*gate, kind, fact.Version)
-	if err := e.store.PutGate(ctx, tx, updated); err != nil {
-		return intake.Result{}, err
-	}
-	isOpen := classify.DesignGateOpen(updated)
-	if fact.Kind == intake.DispatchArtifactChangesRequested {
-		if err := e.notice(ctx, tx, fact.Key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason}); err != nil {
-			return intake.Result{}, err
-		}
-	}
-	if !wasOpen && isOpen {
-		if err := e.notice(ctx, tx, fact.Key, record.Notice{Kind: "design-approved", Version: fact.Version}); err != nil {
-			return intake.Result{}, err
-		}
-		issue, err := e.store.Issue(ctx, tx, fact.Key)
-		if err != nil || issue == nil {
-			return intake.Result{}, err
-		}
-		if err := e.advanceAdmittedTree(ctx, tx, *issue, updated); err != nil {
-			return intake.Result{}, err
-		}
-	}
-	return intake.Result{}, e.advancePendingReady(ctx, tx, fact.Key, updated)
 }
 
 func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComplete) (intake.Result, error) {

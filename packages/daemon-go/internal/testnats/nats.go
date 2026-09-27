@@ -49,11 +49,12 @@ var (
 // init runs in every test binary that imports this package, whichever helper its tests use. Every
 // server these helpers start has no users unless a test configures some, and nats.go refuses an
 // nkey when the server sends no nonce ("nats: nkeys not supported by the server"), so an
-// operator's NATS_NKEY_SEED or NATS_NKEY_SEED_FILE never reaches the tests' clients. A test that
-// means to pass a seed sets it itself.
+// operator's NATS_NKEY_SEED, NATS_DAEMON_NKEY_SEED, or either's _FILE pointer never reaches the
+// tests' clients. A test that means to pass a seed sets it itself.
 func init() {
-	os.Unsetenv("NATS_NKEY_SEED")
-	os.Unsetenv("NATS_NKEY_SEED_FILE")
+	for _, name := range []string{"NATS_NKEY_SEED", "NATS_NKEY_SEED_FILE", "NATS_DAEMON_NKEY_SEED", "NATS_DAEMON_NKEY_SEED_FILE"} {
+		os.Unsetenv(name)
+	}
 }
 
 // Main runs the package's tests, then removes the NATS container if a test started one, and
@@ -232,7 +233,29 @@ func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer
 // client URL once the server answers there (answering).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
-	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ { nkey: %q } ]\n}\n", user)
+	return StartNkeyAuthorizedUsers(t, NkeyUser{Public: user})
+}
+
+// NkeyUser is one nkey user a server admits: its public key, and the server's permissions block for
+// it in the configuration's syntax (`{ subscribe: { deny: ["x.>"] } }`), "" granting everything.
+type NkeyUser struct {
+	Public      string
+	Permissions string
+}
+
+// StartNkeyAuthorizedUsers is StartNkeyAuthorized for a server admitting users alone, each with its
+// permissions.
+func StartNkeyAuthorizedUsers(t testing.TB, users ...NkeyUser) string {
+	t.Helper()
+	entries := make([]string, 0, len(users))
+	for _, user := range users {
+		entry := fmt.Sprintf("{ nkey: %q", user.Public)
+		if user.Permissions != "" {
+			entry += ", permissions: " + user.Permissions
+		}
+		entries = append(entries, entry+" }")
+	}
+	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", strings.Join(entries, ", "))
 	container, err := start(tcnats.WithConfigFile(strings.NewReader(config)))
 	if err != nil {
 		t.Fatalf("start nkey-authorized NATS: %v", err)

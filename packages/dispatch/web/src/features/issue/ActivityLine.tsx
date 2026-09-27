@@ -28,7 +28,7 @@ function LinkedName({
   return (
     <span>
       {description.slice(0, at)}
-      <Link className={`underline ${linkText}`} to={to}>
+      <Link className={`dispatch-inline-link underline ${linkText}`} to={to}>
         {name}
       </Link>
       {description.slice(at + name.length)}
@@ -88,7 +88,7 @@ export function ActivityLine({
         <>
           <span>{description}</span>
           <Link
-            className={`underline ${linkText}`}
+            className={`dispatch-inline-link underline ${linkText}`}
             to={buildIssuePath({ id: event.payload.id, key: issueKey, kind: "comment" })}
           >
             view

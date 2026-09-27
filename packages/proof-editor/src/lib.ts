@@ -90,6 +90,7 @@ import { registerPopoverHookInstance } from './dispatch-popover-hook';
 import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
 import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
 import { configureDispatchLinks } from './dispatch-links';
+import { trailingNewlineInputPlugin } from './trailing-newline-input';
 
 export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
 export type {
@@ -301,6 +302,8 @@ export async function createProofEditor(
     .use(marksPlugins)
     // Allow Backspace to delete empty table rows
     .use(tableKeyboardPlugin)
+    // Firefox puts text typed over a code block's last line before its newline
+    .use(trailingNewlineInputPlugin)
     .use(placeholderPlugin)
     .config((ctx) => {
       ctx.update(remarkStringifyOptionsCtx, (prev) => ({

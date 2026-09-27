@@ -29,6 +29,9 @@ on:
       - "packages/pi-envoy/**"
       - "packages/workspace/**"
       - "skills/**"
+      # The worker image's remaining inputs (worker_image below).
+      - ".dockerignore"
+      - ".github/workflows/worker-image.yaml"
   workflow_dispatch:
 
 permissions:
@@ -77,7 +80,10 @@ jobs:
               - 'packages/envoy/go.sum'
             # The cli stage's frozen install needs the root manifest, lockfile, patches, and each
             # root-workspace manifest. Keep this explicit because a workspace can affect Bun's
-            # install without its source becoming part of the worker image.
+            # install without its source becoming part of the worker image. The context's
+            # .dockerignore and the called workflow change the image too. With cli, pi_envoy and go
+            # this covers every file worker.Dockerfile builds from;
+            # .github/scripts/check-image-trigger-paths.sh fails the build when it misses one.
             worker_image:
               - 'package.json'
               - 'bun.lock'
@@ -92,6 +98,8 @@ jobs:
               - 'packages/dispatch/package.json'
               - 'packages/workspace/package.json'
               - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
+              - '.dockerignore'
+              - '.github/workflows/worker-image.yaml'
 
   cli:
     needs: changes

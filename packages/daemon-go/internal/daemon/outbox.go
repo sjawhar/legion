@@ -290,7 +290,9 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
 // notice either. A publish the listener accepts but then cannot forward, to a session that is
 // registered but no longer running, comes back as a role-lane exception and is queued again
-// (rehold, notice_exceptions.go).
+// (rehold, notice_exceptions.go). The runner executes a row it leased from memory, so a row deleted
+// under its lease since (a catch-up a newer ready dropped) is found gone in the tree's snapshot and
+// finishes without a publish.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -299,6 +301,10 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		return errors.New("notice executor has no claim supervisor")
 	}
 	issue, tree, err := r.readNoticeTree(ctx, row)
+	if errors.Is(err, errNoticeRowGone) {
+		r.log.Info("outbox notice finished without publishing: its row was deleted under its lease", "row", row.ID, "kind", payload.Kind, "issue", row.Issue)
+		return nil
+	}
 	if errors.Is(err, errNoticeUnroutable) {
 		r.log.Error("outbox notice finished undelivered: it has no architect", "row", row.ID, "kind", payload.Kind, "issue", row.Issue, "error", err)
 		return nil
@@ -445,6 +451,19 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			}
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("relaunch retired claim %s: %w", token, err)
+			}
+		}
+		// A start that finds a tree's root architect running is a re-admission while its session
+		// lived on. The linger suspends the root's claim, so that happens only when the claim was
+		// mid-launch when the suspend ran (the machine ignores a suspend while launching), or the
+		// re-admission's start ran before the suspend. No ready follows, and a ready is what tells
+		// the architect its tree (workflow's claimReady), so the start applies that fact itself,
+		// for the running launch, once per start row, and the architect is told its tree's new
+		// generation.
+		if claimTookRole(state) && claim.IsTreeArchitect(payload.Role, issue.Key, issue.Tree) {
+			if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("start-running:%s:%d", token, row.ID),
+				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation}, r.handlers...); err != nil {
+				return fmt.Errorf("tell the running architect of %s its tree: %w", issue.Key, err)
 			}
 		}
 		// A claim that, once relaunched, still holds a task of this row's phase and run that it will

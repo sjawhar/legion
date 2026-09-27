@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -36,7 +37,7 @@ func TestAPullRequestFinishingOutsideAwaitingMergeTellsTheArchitectOnce(t *testi
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
 				Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
 			for _, id := range []string{"finished", "redelivered"} {
-				if _, err := intake.ApplyFact(context.Background(), pool, "github", id, tc.fact, testEngine(), admissionStub{}); err != nil {
+				if _, err := intake.ApplyFact(context.Background(), pool, "github", id, tc.fact, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 					t.Fatalf("ApplyFact %s: %v", id, err)
 				}
 			}
@@ -56,7 +57,7 @@ func TestAPullRequestFinishingOutsideAwaitingMergeTellsTheArchitectOnce(t *testi
 func TestALateCloseTellsTheArchitectNothingAndARedeliveredCloseNothingMore(t *testing.T) {
 	earlier, later := lateApplied.Add(-time.Hour), lateApplied.Add(time.Minute)
 	pool := appliedEvents(t, record.PullRequestOpen)
-	apply := applyFacts(t, pool, testEngine())
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
 	for _, step := range []struct {
 		id      string
 		fact    intake.Fact

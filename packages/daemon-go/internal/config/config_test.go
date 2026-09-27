@@ -979,9 +979,10 @@ func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 	}
 }
 
-// Every top-level key of the shipped schema (CONFIG_SCHEMA, packages/daemon/src/daemon/config.ts,
-// 37 keys) plus the new postgres_dsn, and the class it is in at Stage 2. No shipped key may fall
-// through to the typo refusal. Stage 2 moved fifteen keys from known-later to modelled.
+// Every top-level key of the shipped schema (CONFIG_SCHEMA, packages/daemon/src/daemon/config.ts:
+// 38 keys, nats_daemon_nkey_seed_file among them since #1494) plus the new postgres_dsn, and the
+// class it is in at Stage 2. No shipped key may fall through to the typo refusal. Stage 2 moved
+// fifteen keys from known-later to modelled.
 func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	const (
 		modelled   = "modelled"
@@ -1018,6 +1019,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "envoy_url", line: "envoy_url: http://127.0.0.1:9020", class: modelled},
 		{key: "envoy_token_file", line: "envoy_token_file: /var/run/legion/ENVOY_TOKEN", class: modelled},
 		{key: "nats_nkey_seed_file", line: "nats_nkey_seed_file: /var/run/legion/NATS_NKEY_SEED", class: modelled},
+		{key: "nats_daemon_nkey_seed_file", line: "nats_daemon_nkey_seed_file: /var/run/legion/NATS_DAEMON_NKEY_SEED", class: modelled},
 		{key: "nats_urls", line: "nats_urls: [nats://127.0.0.1:4222]", class: modelled},
 		{key: "operator_token_file", line: "operator_token_file: /var/run/legion/OPERATOR_TOKEN", class: modelled},
 

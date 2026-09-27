@@ -104,22 +104,26 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // boot makes, through the loader that runs neither GitHub App's private_key_command nor any
 // secretsd read, then every refusal boot makes from the configuration, the environment and the
 // files they name before it writes anything (daemon.CheckStart, the reads boot's own prepare
-// starts with), and nothing else: no store, no team, no file written, and no process but `mise
-// where <tool>` when a tmux configuration's omp_invocation names a mise tool. The OK line names the
-// NATS nkey seed's public key when there is one, never the seed.
+// starts with, the daemon's own NATS nkey seed among them), and nothing else: no store, no team, no
+// file written, and no process but `mise where <tool>` when a tmux configuration's omp_invocation
+// names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
+// the seed.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
-	natsUser := ""
+	paneNatsUser, daemonNatsUser := "", ""
 	if err == nil {
-		natsUser, err = daemon.CheckStart(cfg, os.LookupEnv)
+		paneNatsUser, daemonNatsUser, err = daemon.CheckStart(cfg, os.LookupEnv)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
 	ok := "Config OK: project=" + cfg.Project
-	if natsUser != "" {
-		ok += " nats-nkey-user=" + natsUser
+	if paneNatsUser != "" {
+		ok += " nats-nkey-user=" + paneNatsUser
+	}
+	if daemonNatsUser != "" {
+		ok += " nats-daemon-nkey-user=" + daemonNatsUser
 	}
 	fmt.Fprintln(stdout, ok)
 	return 0

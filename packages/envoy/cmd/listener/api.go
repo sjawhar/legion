@@ -147,10 +147,14 @@ func hasCapability(capabilities []string, value string) bool {
 //     the send outright. A malformed or unreadable targeted frame is never treated as if it
 //     were untagged: presence of the exact "delivery" key is itself a claim that this send is
 //     targeted, and an unreadable claim is refused, not waved through.
-//   - "delivery" is present and its mode reads unambiguously as a single non-empty string:
-//     mode=<that string>, err=nil. An unrecognised (non-enum) mode string is not a case this
-//     function decides: it returns that string like any other, and the ordinary capability
-//     check refuses it because no session advertises a bogus capability.
+//   - "delivery" is present and its mode reads unambiguously as one of the three delivery
+//     modes: mode=<that string>, err=nil.
+//   - "delivery" is present and its mode reads unambiguously as something else: mode="",
+//     err!=nil, refused like any other unreadable claim. This used to be waved through on the
+//     grounds that the capability check behind it would refuse a mode no session advertises -
+//     but `capabilities` is an open list from the registry, so a session that advertises a
+//     bogus string is exactly what makes that argument fail. The Dispatch server's
+//     `validDelivery` already refuses the same set at its own boundary; this is the listener's.
 func frameDeliveryMode(payload *string) (mode string, err error) {
 	if payload == nil {
 		return "", nil
@@ -183,7 +187,18 @@ func frameDeliveryMode(payload *string) (mode string, err error) {
 	if mode == "" {
 		return "", fmt.Errorf("delivery.mode is present but empty")
 	}
+	if !isDeliveryMode(mode) {
+		return "", fmt.Errorf("delivery.mode %q is not a delivery mode", mode)
+	}
 	return mode, nil
+}
+
+// isDeliveryMode reports whether value is one of the three targeted-delivery modes. The list is
+// DELIVERY_CAPABILITIES in packages/contracts/src/dispatch-api.ts, spelled here as the Dispatch
+// server spells it in its own `validDelivery`: the two sides talk over HTTP, not a shared Go
+// import.
+func isDeliveryMode(value string) bool {
+	return value == "aside" || value == "btw" || value == "steer"
 }
 
 // hasCaseVariantSibling reports whether keys contains some key that case-insensitively, but

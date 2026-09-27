@@ -5,6 +5,7 @@ import {
   type ReactNode,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -33,6 +34,7 @@ import {
   inputClasses,
   linkHoverText,
   linkText,
+  scrollFadeTrailing,
   secondaryButtonBorder,
   secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
@@ -97,6 +99,43 @@ export function IssueHeader({
       parentInputRef.current?.focus();
     }
   }, [parentEditing]);
+  // Whether the details rail has anywhere left to scroll, which is what its trailing fade says.
+  // The rail element is state rather than a ref so this runs once per rail, not once per render:
+  // three things change the answer and none of them is a render of this component - the reader
+  // scrolling the rail, the rail's box changing with the viewport, and its content arriving (the
+  // labels, the subscriber count, a GitHub title). One listener and two observers cover them,
+  // and the mutation observer re-observes children a render added.
+  const [rail, setRail] = useState<HTMLDivElement | null>(null);
+  const [railScrollable, setRailScrollable] = useState(false);
+  useLayoutEffect(() => {
+    if (rail === null) {
+      return;
+    }
+    // A fractional layout leaves scrollLeft a hair short of the end; one pixel of slack keeps a
+    // rail scrolled to its end from wearing the fade.
+    const measure = () =>
+      setRailScrollable(rail.scrollWidth - rail.clientWidth - rail.scrollLeft > 1);
+    const sizes = new ResizeObserver(measure);
+    const observeAll = () => {
+      sizes.observe(rail);
+      for (const child of rail.children) {
+        sizes.observe(child);
+      }
+    };
+    observeAll();
+    const contents = new MutationObserver(() => {
+      observeAll();
+      measure();
+    });
+    contents.observe(rail, { characterData: true, childList: true, subtree: true });
+    rail.addEventListener("scroll", measure, { passive: true });
+    measure();
+    return () => {
+      rail.removeEventListener("scroll", measure);
+      sizes.disconnect();
+      contents.disconnect();
+    };
+  }, [rail]);
   const [subscribersOpen, setSubscribersOpen] = useState(false);
   const [referencesOpen, setReferencesOpen] = useState(false);
   const { titles: agentTitles } = useAgents(issue.created_by?.kind === "session");
@@ -273,8 +312,11 @@ export function IssueHeader({
                 value={drafts.title}
               />
             ) : (
+              // The clamp lives on the inner span, not here: `overflow: hidden` clips at the
+              // padding edge, so a clamped element with vertical padding shows the top of the
+              // line it cut - fragments of a third line under the ellipsis.
               <h1
-                className={`min-w-0 flex-1 break-words rounded-lg border px-2 py-1 text-[22px] leading-7 font-semibold tracking-tight md:py-0 ${borderTransparent} ${textPrimaryOnSurface} line-clamp-2 ${
+                className={`min-w-0 flex-1 break-words rounded-lg border px-2 py-1 text-[22px] leading-7 font-semibold tracking-tight md:py-0 ${borderTransparent} ${textPrimaryOnSurface} ${
                   isClosed ? "" : `cursor-text ${borderStrongHover}`
                 }`}
                 onClick={() => {
@@ -296,7 +338,7 @@ export function IssueHeader({
                 tabIndex={isClosed ? -1 : 0}
                 title={issue.title}
               >
-                {drafts.title}
+                <span className="line-clamp-2">{drafts.title}</span>
               </h1>
             )}
             <PinButton
@@ -388,9 +430,14 @@ export function IssueHeader({
             </button>
           )}
         </div>
+        {/* The details line scrolls sideways rather than widening the page, and at a phone width
+            its cut lands inside an item - the Labels control alone is wider than the rail. The
+            fade says the cut is a scroll, and it is off at the end of the scroll, where a fade
+            would hide the last item instead. */}
         <div
-          className="flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto [scrollbar-width:thin] md:[&_button]:min-h-7 md:[&_button]:py-0"
+          className={`flex min-w-0 flex-nowrap items-center gap-2 overflow-x-auto [scrollbar-width:thin] md:[&_button]:min-h-7 md:[&_button]:py-0 ${railScrollable ? scrollFadeTrailing : ""}`}
           data-testid="issue-metadata-rail"
+          ref={setRail}
         >
           {whoseTurn === null ? null : (
             <span
@@ -457,7 +504,7 @@ export function IssueHeader({
               <span className="font-medium">Parent:</span>
               {issue.parent === null ? null : (
                 <Link
-                  className={`shrink-0 underline ${linkText} ${linkHoverText}`}
+                  className={`dispatch-inline-link shrink-0 underline ${linkText} ${linkHoverText}`}
                   to={buildIssuePath({ key: issue.parent, kind: "issue" })}
                 >
                   {issue.parent}

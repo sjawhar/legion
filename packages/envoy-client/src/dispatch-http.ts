@@ -237,8 +237,9 @@ export class DispatchClient {
     return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
   }
 
-  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row. */
-  async getArchitectureSource(project: string): Promise<ArchitectureSource> {
+  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row, or `null`
+   *  when the project has none. Having none is an answer, not a failure. */
+  async getArchitectureSource(project: string): Promise<ArchitectureSource | null> {
     return this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
   }
 

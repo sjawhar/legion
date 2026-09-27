@@ -70,13 +70,22 @@ dispatch_human() {
   fi
 }
 # new_issue TITLE [PARENT] creates an issue in the run's project and prints its key. A root carries
-# the `legion` label, which hands it to the Go daemon (it admits no unlabeled root); a child carries
-# none, since it runs under its root's tree.
+# the `legion` label, which hands it to the Go daemon (it admits no unlabeled root), and smoke_spec
+# as its primary document: the proof gives its architect no instruction, so what the tree is for
+# comes from the issue itself. A child carries neither, since it runs under its root's tree.
 new_issue() {
   local title=$1 parent=${2:-} payload
-  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" \
-    'if $parent == "" then {project:$project,title:$title,labels:["legion"],force:true} else {project:$project,title:$title,parent:$parent,force:true} end')
+  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" --arg spec "$(smoke_spec)" \
+    'if $parent == "" then {project:$project,title:$title,labels:["legion"],spec:$spec,force:true} else {project:$project,title:$title,parent:$parent,force:true} end')
   dispatch_human POST issues "$payload" | jq -er .key
+}
+# smoke_spec is every root's starting document: one tiny one-file change, and the one extra line a
+# scripted review round may ask for, which is in scope.
+smoke_spec() {
+  printf '%s\n' "## Summary" "" \
+    "A Legion smoke proof. Make one tiny, concrete one-file change in \`$repo\`: add one new Markdown file under \`smoke/\` holding a single line that names this issue." "" \
+    "## Scope" "" \
+    "A review of the pull request may ask for one more line appended to that same file; that is in scope. Nothing else changes."
 }
 set_status() { dispatch_human PATCH "issues/$1" "$(jq -cn --arg status "$2" '{status:$status}')" >/dev/null; }
 
@@ -156,14 +165,23 @@ gate_registered() {
   daemon_state | jq -e --arg issue "$1" --arg artifact "$2" \
     '.issues[$issue].designGate.artifactId == $artifact and .issues[$issue].designGate.currentVersion > 0'
 }
-# The architect owns spec editing and gate registration; the proof names the one primary artifact
-# Dispatch created so a real agent cannot register an unrelated document.
-drive_gate() {
+# architect_registers_gate ISSUE LABEL waits for a root's architect to register its gate on its
+# own. Nobody prompts it: its first turn is the daemon's catch-up notice, from which it writes the
+# spec (requesting approval when the design gate is armed) and registers the gate. The registration
+# must name the one primary artifact Dispatch created, so a real agent cannot register an unrelated
+# document.
+architect_registers_gate() {
   local issue=$1 label=$2 artifact
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
-  send_agent "$issue" architect "$label: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo, and say in it that a review of the pull request may ask for one more line appended to that same file, which is in scope. Request approval for primary artifact $artifact. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at the version returned by that approval request. Wait after registering."
-  until_true 300 "$label architect to register primary artifact $artifact" gate_registered "$issue" "$artifact"
+  until_true 300 "$label architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
+  until_true 900 "$label architect to register primary artifact $artifact on its own" gate_registered "$issue" "$artifact"
+}
+# drive_gate ISSUE LABEL: the architect registers the gate on its own, then the proof's human
+# approves the registered version and the daemon moves the issue to planning.
+drive_gate() {
+  local issue=$1 label=$2
+  architect_registers_gate "$issue" "$label"
   gate_artifact=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.artifactId')
   gate_version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
   dispatch_human POST "artifacts/$gate_artifact/reviews" '{"state":"approved"}' >/dev/null
@@ -392,7 +410,7 @@ worker_notices() {
   while IFS=$'\t' read -r f role; do
     jq -R -r --arg file "${f##*/}" --arg role "$role" '
       fromjson? | select(.customType == "envoy-message") | (.content | tostring)
-      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status) on [^\\n]*)")
+      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up) on [^\\n]*)")
       | "\($file) \($role) \(.summary)"' "$f"
   done < <(worker_sessions "$1")
 }

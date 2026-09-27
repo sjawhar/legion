@@ -28,6 +28,9 @@ import {
   sessionHandoffFile,
   writeSessionHandoff,
 } from "../src/session-identity"
+import { isolatePaneEnvironment } from "./pane-environment"
+
+isolatePaneEnvironment()
 
 interface Queue {
   readonly subject: string
