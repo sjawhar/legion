@@ -81,7 +81,11 @@ type Service struct {
 	// afterSettleLock runs after settleRoom has taken the document's advisory lock and before
 	// it touches the room. Nil outside tests; tests use it to fail the room in that window.
 	afterSettleLock func(room string)
-	settleWG        sync.WaitGroup
+	// afterPublishRefused runs when a committed write's publish is refused by its room, before
+	// the publish decides whether to fail that room. Nil outside tests; tests use it to let the
+	// refused room's recovery finish in that window.
+	afterPublishRefused func(room string)
+	settleWG            sync.WaitGroup
 	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
 	// the store, so shutdown joins them before it closes.
 	evictWG sync.WaitGroup

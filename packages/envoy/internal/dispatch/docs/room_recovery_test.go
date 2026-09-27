@@ -60,18 +60,20 @@ func requireText(t *testing.T, service *Service, artifactID, want string) {
 // failRoomDuringLoadStore fails a room from inside its load: the durable read ygo makes just
 // before it calls OnLoadDocument, with the room's ready barrier still open. It stands for any
 // failure that lands in that window - a committed write's publish, a browser update's append,
-// a commit whose outcome is unknown - which a test cannot time by hand.
+// a commit whose outcome is unknown - which a test cannot time by hand. It fails the first load
+// that runs after it is armed, so a test can choose which load meets the failure.
 type failRoomDuringLoadStore struct {
 	VersionedStore
 	service atomic.Pointer[Service]
 	room    string
+	armed   atomic.Bool
 	failed  chan struct{}
 	once    sync.Once
 }
 
 func (s *failRoomDuringLoadStore) Load(ctx context.Context, room string) (persistence.LoadResult, error) {
 	result, err := s.VersionedStore.Load(ctx, room)
-	if err != nil || room != s.room {
+	if err != nil || room != s.room || !s.armed.Load() {
 		return result, err
 	}
 	s.once.Do(func() {
@@ -102,6 +104,7 @@ func TestARoomThatFailsWhileItIsLoadingRecovers(t *testing.T) {
 	})
 	persist.service.Store(service)
 	seedServiceText(t, service, artifactID, "before")
+	persist.armed.Store(true)
 
 	// The load runs on context.Background(), as the settlement warm-up and a committed write's
 	// publish do, so nothing but the fix ends it.
@@ -133,6 +136,74 @@ func TestARoomThatFailsWhileItIsLoadingRecovers(t *testing.T) {
 		t.Fatalf("commit the write: %v", err)
 	}
 	requireText(t, service, artifactID, "after\n")
+}
+
+// A committed write's publish that its room refuses must not fail the room it finds by name. The
+// refusal says the room had already failed, and by the time it is handled that failure's
+// recovery can have finished and registered a replacement - which holds this write, whose append
+// committed. Failing the replacement refused every write to the document until it too recovered.
+func TestAPublishRefusedByAFailedRoomLeavesTheReplacementAlone(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "")
+	persist := &failRoomDuringLoadStore{
+		VersionedStore: NewPgVersioned(database),
+		room:           artifactID,
+		failed:         make(chan struct{}),
+	}
+	service := New(Deps{Store: database, Persistence: persist, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		stop, cancel := context.WithTimeout(context.Background(), recoveryBound)
+		defer cancel()
+		_ = service.Shutdown(stop)
+	})
+	persist.service.Store(service)
+	seedServiceText(t, service, artifactID, "before")
+	alice := model.Actor{Kind: "user", ID: "alice"}
+
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin write transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ReplaceText(joined, artifactID, "after", alice); err != nil {
+		t.Fatalf("joined write: %v", err)
+	}
+	// Commit without publishing, the window a room can be replaced in, and leave the publish a
+	// room to load: the write's own update is durable from its append.
+	if err := ledger.commit(ctx); err != nil {
+		t.Fatalf("commit the write: %v", err)
+	}
+	if err := service.Evict(ctx, artifactID); err != nil {
+		t.Fatalf("evict the room: %v", err)
+	}
+	persist.armed.Store(true)
+	// The publish's own load meets a failure, and the refusal is handled only once that
+	// failure's recovery has finished - the window in which the publish would fail the
+	// replacement room instead of the failed one.
+	service.afterPublishRefused = func(room string) { awaitRecovered(t, service, room) }
+	ledger.publish()
+	<-persist.failed
+
+	if service.roomFailed(artifactID) {
+		t.Fatal("the refused publish failed the room that replaced the one it was refused by")
+	}
+	retry, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin retry transaction: %v", err)
+	}
+	defer retry.Rollback(ctx)
+	retryJoined, retryLedger := service.Join(ctx, retry)
+	defer retryLedger.Discard()
+	if _, err := service.ReplaceText(retryJoined, artifactID, "later", alice); err != nil {
+		t.Fatalf("joined write after the refused publish: %v", err)
+	}
+	if err := retryLedger.Commit(ctx); err != nil {
+		t.Fatalf("commit the retry: %v", err)
+	}
+	requireText(t, service, artifactID, "later\n")
 }
 
 // A failure drops the room's settlement: the queued one is stopped, a running one refuses, and
