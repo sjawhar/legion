@@ -45,11 +45,18 @@ type ChainVerifier struct {
 	FetchApproval func(ctx context.Context, recordID string) (assertion json.RawMessage, found bool, err error)
 
 	// VerifyAssertion re-verifies the approval assertion against the approver's currently live
-	// key set — approvers.Service.VerifyAssertion's own contract, but read-only: a caller wiring
-	// this against a real approvers.Service must run it inside a transaction it always rolls
-	// back, so re-verifying the same stored assertion on every future call never advances the
-	// approving key's own signature counter (which would otherwise make every re-verification
-	// after the first refuse it as a replay of itself).
+	// key set — approvers.Service.VerifyAssertion's own contract, run inside a transaction the
+	// caller always rolls back so a re-check never persists a side effect. That re-check's own
+	// authenticator signature counter was already advanced once, for real, by the original,
+	// committed decision this assertion approved; rolling back a later re-verification's own
+	// transaction cannot undo that earlier commit, so every honest re-check of the exact same
+	// stored assertion legitimately fails the counter-monotonicity check on its own
+	// (approvers.ErrCounterReplay) even though the signature, origin, rpID, challenge and key
+	// liveness all still check out. A caller wiring this against a real approvers.Service must
+	// therefore treat ErrCounterReplay alone as success — never any other error, since the
+	// counter check runs strictly after every cryptographic and liveness check, so a forged
+	// signature, wrong origin/rpID/challenge, or a since-revoked/tombstoned key all fail before
+	// the counter is ever reached and never wrap ErrCounterReplay.
 	VerifyAssertion func(ctx context.Context, login string, challenge [32]byte, assertion json.RawMessage) error
 }
 

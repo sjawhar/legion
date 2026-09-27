@@ -12,17 +12,16 @@ package enroll
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/broker/approvers"
 	"github.com/sjawhar/envoy/internal/broker/dispatch"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -119,18 +118,19 @@ func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, opera
 }
 
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
-// re-verification uses, wired against st: FetchRecord and FetchApproval read straight from
-// Postgres. VerifyAssertion does not re-run the approver's WebAuthn signature check — a stored
-// assertion's own authenticator signature counter is a one-time proof by design: re-verifying it
-// through approvers.Service.VerifyAssertion a second time always fails as a replay of itself,
-// since that first, real re-verification already advanced sign_count to match the assertion's
-// own fixed counter value. What can genuinely change between decision time and now is whether
-// the approving key is still trusted at all, so VerifyAssertion instead extracts the credential
-// id the stored assertion names and checks that key's own current state: a key later revoked
-// (or tombstoned) stops authenticating everything it ever approved, exactly as
-// approvers.Service.RevokeKey's cascade intends, without re-litigating a signature that was
-// already checked once, permanently, in credential_requests' own append-only ledger.
-func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *record.ChainVerifier {
+// re-verification uses, wired against st and approversSvc: FetchRecord and FetchApproval read
+// straight from Postgres. VerifyAssertion re-runs the approver's real WebAuthn signature check
+// (approvers.Service.VerifyAssertion — full origin/rpID/flags/challenge/signature verification,
+// plus the approver key's own current active/revoked state) inside a transaction it always rolls
+// back, so a re-check can never persist a side effect. The assertion's own authenticator
+// signature counter was already advanced once, for real, by the original (committed) decision at
+// ApplyDecision time, so every honest re-check of that exact same stored assertion fails the
+// counter-monotonicity check on its own — approvers.ErrCounterReplay — and that is the ONLY error
+// this treats as success: the counter check runs strictly after every cryptographic check inside
+// VerifyAssertion, so a forged signature, wrong origin/rpID/challenge, or a since-revoked or
+// tombstoned key all fail before the counter is ever reached, and none of those wrap
+// ErrCounterReplay.
+func NewChainVerifier(st *store.Store, approversSvc *approvers.Service, audience string, skew time.Duration) *record.ChainVerifier {
 	return &record.ChainVerifier{
 		Audience: audience,
 		Skew:     skew,
@@ -157,25 +157,14 @@ func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *rec
 			}
 			return assertion, true, nil
 		},
-		VerifyAssertion: func(ctx context.Context, login string, _ [32]byte, assertion json.RawMessage) error {
-			parsed, err := protocol.ParseCredentialRequestResponseBytes(assertion)
-			if err != nil {
-				return fmt.Errorf("parse stored assertion: %w", err)
-			}
-			credentialID := base64.RawURLEncoding.EncodeToString(parsed.RawID)
-			var storedLogin, state string
-			err = st.Pool.QueryRow(ctx, `select login, state from approver_keys where credential_id=$1`, credentialID).Scan(&storedLogin, &state)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return fmt.Errorf("approver key %s no longer exists", credentialID)
-			}
+		VerifyAssertion: func(ctx context.Context, login string, challenge [32]byte, assertion json.RawMessage) error {
+			tx, err := st.Pool.Begin(ctx)
 			if err != nil {
 				return err
 			}
-			if state != "active" {
-				return fmt.Errorf("approver key %s is %s, not active", credentialID, state)
-			}
-			if login != "" && record.CanonicalLogin(login) != storedLogin {
-				return fmt.Errorf("approver key %s belongs to %s, not %s", credentialID, storedLogin, login)
+			defer tx.Rollback(ctx)
+			if _, err := approversSvc.VerifyAssertion(ctx, tx, login, challenge, assertion); err != nil && !errors.Is(err, approvers.ErrCounterReplay) {
+				return err
 			}
 			return nil
 		},

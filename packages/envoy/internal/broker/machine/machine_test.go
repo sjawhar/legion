@@ -3,6 +3,7 @@ package machine
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"regexp"
@@ -65,7 +66,7 @@ func newFixture(t *testing.T) (*Service, *webauthntest.Authenticator) {
 	}
 
 	enr := &enroll.Service{Store: st, Lease: time.Hour}
-	enr.Chain = enroll.NewChainVerifier(st, testAudience, time.Minute)
+	enr.Chain = enroll.NewChainVerifier(st, approversSvc, testAudience, time.Minute)
 
 	rulesPath := t.TempDir() + "/rules.yaml"
 	if err := os.WriteFile(rulesPath, []byte("version: 1\n"), 0o600); err != nil {
@@ -359,4 +360,112 @@ func TestExpirePendingMarksOverdueLoginsExpired(t *testing.T) {
 	if state, _, err := svc.recordState(ctx, decidedView.RecordID); err != nil || state != "denied" {
 		t.Fatalf("recordState(decided) = %q, %v, want denied (ExpirePending must not overwrite a real decision)", state, err)
 	}
+}
+
+// TestAuthenticateLauncherSucceedsOnRepeatedChainReVerification mirrors Task 6's
+// TestValuesSucceedsTwiceOnALiveApprovedGrant: re-verifying a live, previously-approved
+// credential's issuance chain a second time must still succeed. AuthenticateLauncher's chain
+// re-check re-runs the approver's real WebAuthn signature check on every call, inside a
+// transaction it always rolls back; the assertion's own authenticator counter was already
+// advanced once, for real, by ApplyDecision's own committed decision, so every honest re-check of
+// that same stored assertion legitimately trips the counter-monotonicity check on its own
+// (approvers.ErrCounterReplay) — proving ErrCounterReplay tolerance, not a broken re-check, is
+// what lets a credential go on authenticating after the first call.
+func TestAuthenticateLauncherSucceedsOnRepeatedChainReVerification(t *testing.T) {
+	svc, approverAuth := newFixture(t)
+	ctx := context.Background()
+
+	compact := signMachineLogin(t, "sjawhar", "sami-agents", "")
+	_, code, err := svc.Login(ctx, compact)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	view, err := svc.LookupByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("LookupByCode: %v", err)
+	}
+	assertion := approverAuth.Assert(t, testRPID, testOrigin, view.ApproveChallenge)
+	_, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, true, assertion, code)
+	if err != nil {
+		t.Fatalf("ApplyDecision: %v", err)
+	}
+
+	for i := range 2 {
+		if _, live, err := svc.Enroll.AuthenticateLauncher(ctx, credentialID); err != nil || !live {
+			t.Fatalf("AuthenticateLauncher call %d = live=%v err=%v, want live=true", i+1, live, err)
+		}
+	}
+}
+
+// TestChainVerificationRefusesAForgedAssertionSignature is the mutation-proof that
+// AuthenticateLauncher's chain re-check still runs a genuine WebAuthn signature verification on
+// every call rather than only checking the signer's liveness: tampering the stored assertion's
+// signature byte-for-byte (everything else, including its counter, left untouched) must turn a
+// credential that authenticates into one that does not. Deleting the real VerifyAssertion call
+// (or replacing it with a liveness-only check) would make this test fail, since nothing else in
+// the chain notices a corrupted signature.
+func TestChainVerificationRefusesAForgedAssertionSignature(t *testing.T) {
+	svc, approverAuth := newFixture(t)
+	ctx := context.Background()
+
+	compact := signMachineLogin(t, "sjawhar", "sami-agents", "")
+	_, code, err := svc.Login(ctx, compact)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	view, err := svc.LookupByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("LookupByCode: %v", err)
+	}
+	assertion := approverAuth.Assert(t, testRPID, testOrigin, view.ApproveChallenge)
+	_, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, true, assertion, code)
+	if err != nil {
+		t.Fatalf("ApplyDecision: %v", err)
+	}
+
+	// Sanity: the untouched credential authenticates — otherwise a broken fixture (or a
+	// regression that always refuses) could make the assertion below pass for the wrong reason.
+	if _, live, err := svc.Enroll.AuthenticateLauncher(ctx, credentialID); err != nil || !live {
+		t.Fatalf("AuthenticateLauncher(before tamper) = live=%v err=%v, want live=true", live, err)
+	}
+
+	if _, err := svc.Store.Pool.Exec(ctx, `update credential_request_events set assertion=$2 where record_id=$1 and event='approved'`,
+		view.RecordID, tamperAssertionSignature(t, assertion)); err != nil {
+		t.Fatalf("tamper stored assertion: %v", err)
+	}
+
+	if _, live, err := svc.Enroll.AuthenticateLauncher(ctx, credentialID); err != nil || live {
+		t.Fatalf("AuthenticateLauncher(forged signature) = live=%v err=%v, want live=false, err=nil", live, err)
+	}
+}
+
+// tamperAssertionSignature flips a bit in an otherwise-valid AuthenticationResponseJSON's
+// signature field, leaving its clientDataJSON, authenticatorData (and so its counter), and
+// credential id untouched — a forged signature over otherwise-genuine everything-else.
+func tamperAssertionSignature(t *testing.T, assertion json.RawMessage) json.RawMessage {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(assertion, &doc); err != nil {
+		t.Fatal(err)
+	}
+	response, ok := doc["response"].(map[string]any)
+	if !ok {
+		t.Fatal("assertion has no response object")
+	}
+	sig, ok := response["signature"].(string)
+	if !ok {
+		t.Fatal("assertion response has no signature")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(sig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[0] ^= 0xFF
+	response["signature"] = base64.RawURLEncoding.EncodeToString(raw)
+	doc["response"] = response
+	tampered, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tampered
 }
