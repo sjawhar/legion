@@ -311,7 +311,12 @@ export function SearchPalette({
                         surface so the hits read as the list and this reads as its heading.
                         Its status is the lifecycle label the rest of the product shows -
                         `Needs review`, never the raw value. */}
+                    {/* `aria-hidden` because the group below takes its name from this row: a
+                        reader would otherwise hear the owner twice, once as the row and once
+                        as the group's label. `aria-labelledby` computes a name from a hidden
+                        element, so the group keeps it. */}
                     <div
+                      aria-hidden="true"
                       aria-label={`${header.key}: ${header.name}`}
                       className={`flex min-w-0 items-center gap-2 border-b px-3 py-1.5 text-xs ${borderDefault} ${surfaceMutedBg} ${
                         muted ? textMutedOnSurfaceMuted : ""

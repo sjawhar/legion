@@ -408,6 +408,15 @@ test("each palette group is named by its owner row", async ({ browser }, testInf
     await expect(group).toBeVisible();
     // The options are inside it, and the listbox still owns them.
     await expect(group.getByRole("option").first()).toBeVisible();
+    // The owner row names the group and is not a second node in the accessibility tree, so a
+    // reader hears the owner once rather than twice. `aria-labelledby` computes a name from a
+    // hidden element, which is why the group above still has one.
+    const row = page.locator(`[id="search-group-issue:${issue.key}"]`);
+    await expect(row).toHaveAttribute("aria-hidden", "true");
+    // Playwright's role engine skips `aria-hidden` subtrees, so the owner's text is reachable
+    // once - as the group's name - and not as a node of its own.
+    await expect(page.getByRole("group", { name: new RegExp(`^${issue.key}: `) })).toHaveCount(1);
+    await expect(page.getByText(`${issue.key}: Conversation view`, { exact: true })).toHaveCount(0);
   } finally {
     await alice.close();
   }
