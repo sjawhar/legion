@@ -329,7 +329,8 @@ func (s *server) writeBroadcast(
 // broadcastDeliveryWorkers at a time. It runs on the server's lifetime rather than the
 // request's, so a browser that goes away cannot strand a recipient, and a shutdown cancels it
 // rather than leaving the goroutine behind. One recipient's failure never stops another's: a
-// send the listener refused settles that recipient's attempt as failed, and a delivery this
+// send the listener refused settles that recipient's attempt as failed, a recipient whose
+// attempt was taken over from the agent card is skipped, and a delivery this
 // cannot record at all leaves the attempt pending and unclaimed, which the broadcast view
 // shows as sending and, once the claim lease has passed, offers a same-mode retry for.
 func (s *server) deliverBroadcast(messages []model.Message, delivery string, actor model.Actor) {
@@ -342,7 +343,15 @@ func (s *server) deliverBroadcast(messages []model.Message, delivery string, act
 			defer wait.Done()
 			for message := range pending {
 				ctx := store.WithTransactionTracking(s.lifetime())
-				if _, err := s.deliverMessage(ctx, message, delivery, nil, actor, nil); err != nil {
+				// Bound to the attempt the write opened. A human who changes the mode from the
+				// agent card while this worker is queued settles that attempt and sends their
+				// own; the worker must then send nothing, because an attempt of its own would
+				// put a second frame on the session's subject.
+				_, err := s.deliverMessageResuming(ctx, message, delivery, nil, actor, nil, 1)
+				if errors.Is(err, errAttemptNotPending) {
+					continue
+				}
+				if err != nil {
 					slog.Error("dispatch: broadcast delivery",
 						"message", message.ID, "target", messageTarget(message.Target), "error", err)
 				}

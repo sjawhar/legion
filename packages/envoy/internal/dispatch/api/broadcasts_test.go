@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -439,5 +440,112 @@ func TestBroadcastAnswersBeforeDeliveringAndStillReachesEveryRecipient(t *testin
 			t.Fatalf("%s attempts = %#v, want the one attempt settled sent",
 				recipient.SessionID, recipient.Message.Deliveries)
 		}
+	}
+}
+
+// LEGION-233 review, second round. A broadcast's worker is queued behind its own attempt, so a
+// human who changes the mode from the agent card in the meantime settles attempt 1 and sends
+// their own frame. The worker used to find no pending attempt, open one of its own, and send a
+// SECOND frame to the same session. It is bound to attempt 1 now, and skips the recipient once
+// that attempt is no longer its to send.
+func TestBroadcastWorkerSkipsARecipientTakenOverFromTheAgentCard(t *testing.T) {
+	release := make(chan struct{})
+	// The worker announces itself when it parks, so the takeover below happens while it is
+	// held rather than at a moment this test guessed.
+	parked := make(chan struct{}, 1)
+	var listenerState struct {
+		sync.Mutex
+		seenCreate bool
+		holding    bool
+		sends      []string
+	}
+	listenerState.holding = true
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			listenerState.Lock()
+			// The create handler judges the selection before it starts any worker, so its own
+			// read is always the first one and is never held.
+			first := !listenerState.seenCreate
+			listenerState.seenCreate = true
+			hold := listenerState.holding && !first
+			listenerState.Unlock()
+			if hold {
+				parked <- struct{}{}
+				<-release
+			}
+			_, _ = w.Write([]byte(broadcastSessions))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			var request struct {
+				IdempotencyKey string `json:"idempotency_key"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode send: %v", err)
+			}
+			listenerState.Lock()
+			listenerState.sends = append(listenerState.sends, request.IdempotencyKey)
+			listenerState.Unlock()
+			_, _ = w.Write([]byte(`{"event_id":"envelope","recipient":"planner"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+
+	created := decodeBody[broadcastResponse](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/broadcasts", map[string]any{
+		"body": "Status?", "delivery": "btw", "session_ids": []string{"planner"},
+	}, "alice"))
+	message := created.Recipients[0].Message.ID
+
+	<-parked
+	// The worker is held. From here the listener answers everyone else at once, so the human's
+	// own send is never the one being held.
+	listenerState.Lock()
+	listenerState.holding = false
+	listenerState.Unlock()
+
+	// The human changes the mode from the agent card while the worker is held: this settles
+	// attempt 1 as superseded and sends its own frame under attempt 2.
+	change := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message+"/deliveries", map[string]any{
+		"delivery": "steer",
+	}, "alice")
+	if change.Code != http.StatusCreated {
+		t.Fatalf("mode change: status=%d body=%s", change.Code, change.Body.String())
+	}
+	close(release)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var pending int
+		if err := database.Pool.QueryRow(context.Background(),
+			`select count(*) from message_deliveries where message_id = $1 and state = 'pending'`,
+			message).Scan(&pending); err != nil {
+			t.Fatalf("count pending attempts: %v", err)
+		}
+		if pending == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("an attempt is still pending; the worker never finished")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Give a worker that wrongly opened an attempt of its own time to send it.
+	time.Sleep(200 * time.Millisecond)
+
+	listenerState.Lock()
+	sends := append([]string(nil), listenerState.sends...)
+	listenerState.Unlock()
+	if len(sends) != 1 || sends[0] != message+":steer" {
+		t.Fatalf("listener sends = %#v, want only the human's mode change (%s:steer)", sends, message)
+	}
+	var attempts int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select count(*) from message_deliveries where message_id = $1`, message).Scan(&attempts); err != nil {
+		t.Fatalf("count attempts: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want the broadcast's and the human's, and none the worker opened", attempts)
 	}
 }
