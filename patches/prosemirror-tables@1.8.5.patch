@@ -1,0 +1,36 @@
+diff --git a/dist/index.cjs b/dist/index.cjs
+index 6c65eb7d57e207a8cd1f2a2ae3bb99507c405cef..39538334beb7b07fbe56cd25ffb4033e66c16723 100644
+--- a/dist/index.cjs
++++ b/dist/index.cjs
+@@ -834,11 +834,10 @@ function fixTable(state, table, tablePos, tr) {
+ 		const end = pos + row.nodeSize;
+ 		const add = mustAdd[i];
+ 		if (add > 0) {
+-			let role = "cell";
+-			if (row.firstChild) role = row.firstChild.type.spec.tableRole;
++			const type = row.firstChild ? tableNodeTypes(state.schema)[row.firstChild.type.spec.tableRole] : row.type.contentMatch.defaultType;
+ 			const nodes = [];
+ 			for (let j = 0; j < add; j++) {
+-				const node = tableNodeTypes(state.schema)[role].createAndFill();
++				const node = type.createAndFill();
+ 				if (node) nodes.push(node);
+ 			}
+ 			const side = (i == 0 || first == i - 1) && last == i ? pos + 1 : end - 1;
+diff --git a/dist/index.js b/dist/index.js
+index 5b4ac25594ba5722409332b1e5c812f108c9bf11..4a61a13e487e3f70f0889c882f686bf387d69375 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -834,11 +834,10 @@ function fixTable(state, table, tablePos, tr) {
+ 		const end = pos + row.nodeSize;
+ 		const add = mustAdd[i];
+ 		if (add > 0) {
+-			let role = "cell";
+-			if (row.firstChild) role = row.firstChild.type.spec.tableRole;
++			const type = row.firstChild ? tableNodeTypes(state.schema)[row.firstChild.type.spec.tableRole] : row.type.contentMatch.defaultType;
+ 			const nodes = [];
+ 			for (let j = 0; j < add; j++) {
+-				const node = tableNodeTypes(state.schema)[role].createAndFill();
++				const node = type.createAndFill();
+ 				if (node) nodes.push(node);
+ 			}
+ 			const side = (i == 0 || first == i - 1) && last == i ? pos + 1 : end - 1;
