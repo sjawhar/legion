@@ -279,7 +279,9 @@ tester, reviewer, retro, merger READY, the ordinary human squash merge, producti
 architect sign-off. It also proves three changes-requested rounds, each posted by the reviewer
 pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
 the round returns to implementing only once the reviewer's handoff is recorded, authored and
-committed by the review App — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
+committed by the review App, and each review, like the final approval, names the commit carrying
+that round's reviewer handoff, the head the reviewer's own handoff push made (the order the Go
+reviewer prompt gives; the proof names only the decision) — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
 implementer's pull request changed, which the run records and requires to be exactly one; the
 correction counts only in that file's patch on the pull request) and reaching testing only on
 that round's own implementer handoff (the daemon's phase record must hold the implementer's

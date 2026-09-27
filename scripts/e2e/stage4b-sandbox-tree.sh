@@ -1492,7 +1492,7 @@ send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implement
 wait_for_phase "$tree1" reviewing 1200
 assert_handoff_committer "$tree1" tester testing 0
 wait_for_worker "$tree1" reviewer
-send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents, then submit APPROVE on it at its current head as legion-reviewer[bot] and complete the reviewer handoff."
+send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. Your decision is APPROVE, submitted as legion-reviewer[bot]; take the round's steps in the order your role gives, and complete the reviewer handoff."
 pair_session=$(claim_session_file "$tree1" reviewer) || fail "the reviewer on $tree1 has no session file"
 until_true 1800 "the reviewer's two thermonuclear dispatches to reach an outcome" pair_settled
 record_pair || fail "the reviewer's session and its review pair could not be recorded"

@@ -637,9 +637,13 @@ This publishes your phase's completion to the architect's role and clears the da
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
 invent a different completion protocol — this is the whole contract.
 
-A reviewer's phase ends with its completion, not with its review: submit the review on GitHub
-first, then commit the handoff and complete. The daemon moves the issue once both are in — the
-decision GitHub reports and your completion, in either order — so a review posted without a
+A reviewer's phase ends with its completion, not with its review. A round that writes a handoff
+takes this order: write, commit and push the handoff; wait for the CI verdict to settle at the
+head that push made; submit the review of that head by its SHA; then complete. A review of a head
+the handoff push then replaces names a head the pull request no longer has, and GitHub can
+dismiss an approval once the head moves. A round that writes none (the final approval of the
+`.legion/` deletion head) reviews the head as it is. The daemon moves the issue once both are in —
+the decision GitHub reports and your completion, in either order — so a review posted without a
 completion leaves the issue in reviewing until you finish.
 
 **A refused completion is information, not a retry loop.** The daemon attributes your report to

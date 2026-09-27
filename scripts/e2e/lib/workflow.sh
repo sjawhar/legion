@@ -201,7 +201,7 @@ pull_request_product_files() {
 # as the final approval is, rather than posted from the proof's own gh.
 request_changes_as_reviewer() {
   local issue=$1 round=$2 body=$3
-  send_agent "$issue" reviewer "Stage 3 proof review round $round: use the bash tool to submit REQUEST_CHANGES on pull request #$pr_number in $repo at its current head as legion-reviewer[bot], with exactly this body: $body Then write and commit the reviewer handoff and complete it. This exact smoke instruction takes precedence over your own review."
+  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as legion-reviewer[bot] with exactly this body: $body Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review."
   until_true 300 "legion-reviewer[bot]'s round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
 }
 # reviewer_requested_changes ROUND: the review App has posted at least ROUND changes-requested
@@ -242,7 +242,7 @@ reviewer_approved_head() {
 # .legion/ handoffs and retro learnings onto the smoke main, and clean_smoke_main removes them.
 approve_as_reviewer() {
   local issue=$1
-  send_agent "$issue" reviewer "Stage 3 proof final review: review pull request #$pr_number in $repo at its current head as your role says, submit your decision, then complete the reviewer handoff. This is the round's last review."
+  send_agent "$issue" reviewer "Stage 3 proof final review: review pull request #$pr_number in $repo as your role says, taking the round's steps in the order it gives, and complete the reviewer handoff. This is the round's last review."
   until_true 300 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
 }
 # smoke_main_leftovers prints each path on the smoke repository's main under .legion/ or
@@ -362,6 +362,20 @@ assert_handoff_committer() {
   want="$(role_app "$2")|$(role_app "$2")"
   [ "$identity" = "$want" ] || fail "$1's $2 $3 round $4 handoff commit $commit is authored|committed by $identity, want $want"
   note "$2 $3 round $4 handoff $commit authored and committed by $identity"
+}
+# assert_review_of_own_handoff ISSUE ROUND STATE: the reviewer's newest STATE review
+# (CHANGES_REQUESTED or APPROVED) on the proof's pull request names the commit carrying its round
+# ROUND handoff, the head its own handoff push made. The Go reviewer prompt orders the round so: an
+# approval of a head the handoff push then replaces is of a head the pull request no longer has.
+assert_review_of_own_handoff() {
+  local handoff reviewed
+  handoff=$(handoff_fact_commit "$1" reviewer reviewing "$2")
+  [ -n "$handoff" ] || fail "$1 has no reviewer reviewing round $2 handoff fact"
+  reviewed=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
+    --jq ".[] | select(.user.login == \"legion-reviewer[bot]\" and .state == \"$3\") | .commit_id" | tail -1) ||
+    fail "read the reviews on pull request #$pr_number"
+  [ "$reviewed" = "$handoff" ] || fail "the reviewer's round $2 $3 review names $reviewed, not $handoff, the head its handoff push made"
+  note "the reviewer's round $2 $3 review names $handoff, the head its own handoff push made"
 }
 # retro_reported ISSUE: the daemon applied the implementer's retro completion, the one way out of
 # retro.

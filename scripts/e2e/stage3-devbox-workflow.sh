@@ -739,6 +739,7 @@ primary_issue() {
     # The round ends when the reviewer completes it: its review, its handoff commit, its completion.
     wait_for_phase "$root_issue" implementing 1200
     assert_handoff_committer "$root_issue" reviewer reviewing "$round"
+    assert_review_of_own_handoff "$root_issue" "$round" CHANGES_REQUESTED
     until_true 180 "round $round to write in_progress on the Dispatch board" dispatch_status_is "$root_issue" in_progress
     wait_for_worker "$root_issue" implementer
     if [ "$round" = 3 ]; then
@@ -781,6 +782,7 @@ primary_issue() {
   # reviewing, not to sit in retro.
   until_true 600 "$root_issue to leave reviewing for retro" issue_phase_in "$root_issue" retro merging
   assert_handoff_committer "$root_issue" reviewer reviewing 3
+  assert_review_of_own_handoff "$root_issue" 3 APPROVED
   pass
   [ "$until" != rework ] || return 0
 

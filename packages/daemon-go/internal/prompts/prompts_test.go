@@ -45,7 +45,8 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
 			"submit `APPROVE` on a clean head even though it carries `.legion/`", "there is no hold",
 			"Wait out CI that is still pending on the head, then decide", "never gates your approval",
-			"Anything that would change the head is a `REQUEST_CHANGES`"}},
+			"Anything that would change the head is a `REQUEST_CHANGES`",
+			"Write the round's review handoff, commit it and push it", "Never approve a head your handoff push will replace"}},
 		// The packet limit the merger is told is the one the handoff route enforces.
 		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", fmt.Sprintf("at most %d characters", record.MessagePostLimit)}},
 	} {
