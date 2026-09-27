@@ -70,11 +70,9 @@ dispatch_human() {
   fi
 }
 # new_issue TITLE [PARENT] creates an issue in the run's project and prints its key. A root carries
-# the `legion` label, which hands it to the Go daemon (it admits no unlabeled root); a child carries
-# none, since it runs under its root's tree.
-# new_issue TITLE [PARENT] creates an issue in the run's project and prints its key. A root carries
-# the legion label and smoke_spec as its primary document: its architect is given no instruction by
-# the proof, so what the tree is for comes from the issue itself.
+# the `legion` label, which hands it to the Go daemon (it admits no unlabeled root), and smoke_spec
+# as its primary document: the proof gives its architect no instruction, so what the tree is for
+# comes from the issue itself. A child carries neither, since it runs under its root's tree.
 new_issue() {
   local title=$1 parent=${2:-} payload
   payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" --arg spec "$(smoke_spec)" \

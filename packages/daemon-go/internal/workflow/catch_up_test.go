@@ -17,10 +17,12 @@ import (
 
 // An admitted root's architect has no turn of its own: admission's start launches it with no task.
 // Once its claim is ready, the daemon tells it what its tree holds, which is its first instruction.
-// It is told once per generation: a relaunch in the same generation resumes a session that was
-// told already, and a re-admitted tree's next generation is told again. The notice states the
+// Each launch's ready tells it again, as the TypeScript daemon sends the catch-up at every ready of
+// an active root: a relaunch in the same generation may be an architect that died during its first
+// turn, or a fresh agent whose workspace was lost, and neither was woken. A ready is one fact per
+// launch, so the boot's replay of one already applied tells nothing more. The notice states the
 // design gate policy, so the architect knows whether to ask for approval.
-func TestAnAdmittedRootArchitectIsToldItsTreeOnceItIsReady(t *testing.T) {
+func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		policy config.DesignGate
@@ -32,22 +34,29 @@ func TestAnAdmittedRootArchitectIsToldItsTreeOnceItIsReady(t *testing.T) {
 			pool := migratedPool(t)
 			seedAdmittedTree(t, pool, 1)
 			engine := catchUpEngine(tc.policy)
+			told := func(generation int) string {
+				return fmt.Sprintf("LEGION-1 gen=%d policy=%s issues=LEGION-1,LEGION-2", generation, tc.policy)
+			}
 
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 1)
-			want := fmt.Sprintf("LEGION-1 gen=1 policy=%s issues=LEGION-1,LEGION-2", tc.policy)
-			if got := catchUps(t, pool); fmt.Sprint(got) != "["+want+"]" {
-				t.Fatalf("after the root architect's first ready, catch-ups %v; want [%s]", got, want)
+			if got, want := catchUps(t, pool), []string{told(1)}; fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("after the root architect's first ready, catch-ups %v; want %v", got, want)
 			}
 
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 2)
-			if got := catchUps(t, pool); len(got) != 1 {
-				t.Fatalf("after a relaunch in the same generation, catch-ups %v; want still the one", got)
+			if got, want := catchUps(t, pool), []string{told(1), told(1)}; fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("after a relaunch in the same generation, catch-ups %v; want %v", got, want)
+			}
+
+			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 2)
+			if got := catchUps(t, pool); len(got) != 2 {
+				t.Fatalf("after the boot's replay of that ready, catch-ups %v; want still two", got)
 			}
 
 			seedAdmittedTree(t, pool, 2)
 			claimReady(t, pool, engine, "LEGION-1", claim.RoleArchitect, 3)
-			if got := catchUps(t, pool); len(got) != 2 || got[1] != fmt.Sprintf("LEGION-1 gen=2 policy=%s issues=LEGION-1,LEGION-2", tc.policy) {
-				t.Fatalf("after the re-admitted tree's ready, catch-ups %v; want one more, for generation 2", got)
+			if got, want := catchUps(t, pool), []string{told(1), told(1), told(2)}; fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Fatalf("after the re-admitted tree's ready, catch-ups %v; want %v", got, want)
 			}
 		})
 	}

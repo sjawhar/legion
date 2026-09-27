@@ -12,17 +12,16 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// catchUpSource is the processed-events source that marks a root's generation told its tree.
-const catchUpSource = "catch-up"
-
-// claimReady gives a tree's root architect its first instruction in a generation. Nothing else
-// starts its first turn: admission's start launches it with no task, and a re-admitted tree
-// resumes its session. So once its claim is ready, the daemon sends it a catch-up notice of what
-// its tree holds (catchUp), as the TypeScript daemon sends the overseer catch-up at a root's
-// /process/ready (onTreeReady). The notice goes through the outbox like any other, so it is
-// routed, held and re-held as they are. It goes once per generation, marked in the same
-// transaction: a relaunch in that generation resumes a session that was told already, and the
-// notices it missed come through the outbox's hold and re-hold. A tree that lingers or has left the
+// claimReady gives a tree's root architect its first instruction. Nothing else starts a turn of
+// it: admission's start launches it with no task, and a re-admitted tree resumes its session. So
+// at each launch's ready the daemon sends it a catch-up notice of what its tree holds (catchUp), as
+// the TypeScript daemon sends the overseer catch-up at every ready of an active root
+// (onTreeReady). A relaunch in the same generation is told again: it may be an architect that died
+// during the turn a catch-up started, resumed idle, or a fresh agent whose workspace was lost, and
+// nothing else wakes either. The ready is one fact per launch (workflowRuntime.applyTerminal keys
+// it by the claim's launch generation), so the boot's replay of a ready already applied tells
+// nothing more, and one never applied tells it once. The notice goes through the outbox like any
+// other, so it is routed, held and re-held as they are. A tree that lingers or has left the
 // workflow is told nothing, nor is a sub-architect (no workflow path starts one) or a phase worker.
 func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimReady) (intake.Result, error) {
 	if fact.Role != claim.RoleArchitect {
@@ -34,10 +33,6 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 	}
 	if root == nil || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || record.OutOfWorkflow(root.Status) {
 		return intake.Result{}, nil
-	}
-	fresh, err := e.store.MarkProcessed(ctx, tx, catchUpSource, fmt.Sprintf("%s:%d", root.Key, root.Generation))
-	if err != nil || !fresh {
-		return intake.Result{}, err
 	}
 	catchUp, err := e.catchUp(ctx, tx, *root)
 	if err != nil {
