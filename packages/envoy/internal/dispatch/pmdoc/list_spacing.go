@@ -320,7 +320,8 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		}
 		definitionHolds := definitionBlanksInQuote(list, lines)
 		setSpread(list, spread, func(item ast.Node) bool {
-			return blankBetweenBlocksBut(item, anyBlock, definitionHolds) || definitionEndSpreadsItem(item, list, quote, lines)
+			return blankBetweenBlocksBut(item, anyBlock, definitionHolds) || definitionEndSpreadsItem(item, list, quote, lines) ||
+				emptyDefinitionBeforeContainer(item)
 		}, lines)
 	case footnoted:
 		setSpread(list, false, func(item ast.Node) bool {
@@ -340,33 +341,73 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 // footnote definition one of its items holds are the definition's and spread nothing, as the
 // browser editor's parser reads them: one blank line before anything but a quote, a list or a
 // footnote definition (startsContainer), which that line spreads the item before, as two blank
-// lines do before anything.
+// lines do before anything. An empty definition's own line is one of them (emptyDefinition).
 func definitionBlanksInQuote(list ast.Node, lines sourceLines) func(ast.Node) bool {
 	blank := quoteBlankLineAt(quoteDepth(list))
 	return func(block ast.Node) bool {
-		return !startsContainer(block) && lines.blanksBefore(startOf(block), blank) < 2
+		return !startsContainer(block) && lines.blanksBefore(startOf(block), blank)+emptyLines(block.PreviousSibling()) < 2
 	}
+}
+
+// emptyDefinitionBeforeContainer reports whether item, in a quote, holds an empty footnote
+// definition right before a quote, a list or a definition, with no blank line between: the
+// browser editor's parser reads the definition's line as a blank line of the item, which spreads it
+// before those as one blank line does (definitionBlanksInQuote).
+func emptyDefinitionBeforeContainer(item ast.Node) bool {
+	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
+		if next := child.NextSibling(); next != nil && emptyDefinition(child) && startsContainer(next) && !blankBefore(next) {
+			return true
+		}
+	}
+	return false
+}
+
+// emptyDefinition reports whether node is a footnote definition holding no block, only the backlink
+// goldmark may append, whose line the browser editor's parser reads, in a quote, as a blank line of
+// the list item holding it.
+func emptyDefinition(node ast.Node) bool {
+	definition, ok := node.(*extensionast.Footnote)
+	if !ok {
+		return false
+	}
+	for child := definition.FirstChild(); child != nil; child = child.NextSibling() {
+		if _, backlink := child.(*extensionast.FootnoteBacklink); !backlink {
+			return false
+		}
+	}
+	return true
+}
+
+// emptyLines is the blank line node's own line counts as, 1 for an empty footnote definition
+// (emptyDefinition), 0 otherwise.
+func emptyLines(node ast.Node) int {
+	if emptyDefinition(node) {
+		return 1
+	}
+	return 0
 }
 
 // definitionEndSpreadsItem reports whether the blank lines after item, in a list in quote, spread
 // it as the browser editor's parser reads them where item ends in a footnote definition: they are
 // the definition's, so one spreads the item before a quote, a list or a definition after the list,
 // two spread it before anything - the next item and the end of the quote as well - and neither
-// spreads the list (quotedListSpread).
+// spreads the list (quotedListSpread). An empty definition's own line is one of them
+// (emptyDefinition).
 func definitionEndSpreadsItem(item ast.Node, list *ast.List, quote ast.Node, lines sourceLines) bool {
 	if !itemEndsInDefinition(item) {
 		return false
 	}
 	depth := quoteDepth(list)
 	blank := quoteBlankLineAt(depth)
+	own := emptyLines(item.LastChild())
 	if next := item.NextSibling(); next != nil {
-		return lines.blanksBefore(startOf(next), blank) >= 2
+		return lines.blanksBefore(startOf(next), blank)+own >= 2
 	}
 	next := nextBlock(list)
 	if next == nil || !isAncestor(quote, next) {
-		return lines.blanksEnding(next, outerBlankLineAt(depth), blank) >= 2
+		return lines.blanksEnding(next, outerBlankLineAt(depth), blank)+own >= 2
 	}
-	blanks := lines.blanksBefore(startOf(next), blank)
+	blanks := lines.blanksBefore(startOf(next), blank) + own
 	switch next.(type) {
 	case *ast.Blockquote, *ast.List, *extensionast.Footnote:
 		return blanks >= 1

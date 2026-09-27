@@ -624,15 +624,19 @@ func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string
 			} else if previous.Type == "footnote_definition" && r.quoteDepth > 0 && child.Type != "blockquote" && child.Type != "footnote_definition" && !isList(child) {
 				// In a quote the blank lines after a footnote definition are the definition's: one
 				// spreads the item only before a quote, a list or a definition, and two spread it
-				// before anything else (definitionBlanksInQuote). A spread item writes two where no
-				// blank line between two of its other blocks spreads it, and a tight one writes one
-				// only to keep a block that cannot open on the line after a paragraph off the
-				// definition's, and none after a definition ending in a list no line continues
-				// (endsInClosedList).
+				// before anything else (definitionBlanksInQuote), an empty definition's own line
+				// being one of them. A spread item writes two where no blank line between two of
+				// its other blocks spreads it, and a tight one writes one only to keep a block that
+				// cannot open on the line after a paragraph off the definition's, and none after a
+				// definition ending in a list no line continues (endsInClosedList) or an empty one.
+				own := 0
+				if holdsOnlyAnEmptyParagraph(previous) {
+					own = 1
+				}
 				switch {
 				case spread && !spreadElsewhere(blocks):
-					blanks = 2
-				case spread || !opensAfterParagraph(child) && !endsInClosedList(previous):
+					blanks = 2 - own
+				case spread || own == 0 && !opensAfterParagraph(child) && !endsInClosedList(previous):
 					blanks = 1
 				}
 			}
