@@ -61,6 +61,8 @@ test("the ask card lists every session that wrote to the ask and a human can unf
     const card = page.getByTestId(`ask-${ask.id}`);
     const followers = card.getByRole("region", { name: "Recipients" });
     await expect(followers).toContainText("Reaches 2");
+    // The routing list is folded at rest; the count names it, and the chips are inside.
+    await followers.getByRole("button", { name: /^Reaches/ }).click();
     if (!process.env.PLAYWRIGHT_BASE_URL) {
       await expect(followers.getByText("Asker (e2e)", { exact: true })).toBeVisible();
       await expect(followers.getByText("Replier (e2e)", { exact: true })).toBeVisible();
@@ -139,6 +141,7 @@ test("the ask card lists the issue's subscribers and removing one cuts the issue
     const card = page.getByTestId(`ask-${ask.id}`);
     const recipients = card.getByRole("region", { name: "Recipients" });
     await expect(recipients).toContainText("Reaches 2");
+    await recipients.getByRole("button", { name: /^Reaches/ }).click();
     await expect(
       recipients.getByRole("list", { name: "Followers" }).locator(`[title='${asker.id}']`)
     ).toHaveCount(1);

@@ -55,8 +55,12 @@ export function AskChoiceRow({
   onChange: () => void;
   option: AskOption;
 }): ReactNode {
+  // A chosen option takes the same border and fill the recorded answer shows afterwards, so
+  // choosing and having chosen read alike.
   return (
-    <label className={`${ROW_CLASS} cursor-pointer ${cardHoverBorder} ${className}`}>
+    <label
+      className={`${ROW_CLASS} cursor-pointer ${checked ? `${selectedCardBorder} ${selectedCardBg}` : cardHoverBorder} ${className}`}
+    >
       <input
         checked={checked}
         data-ask-option={hotkey ? "" : undefined}

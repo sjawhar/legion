@@ -179,58 +179,65 @@ function InboxItem({
       onPointerLeave={onRelease}
       tabIndex={-1}
     >
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        {ask.document === undefined ? (
-          owner === null ? (
-            <p className={`text-sm ${textMutedOnCanvas}`}>{title}</p>
+      {/* One line: the issue this question belongs to on the left, the controls that defer or
+          reroute it on the right. Both stay on one line at every width - the title truncates
+          rather than pushing the controls into a second row. */}
+      <div className="mb-1.5 flex items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-baseline gap-2">
+          {ask.document === undefined ? (
+            owner === null ? (
+              <p className={`truncate text-sm ${textMutedOnCanvas}`}>{title}</p>
+            ) : (
+              <Link
+                className={`flex min-w-0 items-baseline gap-2 text-sm ${linkText} ${linkHoverText}`}
+                data-inbox-owner=""
+                to={buildIssuePath({ id: ask.id, key: owner, kind: "ask" })}
+                {...referenceTriggerProps({ key: owner, kind: "issue" })}
+              >
+                <span className="shrink-0 font-semibold">{owner}</span>
+                <span className="truncate">{title}</span>
+              </Link>
+            )
           ) : (
             <Link
-              className={`flex flex-col items-start gap-1 text-sm md:inline-flex md:flex-row md:items-baseline md:gap-2 ${linkText} ${linkHoverText}`}
+              className={`min-w-0 truncate text-sm font-semibold ${linkText} ${linkHoverText}`}
               data-inbox-owner=""
-              to={buildIssuePath({ id: ask.id, key: owner, kind: "ask" })}
-              {...referenceTriggerProps({ key: owner, kind: "issue" })}
+              to={buildProjectPath({
+                item: { id: ask.id, kind: "ask" },
+                kind: "document",
+                project: ask.document.project,
+                slug: ask.document.slug,
+              })}
+              {...referenceTriggerProps({
+                kind: "document",
+                project: ask.document.project,
+                slug: ask.document.slug,
+              })}
             >
-              <span className="font-semibold">{owner}</span>
-              <span>{title}</span>
+              {ask.document.project} · {ask.document.name}
             </Link>
-          )
-        ) : (
-          <Link
-            className={`flex flex-col items-start gap-1 text-sm font-semibold md:inline-flex md:flex-row md:items-baseline md:gap-2 ${linkText} ${linkHoverText}`}
-            data-inbox-owner=""
-            to={buildProjectPath({
-              item: { id: ask.id, kind: "ask" },
-              kind: "document",
-              project: ask.document.project,
-              slug: ask.document.slug,
-            })}
-            {...referenceTriggerProps({
-              kind: "document",
-              project: ask.document.project,
-              slug: ask.document.slug,
-            })}
-          >
-            {ask.document.project} · {ask.document.name}
-          </Link>
-        )}
-        <InboxRowChip ask={ask} />
-        {ask.issue_key === null ? null : (
-          <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
-        )}
-        {ask.issue_key !== null && (section === "unassigned" || assignLive) ? (
-          <AssignToMe
+          )}
+          <InboxRowChip ask={ask} />
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {ask.issue_key === null ? null : (
+            <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
+          )}
+          {ask.issue_key !== null && (section === "unassigned" || assignLive) ? (
+            <AssignToMe
+              askId={ask.id}
+              issueKey={ask.issue_key}
+              onLive={onAssignLive}
+              viewer={viewer}
+            />
+          ) : null}
+          <SnoozeControl
             askId={ask.id}
-            issueKey={ask.issue_key}
-            onLive={onAssignLive}
-            viewer={viewer}
+            label={owner ?? title}
+            onLive={onSnoozeLive}
+            snoozedUntil={section === "later" ? ask.snoozed_until : null}
           />
-        ) : null}
-        <SnoozeControl
-          askId={ask.id}
-          label={owner ?? title}
-          onLive={onSnoozeLive}
-          snoozedUntil={section === "later" ? ask.snoozed_until : null}
-        />
+        </div>
       </div>
       <AskCard
         ask={ask}
@@ -537,7 +544,7 @@ export function Inbox(): ReactNode {
   // it - its draft, selection, disclosures, and focus stay, and the viewport anchor can find it.
   return (
     <ViewportAnchor
-      className="space-y-6"
+      className="space-y-4"
       group="data-inbox-section"
       item={ROW_ATTRIBUTE}
       ref={viewport}
@@ -549,11 +556,12 @@ export function Inbox(): ReactNode {
       <ul className="space-y-3">
         {sections.flatMap(({ rows, section, shownRows }, index) => [
           <li
-            className={index === 0 ? undefined : "pt-3"}
+            className={index === 0 ? undefined : "pt-2"}
             key={`heading-${section}`}
             role="presentation"
           >
-            <h2 className={`text-base font-semibold ${textMutedOnCanvas}`}>
+            {/* A band divider, not a heading that competes with the questions under it. */}
+            <h2 className={`text-xs font-semibold tracking-wide uppercase ${textMutedOnCanvas}`}>
               {COLLAPSED_SECTIONS[section] === true ? (
                 <DisclosureToggle
                   expanded={laterOpen}

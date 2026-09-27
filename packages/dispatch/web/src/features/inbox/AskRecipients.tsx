@@ -4,6 +4,7 @@ import { type ReactNode, useState } from "react";
 import { api } from "../../api/client";
 import { whoAmIQuery } from "../../api/queries";
 import type { Ask, AskFollower, Subscriber } from "../../api/types";
+import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
 import { textMutedOnSurface } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
@@ -113,6 +114,7 @@ export function AskRecipients({
   );
   const { agents } = useAgents(followers.length > 0);
   const [confirming, setConfirming] = useState<Confirming | undefined>(undefined);
+  const [open, setOpen] = useState(false);
   const unfollow = useMutation({
     mutationFn: (sessionId: string) => removeFollower(askId, sessionId),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ask-thread", askId] }),
@@ -137,67 +139,74 @@ export function AskRecipients({
 
   return (
     <section aria-label="Recipients" className="mt-2">
-      <h3 className={`text-xs font-semibold ${textMutedOnSurface}`}>
-        Reaches {followers.length + subscribers.length}
-      </h3>
-      {followers.length === 0 ? null : (
-        <ul aria-label="Followers" className="mt-1 flex flex-wrap gap-2">
-          {followers.map((follower) => {
-            const live = agents.some((agent) => agent.session_id === follower.session_id);
-            return (
-              <li className={sessionChipClassName} key={follower.session_id}>
-                <LiveDot live={live} />
-                <span title={follower.session_id}>{followerLabel(follower.session_id)}</span>
-                <button
-                  className={sessionRemoveButtonClassName}
-                  disabled={unfollow.isPending}
-                  onClick={() =>
-                    setConfirming({ kind: "follower", sessionId: follower.session_id })
-                  }
-                  type="button"
-                >
-                  Unfollow
-                </button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      {subscribers.length === 0 ? null : (
+      <DisclosureToggle
+        expanded={open}
+        label={`Reaches ${followers.length + subscribers.length}`}
+        onToggle={() => setOpen((shown) => !shown)}
+        textClassName={textMutedOnSurface}
+      />
+      {!open ? null : (
         <>
-          <p className={`mt-1.5 text-xs italic ${textMutedOnSurface}`}>{viaLabel}</p>
-          <ul
-            aria-label={`Via ${subscription?.noun} subscription`}
-            className="mt-1 flex flex-wrap gap-2"
-          >
-            {subscribers.map((subscriber) => (
-              <li className={sessionChipClassName} key={subscriber.session_id}>
-                <LiveDot live={subscriber.live} />
-                <span title={subscriber.session_id}>
-                  {sessionLabel(subscriber.session_id, subscriber.title)}
-                </span>
-                {subscriber.removable ? (
-                  <button
-                    className={sessionRemoveButtonClassName}
-                    disabled={unsubscribe.isPending}
-                    onClick={() =>
-                      setConfirming({ kind: "subscriber", sessionId: subscriber.session_id })
-                    }
-                    type="button"
-                  >
-                    Unsubscribe
-                  </button>
-                ) : (
-                  <span
-                    className="text-xs italic"
-                    title={`Subscribed only via ${subscriber.via}, which also covers other issues and documents — cannot unsubscribe just this one`}
-                  >
-                    via {subscriber.via}
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
+          {followers.length === 0 ? null : (
+            <ul aria-label="Followers" className="mt-1 flex flex-wrap gap-2">
+              {followers.map((follower) => {
+                const live = agents.some((agent) => agent.session_id === follower.session_id);
+                return (
+                  <li className={sessionChipClassName} key={follower.session_id}>
+                    <LiveDot live={live} />
+                    <span title={follower.session_id}>{followerLabel(follower.session_id)}</span>
+                    <button
+                      className={sessionRemoveButtonClassName}
+                      disabled={unfollow.isPending}
+                      onClick={() =>
+                        setConfirming({ kind: "follower", sessionId: follower.session_id })
+                      }
+                      type="button"
+                    >
+                      Unfollow
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          {subscribers.length === 0 ? null : (
+            <>
+              <p className={`mt-1.5 text-xs italic ${textMutedOnSurface}`}>{viaLabel}</p>
+              <ul
+                aria-label={`Via ${subscription?.noun} subscription`}
+                className="mt-1 flex flex-wrap gap-2"
+              >
+                {subscribers.map((subscriber) => (
+                  <li className={sessionChipClassName} key={subscriber.session_id}>
+                    <LiveDot live={subscriber.live} />
+                    <span title={subscriber.session_id}>
+                      {sessionLabel(subscriber.session_id, subscriber.title)}
+                    </span>
+                    {subscriber.removable ? (
+                      <button
+                        className={sessionRemoveButtonClassName}
+                        disabled={unsubscribe.isPending}
+                        onClick={() =>
+                          setConfirming({ kind: "subscriber", sessionId: subscriber.session_id })
+                        }
+                        type="button"
+                      >
+                        Unsubscribe
+                      </button>
+                    ) : (
+                      <span
+                        className="text-xs italic"
+                        title={`Subscribed only via ${subscriber.via}, which also covers other issues and documents — cannot unsubscribe just this one`}
+                      >
+                        via {subscriber.via}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </>
       )}
       {subscribersQuery.isError ? (

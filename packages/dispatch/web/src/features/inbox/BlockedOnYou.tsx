@@ -3,10 +3,10 @@ import { Link } from "react-router-dom";
 
 import type { InboxRow } from "../../api/types";
 import {
-  linkHoverText,
-  linkText,
+  askUrgencyHighBorder,
+  calloutWarningBg,
+  calloutWarningText,
   surfaceMutedStrongBg,
-  textMutedOnCanvas,
   textSecondaryHoverToPrimary,
   textSecondaryOnSurface,
 } from "../../theme/classes";
@@ -58,12 +58,15 @@ export function BlockedOnYou({
   });
 
   const count = waiting.length;
+  // An alert, not a sentence: the whole strip is the target, and its left accent is the same
+  // amber a high-urgency ask card carries, so one hue means one thing across the screen.
   return (
-    <p className={`mb-4 text-sm font-medium ${textMutedOnCanvas}`}>
-      <Link className={`${linkText} ${linkHoverText}`} to="/">
-        Blocked on you: {count} {count === 1 ? "item" : "items"}, oldest{" "}
-        {formatAskAge(oldest.created_at)}
-      </Link>
-    </p>
+    <Link
+      className={`block rounded-lg border-l-4 px-3 py-2 text-sm font-medium ${calloutWarningBg} ${askUrgencyHighBorder} ${calloutWarningText}`}
+      to="/"
+    >
+      Blocked on you: {count} {count === 1 ? "item" : "items"}, oldest{" "}
+      {formatAskAge(oldest.created_at)}
+    </Link>
   );
 }

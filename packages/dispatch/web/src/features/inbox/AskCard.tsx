@@ -390,19 +390,35 @@ export function AskCard({
       )}
       <div>
         {isApproval ? (
-          <p className={`text-xs font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
+          <p className={`text-[10px] font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
             Approval requested
           </p>
         ) : null}
         {inBlock ? null : (
-          <div className={`text-sm leading-relaxed font-medium ${textPrimaryOnSurface}`}>
+          <div className={`text-[15px] leading-relaxed font-medium ${textPrimaryOnSurface}`}>
             <MarkdownBody markdown={displayedAsk.question} />
           </div>
         )}
-        <p className={`mt-1 flex flex-wrap items-center gap-x-1 text-sm ${textMutedOnSurface}`}>
+        {/* One provenance line under the question: whose turn it is first, because that is the
+            only part a reader acts on, then who asked, when, and the copy handles. It stays one
+            row at every width - the copy controls keep their 44 px tap target, so wrapping would
+            cost a second 44 px row of chrome - and scrolls sideways inside the card instead,
+            the same rule the issue header's metadata rail follows. */}
+        <p
+          className={`mt-1.5 flex items-center gap-x-1.5 overflow-x-auto text-xs whitespace-nowrap ${textMutedOnSurface}`}
+        >
+          {turnLabel === null ? null : (
+            <span
+              className={`shrink-0 font-semibold ${textSecondaryOnSurface}`}
+              data-testid={`turn-${displayedAsk.id}`}
+            >
+              {turnLabel}
+            </span>
+          )}
+          {turnLabel === null ? null : <span aria-hidden="true">·</span>}
           {/* A block ask the server indexed with no pending author has an empty label; it still
               says when it was asked rather than opening with a dangling separator. */}
-          <span>{authorLabel === "" ? "asked" : authorLabel}</span>
+          <span className="shrink-0">{authorLabel === "" ? "asked" : authorLabel}</span>
           {sessionAuthor === undefined ? null : (
             <CopyButton value={sessionAuthor.id} what="session ID">
               ID
@@ -413,12 +429,12 @@ export function AskCard({
               title
             </CopyButton>
           )}
-          <span className="inline-flex items-center gap-x-1">
+          <span className="inline-flex shrink-0 items-center gap-x-1">
             <span aria-hidden="true">·</span>
             <Timestamp at={displayedAsk.created_at} />
           </span>
           {tmuxTarget === undefined ? null : (
-            <span className="inline-flex items-center gap-x-1">
+            <span className="inline-flex shrink-0 items-center gap-x-1">
               <span aria-hidden="true">·</span>
               <CopyButton value={tmuxTarget} what="tmux target">
                 {tmuxTarget}
@@ -427,20 +443,7 @@ export function AskCard({
           )}
           {reference === undefined ? null : <CopyRefButton route={reference} />}
         </p>
-        {turnLabel === null ? null : (
-          <p
-            className={`mt-1 text-xs font-medium ${textSecondaryOnSurface}`}
-            data-testid={`turn-${displayedAsk.id}`}
-          >
-            {turnLabel}
-          </p>
-        )}
         <AskEditHistory ask={displayedAsk} edits={edits} />
-        <AskRecipients
-          askId={displayedAsk.id}
-          followers={threadQuery.data?.followers ?? []}
-          owner={displayedAsk}
-        />
         {referencedByNode}
       </div>
       {askChanged ? (
@@ -450,7 +453,7 @@ export function AskCard({
         </p>
       ) : null}
       {threadNode}
-      <form className="mt-4 space-y-3" onSubmit={submit} ref={trackForm}>
+      <form className="mt-3 space-y-3" onSubmit={submit} ref={trackForm}>
         {displayedAsk.options.length === 0 ? null : (
           <fieldset className="min-w-0 space-y-2">
             <legend className="sr-only">Answer options</legend>
@@ -532,6 +535,11 @@ export function AskCard({
           />
         ) : null}
       </form>
+      <AskRecipients
+        askId={displayedAsk.id}
+        followers={threadQuery.data?.followers ?? []}
+        owner={displayedAsk}
+      />
     </article>
   );
 }
