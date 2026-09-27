@@ -799,8 +799,10 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var client dispatch.Client
 	var tokens appauth.Tokens
 	var grants *credential.Grants
+	var claimReady func(context.Context, supervise.Claim)
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
+		claimReady = workflow.claimReady
 	}
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
@@ -827,6 +829,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Tokens:            tokens,
 		GitHubOwner:       githubOwner(cfg),
 		Grants:            grants,
+		ClaimReady:        claimReady,
 	})
 
 	group, serving := errgroup.WithContext(ctx)

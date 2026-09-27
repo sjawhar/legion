@@ -344,6 +344,18 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	return group.Wait()
 }
 
+// claimReady releases the notices waiting out a re-send delay for an architect whose claim is
+// ready on a new session (outbox.releaseReheld): a relaunched architect is told what it missed at
+// once, ahead of what follows.
+func (w *workflowRuntime) claimReady(ctx context.Context, c supervise.Claim) {
+	if c.Role != claim.RoleArchitect {
+		return
+	}
+	if err := w.outbox.releaseReheld(ctx, c.Token, c.Session); err != nil {
+		w.log.Error("release the notices waiting for an architect", "claim", c.Token, "error", err)
+	}
+}
+
 func (w *workflowRuntime) stop() {
 	if w == nil {
 		return

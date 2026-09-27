@@ -109,6 +109,9 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 		s.claimFailure(w, "ready", req.ClaimToken, err)
 		return
 	}
+	if s.claimReady != nil {
+		s.claimReady(context.WithoutCancel(r.Context()), m.Claim())
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

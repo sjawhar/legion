@@ -87,6 +87,9 @@ type Notice struct {
 	// Resends counts the times the notice was queued again after the listener could not forward
 	// it to its architect's session (the daemon's rehold), which stops at a cap.
 	Resends int `json:"resends,omitempty"`
+	// StaleSession is the session the listener forwarded the notice to before it was queued again,
+	// one that did not confirm it; the copy waits its delay until its architect is ready on another.
+	StaleSession string `json:"stale_session,omitempty"`
 }
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }

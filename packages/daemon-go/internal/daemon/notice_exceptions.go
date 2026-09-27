@@ -141,7 +141,7 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 		return nil
 	}
 	delay := noticeReholdDelays[notice.Resends]
-	notice.Resends++
+	notice.Resends, notice.StaleSession = notice.Resends+1, exception.RecipientSession
 	row, err := record.NewOutboxRow(issue, notice, r.now().Add(delay))
 	if err != nil {
 		return fmt.Errorf("%w: exception %s carries a notice the outbox refuses: %w", errNoticeException, envelope.EventID, err)
@@ -198,4 +198,61 @@ func sessionLive(state supervise.ClaimState) bool {
 	default:
 		return false
 	}
+}
+
+// releaseReheld makes due at once every copy of a notice waiting out its re-send delay that
+// architect now owns and that failed on a session other than session, once architect's claim is
+// ready on session: its agent registered, took its Envoy role back, and said it can be prompted. A
+// copy waiting minutes for a stopped session's registration to lapse would otherwise hold back
+// every later notice to that architect behind the fence, after the architect is back. Released,
+// the copies go in the order they were written, ahead of the notices behind them. A copy that
+// failed on session itself keeps its delay.
+func (r *outbox) releaseReheld(ctx context.Context, architect claim.Token, session string) error {
+	now := r.now()
+	var waiting []record.OutboxRow
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		waiting, err = r.records.WaitingNotices(ctx, tx, r.dispatchProject, now)
+		return err
+	}); err != nil {
+		return fmt.Errorf("release the notices waiting for %s: %w", architect, err)
+	}
+	runs := func(token claim.Token) bool { return claimRuns(r.claimState(token)) }
+	released := []int64{}
+	for _, row := range waiting {
+		payload, err := record.DecodeOutboxPayload(row)
+		if err != nil {
+			return fmt.Errorf("decode waiting notice row %d: %w", row.ID, err)
+		}
+		notice, ok := payload.(record.Notice)
+		if !ok || notice.Resends == 0 || notice.StaleSession == session {
+			continue
+		}
+		issue, tree, err := r.readNoticeTree(ctx, row)
+		if errors.Is(err, errNoticeUnroutable) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if owner, err := owningArchitect(tree.project, tree.issues, issue, notice.Kind, runs); err != nil || owner != architect {
+			continue
+		}
+		released = append(released, row.ID)
+	}
+	if len(released) == 0 {
+		return nil
+	}
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		for _, id := range released {
+			if err := r.records.ExpediteOutbox(ctx, tx, id, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("release the notices waiting for %s: %w", architect, err)
+	}
+	r.log.Info("outbox notices released: their architect is ready on a new session", "architect", architect, "session", session, "rows", released)
+	return nil
 }

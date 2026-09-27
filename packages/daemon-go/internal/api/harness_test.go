@@ -175,6 +175,8 @@ type harness struct {
 	tokens     *BootTokens
 	supervisor *testSupervisor
 	handler    http.Handler
+	// readied is each claim ClaimReady was told of, in order.
+	readied *[]supervise.Claim
 }
 
 func newHarness(t *testing.T) *harness {
@@ -210,11 +212,13 @@ func newHarness(t *testing.T) *harness {
 		machines: map[claim.Token]*supervise.Machine{},
 		prompts:  map[claim.Token]string{},
 	}
+	readied := &[]supervise.Claim{}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
 		Pool: st.Pool(), Record: record.NewStore(),
+		ClaimReady: func(_ context.Context, c supervise.Claim) { *readied = append(*readied, c) },
 	})
-	return &harness{t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler}
+	return &harness{t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler, readied: readied}
 }
 
 // request sends one request through the server's own handler. A nil body sends none; a string is
