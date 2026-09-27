@@ -19,14 +19,15 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
+	"github.com/sjawhar/legion/daemon/internal/stream"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // kubernetesConfig is testConfig under runtime: kubernetes, its client a kubeconfig whose current
@@ -411,5 +412,119 @@ func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 	}
 	if opts.BootIntervals != cfg.WorkerBootRegistrationDeadlineIntervals {
 		t.Errorf("sandbox BootIntervals = %d, want %d", opts.BootIntervals, cfg.WorkerBootRegistrationDeadlineIntervals)
+	}
+}
+
+// sandboxOptions carries runtime.kubernetes.agent_secrets straight into the runtime's Options,
+// nil when the configuration sets no block, and the worker image's agent-secrets binary is
+// always the tools path (Task 11 mounts it there whether or not the deployment enrolls).
+func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1") // the file's fixture (`:32-41`): testConfig under runtime: kubernetes
+	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
+		URL: "https://secrets.dev1.internal.trajectorylabs.com", Operator: "sjawhar", Audience: "agent-secrets", TokenExpirySeconds: 1800,
+	}
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &sandbox.AgentSecrets{URL: "https://secrets.dev1.internal.trajectorylabs.com", Audience: "agent-secrets", TokenExpiry: 30 * time.Minute}
+	if opts.AgentSecrets == nil || *opts.AgentSecrets != *want {
+		t.Fatalf("AgentSecrets = %+v, want %+v", opts.AgentSecrets, want)
+	}
+	if opts.Tools.AgentSecrets != "/opt/legion/go/bin/agent-secrets" {
+		t.Fatalf("Tools.AgentSecrets = %q", opts.Tools.AgentSecrets)
+	}
+	cfg.Runtime.Kubernetes.AgentSecrets = nil
+	opts, _ = sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", lookup(nil), quietLogger())
+	if opts.AgentSecrets != nil {
+		t.Fatalf("AgentSecrets = %+v without the block", opts.AgentSecrets)
+	}
+}
+
+// No credential material — no key, no launcher credential, no bearer — ever reaches a pod or a
+// launch secret: the daemon's machine login lives only in the *agentsecrets.Client's process
+// memory (Task 1's cred atomic.Pointer[credential]), which the configuration and
+// sandbox.Options carry no field for at all. newSecretsLogin hands the runtime only the broker
+// URL, audience and token lifetime, and no launch's secrets ever name an AGENT_SECRETS_*
+// variable.
+func TestNoCredentialMaterialReachesAPod(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
+		URL: "https://s", Operator: "sjawhar", Audience: "agent-secrets", TokenExpirySeconds: 3600,
+	}
+	for _, secret := range launchSecrets(cfg, lookup(nil)) {
+		if strings.HasPrefix(secret.name, "AGENT_SECRETS") {
+			t.Fatalf("launch secret %s: no daemon credential material may reach a pod", secret.name)
+		}
+	}
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "tcp://10.0.0.5:13371", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.AgentSecrets == nil || opts.AgentSecrets.URL != "https://s" || opts.AgentSecrets.Audience != "agent-secrets" || opts.AgentSecrets.TokenExpiry != time.Hour {
+		t.Fatalf("AgentSecrets = %+v, want only the URL, audience and token lifetime the pod's own client needs", opts.AgentSecrets)
+	}
+	enroller, client := newSecretsLogin(cfg, quietLogger())
+	if enroller == nil || client == nil {
+		t.Fatalf("enroller %v, client %v; want both", enroller, client)
+	}
+	if client.URL != "https://s" || client.Operator != "sjawhar" {
+		t.Fatalf("client = %+v, want only the configured URL and operator, never a key or a bearer", client)
+	}
+	cfg.Runtime.Kubernetes.AgentSecrets = nil
+	if enroller, client := newSecretsLogin(cfg, quietLogger()); enroller != nil || client != nil {
+		t.Fatalf("without the block: %v, %v; want nil, nil", enroller, client)
+	}
+}
+
+// newSecretsLogin logs the contract's exact line, once, naming the code the broker issued and
+// the configured operator; a background poll goroutine keeps running against the (later closed)
+// broker after the login is issued, which is fine — it is the same unbounded, backed-off retry
+// production leaves running for as long as the daemon is up.
+func TestNewSecretsLoginLogsTheConfirmationCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/launcher-credentials" {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]string{"pending_id": "pending-1", "code": "ABCD-1234"})
+	}))
+	defer server.Close()
+
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
+		URL: server.URL, Operator: "sjawhar", Audience: "agent-secrets", TokenExpirySeconds: 3600,
+	}
+	var logged bytes.Buffer
+	enroller, client := newSecretsLogin(cfg, slog.New(slog.NewJSONHandler(&logged, nil)))
+	if enroller == nil || client == nil {
+		t.Fatal("want an enroller and a client")
+	}
+	want := "agent-secrets machine login: enter code ABCD-1234 on the Dispatch credential page (approver: sjawhar); pod enrollment is held until approved"
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(logged.String(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("log = %s, want it to contain %q", logged.String(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// A hello carrying an agent-secrets identity maps to the machine's StreamHello with it; a hello
+// with none maps to one with no identity.
+func TestAHelloWithAnIdentityMapsToTheMachinesEvent(t *testing.T) {
+	ev, err := superviseEvent(stream.Hello{Claim: "legion-LEGION-209-implementer", Generation: 2,
+		AgentSecrets: &stream.AgentSecretsIdentity{Thumbprint: "tp", PodToken: "a.b.c"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := ev.(supervise.StreamHello)
+	if hello.Generation != 2 || hello.AgentSecrets == nil || hello.AgentSecrets.Thumbprint != "tp" || hello.AgentSecrets.PodToken != "a.b.c" {
+		t.Fatalf("mapped %+v", hello)
+	}
+	ev, _ = superviseEvent(stream.Hello{Claim: "legion-LEGION-209-implementer", Generation: 2})
+	if ev.(supervise.StreamHello).AgentSecrets != nil {
+		t.Fatal("a hello with no identity mapped to one")
 	}
 }

@@ -241,6 +241,33 @@ func (c *Conn) AdoptWorkingCopy(ctx context.Context, identity runtime.GitIdentit
 	return fmt.Errorf("worker-stream: %s %s answered by a %s frame", c.claim, shimwire.TypeAdoptWorkingCopy, answer.FrameType())
 }
 
+// AgentSecretsEnrollment hands the shim the broker's enrollment id for its pod; the shim writes it
+// beside the key and starts the lease renewer, and answers. Bounded by the RPC timeout: a file
+// write, not a command.
+func (c *Conn) AgentSecretsEnrollment(ctx context.Context, enrollmentID string) error {
+	id := rand.Text()
+	frame := shimwire.AgentSecretsEnrollment{ID: id, EnrollmentID: enrollmentID}
+	if err := frame.Validate(); err != nil {
+		return fmt.Errorf("worker-stream: %s: %w", c.claim, err)
+	}
+	answer, err := c.request(ctx, frame, id, "", c.rpcTimeout)
+	if err != nil {
+		return err
+	}
+	switch answer := answer.(type) {
+	case shimwire.AgentSecretsEnrollmentResult:
+		if answer.OK {
+			return nil
+		}
+		return &RefusedError{Claim: c.claim, Command: shimwire.TypeAgentSecretsEnrollment, Reason: answer.Error}
+	case shimwire.Response:
+		if !answer.Success {
+			return &RefusedError{Claim: c.claim, Command: shimwire.TypeAgentSecretsEnrollment, Reason: answer.Error}
+		}
+	}
+	return fmt.Errorf("worker-stream: %s %s answered by a %s frame", c.claim, shimwire.TypeAgentSecretsEnrollment, answer.FrameType())
+}
+
 // call is a request OMP answers with a response to the same command, successful.
 func (c *Conn) call(ctx context.Context, frame shimwire.Frame, id, deliveryID string) (shimwire.Response, error) {
 	answer, err := c.request(ctx, frame, id, deliveryID, c.rpcTimeout)
@@ -386,6 +413,14 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 				"extension", event.ExtensionPath, "event", event.Event, "error", event.Error)
 		}
 	case shimwire.AdoptWorkingCopyResult:
+		c.mu.Lock()
+		request, waiting := c.pending[frame.ID]
+		delete(c.pending, frame.ID)
+		c.mu.Unlock()
+		if waiting {
+			request.answer <- frame
+		}
+	case shimwire.AgentSecretsEnrollmentResult:
 		c.mu.Lock()
 		request, waiting := c.pending[frame.ID]
 		delete(c.pending, frame.ID)

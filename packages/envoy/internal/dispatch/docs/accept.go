@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -36,25 +37,36 @@ func settleAccepted(before, after *pmdoc.Node, match pmdoc.Range, with string) (
 // what reads back and changes nothing but the lines it writes: in a list item's code, the lines it
 // leaves blank (blankListItemLines); then, markdown dropping the line breaks that end code, where
 // only line breaks follow the match, the text's own ending breaks, a blank line it ends with
-// included. A match that runs past the code into the next block is written as sent, since what
-// follows the text there is the rest of that block, which the splice joins to it.
-func acceptedCode(with string, at pmdoc.TextblockAt, match pmdoc.Range) (string, pmdoc.Range) {
+// included. A match can run past the code into later blocks of tree, to the textblock it ends in.
+// One that takes all of that textblock's text leaves nothing after the text, as at the code's end,
+// so the same rules apply. One that ends inside that text is written as sent: the rest of it,
+// which the splice joins to the code, follows the text, and neither rule can judge it, so a line
+// of spaces and tabs that text leaves in a list item's code reads back empty and the accept is
+// refused.
+func acceptedCode(tree *pmdoc.Node, with string, at pmdoc.TextblockAt, match pmdoc.Range) (string, pmdoc.Range) {
+	past := match.To > at.Content.To
+	if past {
+		if end, _ := pmdoc.ContainingTextblock(tree, match.To); match.To != end.Content.To {
+			return with, match
+		}
+	}
 	var text strings.Builder
 	for _, child := range at.Node.Children {
 		text.WriteString(child.Text)
 	}
 	code := utf16.Encode([]rune(text.String()))
-	from, to := match.From-at.Content.From, match.To-at.Content.From
-	if to > len(code) {
-		return with, match
-	}
+	from, to := match.From-at.Content.From, min(match.To, at.Content.To)-at.Content.From
 	if insideListItem(at) {
 		with, from, to = blankListItemLines(code, with, from, to)
 	}
 	if !slices.ContainsFunc(code[to:], func(unit uint16) bool { return unit != '\n' }) {
 		with = strings.TrimRight(with, "\n")
 	}
-	return with, pmdoc.Range{From: at.Content.From + from, To: at.Content.From + to}
+	written := pmdoc.Range{From: at.Content.From + from, To: at.Content.From + to}
+	if past {
+		written.To = match.To
+	}
+	return with, written
 }
 
 // blankListItemLines writes empty each line that with, written over code from to to, leaves
@@ -128,7 +140,7 @@ func refuseReshapedAccept(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc
 }
 
 func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string, replacement *pmdoc.Node, check func(*pmdoc.Node) error) error {
-	broke, err := replacementBroke(before, after, match, check)
+	_, broke, err := replacementBroke(before, after, match, check)
 	if err != nil || broke == nil {
 		return err
 	}
@@ -196,6 +208,95 @@ func acceptRefusal(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textbl
 	)
 }
 
+// padCutTables pads each table in the document-level blocks a splice of r changed, from before to
+// after (changedBlocks), to its width (pmdoc.PadTables), as the browser editor's table plugin pads a
+// table after any change.
+func padCutTables(before, after *pmdoc.Node, r pmdoc.Range) (*pmdoc.Node, error) {
+	first, _, last, err := changedBlocks(before, after, r)
+	if err != nil {
+		return nil, err
+	}
+	return pmdoc.PadTables(after, first, last), nil
+}
+
+// padsLikeTheBrowser reports whether an accept may pad the tables its splice cut: whether the
+// browser editor's accept writes the replacement where Splice does (proof-sdk marks.ts accept and
+// applyMarkdownReplace). A range running from one table into the next, or from one body row into
+// another, is never padded: the browser can join the two tables or rows, which Splice does not. An
+// inline replacement (text that stays in the textblock, or code's literal text) replaces the
+// matched range there as here; an empty one follows this accept's own rule, deleting the matched
+// text, where the browser's accept of an empty suggestion only clears its mark. The browser takes
+// block content across two textblocks and replaces both whole (pmdoc.MultiblockRange). Splice
+// replaces what the browser does only when the match is exactly those textblocks' content and the
+// first, at, is a document-level block, not one inside a callout, a quote, a list item or a table
+// cell. Other block content over a table, such as a list over one cell's whole text, is not padded
+// either. An accept that is not padded is judged as the splice left it, which refuses one that cut
+// a table.
+func padsLikeTheBrowser(tree *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, inline bool) bool {
+	if joinsTwo(tree, match, "table") || joinsTwo(tree, match, "table_row") {
+		return false
+	}
+	if inline {
+		return true
+	}
+	blocks, ok := pmdoc.MultiblockRange(tree, match)
+	return ok && blocks == match && len(at.Ancestors) == 1
+}
+
+// acceptSpliceRefusal words the refusal of an accept whose replacement Splice cannot fit, naming
+// what the person accepting can do: an inline replacement running into an ask or callout from the
+// text before it would join the two and leave the ask or callout empty; a replacement no level of
+// the document can hold where the suggestion sits; and any other join the document cannot hold.
+func acceptSpliceRefusal(err error) error {
+	switch {
+	case errors.Is(err, pmdoc.ErrJoinEmptiesTypedBlock):
+		return &ErrInvalidOp{Field: "anchor", Reason: "the suggestion runs into an ask or callout from the text before it, " +
+			"and replacing it would join the two and leave the ask or callout empty; suggest a change inside one of them"}
+	case errors.Is(err, pmdoc.ErrReplacementDoesNotFit):
+		return &ErrInvalidOp{Field: "replace_with", Reason: "no part of the document can hold it where the suggestion sits " +
+			"(a table cell's whole text, for one, can only be replaced by inline text)"}
+	case errors.Is(err, pmdoc.ErrSchema):
+		return &ErrInvalidOp{Field: "anchor", Reason: fmt.Sprintf("the suggestion runs across blocks that replacing it "+
+			"would join, which the document cannot hold together (%v); reject the suggestion, or suggest a change inside one block", err)}
+	}
+	return err
+}
+
+// refuseAcceptedCodeThatReshapes refuses an accept whose code changes how a block around the code
+// reads back (pmdoc.BlockShapeError), in the words of the other accept refusals: the block, why,
+// and what the person accepting can do, since they cannot move the code as the edit route's
+// refusal (refuseCodeThatReshapesItsBlock) advises. The block named is the typed block holding
+// the code when the document-level block that reads back otherwise is the one holding the code,
+// and otherwise that block, such as the list of a task item that a suggestion running out of the
+// code empties ahead of the item's nested list.
+func refuseAcceptedCodeThatReshapes(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, with string) error {
+	broken, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	if err != nil || reshaped == nil {
+		return err
+	}
+	// The document-level block holding the code is the first the accept changed (changedBlocks),
+	// at the same index before and after it.
+	holding, _, _, err := changedBlocks(before, after, match)
+	if err != nil {
+		return err
+	}
+	if broken == holding {
+		for _, ancestor := range at.Ancestors {
+			if pmdoc.IsTypedBlock(ancestor.Type) {
+				holder := holderName(ancestor)
+				return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
+					"replace_with %q changes how the %s holding this code block reads back (%v); reject the suggestion, or reply asking for code the %s can hold",
+					with, holder, reshaped, holder,
+				)}
+			}
+		}
+	}
+	return &ErrInvalidOp{Field: "replace_with", Reason: fmt.Sprintf(
+		"replace_with %q changes how the %s reads back (%v); reject the suggestion, or reply asking for a change that stays inside the code block",
+		with, holderName(after.Children[broken]), reshaped,
+	)}
+}
+
 // holderName names the block holding a match as a reader names it.
 func holderName(parent *pmdoc.Node) string {
 	if parent.Type == "doc" {
@@ -229,23 +330,24 @@ func changedBlocks(before, after *pmdoc.Node, match pmdoc.Range) (first, last, l
 	return first, last, max(first, last+len(after.Children)-len(before.Children)), nil
 }
 
-// replacementBroke is what check says of a document-level block the write changed
-// (changedBlocks), when it said nothing of the blocks the match lay in before: a block that already
-// failed the check, or another block that does, is no reason to refuse this write.
-func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (broke, err error) {
+// replacementBroke is the index in after of the first document-level block the write changed
+// (changedBlocks) that check fails, and what check says of it, when it said nothing of the blocks
+// the match lay in before: a block that already failed the check, or another block that does, is
+// no reason to refuse this write.
+func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (block int, broke, err error) {
 	first, last, lastAfter, err := changedBlocks(before, after, match)
 	if err != nil {
-		return nil, err
+		return -1, nil, err
 	}
 	for index := first; index <= last; index++ {
 		if check(before.Children[index]) != nil {
-			return nil, nil
+			return -1, nil, nil
 		}
 	}
 	for index := first; index <= lastAfter; index++ {
 		if broke = check(after.Children[index]); broke != nil {
-			return broke, nil
+			return index, broke, nil
 		}
 	}
-	return nil, nil
+	return -1, nil, nil
 }

@@ -375,6 +375,48 @@ func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 	}
 }
 
+// TestSendHandlerRefusesAModeThatIsNotADeliveryMode proves the listener decides what a delivery
+// mode is, rather than deferring to what the target session advertises. `capabilities` is an
+// open string list the session itself writes at registration, so "no session advertises a bogus
+// capability" was an assumption about every present and future client, not a property of this
+// boundary. A session that advertises "agentstream" and a frame claiming that mode used to pass
+// both checks and reach the receiver; now the mode itself is refused, as the Dispatch server's
+// own `validDelivery` refuses it.
+func TestSendHandlerRefusesAModeThatIsNotADeliveryMode(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put("ses_target", session.SessionEntry{
+		Port:         1,
+		MachineID:    "test-machine",
+		Dir:          "/test/ses_target",
+		Title:        "planner",
+		Capabilities: []string{"aside", "btw", "steer", "agentstream"},
+	}); err != nil {
+		t.Fatalf("register target session: %v", err)
+	}
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+
+	rr := httptest.NewRecorder()
+	requestJSON := fmt.Sprintf(
+		`{"target_session":"ses_target","message":"Can this ship?","payload":%s}`,
+		mustJSONString(t, `{"delivery":{"attempt":1,"mode":"agentstream"}}`),
+	)
+	sendHandler(state).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(requestJSON)))
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body: %s)", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if response.Error != "session ses_target (planner) sent a delivery mode that cannot be read unambiguously" {
+		t.Fatalf("error = %q, want the unreadable-delivery refusal shape", response.Error)
+	}
+}
+
 // TestSendHandlerRefusesUnadvertisedModeFromDerivedPayload proves the guard
 // checks messageEnvelope's effective payload, not only the optional HTTP
 // payload field. A long structured message becomes the receiver's payload.

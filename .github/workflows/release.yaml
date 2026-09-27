@@ -21,14 +21,16 @@ on:
       - "packages/daemon-go/**"
       - "go.work"
       - "go.work.sum"
-      - "packages/envoy/go.mod"
-      - "packages/envoy/go.sum"
+      - "packages/envoy/**"
       - "packages/envoy-plugin/**"
       - "packages/envoy-client/**"
       - "packages/contracts/**"
       - "packages/pi-envoy/**"
       - "packages/workspace/**"
       - "skills/**"
+      # The worker image's remaining inputs (worker_image below).
+      - ".dockerignore"
+      - ".github/workflows/worker-image.yaml"
   workflow_dispatch:
 
 permissions:
@@ -68,16 +70,19 @@ jobs:
               - 'packages/workspace/**'
               - 'skills/**'
             # The Go `legion` the worker image compiles and its build inputs (worker.Dockerfile's go
-            # stage); only worker_image reads it, since nothing here releases the Go module.
+            # stage), plus packages/envoy — copied whole for the agent-secrets binary it also builds
+            # (AGENTC-393); only worker_image reads it, since nothing here releases the Go module.
             go:
               - 'packages/daemon-go/**'
               - 'go.work'
               - 'go.work.sum'
-              - 'packages/envoy/go.mod'
-              - 'packages/envoy/go.sum'
+              - 'packages/envoy/**'
             # The cli stage's frozen install needs the root manifest, lockfile, patches, and each
             # root-workspace manifest. Keep this explicit because a workspace can affect Bun's
-            # install without its source becoming part of the worker image.
+            # install without its source becoming part of the worker image. The context's
+            # .dockerignore and the called workflow change the image too. With cli, pi_envoy and go
+            # this covers every file worker.Dockerfile builds from;
+            # .github/scripts/check-image-trigger-paths.sh fails the build when it misses one.
             worker_image:
               - 'package.json'
               - 'bun.lock'
@@ -92,6 +97,8 @@ jobs:
               - 'packages/dispatch/package.json'
               - 'packages/workspace/package.json'
               - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
+              - '.dockerignore'
+              - '.github/workflows/worker-image.yaml'
 
   cli:
     needs: changes

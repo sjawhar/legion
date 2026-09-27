@@ -47,10 +47,22 @@ COPY packages/envoy/internal ./internal
 # trust the copy checked into the tree over a fresh regeneration.
 COPY --from=web /repo/packages/envoy/internal/contracts/generated.go ./internal/contracts/generated.go
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
+# The legion commit this image is built from, which envoy-dispatch's /healthz reports as
+# `commit`. The release workflow passes its own github.sha. Left empty (a local compose or
+# testcontainers build) the binary reports null; anything else must be a full commit sha, so
+# no placeholder is ever reported as a commit.
+ARG LEGION_COMMIT=
+RUN if [ -n "$LEGION_COMMIT" ] && ! printf '%s' "$LEGION_COMMIT" | grep -Eqx '[0-9a-f]{40}'; then \
+      echo "LEGION_COMMIT must be a full 40-character commit sha or empty, got '$LEGION_COMMIT'" >&2; exit 1; \
+    fi \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
     go build -o /out/envoy-listener ./cmd/listener \
     && CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
-    go build -o /out/envoy-dispatch ./cmd/dispatch
+    go build -ldflags "-X main.buildCommit=${LEGION_COMMIT}" -o /out/envoy-dispatch ./cmd/dispatch \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
+    go build -o /out/envoy-broker ./cmd/broker \
+    && CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
+    go build -o /out/agent-secrets ./cmd/agent-secrets
 
 # Minimal runtime — static binary, no shell needed.
 # curl is included for HEALTHCHECK and operational debugging.
@@ -65,7 +77,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 
 COPY --from=build /out/envoy-listener /usr/local/bin/envoy-listener
 COPY --from=build /out/envoy-dispatch /usr/local/bin/envoy-dispatch
+COPY --from=build /out/envoy-broker /usr/local/bin/envoy-broker
+COPY --from=build /out/agent-secrets /usr/local/bin/agent-secrets
 COPY --from=web --chown=envoy:envoy /repo/packages/dispatch/web/dist /srv/dispatch-web
+
+# The same commit envoy-dispatch reports on /healthz, as the image's own label. Its presence is how
+# a deploy check knows the pinned image serves /healthz's commit and schema_version (agent-c's
+# scripts/verify_dispatch_deploy.py). Declared this late so a new commit reuses every layer above.
+ARG LEGION_COMMIT=
+LABEL org.opencontainers.image.revision=${LEGION_COMMIT}
 
 ENV DISPATCH_WEB_DIST=/srv/dispatch-web
 

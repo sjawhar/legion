@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # Legion worker image: every Legion agent process under `runtime: kubernetes` runs from this image.
 # Build context: the repo root. Built by .github/workflows/worker-image.yaml on the GitHub-hosted runner
-# (called from release.yaml after `cli`, on every head of a pull request against main that touches the
-# image files, or dispatched post-merge). Never build it on a workstation — no `docker build`,
+# (called from release.yaml after `cli`, on every head of a pull request against main that touches a file
+# it builds from, or dispatched post-merge). Never build it on a workstation — no `docker build`,
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
 # Contents: pinned Bun; the TypeScript `legion` CLI compiled from this checkout (one binary: legion,
@@ -119,11 +119,13 @@ COPY packages/daemon-go/go.mod packages/daemon-go/go.sum packages/daemon-go/
 COPY packages/envoy/go.mod packages/envoy/go.sum packages/envoy/
 RUN go mod download
 COPY packages/daemon-go packages/daemon-go
+COPY packages/envoy packages/envoy
 WORKDIR /src/packages/daemon-go
 # Declared here, after the dependency layers, so a new commit re-runs only the compile.
 ARG LEGION_REVISION
 RUN test -n "$LEGION_REVISION" \
-    && CGO_ENABLED=0 go build -ldflags "-X main.revision=${LEGION_REVISION}" -o /out/legion ./cmd/legion
+    && CGO_ENABLED=0 go build -ldflags "-X main.revision=${LEGION_REVISION}" -o /out/legion ./cmd/legion \
+    && CGO_ENABLED=0 go -C /src/packages/envoy build -o /out/agent-secrets ./cmd/agent-secrets
 
 # ------------------------------------------------------------------------------------------------
 # runtime: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm and
@@ -193,6 +195,11 @@ RUN set -eu; \
 # The Go `legion` goes in after the probe layer: its binary differs on every commit (it links the
 # commit), so a new commit rebuilds only the last two layers, never the probe layer and its natives.
 COPY --from=go /out/legion /opt/legion/go/bin/legion
+# agent-secrets (packages/envoy/cmd/agent-secrets, AGENTC-393): the pod's secrets client — the shim
+# runs `keygen` before its hello and `renew` after its enrollment, and the agent's tools call it
+# from PATH, which /opt/legion/go/bin leads in every worker container (sandbox/manifest.go:536,
+# mainEnvironment). The daemon's Tools.AgentSecrets names this path.
+COPY --from=go /out/agent-secrets /opt/legion/go/bin/agent-secrets
 # The final step: the Go `legion` runs on this base and names the commit the workflow built. git resolves
 # to /usr/bin/git on the image PATH and the step refuses any other path, so git's absolute path is as fixed
 # as gh's and jj's (/usr/local/bin, copied above) and a pod environment can name all three. Then the Go
@@ -213,6 +220,7 @@ RUN set -eu; \
     version="$(/opt/legion/go/bin/legion version)"; echo "$version"; \
     test "$version" = "legion (devel) commit ${LEGION_REVISION}"; \
     /opt/legion/go/bin/legion probe-image --plugin-root /opt/legion/pi-legion-envoy --skip-agent-models; \
+    /opt/legion/go/bin/agent-secrets --help >/dev/null; \
     rm -rf /home/legion/.omp/profiles/legion/logs
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs

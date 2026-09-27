@@ -399,6 +399,25 @@ func TestApplyOpsRejectsMarkdownOutsideProofSchema(t *testing.T) {
 	waitForDocumentText(t, service, artifactID, "keep\n")
 }
 
+// Table rows inserted before a table's header cell, which the table cannot hold there, are an
+// invalid insert naming its markdown, never an error the handler answers 500.
+func TestApplyOperationRefusesTableRowsBeforeAHeaderCell(t *testing.T) {
+	for _, test := range []struct{ spec, markdown string }{
+		{"| a | b |\n| --- | --- |\n| c | d |\n", "| x | y |"},
+		{"| a |\n| --- |\n| c |\n", "| a |\n| - |\n| b |"},
+	} {
+		tree, err := parseInput(test.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = applyOperation(tree, model.EditOp{Op: "insert", Before: "a", Markdown: test.markdown})
+		var invalid *ErrInvalidOp
+		if !errors.As(err, &invalid) || invalid.Field != "markdown" {
+			t.Fatalf("insert %q before a header cell: %v, want an invalid op on markdown", test.markdown, err)
+		}
+	}
+}
+
 func TestApplyOperationInsertsParagraphAfterTableContainingCellAnchor(t *testing.T) {
 	tree, err := parseInput("| Key | Value |\n| --- | --- |\n| A10 | old |\n\nAfter.\n")
 	if err != nil {

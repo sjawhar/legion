@@ -215,7 +215,7 @@ func (s *streamStub) admit(conn net.Conn) {
 		return
 	}
 	frame, err := shimwire.Decode(line)
-	hello, ok := frame.(shimwire.Hello)
+	hello, ok := frame.(shimwire.Hello2)
 	if err != nil || !ok {
 		conn.Close()
 		return
@@ -366,6 +366,10 @@ func (c *stubConn) Sequence() uint64 { return c.seq }
 
 func (c *stubConn) AdoptWorkingCopy(context.Context, runtime.GitIdentity, time.Duration) error {
 	return errors.New("the stream stub does not adopt working copies")
+}
+
+func (c *stubConn) AgentSecretsEnrollment(context.Context, string) error {
+	return errors.New("the stream stub does not enroll agent secrets")
 }
 
 func (c *stubConn) awaitEvent(t *testing.T, want string) {

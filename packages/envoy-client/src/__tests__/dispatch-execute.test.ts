@@ -2,10 +2,20 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { dispatchToolSpecs, type IssueComponents, zodSchemaApi } from "@legion/contracts";
+import {
+  type Artifact,
+  dispatchToolSpecs,
+  type IssueComponents,
+  zodSchemaApi,
+} from "@legion/contracts";
 import { z } from "zod";
 import type { ExecFn } from "../dispatch-cwd";
-import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
+import {
+  type DispatchToolResult,
+  executeDispatchTool,
+  resolveIssueDocumentId,
+} from "../dispatch-execute";
+import { DispatchClient } from "../dispatch-http";
 import { dispatchFollowNotice } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 
@@ -59,11 +69,9 @@ const createdIssueLine =
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
+/** A project with no architecture source: the read answers null, never a refusal. */
 function sourceNotFound(): Response {
-  return new Response(JSON.stringify({ code: "SOURCE_NOT_FOUND", error: "source not found" }), {
-    status: 404,
-    headers: { "Content-Type": "application/json" },
-  });
+  return new Response("null", { headers: { "Content-Type": "application/json" } });
 }
 
 function architectureSource(project: string) {
@@ -526,6 +534,7 @@ describe("executeDispatchTool", () => {
             slug: artifact,
           });
         }
+        if (/^\/api\/v1\/projects\/[^/]+\/artifacts$/.test(target.pathname)) return response([]);
         if (target.pathname.endsWith("/asks")) {
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
           request = { body, path: target.pathname };
@@ -1450,6 +1459,7 @@ describe("executeDispatchTool", () => {
         status: "todo",
         parent: "AGENTC-9",
         label: "bug",
+        priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
       },
       cwd: "/workspace",
@@ -1464,13 +1474,17 @@ describe("executeDispatchTool", () => {
       "/api/v1/issues",
       "/api/v1/agents",
     ]);
-    expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
-      project: "AGENTC",
-      status: "todo",
-      parent: "AGENTC-9",
-      label: "bug",
-      updated_since: "2026-09-01T00:00:00Z",
-    });
+    // Each priority repeats as its own parameter, and null asks for issues with no priority.
+    expect([...(requests[0]?.searchParams ?? [])]).toEqual([
+      ["project", "AGENTC"],
+      ["status", "todo"],
+      ["parent", "AGENTC-9"],
+      ["label", "bug"],
+      ["priority", "0"],
+      ["priority", "1"],
+      ["priority", "none"],
+      ["updated_since", "2026-09-01T00:00:00Z"],
+    ]);
     expect(result.details).toEqual({
       issues: [
         {
@@ -2544,23 +2558,23 @@ describe("executeDispatchTool", () => {
     const start = (name: string) => {
       started.push(name);
     };
+    const notes = {
+      id: "artifact-42",
+      issue_key: null,
+      project: "CORE",
+      ref_key: "CORE/notes",
+      slug: "notes",
+      name: "notes.md",
+      kind: "doc",
+      primary: false,
+      created_by: { kind: "session", id: "session-1" },
+      created_at: "2026-09-18T00:00:00Z",
+      versions: [],
+    };
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
-      if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") {
-        return response({
-          id: "artifact-42",
-          issue_key: null,
-          project: "CORE",
-          ref_key: "CORE/notes",
-          slug: "notes",
-          name: "notes.md",
-          kind: "doc",
-          primary: false,
-          created_by: { kind: "session", id: "session-1" },
-          created_at: "2026-09-18T00:00:00Z",
-          versions: [],
-        });
-      }
+      if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") return response(notes);
+      if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([notes]);
       if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
         start("document");
         documentRequested.resolve();
@@ -3015,6 +3029,210 @@ describe("executeDispatchTool", () => {
     );
   });
 
+  // Dispatch suffixes a slug two documents would share: "plan v2" takes plan-v2, so a document
+  // named "plan-v2" takes plan-v2-2, and plan-v2 is then one document's slug and the other's
+  // filename.
+  const projectDocument = (id: string, slug: string, name: string): Artifact => ({
+    id,
+    issue_key: null,
+    project: "GREF",
+    ref_key: `GREF/${slug}`,
+    slug,
+    name,
+    kind: "doc",
+    primary: false,
+    created_by: { kind: "user", id: "alice" },
+    created_at: "2026-09-27T00:00:00Z",
+    versions: [],
+  });
+  /** Dispatch's project routes over `documents`: the slug route answers a slug, then a filename
+   * no other document shares, and the unlinked list is every document. `requests` records each
+   * call as its method and path. */
+  const projectDispatch = (documents: readonly Artifact[], requests: string[]) =>
+    (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = new URL(String(url));
+      requests.push(`${init?.method ?? "GET"} ${request.pathname}${request.search}`);
+      if (request.pathname === "/api/v1/projects/GREF/artifacts") return response(documents);
+      const routed = request.pathname.match(/^\/api\/v1\/projects\/GREF\/artifacts\/([^/]+)$/);
+      if (routed?.[1] !== undefined) {
+        const reference = decodeURIComponent(routed[1]);
+        const named = documents.filter((document) => document.name === reference);
+        const hit =
+          documents.find((document) => document.slug === reference) ??
+          (named.length === 1 ? named[0] : undefined);
+        return hit === undefined
+          ? new Response(JSON.stringify({ code: "ARTIFACT_NOT_FOUND", error: "not found" }), {
+              status: 404,
+              headers: { "Content-Type": "application/json" },
+            })
+          : response(hit);
+      }
+      const text = request.pathname.match(/^\/api\/v1\/artifacts\/([^/]+)\/text$/);
+      if (text?.[1] !== undefined) return response({ markdown: `# ${text[1]}`, version: 1 });
+      if (request.pathname.endsWith("/asks") || request.pathname.endsWith("/comments")) {
+        return response([]);
+      }
+      throw new Error(`unexpected request: ${request.pathname}`);
+    }) as typeof fetch;
+  /** Dispatch's issue route for DSP-42, whose primary document is `spec` and which carries
+   * `artifacts` besides, and the text and comment reads a document read makes. */
+  const issueDispatch = (artifacts: readonly Pick<Artifact, "id" | "slug" | "name" | "kind">[]) =>
+    (async (url: RequestInfo | URL): Promise<Response> => {
+      const request = new URL(String(url));
+      if (request.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-spec",
+          artifacts: [
+            { id: "artifact-spec", slug: "spec", name: "spec.md", kind: "doc", primary: true },
+            ...artifacts.map((artifact) => ({ ...artifact, primary: false })),
+          ],
+        });
+      }
+      const text = request.pathname.match(/^\/api\/v1\/artifacts\/([^/]+)\/text$/);
+      if (text?.[1] !== undefined) return response({ markdown: `# ${text[1]}`, version: 1 });
+      if (request.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+      throw new Error(`unexpected request: ${request.pathname}`);
+    }) as typeof fetch;
+  const readDocument = (args: Record<string, unknown>, fetchImpl: typeof fetch) =>
+    executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args,
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+  test("a bare project reference that is one document's slug and another's filename is refused", async () => {
+    const documents = [
+      projectDocument("artifact-v2", "plan-v2", "plan v2"),
+      projectDocument("artifact-v2-2", "plan-v2-2", "plan-v2"),
+    ];
+    const requests: string[] = [];
+    const fetchImpl = projectDispatch(documents, requests);
+    const refusal =
+      '"plan-v2" names 2 documents on this project; use the id: artifact-v2 (plan-v2, plan v2), artifact-v2-2 (plan-v2-2, plan-v2)';
+    await expect(readDocument({ project: "GREF", artifact: "plan-v2" }, fetchImpl)).rejects.toThrow(
+      refusal
+    );
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { project: "GREF", artifact: "plan-v2", body: "Looks good." },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(refusal);
+    expect(requests.filter((request) => !request.startsWith("GET "))).toEqual([]);
+    for (const [reference, id] of [
+      ["plan v2", "artifact-v2"],
+      ["plan-v2-2", "artifact-v2-2"],
+      ["artifact-v2", "artifact-v2"],
+    ] as const) {
+      const result = await readDocument({ project: "GREF", artifact: reference }, fetchImpl);
+      expect(result.text).toBe(`# ${id}`);
+    }
+  });
+
+  test("a bare project reference that is one document's id and another's slug resolves as the id", async () => {
+    const documents = [
+      projectDocument("shared-reference", "notes", "notes.md"),
+      projectDocument("artifact-other", "shared-reference", "other.md"),
+    ];
+    const result = await readDocument(
+      { project: "GREF", artifact: "shared-reference" },
+      projectDispatch(documents, [])
+    );
+    expect(result.text).toBe("# shared-reference");
+  });
+
+  // Only documents answer to a filename (Dispatch's own filename fallback reads documents alone),
+  // so an image or file whose filename is a document's slug names no second document.
+  test("a document slug that an image's or file's filename repeats resolves to the document", async () => {
+    const project = await readDocument(
+      { project: "GREF", artifact: "diagram" },
+      projectDispatch(
+        [
+          projectDocument("artifact-doc", "diagram", "Diagram notes"),
+          { ...projectDocument("artifact-image", "diagram-2", "diagram"), kind: "image" },
+          { ...projectDocument("artifact-file", "diagram-3", "diagram"), kind: "file" },
+        ],
+        []
+      )
+    );
+    expect(project.text).toBe("# artifact-doc");
+
+    const issue = await readDocument(
+      { issue: "DSP-42", artifact: "diagram" },
+      issueDispatch([
+        { id: "artifact-doc", slug: "diagram", name: "Diagram notes", kind: "doc" },
+        { id: "artifact-image", slug: "diagram-2", name: "diagram", kind: "image" },
+      ])
+    );
+    expect(issue.text).toBe("# artifact-doc");
+  });
+
+  test("a bare project reference fails with the route read's error, and with the list read's after a route hit", async () => {
+    const documents = [projectDocument("artifact-v2", "plan-v2", "plan v2")];
+    const failing = (target: string) =>
+      (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const request = new URL(String(url));
+        if (request.pathname + request.search === target) {
+          return new Response(JSON.stringify({ code: "UNAVAILABLE", error: `${target} failed` }), {
+            status: 503,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return projectDispatch(documents, [])(url, init);
+      }) as typeof fetch;
+    for (const target of [
+      "/api/v1/projects/GREF/artifacts/plan-v2",
+      "/api/v1/projects/GREF/artifacts?unlinked=true",
+    ]) {
+      await expect(
+        readDocument({ project: "GREF", artifact: "plan-v2" }, failing(target))
+      ).rejects.toThrow(`${target} failed`);
+    }
+  });
+
+  // A dispatch:// reference's document part is a slug, the address the dashboard and Dispatch's
+  // own routes use, so it names one document even where the same text is another's filename.
+  test("a dispatch:// document reference resolves by slug, never refused for a filename clash", async () => {
+    const requests: string[] = [];
+    const documents = [
+      projectDocument("artifact-v2", "plan-v2", "plan v2"),
+      projectDocument("artifact-v2-2", "plan-v2-2", "plan-v2"),
+    ];
+    const project = await readDocument(
+      { ref: "dispatch://GREF/artifact/plan-v2" },
+      projectDispatch(documents, requests)
+    );
+    expect(project.text).toBe("# artifact-v2");
+    expect(requests).not.toContain("GET /api/v1/projects/GREF/artifacts?unlinked=true");
+
+    const clashing = issueDispatch([
+      { id: "artifact-v2", slug: "spec-v2", name: "spec v2", kind: "doc" },
+      { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", kind: "doc" },
+    ]);
+    for (const ref of [
+      "dispatch://DSP-42/artifact/spec-v2",
+      "http://dispatch.test/issues/DSP-42/artifacts/spec-v2",
+    ]) {
+      const issue = await readDocument({ ref }, clashing);
+      expect(issue.text).toBe("# artifact-v2");
+    }
+    await expect(readDocument({ issue: "DSP-42", artifact: "spec-v2" }, clashing)).rejects.toThrow(
+      '"spec-v2" names 2 documents on this issue; use the id'
+    );
+  });
+
   test("renders a no-new-version document edit and forwards its summary and precondition", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -3375,7 +3593,9 @@ describe("executeDispatchTool", () => {
         return response(artifact);
       }
       if (request.pathname === "/api/v1/projects/CORE/artifacts") {
-        return response({ artifact, version: { number: 1 } });
+        return request.search === "?unlinked=true"
+          ? response([artifact])
+          : response({ artifact, version: { number: 1 } });
       }
       if (request.pathname.endsWith("/text"))
         return response({ markdown: "# Runbook", version: 1 });
@@ -5973,3 +6193,63 @@ for (const { tool, args, writes } of askWriteTools) {
     expect(requests).toEqual([...writes]);
   });
 }
+
+// resolveIssueDocumentId takes the reference the Dispatch tools take for an issue's document: `spec`
+// for its primary document, its id, its slug, or its filename; one that names no document throws.
+test("an issue document reference resolves to the document's id as the Dispatch tools resolve it", async () => {
+  const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+    const target = new URL(String(url));
+    if (target.pathname !== "/api/v1/issues/DSP-42")
+      throw new Error(`unexpected request: ${target.pathname}`);
+    return response({
+      key: "DSP-42",
+      primary_artifact_id: "artifact-42",
+      artifacts: [
+        { id: "artifact-42", slug: "spec-md", name: "spec.md", primary: true },
+        { id: "artifact-43", slug: "notes-md", name: "notes.md", primary: false },
+      ],
+    });
+  };
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  for (const [reference, id] of [
+    ["spec", "artifact-42"],
+    ["spec-md", "artifact-42"],
+    ["spec.md", "artifact-42"],
+    ["artifact-43", "artifact-43"],
+    ["notes-md", "artifact-43"],
+    ["notes.md", "artifact-43"],
+  ] as const) {
+    expect(await resolveIssueDocumentId(client, "DSP-42", reference)).toBe(id);
+  }
+  await expect(resolveIssueDocumentId(client, "DSP-42", "plan.md")).rejects.toThrow(/plan\.md/);
+});
+
+// Dispatch suffixes a slug two documents would share, so on one issue a document's filename can be
+// another's slug: `spec v2` has slug `spec-v2`, and a document named `spec-v2` gets `spec-v2-2`.
+// Such a reference names two documents, so it is refused rather than taken by slug, and the hint
+// names each document's id. A reference only one document answers to still resolves.
+test("a reference that is one document's slug and another's filename is refused as ambiguous", async () => {
+  const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+    response({
+      key: "DSP-42",
+      primary_artifact_id: "artifact-spec",
+      artifacts: [
+        { id: "artifact-spec", slug: "spec", name: "spec.md", primary: true },
+        { id: "artifact-notes", slug: "notes-md", name: "notes.md", primary: false },
+        { id: "artifact-v2", slug: "spec-v2", name: "spec v2", kind: "doc", primary: false },
+        { id: "artifact-v2-2", slug: "spec-v2-2", name: "spec-v2", kind: "doc", primary: false },
+      ],
+    });
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl as typeof fetch);
+  await expect(resolveIssueDocumentId(client, "DSP-42", "spec-v2")).rejects.toThrow(
+    '"spec-v2" names 2 documents on this issue; use the id: artifact-v2 (spec-v2, spec v2), artifact-v2-2 (spec-v2-2, spec-v2)'
+  );
+  for (const [reference, id] of [
+    ["spec v2", "artifact-v2"],
+    ["spec-v2-2", "artifact-v2-2"],
+    ["artifact-v2-2", "artifact-v2-2"],
+    ["spec", "artifact-spec"],
+  ] as const) {
+    expect(await resolveIssueDocumentId(client, "DSP-42", reference)).toBe(id);
+  }
+});

@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { GrantResponse, LegionRole } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
+import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
+import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { messageFor } from "@legion/envoy-client/errors";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -1155,6 +1158,25 @@ export default function legionExtension(pi: PiApi): void {
           };
         },
         onPhaseCompleted,
+        resolveDocument: async (issue, reference) => {
+          const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+          if (config === null) {
+            throw new Error(
+              `register_gate cannot look up document "${reference}" on ${issue}: this pane has no Dispatch configured; pass the document's id`
+            );
+          }
+          try {
+            return await resolveIssueDocumentId(
+              new DispatchClient(config.url, config.token, fetch),
+              issue,
+              reference
+            );
+          } catch (error) {
+            throw new Error(
+              `register_gate could not look up document "${reference}" on ${issue} in Dispatch: ${messageFor(error)}`
+            );
+          }
+        },
       })
     );
   };

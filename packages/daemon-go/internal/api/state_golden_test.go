@@ -118,6 +118,7 @@ func populatedState() State {
 			SessionID:    "ses_controller",
 			RegisteredAt: time.Date(2026, 9, 22, 9, 16, 40, 0, time.UTC),
 		},
+		AgentSecretsLogin: &AgentSecretsLoginView{State: "pending", Code: "WXYZ-1234"},
 	}
 }
 

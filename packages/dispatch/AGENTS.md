@@ -29,7 +29,7 @@ The `Artifacts` tab carries the number of rows it lists as a `Pill` after the la
 
 Project pages keep their name, linked project key, project tabs, and, on issue routes, the keyboard-reachable List/Board control in a dense responsive header. At `md` and above these controls form one strip; on smaller screens the name, key, and blocker pill form the first row, with tabs and the view control below. When an open ask waits on the viewer, the header's `Blocked on you · N` pill links to the Inbox; it is absent when no asks are waiting.
 
-A project's routes are `/projects/:key/architecture`, `/projects/:key/issues` (the List and the Board; every `?label=`/`?status=`/`?q=` filter URL lives here), and `/projects/:key/documents`; the bare `/projects/:key` (the sidebar's link) is the open-on rule in `ProjectPage.tsx`: it renders nothing while `["architecture-source", key]` is pending, then `<Navigate replace>` to `/architecture` on 200 or to `/issues` — the search forwarded — on the one expected failure, `404 SOURCE_NOT_FOUND` (`isSourceNotFound` in `api/client.ts`, which also stops the shared retry policy from retrying it); any other failure renders `QueryError`, never a quiet fall back to Issues. The Architecture tab exists only when the project has a source (a direct `/architecture` link without one is `NotFoundPage`).
+A project's routes are `/projects/:key/architecture`, `/projects/:key/issues` (the List and the Board; every `?label=`/`?status=`/`?q=` filter URL lives here), and `/projects/:key/documents`; the bare `/projects/:key` (the sidebar's link) is the open-on rule in `ProjectPage.tsx`: it renders nothing while `["architecture-source", key]` is pending, then `<Navigate replace>` to `/architecture` when the read names a source or to `/issues` — the search forwarded — when it answers `null`, which is what a project with no source reads as; any failure renders `QueryError`, never a quiet fall back to Issues. (`isSourceNotFound` in `api/client.ts` remains for the architecture TREE read, which is still `404 SOURCE_NOT_FOUND` without a source, and stops the shared retry policy retrying it.) The Architecture tab exists only when the project has a source (a direct `/architecture` link without one is `NotFoundPage`).
 
 `features/architecture/ArchitecturePage.tsx` is that tab (LEGION-191 slice 1a): `GET /projects/{key}/architecture` under `["architecture", key]` (`staleTime` 15 s; `api/sse.ts` invalidates it on every issue and import event, so a bar moves in place when an issue closes). Its URL state is two search parameters — `?component=<id>` is the level (when that component has children) and the details panel; `?view=unassigned|none|retired` opens the side list of that name below the rows, and `?view=no-work` filters the rows to the non-external components with no work (each shown with its parent path). The header's source line reads `repo/branch · at <sha8> · checked <Timestamp> · Refresh` (Refresh is `POST /architecture-source/sync`, disabled in flight; a failure of the request itself — transport, 5xx, nothing recorded on the source row — renders `dangerText` `role=alert` beside the button until the next attempt) and the scope line `D/N issues done · N components with no tracked work · N unassigned · N not architectural` (each a toggle for the matching `?view=`), plus `N issues point at retired components` when `totals.retired_links > 0`. Rows (`<article tabIndex=-1 data-component-row>` under `ul[aria-label=Components]`) are the components at the current level (roots when nothing is selected; `?component=` naming an id the model no longer has shows the roots under a `role=status` notice `Component <id> is not in the current model`), each with a chevron into its children (breadcrumb `nav[aria-label="Component level"]` back), the title link to its details, and a bar read from `done/total` alone — nothing from CI or PRs colours anything. The colour rule (`componentTone` in `architecture-model.ts`, over non-external components only): `total == 0` → dashed track and `No tracked work`; `done == 0` → gray track; `0 < done < total` → gray track with the `progressFill` green; `done == total > 0` → the whole bar `progressFillDone` green, unless a non-external descendant has `total == 0`, which keeps the fill bar and adds the `contains components with no tracked work` badge. External components (`external: true`, never attachable — the server refuses them) render as a plain row with an `external` badge and no bar and are outside every count. Trust states (`sourceState`/`modelDistrusted`): **never synced** (`last_commit == null`) says so in the source line and, with no components, shows `No model imported yet — Refresh reads .dispatch/architecture from repo/branch` in place of the rows; **stale** (`last_sync_at` older than 10 min, twice the sync ticker) renders the age in `inlineWarningText` with `(stale)`; a **failed import** (`last_error`) shows a `role=alert` banner `Last import failed: <error> · showing the model from <sha8>`; stale and failed both hatch every row (`border-dashed` + `trustWarningBorder`). Vanished-path badges wait for the importer to check paths (slice 2). `ComponentDetails.tsx` renders the selected component below the rows: **Work** — its own issues, unfinished first by lifecycle status then `updated_at` desc, done ones behind `Show N done` (`components/DisclosureToggle.tsx`, hoisted from the Agents page) — each row key · title link, `StatusPill`, `Timestamp`, `GitHubLink`s, and a muted `inherited` or `in <descendant>` marker; a row's chevron expands the issue's children in place, read from the issue's own `GET /issues/{key}` (`["issue", key]`, the query the issue page shares — the tree's side lists carry no `parent`, so every work row gets a chevron and children are fetched on expansion) and placed against the tree (`placeChild`): a child of this component renders as a full row, one counted under another component dims with `elsewhere · <component>`, one declared not architectural dims with `not architectural`, one in no list dims with `unassigned`; the expansion set lives in `sessionStorage` per project+component so Back from an issue restores it, and the details scroll into view once on mount. Then **Code & definition** — the prose through `MarkdownBody`, `paths`, `depends_on` as links to those components' details, the `external` badge. `AttachmentLists.tsx` is the `?view=` lists: **Unassigned** rows carry the `ComponentPicker` (`components/MultiSelect.tsx` over the non-external components; save on close, like labels → `{mode: "explicit", ids}`) and `Not architectural…` (a reason form → `{mode: "none", reason}`); **Not architectural** rows show the reason and `inherited from <KEY>`, with `Reconsider` (→ `{mode: "inherit"}`) only on an issue's own row; **Pointing at retired components** rows name the retired ids and re-attach through the picker, seeded with the issue's surviving live components (the tree rows where it is `direct` or `inherited`), so the save adds the pick instead of replacing the set. Every write goes through `features/issue/useIssueComponents.ts` (`PATCH /issues/{key}` `components`): the issue detail and the tree cache move optimistically (`predictTree` — the row leaves its list, the target components' totals grow; an `inherit` write only removes the issue's rows, since where it lands depends on ancestors the tree does not expose), the row stays rendered in its list, at its index, marked `Saving…` (`role=status`) until the PATCH resolves (focus, which the unmounted picker dropped, then lands on the row at that index), a failure rolls both caches back and shows the server's message inline (`role=alert`), and both the tree and every `["issue"]` query refetch afterwards because descendants inherit the change with no event of their own. The issue header's `Components:` line (`IssueComponentsLine.tsx`) offers the same picker only when the project's `GET /architecture-source` (`["architecture-source", key]`, the lookup the project page shares) answers 200 — the tree itself is fetched only while the picker is open, never on load; an empty pick there means `inherit`; without a source (404 SOURCE_NOT_FOUND) it stays read-only.
 
@@ -102,6 +102,73 @@ nothing else, emerald is settled, and one filled button per surface names the ac
 wants. Anything a reader uses less than once per visit folds behind a labelled control that still
 names its count. The full vocabulary, with the reason each call beat its alternative, is the
 `LEGION-67` specification in Dispatch.
+
+## Credential requests
+
+`features/credentials/` renders the whole AGENTC-393 credential-request approval surface —
+directed, signature-verified, immutable-record requests the broker owns and decides; Dispatch
+only relays and renders. The feature is off — the inbox section hidden, its routes 404-clean —
+whenever `DISPATCH_AGENT_SECRETS_URL` is unset on the server; every SPA read of that state comes
+from an ordinary `404 FEATURE_OFF` on the pending-list query, never a separate capability flag.
+`CredentialRequestsSection.tsx` mounts in `features/inbox/Inbox.tsx`, above the ask sections and
+outside its roving-focus/`ViewportAnchor` mechanism (it is not an ask row): each pending row shows
+a kind badge ("Secret request" for `agent_secret`, "Machine login" for `launcher_credential`), the
+requested identifiers, and a relative `Timestamp`, linking to `/credentials/:recordId` — except a
+machine-kind row, which links to `/credentials/machine` instead, since a machine record's
+WebAuthn challenge is obtainable only through the typed-code lookup route (ruling 13: a direct
+record link can never approve a machine login).
+
+`CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
+(`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
+lifetime, requested/expiry timestamps, rules version, approver, then the agent's reason) and
+`CredentialDecisionButtons.tsx` (the Approve/Deny pair). The reason renders inside a
+`<blockquote>` as **plain text only** — no Markdown pipeline, no linkification, `white-space:
+pre-wrap` — since it is the agent's own words, not reviewed content; a machine-kind record adds
+the sentence "Approving lets `<host>` start agent sessions as you." verbatim and renders no
+buttons at all, pointing instead at the machine page, whose code-entry lookup is the only way to
+obtain that record's challenges. Every WebAuthn ceremony (`lib/webauthn.ts`: `getAssertion`,
+`createCredential`, and the `b64urlToBuf`/`bufToB64url` base64url codec) runs with `rpId =
+location.hostname` and a challenge taken **only** from the same response that carried the
+record's facts — never from a URL, a prop, or any other side channel. A plain record's approve
+POST body is `{assertion}`; a machine record's is `{assertion, code}` (the code re-entered, not
+cached) — deny is always `{assertion}` alone. Terminal-state records (`approved`, `denied`,
+`expired`, `cancelled`, `revoked`) render their recorded decision and no buttons; every broker
+error surfaces verbatim through `ApiError`'s message, never reworded.
+
+`KeysPage.tsx` (`/credentials/keys`, linked from an "Approver keys" section on `/settings`) lists
+the signed-in login's own keys and offers **Register key** (begin → `createCredential` → finish,
+rendering the broker's returned rules-file YAML entry in a copyable `<pre>` with the instruction
+to add it to `agent-c`'s `agent-secret-rules.yaml`) and, once a key is freshly registered,
+**Endorse with another key** (an assertion by an already-live key over that new key's id/hash,
+finishing into an endorsement YAML block) — a freshly registered key has no persisted
+`approver_keys` row yet (the broker's rules-file reconciliation is what actually admits it), so
+endorsement necessarily operates on the in-hand registration response held in this page's own
+React state, not on anything fetched from the keys list. `GrantsSection.tsx` lists the viewer's
+live approval-granted secret grants with a Revoke control; since the UI grants list carries no
+per-grant challenge, `keys.ts`'s `revokeChallenge` computes it client-side via the Web Crypto API
+(`SHA-256("agent-secrets/revoke/v1\n" + grantId)`, base64url-encoded) — the same deterministic
+construction contract v9 fixes, so the broker independently derives and verifies the identical
+value.
+
+`packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
+broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
+resolved in `cmd/dispatch/main.go`'s boot config with the repo's usual trimmed-file-wins `_FILE`
+convention, threaded through `api.Deps`/`routes.AppContextOptions` as `Deps.AgentSecrets`, nil
+when unconfigured): every method returns the broker's JSON body as `json.RawMessage` and relays
+it unmodified, since Dispatch never models or decides — only the broker's assertion verification
+does. `packages/envoy/internal/dispatch/api/credential_requests.go` mounts the nine `human`-auth
+proxy rows every page above calls: `GET/POST /api/v1/credential-requests[/{id}[/approve|/deny]]`,
+`POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-keys/{login}`,
+`POST /api/v1/credential-keys/{login}/{kind}/{step}` (`kind` `register|endorse`, `step`
+`begin|finish`; anything else a plain `404 NOT_FOUND`), and `GET /api/v1/credential-grants` +
+`POST /api/v1/credential-grants/{id}/revoke`. Every handler requires a human caller first, then a
+configured client (`404 FEATURE_OFF` on a nil one); the two `?approver=` routes accept only the
+literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own
+canonical login — the UI never asks for anyone else's list. A `*agentsecrets.Error` forwards the
+broker's exact status and body verbatim (e.g. `409 RECORD_TERMINAL`); any other failure is
+`503 AGENT_SECRETS_UNAVAILABLE`. `internal/dispatch/api/contract_test.go` proves this round-trips
+a real broker (`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`, a real
+`webauthntest` assertion) rather than a fake built from this client's own assumptions.
 
 ## Dark mode
 

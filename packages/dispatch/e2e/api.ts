@@ -614,6 +614,22 @@ export function retryCommentDelivery(
  * disabled, so there is no bus and no live session for a browser test of the conversation view
  * to take frames from.
  */
+/** Whether a session answers the relay's replay request at all, with no history behind it: a
+ *  live session that has produced nothing (true), or one whose plugin predates the live view or
+ *  is no longer running (false). */
+export function setAgentStreamResponder(
+  sessionID: string,
+  responding: boolean,
+  options: ApiOptions = {}
+): Promise<{ ok: boolean }> {
+  return request<{ ok: boolean }>(
+    `/api/v1/agents/${encodeURIComponent(sessionID)}/stream/_test/publish?as=responder`,
+    "POST",
+    { responding },
+    options
+  );
+}
+
 export function publishAgentStreamFrame(
   sessionID: string,
   frame: object,

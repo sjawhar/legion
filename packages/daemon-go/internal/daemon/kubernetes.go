@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/sjawhar/legion/daemon/internal/agentsecrets"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
@@ -21,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // agentSandbox is the Agent Sandbox a cluster must have installed for the runtime (LEGION-206
@@ -33,7 +36,10 @@ var agentSandbox = sandbox.InstallRef{
 // workerImageTools are the worker image's own gh, git, jj, and Go legion
 // (packages/daemon/docker/worker.Dockerfile: git from the distribution, gh and jj copied to
 // /usr/local/bin, the Go coordinator's legion under /opt/legion/go/bin).
-var workerImageTools = sandbox.Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"}
+var workerImageTools = sandbox.Tools{
+	GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion",
+	AgentSecrets: "/opt/legion/go/bin/agent-secrets",
+}
 
 // imageProbeRetry is how often the daemon tries its worker image again after an attempt that said
 // nothing definitive: the daemon's backoff, bounded like `legion probe-image`'s at six attempts.
@@ -150,6 +156,10 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		}
 		resources[role] = requirements
 	}
+	var agentSecrets *sandbox.AgentSecrets
+	if a := k.AgentSecrets; a != nil {
+		agentSecrets = &sandbox.AgentSecrets{URL: a.URL, Audience: a.Audience, TokenExpiry: time.Duration(a.TokenExpirySeconds) * time.Second}
+	}
 	return sandbox.Options{
 		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, TreeVolume: treeVolume,
 		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
@@ -167,6 +177,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		TerminationGrace: cfg.WorkerStopTimeout,
 		ProbeInterval:    cfg.ProbeInterval,
 		AdoptTimeout:     cfg.SlowCommandTimeout,
+		AgentSecrets:     agentSecrets,
 		Log:              log,
 	}, nil
 }
@@ -181,6 +192,50 @@ func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []s
 	}
 	return nil
 }
+
+// newSecretsLogin is the daemon's agent-secrets machine login as the machines' Enroller
+// (AGENTC-393 Plan C): constructs the client from runtime.kubernetes.agent_secrets and starts its
+// machine login on a background context at boot, logging the confirmation code exactly once —
+// pod enrollment is held until a human approves it on the Dispatch credential page. The client
+// itself is returned too, read-only, so the state route can show the login's current status
+// (source.State, agentsecrets.Client.LoginStatus). Never part of launchSecrets, so no pod is ever
+// handed the daemon's key or its won credential. Nil, nil without the block.
+func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *agentsecrets.Client) {
+	k := cfg.Runtime.Kubernetes
+	if k == nil || k.AgentSecrets == nil {
+		return nil, nil
+	}
+	client := &agentsecrets.Client{URL: k.AgentSecrets.URL, Operator: k.AgentSecrets.Operator, HTTP: &http.Client{Timeout: 30 * time.Second}}
+	operator := k.AgentSecrets.Operator
+	go func() {
+		code, err := client.Login(context.Background())
+		if err != nil {
+			log.Error("agent-secrets machine login failed", "error", err)
+			return
+		}
+		log.Info(fmt.Sprintf(
+			"agent-secrets machine login: enter code %s on the Dispatch credential page (approver: %s); pod enrollment is held until approved",
+			code, operator,
+		))
+	}()
+	return brokerEnroller{client: client}, client
+}
+
+// brokerEnroller is agentsecrets.Client as supervise.Enroller; an *agentsecrets.APIError is a
+// PermanentError when its status says so, which is how the machine tells a refusal from an outage.
+type brokerEnroller struct{ client *agentsecrets.Client }
+
+func (b brokerEnroller) Enroll(ctx context.Context, e supervise.PodEnrollment) (string, error) {
+	enrolled, err := b.client.Enroll(ctx, agentsecrets.PodEnrollment{
+		PodUID: e.PodUID, Thumbprint: e.Thumbprint, PodToken: e.PodToken, Session: e.Session,
+	})
+	if err != nil {
+		return "", err
+	}
+	return enrolled.ID, nil
+}
+
+func (b brokerEnroller) Revoke(ctx context.Context, id string) error { return b.client.Revoke(ctx, id) }
 
 // providerSecretKeys are provider_keys as the runtime takes them: each variable Oh My Pi reads,
 // to the key of the providers Secret that holds it; nil when the file names none.

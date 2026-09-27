@@ -14,12 +14,14 @@ type Memory struct {
 	next      int
 	viewers   map[string]map[int]func(Frame)
 	replay    map[string]Frame
+	responder map[string]bool
 	watchSeen map[string]int
 }
 
 func NewMemory() *Memory {
 	return &Memory{
 		replay:    make(map[string]Frame),
+		responder: make(map[string]bool),
 		viewers:   make(map[string]map[int]func(Frame)),
 		watchSeen: make(map[string]int),
 	}
@@ -43,9 +45,14 @@ func (m *Memory) Subscribe(sessionID string, deliver func(Frame)) (func(), error
 	}, nil
 }
 
+// Replay answers as a session would. A session this harness has not given a responder to is one
+// nobody is listening for, which is the state a plugin that cannot stream leaves on the bus.
 func (m *Memory) Replay(_ context.Context, sessionID string) (Frame, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if !m.responder[sessionID] {
+		return nil, ErrNoResponder
+	}
 	return m.replay[sessionID], nil
 }
 
@@ -63,11 +70,25 @@ func (m *Memory) Watches(sessionID string) int {
 	return m.watchSeen[sessionID]
 }
 
-// SetReplay is what a session would answer a replay request with.
+// SetReplay is what a session would answer a replay request with. Answering at all makes it a
+// responder, exactly as a running session with a streaming plugin is.
 func (m *Memory) SetReplay(sessionID string, frame Frame) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.replay[sessionID] = frame
+	m.responder[sessionID] = true
+}
+
+// SetResponder says whether anyone is listening on the session's control subject, without
+// giving it a history: a live session that has produced nothing yet is a responder with no
+// frames, and one on a plugin that predates the live view is not a responder at all.
+func (m *Memory) SetResponder(sessionID string, responding bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.responder[sessionID] = responding
+	if !responding {
+		delete(m.replay, sessionID)
+	}
 }
 
 // Publish fans a frame out to every viewer of sessionID, as the bus would.

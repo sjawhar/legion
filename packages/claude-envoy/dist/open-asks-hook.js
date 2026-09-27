@@ -14424,13 +14424,14 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
-    example: { project: "AGENTC" },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, and open-ask count, so you can see backlog shape without " + "opening every issue. Optionally filter by status, parent, label, or how recently it changed. Do " + "not use it to search by keyword or phrase; dispatch_search remains the keyword surface. Rows are " + "capped at limit (default 50, max 250), applied to the response here, not by the server.",
+    example: { project: "AGENTC", priority: [0, 1] },
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, and open-ask count, so you can see backlog shape without " + "opening every issue. Optionally filter by status, parent, label, priority, or how recently it " + "changed; priority takes one or more of 0-3 (P0-P3) and null for an issue with no priority, so " + "an owner's P0/P1 audit is priority [0, 1]. Do not use it to search by keyword or phrase; " + "dispatch_search remains the keyword surface. Rows are capped at limit (default 50, max 250), " + "applied to the response here, not by the server.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
       parent: z2.string().describe("Optional parent issue key filter.").optional(),
       label: z2.string().describe("Optional label filter.").optional(),
+      priority: z2.array(z2.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z2.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
       limit: z2.number({ int: true, min: 1, max: 250 }).describe("Maximum rows, 1-250; default 50.").optional()
     })
@@ -15332,6 +15333,9 @@ class DispatchClient {
       for (const [name, value] of Object.entries(query)) {
         if (typeof value === "string" || typeof value === "number") {
           url2.searchParams.set(name, String(value));
+        } else if (Array.isArray(value)) {
+          for (const item of value)
+            url2.searchParams.append(name, String(item));
         }
       }
     }
@@ -15632,6 +15636,10 @@ function optionalPriority(args, name) {
     return null;
   return typeof value === "number" ? value : undefined;
 }
+function optionalPriorityFilter(args, name) {
+  const value = args[name];
+  return Array.isArray(value) ? value.map((item) => item ?? "none") : undefined;
+}
 function optionalComponents(args, name) {
   const value = args[name];
   if (typeof value !== "object" || value === null)
@@ -15658,12 +15666,11 @@ async function architectureGuidance(client, project, components) {
   if (components.mode === "none" || components.ids.length > 0)
     return;
   try {
-    await client.getArchitectureSource(project);
-    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
-  } catch (error48) {
-    if (error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "SOURCE_NOT_FOUND") {
+    if (await client.getArchitectureSource(project) === null) {
       return;
     }
+    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
+  } catch (error48) {
     return `Could not check whether project ${project} has an architecture model: ${messageFor(error48)}. ${architectureComponentsAction}`;
   }
 }
@@ -16043,13 +16050,23 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, pro
   const issue2 = `${repo2}#${legionIssue}`;
   return { args: { ...args, issue: issue2 }, ref, owner: { kind: "issue", issue: issue2 } };
 }
-function artifactByReference(artifacts, artifactReference, owner) {
-  const byIdOrSlug = artifacts.find((candidate) => candidate.id === artifactReference) ?? artifacts.find((candidate) => candidate.slug === artifactReference);
-  if (byIdOrSlug !== undefined)
-    return byIdOrSlug;
+function artifactByReference(artifacts, artifactReference, owner, canonical) {
+  const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
+  if (canonical && bySlug !== undefined)
+    return bySlug;
+  const byId = artifacts.find((candidate) => candidate.id === artifactReference);
+  if (byId !== undefined)
+    return byId;
   const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
+  if (bySlug !== undefined) {
+    const named = byName.filter((candidate) => candidate.id !== bySlug.id && candidate.kind === "doc");
+    if (named.length > 0) {
+      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
+    }
+    return bySlug;
+  }
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -16057,32 +16074,31 @@ function artifactByReference(artifacts, artifactReference, owner) {
   }
   return artifact;
 }
-async function resolveArtifact(client, owner, artifactReference) {
+async function resolveArtifact(client, owner, artifactReference, { canonical = false } = {}) {
   if (owner.kind === "project") {
     if (artifactReference === undefined) {
       throw new Error("artifact is required for a project document");
     }
-    try {
-      return {
-        owner,
-        artifact: await client.getProjectArtifact(owner.project, artifactReference)
-      };
-    } catch (error48) {
+    const routed = await client.getProjectArtifact(owner.project, artifactReference).catch((error48) => {
       if (!(error48 instanceof DispatchServiceError) || error48.status !== 404)
         throw error48;
-      const artifacts = await client.listProjectArtifacts(owner.project, true);
-      return {
-        owner,
-        artifact: artifactByReference(artifacts, artifactReference, "project")
-      };
-    }
+      return;
+    });
+    if (canonical && routed !== undefined)
+      return { owner, artifact: routed };
+    const unlinked = await client.listProjectArtifacts(owner.project, true);
+    const artifacts = routed === undefined ? unlinked : [routed, ...unlinked.filter((candidate) => candidate.id !== routed.id)];
+    return {
+      owner,
+      artifact: artifactByReference(artifacts, artifactReference, "project", canonical)
+    };
   }
   const issue2 = await client.getIssue(owner.issue);
   let artifact;
   if (artifactReference === undefined || artifactReference === "spec") {
     artifact = issue2.artifacts.find((candidate) => candidate.primary || candidate.id === issue2.primary_artifact_id);
   } else {
-    artifact = artifactByReference(issue2.artifacts, artifactReference, "issue");
+    artifact = artifactByReference(issue2.artifacts, artifactReference, "issue", canonical);
   }
   if (!artifact) {
     throw new Error(documentReferenceProblem(artifactReference ?? "spec", issue2.artifacts, "issue"));
@@ -16090,10 +16106,10 @@ async function resolveArtifact(client, owner, artifactReference) {
   return { owner, issue: issue2, artifact };
 }
 var documentHintLimit = 8;
-function documentReferenceProblem(reference, documents, owner, ambiguous = false) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => `${document.slug} (${document.name})`);
+function documentReferenceProblem(reference, documents, owner, use) {
+  const hints = documents.slice(0, documentHintLimit).map((document) => use === "id" ? `${document.id} (${document.slug}, ${document.name})` : `${document.slug} (${document.name})`);
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return ambiguous ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}` : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
+  return use === undefined ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}` : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
 }
 var askHintLimit = 8;
 function askIDInputProblem(asks, scope) {
@@ -16483,6 +16499,10 @@ async function executeDispatchTool(input) {
   const args = parsed.success ? parsed.data : ownerArguments.args;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
+  const refDocument = ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
+  const resolveDocument = (documentOwner2, reference) => resolveArtifact(client, documentOwner2, reference, {
+    canonical: reference !== undefined && reference === refDocument
+  });
   const owner = ownerArguments.owner?.kind === "issue" ? {
     kind: "issue",
     issue: await resolveExistingIssue(client, ownerArguments.owner.issue)
@@ -16698,6 +16718,7 @@ async function executeDispatchTool(input) {
       const status = optionalString(args, "status");
       const parent = optionalString(args, "parent");
       const label = optionalString(args, "label");
+      const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
       const issues = await client.listIssues({
@@ -16705,6 +16726,7 @@ async function executeDispatchTool(input) {
         ...status === undefined ? {} : { status },
         ...parent === undefined ? {} : { parent },
         ...label === undefined ? {} : { label },
+        ...priority === undefined ? {} : { priority },
         ...updatedSince === undefined ? {} : { updated_since: updatedSince }
       });
       const rows = issues.slice(0, limit).map((row) => ({
@@ -16771,7 +16793,7 @@ async function executeDispatchTool(input) {
         const issueKey = ref.owner.issue;
         id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => client.getComments(issueKey));
       } else if (ref !== null) {
-        const artifact = (await resolveArtifact(client, ref.owner, ref.artifact)).artifact;
+        const artifact = (await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true })).artifact;
         document = artifact;
         id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => client.getArtifactComments(artifact.id));
       }
@@ -16783,7 +16805,7 @@ async function executeDispatchTool(input) {
       const anchorArgs = asObject(args.anchor);
       const owner2 = documentOwner();
       const artifactReference = optionalString(args, "artifact") ?? (anchorArgs === null ? undefined : optionalString(anchorArgs, "artifact"));
-      const resolved = owner2.kind === "project" || artifactReference === undefined ? owner2.kind === "project" ? await resolveArtifact(client, owner2, artifactReference) : undefined : await resolveArtifact(client, owner2, artifactReference);
+      const resolved = owner2.kind === "project" || artifactReference === undefined ? owner2.kind === "project" ? await resolveDocument(owner2, artifactReference) : undefined : await resolveDocument(owner2, artifactReference);
       const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
@@ -16833,7 +16855,7 @@ ${followsAsk(askOwner)}`,
     case "dispatch_comment": {
       const artifactReference = optionalString(args, "artifact");
       const owner2 = documentOwner();
-      const resolved = owner2.kind === "project" || artifactReference === undefined ? owner2.kind === "project" ? await resolveArtifact(client, owner2, artifactReference) : undefined : await resolveArtifact(client, owner2, artifactReference);
+      const resolved = owner2.kind === "project" || artifactReference === undefined ? owner2.kind === "project" ? await resolveDocument(owner2, artifactReference) : undefined : await resolveDocument(owner2, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
       const replyTo = optionalString(args, "reply_to");
       const replyToAskReference = optionalString(args, "reply_to_ask");
@@ -16886,7 +16908,7 @@ ${followsAsk(askOwner)}`,
       };
     }
     case "dispatch_suggest": {
-      const resolved = await resolveArtifact(client, documentOwner(), stringArg(args, "artifact"));
+      const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
       const anchored = anchor(resolved.artifact, args);
       if (anchored === undefined)
         throw new Error("quote is required");
@@ -16941,7 +16963,7 @@ ${followsAsk(askOwner)}`,
       };
     }
     case "dispatch_doc_edit": {
-      const resolved = await resolveArtifact(client, documentOwner(), stringArg(args, "artifact"));
+      const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
       const ops = args.ops;
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;
@@ -16983,7 +17005,7 @@ ${followsAsk(askOwner)}`,
     }
     case "dispatch_doc_read": {
       const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
-      const resolved = await resolveArtifact(client, documentOwner(), artifactReference);
+      const resolved = await resolveDocument(documentOwner(), artifactReference);
       const version2 = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
       const documentPromise = client.docRead(resolved.artifact.id, version2);
       const marksPromise = openArtifactMarks(client, resolved);
@@ -17012,7 +17034,7 @@ ${trailer.join(`
     }
     case "dispatch_request_approval": {
       const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
-      const resolved = await resolveArtifact(client, documentOwner(), artifactReference);
+      const resolved = await resolveDocument(documentOwner(), artifactReference);
       const result = await client.requestApproval(resolved.artifact.id, { actor });
       if (result.ask === null) {
         return {
@@ -17090,7 +17112,7 @@ ${trailer.join(`
     case "dispatch_read": {
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveArtifact(client, ref.owner, ref.artifact)).artifact.id, "all"));
+        const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));
         const askRead = await client.getAsk(id);
         const askRef = refTarget(ref, "ask", id);
         return {
@@ -17100,7 +17122,7 @@ ${trailer.join(`
       }
       if (ownerArguments.ref?.kind === "comment") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments((await resolveArtifact(client, ref.owner, ref.artifact)).artifact.id));
+        const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments((await resolveDocument(ref.owner, ref.artifact)).artifact.id));
         const comment = await client.getComment(id);
         const commentRef = refTarget(ref, "comment", id);
         return {
@@ -17120,7 +17142,7 @@ ${trailer.join(`
         };
       }
       if (documentOwner().kind === "project") {
-        const resolved = await resolveArtifact(client, documentOwner(), stringArg(args, "artifact"));
+        const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
         const documentRef = dispatchDocumentRef(resolved.artifact.project, resolved.artifact.slug);
         return {
           text: [

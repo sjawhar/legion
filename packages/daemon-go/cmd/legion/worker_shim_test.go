@@ -61,6 +61,7 @@ func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 		{"a providers key the shim's environment already has", append([]string{"--connect", connect, "--boot-token-file", token, "--provider-env-dir", providers}, omp...), 1, []string{"LEGION_SHIM_TEST_SHADOWED", shadow}},
 		{"an unreadable providers directory", append([]string{"--connect", connect, "--boot-token-file", token, "--provider-env-dir", filepath.Join(dir, "absent")}, omp...), 1, []string{"--provider-env-dir " + filepath.Join(dir, "absent") + " is unreadable"}},
 		{"no wrapped command", []string{"--connect", connect, "--boot-token-file", token, "--"}, 1, []string{"no wrapped command"}},
+		{"--agent-secrets-key-dir alone", append([]string{"--connect", connect, "--boot-token-file", token, "--agent-secrets-key-dir", dir}, omp...), 1, []string{"given together or not at all"}},
 		{"--socket mode, which is not ported", append([]string{"--socket", socket}, omp...), 2, []string{"-socket"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,7 +125,7 @@ func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if hello, err := shimwire.Decode(line); err != nil || hello != (shimwire.Hello{BootToken: "boot-token"}) {
+			if frame, err := shimwire.Decode(line); err != nil || frame != (shimwire.Hello2{BootToken: "boot-token"}) {
 				return errors.New("the first frame was " + string(line))
 			}
 			return shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{})

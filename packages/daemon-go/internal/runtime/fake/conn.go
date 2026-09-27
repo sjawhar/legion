@@ -31,13 +31,14 @@ type Adoption struct {
 // Conn is one agent's connection as a double: it records what was asked of the agent and answers
 // what the test told it to. The zero value is not usable; call NewConn.
 type Conn struct {
-	seq       uint64
-	mu        sync.Mutex
-	prompts   []Prompt
-	adoptions []Adoption
-	shutdowns int
-	state     runtime.ConnState
-	failures  map[string]error
+	seq         uint64
+	mu          sync.Mutex
+	prompts     []Prompt
+	adoptions   []Adoption
+	enrollments []string
+	shutdowns   int
+	state       runtime.ConnState
+	failures    map[string]error
 }
 
 // NewConn is a connection that accepts everything and reports no turn in flight.
@@ -89,6 +90,14 @@ func (c *Conn) AdoptWorkingCopy(_ context.Context, id runtime.GitIdentity, timeo
 	return c.failures["AdoptWorkingCopy"]
 }
 
+// AgentSecretsEnrollment records the enrollment id the daemon asked the agent's shim to keep.
+func (c *Conn) AgentSecretsEnrollment(_ context.Context, enrollmentID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.enrollments = append(c.enrollments, enrollmentID)
+	return c.failures["AgentSecretsEnrollment"]
+}
+
 // Prompts is every prompt frame sent over this connection, in order.
 func (c *Conn) Prompts() []Prompt {
 	c.mu.Lock()
@@ -101,6 +110,13 @@ func (c *Conn) Adoptions() []Adoption {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]Adoption(nil), c.adoptions...)
+}
+
+// Enrollments is every enrollment id asked over this connection, in order.
+func (c *Conn) Enrollments() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.enrollments...)
 }
 
 // Shutdowns is how many times the agent was asked to end itself.

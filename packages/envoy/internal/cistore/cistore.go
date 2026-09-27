@@ -29,6 +29,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/logging"
 )
 
 // Bucket is the JetStream KV bucket name for per-commit CI state.
@@ -258,6 +259,9 @@ type Store struct {
 	// be written to it (update).
 	combineMu sync.Mutex
 	combiners map[string]*keyCombiner
+
+	// logger writes the store's JSON lines, which an alarm can count (write).
+	logger *logging.Logger
 }
 
 type openOpts struct {
@@ -289,8 +293,8 @@ func WithTTL(d time.Duration) Option {
 
 // Open connects (or creates) the CI-state KV bucket and starts the WatchAll
 // cache. Mirrors store.Open: the cache is populated asynchronously by watch()
-// so Open never blocks on per-key Gets.
-func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
+// so Open never blocks on per-key Gets. The store logs through logger.
+func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error) {
 	o := openOpts{replicas: 1, ttl: 7 * 24 * time.Hour, bucket: Bucket}
 	for _, f := range opts {
 		f(&o)
@@ -314,6 +318,7 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 		cacheRevisions: map[string]uint64{},
 		combiners:      map[string]*keyCombiner{},
 		rewatched:      make(chan struct{}),
+		logger:         logger,
 	}
 	s.watcher = kvwatch.New("cistore", kv, s.applyWatched, s.resetCache)
 	s.watcher.Start()
@@ -391,7 +396,7 @@ func (s *Store) applyWatched(entry nats.KeyValueEntry) {
 	s.mu.Unlock()
 
 	if malformed != nil {
-		slog.Warn("cistore watch evicted malformed value",
+		s.logger.Warn("cistore watch evicted malformed value",
 			slog.String("key", key),
 			slog.Uint64("revision", entry.Revision()),
 			slog.String("error", malformed.Error()),

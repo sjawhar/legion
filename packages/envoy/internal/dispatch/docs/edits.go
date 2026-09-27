@@ -794,6 +794,7 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		// wholly inside, so each anchor's quote is still the whole text it covers.
 		pmdoc.AddMarks(with, pmdoc.AnchorMarksCovering(tree, r))
 		next, err := pmdoc.Splice(tree, r, with)
+		err = invalidSchemaOp("with", err)
 		if err == nil && level != 0 {
 			next, err = pmdoc.SetHeadingLevel(next, r.From, level)
 		}
@@ -829,7 +830,8 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return pmdoc.Splice(tree, r, empty)
+		out, err := pmdoc.Splice(tree, r, empty)
+		return out, invalidSchemaOp("find", err)
 	case "insert":
 		if op.Markdown == "" {
 			return nil, invalidOp("markdown")
@@ -861,11 +863,11 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			return nil, invalidMarkdownOp("markdown", err)
 		}
 		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
-			return out, err
+			return out, invalidSchemaOp("markdown", err)
 		}
 		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
 		if err != nil {
-			return nil, err
+			return nil, invalidSchemaOp("markdown", err)
 		}
 		if err := pmdoc.RepeatedBlockID(tree, out, with); err != nil {
 			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
@@ -1144,7 +1146,7 @@ func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdo
 // line, a table cell or a heading is inline HTML and is kept. A block that was already unreadable,
 // or another block that is, is no reason to refuse this replace.
 func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
+	_, unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
 	if err != nil || unreadable == nil {
 		return err
 	}
@@ -1156,7 +1158,7 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 // break inside a code span or inline HTML there ends the block, as a hard break would
 // (hasHardBreak), and the document reads back a heading and a paragraph, or a row as two rows.
 func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	_, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}
@@ -1292,7 +1294,7 @@ func inlineAware(markdown string, edges textEdges, opensDocument bool) (*pmdoc.N
 // this one, could read as that fence (pmdoc's typedFence). Code that only reads back with
 // different whitespace keeps its shape and is not refused.
 func refuseCodeThatReshapesItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
-	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	_, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}

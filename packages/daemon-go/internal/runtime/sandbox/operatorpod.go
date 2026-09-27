@@ -88,12 +88,16 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 			return fmt.Errorf("runtime.kubernetes.pod.volumes[%d].name %s is a volume Legion puts in every pod", i, volume.Name)
 		}
 	}
+	imageOwned := append(imageOwnedPaths(), tools.GH, tools.Git, tools.JJ, tools.Legion)
+	if tools.AgentSecrets != "" {
+		imageOwned = append(imageOwned, tools.AgentSecrets)
+	}
 	owners := []struct {
 		paths       []string
 		owns, whose string
 	}{
 		{legionMountPaths(), "Legion mounts in every pod", "Legion's"},
-		{append(imageOwnedPaths(), tools.GH, tools.Git, tools.JJ, tools.Legion), "the worker image owns", "the image's"},
+		{imageOwned, "the worker image owns", "the image's"},
 	}
 	for i, mount := range pod.VolumeMounts {
 		for _, owner := range owners {

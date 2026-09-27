@@ -35,6 +35,10 @@ type State struct {
 	// ControllerLocator is the project's controller, absent until a session registers with the
 	// capability `legion controller start` fetched.
 	ControllerLocator *ControllerLocator `json:"controllerLocator,omitempty"`
+	// AgentSecretsLogin is the daemon's own agent-secrets machine login
+	// (runtime.kubernetes.agent_secrets, AGENTC-393 Plan C), absent when the deployment configures
+	// no broker.
+	AgentSecretsLogin *AgentSecretsLoginView `json:"agentSecretsLogin,omitempty"`
 }
 
 // ControllerLocator is the external record of the project's controller (LEGION-206 Requirement
@@ -56,6 +60,16 @@ func ControllerLocatorOf(runtimeName string, record controller.Record) *Controll
 		return nil
 	}
 	return &ControllerLocator{Runtime: runtimeName, External: true, SessionID: record.Session, RegisteredAt: record.RegisteredAt}
+}
+
+// AgentSecretsLoginView is the daemon's own agent-secrets machine login's current status
+// (agentsecrets.Client.LoginStatus): State is one of "none" (no login has ever been started),
+// "pending", "issued", "denied", or "expired"; Code is the confirmation code shown on the
+// Dispatch credential page for a pending login, "" otherwise. Never a key or a launcher
+// credential — those live only in the daemon's process memory.
+type AgentSecretsLoginView struct {
+	State string `json:"state"`
+	Code  string `json:"code"`
 }
 
 // MarshalJSON keeps `issues` an object on the wire: a nil Go map is `null`, which the plugin's

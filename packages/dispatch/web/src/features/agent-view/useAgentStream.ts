@@ -1,4 +1,4 @@
-import type { AgentStreamFrame, AgentStreamReplay } from "@legion/contracts";
+import type { AgentStreamFrame, AgentStreamReplay, AgentStreamResponder } from "@legion/contracts";
 import { useEffect, useState } from "react";
 
 import { EventStreamHttpError, readEventStream, reconnectDelayMs } from "../../api/live";
@@ -14,6 +14,10 @@ export type AgentStreamStatus = "connecting" | "live" | "reconnecting" | "unavai
 export interface AgentStreamState {
   readonly conversation: AgentConversation;
   readonly status: AgentStreamStatus;
+  /** Whether the session answers the relay on its control subject; `undefined` until it says.
+   *  `false` is a session that cannot stream - an older plugin, or one no longer running - and
+   *  it can turn true on a later replay without this viewer reconnecting. */
+  readonly responding: boolean | undefined;
 }
 
 /**
@@ -26,6 +30,7 @@ export interface AgentStreamState {
 export function useAgentStream(sessionID: string): AgentStreamState {
   const [state, setState] = useState<AgentStreamState>({
     conversation: EMPTY_CONVERSATION,
+    responding: undefined,
     status: "connecting",
   });
 
@@ -34,7 +39,7 @@ export function useAgentStream(sessionID: string): AgentStreamState {
     let attempt = 0;
     let controller: AbortController | null = null;
     let reconnect: number | undefined;
-    setState({ conversation: EMPTY_CONVERSATION, status: "connecting" });
+    setState({ conversation: EMPTY_CONVERSATION, responding: undefined, status: "connecting" });
 
     const open = (): void => {
       const current = new AbortController();
@@ -43,20 +48,28 @@ export function useAgentStream(sessionID: string): AgentStreamState {
         onChunk: () => undefined,
         onEvent: (raw) => {
           if (stopped) return;
+          if (raw.event === "responder") {
+            const responder = JSON.parse(raw.data) as AgentStreamResponder;
+            setState((previous) => ({ ...previous, responding: responder.responding }));
+            return;
+          }
           if (raw.event === "replay") {
             const replay = JSON.parse(raw.data) as AgentStreamReplay;
             // A reconnect rebuilds from the session's own replay rather than layering it over
             // a conversation whose newest frames may already be gone from the session's ring.
-            setState({
+            setState((previous) => ({
               conversation: applyFrames(EMPTY_CONVERSATION, replay.frames),
+              responding: previous.responding,
               status: "live",
-            });
+            }));
             return;
           }
           if (raw.event !== "frame") return;
           const frame = JSON.parse(raw.data) as AgentStreamFrame;
           setState((previous) => ({
             conversation: applyFrame(previous.conversation, frame),
+            // A frame is a session speaking, which is the same evidence the replay answer is.
+            responding: true,
             status: "live",
           }));
         },

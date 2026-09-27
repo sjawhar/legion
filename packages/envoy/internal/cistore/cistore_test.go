@@ -89,7 +89,7 @@ func connectNATS(t testing.TB) (*natsgo.Conn, func()) {
 func openStore(t testing.TB, conn *natsgo.Conn) *Store {
 	t.Helper()
 	name := testBucket(t)
-	st, err := Open(conn, WithReplicas(1), WithTTL(time.Hour), func(o *openOpts) { o.bucket = name })
+	st, err := Open(conn, logging.New("test"), WithReplicas(1), WithTTL(time.Hour), func(o *openOpts) { o.bucket = name })
 	if err != nil {
 		t.Fatalf("open cistore: %v", err)
 	}

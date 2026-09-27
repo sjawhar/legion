@@ -26,12 +26,14 @@ export interface SentMessage {
  */
 export function AgentRuntimeThread({
   conversation,
+  empty,
   onNew,
   placeholder,
   resetKey,
   sent,
 }: {
   conversation: AgentConversation;
+  empty: string;
   onNew: (message: { content: readonly { type: string; text?: string }[] }) => Promise<void>;
   placeholder: string;
   resetKey: string;
@@ -61,7 +63,7 @@ export function AgentRuntimeThread({
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <AgentThread placeholder={placeholder} resetKey={resetKey} />
+      <AgentThread empty={empty} placeholder={placeholder} resetKey={resetKey} />
     </AssistantRuntimeProvider>
   );
 }

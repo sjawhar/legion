@@ -118,9 +118,15 @@ func TestAgentStreamRelaysTheSessionsOwnReplayThenItsLiveFrames(t *testing.T) {
 		t.Fatalf("open stream: %d", response.StatusCode)
 	}
 
+	// Every stream opens by saying whether the session is answering at all: an empty transcript
+	// means one thing for a session that answers and another for one nobody is listening for.
 	event, data := readStreamEvent(t, reader)
+	if event != "responder" || data != `{"v":1,"responding":true}` {
+		t.Fatalf("first event is %q %q, want the responder verdict", event, data)
+	}
+	event, data = readStreamEvent(t, reader)
 	if event != "replay" || data != `{"v":1,"kind":"replay-body"}` {
-		t.Fatalf("first event is %q %q, want the session's replay", event, data)
+		t.Fatalf("second event is %q %q, want the session's replay", event, data)
 	}
 	// The session publishes only while a viewer is attached, so the relay must have told it so
 	// before any turn ran — not on its first ten-second tick.
@@ -131,6 +137,35 @@ func TestAgentStreamRelaysTheSessionsOwnReplayThenItsLiveFrames(t *testing.T) {
 	source.Publish(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"message","seq":7}`))
 	event, data = readStreamEvent(t, reader)
 	if event != "frame" || data != `{"v":1,"kind":"message","seq":7}` {
+		t.Fatalf("live event is %q %q, want the published frame", event, data)
+	}
+}
+
+// A session nobody answers for is a different statement from a session with an empty history,
+// and it is the only thing that tells a plugin that cannot stream from one that has not spoken:
+// every release that can stream answers the control subject, and none that cannot does. The
+// relay says so on the wire rather than leaving a viewer waiting on a turn that cannot arrive.
+func TestAgentStreamReportsASessionNobodyAnswersFor(t *testing.T) {
+	source := agentstream.NewMemory()
+	source.SetResponder(plannerSessionID, false)
+	handler, _, _ := newTestServer(t, testServerOptions{agentStream: source})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, reader := openAgentStream(t, server, plannerSessionID, "cookie")
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("open stream: %d", response.StatusCode)
+	}
+	event, data := readStreamEvent(t, reader)
+	if event != "responder" || data != `{"v":1,"responding":false}` {
+		t.Fatalf("first event is %q %q, want the no-responder verdict", event, data)
+	}
+	// The stream itself is healthy: a frame published to it still reaches the viewer, which is
+	// what makes the verdict a statement about the session rather than about the relay.
+	source.Publish(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"message","seq":1}`))
+	event, data = readStreamEvent(t, reader)
+	if event != "frame" || data != `{"v":1,"kind":"message","seq":1}` {
 		t.Fatalf("live event is %q %q, want the published frame", event, data)
 	}
 }
@@ -149,9 +184,13 @@ func TestAgentStreamWritesNothingToPostgres(t *testing.T) {
 		response.Body.Close()
 		t.Fatalf("open stream: %d", response.StatusCode)
 	}
+	if event, _ := readStreamEvent(t, reader); event != "responder" {
+		response.Body.Close()
+		t.Fatalf("first event is %q, want the responder verdict", event)
+	}
 	if event, _ := readStreamEvent(t, reader); event != "replay" {
 		response.Body.Close()
-		t.Fatalf("first event is %q, want replay", event)
+		t.Fatalf("second event is %q, want replay", event)
 	}
 	source.Publish(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"tool-result","secret":"hunter2"}`))
 	if event, _ := readStreamEvent(t, reader); event != "frame" {

@@ -36,6 +36,22 @@ function deliveryModes(capabilities: readonly string[]): MessageDeliveryMode[] {
   return advertised.length === 0 ? ["aside"] : advertised;
 }
 
+/**
+ * What an empty transcript means for this session, which only the session can say: it answers
+ * the relay on its control subject, or nobody is there. Saying "the next turn appears here" to a
+ * viewer of a session that answers nothing was a promise the page could not keep. Not every
+ * silent plugin has a newer one to install - no claude-envoy release streams at all - so the
+ * text names what is true of the plugin rather than telling its reader to upgrade. The relay
+ * keeps asking, so a session restarted onto a plugin that streams turns this around without a
+ * reload, and the wording stays neutral until the first answer arrives.
+ */
+function emptyText(responding: boolean | undefined): string {
+  if (responding === false) {
+    return "This session is not answering the live view: its Envoy plugin does not stream (Claude Code sessions don't, nor pi-legion-envoy before 5.8.0), or the session is no longer running. Nothing appears here until it answers.";
+  }
+  return "Nothing yet. This session's next turn appears here as it happens.";
+}
+
 export function AgentConversationPage(): ReactNode {
   const { sessionId = "" } = useParams<{ sessionId: string }>();
   const { agents } = useAgents(true, true);
@@ -43,7 +59,7 @@ export function AgentConversationPage(): ReactNode {
   const label = sessionLabel(sessionId, agent?.title ?? "");
   useDocumentTitle(label);
 
-  const { conversation, status } = useAgentStream(sessionId);
+  const { conversation, responding, status } = useAgentStream(sessionId);
   const modes = deliveryModes(agent?.capabilities ?? []);
   const [mode, setMode] = useState<MessageDeliveryMode>("aside");
   const [sendError, setSendError] = useState<string | null>(null);
@@ -139,6 +155,7 @@ export function AgentConversationPage(): ReactNode {
       <ErrorBoundary region="this conversation" resetKey={sessionId}>
         <AgentRuntimeThread
           conversation={conversation}
+          empty={emptyText(responding)}
           onNew={onNew}
           placeholder={`Message ${label} — delivered as ${mode}…`}
           resetKey={sessionId}

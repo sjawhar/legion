@@ -563,7 +563,7 @@ func dialShim(t *testing.T, address, bootToken string) *shim {
 	}
 	t.Cleanup(func() { conn.Close() })
 	s := &shim{t: t, conn: conn, lines: bufio.NewReader(conn), writer: shimwire.NewWriter(conn)}
-	s.send(shimwire.Hello{BootToken: bootToken})
+	s.send(shimwire.Hello2{BootToken: bootToken})
 	if frame := s.next(); frame.FrameType() != shimwire.TypeHelloAck {
 		t.Fatalf("the daemon answered the hello with %#v, want hello_ack", frame)
 	}

@@ -225,10 +225,26 @@ describe("dispatchToolSpecs", () => {
         status: "todo",
         parent: "AGENTC-1",
         label: "bug",
+        priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
         limit: 250,
       }).success
     ).toBe(true);
+  });
+
+  test("dispatch_issues takes a list of priority buckets, null meaning no priority", () => {
+    const schema = schemaFor("dispatch_issues");
+
+    for (const priority of [[0], [3, null], [null]]) {
+      expect(schema.safeParse({ project: "AGENTC", priority }).success, String(priority)).toBe(
+        true
+      );
+    }
+    for (const priority of [[], [4], [-1], [1.5], ["P0"], 0, null]) {
+      expect(schema.safeParse({ project: "AGENTC", priority }).success, String(priority)).toBe(
+        false
+      );
+    }
   });
 
   test("dispatch_message needs an issue unless in_reply_to answers a direct message", () => {

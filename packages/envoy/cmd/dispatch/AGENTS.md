@@ -25,6 +25,14 @@ script are tighter still at three seconds. The deadline covers the other half â€
 a database that drops packets rather than refusing is answered `503` with
 `db: false` inside the bound, never with silence, and the reason is logged.
 
+Beside `ok`, `db` and `nats`, `/healthz` names what is deployed: `commit`, the
+legion commit the image build stamped (`main.buildCommit`, from the Dockerfile's
+`LEGION_COMMIT` build argument, which the release workflow sets to its
+`github.sha` and which must be a full sha or empty; `null` in an unstamped
+build), and `schema_version`, `max(version)` from `schema_migrations`, read by
+the same probe query (`null` whenever `db` is false). agent-c's dispatch-apply
+lane compares both with the image pin it applied and that commit's migrations.
+
 Migration 0010 adds stored generated `search` columns; Postgres maintains them on writes and no
 application code writes or refreshes them.
 
@@ -146,13 +154,13 @@ the table says human only.
 | `/auth/whoami` | GET | identity | Return the resolved human identity. |
 | `/api/github/rest/...` | any | identity | Proxy GitHub REST with the user's token. |
 | `/api/github/graphql` | POST | identity | Proxy GitHub GraphQL with the user's token. |
-| `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, and NATS is connected where configured. |
+| `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, and NATS is connected where configured, plus `commit` (the build's legion commit, or `null`) and `schema_version` (the highest applied migration, or `null` when the database did not answer). |
 | `/api/v1/projects` | GET, POST | POST human only | List projects (including `open_asks`) or create one. |
 | `/api/v1/projects/{key}/artifacts` | GET, POST | user or bearer | List non-primary artifacts in a project (`?unlinked=true` selects unlinked ones) or create an unlinked project artifact. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. |
 | `/api/v1/settings/repo-projects` | GET | human only | List repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | human only | Create or replace, or remove, a repository mapping. |
 | `/api/v1/settings/architecture-sources` | GET | human only | List every project's architecture source with its sync bookkeeping. |
-| `/api/v1/projects/{key}/architecture-source` | GET, PUT, DELETE | GET user or bearer; PUT, DELETE human only | A project's architecture source (`{repo, branch}`; the directory is fixed at `.dispatch/architecture/`). PUT proves the GitHub App can read the repository first (`409 SOURCE_ACCESS` otherwise); DELETE removes the source and the model it projected; GET is `404 SOURCE_NOT_FOUND` without one. |
+| `/api/v1/projects/{key}/architecture-source` | GET, PUT, DELETE | GET user or bearer; PUT, DELETE human only | A project's architecture source (`{repo, branch}`; the directory is fixed at `.dispatch/architecture/`). PUT proves the GitHub App can read the repository first (`409 SOURCE_ACCESS` otherwise); DELETE removes the source and the model it projected; GET answers `200 null` without one, since whether a project has a source is a question with an ordinary negative answer (DELETE and `/sync`, which act on a source, keep `404 SOURCE_NOT_FOUND`). |
 | `/api/v1/projects/{key}/architecture-source/sync` | POST | user or bearer | Import the model now; `200` carries the updated row (`last_error` set when the model was rejected and the previous projection stays up), `409 SOURCE_ACCESS` a credential or branch problem. |
 | `/api/v1/projects/{key}/architecture` | GET | user or bearer | The component tree with the work attached: `source`, `totals` (`issues_done`/`issues_total` over every filed issue, `unassigned`, `not_architectural`, `components_without_work` over non-external components, `retired_links`), one row per component (`done`/`total` count the distinct issues whose effective set names it or any component it contains, parents and icebox included, each once; `own_*` only those naming it itself; `issues` say how each qualified: `direct` > `inherited` > `contained` with `via`), and the `unassigned`, `not_architectural` (with `reason`, `inherited_from`), and `retired_links` lists. `404 SOURCE_NOT_FOUND` without a source. |
 | `/api/v1/me/agent-tokens` | GET, POST | human only | List personal token metadata or mint a personal agent token. |
