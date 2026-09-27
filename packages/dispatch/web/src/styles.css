@@ -211,6 +211,85 @@ a {
   display: none;
 }
 
+/* A typed block's header is a label, not a dump. No stylesheet targeted it, so the block's
+   name and its attributes rendered as bare prose lines down the page (#1434/#1452, LEGION-67).
+   The name is the eyebrow role, a `kind` is a badge beside it, a `title` is the header's text,
+   and any remaining author-written attribute is a quiet inline pair. The selectors sit under
+   `.dispatch-doc` so they outrank the unlayered library typography the way the decision block's
+   own rules below do. Colours are the palette swatches their comments name; the pin test holds
+   them to it. */
+.dispatch-doc [data-proof-block-summary] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.dispatch-doc [data-proof-block-name] {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #62748e; /* slate-500 */
+}
+
+.dispatch-doc [data-proof-block-badge] {
+  border-radius: 9999px;
+  padding: 0 0.5rem;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.25rem;
+  background-color: #f1f5f9; /* slate-100 */
+  color: #45556c; /* slate-600 */
+}
+
+.dispatch-doc [data-proof-block-title] {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: #0f172b; /* slate-900 */
+}
+
+.dispatch-doc [data-proof-block-attributes] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.5rem;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1rem;
+  color: #62748e; /* slate-500 */
+}
+
+.dispatch-doc [data-proof-block-attributes] dt {
+  font-weight: 600;
+}
+
+.dispatch-doc [data-proof-block-attributes] dt::after {
+  content: ":";
+}
+
+.dispatch-doc [data-proof-block-attributes] dd {
+  margin: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .dispatch-doc [data-proof-block-name],
+  .dispatch-doc [data-proof-block-attributes] {
+    color: #90a1b9; /* slate-400 */
+  }
+
+  .dispatch-doc [data-proof-block-badge] {
+    background-color: #1d293d; /* slate-800 */
+    color: #90a1b9; /* slate-400 */
+  }
+
+  .dispatch-doc [data-proof-block-title] {
+    color: #f1f5f9; /* slate-100 */
+  }
+}
+
 /* A decision block is a card inside prose. Its first/last child would otherwise carry the
    prose paragraph margins into the card (a 20px gap under a 12px header). */
 .dispatch-doc .proof-typed-block-ask [data-proof-block-content] > :first-child {

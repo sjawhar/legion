@@ -17,13 +17,80 @@ import {
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
 
 /**
+ * Attributes the document's author never wrote and never reads: the block's own identity, the
+ * parser's complaint, and the server-owned state a decision carries. Printing them turned a
+ * typed block's header into a list of internals - `callout / kind / title / blockId` down the
+ * page, block id and all (LEGION-67).
+ */
+const INTERNAL_BLOCK_ATTRIBUTES: Record<string, true> = {
+  answer: true,
+  answered_at: true,
+  answered_by: true,
+  blockId: true,
+  invalid: true,
+  selected: true,
+  state: true,
+};
+
+function attributeValue(value: unknown): string {
+  return Array.isArray(value) ? JSON.stringify(value) : String(value);
+}
+
+/**
  * Draws a document's host-owned typed blocks other than `ask`, which `AskBlockView` owns: the
- * block's name and attributes as a header the reader sees, above its content. It is the node
- * view's drawing (`typedBlockView`), never the node's `toDOM`: HTML of the document - a copy, a
- * drag, or the editor's plain-text paste, which renders the markdown it parsed through `toDOM` -
- * carries only the block's section and content, which is all its parse rule reads.
+ * block's kind and the author's own attributes as a header the reader sees, above its content.
+ * The header reads as a label rather than a dump: the block's name is an eyebrow, a `kind` is a
+ * badge beside it, a `title` is the header's own text, and any other attribute the author wrote
+ * follows as a quiet name/value pair. Nothing the author did not write appears at all. It is
+ * the node view's drawing (`typedBlockView`), never the node's `toDOM`: HTML of the document -
+ * a copy, a drag, or the editor's plain-text paste, which renders the markdown it parsed
+ * through `toDOM` - carries only the block's section and content, which is all its parse rule
+ * reads.
  */
 export function renderTypedBlock(node: ProseMirrorNode): DOMOutputSpec {
+  const shown = Object.entries(node.attrs).filter(
+    ([name, value]) =>
+      INTERNAL_BLOCK_ATTRIBUTES[name] !== true &&
+      value !== null &&
+      value !== undefined &&
+      value !== ""
+  );
+  const title = shown.find(([name]) => name === "title");
+  const kind = shown.find(([name]) => name === "kind");
+  const rest = shown.filter(([name]) => name !== "title" && name !== "kind");
+  const badge: DOMOutputSpec[] =
+    kind === undefined
+      ? []
+      : [
+          [
+            "span",
+            { "data-proof-block-attribute": "kind", "data-proof-block-badge": "" },
+            attributeValue(kind[1]),
+          ],
+        ];
+  const heading: DOMOutputSpec[] =
+    title === undefined
+      ? []
+      : [
+          [
+            "span",
+            { "data-proof-block-attribute": "title", "data-proof-block-title": "" },
+            attributeValue(title[1]),
+          ],
+        ];
+  const others: DOMOutputSpec[] =
+    rest.length === 0
+      ? []
+      : [
+          [
+            "dl",
+            { "data-proof-block-attributes": "" },
+            ...rest.flatMap(([name, value]) => [
+              ["dt", {}, name],
+              ["dd", { "data-proof-block-attribute": name }, attributeValue(value)],
+            ]),
+          ],
+        ];
   return [
     "section",
     {
@@ -34,18 +101,9 @@ export function renderTypedBlock(node: ProseMirrorNode): DOMOutputSpec {
       "header",
       { contenteditable: "false", "data-proof-block-summary": "" },
       ["span", { "data-proof-block-name": "" }, node.type.name],
-      [
-        "dl",
-        { "data-proof-block-attributes": "" },
-        ...Object.entries(node.attrs).flatMap(([name, value]) => [
-          ["dt", {}, name],
-          [
-            "dd",
-            { "data-proof-block-attribute": name },
-            Array.isArray(value) ? JSON.stringify(value) : String(value),
-          ],
-        ]),
-      ],
+      ...badge,
+      ...heading,
+      ...others,
     ],
     ["div", { "data-proof-block-content": "" }, 0],
   ];
