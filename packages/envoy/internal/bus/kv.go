@@ -116,6 +116,25 @@ func (kv KeyValue) Delete(key string, opts ...nats.DeleteOpt) error {
 	return kv.KeyValue.Delete(key, opts...)
 }
 
+// DeleteAtRead deletes key at the revision it reads, so a write that lands in between is kept, and
+// returns that revision, 0 when there was none to read. A key it may not read (ErrRefused) it may not
+// write either, since a write is held to the longest bound, so nothing can land in between: that key
+// is deleted at no revision, as a key it finds missing is.
+func (kv KeyValue) DeleteAtRead(key string) (uint64, error) {
+	entry, err := kv.Get(key)
+	var revision uint64
+	var opts []nats.DeleteOpt
+	switch {
+	case err == nil:
+		revision = entry.Revision()
+		opts = append(opts, nats.LastRevision(revision))
+	case errors.Is(err, nats.ErrKeyNotFound), errors.Is(err, ErrRefused):
+	default:
+		return 0, err
+	}
+	return revision, kv.Delete(key, opts...)
+}
+
 func (kv KeyValue) Purge(key string, opts ...nats.DeleteOpt) error {
 	if err := kv.check(key, putOverhead(kv.Bucket())); err != nil {
 		return err

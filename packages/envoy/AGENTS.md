@@ -896,18 +896,18 @@ the synchronous listener call records the sent or failed attempt instead of blin
   refused before anything is sent. A write is held to the longest subject its key makes (a watcher's
   create request), so a key written now stays readable, watchable and deletable; any other call only
   to its own subject, so a key an earlier build stored past that bound still lists and deletes. The
-  stores skip such a key where they cannot read it, with a WARN, rather than fail a start or a
-  sweep, and the reapers delete it. The webhook is answered 422, which Dispatch's redelivery sweep
-  takes as terminal, and logged `<source> publish refused` (or `github ci record refused`); any
-  other failure stays a 503 logged `<source> publish failed`. A head's CI record is bounded at 384
-  KiB (`maxRecordBytes`, about 1,300 checks) and its settlement at 960 KiB (`maxSettlementBytes`; a
-  failing check's `"` costs three times as much there), since GitHub allows 50,000 check runs in a
-  suite: a check past either is refused the same way, and the record is marked `overflowed` and
-  never settles again. A head that had already settled keeps its last settlement, which nothing
-  supersedes, so a consumer holding it learns about the refused checks only from GitHub's own read.
-  A settlement NATS refuses anyway (a server whose max payload is set lower) marks the record
-  overflowed too, logged once as `checks settlement refused`, rather than being published again
-  every tick.
+  stores skip such a key where they cannot read or rewrite it, with a WARN, rather than fail a
+  start, a sweep or a caller's own request, and the reapers delete it. The webhook is answered 422,
+  which Dispatch's redelivery sweep takes as terminal, and logged `<source> publish refused` (or
+  `github ci record refused`); any other failure stays a 503 logged `<source> publish failed`. A
+  head's CI record is bounded at 384 KiB (`maxRecordBytes`, about 1,300 checks) and its settlement
+  at 960 KiB (`maxSettlementBytes`; a failing check's `"` costs three times as much there), since
+  GitHub allows 50,000 check runs in a suite: a check past either is refused the same way, and the
+  record is marked `overflowed` and never settles again. A head that had already settled keeps its
+  last settlement, which nothing supersedes, so a consumer holding it learns about the refused
+  checks only from GitHub's own read. A settlement NATS refuses anyway (a server whose max payload
+  is set lower) marks the record overflowed too, logged once as `checks settlement refused`, rather
+  than being published again every tick.
 - A `pull_request_review` payload carries the review's own `commit_id` and the PR's current
   `head_sha` so consumers can tell whether the review is at head, and `submitted_at` (GitHub's
   RFC 3339 time) and `review_id` (GitHub's review id as a decimal string), so consumers can order

@@ -73,10 +73,10 @@ type GitHub interface {
 }
 
 // OpenState opens the sweep's KV bucket, creating it on first use.
-func OpenState(js nats.JetStreamContext) (nats.KeyValue, error) {
+func OpenState(js nats.JetStreamContext) (bus.KeyValue, error) {
 	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: Bucket, TTL: retention, Storage: nats.FileStorage, Replicas: 1})
 	if err != nil {
-		return nil, fmt.Errorf("open %s KV bucket: %w", Bucket, err)
+		return bus.KeyValue{}, fmt.Errorf("open %s KV bucket: %w", Bucket, err)
 	}
 	return kv, nil
 }
@@ -165,7 +165,7 @@ type Options struct {
 // Sweeper lists the App webhook's failed deliveries and redelivers them.
 type Sweeper struct {
 	GitHub GitHub
-	State  nats.KeyValue
+	State  bus.KeyValue
 	Logger *slog.Logger
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
@@ -599,7 +599,7 @@ func (s *Sweeper) now() time.Time {
 
 // readState reads key's JSON value and its revision; an absent key is the zero value at revision
 // zero. what names the value in an error.
-func readState[T any](kv nats.KeyValue, key, what string) (T, uint64, error) {
+func readState[T any](kv bus.KeyValue, key, what string) (T, uint64, error) {
 	var value T
 	entry, err := kv.Get(key)
 	if errors.Is(err, nats.ErrKeyNotFound) {
@@ -616,7 +616,7 @@ func readState[T any](kv nats.KeyValue, key, what string) (T, uint64, error) {
 
 // writeState writes value's JSON at key only over revision (absent when zero), so a lost race is
 // a conflict (isConflict), and returns the new revision.
-func writeState(kv nats.KeyValue, key string, value any, revision uint64) (uint64, error) {
+func writeState(kv bus.KeyValue, key string, value any, revision uint64) (uint64, error) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		return 0, err

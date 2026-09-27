@@ -590,7 +590,7 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
-	r := &Registry{roleKV: roleKV, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
+	r := &Registry{roleKV: bus.KeyValue{KeyValue: roleKV}, now: time.Now, cache: map[string]Interest{}, cacheRevisions: map[string]uint64{}}
 	r.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: kv}, r.applyWatched, r.resetCache)
 	return r, kv
 }
@@ -1103,7 +1103,7 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t *tes
 		t.Fatalf("seed lapsed role claim: %v", err)
 	}
 	roleKV := registry.roleKV
-	registry.roleKV = &racingDeleteKeyValue{
+	registry.roleKV = bus.KeyValue{KeyValue: &racingDeleteKeyValue{
 		KeyValue: roleKV,
 		beforeFirstDelete: func() {
 			entry, err := roleKV.Get(role)
@@ -1122,7 +1122,7 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t *tes
 			}
 		},
 		err: natsgo.ErrKeyExists,
-	}
+	}}
 
 	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
 	if err != nil {
@@ -1144,7 +1144,7 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t *te
 		t.Fatalf("seed lapsed role claim: %v", err)
 	}
 	roleKV := registry.roleKV
-	registry.roleKV = &racingDeleteKeyValue{
+	registry.roleKV = bus.KeyValue{KeyValue: &racingDeleteKeyValue{
 		KeyValue: roleKV,
 		beforeFirstDelete: func() {
 			entry, err := roleKV.Get(role)
@@ -1156,7 +1156,7 @@ func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t *te
 			}
 		},
 		err: natsgo.ErrKeyNotFound,
-	}
+	}}
 
 	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
 	if err != nil {
@@ -1179,11 +1179,11 @@ func TestReleaseExpiredRoleClaimReturnsErrorWithoutRelease(t *testing.T) {
 	}
 	releaseErr := errors.New("injected conditional delete failure")
 	roleKV := registry.roleKV
-	registry.roleKV = &racingDeleteKeyValue{
+	registry.roleKV = bus.KeyValue{KeyValue: &racingDeleteKeyValue{
 		KeyValue:          roleKV,
 		beforeFirstDelete: func() {},
 		err:               releaseErr,
-	}
+	}}
 
 	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
 	if !errors.Is(err, releaseErr) {
@@ -1474,11 +1474,11 @@ func TestSetRoleLeavesInterestWhenRoleWriteFails(t *testing.T) {
 		t.Fatalf("seed role claim: %v", err)
 	}
 
-	reg.roleKV = &failingKeyValue{
+	reg.roleKV = bus.KeyValue{KeyValue: &failingKeyValue{
 		KeyValue:     reg.roleKV,
 		failUpdateAt: 1,
 		err:          errors.New("injected role update failure"),
-	}
+	}}
 	if _, err := reg.SetRole(newSession, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed role update")
 	}
@@ -1497,11 +1497,11 @@ func TestSetRoleRollsBackWhenRoleCreateFails(t *testing.T) {
 		sessionID = "ses_new"
 		role      = "legion-controller"
 	)
-	reg.roleKV = &failingKeyValue{
+	reg.roleKV = bus.KeyValue{KeyValue: &failingKeyValue{
 		KeyValue:     reg.roleKV,
 		failCreateAt: 1,
 		err:          errors.New("injected role create failure"),
-	}
+	}}
 	if _, err := reg.SetRole(sessionID, "example-host", role, false); err == nil {
 		t.Fatal("SetRole must return the failed role create")
 	}
@@ -1727,7 +1727,7 @@ func TestSetRoleTreatsSameSessionCASConflictAsConcurrentSuccess(t *testing.T) {
 		roleTopic = "notifications.role.legion-controller"
 	)
 	racingKV := &racingCreateKeyValue{KeyValue: reg.roleKV}
-	reg.roleKV = racingKV
+	reg.roleKV = bus.KeyValue{KeyValue: racingKV}
 
 	var concurrent Interest
 	var concurrentErr error
@@ -1824,7 +1824,7 @@ func TestSetRoleOldHolderCleanupDoesNotDeleteNewerClaim(t *testing.T) {
 	// B's role-row Update is the CAS write; fire A's re-claim right after it
 	// succeeds and before B proceeds to old-holder cleanup.
 	racing := &afterUpdateKeyValue{KeyValue: reg.roleKV}
-	reg.roleKV = racing
+	reg.roleKV = bus.KeyValue{KeyValue: racing}
 	racing.after = func() {
 		racing.after = nil
 		if _, err := reg.SetRole("ses_a", "m1", role, false); err != nil {

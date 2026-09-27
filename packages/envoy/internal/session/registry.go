@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"sort"
 	"sync"
@@ -279,24 +278,11 @@ func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 func (r *SessionRegistry) Delete(sessionID string) error {
 	revision := r.cachedRevision(sessionID)
 	kv := r.watcher.KV()
-	entry, err := kv.Get(sessionID)
-	opts := []nats.DeleteOpt{}
-	switch {
-	case err == nil:
-		if entry.Revision() > revision {
-			revision = entry.Revision()
-		}
-		opts = append(opts, nats.LastRevision(entry.Revision()))
-	case errors.Is(err, nats.ErrKeyNotFound), errors.Is(err, bus.ErrRefused):
-		// A key this build cannot read (an earlier build stored it past what a read of it may
-		// send) it cannot write either, so nothing can land before the delete: it goes without a
-		// revision.
-	default:
+	read, err := kv.DeleteAtRead(sessionID)
+	if err != nil {
 		return err
 	}
-	if err := kv.Delete(sessionID, opts...); err != nil {
-		return err
-	}
+	revision = max(revision, read)
 	entries, err := kv.History(sessionID)
 	if err == nil && len(entries) > 0 {
 		latest := entries[len(entries)-1]

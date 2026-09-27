@@ -46,7 +46,7 @@ type Registry struct {
 	// kvMu guards roleKV, which Rewatch moves to a replacement connection. The interest bucket's
 	// handle is the watcher's (kvwatch.Watcher.KV).
 	kvMu                  sync.RWMutex
-	roleKV                nats.KeyValue
+	roleKV                bus.KeyValue
 	now                   func() time.Time
 	openedAt              time.Time
 	restoredRoleRevisions map[string]uint64
@@ -150,7 +150,7 @@ func (r *Registry) interests() bus.KeyValue {
 	return r.watcher.KV()
 }
 
-func (r *Registry) roles() nats.KeyValue {
+func (r *Registry) roles() bus.KeyValue {
 	r.kvMu.RLock()
 	defer r.kvMu.RUnlock()
 	return r.roleKV
@@ -160,7 +160,7 @@ func (r *Registry) roles() nats.KeyValue {
 // holder gets to register again. A claim whose key this build cannot read (bus.ErrRefused: an
 // earlier build stored it past what a read of it may send) gets none, since nothing can resolve
 // it; the role reaper deletes it.
-func roleRevisions(kv nats.KeyValue) (map[string]uint64, error) {
+func roleRevisions(kv bus.KeyValue) (map[string]uint64, error) {
 	revisions := map[string]uint64{}
 	keys, err := kv.Keys()
 	if errors.Is(err, nats.ErrNoKeysFound) {
@@ -217,26 +217,14 @@ func (r *Registry) evictCachedInterestLocked(sessionID string, revision uint64) 
 	r.cacheRevisions[sessionID] = revision
 }
 
-// deleteInterest deletes sessionID's interest. It deletes at the revision it reads, so a write that
-// lands in between is kept. A key this build cannot read (bus.ErrRefused) it cannot write either,
-// so nothing of its can land in between, and that key is deleted without a revision.
+// deleteInterest deletes sessionID's interest at the revision it reads (bus.KeyValue.DeleteAtRead).
 func (r *Registry) deleteInterest(sessionID string) error {
 	revision := r.cachedRevision(sessionID)
-	entry, err := r.interests().Get(sessionID)
-	deleteOpts := []nats.DeleteOpt{}
-	switch {
-	case err == nil:
-		if entry.Revision() > revision {
-			revision = entry.Revision()
-		}
-		deleteOpts = append(deleteOpts, nats.LastRevision(entry.Revision()))
-	case errors.Is(err, nats.ErrKeyNotFound), errors.Is(err, bus.ErrRefused):
-	default:
+	read, err := r.interests().DeleteAtRead(sessionID)
+	if err != nil {
 		return err
 	}
-	if err := r.interests().Delete(sessionID, deleteOpts...); err != nil {
-		return err
-	}
+	revision = max(revision, read)
 
 	entries, err := r.interests().History(sessionID)
 	if err == nil && len(entries) > 0 {
@@ -649,7 +637,17 @@ func (r *Registry) SetRoleWithPrevious(sessionID, machineID, role, previousSessi
 	}
 
 	if oldSessionID != "" && oldSessionID != sessionID {
-		if err := r.removeInterestTopics(oldSessionID, []string{roleTopic}); err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
+		err := r.removeInterestTopics(oldSessionID, []string{roleTopic})
+		if errors.Is(err, bus.ErrRefused) {
+			// The old holder is a session an earlier build registered under an id this one cannot
+			// write. The claim is written and the caller named nothing too long, so it succeeds; the
+			// interest reaper removes the old holder's interest once its session is gone.
+			slog.Warn("registry role claim left an old holder's interest it cannot write to the reaper",
+				slog.String("role", role),
+				slog.Int("key_bytes", len(oldSessionID)),
+				slog.String("error", err.Error()),
+			)
+		} else if err != nil && !errors.Is(err, nats.ErrKeyNotFound) {
 			slog.Warn("registry role claim old holder cleanup failed",
 				slog.String("role", role),
 				slog.String("old_session_id", oldSessionID),

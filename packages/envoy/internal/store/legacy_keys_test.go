@@ -17,7 +17,8 @@ import (
 // refuses to write (testnats.LegacyKeys). Such a key must neither stop the registry from opening
 // nor fail a sweep: the registry opens and resolves every role it can read, removing a session skips
 // a claim it cannot read, and the reapers delete both the entries they can read and the ones they
-// cannot, whose holders no build can reach any more.
+// cannot, whose holders no build can reach any more. An entry past even a delete's bound, which only
+// another writer could store (testnats.RawOnlyKey), is skipped, and the sweeps go on.
 func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -36,8 +37,9 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 	}
 	readableRole, unreadableRole := testnats.LegacyKeys(names.roles, "r")
 	readableSession, unreadableSession := testnats.LegacyKeys(names.interests, "s")
+	rawOnlyRole, rawOnlySession := testnats.RawOnlyKey(names.roles, "o"), testnats.RawOnlyKey(names.interests, "o")
 	stale := time.Now().Add(-time.Hour).UnixMilli()
-	for role, holder := range map[string]string{"reviewer": "ses_live", readableRole: readableSession, unreadableRole: unreadableSession} {
+	for role, holder := range map[string]string{"reviewer": "ses_live", readableRole: readableSession, unreadableRole: unreadableSession, rawOnlyRole: "ses_gone"} {
 		claim, err := json.Marshal(RoleClaim{HolderSessionID: holder, ClaimedAt: stale})
 		if err != nil {
 			t.Fatalf("encode claim: %v", err)
@@ -46,7 +48,7 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 			t.Fatalf("store the %d-byte role: %v", len(role), err)
 		}
 	}
-	for _, sessionID := range []string{"ses_live", readableSession, unreadableSession} {
+	for _, sessionID := range []string{"ses_live", readableSession, unreadableSession, rawOnlySession} {
 		putInterest(t, rawInterests, Interest{SessionID: sessionID, MachineID: "earlier", Topics: []string{"notifications.agent." + sessionID[:8]}, UpdatedAt: stale})
 	}
 
@@ -78,14 +80,74 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 	if _, err := registry.ReapRoleClaims(isAlive, 0); err != nil {
 		t.Fatalf("reap role claims: %v", err)
 	}
-	for bucket, want := range map[natsgo.KeyValue][]string{rawInterests: {"ses_live"}, rawRoles: {"reviewer"}} {
+	for bucket, want := range map[natsgo.KeyValue][]string{rawInterests: {"ses_live", rawOnlySession}, rawRoles: {"reviewer", rawOnlyRole}} {
 		keys, err := bucket.Keys()
 		if err != nil && !errors.Is(err, natsgo.ErrNoKeysFound) {
 			t.Fatalf("list %s: %v", bucket.Bucket(), err)
 		}
+		slices.Sort(keys)
+		slices.Sort(want)
 		if !slices.Equal(keys, want) {
-			t.Fatalf("%s holds %d keys after the reapers, want only %v", bucket.Bucket(), len(keys), want)
+			t.Fatalf("%s holds %d keys after the reapers, want the live one and the one past a delete's bound", bucket.Bucket(), len(keys))
 		}
 	}
 	assertRoleHolder(t, registry, "reviewer", "ses_live")
+}
+
+// A claim takes a role from its holder and then removes the role's topic from the old holder's
+// interest. When the old holder is a session an earlier listener registered under an id this
+// build cannot write (testnats.LegacyKeys), the claim still succeeds, as it did before the key
+// check: the caller named nothing too long, and its claim is written. The old holder's interest
+// keeps the topic until the interest reaper removes it.
+func TestAClaimOfARoleAnEarlierListenersSessionHeldSucceeds(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	names := testBuckets(t)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.interests, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create interest bucket: %v", err)
+	}
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.roles, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create role bucket: %v", err)
+	}
+	readable, unreadable := testnats.LegacyKeys(names.interests, "s")
+	roles := map[string]string{"legacy-readable": readable, "legacy-unreadable": unreadable}
+	for role, holder := range roles {
+		claim, err := json.Marshal(RoleClaim{HolderSessionID: holder, ClaimedAt: time.Now().UnixMilli()})
+		if err != nil {
+			t.Fatalf("encode claim: %v", err)
+		}
+		if _, err := rawRoles.Put(role, claim); err != nil {
+			t.Fatalf("store the claim of %s: %v", role, err)
+		}
+		// Subscribe gives every interest its session's own agent topic, so the role's topic is not
+		// the last one and removing it rewrites the interest rather than deleting it.
+		putInterest(t, rawInterests, Interest{SessionID: holder, MachineID: "earlier", Topics: []string{"notifications.agent." + holder, "notifications.role." + role}, UpdatedAt: time.Now().UnixMilli()})
+	}
+
+	registry, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := registry.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("wait for the cache: %v", err)
+	}
+	for role, holder := range roles {
+		item, err := registry.SetRole("ses_new", "example-host", role, false)
+		if err != nil {
+			t.Fatalf("claim %s from a %d-byte session: %v", role, len(holder), err)
+		}
+		if !slices.Contains(item.Topics, "notifications.role."+role) {
+			t.Fatalf("the claimant's interest %v lacks the role's topic", item.Topics)
+		}
+		assertRoleHolder(t, registry, role, "ses_new")
+	}
 }

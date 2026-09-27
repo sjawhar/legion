@@ -12,3 +12,10 @@ import "strings"
 func LegacyKeys(bucket string, letter string) (readable, unreadable string) {
 	return strings.Repeat(letter, 3997-2*len(bucket)), strings.Repeat(letter, 4015-2*len(bucket))
 }
+
+// RawOnlyKey returns a key, of letter, past the bound a listener deletes a key of the bucket named
+// bucket to, which no listener could have stored but a plain KV put from another writer still can:
+// its put, `PUB $KV.<bucket>.<key> <38-byte reply inbox> <size>`, fits the server's 4 KiB line.
+func RawOnlyKey(bucket string, letter string) string {
+	return strings.Repeat(letter, 4035-len(bucket))
+}
