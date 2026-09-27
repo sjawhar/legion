@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..1d24e8fbeae7502c731d4f5e3748f5b5ef3da4e9 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..e37e0e5b79d833e431491e7dba585f911a362da1 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,9 @@
@@ -13,7 +13,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..1d24e8fbeae7502c731d4f5e3748f5b5
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
  function isPureText(content) {
-@@ -24,6 +26,98 @@ function withMeta(plugin, meta) {
+@@ -24,6 +26,110 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
@@ -79,12 +79,18 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..1d24e8fbeae7502c731d4f5e3748f5b5
 +	return {
 +		...cells,
 +		rows: cells.rows.map((row, index) => {
-+			const type = rect.table.child(rect.top + index).type.contentMatch.defaultType;
++			const type = rect.table.child(Math.min(rect.top + index, rect.table.childCount - 1)).type.contentMatch.defaultType;
 +			const typed = [];
 +			row.forEach((cell) => typed.push(cell.type === type ? cell : type.create(cell.attrs, cell.content, cell.marks)));
 +			return Fragment.from(typed);
 +		})
 +	};
++}
++function holdsTableCells(html) {
++	if (html.length === 0) return false;
++	const template = document.createElement("template");
++	template.innerHTML = html;
++	return template.content.querySelector("td, th") !== null;
 +}
 +function pasteIntoTable(view, event, slice, parsePlainText) {
 +	const { state } = view;
@@ -103,6 +109,12 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..1d24e8fbeae7502c731d4f5e3748f5b5
 +		return true;
 +	}
 +	if (!inTableCell(selection.$from)) return false;
++	const cells = holdsTableCells(html) ? __pastedCells(slice) : null;
++	if (cells) {
++		const rect = selectedRect(state);
++		__insertCells(state, view.dispatch, rect.tableStart, rect, typedCells(cells, rect));
++		return true;
++	}
 +	const content = html.length === 0 ? parsePlainText(text)?.content : slice.content;
 +	if (!content) return false;
 +	view.dispatch(state.tr.replaceSelection(inlineSlice(content, schema)).scrollIntoView());
@@ -112,7 +124,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..1d24e8fbeae7502c731d4f5e3748f5b5
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -40,9 +134,15 @@ function dispatchPasteSlice(view, slice) {
+@@ -40,9 +146,15 @@ function dispatchPasteSlice(view, slice) {
  }
  var clipboard = $prose((ctx) => {
  	const schema = ctx.get(schemaCtx);
@@ -128,7 +140,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..1d24e8fbeae7502c731d4f5e3748f5b5
  		transformPastedHTML: (html, view) => {
  			const prevTransform = prev.transformPastedHTML;
  			if (prevTransform) html = prevTransform(html, view);
-@@ -58,7 +158,6 @@ var clipboard = $prose((ctx) => {
+@@ -58,7 +170,6 @@ var clipboard = $prose((ctx) => {
  		key,
  		props: {
  			handlePaste: (view, event, preProcessedSlice) => {
@@ -136,7 +148,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..1d24e8fbeae7502c731d4f5e3748f5b5
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -77,13 +176,13 @@ var clipboard = $prose((ctx) => {
+@@ -77,13 +188,13 @@ var clipboard = $prose((ctx) => {
  				}
  				const html = clipboardData.getData("text/html");
  				if (html.length === 0 && text.length === 0) return false;

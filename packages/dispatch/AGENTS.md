@@ -170,16 +170,18 @@ joined by a space, with each line break a space too. A lone ask or a list pasted
 adds its text to that question. HTML pasted outside a table follows the same rule. So a lone
 typed block pasted beside a paragraph's text stays a block, while the first and last paragraphs
 or list items of other pasted text still join the text on either side of the caret. Tables are
-handled before any plugin sees the paste, by a
-`handlePaste` the patch adds to the editor's own view props (`pasteIntoTable`), since
-prosemirror-tables' plugin handler would otherwise overwrite the caret's cell and spread the pasted
-lines into new cells of the row. A paste with the caret in a cell's text, plain text or HTML, is
-flattened the same way, marks and links kept, since a GFM cell holds one line. A paste onto a
-selection of whole cells (a `CellSelection`) is prosemirror-tables' grid paste (`__pastedCells`,
-`__clipCells`, `__insertCells`), with two changes. Tab-separated text fills the cells one value
-each. Every cell is retyped for the row it lands in, because Milkdown's header row holds only
-`table_header` cells and a body row only `table_cell` ones, and prosemirror-tables' own insert
-threw on a selection that reached the header row. The patch applies to that one version: raising
+handled before any plugin sees the paste, by a `handlePaste` the patch adds to the editor's own view
+props (`pasteIntoTable`), since prosemirror-tables' plugin handler would otherwise overwrite the
+caret's cell and spread the pasted lines into new cells of the row. A paste with the caret in a
+cell's text, plain text or HTML, is flattened the same way, marks and links kept, since a GFM cell
+holds one line, unless the clipboard HTML holds table cells (`td` or `th`, as a copy from a table
+does). Those, and any paste onto a selection of whole cells (a `CellSelection`), are
+prosemirror-tables' grid paste (`__pastedCells`, `__clipCells`, `__insertCells`): from the caret's
+cell on, growing the table as needed, or clipped to the selection. There are two changes.
+Tab-separated text pasted onto selected cells fills them one value each. Every cell is retyped for
+the row it lands in, because Milkdown's header row holds only `table_header` cells and a body row
+only `table_cell` ones, and prosemirror-tables' own insert threw on a paste that put header cells in
+a body row or reached the header row. The patch applies to that one version: raising
 `@milkdown/plugin-clipboard` means carrying the patch to the new version, and the paste rows in
 `ask-blocks.e2e.ts` and `editor-paste.e2e.ts` fail without it.
 
