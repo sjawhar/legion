@@ -23,5 +23,8 @@ make_omp_home() {
   export MISE_DATA_DIR="${MISE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mise}"
   export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
   mkdir -p "$natives" "$1/.omp"
-  ln -s "$natives" "$1/.omp/natives"
+  # -T reads DIR/.omp/natives as the link's own name, never as a directory to put the link in: a
+  # second call replaces the link (plain -s would write natives/natives into the operator's cache,
+  # through the first link), and a real directory there fails the call instead of taking a link.
+  ln -sfT "$natives" "$1/.omp/natives"
 }

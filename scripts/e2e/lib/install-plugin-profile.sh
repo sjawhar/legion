@@ -77,6 +77,9 @@ fi
 
 # The profile goes under the run's own home, never the caller's: a proof's profile, and a crashed
 # proof's leftovers, then live in its work directory (lib/omp-home.sh, make_omp_home).
+# An unset or empty HOME is refused first: realpath of it fails inside the substitution, which
+# yields an empty string and would pass the comparison below for any --home.
+[ -n "${HOME:-}" ] || refuse "HOME is unset or empty, so --home cannot be checked against it"
 home=$(realpath -m -- "$home")
 [ "$home" != "$(realpath -m -- "$HOME")" ] || refuse "--home $home is your own HOME; give the profile a home of its own (make_omp_home, lib/omp-home.sh)"
 [ -d "$home/.omp" ] || refuse "--home $home has no .omp directory; make it with make_omp_home (lib/omp-home.sh)"

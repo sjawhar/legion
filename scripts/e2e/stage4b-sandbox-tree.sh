@@ -1803,6 +1803,10 @@ controller_notice() {
 }
 until_true 300 "the held notice for $tree3 to reach the controller session $controller_session" controller_notice
 note "the controller session $controller_session received the held notice for $tree3"
+# That session is under the run's own home, and the operator's profile root holds none of the
+# controller's profile (make_omp_home, lib/omp-home.sh).
+[ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
+note "the controller's session is under $profile_agent/sessions; $HOME/.omp/profiles/$profile does not exist"
 interests_sample "$check"
 before_status=$(dispatch_get "issues/$tree3" | jq -r .status)
 out=$("$work/legion" status "$tree3" backlog --operator-token-file "$work/operator-token" --config "$work/legion.yaml" 2>&1) || fail "legion status $tree3 backlog from the operator shell: $out"

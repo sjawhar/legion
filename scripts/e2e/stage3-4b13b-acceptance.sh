@@ -1262,6 +1262,15 @@ note "$route"
 collect_transcripts
 pass
 
+begin profile-stays-in-the-run
+# Every session the run's agents wrote is under the run's own home, inside its work directory, and
+# the operator's profile root holds none of the run's profile (make_omp_home, lib/omp-home.sh).
+sessions=$(find "$profile_agent/sessions" -name '*.jsonl' -type f | wc -l)
+[ "$sessions" -gt 0 ] || fail "no agent session under $profile_agent/sessions"
+[ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
+note "$sessions agent session files under $profile_agent/sessions; $HOME/.omp/profiles/$profile does not exist"
+pass
+
 ok=1
 if [ -s "$soft_failures" ]; then
   printf 'acceptance 4b.13b: FAIL — %s soft failure(s):\n' "$(wc -l <"$soft_failures")"
