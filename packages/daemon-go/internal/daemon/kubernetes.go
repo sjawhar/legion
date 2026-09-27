@@ -56,13 +56,15 @@ func prepareSandbox(cfg config.Config, log *slog.Logger, o overrides, dispatchTo
 		return err
 	}
 	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
-	lookup := environLookup(o.environment())
-	if err := CheckOperatorPod(cfg, lookup); err != nil {
-		return err
-	}
-	opts, err := sandboxOptions(cfg, k, p.project, p.stream, dispatchToken, lookup, log)
+	opts, err := sandboxOptions(cfg, k, p.project, p.stream, dispatchToken, environLookup(o.environment()), log)
 	if err != nil {
 		return err
+	}
+	if seed := p.secrets[natsauth.SeedVariable]; seed != "" {
+		// The probe refuses a providers Secret whose NATS_NKEY_SEED is any other user's seed.
+		if opts.NATSUser, err = natsauth.PublicKey(seed); err != nil {
+			return err
+		}
 	}
 	if o.runtime != nil {
 		p.newRuntime, p.probe = o.runtime, o.probe
@@ -158,28 +160,6 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, stream, dis
 		AdoptTimeout:     cfg.SlowCommandTimeout,
 		Log:              log,
 	}, nil
-}
-
-// CheckOperatorPod is the Sandbox runtime's refusal of an operator pod or provider key that
-// collides with Legion's own (sandbox.CheckPod) over the configuration and the daemon's
-// environment (lookup), run before anything is opened: boot runs it, and so does `legion start
-// --check-config`, which starts no runtime.
-func CheckOperatorPod(cfg config.Config, lookup func(string) (string, bool)) error {
-	if cfg.Runtime.Kubernetes == nil {
-		return nil
-	}
-	return sandbox.CheckPod(sandbox.Pod(cfg.Runtime.Kubernetes.Pod), providerSecretKeys(cfg.ProviderKeys),
-		workerImageTools, launchSecretNames(cfg, lookup))
-}
-
-// launchSecretNames are the names of the secrets every launch's spec carries (launchSecrets), which
-// the runtime refuses the operator's pod and a provider key for.
-func launchSecretNames(cfg config.Config, lookup func(string) (string, bool)) []string {
-	var names []string
-	for _, secret := range launchSecrets(cfg, lookup) {
-		names = append(names, secret.name)
-	}
-	return names
 }
 
 // providersSecrets are the launch secrets a pod reads from the providers Secret's key of the same

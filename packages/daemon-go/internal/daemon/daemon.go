@@ -361,8 +361,12 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if err != nil {
 		return plan{}, err
 	}
+	lookup := environLookup(o.environment())
+	if err := CheckOperatorConfig(cfg, lookup); err != nil {
+		return plan{}, err
+	}
 	secrets := map[string]string{}
-	for _, secret := range launchSecrets(cfg, environLookup(o.environment())) {
+	for _, secret := range launchSecrets(cfg, lookup) {
 		value, err := secret.read()
 		if err != nil {
 			return plan{}, err
@@ -417,46 +421,6 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		return plan{}, err
 	}
 	return p, nil
-}
-
-// launchSecret is one secret every launch's spec carries (specs.SpawnSpec), by its name, and how
-// the daemon reads it.
-type launchSecret struct {
-	name string
-	read func() (string, error)
-}
-
-// launchSecrets are the secrets every launch's spec carries, in name order: the Envoy bearer, when
-// the daemon has one, and the NATS nkey seed, when the configuration or the daemon's environment
-// (lookup) names one (natsauth.Seed) — the seed the daemon's own NATS connection authenticates
-// with. Which of them there are is known from the configuration and the environment alone, so
-// `legion start --check-config` names them without reading a file.
-func launchSecrets(cfg config.Config, lookup func(string) (string, bool)) []launchSecret {
-	var secrets []launchSecret
-	if cfg.EnvoyTokenFile != "" {
-		secrets = append(secrets, launchSecret{"ENVOY_TOKEN", func() (string, error) {
-			return config.ReadSecretPointer("envoy_token_file", cfg.EnvoyTokenFile)
-		}})
-	}
-	if natsauth.Configured(cfg.NatsNkeySeedFile, lookup) {
-		secrets = append(secrets, launchSecret{natsauth.SeedVariable, func() (string, error) {
-			return natsauth.Seed(cfg.NatsNkeySeedFile, lookup)
-		}})
-	}
-	return secrets
-}
-
-// environLookup is os.LookupEnv over environ, the daemon's environment or a test's.
-func environLookup(environ []string) func(string) (string, bool) {
-	return func(name string) (string, bool) { return envValue(environ, name) }
-}
-
-// environment is o.environ, or the process's when a test replaced none.
-func (o overrides) environment() []string {
-	if o.environ == nil {
-		return os.Environ()
-	}
-	return o.environ
 }
 
 // prepareTmux is what panes on this host need: the OMP invocation every pane runs and the plugin

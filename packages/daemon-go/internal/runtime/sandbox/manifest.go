@@ -95,12 +95,9 @@ type launch struct {
 	workspace string
 	// secrets are the claim Secret's keys beside the provisioning token, each reaching the main
 	// container as a `<NAME>_FILE` pointer: the boot token, the spec's but the providers Secret's
-	// own (fromProviders), and the Dispatch bearer when Dispatch is configured.
+	// own (Options.ProvidersSecrets, which the runtime points at the providers mount whatever the
+	// spec carries), and the Dispatch bearer when Dispatch is configured.
 	secrets map[string]string
-	// fromProviders are the spec's secrets the providers Secret carries (Options.ProvidersSecrets),
-	// in name order, each reaching the main container as a `<NAME>_FILE` pointer to the providers
-	// mount's own file.
-	fromProviders []string
 	// root is the tree's root claim, whose Sandbox owns the tree volume; isRoot is spec's claim
 	// being it.
 	root   claim.Token
@@ -148,19 +145,15 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if secrets == nil {
 		secrets = map[string]string{}
 	}
-	var fromProviders []string
 	for _, name := range r.providersSecrets {
-		if _, ok := secrets[name]; ok {
-			delete(secrets, name)
-			fromProviders = append(fromProviders, name)
-		}
+		delete(secrets, name)
 	}
 	secrets[bootTokenKey] = spec.BootToken
 	if r.dispatchToken != "" {
 		secrets[dispatchTokenKey] = r.dispatchToken
 	}
 	l := launch{
-		spec: spec, name: SandboxName(spec.Claim), workspace: working.Dir, secrets: secrets, fromProviders: fromProviders,
+		spec: spec, name: SandboxName(spec.Claim), workspace: working.Dir, secrets: secrets,
 		root: root, isRoot: claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree), prompt: prompt,
 	}
 	if spec.ResumeSessionFile != "" {
@@ -424,10 +417,10 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 // configured keys alone, each a file named for the variable Oh My Pi reads, which is what the shim
 // exports into Oh My Pi's environment (--provider-env-dir, shim.ReadProviderEnv), and each
 // providers secret (Options.ProvidersSecrets), a file of its own name that the shim skips, since
-// the container's `<NAME>_FILE` points at it. Neither without provider keys or providers secrets,
-// so a deployment with none needs no such Secret.
+// the container's `<NAME>_FILE` points at it (providersPointers). Neither without provider keys or
+// providers secrets, so a deployment with none needs no such Secret.
 func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
-	if len(r.providerKeys) == 0 && len(r.providersSecrets) == 0 {
+	if !r.mountsProviders() {
 		return nil, nil
 	}
 	var items []corev1.KeyToPath
@@ -441,6 +434,23 @@ func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
 			SecretName: ProvidersSecretName(r.project), Items: items, DefaultMode: new(int32(0o440)),
 		}}}},
 		[]corev1.VolumeMount{{Name: providersVolume, MountPath: ProvidersDir, ReadOnly: true}}
+}
+
+// mountsProviders reports whether every pod mounts the providers Secret: some provider key or
+// providers secret is configured.
+func (r *Runtime) mountsProviders() bool {
+	return len(r.providerKeys) > 0 || len(r.providersSecrets) > 0
+}
+
+// providersPointers are the `<NAME>_FILE` pointer of each providers secret to its file in the
+// providers mount, in the worker's container and the image probe's alike: set by the runtime for
+// every pod that mounts the Secret, whatever a spec carries, so the shim never exports the secret.
+func (r *Runtime) providersPointers() []corev1.EnvVar {
+	var env []corev1.EnvVar
+	for _, name := range r.providersSecrets {
+		env = append(env, corev1.EnvVar{Name: name + "_FILE", Value: ProvidersDir + "/" + name})
+	}
+	return env
 }
 
 // operatorEnv is the operator's variables for the agent's container, in name order.
@@ -565,10 +575,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	for _, name := range sortedKeys(l.secrets) {
 		add(name+"_FILE", BootDir+"/"+name)
 	}
-	for _, name := range l.fromProviders {
-		add(name+"_FILE", ProvidersDir+"/"+name)
-	}
-	return env
+	return append(env, r.providersPointers()...)
 }
 
 // nodeSelector is the Legion pool's label and the configured selector, which configure keeps off

@@ -67,6 +67,7 @@ type Runtime struct {
 	pod                                     Pod
 	providerKeys                            map[string]string
 	providersSecrets                        []string
+	natsUser                                string
 	agent                                   []string
 	bootTimeout                             time.Duration
 	bootIntervals                           int
@@ -171,7 +172,7 @@ func configure(opts Options) (*Runtime, error) {
 			return refuse("the image's %s path %q is not absolute", tool.name, tool.path)
 		}
 	}
-	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets); err != nil {
+	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets); err != nil {
 		return refuse("%v", err)
 	}
 	for _, name := range opts.ProvidersSecrets {
@@ -184,7 +185,7 @@ func configure(opts Options) (*Runtime, error) {
 		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools,
-		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)),
+		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,

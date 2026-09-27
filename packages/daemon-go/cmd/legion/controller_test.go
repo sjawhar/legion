@@ -19,12 +19,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nkeys"
-
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
 const (
@@ -177,7 +176,7 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 	c.write("instructions.md", "Always be kind.\n", 0o600)
 	c.write("envoy-token", "envoy-bearer\n", 0o600)
 	c.write("dispatch-token", "dispatch-bearer\n", 0o600)
-	c.write("nats-seed", testUserSeed(t)+"\n", 0o600)
+	c.write("nats-seed", testnats.UserSeed(t)+"\n", 0o600)
 	lines := opts.lines
 	if lines == nil {
 		lines = []string{
@@ -665,19 +664,21 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 	t.Run("a NATS nkey seed file holding no user seed", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{})
-		account, err := nkeys.CreateAccount()
-		if err != nil {
-			t.Fatal(err)
-		}
-		seed, err := account.Seed()
-		if err != nil {
-			t.Fatal(err)
-		}
-		c.write("nats-seed", string(seed)+"\n", 0o600)
+		seed := testnats.Account(t)
+		c.write("nats-seed", seed+"\n", 0o600)
 		want := fmt.Sprintf("nats_nkey_seed_file (%s) holds an nkey seed that is not a user's", filepath.Join(c.dir, "nats-seed"))
-		if code, _, errb := c.run(); code != 1 || !strings.Contains(errb, want) || strings.Contains(errb, string(seed)) {
+		if code, _, errb := c.run(); code != 1 || !strings.Contains(errb, want) || strings.Contains(errb, seed) {
 			t.Fatalf("legion controller start = %d, stderr %q; want 1 and %q, without the seed", code, errb, want)
 		}
+		c.wantNoSecretRequest()
+	})
+	t.Run("a NATS nkey seed file its group can read", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		if err := os.Chmod(filepath.Join(c.dir, "nats-seed"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+		c.refused(fmt.Sprintf("nats_nkey_seed_file %s is readable by its group or others (mode 0640); chmod 0600 it", filepath.Join(c.dir, "nats-seed")))
 		c.wantNoSecretRequest()
 	})
 	t.Run("a missing Dispatch token file", func(t *testing.T) {
@@ -912,18 +913,4 @@ func TestControllerStartUsage(t *testing.T) {
 			t.Errorf("%v = %d, stderr %q; want the usage and exit 2", argv, code, errb.String())
 		}
 	}
-}
-
-// testUserSeed is a fresh nkey user's seed.
-func testUserSeed(t *testing.T) string {
-	t.Helper()
-	user, err := nkeys.CreateUser()
-	if err != nil {
-		t.Fatalf("create nkey user: %v", err)
-	}
-	seed, err := user.Seed()
-	if err != nil {
-		t.Fatalf("user seed: %v", err)
-	}
-	return string(seed)
 }

@@ -26,54 +26,91 @@ const (
 // Configured reports whether Seed reads a seed at all: file (the SeedFileKey's, "" when the
 // configuration names none) is set, or either variable is, whatever it holds.
 func Configured(file string, lookup func(string) (string, bool)) bool {
-	if file != "" {
-		return true
-	}
-	if _, set := lookup(SeedFileVariable); set {
-		return true
-	}
-	_, set := lookup(SeedVariable)
-	return set
+	_, ok := resolve(file, lookup, nil)
+	return ok
 }
 
 // Seed is the nkey seed of the NATS user a process connects as: the trimmed contents of file, the
 // file the configuration's SeedFileKey names ("" when it names none); else those of the file
 // NATS_NKEY_SEED_FILE names; else NATS_NKEY_SEED. The first source set is authoritative: an empty
-// NATS_NKEY_SEED_FILE, or a missing, unreadable or blank file, is an error naming the key or
-// variable and the path (config.ReadSecretPointer), never a fallback to the next source or to no
-// credential; so is a blank NATS_NKEY_SEED, and a seed that is not a user nkey seed. None set is
-// "": the connection carries no credential, as every connection did before servers required one.
-// No error carries the seed.
+// NATS_NKEY_SEED_FILE, or a missing, unreadable, blank, or group- or other-readable file, is an
+// error naming the key or variable and the path (config.ReadPrivateSecretPointer), never a fallback
+// to the next source or to no credential; so is a blank NATS_NKEY_SEED, and a seed that is not a
+// user nkey seed. None set is "": the connection carries no credential, as every connection did
+// before servers required one. No error carries the seed.
 // Deploy order: a process gets a seed only after its server has nkey users (the SRE's stage 1, with
 // the no_auth_user fallback); a server with no users sends no nonce, and nats.go then refuses the
 // nkey ("nats: nkeys not supported by the server") rather than connecting without it.
 func Seed(file string, lookup func(string) (string, bool)) (string, error) {
-	var seed, source string
-	if file != "" {
-		read, err := config.ReadSecretPointer(SeedFileKey, file)
-		if err != nil {
-			return "", err
-		}
-		seed, source = read, fmt.Sprintf("%s (%s)", SeedFileKey, file)
-	} else if file, set := lookup(SeedFileVariable); set {
-		if file == "" {
-			return "", fmt.Errorf("%s is set but empty", SeedFileVariable)
-		}
-		read, err := config.ReadSecretPointer(SeedFileVariable, file)
-		if err != nil {
-			return "", err
-		}
-		seed, source = read, fmt.Sprintf("%s (%s)", SeedFileVariable, file)
-	} else if value, set := lookup(SeedVariable); set {
-		seed = strings.TrimSpace(value)
-		if seed == "" {
-			return "", fmt.Errorf("%s is set but empty", SeedVariable)
-		}
-		source = SeedVariable
-	} else {
+	src, ok := resolve(file, lookup, config.ReadPrivateSecretPointer)
+	if !ok {
 		return "", nil
 	}
-	if _, err := userKey(seed, source); err != nil {
+	return src.seed()
+}
+
+// SeedFile is Seed of the file the configuration's SeedFileKey names, alone: what `legion
+// controller start` checks before handing its Oh My Pi that file.
+func SeedFile(file string) (string, error) {
+	return fileSource(SeedFileKey, file, config.ReadPrivateSecretPointer).seed()
+}
+
+// MountedSeed is Seed of the two variables alone, reading NATS_NKEY_SEED_FILE whatever its mode: a
+// pod's pointer names the providers Secret's key, which the kubelet mounts readable by the pod's
+// group, and which only that pod can read. `legion probe-image` checks it inside the probe pod.
+func MountedSeed(lookup func(string) (string, bool)) (string, error) {
+	src, ok := resolve("", lookup, config.ReadSecretPointer)
+	if !ok {
+		return "", nil
+	}
+	return src.seed()
+}
+
+// source is one place a seed is read from: its name, which every refusal carries, and read, which
+// answers the seed or why the source holds none.
+type source struct {
+	name string
+	read func() (string, error)
+}
+
+// resolve is the one precedence every reader of a seed shares: file when the configuration names
+// one, else NATS_NKEY_SEED_FILE when set, else NATS_NKEY_SEED when set, whatever each holds; ok is
+// false when none is. read reads a file source (the key or variable naming it, and its path).
+func resolve(file string, lookup func(string) (string, bool), read func(key, path string) (string, error)) (source, bool) {
+	if file != "" {
+		return fileSource(SeedFileKey, file, read), true
+	}
+	if path, set := lookup(SeedFileVariable); set {
+		if path == "" {
+			return source{SeedFileVariable, func() (string, error) {
+				return "", fmt.Errorf("%s is set but empty", SeedFileVariable)
+			}}, true
+		}
+		return fileSource(SeedFileVariable, path, read), true
+	}
+	if value, set := lookup(SeedVariable); set {
+		return source{SeedVariable, func() (string, error) {
+			if seed := strings.TrimSpace(value); seed != "" {
+				return seed, nil
+			}
+			return "", fmt.Errorf("%s is set but empty", SeedVariable)
+		}}, true
+	}
+	return source{}, false
+}
+
+// fileSource is the file path that key (a configuration key or a variable) names, which read reads.
+func fileSource(key, path string, read func(key, path string) (string, error)) source {
+	return source{fmt.Sprintf("%s (%s)", key, path), func() (string, error) { return read(key, path) }}
+}
+
+// seed is the source's seed, refused unless it is a user's nkey seed.
+func (s source) seed() (string, error) {
+	seed, err := s.read()
+	if err != nil {
+		return "", err
+	}
+	if _, err := userKey(seed, s.name); err != nil {
 		return "", err
 	}
 	return seed, nil
@@ -94,6 +131,16 @@ func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, er
 		options = append(options, nats.Nkey(public, user.Sign))
 	}
 	return nats.Connect(strings.Join(urls, ","), options...)
+}
+
+// PublicKey is the public key of the nkey user seed is the seed of, a seed Seed answered: what a
+// process may say about the seed it holds without the seed leaving it.
+func PublicKey(seed string) (string, error) {
+	user, err := userKey(seed, "the NATS nkey seed")
+	if err != nil {
+		return "", err
+	}
+	return user.PublicKey()
 }
 
 // userKey is seed's key pair, refused, naming source, when seed is no nkey seed or the seed of

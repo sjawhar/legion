@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
 // kubernetesConfig is testConfig under runtime: kubernetes, its client a kubeconfig whose current
@@ -253,14 +254,14 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 			change: func(cfg *config.Config) {
 				cfg.ProviderKeys = []config.ProviderKey{{Env: "ENVOY_TOKEN", Secret: "envoy"}}
 			},
-			want: "provider_keys names ENVOY_TOKEN, whose pointer ENVOY_TOKEN_FILE every launch sets (the pointer to the launch secret ENVOY_TOKEN): the shim skips a key whose pointer the pod sets",
+			want: "provider_keys names ENVOY_TOKEN, the launch secret every launch carries behind its ENVOY_TOKEN_FILE pointer: a provider key may not name a launch secret",
 		},
 		{
 			name: "a provider key the NATS nkey seed's pointer names",
 			change: func(cfg *config.Config) {
 				cfg.ProviderKeys = []config.ProviderKey{{Env: "NATS_NKEY_SEED", Secret: "seed"}}
 			},
-			want: "provider_keys names NATS_NKEY_SEED, whose pointer NATS_NKEY_SEED_FILE every launch sets (the pointer to the launch secret NATS_NKEY_SEED): the shim skips a key whose pointer the pod sets",
+			want: "provider_keys names NATS_NKEY_SEED, the launch secret every launch carries behind its NATS_NKEY_SEED_FILE pointer: a provider key may not name a launch secret",
 		},
 		{
 			name: "a pod variable that is the NATS nkey seed's pointer",
@@ -269,6 +270,13 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 			},
 			want: "runtime.kubernetes.pod.env sets NATS_NKEY_SEED_FILE, which every launch sets (the pointer to the launch secret NATS_NKEY_SEED)",
 		},
+		{
+			name: "a provider key reading the NATS nkey seed's providers Secret key",
+			change: func(cfg *config.Config) {
+				cfg.ProviderKeys = []config.ProviderKey{{Env: "FOO", Secret: "NATS_NKEY_SEED"}}
+			},
+			want: "provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := kubernetesConfig(t, "https://127.0.0.1:1")
@@ -276,7 +284,7 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 			if err := os.WriteFile(cfg.EnvoyTokenFile, []byte("envoy-bearer\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cfg.NatsNkeySeedFile = writeSeed(t, userSeed(t))
+			cfg.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
 			tc.change(&cfg)
 			if _, err := prepare(cfg, quietLogger(), overrides{environ: []string{}}); err == nil || err.Error() != tc.want {
 				t.Fatalf("prepare = %v, want %q", err, tc.want)
@@ -317,7 +325,7 @@ func TestTheOperatorsPodReachesTheSandboxRuntime(t *testing.T) {
 // NATS_NKEY_SEED — it is a launch secret the runtime reads from the providers mount, and with none
 // it is neither.
 func TestTheNatsSeedReachesTheSandboxRuntimeAsTheProvidersSecrets(t *testing.T) {
-	seedFile := writeSeed(t, userSeed(t))
+	seedFile := testnats.SeedFile(t, testnats.UserSeed(t))
 	for _, tc := range []struct {
 		name string
 		key  string

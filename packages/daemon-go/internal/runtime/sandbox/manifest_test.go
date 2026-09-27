@@ -668,103 +668,33 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 	}
 }
 
-// With provider keys, every pod Legion runs mounts exactly the configured keys of the providers
-// Secret — the TypeScript runtime's legion-<project token>-providers — each as a file named for the
-// variable Oh My Pi reads, read-only at ProvidersDir in the agent's container alone, and the
-// worker's shim exports that directory into Oh My Pi's environment (--provider-env-dir); with none,
-// no pod mounts the Secret and no shim is told a directory.
-func TestProviderKeysReachEveryPodAsTheProvidersSecretsFiles(t *testing.T) {
-	const providersSecret = "legion-" + testProject + "-providers"
-	for name, keys := range map[string]map[string]string{
-		"configured": {"GEMINI_API_KEY": "gemini", "ANTHROPIC_API_KEY": "anthropic"},
-		"none":       nil,
-	} {
-		t.Run(name, func(t *testing.T) {
-			opts := testOptions()
-			opts.ProviderKeys = keys
-			r, err := configure(opts)
-			if err != nil {
-				t.Fatal(err)
-			}
-			worker := podOf(t, r, workerSpec(t), false)
-			for _, tc := range []struct {
-				pod   corev1.PodSpec
-				agent string
-			}{
-				{worker, mainContainer},
-				{r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec, probeContainer},
-			} {
-				var volumes []corev1.Volume
-				for _, volume := range tc.pod.Volumes {
-					if volume.Secret != nil && volume.Secret.SecretName == providersSecret {
-						volumes = append(volumes, volume)
-					}
-				}
-				mounted := func(c corev1.Container) []corev1.VolumeMount {
-					var mounts []corev1.VolumeMount
-					for _, mount := range c.VolumeMounts {
-						if slices.ContainsFunc(volumes, func(v corev1.Volume) bool { return v.Name == mount.Name }) || mount.MountPath == ProvidersDir {
-							mounts = append(mounts, mount)
-						}
-					}
-					return mounts
-				}
-				agent := containerNamed(t, tc.pod, tc.agent)
-				if keys == nil {
-					if len(volumes) != 0 || len(mounted(agent)) != 0 {
-						t.Errorf("%s: with no provider keys the pod has %+v and mounts %+v", tc.agent, volumes, mounted(agent))
-					}
-					continue
-				}
-				want := &corev1.SecretVolumeSource{
-					SecretName:  providersSecret,
-					Items:       []corev1.KeyToPath{{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}, {Key: "gemini", Path: "GEMINI_API_KEY"}},
-					DefaultMode: new(int32(0o440)),
-				}
-				if len(volumes) != 1 || !reflect.DeepEqual(volumes[0].Secret, want) {
-					t.Fatalf("%s's pod holds the providers Secret as %+v, want once as %+v", tc.agent, volumes, *want)
-				}
-				if got := mounted(agent); len(got) != 1 || got[0].MountPath != ProvidersDir || !got[0].ReadOnly || got[0].SubPath != "" {
-					t.Errorf("%s mounts the providers Secret as %+v, want once, read-only, at %s", tc.agent, got, ProvidersDir)
-				}
-				for _, init := range tc.pod.InitContainers {
-					if got := mounted(init); len(got) != 0 {
-						t.Errorf("%s mounts the providers Secret: %+v", init.Name, got)
-					}
-				}
-			}
-			main := containerNamed(t, worker, mainContainer)
-			shim := main.Command[:slices.Index(main.Command, "--")]
-			at := slices.Index(shim, "--provider-env-dir")
-			switch {
-			case keys == nil && at >= 0:
-				t.Errorf("with no provider keys the shim is told %v", shim)
-			case keys != nil && (at < 0 || at+1 == len(shim) || shim[at+1] != ProvidersDir):
-				t.Errorf("the shim runs as %v, want --provider-env-dir %s", shim, ProvidersDir)
-			}
-		})
-	}
-}
-
-// The NATS nkey seed is the providers Secret's, never a claim's: with NATS_NKEY_SEED among the
-// providers secrets, a worker's container and the image probe's each mount the providers Secret's
-// NATS_NKEY_SEED key beside the provider keys, and name it in NATS_NKEY_SEED_FILE, so the shim
-// exports it to no one; the claim's Secret holds no copy of it, and no variable holds its value.
-// With a seed and no provider key, the Secret is mounted for the seed alone. With no seed there is
-// no pointer and no key.
-func TestTheNatsSeedReachesEveryPodAsTheProvidersSecretsOwnFile(t *testing.T) {
+// The providers Secret — the TypeScript runtime's legion-<project token>-providers — reaches every
+// pod Legion runs, a worker's and the image probe's alike, as exactly its configured keys, read-only
+// at ProvidersDir in the agent's container alone: each provider key as a file named for the variable
+// Oh My Pi reads, which the worker's shim exports into Oh My Pi's environment (--provider-env-dir),
+// and each providers secret (the NATS nkey seed) as a file of its own name that the container's
+// `<NAME>_FILE` names, so the shim exports it to no one. The pointer is the runtime's, not the
+// spec's: a spec that carries no seed still gets it, and the claim's Secret never holds a copy. With
+// neither, no pod mounts the Secret, no shim is told a directory, and there is no pointer.
+func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 	const providersSecret = "legion-" + testProject + "-providers"
 	const seed = "SUAIBDPBAUTWCWBKIO6XHQNINK5FWJW4OHLXC3HQ2KFE4PEJUA44CNHTC4"
+	nats := []string{"NATS_NKEY_SEED"}
+	natsItem := corev1.KeyToPath{Key: "NATS_NKEY_SEED", Path: "NATS_NKEY_SEED"}
+	anthropic := corev1.KeyToPath{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}
 	for _, tc := range []struct {
 		name      string
 		keys      map[string]string
 		providers []string
+		specSeed  bool
 		items     []corev1.KeyToPath
 	}{
-		{"with provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, []string{"NATS_NKEY_SEED"},
-			[]corev1.KeyToPath{{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}, {Key: "NATS_NKEY_SEED", Path: "NATS_NKEY_SEED"}}},
-		{"alone", nil, []string{"NATS_NKEY_SEED"}, []corev1.KeyToPath{{Key: "NATS_NKEY_SEED", Path: "NATS_NKEY_SEED"}}},
-		{"no seed", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, nil, []corev1.KeyToPath{{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}}},
+		{"provider keys", map[string]string{"GEMINI_API_KEY": "gemini", "ANTHROPIC_API_KEY": "anthropic"}, nil, false,
+			[]corev1.KeyToPath{anthropic, {Key: "gemini", Path: "GEMINI_API_KEY"}}},
+		{"neither", nil, nil, false, nil},
+		{"the seed with provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, nats, true, []corev1.KeyToPath{anthropic, natsItem}},
+		{"the seed alone", nil, nats, true, []corev1.KeyToPath{natsItem}},
+		{"the seed, on a spec that carries none", nil, nats, false, []corev1.KeyToPath{natsItem}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := testOptions()
@@ -776,7 +706,7 @@ func TestTheNatsSeedReachesEveryPodAsTheProvidersSecretsOwnFile(t *testing.T) {
 			}
 			spec := workerSpec(t)
 			spec.Secrets = map[string]string{"ENVOY_TOKEN": "envoy-bearer"}
-			if tc.providers != nil {
+			if tc.specSeed {
 				spec.Secrets["NATS_NKEY_SEED"] = seed
 			}
 			l, err := r.prepare(spec)
@@ -792,10 +722,10 @@ func TestTheNatsSeedReachesEveryPodAsTheProvidersSecretsOwnFile(t *testing.T) {
 				spec      corev1.PodSpec
 				container string
 			}{{worker, mainContainer}, {probe, probeContainer}} {
-				var items []corev1.KeyToPath
+				var volumes []corev1.Volume
 				for _, volume := range pod.spec.Volumes {
 					if volume.Secret != nil && volume.Secret.SecretName == providersSecret {
-						items = volume.Secret.Items
+						volumes = append(volumes, volume)
 					}
 					if volume.Name == bootVolume {
 						for _, item := range volume.Secret.Items {
@@ -805,10 +735,35 @@ func TestTheNatsSeedReachesEveryPodAsTheProvidersSecretsOwnFile(t *testing.T) {
 						}
 					}
 				}
-				if !reflect.DeepEqual(items, tc.items) {
-					t.Errorf("%s's pod mounts the providers Secret's %+v, want %+v", pod.container, items, tc.items)
+				mounted := func(c corev1.Container) []corev1.VolumeMount {
+					var mounts []corev1.VolumeMount
+					for _, mount := range c.VolumeMounts {
+						if slices.ContainsFunc(volumes, func(v corev1.Volume) bool { return v.Name == mount.Name }) || mount.MountPath == ProvidersDir {
+							mounts = append(mounts, mount)
+						}
+					}
+					return mounts
 				}
-				env := envOf(containerNamed(t, pod.spec, pod.container))
+				agent := containerNamed(t, pod.spec, pod.container)
+				for _, init := range pod.spec.InitContainers {
+					if got := mounted(init); len(got) != 0 {
+						t.Errorf("%s mounts the providers Secret: %+v", init.Name, got)
+					}
+				}
+				if tc.items == nil {
+					if len(volumes) != 0 || len(mounted(agent)) != 0 {
+						t.Errorf("%s: with neither the pod has %+v and mounts %+v", pod.container, volumes, mounted(agent))
+					}
+				} else {
+					want := &corev1.SecretVolumeSource{SecretName: providersSecret, Items: tc.items, DefaultMode: new(int32(0o440))}
+					if len(volumes) != 1 || !reflect.DeepEqual(volumes[0].Secret, want) {
+						t.Errorf("%s's pod holds the providers Secret as %+v, want once as %+v", pod.container, volumes, *want)
+					}
+					if got := mounted(agent); len(got) != 1 || got[0].MountPath != ProvidersDir || !got[0].ReadOnly || got[0].SubPath != "" {
+						t.Errorf("%s mounts the providers Secret as %+v, want once, read-only, at %s", pod.container, got, ProvidersDir)
+					}
+				}
+				env := envOf(agent)
 				pointer, pointed := env["NATS_NKEY_SEED_FILE"]
 				if want := tc.providers != nil; pointed != want || (want && pointer != ProvidersDir+"/NATS_NKEY_SEED") {
 					t.Errorf("%s's NATS_NKEY_SEED_FILE = %q (set: %t), want %s/NATS_NKEY_SEED set %t", pod.container, pointer, pointed, ProvidersDir, want)
@@ -823,7 +778,12 @@ func TestTheNatsSeedReachesEveryPodAsTheProvidersSecretsOwnFile(t *testing.T) {
 				}
 			}
 			main := containerNamed(t, worker, mainContainer)
-			if shim := main.Command[:slices.Index(main.Command, "--")]; !slices.Contains(shim, "--provider-env-dir") {
+			shim := main.Command[:slices.Index(main.Command, "--")]
+			at := slices.Index(shim, "--provider-env-dir")
+			switch {
+			case tc.items == nil && at >= 0:
+				t.Errorf("with neither the shim is told %v", shim)
+			case tc.items != nil && (at < 0 || at+1 == len(shim) || shim[at+1] != ProvidersDir):
 				t.Errorf("the shim runs as %v, want --provider-env-dir %s", shim, ProvidersDir)
 			}
 		})

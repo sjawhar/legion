@@ -673,7 +673,7 @@ func TestClaimsRefusesAMissingFlagBeforeReachingTheDaemon(t *testing.T) {
 	}
 }
 
-// The bearer is read by config.ReadOperatorTokenFile's rules: a token file that cannot be read,
+// The bearer is read by config.ReadPrivateSecretPointer's rules: a token file that cannot be read,
 // holds nothing but whitespace, is not a regular file, or that its group or others can read fails
 // the command naming the path, and nothing is sent.
 func TestClaimsRefusesAnOperatorTokenFileItCannotRead(t *testing.T) {

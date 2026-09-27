@@ -9,7 +9,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/nats-io/nkeys"
 
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -23,32 +22,6 @@ func env(values map[string]string) func(string) (string, bool) {
 		value, ok := values[name]
 		return value, ok
 	}
-}
-
-func testUser(t *testing.T) (seed, public string) {
-	t.Helper()
-	user, err := nkeys.CreateUser()
-	if err != nil {
-		t.Fatalf("create nkey user: %v", err)
-	}
-	raw, err := user.Seed()
-	if err != nil {
-		t.Fatalf("user seed: %v", err)
-	}
-	public, err = user.PublicKey()
-	if err != nil {
-		t.Fatalf("user public key: %v", err)
-	}
-	return string(raw), public
-}
-
-func seedFile(t *testing.T, contents string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "nats.seed")
-	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-		t.Fatalf("write seed file: %v", err)
-	}
-	return path
 }
 
 // connect dials url as the user lookup names (natsauth.Seed with no configuration key).
@@ -88,13 +61,13 @@ func TestNoSeedConnectsToAServerWithoutAuthorization(t *testing.T) {
 // A server that admits only its nkey users accepts the daemon naming the user's seed, from the file
 // (which wins over the variable) or the variable.
 func TestItsSeedConnectsToAServerThatRequiresIt(t *testing.T) {
-	seed, public := testUser(t)
+	seed, public := testnats.User(t)
 	url := testnats.StartNkeyAuthorized(t, public)
 	for _, tc := range []struct {
 		name string
 		env  map[string]string
 	}{
-		{"NATS_NKEY_SEED_FILE, over NATS_NKEY_SEED", map[string]string{"NATS_NKEY_SEED_FILE": seedFile(t, "\n"+seed+"  \n"), "NATS_NKEY_SEED": "not a seed"}},
+		{"NATS_NKEY_SEED_FILE, over NATS_NKEY_SEED", map[string]string{"NATS_NKEY_SEED_FILE": testnats.SeedFile(t, "\n"+seed+"  \n"), "NATS_NKEY_SEED": "not a seed"}},
 		{"NATS_NKEY_SEED", map[string]string{"NATS_NKEY_SEED": seed}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -110,7 +83,7 @@ func TestItsSeedConnectsToAServerThatRequiresIt(t *testing.T) {
 
 // With no seed configured, the server that requires one refuses the daemon, and the error says so.
 func TestNoSeedIsRefusedByAServerThatRequiresOne(t *testing.T) {
-	_, public := testUser(t)
+	_, public := testnats.User(t)
 	url := testnats.StartNkeyAuthorized(t, public)
 	conn, err := connect(t, url, env(nil))
 	if err == nil {
@@ -126,8 +99,8 @@ func TestNoSeedIsRefusedByAServerThatRequiresOne(t *testing.T) {
 // configured file is the seed whatever the environment says. Neither the key nor a variable set is
 // no seed, and Configured says which of those Seed will read.
 func TestTheConfigurationKeyOutranksBothVariables(t *testing.T) {
-	seed, _ := testUser(t)
-	file := seedFile(t, seed+"\n")
+	seed, _ := testnats.User(t)
+	file := testnats.SeedFile(t, seed+"\n")
 	shadowed := map[string]string{"NATS_NKEY_SEED_FILE": "", "NATS_NKEY_SEED": "hunter2"}
 	got, err := natsauth.Seed(file, env(shadowed))
 	if err != nil || got != seed {
@@ -155,20 +128,16 @@ func TestTheConfigurationKeyOutranksBothVariables(t *testing.T) {
 // A seed configured but unusable is an error, naming the key or variable and the path, never a
 // fallback to the next source or to connecting without a credential.
 func TestAnUnusableSeedIsAnErrorNamingItsSource(t *testing.T) {
-	userSeed, _ := testUser(t)
+	userSeed, _ := testnats.User(t)
 	missing := filepath.Join(t.TempDir(), "missing.seed")
-	blank := seedFile(t, " \n")
-	notASeed := seedFile(t, "SUNOTASEED")
-	account, err := nkeys.CreateAccount()
-	if err != nil {
-		t.Fatalf("create nkey account: %v", err)
+	blank := testnats.SeedFile(t, " \n")
+	notASeed := testnats.SeedFile(t, "SUNOTASEED")
+	accountSeed := testnats.SeedFile(t, testnats.Account(t))
+	good := testnats.SeedFile(t, userSeed)
+	shared := testnats.SeedFile(t, userSeed)
+	if err := os.Chmod(shared, 0o640); err != nil {
+		t.Fatal(err)
 	}
-	rawAccountSeed, err := account.Seed()
-	if err != nil {
-		t.Fatalf("account seed: %v", err)
-	}
-	accountSeed := seedFile(t, string(rawAccountSeed))
-	good := seedFile(t, userSeed)
 	for _, tc := range []struct {
 		name string
 		key  string
@@ -186,6 +155,9 @@ func TestAnUnusableSeedIsAnErrorNamingItsSource(t *testing.T) {
 		{"a file holding an account seed", "", map[string]string{"NATS_NKEY_SEED_FILE": accountSeed}, "NATS_NKEY_SEED_FILE (" + accountSeed + ") holds an nkey seed that is not a user's"},
 		{"a blank variable", "", map[string]string{"NATS_NKEY_SEED": "  "}, "NATS_NKEY_SEED is set but empty"},
 		{"a variable holding no seed", "", map[string]string{"NATS_NKEY_SEED": "hunter2"}, "NATS_NKEY_SEED does not hold a valid nkey seed"},
+		{"a key file its group can read", shared, nil, "nats_nkey_seed_file " + shared + " is readable by its group or others (mode 0640); chmod 0600 it"},
+		{"a file its group can read", "", map[string]string{"NATS_NKEY_SEED_FILE": shared, "NATS_NKEY_SEED": userSeed},
+			"NATS_NKEY_SEED_FILE " + shared + " is readable by its group or others (mode 0640); chmod 0600 it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			seed, err := natsauth.Seed(tc.key, env(tc.env))

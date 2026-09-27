@@ -359,15 +359,18 @@ daemon or running a key command.
 The NATS nkey seed is optional, as on tmux: `nats_nkey_seed_file` (relative to `legion.yaml`'s
 directory), else `NATS_NKEY_SEED_FILE`, else `NATS_NKEY_SEED` in the daemon's environment, is the
 `legion-pane` user the daemon's own NATS connection authenticates as. A set source that is empty,
-missing, unreadable, blank, or not an nkey user seed refuses boot, naming the key and the path.
-With one, every pod's `NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the
-providers Secret's own `NATS_NKEY_SEED` key, which every pod and the image probe mount beside the
-`provider_keys`: the daemon never copies the seed into a claim's Secret. Put the same seed in the
-providers Secret under that key; a key the kubelet cannot mount fails the image probe at boot. The
-shim skips the file, since the pointer names it, so the seed is never a variable of Oh My Pi or
-the tools it runs. With none, a pod carries no pointer and mounts no such key. `provider_keys`
-may not name `NATS_NKEY_SEED`, and `pod.env` may not set `NATS_NKEY_SEED_FILE`, while the daemon
-has a seed.
+missing, unreadable, blank, readable by its group or others (the file wants mode 0600), or not an
+nkey user seed refuses boot, naming the key and the path. With one, every pod's
+`NATS_NKEY_SEED_FILE` names `/var/run/legion/providers/NATS_NKEY_SEED`, the providers Secret's own
+`NATS_NKEY_SEED` key, which every pod and the image probe mount beside the `provider_keys`,
+whatever a launch carries: the daemon never copies the seed into a claim's Secret. Put the same
+seed in the providers Secret under that key. The image probe refuses boot when the kubelet cannot
+mount the key, when it holds no user seed, and when its user is not the daemon's own seed's (the
+probe reports the user's public key, never the seed). The shim skips the file, since the pointer
+names it, so the seed is never a variable of Oh My Pi or the tools it runs. With none, a pod
+carries no pointer and mounts no such key. While the daemon has a seed, `provider_keys` may neither
+name `NATS_NKEY_SEED` (on either runtime) nor read the Secret's `NATS_NKEY_SEED` key under another
+name, and `pod.env` may not set `NATS_NKEY_SEED_FILE`.
 
 ### Anatomy of a Sandbox pod
 
@@ -1058,7 +1061,8 @@ refused naming the path and mode (`… is readable by its group or others (mode 
 keeping nothing until the daemon has answered, the command:
 
 1. reads the file and refuses as above, and refuses a blank or unreadable Envoy or Dispatch token
-   file, a `nats_nkey_seed_file` that is blank, unreadable, or holds no nkey user seed, a
+   file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or
+   holds no nkey user seed, a
    role-prompt directory missing a file (`LEGION_ROLE_PROMPTS_DIR`, or the checkout's
    `packages/pi-envoy/roles`), a missing or blank instructions file, and an Oh My Pi invocation that
    does not resolve;

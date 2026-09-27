@@ -90,7 +90,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, err
 	}
-	operatorToken, err := config.ReadOperatorTokenFile("operator_token_file", cfg.OperatorTokenFile)
+	operatorToken, err := config.ReadPrivateSecretPointer("operator_token_file", cfg.OperatorTokenFile)
 	if err != nil {
 		return 0, err
 	}
@@ -104,7 +104,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 		}
 	}
 	if cfg.NatsNkeySeedFile != "" {
-		if _, err := natsauth.Seed(cfg.NatsNkeySeedFile, os.LookupEnv); err != nil {
+		if _, err := natsauth.SeedFile(cfg.NatsNkeySeedFile); err != nil {
 			return 0, err
 		}
 	}
