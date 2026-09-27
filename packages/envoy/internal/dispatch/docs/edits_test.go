@@ -84,8 +84,9 @@ func TestApplyOpsReportsABatchThatWroteUpdatesAndNoMarkdownAsUnchanged(t *testin
 }
 
 // Canonical markdown renders no anchor mark, so a `replace` whose `with` equals its `find` reads
-// as identical text while the human comment anchor it covered is gone. That is a change, and the
-// version that records it must still be minted (Deep1326).
+// as identical text while the human comment anchor it covered is gone - a replace that runs past
+// an anchor's edge writes its text outside that anchor. That is a change, and the version that
+// records it must still be minted (Deep1326).
 func TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "Keep anchored words here.")
@@ -95,7 +96,7 @@ func TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged(t *testing.T) {
 		t.Fatalf("anchor a comment: %v", err)
 	}
 	result, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
-		{Op: "replace", Find: "anchored words", With: "anchored words"},
+		{Op: "replace", Find: "Keep anchored words", With: "Keep anchored words"},
 	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	if err != nil {
 		t.Fatalf("replace over the anchor: %v", err)

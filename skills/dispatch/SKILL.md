@@ -106,7 +106,10 @@ A spec has two readers: the human who decides reads the **Summary** and **New si
   between two lanes or a halt condition, a question for the platform PO (see
   [Before you ask](#before-you-ask) under Asking).
 - Keep each section to one screen; work that exceeds one screen per section is two specs.
-- Update the spec as decisions land: the spec is the record, comments are the discussion.
+- Update the spec as decisions land: the spec is the record, comments are the discussion. It
+  records decisions and requirements, never progress: no status, timestamps, "Update HH:MMZ"
+  section, PR list, or handoff notes. Progress is not a Dispatch object at all; it lives in your
+  transcript and your pull request (see [Messages](#messages)).
 - Before sending it: no sections conflict, every requirement has exactly one reading, and the
   Summary and every ask block pass the phone test above.
 
@@ -274,6 +277,10 @@ start with the issue key; standalone project-document hit lines start with
 
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
+The check compares title words only (shared stemmed terms), never meaning: "four tests that fail a
+merge" pairs with "four CI gates that cannot fail a merge". So when you force past a candidate, give
+the new issue a title that names what differs where you can, and open its spec's Summary with the
+distinction from the named issue, citing it (`dispatch://KEY`), for whoever reads the next pairing.
 
 ## Reading a project's backlog
 
@@ -548,9 +555,8 @@ the document's approval state; `stale` means it was approved and then edited - r
 ## The Spec
 
 The spec holds requirements, design, acceptance, decisions, and rejected alternatives, structured per [Writing a spec](#writing-a-spec).
-It changes only when a decision or requirement changes, and every version that records one is named with `summary`. Never write
-progress, status, timestamps, an "Update HH:MMZ" section, a PR list, or handoff notes into the spec. Progress is not a
-Dispatch object at all: it lives in your transcript and your pull request (see [Messages](#messages)).
+It changes only when a decision or requirement changes, and every version that records one is named with `summary`. What it
+never carries is in [Rules](#rules) under Writing a spec.
 
 Read the current document before changing it:
 

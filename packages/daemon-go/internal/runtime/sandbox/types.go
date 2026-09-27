@@ -93,7 +93,8 @@ type Options struct {
 	// `<NAME>_FILE` pointer names that file, in the worker's container and the image probe's alike,
 	// so the shim never exports it into Oh My Pi's environment.
 	ProvidersSecrets []string
-	// NATSUser is the public key of the NATS nkey user the daemon's own seed is, "" when it has
+	// NATSUser is the public key of the NATS nkey user of the pane seed the daemon hands every pod
+	// (nats_nkey_seed_file, never the daemon's own nats_daemon_nkey_seed_file), "" when it has
 	// none. The image probe passes only when it read, through its providers secrets' pointers, the
 	// seed of this same user (bootprobe.NATSUser), so a providers Secret holding a blank, invalid,
 	// or other seed refuses boot instead of every agent's connection.

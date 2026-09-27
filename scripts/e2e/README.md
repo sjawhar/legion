@@ -233,8 +233,9 @@ domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-co
 either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
 neither value. The bridge connects to that upstream as the nkey user `NATS_NKEY_SEED_FILE` or
 `NATS_NKEY_SEED` in the operator's environment names, and without a credential when neither is set. Every process the rigs start against their own no-auth NATS (the listener, the Envoy Dispatch
-server, the Go daemon; stage 2 and the other local rigs unset both variables outright) runs without
-`NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
+server, the Go daemon; stage 2 and the other local rigs unset every variable below outright) runs without
+`NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, and the Go daemon also without the daemon seed's
+`NATS_DAEMON_NKEY_SEED`/`NATS_DAEMON_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
 users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, keeps the operator's seed. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
@@ -1070,6 +1071,10 @@ where an agent runs:
 | `assert_claim_endpoints ISSUE ROLE` | fails the check when the claim's process could reach a service outside the rig; every instruction runs it first |
 | `claim_session_text ISSUE ROLE` | prints the claim's session file, and fails when there is none |
 | `workspace_jj ISSUE ARGS…` | runs `jj ARGS…` in the issue's workspace |
+
+`new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
+`legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
+none, since it runs under its root's tree.
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own

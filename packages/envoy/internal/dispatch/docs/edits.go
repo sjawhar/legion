@@ -790,6 +790,9 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 				op.With,
 			)}
 		}
+		// The text written over the match stays inside every ask and comment anchor the match lay
+		// wholly inside, so each anchor's quote is still the whole text it covers.
+		pmdoc.AddMarks(with, pmdoc.AnchorMarksCovering(tree, r))
 		next, err := pmdoc.Splice(tree, r, with)
 		err = invalidSchemaOp("with", err)
 		if err == nil && level != 0 {

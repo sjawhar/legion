@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -339,6 +340,15 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			replacement = codeReplacement(codeText)
 		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From)); err != nil {
 			return err
+		}
+		// Accepted text stays inside every ask and comment anchor the suggestion lay wholly inside,
+		// as an edit's replacement does, and the suggestion's own mark goes with the text it
+		// replaced. Only text that stays in the textblock carries them: a block replacement can
+		// land a code block, which an ask's mark cannot cover.
+		if code || isInlineDocument(replacement) {
+			pmdoc.AddMarks(replacement, slices.DeleteFunc(pmdoc.AnchorMarksCovering(tree, range_), func(mark pmdoc.Mark) bool {
+				return mark.Type == string(MarkSuggestion) && mark.Attrs["id"] == id
+			}))
 		}
 		next, err := pmdoc.Splice(tree, range_, replacement)
 		if err != nil {

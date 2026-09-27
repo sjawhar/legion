@@ -140,6 +140,19 @@ runs, and a human may set any lifecycle status from the Dispatch dashboard. `leg
 <status>` remains the controller path for `triage`/`icebox`/`backlog`/`todo`. A human can also
 close an issue into `done` and reopen it into `backlog` from the Dispatch dashboard.
 
+**Handover:** the Go coordinator (`packages/daemon-go`) works only the issues handed to it with the
+Dispatch label `legion` (in any case), so it can share a Dispatch project with humans and other
+agents; a dedicated project hands its issues over the same way. A human sets the label from the
+issue header in the Dispatch dashboard, an agent with `dispatch_issue` or `dispatch_issue_update`.
+A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes
+the controller. A child needs none: it runs under its tree's architect once its root is admitted. A
+child whose tree is not live is an orphan, admitted as a root of its own, so it needs the label as
+any root does. Taking the label off a waiting root drops it from the waiting line, as a status that
+leaves `todo` does; taking it off a root already admitted does not stop its tree. The mark is a
+label rather than the issue's `route` because Dispatch publishes every event of a routed issue to
+the route's topic, where a label only marks the issue; it carries no workflow state, and the
+TypeScript daemon does not read it.
+
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: the architect
 requests it with `dispatch_request_approval` and registers the document id and version with the

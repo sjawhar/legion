@@ -320,6 +320,17 @@ reset does not retry. It still waits for any open server transaction before trun
 deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database and `E2E_AGENT_TOKEN` for
 bearer-seeded API calls.
 
+The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts` alone. Where a caret lands beside
+a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
+while Firefox is unaffected, so that spec is the one that needs a second engine. CI installs
+WebKit beside Chromium for it (`bun run e2e:install` does the same locally).
+
+The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts` alone: Firefox's native
+editing puts text typed over a code block's last line before that line's newline, and deletes a
+paragraph's hard break along with the text after it, which Chromium and WebKit never do, so that
+spec is the one that needs a second engine. CI installs Firefox
+beside Chromium for it (`bun run e2e:install` does the same locally).
+
 ## Phone acceptance
 
 The `iphone` Playwright project uses Chromium with the iPhone 13 viewport,

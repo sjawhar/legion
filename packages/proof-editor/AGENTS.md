@@ -30,15 +30,17 @@ pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstre
 | `src/lib.css` | The editor stylesheet |
 | `src/tests/*.test.ts` | The suites that came with those files |
 
-Two files under `src/` are legion's own rather than copies, so the file-by-file audit below does
+Four files under `src/` are legion's own rather than copies, so the file-by-file audit below does
 not reach them:
 
 | File | What it is |
 | --- | --- |
+| `src/collab-cursor-plugin.ts` | The peer-cursor plugin: y-prosemirror's, except that a peer's caret is not drawn while it sits on the focused local caret, where Chromium and WebKit otherwise drop or misplace typing (LEGION-289); it is also biome-checked |
 | `src/editor/schema/dom-attributes.ts` | `withDomAttributes`, the DOM-output-spec helper lifted out of `block-ids.ts` so the typed-block schema can use it too |
+| `src/trailing-newline-input.ts` | Types over a selection that would leave its text block ending in a newline, where Firefox otherwise puts the text before a code block's newline or deletes a paragraph's hard break (LEGION-289); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Six kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Eight kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -52,12 +54,15 @@ in the tree (136 lines in the module) — `typedBlockSpec` moved out of `blockSc
 `$nodeSchema` callback and exported so a test can build the spec without a Milkdown ctx,
 `attributeText` lifted out of `markdownAttrs`, the new `domAttributeName`, `domAttrs` and
 `parsedDomAttrs`, the parse rule's `getAttrs` and `contentElement`, the `withDomAttributes`
-wrapper on `toDOM`, and the suite's cases for all of it; and annotations, casts and assertions
+wrapper on `toDOM`, and the suite's cases for all of it; `src/lib.ts` installing its peer
+cursors through `collabCursorPlugin` from `./collab-cursor-plugin` instead of calling
+`yCursorPlugin` itself; `src/lib.ts` installing `trailingNewlineInputPlugin` from
+`./trailing-newline-input`; and annotations, casts and assertions
 that make a file type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the six kinds.
+only lines that differ should be the eight kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
@@ -133,4 +138,5 @@ against the pinned commit stays readable. `assist` matters as much as the other 
 `organizeImports` is a safe fix, so one `biome check --write` or an editor with organize-on-save
 would reorder the copy's imports. `upstream/` is excluded the same way, for the same reason:
 it is tsc's output, not source. Anything legion writes here — `scripts/`, `tests/`,
-`src/tests/harness.ts` — follows the repo's conventions and is checked.
+`src/collab-cursor-plugin.ts`, `src/trailing-newline-input.ts`, `src/tests/harness.ts` — follow
+the repo's conventions and are checked.

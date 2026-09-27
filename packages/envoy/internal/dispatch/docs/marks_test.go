@@ -612,6 +612,94 @@ func TestReplaceTextReanchorsOpenRows(t *testing.T) {
 	}
 }
 
+// A replace through the edit API keeps an open anchor over the text it wrote wherever that text
+// lands inside the anchor, so the refreshed quote is the anchor's whole current extent rather than
+// the run of the mark before the edit (production's LEGSMOKE-301 read "quick " after "brown"
+// became "red"). A replace that runs past the anchor's edge rewrote text outside it as well, so the
+// anchor keeps only the text the replace left alone.
+func TestAReplaceKeepsTheAnchorOverItsWholeCurrentExtent(t *testing.T) {
+	const text = "The quick brown fox jumps over the lazy dog"
+	const quote = "quick brown fox jumps"
+	for _, test := range []struct {
+		name, find, with, want string
+		orphaned               bool
+	}{
+		{name: "a word inside", find: "brown", with: "red", want: "quick red fox jumps"},
+		{name: "words inside", find: "brown fox", with: "red fox", want: "quick red fox jumps"},
+		{name: "the first word", find: "quick", with: "slow", want: "slow brown fox jumps"},
+		{name: "the last word", find: "jumps", with: "leaps", want: "quick brown fox leaps"},
+		{name: "the whole quote", find: quote, with: "sleepy cat naps", want: "sleepy cat naps"},
+		{name: "a deletion inside", find: "brown ", with: "", want: "quick fox jumps"},
+		{name: "an insertion inside", find: "brown", with: "very brown", want: "quick very brown fox jumps"},
+		{name: "across the end", find: "jumps over", with: "leaps across", want: "quick brown fox "},
+		{name: "across the start", find: "The quick", with: "A slow", want: " brown fox jumps"},
+		{name: "over the whole quote and more", find: "The " + quote, with: "A cat", orphaned: true, want: quote},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, text)
+			askID := insertAnchoredAsk(t, service, artifactID, quote)
+			commentID := insertAnchoredComment(t, service, artifactID, quote)
+
+			ctx := context.Background()
+			tx, err := service.store.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin edit: %v", err)
+			}
+			defer tx.Rollback(ctx)
+			joined, ledger := service.Join(ctx, tx)
+			defer ledger.Discard()
+			if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{
+				Op: "replace", Find: test.find, With: test.with,
+			}}, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
+				t.Fatalf("replace %q with %q: %v", test.find, test.with, err)
+			}
+			if err := ledger.Commit(ctx); err != nil {
+				t.Fatalf("commit edit: %v", err)
+			}
+
+			for _, anchor := range []struct {
+				kind   string
+				stored storedAnchor
+			}{
+				{kind: "ask", stored: loadAskAnchor(t, service, askID)},
+				{kind: "comment", stored: loadCommentAnchor(t, service, commentID)},
+			} {
+				if anchor.stored.Quote != test.want || anchor.stored.Orphaned != test.orphaned {
+					t.Errorf("%s anchor after replacing %q with %q = quote %q orphaned %t, want quote %q orphaned %t",
+						anchor.kind, test.find, test.with, anchor.stored.Quote, anchor.stored.Orphaned, test.want, test.orphaned)
+				}
+			}
+		})
+	}
+}
+
+// Accepting a suggestion inside a comment's quote writes its text inside that comment too, so the
+// comment's quote is its whole current extent; the accepted suggestion's own mark goes with the
+// text it replaced.
+func TestAnAcceptedSuggestionStaysInsideTheCommentAroundIt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "The quick brown fox jumps over the lazy dog")
+	commentID := insertAnchoredComment(t, service, artifactID, "quick brown fox jumps")
+	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+		Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"},
+	}, "brown", nil); err != nil {
+		t.Fatalf("mark the suggestion: %v", err)
+	}
+	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "red", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("accept the suggestion: %v", err)
+	}
+	tree := liveTree(t, service, artifactID)
+	if _, quote, found := pmdoc.FindMark(tree, string(MarkComment), commentID); !found || quote != "quick red fox jumps" {
+		t.Fatalf("comment mark after the accept = %q found=%t, want %q", quote, found, "quick red fox jumps")
+	}
+	if _, _, found := pmdoc.FindMark(tree, string(MarkSuggestion), "s1"); found {
+		t.Fatal("the accepted suggestion's mark survived the accept")
+	}
+}
+
 type storedAnchor struct {
 	ArtifactID string `json:"artifact_id"`
 	MarkID     string `json:"mark_id"`

@@ -10,7 +10,7 @@
     "test": "bun test web/src",
     "e2e": "bun run build:web && playwright test --config e2e/playwright.config.ts",
     "e2e:deployed": "playwright test --config e2e/playwright.config.ts",
-    "e2e:install": "playwright install chromium",
+    "e2e:install": "playwright install chromium webkit firefox",
     "typecheck": "bunx tsc --noEmit",
     "lint": "bunx biome check web/src e2e"
   },

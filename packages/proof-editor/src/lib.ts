@@ -45,7 +45,8 @@ import { listener } from '@milkdown/plugin-listener';
 import { cursor } from '@milkdown/plugin-cursor';
 import { clipboard } from '@milkdown/plugin-clipboard';
 import { nord } from '@milkdown/theme-nord';
-import { yCursorPlugin, yCursorPluginKey, ySyncPluginKey } from 'y-prosemirror';
+import { yCursorPluginKey, ySyncPluginKey } from 'y-prosemirror';
+import { collabCursorPlugin } from './collab-cursor-plugin';
 import type { Awareness } from 'y-protocols/awareness';
 import type * as Y from 'yjs';
 import type { EditorView } from '@milkdown/kit/prose/view';
@@ -89,6 +90,7 @@ import { registerPopoverHookInstance } from './dispatch-popover-hook';
 import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
 import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
 import { configureDispatchLinks } from './dispatch-links';
+import { trailingNewlineInputPlugin } from './trailing-newline-input';
 
 export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
 export type {
@@ -211,11 +213,7 @@ function installCollabCursorsWhenReady(
     }
 
     try {
-      const cursorPlugin = yCursorPlugin(
-        awareness,
-        { cursorBuilder: collabCursorBuilder, selectionBuilder: collabSelectionBuilder },
-        undefined,
-      );
+      const cursorPlugin = collabCursorPlugin(awareness);
       const nextPlugins = view.state.plugins.concat(cursorPlugin);
       ctx.set(prosePluginsCtx, nextPlugins);
       view.updateState(view.state.reconfigure({ plugins: nextPlugins }));
@@ -304,6 +302,8 @@ export async function createProofEditor(
     .use(marksPlugins)
     // Allow Backspace to delete empty table rows
     .use(tableKeyboardPlugin)
+    // Firefox puts text typed over a code block's last line before its newline
+    .use(trailingNewlineInputPlugin)
     .use(placeholderPlugin)
     .config((ctx) => {
       ctx.update(remarkStringifyOptionsCtx, (prev) => ({

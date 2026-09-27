@@ -137,8 +137,12 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	controllerDir := filepath.Join(stateDir, "controller")
 	token := string(legionclaim.ControllerToken(cfg.Project))
 	// One environment, probed and then launched: the operator's own with the controller's set on
-	// top, later pairs replacing inherited values of the same name.
+	// top, later pairs replacing inherited values of the same name. The controller is pane-side, so
+	// the daemon's own NATS seed, which an operator shell that also runs a daemon may export, is
+	// dropped by value and by pointer; its pane seed pointer is the controller's set's.
 	env := processEnvironment()
+	delete(env, natsauth.DaemonSeedVariable)
+	delete(env, natsauth.DaemonSeedFileVariable)
 	for _, pair := range controllerEnvironment(cfg, stateDir, token, runtime.SecretFilePath(stateDir, token)) {
 		env[pair[0]] = pair[1]
 	}
