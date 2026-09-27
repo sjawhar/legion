@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 import { ApiError, api } from "../../api/client";
 import type { ExternalLink } from "../../api/types";
+import { TruncatedText } from "../../components/TruncatedText";
 import { badgeLow, linkHoverText, linkText, textMutedOnSurface } from "../../theme/classes";
 
 function safeExternalHref(value: string): string | undefined {
@@ -88,7 +89,7 @@ export function GitHubLink({ link }: { link: ExternalLink }): ReactNode {
         href={href}
         title={link.url}
       >
-        {link.url}
+        <TruncatedText>{link.url}</TruncatedText>
       </a>
     );
   }

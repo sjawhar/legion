@@ -1,17 +1,20 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import { setLiveSessions } from "./agents";
 
 import {
+  createArtifactAsk,
   createAsk,
   createComment,
   createIssue,
+  createIssueArtifact,
   createMessage,
   createProject,
   createProjectDocument,
+  editArtifact,
   getAsk,
 } from "./api";
 import { actionBar, barAction, documentEditor, selectEditorText } from "./editor";
-import { resetDatabase } from "./seed";
+import { insertExternalLink, resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 const session = {
@@ -408,6 +411,104 @@ test("an inline link keeps its line and grows its hit box without covering its n
     //    second.
     expect(measured.onFirstLowerEdge).toBe("First choice");
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
+  } finally {
+    await context.close();
+  }
+});
+
+/** The name is cut, and whatever cuts it draws an ellipsis. `text-overflow` applies to a block
+ *  container's own text, never to a flex container's, and below 1280 px every link is an
+ *  inline-flex box: a `truncate` link there clipped its name mid-word with nothing to say so. */
+async function expectEllipsis(link: Locator): Promise<void> {
+  const state = await link.evaluate((node) => {
+    const clippers = [node, ...node.querySelectorAll("*")].filter(
+      (element) =>
+        element.scrollWidth > element.clientWidth &&
+        getComputedStyle(element).overflowX === "hidden"
+    );
+    const container = node.parentElement?.getBoundingClientRect();
+    return {
+      clipperStyles: clippers.map((element) => {
+        const style = getComputedStyle(element);
+        return `${style.display}/${style.textOverflow}`;
+      }),
+      overflowsContainer:
+        container === undefined || node.getBoundingClientRect().right > container.right + 0.5,
+    };
+  });
+  expect(state.overflowsContainer).toBe(false);
+  expect(state.clipperStyles.length).toBeGreaterThan(0);
+  for (const style of state.clipperStyles) {
+    expect(style).toMatch(/^(block|inline-block)\/ellipsis$/);
+  }
+}
+
+test("a long name ends in an ellipsis wherever a link truncates it", async ({
+  browser,
+}, testInfo) => {
+  const longName =
+    "legion-go-coordinator-stage-4b-sandbox-tree-runbook-with-every-checkpoint-and-the-evidence-each-one-left-on-the-production-cluster.md";
+  const longQuestion =
+    "Which checkpoint gates the sandbox tree before the daemon restarts mid-tree: the fence, the node release, or the linger close that follows both of them?";
+  const longUrl = `https://docs.example.com/runbooks/legion/go-coordinator/stage-4b/${"sandbox-tree-".repeat(4)}checkpoints`;
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Stage 4b runbook" });
+  await createIssueArtifact(issue.key, { content: "# Runbook\n", name: longName });
+  const document = await createProjectDocument("CORE", { content: "# Runbook\n", name: longName });
+  await createArtifactAsk(
+    document.artifact.id,
+    { question: "Does this runbook cover it?" },
+    session
+  );
+  await insertExternalLink(issue.key, longUrl);
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown: `:::ask{#gate urgency="high" multiple="false" state="open"}\n${longQuestion}\n\n- Fence\n- Release\n:::\n`,
+          op: "insert",
+        },
+      ],
+    },
+    session
+  );
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  if (testInfo.project.name === "chromium") {
+    await page.setViewportSize({ height: 900, width: 1280 });
+  }
+  try {
+    // The project's Documents list: the name ends in an ellipsis, and its kind and time share
+    // one line rather than stacking in a second column.
+    await page.goto("/projects/CORE/documents");
+    const row = page.getByRole("listitem", { name: longName });
+    await expectEllipsis(row.getByRole("link", { name: longName }));
+    const details = await row.evaluate((node) => {
+      const time = node.querySelector("time");
+      const kind = [...node.querySelectorAll("span")].find((span) => span.textContent === "doc");
+      if (time === null || kind === undefined) {
+        throw new Error("the row has no kind or time");
+      }
+      return { kind: kind.getBoundingClientRect().top, time: time.getBoundingClientRect().top };
+    });
+    expect(Math.abs(details.kind - details.time)).toBeLessThanOrEqual(4);
+
+    await page.goto(`/issues/${issue.key}/artifacts`);
+    await expectEllipsis(page.getByRole("link", { exact: true, name: longName }));
+
+    await page.goto("/?view=everyone");
+    await expectEllipsis(page.locator("[data-inbox-owner]", { hasText: longName }));
+
+    await page.goto(`/issues/${issue.key}`);
+    await expectEllipsis(page.getByRole("link", { name: longUrl }));
+    await expectEllipsis(
+      page
+        .getByRole("navigation", { name: "Open decisions" })
+        .getByRole("link", { name: longQuestion })
+    );
   } finally {
     await context.close();
   }

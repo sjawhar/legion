@@ -6,6 +6,7 @@ import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
+import { TruncatedText } from "../../components/TruncatedText";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   borderDefault,
@@ -43,9 +44,12 @@ function DocumentRow({ document }: { document: Artifact }): ReactNode {
   return (
     <li
       aria-label={document.name}
-      className={`grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-2 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto_auto_auto] sm:items-center ${borderDefault}`}
+      // From `sm` a four-column grid; on a phone the name takes its own line and the kind, the
+      // issue and the time share the line under it; a two-column grid would stack the kind
+      // over a blank cell and put the time a line below both.
+      className={`flex flex-wrap items-center gap-x-4 gap-y-2 border-t py-3 sm:grid sm:grid-cols-[minmax(0,1fr)_auto_auto_auto] ${borderDefault}`}
     >
-      <div className="min-w-0">
+      <div className="min-w-0 basis-full">
         <div className="flex min-w-0 items-center gap-1">
           {document.issue_key === null ? (
             <Link
@@ -56,7 +60,7 @@ function DocumentRow({ document }: { document: Artifact }): ReactNode {
                 slug: document.slug,
               })}
             >
-              {document.name}
+              <TruncatedText>{document.name}</TruncatedText>
             </Link>
           ) : (
             <Link
@@ -67,7 +71,7 @@ function DocumentRow({ document }: { document: Artifact }): ReactNode {
                 slug: document.slug,
               })}
             >
-              {document.name}
+              <TruncatedText>{document.name}</TruncatedText>
             </Link>
           )}
           <CopyRefButton route={documentRoute(document)} />
@@ -75,7 +79,7 @@ function DocumentRow({ document }: { document: Artifact }): ReactNode {
         <ApprovalChip artifact={document} />
       </div>
       <span className={`text-xs ${textSecondaryOnCanvas}`}>{document.kind}</span>
-      <span className="text-xs">
+      <span className="text-xs max-sm:empty:hidden">
         {document.issue_key === null ? null : (
           <Link
             className={`rounded-full border px-2 py-1 font-medium ${borderDefault} ${surfaceMutedBg} ${linkText} ${linkHoverText}`}
