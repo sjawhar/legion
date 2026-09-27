@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
@@ -94,15 +95,12 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 	if err != nil {
 		return nil, err
 	}
-	kv, err := js.KeyValue(SessionBucket)
-	if errors.Is(err, nats.ErrBucketNotFound) {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{
-			Bucket:   SessionBucket,
-			TTL:      opts.ttl,
-			Replicas: opts.replicas,
-			Storage:  nats.FileStorage,
-		})
-	}
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
+		Bucket:   SessionBucket,
+		TTL:      opts.ttl,
+		Replicas: opts.replicas,
+		Storage:  nats.FileStorage,
+	})
 	if err != nil {
 		return nil, err
 	}

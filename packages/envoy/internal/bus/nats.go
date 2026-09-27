@@ -679,18 +679,26 @@ func usesCoreTransport(topic string) bool {
 // or ErrInvalidSubject.
 var ErrRefused = errors.New("refused")
 
+// refusal is a kind of ErrRefused. Its text names only the kind, since every line and answer that
+// reports a refusal already says it is one (`github publish refused: too large to publish whole`).
+type refusal string
+
+func (r refusal) Error() string { return string(r) }
+
+func (r refusal) Is(target error) bool { return target == ErrRefused }
+
 // ErrTooLarge is the ErrRefused of an envelope too large to publish whole: a message past the NATS
 // server's max payload, which nats.go refuses before sending it, a subject past maxSubjectBytes, a
 // KV key whose subject would be, or a CI record or settlement past the bound its store keeps below
 // those. Its error names the size and the bound.
-var ErrTooLarge = fmt.Errorf("%w: too large to publish whole", ErrRefused)
+var ErrTooLarge error = refusal("too large to publish whole")
 
 // ErrInvalidSubject is the ErrRefused of a subject NATS does not accept: an empty one or one holding
 // whitespace, which nats.go refuses, or one holding an empty token (`a..b`, or a leading or trailing
 // dot), which no stream's subjects match, so a JetStream publish waits out its deadline for an
 // answer that never comes and a core publish is dropped. Its error names the subject, or the KV key
 // that would have made it.
-var ErrInvalidSubject = fmt.Errorf("%w: not a subject NATS accepts", ErrRefused)
+var ErrInvalidSubject error = refusal("not a subject NATS accepts")
 
 // maxSubjectBytes bounds a subject the bus publishes on. The server closes a connection whose
 // protocol line runs past its max control line (4 KiB by default) and nats.go does not check it,

@@ -1,19 +1,38 @@
 package bus
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/nats-io/nats.go"
 )
 
-// CheckedKeyValue returns kv with each key checked before nats.go builds a subject from it, which
-// nats.go checks only for the characters a key may hold. A key whose longest subject would reach
-// past maxSubjectBytes is ErrTooLarge, and one NATS would not accept in a subject (an empty token,
-// `a..b`, which nats.go allows, or whitespace) is ErrInvalidSubject, each refused before anything
-// is sent, whichever call carries the key. Every KV handle the listener and Dispatch read and write
-// through is one.
-func CheckedKeyValue(kv nats.KeyValue) nats.KeyValue {
-	return checkedKeyValue{kv}
+// EnsureKeyValue opens the KV bucket config names, creating it with config when it does not exist.
+// OpenKeyValue opens one that exists and creates nothing, as a rebuild does. They are how the
+// listener and Dispatch open every bucket, and each returns a handle that checks its keys before
+// nats.go builds a subject from one, since nats.go checks only the characters a key may hold: a key
+// whose longest subject would reach past maxSubjectBytes is ErrTooLarge, and one NATS would not
+// accept in a subject (an empty token, `a..b`, which nats.go allows, or whitespace) is
+// ErrInvalidSubject, each refused before anything is sent, whichever call carries the key.
+func EnsureKeyValue(js nats.JetStreamContext, config *nats.KeyValueConfig) (nats.KeyValue, error) {
+	kv, err := js.KeyValue(config.Bucket)
+	if errors.Is(err, nats.ErrBucketNotFound) {
+		kv, err = js.CreateKeyValue(config)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return checkedKeyValue{kv}, nil
+}
+
+// OpenKeyValue opens the existing KV bucket named bucket, its handle checking its keys
+// (EnsureKeyValue).
+func OpenKeyValue(js nats.JetStreamContext, bucket string) (nats.KeyValue, error) {
+	kv, err := js.KeyValue(bucket)
+	if err != nil {
+		return nil, err
+	}
+	return checkedKeyValue{kv}, nil
 }
 
 // kvKeyOverhead is what nats.go puts around a key of bucket in the longest subject it builds from

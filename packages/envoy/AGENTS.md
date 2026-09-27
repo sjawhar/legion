@@ -696,7 +696,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 `expects_reply`, and `expires_at`, and `publish` additionally `dedupe_key`; empty optional
 fields are omitted. `urgency` is `low`, `med`, `high`, or `blocking`; `expects_reply` is
 `none`, `optional`, or `required`. A session id or role that becomes a KV key NATS would refuse
-(`bus.CheckedKeyValue`) is a 413 when too long and a 400 when it holds an empty token or
+(`bus.EnsureKeyValue`) is a 413 when too long and a 400 when it holds an empty token or
 whitespace, on every route that reads or writes one. Every `/v1` 4xx/5xx response, including
 the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`. `expected`
 appears when the caller must provide a field.
@@ -787,30 +787,30 @@ the synchronous listener call records the sent or failed attempt instead of blin
   listed from the merge base, so its `changed_paths` do not describe what it did to the head it
   replaced. Envoy forwards what GitHub sent; what counts as a handoff-only push is the Legion
   daemon's rule, not the listener's.
-- Every other text a webhook payload copies from its body (a title, a ref, a path, a workflow
-  name, a URL) is capped at 2,048 runes with a trailing `…` too (`maxEnvelopeTextRunes`; a
-  comment's or review's body is cut there without one and says so in `body_truncated`), and so is
-  every text a check run copies into the CI store (its name, URL, status, conclusion and times),
-  so no envelope or record grows with the body it came from. The record is keyed by check name, so
-  a name past the cap keeps a digest of the whole name after its `…`, and two names that share
-  their first 2,048 runes stay two checks. What NATS still refuses however often it is sent is
-  refused (`bus.ErrRefused`): an envelope past the server's max payload or a subject past the
-  server's 4 KiB protocol line, over which the server would close the listener's connection
-  (`bus.ErrTooLarge`, naming the size), or a subject holding whitespace or an empty token, which
-  no stream matches (`bus.ErrInvalidSubject`). Every KV handle checks its keys the same way
-  (`bus.CheckedKeyValue`), since a KV call builds its subjects from the key: a key that would take
-  one past the protocol line, or holding an empty token, is refused before anything is sent. The
-  webhook is answered 422, which Dispatch's redelivery
-  sweep takes as terminal, and logged `<source> publish refused` (or `github ci record refused`);
-  any other failure stays a 503 logged `<source> publish failed`. A head's CI record is bounded at
-  384 KiB (`maxRecordBytes`, about 1,300 checks) and its settlement at 960 KiB
-  (`maxSettlementBytes`; a failing check's `"` costs three times as much there), since GitHub
-  allows 50,000 check runs in a suite: a check past either is refused the same way, and the record
-  is marked `overflowed` and never settles again. A head that had already settled keeps its last
-  settlement, which nothing supersedes, so a consumer holding it learns about the refused checks
-  only from GitHub's own read. A settlement NATS refuses anyway (a server whose max
-  payload is set lower) marks the record overflowed too, logged once as `checks settlement
-  refused`, rather than being published again every tick.
+- Every other text a webhook payload copies from its body (a title, a ref, a path, a workflow name,
+  a URL) is capped at 2,048 runes with a trailing `…` too (`maxEnvelopeTextRunes`; a comment's or
+  review's body is cut there without one and says so in `body_truncated`), and so is every text a
+  check run copies into the CI store (its name, URL, status, conclusion and times), so no envelope
+  or record grows with the body it came from. The record is keyed by check name, so a name past the
+  cap keeps a digest of the whole name after its `…`, and two names that share their first 2,048
+  runes stay two checks. What NATS still refuses however often it is sent is refused
+  (`bus.ErrRefused`): an envelope past the server's max payload or a subject past the server's 4 KiB
+  protocol line, over which the server would close the listener's connection (`bus.ErrTooLarge`,
+  naming the size), or a subject holding whitespace or an empty token, which no stream matches
+  (`bus.ErrInvalidSubject`). Every KV bucket is opened through `bus.EnsureKeyValue` or
+  `bus.OpenKeyValue`, whose handle checks its keys the same way, since a KV call builds its subjects
+  from the key: a key that would take one past the protocol line, or holding an empty token, is
+  refused before anything is sent. The webhook is answered 422, which Dispatch's redelivery sweep
+  takes as terminal, and logged `<source> publish refused` (or `github ci record refused`); any
+  other failure stays a 503 logged `<source> publish failed`. A head's CI record is bounded at 384
+  KiB (`maxRecordBytes`, about 1,300 checks) and its settlement at 960 KiB (`maxSettlementBytes`; a
+  failing check's `"` costs three times as much there), since GitHub allows 50,000 check runs in a
+  suite: a check past either is refused the same way, and the record is marked `overflowed` and
+  never settles again. A head that had already settled keeps its last settlement, which nothing
+  supersedes, so a consumer holding it learns about the refused checks only from GitHub's own read.
+  A settlement NATS refuses anyway (a server whose max payload is set lower) marks the record
+  overflowed too, logged once as `checks settlement refused`, rather than being published again
+  every tick.
 - A `pull_request_review` payload carries the review's own `commit_id` and the PR's current
   `head_sha` so consumers can tell whether the review is at head, and `submitted_at` (GitHub's
   RFC 3339 time) and `review_id` (GitHub's review id as a decimal string), so consumers can order

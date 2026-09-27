@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 )
@@ -298,15 +299,12 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := js.KeyValue(o.bucket)
-	if errors.Is(err, nats.ErrBucketNotFound) {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{
-			Bucket:   o.bucket,
-			Replicas: o.replicas,
-			Storage:  nats.FileStorage,
-			TTL:      o.ttl,
-		})
-	}
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
+		Bucket:   o.bucket,
+		Replicas: o.replicas,
+		Storage:  nats.FileStorage,
+		TTL:      o.ttl,
+	})
 	if err != nil {
 		return nil, err
 	}

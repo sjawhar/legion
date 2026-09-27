@@ -220,7 +220,7 @@ func (s *Store) nextRewatch() <-chan struct{} {
 // reports as a 503 but which is configuration no retry within the budget changes, unlike the 503
 // of a server restarting; JetStream refuses the request itself (any other 4xx, an invalid key,
 // a record over the payload limit); or the handle refuses the key before sending anything
-// (bus.ErrRefused, bus.CheckedKeyValue). Anything else is transient, and what the retry actually
+// (bus.ErrRefused, bus.EnsureKeyValue). Anything else is transient, and what the retry actually
 // rescues is a NATS reconnect (ErrReconnectBufExceeded, a request refused while the connection
 // reconnects, and errKVRewatched, a request given up on at the rewatch that follows it), a
 // JetStream 503 while a server restarts, and no responders, which a request gets whenever no

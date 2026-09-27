@@ -116,8 +116,6 @@ export const SUBJECT_SEGMENT_REPLACED = [".", " ", "\t", "\r", "\n", "*", ">"] a
 
 type SubjectSegmentReplaced = (typeof SUBJECT_SEGMENT_REPLACED)[number];
 
-const subjectSegmentReplaced: ReadonlySet<string> = new Set(SUBJECT_SEGMENT_REPLACED);
-
 /**
  * Makes a value one NATS subject segment, writing each of `SUBJECT_SEGMENT_REPLACED` as `_`; a
  * slash is kept. The Go coordinator's intake (`packages/daemon-go/internal/intake`) mirrors it for
@@ -127,7 +125,8 @@ const subjectSegmentReplaced: ReadonlySet<string> = new Set(SUBJECT_SEGMENT_REPL
  * should inspect the envelope payload.
  */
 export function sanitizeSubjectSegment(value: string): string {
-  return Array.from(value, (char) => (subjectSegmentReplaced.has(char) ? "_" : char)).join("");
+  const replaced: readonly string[] = SUBJECT_SEGMENT_REPLACED;
+  return Array.from(value, (char) => (replaced.includes(char) ? "_" : char)).join("");
 }
 
 // Tail-recursive through an accumulator, so the compiler takes a literal of any practical length

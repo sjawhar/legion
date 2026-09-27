@@ -74,14 +74,11 @@ type GitHub interface {
 
 // OpenState opens the sweep's KV bucket, creating it on first use.
 func OpenState(js nats.JetStreamContext) (nats.KeyValue, error) {
-	kv, err := js.KeyValue(Bucket)
-	if errors.Is(err, nats.ErrBucketNotFound) {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{Bucket: Bucket, TTL: retention, Storage: nats.FileStorage, Replicas: 1})
-	}
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: Bucket, TTL: retention, Storage: nats.FileStorage, Replicas: 1})
 	if err != nil {
 		return nil, fmt.Errorf("open %s KV bucket: %w", Bucket, err)
 	}
-	return bus.CheckedKeyValue(kv), nil
+	return kv, nil
 }
 
 // Outcome is what a sweep did, or in a dry run would do, with one delivery.

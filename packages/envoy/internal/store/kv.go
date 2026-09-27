@@ -93,11 +93,11 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := openBucket(js, opts.interestBucket, opts.replicas)
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: opts.interestBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}
-	roleKV, err := openBucket(js, opts.roleBucket, opts.replicas)
+	roleKV, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: opts.roleBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 		return nil, err
 	}
 	r := &Registry{
-		roleKV:                bus.CheckedKeyValue(roleKV),
+		roleKV:                roleKV,
 		cache:                 map[string]Interest{},
 		cacheRevisions:        map[string]uint64{},
 		now:                   opts.now,
@@ -154,14 +154,6 @@ func (r *Registry) roles() nats.KeyValue {
 	r.kvMu.RLock()
 	defer r.kvMu.RUnlock()
 	return r.roleKV
-}
-
-func openBucket(js nats.JetStreamContext, bucket string, replicas int) (nats.KeyValue, error) {
-	kv, err := js.KeyValue(bucket)
-	if errors.Is(err, nats.ErrBucketNotFound) {
-		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{Bucket: bucket, Replicas: replicas, Storage: nats.FileStorage})
-	}
-	return kv, err
 }
 
 func roleRevisions(kv nats.KeyValue) (map[string]uint64, error) {
@@ -283,7 +275,7 @@ func (r *Registry) Rewatch(conn *nats.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open role registry JetStream: %w", err)
 	}
-	roleKV, err := js.KeyValue(r.roles().Bucket())
+	roleKV, err := bus.OpenKeyValue(js, r.roles().Bucket())
 	if err != nil {
 		return fmt.Errorf("open role KV bucket: %w", err)
 	}
@@ -291,7 +283,7 @@ func (r *Registry) Rewatch(conn *nats.Conn) error {
 		return err
 	}
 	r.kvMu.Lock()
-	r.roleKV = bus.CheckedKeyValue(roleKV)
+	r.roleKV = roleKV
 	r.kvMu.Unlock()
 	return nil
 }
