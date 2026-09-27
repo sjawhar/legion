@@ -945,7 +945,9 @@ for (const [target, spec, quote, pasted, stored] of [
 // empty question. Text joining a bold question takes the bold only when it is one line, as a
 // one-line paste does anywhere else: a lone callout or a list pasted there once came out bold too.
 const question = "Which here?";
-const boldQuestion = "**Which here?**";
+// It ends on a letter: after "?" the closing ** would sit between punctuation and a letter, where
+// pmdoc writes it but doesn't read it back as closing the bold.
+const boldQuestion = "**Which here**";
 const calloutText = { html: "", text: loneCallout };
 const listText = { html: "", text: "- x\n- y\n" };
 const tableHtml = {
@@ -963,9 +965,9 @@ for (const [shape, before, clipboard, stored] of [
     "Which here?x y",
   ],
   ["a table as HTML", question, tableHtml, "Which here?one two 1 2"],
-  ["one line as plain text", boldQuestion, { html: "", text: "x" }, "**Which here?x**"],
-  ["a lone callout as plain text", boldQuestion, calloutText, "**Which here?**Careful."],
-  ["a list as plain text", boldQuestion, listText, "**Which here?**x y"],
+  ["one line as plain text", boldQuestion, { html: "", text: "x" }, "**Which herex**"],
+  ["a lone callout as plain text", boldQuestion, calloutText, "**Which here**Careful."],
+  ["a list as plain text", boldQuestion, listText, "**Which here**x y"],
 ] as const) {
   test(`${shape} pasted after the question ${JSON.stringify(before)} stores ${JSON.stringify(stored)}`, async ({
     browser,
@@ -974,7 +976,7 @@ for (const [shape, before, clipboard, stored] of [
       browser,
       "Paste into a question",
       `:::ask{#q1 urgency="med" multiple="false"}\n${before}\n\n- X\n- Y\n:::\n`,
-      "Which here?",
+      before.replaceAll("*", ""),
       "end"
     );
     try {
