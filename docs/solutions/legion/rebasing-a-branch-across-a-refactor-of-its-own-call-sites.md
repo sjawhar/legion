@@ -92,6 +92,12 @@ is cheap enough (40 s here) that it was re-run anyway.
 
 ## 5. jj housekeeping specific to a rebased worker branch
 
+**Superseded 2026-09-27 (LEGION-118):** this housekeeping is for a rebased chain (divergent
+empty siblings from repeated rebases, the undescribed-working-copy push refusal, recording a
+pushed tip before a rewrite). The worker's own conflict/retarget step is now a forward merge —
+one new commit, nothing rewritten, no tip to record — so none of it applies there. Still useful
+for a genuine multi-commit rebase outside that step.
+
 - Before LEGION-58 the daemon-provisioned `.omp/config.yml` lived in the empty working-copy
   commit. Two rebases of the chain made that change divergent (two empty siblings of the head).
   Neither is under the bookmark and neither holds tracked content; `jj edit <one of them>` puts the

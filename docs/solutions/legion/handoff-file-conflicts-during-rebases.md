@@ -78,6 +78,11 @@ The only cost is a new PR number. Use this when:
 
 ## Prevention
 
+**Superseded 2026-09-27 (LEGION-118):** this list is prevention for the multi-commit rebase
+conflict above, which the worker's own conflict/retarget step no longer produces (it merges,
+one commit, once — see the file-level note above). Still useful for a genuine multi-commit
+rebase outside that step.
+
 - **Squash before rebasing**: If the branch has multiple commits touching `.legion/`, squash them into one first. One conflict to resolve instead of N.
 - **Rebase frequently**: Don't let branches diverge from main for long.
 - **Merge shorter-lived branches first**: Reduces the conflict window.
