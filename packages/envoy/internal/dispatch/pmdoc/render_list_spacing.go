@@ -9,7 +9,7 @@ import "strings"
 // (opensAfterParagraph), or the list ends in no paragraph it would continue (endsInParagraph), and
 // either a single blank line would spread what it spaces, or the list stands in a typed block in
 // a footnote definition outside quotes, where the browser editor reads any blank line after it as
-// spreading it, or, inside a list item, the list ends in an empty item, at a blank line after which
+// spreading its last item (spacedAfter), and that item is not spread already, or, inside a list item, the list ends in an empty item, at a blank line after which
 // goldmark ends the list item around it or a quote the list stands in (emptyItemEndsOuterItem).
 // exact reports whether the count is one of those two; the one blank line everywhere else spaces
 // nothing, so a list item may write none instead.
@@ -19,7 +19,7 @@ func (r *renderer) blanksAfterList(list, next *Node, prefix string) (blanks int,
 	switch {
 	case spaced != nil && spaced.Attrs["spread"] == true:
 		return spacing, true
-	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && spacing == 1 || typedInFootnote || r.itemDepth > 0 && endsInEmptyItem(list)):
+	case (isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)) && (spaced != nil && spacing == 1 || typedInFootnote && spacedAfter(list, false).Attrs["spread"] != true || r.itemDepth > 0 && endsInEmptyItem(list)):
 		return 0, true
 	default:
 		return 1, false
@@ -199,7 +199,9 @@ func (r *renderer) writesBlankAfterItem(list, item *Node, prefix string) bool {
 	case r.inFootnote:
 		return item.Attrs["spread"] == true && !spreadByItsOwnLines(item, false, false)
 	case quoted && isList(last):
-		return spacedAfter(last, true).Attrs["spread"] == true
+		// A list spread by its own lines needs none.
+		spaced := spacedAfter(last, true)
+		return spaced.Attrs["spread"] == true && !spreadByItsOwnLines(spaced, true, true)
 	case quoted && r.itemDepth > 0 && holdsOnlyAnEmptyParagraph(item):
 		// Goldmark ends the list item around this list at a blank line after an empty item
 		// (emptyItemEndsOuterItem); in a quote, blank lines after another item or after the list

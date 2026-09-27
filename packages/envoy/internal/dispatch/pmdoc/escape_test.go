@@ -897,6 +897,12 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		":::callout{#t1 kind=\"note\" title=\"T\"}\n- ```\n  \n  ```\n:::\n",
 		"x[^f1]\n\n[^f1]: > ```\n    > \n    > ```\n",
 		"- :::callout{#t1 kind=\"note\" title=\"T\"}\n  > ```\n  > \n  > ```\n  :::\n",
+		// No blank lines after an item that ends in a list in a quote, where that list is spread by
+		// the blank line after its own first item.
+		"> - a\n>   - b\n>   \n>\n>   - c\n> - z\n",
+		// A blank line after a list in a typed block in a footnote definition, where it spreads a last
+		// item that is spread already.
+		"ref[^n] here.\n\n[^n]: :::callout{#c kind=\"note\" title=\"\"}\n    - a\n\n      > q\n\n    > q\n    :::\n\n    tail\n",
 	} {
 		t.Run(markdown, func(t *testing.T) {
 			tree, err := Parse(markdown)
