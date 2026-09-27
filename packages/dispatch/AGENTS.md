@@ -213,8 +213,10 @@ cell on, growing the table as needed, or clipped to the selection. That grid pas
 prosemirror-tables' own paste handler in three ways. Copied cells are read from the clipboard HTML's
 own rows and cells (`htmlTableCells`), because ProseMirror's parse at the caret gives body rows an
 empty leading header row, which Milkdown's table requires. Tab-separated text pasted onto selected
-cells fills them one value each. Every cell is retyped for the row it lands in and kept to one line
-(`fitCells`). The retyping is because Milkdown's header row holds only `table_header` cells and a
+cells fills them one value each, and other HTML one textblock each (`htmlLineCells`), so a list
+fills them item by item, as paragraphs do, and repeats from its first item across a wider
+selection. Every cell is retyped for the row it lands in and kept to one line (`fitCells`). The
+retyping is because Milkdown's header row holds only `table_header` cells and a
 body row only `table_cell` ones, and prosemirror-tables' own insert threw on a paste that put header
 cells in a body row or reached the header row. A cell holding more than one block or a line break (a
 `<br>`, a code block's newline) is flattened as the caret path flattens, because a hard break stored

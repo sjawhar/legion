@@ -1,5 +1,5 @@
 diff --git a/lib/index.js b/lib/index.js
-index a1094153e619ca57d9a444896d85d0a840a0ec24..7799023c5dfb42e0a5f2a40490ffd03c20668be1 100644
+index a1094153e619ca57d9a444896d85d0a840a0ec24..6ce32c1d59ef39adf49b725dd857aae468e326bd 100644
 --- a/lib/index.js
 +++ b/lib/index.js
 @@ -1,7 +1,9 @@
@@ -13,7 +13,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..7799023c5dfb42e0a5f2a40490ffd03c
  import { $prose } from "@milkdown/utils";
  //#region src/__internal__/is-pure-text.ts
  function isPureText(content) {
-@@ -24,6 +26,144 @@ function withMeta(plugin, meta) {
+@@ -24,6 +26,160 @@ function withMeta(plugin, meta) {
  	return plugin;
  }
  //#endregion
@@ -22,8 +22,8 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..7799023c5dfb42e0a5f2a40490ffd03c
 +// into the caret's text, and so is one with the caret in a table cell's text. Flattened text takes
 +// the caret's marks only when the paste is one unmarked line, as an unflattened paste does.
 +// Clipboard HTML that is only a copy of cells is a grid paste from the caret's cell, as a paste onto
-+// selected cells is (tab-separated text included), each cell retyped for the row it lands in and
-+// flattened to one line, since a GFM cell holds one.
++// selected cells is (tab-separated text included, and other HTML one textblock per cell), each cell
++// retyped for the row it lands in and flattened to one line, since a GFM cell holds one.
 +function isolatingAncestorType($pos) {
 +	for (let depth = $pos.depth; depth > 0; depth--) {
 +		const type = $pos.node(depth).type;
@@ -113,6 +113,22 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..7799023c5dfb42e0a5f2a40490ffd03c
 +	const parser = DOMParser.fromSchema(schema);
 +	return __pastedCells(new Slice(Fragment.from(rows.map((tr) => row.create(null, [...tr.children].filter((child) => child.matches("td, th")).map((td) => fitCell(cell, inlineSlice(parser.parseSlice(td).content, schema)))))), 0, 0));
 +}
++function htmlLineCells(view, html, schema) {
++	if (html.length === 0) return null;
++	view.someProp("transformPastedHTML", (transform) => {
++		html = transform(html, view);
++	});
++	const container = document.createElement("div");
++	container.innerHTML = html;
++	const { cell, row } = tableNodeTypes(schema);
++	const cells = [];
++	DOMParser.fromSchema(schema).parseSlice(container).content.descendants((node) => {
++		if (!node.isTextblock) return true;
++		cells.push(fitCell(cell, new Slice(node.content, 0, 0)));
++		return false;
++	});
++	return cells.length === 0 ? null : __pastedCells(new Slice(Fragment.from(row.create(null, cells)), 0, 0));
++}
 +function pasteIntoTable(view, event, slice, parsePlainText) {
 +	const { state } = view;
 +	const { selection, schema } = state;
@@ -121,7 +137,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..7799023c5dfb42e0a5f2a40490ffd03c
 +	const html = event.clipboardData.getData("text/html");
 +	if (selection instanceof CellSelection) {
 +		const rect = selectedRect(state);
-+		const pasted = (html.length === 0 && text.includes("\t") ? tsvCells(text, schema) : htmlTableCells(html, schema)) ?? __pastedCells(slice) ?? {
++		const pasted = (html.length === 0 && text.includes("\t") ? tsvCells(text, schema) : htmlTableCells(html, schema) ?? htmlLineCells(view, html, schema)) ?? __pastedCells(slice) ?? {
 +			width: 1,
 +			height: 1,
 +			rows: [Fragment.from(fitCell(tableNodeTypes(schema).cell, slice))]
@@ -158,7 +174,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..7799023c5dfb42e0a5f2a40490ffd03c
  //#region src/index.ts
  function dispatchPasteSlice(view, slice) {
  	const node = isTextOnlySlice(slice);
-@@ -40,9 +180,15 @@ function dispatchPasteSlice(view, slice) {
+@@ -40,9 +196,15 @@ function dispatchPasteSlice(view, slice) {
  }
  var clipboard = $prose((ctx) => {
  	const schema = ctx.get(schemaCtx);
@@ -174,7 +190,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..7799023c5dfb42e0a5f2a40490ffd03c
  		transformPastedHTML: (html, view) => {
  			const prevTransform = prev.transformPastedHTML;
  			if (prevTransform) html = prevTransform(html, view);
-@@ -58,7 +204,6 @@ var clipboard = $prose((ctx) => {
+@@ -58,7 +220,6 @@ var clipboard = $prose((ctx) => {
  		key,
  		props: {
  			handlePaste: (view, event, preProcessedSlice) => {
@@ -182,7 +198,7 @@ index a1094153e619ca57d9a444896d85d0a840a0ec24..7799023c5dfb42e0a5f2a40490ffd03c
  				const editable = view.props.editable?.(view.state);
  				const { clipboardData } = event;
  				if (!editable || !clipboardData) return false;
-@@ -77,13 +222,13 @@ var clipboard = $prose((ctx) => {
+@@ -77,13 +238,13 @@ var clipboard = $prose((ctx) => {
  				}
  				const html = clipboardData.getData("text/html");
  				if (html.length === 0 && text.length === 0) return false;
