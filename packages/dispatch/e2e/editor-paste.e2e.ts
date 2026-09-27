@@ -108,6 +108,35 @@ for (const [cell, quote, stored] of [
   });
 }
 
+// Cells copied from a table and pasted with the caret in a cell are a grid paste, as on a selection
+// of cells: prosemirror-tables writes them over the cells from the caret's on, growing the table as
+// needed. Each pasted cell is retyped for the row it lands in: pasted onto the body, the copied
+// header cells became header cells in a body row, and prosemirror-tables threw and stored nothing.
+const copiedCells = "<table><tr><th>one</th><th>two</th></tr><tr><td>1</td><td>2</td></tr></table>";
+for (const [cell, quote, stored] of [
+  ["a header cell", "alpha", "| one | two |\n| :--- | :--- |\n| 1 | 2 |\n"],
+  [
+    "a body cell",
+    "delta",
+    "| alpha one | beta two |  |\n| :--- | :--- | :--- |\n| gamma three | one | two |\n|  | 1 | 2 |\n",
+  ],
+] as const) {
+  test(`cells copied from a table and pasted into ${cell} fill the table from there`, async ({
+    browser,
+  }) => {
+    const { alice, issue, page } = await openWithCaret(browser, "Cells paste", table, quote, "end");
+    try {
+      await paste(page, { html: copiedCells, text: "one\ttwo\n1\t2" });
+
+      await expect
+        .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+        .toBe(stored);
+    } finally {
+      await alice.close();
+    }
+  });
+}
+
 /** Opens the table as alice and selects the cells from the one holding `from` to the one holding
  * `to`, the way a person does: dragging across them, or clicking one and shift-clicking the other. */
 async function openWithCellsSelected(
