@@ -464,6 +464,9 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		return intake.Result{}, err
 	}
 	if !blocked {
+		if pr.Verdict == "red" && !pr.PlannedRed {
+			return intake.Result{}, e.checksRed(ctx, tx, pr)
+		}
 		return intake.Result{}, e.advanceOpenReview(ctx, tx, pr)
 	}
 	// Linger holds a member of a closed tree where it stood (record.TreeLingers): the exhausted
@@ -483,6 +486,22 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.notice(ctx, tx, pr.Issue, record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: message})
+}
+
+// checksRed sends an issue in testing or reviewing back to implementing when CI settles red on its
+// head: the tester's pass and the reviewer's decision are both of code CI has now found broken,
+// and nothing else would move the tree. The implementer's task and the architect's checks-red
+// notice name the failing checks; the implementer's next push is a counted fix attempt, as any new
+// head on a red verdict is (classify.AdvancePullRequestHead). A red the review App planned (its
+// failing tests) is not a regression, and in implementing the implementer is already at work.
+func (e *Engine) checksRed(ctx context.Context, tx pgx.Tx, pr *record.PullRequest) error {
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil || issue == nil || (issue.Phase != phase.Testing && issue.Phase != phase.Reviewing) {
+		return err
+	}
+	failing := append(append([]string(nil), pr.Failing...), pr.FailingStatuses...)
+	reason := fmt.Sprintf("CI is red at %s: %s", pr.HeadSHA, strings.Join(failing, ", "))
+	return e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
 }
 
 func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestReview) (intake.Result, error) {
@@ -813,7 +832,12 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason)); err != nil {
 		return err
 	}
-	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Summary, Verdict: handoff.Verdict}); err != nil {
+	notice := record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Summary, Verdict: handoff.Verdict}
+	if trigger == TriggerChecksRed {
+		// The phase did not finish: CI stopped it, and the architect is told why.
+		notice = record.Notice{Kind: "checks-red", Role: claim.RoleArchitect, Phase: from, Reason: reason}
+	}
+	if err := e.notice(ctx, tx, issue.Key, notice); err != nil {
 		return err
 	}
 	if row.To == phase.AwaitingMerge {

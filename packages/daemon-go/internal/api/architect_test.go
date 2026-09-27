@@ -169,10 +169,16 @@ type liveClaim struct {
 
 func newLiveClaim(t *testing.T, h *harness, issue string, role claim.Role) liveClaim {
 	t.Helper()
-	token, boot := h.launch(issue, role)
+	return newLiveClaimIn(t, h, issue, issue, role)
+}
+
+// newLiveClaimIn is newLiveClaim for an issue of tree: a sub-architect or a worker on a child.
+func newLiveClaimIn(t *testing.T, h *harness, tree, issue string, role claim.Role) liveClaim {
+	t.Helper()
+	token, boot := h.launchIn(tree, issue, role)
 	session := "ses_" + string(role) + "_" + issue
 	registration := h.registered(boot, session)
-	c := liveClaim{h: h, token: token, session: session, secret: registration.Secret, tree: issue, issue: issue}
+	c := liveClaim{h: h, token: token, session: session, secret: registration.Secret, tree: tree, issue: issue}
 	// A worker reports a completion inside the turn of the task it was given, and the daemon
 	// attributes the completion to that delivery, so a live claim in these tests holds one.
 	working(t, h, token, issue)
@@ -602,6 +608,17 @@ func TestGateRegistrationRefusesAnotherIssuesDocumentAndAChildIssue(t *testing.T
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
 		"grantId": architect.grant(t), "issue": "LEGION-209", "artifactId": "5c3d9e1f-7a2b-4e6c-8d40-1f9b3a7e2c65", "version": 1,
 	}, nil), http.StatusForbidden, "GATE_ROOT_ONLY")
+	// The root's gate is its own architect's to register: a sub-architect of the tree holding the
+	// root document's id is refused too.
+	statuses.documents["7d1e4f2a-3b5c-4d6e-8f70-9a1b2c3d4e5f"] = "LEGION-208"
+	subArchitect := newLiveClaimIn(t, h, "LEGION-208", "LEGION-209", claim.RoleArchitect)
+	refusal := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+		"grantId": subArchitect.grant(t), "issue": "LEGION-208", "artifactId": "7d1e4f2a-3b5c-4d6e-8f70-9a1b2c3d4e5f", "version": 1,
+	}, nil)
+	if body := refusal.Body.String(); !strings.Contains(body, "its root architect registers it") {
+		t.Fatalf("sub-architect refusal %s does not say the root architect registers the gate", body)
+	}
+	assertFailure(t, refusal, http.StatusForbidden, "GATE_ROOT_ONLY")
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("facts = %#v, want no gate registered", got)
 	}

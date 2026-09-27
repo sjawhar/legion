@@ -310,7 +310,7 @@ architect's session where they are written.
 After the sign-off the proof human removes
 every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
 fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
-loop before Stage 7, so the proof's reviewer approves a head that still carries `.legion/`, and
+loop before Stage 7, so the reviewer, as its Go prompt says and with no approval sent by the proof, approves a head that still carries `.legion/`, and
 without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
 Each check is named in the transcript;
 seven negative controls demonstrate that the status-actor, held-worker, re-closed-gate, idle-read

@@ -15,7 +15,7 @@ var allWorkflowPhases = []phase.Phase{
 var allWorkflowTriggers = []TriggerKind{
 	TriggerGateOpened, TriggerPlannerCompleted, TriggerImplementationReady, TriggerTesterPassed,
 	TriggerTesterFailed, TriggerReviewApproved, TriggerReviewRejected, TriggerRetroCompleted,
-	TriggerReady, TriggerPullRequestMerged, TriggerSignOff, TriggerBackward,
+	TriggerReady, TriggerPullRequestMerged, TriggerSignOff, TriggerBackward, TriggerChecksRed,
 }
 
 func TestEveryPhaseAndTriggerHasARowOrNamedIgnore(t *testing.T) {
@@ -100,6 +100,8 @@ func workflowTransitionRequired(from phase.Phase, trigger TriggerKind) bool {
 		return from == phase.Testing
 	case TriggerReviewApproved, TriggerReviewRejected:
 		return from == phase.Reviewing
+	case TriggerChecksRed:
+		return from == phase.Testing || from == phase.Reviewing
 	case TriggerRetroCompleted:
 		return from == phase.Retro
 	case TriggerReady:

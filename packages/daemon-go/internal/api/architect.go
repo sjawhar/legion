@@ -215,9 +215,14 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The gate is the tree root's: it opens planning for the whole tree, so a child's document
-	// cannot stand in for the root's review.
+	// cannot stand in for the root's review, and only the root's own architect registers it, not a
+	// sub-architect of the tree holding the root document's id.
 	if !claim.IsTreeRoot(req.Issue, grant.Tree) {
 		writeFailure(w, http.StatusForbidden, "GATE_ROOT_ONLY", fmt.Sprintf("the design gate belongs to the tree root %s; register it there", grant.Tree))
+		return
+	}
+	if !claim.IsTreeRoot(grant.Issue, grant.Tree) {
+		writeFailure(w, http.StatusForbidden, "GATE_ROOT_ONLY", fmt.Sprintf("the design gate belongs to the tree root %s; its root architect registers it", grant.Tree))
 		return
 	}
 	if !s.documentOfIssue(w, r, artifactID, req.Issue) {

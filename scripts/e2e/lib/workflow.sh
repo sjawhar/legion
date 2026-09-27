@@ -236,14 +236,13 @@ reviewer_approved_head() {
     --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id') || return 1
   grep -qx -- "$head" <<<"$approved"
 }
-# The Go daemon has no clean-head loop yet: skills/legion-worker/SKILL.md wants APPROVE only for a
-# head that carries no .legion/, then the implementer's .legion/ deletion push, and the Go workflow
-# neither asks for that round nor waits for it. Its destination is Stage 7's clean-head loop. Until
-# then the proof's reviewer approves the head it has, the merge carries the run's .legion/ handoffs
-# and retro learnings onto the smoke main, and clean_smoke_main removes them after the merge.
+# approve_as_reviewer asks the reviewer for the round's last review and waits for it to approve the
+# head on its own: the Go reviewer prompt says to approve a clean head that carries .legion/, since
+# the Go daemon has no .legion/ deletion step before Stage 7. The merge then carries the run's
+# .legion/ handoffs and retro learnings onto the smoke main, and clean_smoke_main removes them.
 approve_as_reviewer() {
   local issue=$1
-  send_agent "$issue" reviewer "Stage 3 proof final review: use the bash tool to submit APPROVE on pull request #$pr_number in $repo at its current head as legion-reviewer[bot], then complete the reviewer handoff. This exact smoke instruction takes precedence over waiting for another review round."
+  send_agent "$issue" reviewer "Stage 3 proof final review: review pull request #$pr_number in $repo at its current head as your role says, submit your decision, then complete the reviewer handoff. This is the round's last review."
   until_true 300 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
 }
 # smoke_main_leftovers prints each path on the smoke repository's main under .legion/ or
@@ -410,7 +409,7 @@ worker_notices() {
   while IFS=$'\t' read -r f role; do
     jq -R -r --arg file "${f##*/}" --arg role "$role" '
       fromjson? | select(.customType == "envoy-message") | (.content | tostring)
-      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up) on [^\\n]*)")
+      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|ready-refused|child-closed|child-status|catch-up|checks-red) on [^\\n]*)")
       | "\($file) \($role) \(.summary)"' "$f"
   done < <(worker_sessions "$1")
 }

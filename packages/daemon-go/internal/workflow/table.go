@@ -18,6 +18,7 @@ const (
 	TriggerPullRequestMerged   TriggerKind = "pull_request_merged"
 	TriggerSignOff             TriggerKind = "sign_off"
 	TriggerBackward            TriggerKind = "backward"
+	TriggerChecksRed           TriggerKind = "checks_red"
 )
 
 // EffectKind identifies the durable outbox consequences selected by a row.
@@ -60,6 +61,8 @@ var Table = append([]Row{
 	{From: phase.Testing, Trigger: TriggerTesterFailed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
 	{From: phase.Reviewing, Trigger: TriggerReviewApproved, Guard: allow, To: phase.Retro, Status: "retro", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
 	{From: phase.Reviewing, Trigger: TriggerReviewRejected, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
+	{From: phase.Testing, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
+	{From: phase.Reviewing, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectStart, EffectNotice}},
 	{From: phase.Retro, Trigger: TriggerRetroCompleted, Guard: allow, To: phase.Merging, Effects: []EffectKind{EffectSuspend, EffectStart, EffectNotice}},
 	{From: phase.Merging, Trigger: TriggerReady, Guard: allow, To: phase.AwaitingMerge, Effects: []EffectKind{EffectSuspend, EffectNotice}},
 	{From: phase.AwaitingMerge, Trigger: TriggerPullRequestMerged, Guard: allow, To: phase.ProductionCheck, Effects: []EffectKind{EffectStart, EffectNotice}},
