@@ -36697,7 +36697,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_ask",
     example: { issue: "DSP-1", question: "Ship this?" },
-    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " + "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " + "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` + `characters and has at most 8 options. ${OWNER_REFERENCE}`,
+    description: "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " + "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " + "Anything you are blocked on a human for, including a credential or grant to renew, an approval, or a decision, is an ask, never a message. " + "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` + "characters and has at most 8 options. A question a human may already have answered in this project (an answered ask, a human comment or message, " + "or an issue filed in the last day) is not asked: the result lists those candidates. Read them and cite the answer, or call again with force: true " + `when none answers this question. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36714,7 +36714,8 @@ var dispatchToolSpecs = [
         artifact: z2.string().describe("Artifact slug or id containing the quoted text."),
         quote: z2.string().describe("Exact text the decision concerns."),
         occurrence: z2.number({ int: true, min: 0 }).describe("Zero-based occurrence of the quote.").optional()
-      }).describe("Optional document location for the question.").optional()
+      }).describe("Optional document location for the question.").optional(),
+      force: z2.boolean().describe("Ask even though a prior-answer check listed candidates; pass it only after reading them and finding none answers this question.").optional()
     }),
     validation: documentOwnerValidation(true)
   },
@@ -39408,6 +39409,21 @@ function duplicateCandidates(error48) {
     throw error48;
   return error48.candidates;
 }
+var PRIOR_ANSWER_KINDS = ["ask", "comment", "message", "issue"];
+function isPriorAnswerCandidate(value) {
+  if (typeof value !== "object" || value === null)
+    return false;
+  const candidate = value;
+  const author = candidate.author;
+  return typeof candidate.kind === "string" && PRIOR_ANSWER_KINDS.includes(candidate.kind) && typeof candidate.ref === "string" && typeof candidate.snippet === "string" && typeof candidate.at === "string" && typeof author === "object" && author !== null && typeof author.kind === "string" && typeof author.id === "string";
+}
+function priorAnswerCandidates(error48) {
+  const { candidates } = error48;
+  if (candidates === undefined || candidates.length === 0 || !candidates.every(isPriorAnswerCandidate)) {
+    throw error48;
+  }
+  return candidates;
+}
 function searchResultLine(result, baseUrl) {
   const href = new URL(result.href, baseUrl).toString();
   const { owner } = result;
@@ -40516,6 +40532,7 @@ async function executeDispatchTool(input) {
       const resolved = owner2.kind === "project" || artifactReference === undefined ? owner2.kind === "project" ? await resolveArtifact(client, owner2, artifactReference) : undefined : await resolveArtifact(client, owner2, artifactReference);
       const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
+      const force = optionalBoolean(args, "force");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
       const askInput = {
@@ -40524,9 +40541,27 @@ async function executeDispatchTool(input) {
         ...multiple === undefined ? {} : { multiple },
         ...urgency === undefined ? {} : { urgency },
         ...anchored === undefined ? {} : { anchor: anchored },
-        actor
+        actor,
+        ...force === undefined ? {} : { force }
       };
-      const ask = resolved?.owner.kind === "project" ? await client.artifactAsk(resolved.artifact.id, askInput) : await client.ask(issue2(), askInput);
+      let ask;
+      try {
+        ask = resolved?.owner.kind === "project" ? await client.artifactAsk(resolved.artifact.id, askInput) : await client.ask(issue2(), askInput);
+      } catch (error48) {
+        if (!(error48 instanceof DispatchServiceError) || error48.code !== "POSSIBLE_PRIOR_ANSWER") {
+          throw error48;
+        }
+        const candidates = priorAnswerCandidates(error48);
+        return {
+          text: [
+            "Not asked: a human may already have answered this.",
+            ...candidates.map((candidate) => `${candidate.ref} [${candidate.kind} by ${actorLabel(candidate.author)}, ${candidate.at.slice(0, 16).replace("T", " ")}Z] ${snippetText(candidate.snippet)}`),
+            "Read them with dispatch_read. If one answers your question, cite it and act on it instead of asking; if none does, call dispatch_ask again with force: true."
+          ].join(`
+`),
+          details: { prior_answers: candidates }
+        };
+      }
       const askOwner = ask.issue_key !== null ? issueTopic(ask.issue_key) : resolved === undefined ? issueTopic(issue2()) : documentTopic(resolved.artifact);
       const adviceLines = renderAdvice(input.tool, askOwner.label, ask.advice, {});
       return {
