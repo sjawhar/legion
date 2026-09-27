@@ -103,6 +103,8 @@ interface State {
   argv0: Expansion | undefined;
   /** The known output of a function's final `echo`, when a substitution consumes it. */
   output: Expansion | undefined;
+  /** Files this shell wrote with a pid it started, indexed by resolved path. */
+  readonly pidFiles: Map<string, Expansion>;
   /** Functions available in this shell, with their definition source for diagnostic locations. */
   functions: Map<string, FunctionDefinition>;
   /** EXIT handlers run when this shell finishes, after its last assignment. */
@@ -462,6 +464,16 @@ function substitution(
   st: State,
   ctx: Ctx
 ): Piece[] {
+  const pidRead = /^\$\(<(.+)\)$/.exec(text);
+  const variableRead = /^\$\(<"?\$([A-Za-z_][A-Za-z0-9_]*)"?\)$/.exec(text);
+  const directFile = pidRead?.[1]?.includes("$") === true ? undefined : pidRead?.[1];
+  const file =
+    directFile ??
+    (variableRead === null ? undefined : literalText(lookup(variableRead[1] as string, st, ctx)));
+  if (file !== undefined && st.cwd !== undefined) {
+    const pid = st.pidFiles.get(path.resolve(st.cwd, file));
+    if (pid !== undefined) return [...pid];
+  }
   const only = script?.commands.length === 1 ? script.commands[0]?.command : undefined;
   const invocation = substitutionInvocation(only, st, ctx);
   const definition = invocation === undefined ? undefined : st.functions.get(invocation.base);
@@ -762,6 +774,7 @@ function clone(st: State): State {
     functions: new Map(st.functions),
     traps: [...st.traps],
     runningFunctions: new Set(st.runningFunctions),
+    pidFiles: new Map(st.pidFiles),
   };
 }
 
@@ -1008,6 +1021,16 @@ function checkRedirects(
       }
       const before = appends ? st.files.get(file) : "";
       st.files.set(file, content === null || before === null ? null : `${before ?? ""}${content}`);
+      if (
+        writes &&
+        !appends &&
+        command?.name === "echo" &&
+        command.args.length === 1 &&
+        command.args[0]?.exp.length > 0 &&
+        command.args[0]?.exp.every((piece) => piece.descendantPid)
+      ) {
+        st.pidFiles.set(file, command.args[0].exp);
+      }
     }
   }
 }
@@ -1472,15 +1495,40 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       const killing = rest.find((arg) =>
         /^kill-(?:server|session|window|pane)$/.test(literalText(arg.exp) ?? "")
       );
-      if (killing !== undefined) {
-        throw new Refusal(
-          site.snippet,
-          site.line,
-          `\`tmux ${literalText(killing.exp)}\` ends panes and the processes in them, which a pane did ` +
-            "not start; Legion's panes are the daemon's to stop"
-        );
+      if (killing === undefined) return;
+      let socket: string | undefined;
+      let explicitSocket = false;
+      for (let i = 0; i < rest.length; i += 1) {
+        const text = literalText(rest[i]?.exp);
+        if (text === "-L" || text === "-S" || text === "--socket") {
+          explicitSocket = true;
+          socket = literalText(rest[i + 1]?.exp);
+          i += 1;
+        } else if (text?.startsWith("--socket=")) {
+          explicitSocket = true;
+          socket = text.slice(9);
+        }
       }
-      return;
+      const ownSocket = ctx.env.TMUX?.split(",")[0];
+      const daemonSocket =
+        ctx.env.LEGION_PROJECT === undefined
+          ? undefined
+          : `legion-${ctx.env.LEGION_PROJECT.toLowerCase()}`;
+      if (
+        explicitSocket &&
+        (socket === undefined || (socket !== ownSocket && socket !== daemonSocket))
+      ) {
+        return;
+      }
+      const target =
+        socket !== undefined && socket === daemonSocket
+          ? "the daemon's private server"
+          : "the pane's server";
+      throw new Refusal(
+        site.snippet,
+        site.line,
+        `\`tmux ${literalText(killing.exp)}\` ends ${target} and the processes in it, which a pane did not start`
+      );
     }
     default:
       break;
@@ -1775,6 +1823,7 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
     script: undefined,
     argv0: undefined,
     output: undefined,
+    pidFiles: new Map(),
     functions: new Map(),
     traps: [],
     runningFunctions: new Set(),
@@ -2243,6 +2292,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     script: undefined,
     argv0: undefined,
     output: undefined,
+    pidFiles: new Map(),
     functions: new Map(),
     traps: [],
   });
