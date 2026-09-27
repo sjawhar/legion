@@ -1,3 +1,13 @@
+# rules.yaml is a v9-shaped rules file: `secrets:` policy plus the `approvers:` section every
+# `approver: operator`/`approver: login:<name>` decision resolves against (AGENTC-393 contract
+# v9). The approvers section here is a structural fixture only — rules.Parse never verifies
+# attestation cryptography (that is approvers.Service.Reconcile's job, against a persisted,
+# attested key set), so its credential_id/registration values are fixtures, not a working WebAuthn
+# key. TestRulesTestdataFixturesParse (../e2e_test.go) loads this file to prove the shape below
+# parses cleanly under v9's schema, with no `issue_assignee` reference left (v9 refuses it).
+# e2e_test.go's own live HTTP flow builds a separate scratch rules file with real, dynamically
+# generated key material instead, since Reconcile's attestation check needs a real credential no
+# static fixture could satisfy.
 version: 1
 secrets:
   DEEL_API_KEY:
@@ -12,7 +22,7 @@ secrets:
         approver: operator
       - kind: pod
         decision: approval
-        approver: issue_assignee
+        approver: login:sjawhar
   AUTO_TOKEN:
     source: dev1/agent-secrets/AUTO_TOKEN
     owner: sjawhar
@@ -28,3 +38,15 @@ secrets:
     delivery: inject
     max_lifetime_seconds: 43200
     requesters: []
+approvers:
+  origin: https://dispatch.test
+  aaguids:
+    - "ee882879-721c-4913-9775-3dfcce97072a"
+  logins:
+    sjawhar:
+      keys:
+        - credential_id: "sjawhar-cred-1"
+          registration:
+            challenge_nonce: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            response: {id: "sjawhar-cred-1"}
+          seed: true

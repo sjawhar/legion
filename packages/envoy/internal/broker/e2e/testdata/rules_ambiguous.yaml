@@ -1,3 +1,8 @@
+# rules_ambiguous.yaml is rules.yaml with DEEL_API_KEY's requesters made ambiguous on purpose: two
+# entries both match kind=box/operator=sjawhar (one needs approval, the other is automatic).
+# TestRulesTestdataFixturesParse (../e2e_test.go) loads this file to prove rules.Parse still
+# refuses this v9-shaped file with its "ambiguous requester" error (rules.go's per-secret `seen`
+# map) — the same refusal `issue_assignee`'s removal from this fixture did not change.
 version: 1
 secrets:
   DEEL_API_KEY:
@@ -15,7 +20,7 @@ secrets:
         decision: automatic
       - kind: pod
         decision: approval
-        approver: issue_assignee
+        approver: login:sjawhar
   AUTO_TOKEN:
     source: dev1/agent-secrets/AUTO_TOKEN
     owner: sjawhar
@@ -31,3 +36,15 @@ secrets:
     delivery: inject
     max_lifetime_seconds: 43200
     requesters: []
+approvers:
+  origin: https://dispatch.test
+  aaguids:
+    - "ee882879-721c-4913-9775-3dfcce97072a"
+  logins:
+    sjawhar:
+      keys:
+        - credential_id: "sjawhar-cred-1"
+          registration:
+            challenge_nonce: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            response: {id: "sjawhar-cred-1"}
+          seed: true
