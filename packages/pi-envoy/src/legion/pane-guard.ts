@@ -896,7 +896,7 @@ function siteOf(node: { readonly pos: number; readonly end: number }, st: State)
   };
 }
 
-function walkScript(script: ParsedScript, st: State, ctx: Ctx): void {
+function walkScript(script: ParsedScript, st: State, ctx: Ctx, runTraps = true): void {
   const [error] = script.errors ?? [];
   if (error !== undefined) {
     throw new Refusal(
@@ -908,6 +908,7 @@ function walkScript(script: ParsedScript, st: State, ctx: Ctx): void {
     );
   }
   for (const statement of script.commands) walkNode(statement, st, ctx, false);
+  if (!runTraps) return;
   for (const trap of st.traps) {
     runText(
       trap.text,
@@ -1586,7 +1587,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     case ".": {
       const file = rest[0];
       if (file !== undefined) {
-        runFile(file, rest.slice(1), outer, ctx, site, "shell");
+        runFile(file, rest.slice(1), outer, ctx, site, "shell", true);
       }
       return;
     }
@@ -2246,7 +2247,8 @@ function runFile(
   st: State,
   ctx: Ctx,
   site: Site,
-  kind: "shell" | "auto" | CodeLanguage
+  kind: "shell" | "auto" | CodeLanguage,
+  source = false
 ): void {
   const text = literalText(file.exp);
   if (text === undefined || (!text.startsWith("/") && st.cwd === undefined)) {
@@ -2310,9 +2312,21 @@ function runFile(
           "the guard stops following scripts this deep; run the inner script directly"
         );
       }
-      const child: State = { ...st, source: content, script: abs, depth: st.depth + 1 };
+      const child: State = { ...clone(st), source: content, script: abs, depth: st.depth + 1 };
       child.positional = positional.map((arg) => arg.exp);
-      walkScript(parse(content), child, ctx);
+      walkScript(parse(content), child, ctx, !source);
+      if (source) {
+        st.vars = child.vars;
+        st.exported = child.exported;
+        st.arrays.clear();
+        for (const [name, elements] of child.arrays) st.arrays.set(name, new Map(elements));
+        st.cwd = child.cwd;
+        st.cwdWhy = child.cwdWhy;
+        st.functions = child.functions;
+        st.traps = child.traps;
+        st.output = child.output;
+        st.backgroundStarted ||= child.backgroundStarted;
+      }
     } else checkCode(language, content, st, ctx);
   } catch (error) {
     if (!(error instanceof Refusal)) throw error;

@@ -244,6 +244,29 @@ describe("scripts a command runs", () => {
     expect(bash('f() { rm -rf "$1"; }; f "$LEGION_WORKSPACE/build"')).toBeUndefined();
   });
 
+  test("runs a sourced parent's EXIT trap only when its parent script ends", () => {
+    const sourced = script("source-trap-body.sh", ":\n");
+    const parent = script(
+      "source-trap-parent.sh",
+      `p=$(pgrep x)\ncleanup() { kill "$p"; }\ntrap cleanup EXIT\n. ${sourced}\nrm -rf "$HOME/x"\n`
+    );
+    const reason = bash(`bash ${parent}`);
+    expect(reason).toContain(`line 5 of ${parent}`);
+    expect(reason).toContain('`rm -rf "$HOME/x"`');
+    expect(reason).not.toContain(sourced);
+  });
+
+  test("attributes a sourced parent's EXIT trap to its declaring file", () => {
+    const sourced = script("source-trap-owner-body.sh", ":\n");
+    const parent = script(
+      "source-trap-owner-parent.sh",
+      `p=$(pgrep x)\ncleanup() { kill "$p"; }\ntrap cleanup EXIT\n. ${sourced}\n`
+    );
+    const reason = bash(`bash ${parent}`);
+    expect(reason).toContain(`line 3 of ${parent}`);
+    expect(reason).not.toContain(`line 3 of ${sourced}`);
+  });
+
   test("uses a shell function's echoed path in a command substitution", () => {
     const generated = script(
       "function-output.sh",
