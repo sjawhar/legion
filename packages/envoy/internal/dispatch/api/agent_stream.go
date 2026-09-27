@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 )
 
@@ -30,13 +32,30 @@ const (
 	agentStreamBuffer = 64
 )
 
+// agentStreamSessionID is the one place a caller-supplied session id becomes part of a NATS
+// subject. An Envoy session id is a UUID, and anything else is refused here rather than
+// concatenated: `*` or `>` in that position is a wildcard, and one request carrying it would
+// subscribe a single viewer to every armed session on the bus at once.
+func agentStreamSessionID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	raw := strings.TrimSpace(r.PathValue("session_id"))
+	if raw == "" {
+		writeError(w, "SESSION_ID_INPUT", http.StatusBadRequest, "session_id is required")
+		return "", false
+	}
+	if _, err := uuid.Parse(raw); err != nil {
+		writeError(w, "SESSION_ID_INPUT", http.StatusBadRequest,
+			"session_id must be a session uuid")
+		return "", false
+	}
+	return raw, true
+}
+
 func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireHuman(w, r); !ok {
 		return
 	}
-	sessionID := strings.TrimSpace(r.PathValue("session_id"))
-	if sessionID == "" {
-		writeError(w, "SESSION_ID_INPUT", http.StatusBadRequest, "session_id is required")
+	sessionID, ok := agentStreamSessionID(w, r)
+	if !ok {
 		return
 	}
 	source := s.deps.AgentStream
@@ -144,7 +163,10 @@ func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request)
 		writeError(w, "FRAME_INPUT", http.StatusBadRequest, "could not read the frame")
 		return
 	}
-	sessionID := strings.TrimSpace(r.PathValue("session_id"))
+	sessionID, valid := agentStreamSessionID(w, r)
+	if !valid {
+		return
+	}
 	if r.URL.Query().Get("as") == "replay" {
 		memory.SetReplay(sessionID, frame)
 	} else {

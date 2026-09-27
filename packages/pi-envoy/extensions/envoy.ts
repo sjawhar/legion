@@ -734,12 +734,16 @@ export default function envoyExtension(pi: PiApi): void {
           continue;
         }
         if (request.type !== "replay" && request.type !== "watch") continue;
+        // The answer is taken before this message arms anything, so a bare replay request from
+        // a client that never attached a viewer gets an empty history rather than the ring.
+        const reply = message.reply;
+        const answer =
+          request.type === "replay" && reply !== undefined
+            ? JSON.stringify(agentStream.replay(session))
+            : undefined;
         agentStream.noteViewer();
-        if (request.type !== "replay" || message.reply === undefined) continue;
-        connection?.publish(
-          message.reply,
-          codec.encode(JSON.stringify(agentStream.replay(session)))
-        );
+        if (answer === undefined || reply === undefined) continue;
+        connection?.publish(reply, codec.encode(answer));
       }
     } catch {
       // A dead iterator is a dropped connection, handled by the resubscribe below.

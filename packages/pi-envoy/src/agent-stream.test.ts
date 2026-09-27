@@ -55,15 +55,23 @@ describe("AgentStreamPublisher", () => {
     ]);
   });
 
-  test("an unwatched session publishes nothing but can still replay what it saw", () => {
+  test("an unwatched session neither publishes nor answers a replay, and answers once armed", () => {
     const { published, publisher } = harness();
     publisher.record(SUBJECT, { content: "hi", role: "user", timestamp: 10 }, false);
     publisher.record(SUBJECT, assistant(20, [{ text: "there", type: "text" }]), false);
     expect(published).toEqual([]);
+    // Handing the ring to a caller is publishing too: one bare replay request must not draw
+    // the conversation out of a session nobody has opened.
+    expect(publisher.replay("s1").frames).toEqual([]);
 
-    const replay = publisher.replay("s1");
-    expect(replay.frames.map((frame) => (frame.kind === "message" ? frame.message.role : "tool")))
-      .toEqual(["user", "assistant"]);
+    // The ring kept filling while nobody watched, which is what lets the first viewer to open
+    // this session see the turn it is already in.
+    publisher.noteViewer();
+    expect(
+      publisher
+        .replay("s1")
+        .frames.map((frame) => (frame.kind === "message" ? frame.message.role : "tool"))
+    ).toEqual(["user", "assistant"]);
   });
 
   test("the watch window expires, and a fresh viewer re-arms it", () => {
@@ -164,6 +172,7 @@ describe("AgentStreamPublisher", () => {
     for (let index = 0; index < 60; index += 1) {
       publisher.record(SUBJECT, assistant(index + 1, [{ text: body, type: "text" }]), false);
     }
+    publisher.noteViewer();
     const replay = publisher.replay("s1");
     const bytes = JSON.stringify(replay.frames).length;
     expect(bytes).toBeLessThanOrEqual(AGENT_STREAM_LIMITS.historyBytes);

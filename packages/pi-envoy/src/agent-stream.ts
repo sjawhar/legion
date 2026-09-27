@@ -188,8 +188,18 @@ export class AgentStreamPublisher {
     return frame;
   }
 
-  /** What this session can still replay, oldest first, inside the byte budget. */
+  /**
+   * What this session can still replay, oldest first, inside the byte budget.
+   *
+   * Answered only while a viewer has already armed the session. The ring itself fills whether
+   * or not anyone is watching — it never leaves this process, and it is what lets the first
+   * viewer to open a session see the turn it is already in — but handing it out is publishing,
+   * so it obeys the same rule as a frame: a session nobody has opened answers nothing. The
+   * relay arms the session before it asks (`Watch` then `Replay` on one connection, in that
+   * order), so a genuine viewer is never refused.
+   */
   replay(sessionID: string): AgentStreamReplay {
+    if (!this.watched) return { frames: [], session_id: sessionID, v: AGENT_STREAM_PROTOCOL };
     const ordered = [...this.#history.values()].sort((left, right) => {
       const leftAt = left.kind === "message" ? left.message.at : left.result.at;
       const rightAt = right.kind === "message" ? right.message.at : right.result.at;

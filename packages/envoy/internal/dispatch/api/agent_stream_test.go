@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -18,6 +19,8 @@ import (
 
 // openAgentStream connects a viewer to session and returns the response plus a reader over its
 // events. The caller closes the response body to end the stream.
+const plannerSessionID = "01a0e090-4848-7473-acc5-fc96e6a646d3"
+
 func openAgentStream(t *testing.T, server *httptest.Server, session, credential string) (*http.Response, *bufio.Reader) {
 	t.Helper()
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, server.URL+"/api/v1/agents/"+session+"/stream", nil)
@@ -104,12 +107,12 @@ func tableCounts(t *testing.T, database *store.Store) map[string]int {
 
 func TestAgentStreamRelaysTheSessionsOwnReplayThenItsLiveFrames(t *testing.T) {
 	source := agentstream.NewMemory()
-	source.SetReplay("planner-session", agentstream.Frame(`{"v":1,"kind":"replay-body"}`))
+	source.SetReplay(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"replay-body"}`))
 	handler, _, _ := newTestServer(t, testServerOptions{agentStream: source})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	response, reader := openAgentStream(t, server, "planner-session", "cookie")
+	response, reader := openAgentStream(t, server, plannerSessionID, "cookie")
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("open stream: %d", response.StatusCode)
@@ -121,11 +124,11 @@ func TestAgentStreamRelaysTheSessionsOwnReplayThenItsLiveFrames(t *testing.T) {
 	}
 	// The session publishes only while a viewer is attached, so the relay must have told it so
 	// before any turn ran — not on its first ten-second tick.
-	if got := source.Watches("planner-session"); got < 1 {
+	if got := source.Watches(plannerSessionID); got < 1 {
 		t.Fatalf("the relay armed the session %d times, want at least 1", got)
 	}
 
-	source.Publish("planner-session", agentstream.Frame(`{"v":1,"kind":"message","seq":7}`))
+	source.Publish(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"message","seq":7}`))
 	event, data = readStreamEvent(t, reader)
 	if event != "frame" || data != `{"v":1,"kind":"message","seq":7}` {
 		t.Fatalf("live event is %q %q, want the published frame", event, data)
@@ -134,14 +137,14 @@ func TestAgentStreamRelaysTheSessionsOwnReplayThenItsLiveFrames(t *testing.T) {
 
 func TestAgentStreamWritesNothingToPostgres(t *testing.T) {
 	source := agentstream.NewMemory()
-	source.SetReplay("planner-session", agentstream.Frame(`{"v":1,"kind":"replay-body"}`))
+	source.SetReplay(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"replay-body"}`))
 	handler, database, _ := newTestServer(t, testServerOptions{agentStream: source})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
 	before := tableCounts(t, database)
 
-	response, reader := openAgentStream(t, server, "planner-session", "cookie")
+	response, reader := openAgentStream(t, server, plannerSessionID, "cookie")
 	if response.StatusCode != http.StatusOK {
 		response.Body.Close()
 		t.Fatalf("open stream: %d", response.StatusCode)
@@ -150,7 +153,7 @@ func TestAgentStreamWritesNothingToPostgres(t *testing.T) {
 		response.Body.Close()
 		t.Fatalf("first event is %q, want replay", event)
 	}
-	source.Publish("planner-session", agentstream.Frame(`{"v":1,"kind":"tool-result","secret":"hunter2"}`))
+	source.Publish(plannerSessionID, agentstream.Frame(`{"v":1,"kind":"tool-result","secret":"hunter2"}`))
 	if event, _ := readStreamEvent(t, reader); event != "frame" {
 		response.Body.Close()
 		t.Fatalf("live event is %q, want frame", event)
@@ -173,7 +176,7 @@ func TestAgentStreamRefusesEveryCallerButAHuman(t *testing.T) {
 
 	for _, credential := range []string{"bearer", "anonymous"} {
 		t.Run(credential, func(t *testing.T) {
-			response, _ := openAgentStream(t, server, "planner-session", credential)
+			response, _ := openAgentStream(t, server, plannerSessionID, credential)
 			defer response.Body.Close()
 			if credential == "anonymous" && response.StatusCode != http.StatusUnauthorized {
 				t.Fatalf("an anonymous viewer got %d, want 401", response.StatusCode)
@@ -197,7 +200,7 @@ func TestAgentStreamRefusesEveryCallerButAHuman(t *testing.T) {
 	}
 	// A refused caller never reached the session: it was never told a viewer is attached, so
 	// the session it asked about stays silent.
-	if got := source.Watches("planner-session"); got != 0 {
+	if got := source.Watches(plannerSessionID); got != 0 {
 		t.Fatalf("a refused viewer armed the session %d times, want 0", got)
 	}
 }
@@ -207,10 +210,42 @@ func TestAgentStreamReportsADeploymentWithNoRelay(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	response, _ := openAgentStream(t, server, "planner-session", "cookie")
+	response, _ := openAgentStream(t, server, plannerSessionID, "cookie")
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("a deployment with no relay answered %d, want 503", response.StatusCode)
+	}
+}
+
+// A session id goes straight into a NATS subject, where `*` and `>` are wildcards: one request
+// carrying either would subscribe a single viewer to every armed session on the bus. The route
+// refuses anything that is not a session uuid before it touches NATS at all.
+func TestAgentStreamRefusesASessionIdThatIsNotAUUID(t *testing.T) {
+	source := agentstream.NewMemory()
+	handler, _, _ := newTestServer(t, testServerOptions{agentStream: source})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	for _, id := range []string{"*", ">", "planner-session", plannerSessionID + ".>"} {
+		t.Run(id, func(t *testing.T) {
+			response, _ := openAgentStream(t, server, url.PathEscape(id), "cookie")
+			defer response.Body.Close()
+			if response.StatusCode != http.StatusBadRequest {
+				t.Fatalf("session id %q got %d, want 400", id, response.StatusCode)
+			}
+			var body struct {
+				Code string `json:"code"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+				t.Fatalf("decode refusal: %v", err)
+			}
+			if body.Code != "SESSION_ID_INPUT" {
+				t.Fatalf("session id %q refused with %q, want SESSION_ID_INPUT", id, body.Code)
+			}
+			if got := source.Watches(id); got != 0 {
+				t.Fatalf("a refused session id reached the bus %d times, want 0", got)
+			}
+		})
 	}
 }
 
@@ -222,12 +257,12 @@ func TestAgentStreamDropsSupersededFramesNotTheNewest(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	response, reader := openAgentStream(t, server, "planner-session", "cookie")
+	response, reader := openAgentStream(t, server, plannerSessionID, "cookie")
 	defer response.Body.Close()
 	// No replay was set, so the first thing the stream carries is a frame. Overrun the buffer
 	// before reading anything.
 	for index := range agentStreamBuffer * 4 {
-		source.Publish("planner-session", agentstream.Frame(fmt.Sprintf(`{"seq":%d}`, index)))
+		source.Publish(plannerSessionID, agentstream.Frame(fmt.Sprintf(`{"seq":%d}`, index)))
 	}
 	last := agentStreamBuffer*4 - 1
 	deadline := time.Now().Add(5 * time.Second)
