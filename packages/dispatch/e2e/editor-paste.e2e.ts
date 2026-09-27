@@ -446,6 +446,68 @@ for (const [blocks, cellHtml, joined] of cellBlocks) {
   }
 }
 
+// A list pasted onto selected cells fills them one item per cell, as paragraphs already do, and
+// like them repeats from its first item across a selection wider than it. It once filled every
+// selected cell with its first item.
+const threeColumns = "| c1 | c2 | c3 |\n| --- | --- | --- |\n| d1 | d2 | d3 |\n";
+for (const [list, tag] of [
+  ["a list", "ul"],
+  ["an ordered list", "ol"],
+] as const) {
+  for (const items of [
+    ["a", "b"],
+    ["a", "b", "c"],
+  ] as const) {
+    const clipboard = {
+      html: `<${tag}>${items.map((item) => `<li>${item}</li>`).join("")}</${tag}>`,
+      text: items.join("\n"),
+    };
+    for (const [to, row] of [
+      ["d2", `| ${items[0]} | ${items[1]} | d3 |`],
+      ["d3", `| ${items[0]} | ${items[1]} | ${items[2] ?? items[0]} |`],
+    ] as const) {
+      test(`${list} of ${items.length} items pasted onto d1 to ${to} fills them item by item`, async ({
+        browser,
+      }) => {
+        const { alice, issue, page } = await openIssue(browser, "List cells paste", threeColumns);
+        try {
+          await expect(documentEditor(page)).toContainText(to);
+          await selectCells(page, "d1", to, "shift-click");
+          await expect(page.locator(".selectedCell")).toHaveCount(to === "d2" ? 2 : 3);
+
+          await paste(page, clipboard);
+
+          await expect
+            .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+            .toBe(`| c1 | c2 | c3 |\n| :--- | :--- | :--- |\n${row}\n`);
+        } finally {
+          await alice.close();
+        }
+      });
+    }
+  }
+}
+
+// The control: two paragraphs pasted onto three cells fill them one paragraph each and repeat.
+test("two paragraphs pasted onto d1 to d3 fill them paragraph by paragraph", async ({
+  browser,
+}) => {
+  const { alice, issue, page } = await openIssue(browser, "Paragraph cells paste", threeColumns);
+  try {
+    await expect(documentEditor(page)).toContainText("d3");
+    await selectCells(page, "d1", "d3", "shift-click");
+    await expect(page.locator(".selectedCell")).toHaveCount(3);
+
+    await paste(page, { html: "<p>x</p><p>y</p>", text: "x\n\ny" });
+
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toBe("| c1 | c2 | c3 |\n| :--- | :--- | :--- |\n| x | y | x |\n");
+  } finally {
+    await alice.close();
+  }
+});
+
 // A copied table's row with no cells (an empty <tr>) carries nothing to paste, so the grid paste
 // leaves it out. It once reached prosemirror-tables' insert as a row of no cells, which threw, and the
 // paste stored nothing.
