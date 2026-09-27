@@ -209,6 +209,21 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 	return nil, lastErr
 }
 
+// Dial opens a tuned core NATS connection using envoy's standard options (5s connect timeout,
+// infinite reconnect every second, retry-loop for the initial 10 attempts). A caller that needs
+// core pub/sub on a connection of its own uses it: nats.go re-subscribes core subscriptions on
+// reconnect by itself, so it needs none of Client's recovery, and it touches no stream. It
+// refuses a NATS server that is not this machine's on the same terms as Connect.
+//
+// For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
+// this codebase owns, ConnectOwningStream.
+func Dial(name string, urls []string) (*nats.Conn, error) {
+	if err := refuseRemoteNATS(urls); err != nil {
+		return nil, err
+	}
+	return connect(name, urls, nil, nil)
+}
+
 // Connect opens a client that publishes and subscribes without touching the shared
 // ENVOY_NOTIFICATIONS stream. Every caller that only publishes or only tails uses it -- natstail,
 // the MCP bridge and envoy-dispatch's operator commands own nothing on the server they reach, and

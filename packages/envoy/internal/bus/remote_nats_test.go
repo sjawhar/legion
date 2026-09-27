@@ -71,6 +71,31 @@ func TestConnectOwningStreamRefusesANATSServerThatIsNotThisMachines(t *testing.T
 	}
 }
 
+// A core connection of a caller's own (Dial) reaches no further than the rest: it is the same
+// process on the same bus, and a viewer's relay dialling production by accident is the thing
+// being stopped.
+func TestDialRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
+	uri := testnats.URL(t)
+	remote := remoteLookingURL(t, uri)
+
+	_, err := bus.Dial("relay", []string{remote})
+	if !errors.Is(err, bus.ErrRemoteNATS) {
+		t.Fatalf("dial %s = %v, want a %v", remote, err, bus.ErrRemoteNATS)
+	}
+	if !strings.Contains(err.Error(), remote) || !strings.Contains(err.Error(), bus.AllowRemoteEnvVar) {
+		t.Fatalf("refusal %q does not name both the server %s and the override %s", err, remote, bus.AllowRemoteEnvVar)
+	}
+
+	conn, err := bus.Dial("relay", []string{uri})
+	if err != nil {
+		t.Fatalf("dial this machine's NATS: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	if !conn.IsConnected() {
+		t.Fatal("the dialled connection is not connected")
+	}
+}
+
 // An agent's ~/.config/opencode/envoy.json names production's bus, so a tool run from a checkout
 // reaches production unless something stops it. The refusal names the server and the override,
 // and it is read off the URL: nothing dials while the run has not said it means another machine's
