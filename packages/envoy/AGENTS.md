@@ -147,8 +147,9 @@ back without them, and an accepted suggestion writes its code as it reads back (
 in a list item's code, a line it leaves holding only spaces and tabs, CommonMark's blank line, is
 written empty, the spaces and tabs that line keeps around it included, while any other character,
 a no-break space or a form feed among them, is kept, as both readers keep it; then, where only
-line breaks follow it, its text loses the line breaks that end it. Code on other lines stays as it
-was. A line of colons in code inside a typed block is kept: the browser editor's
+line breaks follow it, its text loses the line breaks that end it. A suggestion that runs past the
+code into the next block is written as sent, the rest of that block joining it. Code on other
+lines stays as it was. A line of colons in code inside a typed block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
 them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -

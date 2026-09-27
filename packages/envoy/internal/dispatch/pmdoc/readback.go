@@ -220,7 +220,7 @@ func AgreeWithReadBack(before, doc *Node, first, last int, halves bool) *Node {
 	stale, known := staleSpreads(before)
 	spreadDifferences(out, back, first, last, func(node, read *Node) {
 		id := blockIDOf(node)
-		if previous, ok := held[id]; id != "" && ok && previous.Equal(node) && (!known || stale[id]) {
+		if previous, ok := held[id]; ok && previous.Equal(node) && (!known || stale[id]) {
 			return
 		}
 		if node.Attrs == nil {
