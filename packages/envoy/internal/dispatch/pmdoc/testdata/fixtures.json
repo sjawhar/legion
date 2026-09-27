@@ -3709,6 +3709,635 @@
     "rendered_by_milkdown": "Text.\n\n*\n\nText.\n\n* a\n*\n* c\n\nText.\n\n>\n\nText.\n\n*\n  # h\n\nText.\n\n*\n  ```\n  x\n  ```\n\nText.\n\n*\n  > q\n\nText.\n\n*\n  * a\n\nText.\n\n1.\n\nText.\n\n*\n\n**b**\n\nText.\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n\n:::\n\nText.\n\n| h  |\n| :- |\n\nText.\n\n\\| -|\n\nText.\n\n\\| |-\n\nText.\n\n\\| -| b\n\nText.\n\n> \\| -|\n\nText.\n\n* a\n*\n  ***\n* c\n\nText.\n\n1.\n   ***\n2. b\n"
   },
   {
+    "name": "empty-items-before-a-block-outside-their-item",
+    "markdown": "Empty list items before a blank line and a block outside the item around them.\n\nNext.\n\n-\n  > > -\n\n> x\n\nNext.\n\n- a\n\n  > > -\n\n> x\n\nNext.\n\n   > * *\n\n   >   \n\nNext.\n\n> - a\n>\n>   -\n\n>   x\n\nNext.\n\n> > - a\n> >\n> >   -\n>\n> >   x\n\nNext.\n\n> - b\n>\n>   -\n>\n> > y\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Empty list items before a blank line and a block outside the item around them."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000005"
+                  }
+                },
+                {
+                  "type": "blockquote",
+                  "attrs": {
+                    "blockId": "b-000006"
+                  },
+                  "content": [
+                    {
+                      "type": "blockquote",
+                      "attrs": {
+                        "blockId": "b-000007"
+                      },
+                      "content": [
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000008"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000009"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000010"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000011"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000012"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "x"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000014"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": true,
+                "checked": null,
+                "blockId": "b-000015"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000016"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "blockquote",
+                  "attrs": {
+                    "blockId": "b-000017"
+                  },
+                  "content": [
+                    {
+                      "type": "blockquote",
+                      "attrs": {
+                        "blockId": "b-000018"
+                      },
+                      "content": [
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000019"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000020"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000021"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000023"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "x"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000024"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000025"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000026"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000027"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000028"
+                      }
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false,
+                        "blockId": "b-000029"
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "label": "•",
+                            "listType": "bullet",
+                            "spread": false,
+                            "checked": null,
+                            "blockId": "b-000030"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000031"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000032"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000033"
+              }
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000034"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000035"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000036"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": true,
+                    "checked": null,
+                    "blockId": "b-000037"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000038"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": false,
+                        "blockId": "b-000039"
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "label": "•",
+                            "listType": "bullet",
+                            "spread": false,
+                            "checked": null,
+                            "blockId": "b-000040"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000041"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000042"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000043"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "x"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000044"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000045"
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000046"
+              },
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": false,
+                    "blockId": "b-000047"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": true,
+                        "checked": null,
+                        "blockId": "b-000048"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000049"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "a"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000050"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000051"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000052"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000053"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000054"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "x"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000055"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000056"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": false,
+                "blockId": "b-000057"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": true,
+                    "checked": null,
+                    "blockId": "b-000058"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000059"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "bullet_list",
+                      "attrs": {
+                        "spread": true,
+                        "blockId": "b-000060"
+                      },
+                      "content": [
+                        {
+                          "type": "list_item",
+                          "attrs": {
+                            "label": "•",
+                            "listType": "bullet",
+                            "spread": false,
+                            "checked": null,
+                            "blockId": "b-000061"
+                          },
+                          "content": [
+                            {
+                              "type": "paragraph",
+                              "attrs": {
+                                "blockId": "b-000062"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000063"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000064"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "y"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AdABAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBTkVtcHR5IGxpc3QgaXRlbXMgYmVmb3JlIGEgYmxhbmsgbGluZSBhbmQgYSBibG9jayBvdXRzaWRlIHRoZSBpdGVtIGFyb3VuZCB0aGVtLigAAQAHYmxvY2tJZAF3CGItMDAwMDAxhwEAAwlwYXJhZ3JhcGgHAAFRBgQAAVIFTmV4dC4oAAFRB2Jsb2NrSWQBdwhiLTAwMDAwMocBUQMLYnVsbGV0X2xpc3QHAAFZAwlsaXN0X2l0ZW0HAAFaAwlwYXJhZ3JhcGgoAAFbB2Jsb2NrSWQBdwhiLTAwMDAwNYcBWwMKYmxvY2txdW90ZQcAAV0DCmJsb2NrcXVvdGUHAAFeAwtidWxsZXRfbGlzdAcAAV8DCWxpc3RfaXRlbQcAAWADCXBhcmFncmFwaCgAAWEHYmxvY2tJZAF3CGItMDAwMDEwKAABYAVsYWJlbAF3A+KAoigAAWAIbGlzdFR5cGUBdwZidWxsZXQoAAFgBnNwcmVhZAF5KAABYAdibG9ja0lkAXcIYi0wMDAwMDkoAAFfBnNwcmVhZAF5KAABXwdibG9ja0lkAXcIYi0wMDAwMDgoAAFeB2Jsb2NrSWQBdwhiLTAwMDAwNygAAV0HYmxvY2tJZAF3CGItMDAwMDA2KAABWgVsYWJlbAF3A+KAoigAAVoIbGlzdFR5cGUBdwZidWxsZXQoAAFaBnNwcmVhZAF5KAABWgdibG9ja0lkAXcIYi0wMDAwMDQoAAFZBnNwcmVhZAF5KAABWQdibG9ja0lkAXcIYi0wMDAwMDOHAVkDCmJsb2NrcXVvdGUHAAFxAwlwYXJhZ3JhcGgHAAFyBgQAAXMBeCgAAXIHYmxvY2tJZAF3CGItMDAwMDEyKAABcQdibG9ja0lkAXcIYi0wMDAwMTGHAXEDCXBhcmFncmFwaAcAAXcGBAABeAVOZXh0LigAAXcHYmxvY2tJZAF3CGItMDAwMDEzhwF3AwtidWxsZXRfbGlzdAcAAX8DCWxpc3RfaXRlbQcAAYABAwlwYXJhZ3JhcGgHAAGBAQYEAAGCAQFhKAABgQEHYmxvY2tJZAF3CGItMDAwMDE2hwGBAQMKYmxvY2txdW90ZQcAAYUBAwpibG9ja3F1b3RlBwABhgEDC2J1bGxldF9saXN0BwABhwEDCWxpc3RfaXRlbQcAAYgBAwlwYXJhZ3JhcGgoAAGJAQdibG9ja0lkAXcIYi0wMDAwMjEoAAGIAQVsYWJlbAF3A+KAoigAAYgBCGxpc3RUeXBlAXcGYnVsbGV0KAABiAEGc3ByZWFkAXkoAAGIAQdibG9ja0lkAXcIYi0wMDAwMjAoAAGHAQZzcHJlYWQBeSgAAYcBB2Jsb2NrSWQBdwhiLTAwMDAxOSgAAYYBB2Jsb2NrSWQBdwhiLTAwMDAxOCgAAYUBB2Jsb2NrSWQBdwhiLTAwMDAxNygAAYABBWxhYmVsAXcD4oCiKAABgAEIbGlzdFR5cGUBdwZidWxsZXQoAAGAAQZzcHJlYWQBeCgAAYABB2Jsb2NrSWQBdwhiLTAwMDAxNSgAAX8Gc3ByZWFkAXkoAAF/B2Jsb2NrSWQBdwhiLTAwMDAxNIcBfwMKYmxvY2txdW90ZQcAAZkBAwlwYXJhZ3JhcGgHAAGaAQYEAAGbAQF4KAABmgEHYmxvY2tJZAF3CGItMDAwMDIzKAABmQEHYmxvY2tJZAF3CGItMDAwMDIyhwGZAQMJcGFyYWdyYXBoBwABnwEGBAABoAEFTmV4dC4oAAGfAQdibG9ja0lkAXcIYi0wMDAwMjSHAZ8BAwpibG9ja3F1b3RlBwABpwEDC2J1bGxldF9saXN0BwABqAEDCWxpc3RfaXRlbQcAAakBAwlwYXJhZ3JhcGgoAAGqAQdibG9ja0lkAXcIYi0wMDAwMjiHAaoBAwtidWxsZXRfbGlzdAcAAawBAwlsaXN0X2l0ZW0HAAGtAQMJcGFyYWdyYXBoKAABrgEHYmxvY2tJZAF3CGItMDAwMDMxKAABrQEFbGFiZWwBdwPigKIoAAGtAQhsaXN0VHlwZQF3BmJ1bGxldCgAAa0BBnNwcmVhZAF5KAABrQEHYmxvY2tJZAF3CGItMDAwMDMwKAABrAEGc3ByZWFkAXkoAAGsAQdibG9ja0lkAXcIYi0wMDAwMjkoAAGpAQVsYWJlbAF3A+KAoigAAakBCGxpc3RUeXBlAXcGYnVsbGV0KAABqQEGc3ByZWFkAXkoAAGpAQdibG9ja0lkAXcIYi0wMDAwMjcoAAGoAQZzcHJlYWQBeSgAAagBB2Jsb2NrSWQBdwhiLTAwMDAyNigAAacBB2Jsb2NrSWQBdwhiLTAwMDAyNYcBpwEDCmJsb2NrcXVvdGUHAAG9AQMJcGFyYWdyYXBoKAABvgEHYmxvY2tJZAF3CGItMDAwMDMzKAABvQEHYmxvY2tJZAF3CGItMDAwMDMyhwG9AQMJcGFyYWdyYXBoBwABwQEGBAABwgEFTmV4dC4oAAHBAQdibG9ja0lkAXcIYi0wMDAwMzSHAcEBAwpibG9ja3F1b3RlBwAByQEDC2J1bGxldF9saXN0BwABygEDCWxpc3RfaXRlbQcAAcsBAwlwYXJhZ3JhcGgHAAHMAQYEAAHNAQFhKAABzAEHYmxvY2tJZAF3CGItMDAwMDM4hwHMAQMLYnVsbGV0X2xpc3QHAAHQAQMJbGlzdF9pdGVtBwAB0QEDCXBhcmFncmFwaCgAAdIBB2Jsb2NrSWQBdwhiLTAwMDA0MSgAAdEBBWxhYmVsAXcD4oCiKAAB0QEIbGlzdFR5cGUBdwZidWxsZXQoAAHRAQZzcHJlYWQBeSgAAdEBB2Jsb2NrSWQBdwhiLTAwMDA0MCgAAdABBnNwcmVhZAF5KAAB0AEHYmxvY2tJZAF3CGItMDAwMDM5KAABywEFbGFiZWwBdwPigKIoAAHLAQhsaXN0VHlwZQF3BmJ1bGxldCgAAcsBBnNwcmVhZAF4KAABywEHYmxvY2tJZAF3CGItMDAwMDM3KAABygEGc3ByZWFkAXkoAAHKAQdibG9ja0lkAXcIYi0wMDAwMzYoAAHJAQdibG9ja0lkAXcIYi0wMDAwMzWHAckBAwpibG9ja3F1b3RlBwAB4QEDCXBhcmFncmFwaAcAAeIBBgQAAeMBAXgoAAHiAQdibG9ja0lkAXcIYi0wMDAwNDMoAAHhAQdibG9ja0lkAXcIYi0wMDAwNDKHAeEBAwlwYXJhZ3JhcGgHAAHnAQYEAAHoAQVOZXh0LigAAecBB2Jsb2NrSWQBdwhiLTAwMDA0NIcB5wEDCmJsb2NrcXVvdGUHAAHvAQMKYmxvY2txdW90ZQcAAfABAwtidWxsZXRfbGlzdAcAAfEBAwlsaXN0X2l0ZW0HAAHyAQMJcGFyYWdyYXBoBwAB8wEGBAAB9AEBYSgAAfMBB2Jsb2NrSWQBdwhiLTAwMDA0OYcB8wEDC2J1bGxldF9saXN0BwAB9wEDCWxpc3RfaXRlbQcAAfgBAwlwYXJhZ3JhcGgoAAH5AQdibG9ja0lkAXcIYi0wMDAwNTIoAAH4AQVsYWJlbAF3A+KAoigAAfgBCGxpc3RUeXBlAXcGYnVsbGV0KAAB+AEGc3ByZWFkAXkoAAH4AQdibG9ja0lkAXcIYi0wMDAwNTEoAAH3AQZzcHJlYWQBeSgAAfcBB2Jsb2NrSWQBdwhiLTAwMDA1MCgAAfIBBWxhYmVsAXcD4oCiKAAB8gEIbGlzdFR5cGUBdwZidWxsZXQoAAHyAQZzcHJlYWQBeCgAAfIBB2Jsb2NrSWQBdwhiLTAwMDA0OCgAAfEBBnNwcmVhZAF5KAAB8QEHYmxvY2tJZAF3CGItMDAwMDQ3KAAB8AEHYmxvY2tJZAF3CGItMDAwMDQ2hwHwAQMKYmxvY2txdW90ZQcAAYgCAwlwYXJhZ3JhcGgHAAGJAgYEAAGKAgF4KAABiQIHYmxvY2tJZAF3CGItMDAwMDU0KAABiAIHYmxvY2tJZAF3CGItMDAwMDUzKAAB7wEHYmxvY2tJZAF3CGItMDAwMDQ1hwHvAQMJcGFyYWdyYXBoBwABjwIGBAABkAIFTmV4dC4oAAGPAgdibG9ja0lkAXcIYi0wMDAwNTWHAY8CAwpibG9ja3F1b3RlBwABlwIDC2J1bGxldF9saXN0BwABmAIDCWxpc3RfaXRlbQcAAZkCAwlwYXJhZ3JhcGgHAAGaAgYEAAGbAgFiKAABmgIHYmxvY2tJZAF3CGItMDAwMDU5hwGaAgMLYnVsbGV0X2xpc3QHAAGeAgMJbGlzdF9pdGVtBwABnwIDCXBhcmFncmFwaCgAAaACB2Jsb2NrSWQBdwhiLTAwMDA2MigAAZ8CBWxhYmVsAXcD4oCiKAABnwIIbGlzdFR5cGUBdwZidWxsZXQoAAGfAgZzcHJlYWQBeSgAAZ8CB2Jsb2NrSWQBdwhiLTAwMDA2MSgAAZ4CBnNwcmVhZAF4KAABngIHYmxvY2tJZAF3CGItMDAwMDYwKAABmQIFbGFiZWwBdwPigKIoAAGZAghsaXN0VHlwZQF3BmJ1bGxldCgAAZkCBnNwcmVhZAF4KAABmQIHYmxvY2tJZAF3CGItMDAwMDU4KAABmAIGc3ByZWFkAXkoAAGYAgdibG9ja0lkAXcIYi0wMDAwNTeHAZgCAwpibG9ja3F1b3RlBwABrgIDCXBhcmFncmFwaAcAAa8CBgQAAbACAXkoAAGvAgdibG9ja0lkAXcIYi0wMDAwNjQoAAGuAgdibG9ja0lkAXcIYi0wMDAwNjMoAAGXAgdibG9ja0lkAXcIYi0wMDAwNTYA",
+    "rendered_by_milkdown": "Empty list items before a blank line and a block outside the item around them.\n\nNext.\n\n*\n  > > *\n\n> x\n\nNext.\n\n* a\n\n  > > *\n\n> x\n\nNext.\n\n> *\n>   *\n\n>\n\nNext.\n\n> * a\n>\n>   *\n\n> x\n\nNext.\n\n> > * a\n> >\n> >   *\n>\n> > x\n\nNext.\n\n> * b\n>\n>   *\n>\n> > y\n"
+  },
+  {
     "name": "empty",
     "markdown": "",
     "pm_json": {

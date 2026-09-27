@@ -48,6 +48,17 @@ func TestBrowserListSpacingRefusesWhatItCannotRead(t *testing.T) {
 			refused: "- > 1. - a\n  >\n  >    -\n  >\n  >    - c\n",
 		},
 		{
+			// Every blank line goes on with the quote around the outer item, so the browser editor
+			// keeps the next block in that item, whether its text or a quote opening at the item's
+			// content column.
+			name:    "an empty list item followed by a blank quote line in a list item in two quotes",
+			refused: "> > - a\n> >\n> >   -\n> >\n> >   x\n",
+		},
+		{
+			name:    "an empty list item followed by a blank quote line and a quote in the list item around it",
+			refused: "> - a\n>\n>   -\n>\n>   > x\n",
+		},
+		{
 			// A quote standing between the definition and the typed block keeps the typed block's
 			// refusal: the browser editor reads the blank line as spacing the list.
 			name:    "a blank line after a list in a typed block in a quote in a footnote definition",

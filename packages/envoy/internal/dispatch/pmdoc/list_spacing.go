@@ -120,17 +120,36 @@ func emptyItemEndsOuterItem(item *ast.ListItem, lines sourceLines) bool {
 		return false
 	}
 	next := nextBlock(item)
-	if next == nil {
+	if next == nil || isAncestor(outer, next) {
 		return false
 	}
-	// Goldmark ends the quotes around the item there too, and re-opens one for the next line, whose
-	// text the browser editor's parser measures past the markers of the quotes it goes on with.
-	start := startOf(next)
-	if _, quote := next.(*ast.Blockquote); quote {
-		start = lines.pastQuoteMarkers(start, quoteDepth(item))
+	// That parser goes on with the outer item only on lines carrying a marker for each quote
+	// around it, and measures the next block's text past those markers, where a quote the line
+	// opens further in is the item's when its marker stands at the item's content or past it. A
+	// line with fewer markers ends the quotes it lacks, and the item with them. Goldmark ends the
+	// quotes around the empty item at the blank line and re-opens one for the next line, so the
+	// next block's own quotes do not say which quotes those are.
+	depth := quoteDepth(outer)
+	carries := func(line []byte) bool { return leadingQuoteMarkers(line) >= depth }
+	blanks := lines.blanksBefore(startOf(next), markersOrWhitespace)
+	line := lines.lineOf(startOf(next))
+	if blanks == 0 || lines.blanksBefore(startOf(next), func(line []byte) bool { return markersOrWhitespace(line) && carries(line) }) < blanks || !carries(lines.text(line)) {
+		return false
 	}
-	return lines.blanksBefore(startOf(next), markersOrWhitespace) > 0 && !isAncestor(outer, next) &&
-		lines.textColumn(start) >= browserTextColumn(outer.FirstChild(), lines)
+	return lines.textColumn(lines.pastQuoteMarkers(lines.starts[line], depth)) >= browserTextColumn(outer.FirstChild(), lines)
+}
+
+// leadingQuoteMarkers is how many quote markers open line, each with the spaces and tabs before it.
+func leadingQuoteMarkers(line []byte) int {
+	count := 0
+	for {
+		line = bytes.TrimLeft(line, " \t")
+		if len(line) == 0 || line[0] != '>' {
+			return count
+		}
+		count++
+		line = line[1:]
+	}
 }
 
 // quoteContentColumn is the column the content of count quotes starts at on position's line: past
