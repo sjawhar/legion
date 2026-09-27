@@ -945,11 +945,13 @@ a send.
 `GET /api/v1/messages/{id}` reads the conversation any message belongs to, issue-less or not, by
 the id of any message in it: `{message: <thread root with its deliveries>, replies: [...]}`, oldest
 first. It is how `dispatch_read({ message })` reads a direct-message conversation back, since a
-human's direct message belongs to no issue. A human reads any thread; a bearer names its session in
-`?session=` (400 `SESSION_REQUIRED` without it) and reads only a thread that session is in, one
-whose root targets `session:<id>` or one it authored a reply in, and any other is 403
-`THREAD_FORBIDDEN`: a direct message is between a human and one session, and knowing a message id
-opens it to no other agent. The tool sends the host's session id.
+human's direct message belongs to no issue. A thread on an issue follows the issue's rule, exactly
+as `GET /api/v1/issues/{key}/messages/{id}` does. An issue-less thread is a direct conversation: a
+human reads any of them, and a bearer names its session in `?session=` (400 `SESSION_REQUIRED`
+without it) and reads only one that session is in, whose root targets `session:<id>` or where it
+authored a reply; any other is 403 `THREAD_FORBIDDEN`. The session is the caller's own claim, like
+`actor` on a write, so this keeps a session from reading another session's direct conversation by
+mistake and is not an authorization boundary. The tool sends the host's session id.
 
 Messages thread: `in_reply_to` names a message in the same conversation - a message of the same
 issue, or, for `POST /api/v1/agents/{session_id}/messages`, an issue-less message whose thread

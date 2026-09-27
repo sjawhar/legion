@@ -41,8 +41,9 @@ the native Dispatch tool suite:
   answer; with a bare message id and no `issue` it answers a human's direct message, and a second call
   with other text is the session's follow-up in the same conversation. `dispatch_read.message` must be
   used alone (`readValidation`) and reads the conversation a message id belongs to, issue-less or not,
-  as the host's session (`GET /api/v1/messages/{id}?session=`, which refuses a session not in the
-  conversation). `dispatch-api.ts` carries `UserAgentState {cleared_before?, read_through?,
+  as the host's session (`GET /api/v1/messages/{id}?session=`; on a direct, issue-less conversation
+  the server answers 403 to a session not in it, a guard against reading another session's direct
+  conversation by mistake). `dispatch-api.ts` carries `UserAgentState {cleared_before?, read_through?,
   unread_replies}` and `UserAgentStateInput`. Host adapters consume `dispatchToolSpecs` directly.
 - Every Dispatch tool specification includes `example`, a schema-valid call rendered with its allowed keys after the tool rejects invalid arguments; update it with any argument-shape change.
 - `dispatch_issue` accepts optional initial labels (at most 20 labels, each at most 40 characters), an optional coarse priority from `0` (`P0`, highest) through `3` (`P3`, lowest), and an optional `assignee` (a GitHub login on the server's sign-in allowlist; the server lowercases it, and absent it defaults to the caller's owner, then the parent's assignee, then unassigned); an optional `components` (the same `{mode, ids?, reason?}` object as `dispatch_issue_update`, below); project-document arguments accept the document's artifact id, slug, or filename. `dispatch-api.ts` carries `Issue.assignee: string | null` (also on `IssueSummary` and the inbox row's `Ask.issue`), `CreateIssueInput.assignee?: string`, `UpdateIssueInput.assignee?: string | null` (`null` clears), `DispatchUser` / `ListUsersResponse` for `GET /api/v1/users`, and `WhoamiResponse` for `GET /api/v1/whoami` (`{kind: "user", login}` or `{kind: "agent", owner}`).

@@ -125,10 +125,12 @@ func TestGetMessageReadsTheConversationAMessageBelongsTo(t *testing.T) {
 	}
 }
 
-// A direct message is between a human and one session: a bearer reads a conversation only as a
-// session in it - the one its root targets, or one that replied in it - and knowing a message id
-// opens it to no other session.
-func TestBearerReadsOnlyAConversationItsSessionIsIn(t *testing.T) {
+// A direct message is between a human and one session: a bearer reads an issue-less conversation
+// only as the session its root targets (or one that replied in it), so a session cannot read
+// another session's direct conversation by mistake. The session is the caller's own claim, like
+// `actor`, so this guards against accidents rather than authorizing. An issue thread follows the
+// issue's rule, the same as GET /issues/{key}/messages/{id}.
+func TestBearerReadsADirectConversationOnlyAsItsSessionAndAnIssueThreadAsTheIssueAllows(t *testing.T) {
 	handler, root, reply, _ := directConversation(t)
 	first := decodeBody[model.Message](t, reply("On it."))
 
@@ -148,7 +150,6 @@ func TestBearerReadsOnlyAConversationItsSessionIsIn(t *testing.T) {
 		t.Fatalf("a human reading the conversation: status=%d body=%s, want 200", human.Code, human.Body.String())
 	}
 
-	// On an issue thread no session is the root's target, so a session is in it by replying.
 	issue := createInteractionIssue(t, handler, "TEST", "Issue thread", "before")
 	onIssue := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "Who owns this?"}, "alice")
 	answered := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
@@ -157,12 +158,19 @@ func TestBearerReadsOnlyAConversationItsSessionIsIn(t *testing.T) {
 	if answered.Code != http.StatusCreated {
 		t.Fatalf("s2 replying on the issue: status=%d body=%s", answered.Code, answered.Body.String())
 	}
-	if read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+onIssue.ID+"?session=s2", nil); read.Code != http.StatusOK ||
-		len(decodeBody[messageRead](t, read).Replies) != 1 {
-		t.Fatalf("s2 reading a thread it replied in: status=%d body=%s, want 200 with its reply", read.Code, read.Body.String())
+	viaIssue := bearerRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/messages/"+onIssue.ID, nil)
+	if viaIssue.Code != http.StatusOK {
+		t.Fatalf("bearer reading the issue thread through the issue: status=%d body=%s", viaIssue.Code, viaIssue.Body.String())
 	}
-	if read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+onIssue.ID+"?session=s1", nil); read.Code != http.StatusForbidden {
-		t.Fatalf("s1 reading an issue thread it is not in: status=%d body=%s, want 403", read.Code, read.Body.String())
+	reply2 := decodeBody[model.Message](t, answered)
+	for _, query := range []string{"?session=s1", "?session=s2", ""} {
+		read := bearerRequest(t, handler, http.MethodGet, "/api/v1/messages/"+reply2.ID+query, nil)
+		if read.Code != http.StatusOK {
+			t.Fatalf("bearer reading the issue thread by id with %q: status=%d body=%s, want 200 as the issue route answers", query, read.Code, read.Body.String())
+		}
+		if thread := decodeBody[messageRead](t, read); thread.Message.ID != onIssue.ID || len(thread.Replies) != 1 {
+			t.Fatalf("bearer reading the issue thread by id with %q = %#v, want the issue thread with s2's reply", query, thread)
+		}
 	}
 }
 

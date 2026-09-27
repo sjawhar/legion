@@ -465,9 +465,12 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 // getMessageThread reads the conversation a message belongs to by the id of any message in it:
 // the thread root with its deliveries, and every reply, oldest first. It takes no issue, so it
 // is how a session reads back a human's direct message and its own replies to it, which belong
-// to no issue. A human reads any thread. A bearer names its session in ?session= and reads only
-// a thread that session is in: the one the root targets, or one it authored a reply in. A direct
-// message is between a human and one session, so knowing a message id opens it to no other.
+// to no issue. A thread on an issue follows the issue's rule, as GET /issues/{key}/messages/{id}
+// does. An issue-less thread is a direct conversation between a human and one session: a human
+// reads any of them, and a bearer names its session in ?session= and reads only one that session
+// is in (the root targets it, or it authored a reply). The session is the caller's own claim,
+// like `actor`, so this keeps a session from reading another session's direct conversation by
+// mistake; it is not an authorization boundary.
 func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 	_, human, err := s.optionalActor(r)
 	if err != nil {
@@ -475,11 +478,6 @@ func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !requireUUIDPath(w, r, "message") {
-		return
-	}
-	session := strings.TrimSpace(r.URL.Query().Get("session"))
-	if !human && session == "" {
-		writeError(w, "SESSION_REQUIRED", http.StatusBadRequest, "a bearer names its own session in ?session=")
 		return
 	}
 	var rootID string
@@ -494,10 +492,18 @@ func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if !human && !read.hasSession(session) {
-		writeError(w, "THREAD_FORBIDDEN", http.StatusForbidden,
-			"session "+session+" may read only a conversation it is in: one whose root targets it, or one it replied in")
-		return
+	if !human && read.Message.IssueKey == nil {
+		session := strings.TrimSpace(r.URL.Query().Get("session"))
+		if session == "" {
+			writeError(w, "SESSION_REQUIRED", http.StatusBadRequest,
+				"a direct conversation is read as a session in it: name yours in ?session=")
+			return
+		}
+		if !read.hasSession(session) {
+			writeError(w, "THREAD_FORBIDDEN", http.StatusForbidden,
+				"session "+session+" is not in this direct conversation: its root targets another session and it has not replied in it")
+			return
+		}
 	}
 	WriteJSON(w, http.StatusOK, read)
 }
