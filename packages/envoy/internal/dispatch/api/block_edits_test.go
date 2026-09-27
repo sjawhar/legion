@@ -563,9 +563,10 @@ func checkAccept(t *testing.T, handler http.Handler, documentService *docs.Servi
 // are written with different markers, so they read back as two lists wherever an accept leaves
 // them: a list written beside one, text that joins away what stood between two, or blocks an
 // accept writes where a callout it rewrites or consumes stood. A task item emptied of its text
-// reads back as a plain item, so emptying one is refused, naming that and advising rejecting. A
-// task item the document already reads back as plain is not the accept's: text elsewhere is
-// stored, and a second task item emptied is still refused.
+// reads back as a plain item, so emptying one is refused, naming that and advising rejecting. What
+// the document already reads back otherwise is not the accept's: a task item read back as plain,
+// a paragraph ending in a hard break that reads back with a literal backslash. Text elsewhere, or
+// beside it in the same block, is stored, and a second task item emptied is still refused.
 func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -589,6 +590,11 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 		{name: "nothing in a task item", spec: "- [ ] Body.\n- [x] two\n", quote: "Body.", says: task},
 		{name: "nothing in a task item, in a document already reading another back as a plain item", spec: "- [ ] Done\n\nIntro.\n\n- [ ] Body.\n", quote: "Body.", emptied: "Done", says: task},
 		{name: "text in a document already reading a task item back as a plain item", spec: "- [ ] Done\n\nBody.\n", quote: "Body.", emptied: "Done", with: "Changed.", want: "- [ ] \n\nChanged.\n"},
+		// A block that already reads back otherwise the same way is not the accept's, though the
+		// accept changes it: text beside a stale break in it is stored, a new break is refused.
+		{name: "text beside a task item already read back as plain, in its list", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "Changed.", want: "- [ ] \n- [x] Changed.\n\nAfter.\n"},
+		{name: "nothing in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n", quote: "Body.", emptied: "Gone.", says: task},
+		{name: "text in a paragraph already reading back with a literal backslash", spec: "Body. more\\\nxyz\n\nAfter.\n", quote: "Body.", emptied: "xyz", with: "Changed.", want: "Changed. more\\\n\n\nAfter.\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			checkAccept(t, handler, documentService, "L"+string(rune('A'+index)), test)

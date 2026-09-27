@@ -752,6 +752,39 @@ func TestAcceptSuggestionBesideABlockTheParserAlreadyRefuses(t *testing.T) {
 	}
 }
 
+// A footnote definition whose reference a browser edit removed already reads back as nothing,
+// which is not an accept's: an accept inside the definition stores.
+func TestAcceptSuggestionInAFootnoteDefinitionWhoseReferenceIsGone(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "Intro[^1].\n\n[^1]: Body.\n")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		intro := tree.Children[0]
+		kept := intro.Children[:0]
+		for _, child := range intro.Children {
+			if child.Type != "footnote_reference" {
+				kept = append(kept, child)
+			}
+		}
+		intro.Children = kept
+		return tree
+	})
+	if back, err := pmdoc.ReadBack(liveTree(t, service, artifactID)); err != nil || len(back.Children) != 1 {
+		t.Fatalf("the unreferenced definition reads back as %#v (%v); the test needs one that reads back as nothing", back, err)
+	}
+	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
+	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "Body.", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("accept in a footnote definition whose reference is gone: %v", err)
+	}
+	definition := liveTree(t, service, artifactID).Children[1]
+	if definition.Type != "footnote_definition" || pmdoc.StripAnchorMarks(definition.Children[0]).Children[0].Text != "Changed." {
+		t.Fatalf("after the accept the definition is %#v, want it holding Changed.", definition)
+	}
+}
+
 // A repeat the live document already holds is settlement's to repair, not a write's to refuse or
 // to repair: beside one, an accept whose replacement names no held id (inline, or a typed block
 // with an id of its own), the reject of a browser insert, and an upload of the document's own text
