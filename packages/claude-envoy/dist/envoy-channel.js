@@ -39366,6 +39366,10 @@ function optionalPriority(args, name) {
     return null;
   return typeof value === "number" ? value : undefined;
 }
+function optionalPriorityFilter(args, name) {
+  const value = args[name];
+  return Array.isArray(value) ? value.map((item) => item ?? "none") : undefined;
+}
 function optionalComponents(args, name) {
   const value = args[name];
   if (typeof value !== "object" || value === null)
@@ -40431,7 +40435,7 @@ async function executeDispatchTool(input) {
       const status = optionalString(args, "status");
       const parent = optionalString(args, "parent");
       const label = optionalString(args, "label");
-      const priority = Array.isArray(args.priority) ? args.priority.map((value) => value ?? "none") : undefined;
+      const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
       const issues = await client.listIssues({

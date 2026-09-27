@@ -354,6 +354,18 @@ function optionalPriority(
   return typeof value === "number" ? (value as IssuePriority) : undefined;
 }
 
+/** A `priority` filter list as the issue list takes it: null, meaning no priority, is `none`. */
+function optionalPriorityFilter(
+  args: Record<string, unknown>,
+  name: string
+): (IssuePriority | "none")[] | undefined {
+  const value = args[name];
+  // The zod spec already refused anything but a list of integers 0–3 and null.
+  return Array.isArray(value)
+    ? (value as (IssuePriority | null)[]).map((item) => item ?? "none")
+    : undefined;
+}
+
 /** The `components` argument as the server takes it; the zod spec already checked its shape. */
 function optionalComponents(
   args: Record<string, unknown>,
@@ -1845,9 +1857,7 @@ export async function executeDispatchTool(
       const status = optionalString(args, "status");
       const parent = optionalString(args, "parent");
       const label = optionalString(args, "label");
-      const priority = Array.isArray(args.priority)
-        ? (args.priority as (IssuePriority | null)[]).map((value) => value ?? ("none" as const))
-        : undefined;
+      const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
       const issues = await client.listIssues({
