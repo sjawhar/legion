@@ -213,9 +213,12 @@ name and leaving the file-pointer alive disables nothing. The third package to c
 `packages/claude-envoy`: `tests/envoy-channel-server.test.ts` expected its fixture's `Bearer reply-token` on the
 reply it posts to Dispatch and, in a pane, received the real token from `DISPATCH_TOKEN_FILE` instead (LEGION-131's
 implementer, rebuilding the claude-envoy bundles: `40 pass, 1 fail`; `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u
-DISPATCH_TOKEN bun test` → `41 pass`). LEGION-173 fixed it: every claude-envoy test file that builds a Dispatch client
-from a fixture calls `isolateDispatchEnvironment()` from `tests/dispatch-environment.ts`, which clears the three
-variables before each test and restores them after, so the suite passes in a pane as it does in CI.
+DISPATCH_TOKEN bun test` → `41 pass`). LEGION-173 fixed it: a claude-envoy test file that builds a Dispatch or Envoy
+client in-process calls `isolatePaneEnvironment()` from `tests/pane-environment.ts`, which clears `DISPATCH_URL`,
+`DISPATCH_TOKEN`, `DISPATCH_TOKEN_FILE`, `ENVOY_TOKEN` and `ENVOY_TOKEN_FILE` before each test and restores them after
+(`createEnvoyClient` reads `ENVOY_TOKEN_FILE` ahead of `ENVOY_TOKEN`, and a pointer that does not resolve fails it). A
+file that spawns its subject as a subprocess with a literal environment, as `open-asks-hook.test.ts` does (`PATH` plus
+the test's own values), needs no helper: none of those variables reaches the child from the pane.
 
 Run it from `packages/daemon`, which is the `working-directory` of the `test` job in
 `.github/workflows/pr-and-main.yaml` (that job also sets `LEGION_E2E=1` and `LEGION_TMUX_LIVE=1`). There is no root

@@ -9,9 +9,9 @@ import {
   executeEnvoyTool,
 } from "../src/envoy-channel-server"
 import { SessionIdentity } from "../src/session-identity"
-import { isolateDispatchEnvironment } from "./dispatch-environment"
+import { isolatePaneEnvironment } from "./pane-environment"
 
-isolateDispatchEnvironment()
+isolatePaneEnvironment()
 
 function sessionWith(followed: string[]): ChannelSession {
   return {
