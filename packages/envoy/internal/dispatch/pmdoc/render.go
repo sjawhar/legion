@@ -481,6 +481,18 @@ func (r *renderer) list(n *Node, prefix string) {
 	}
 }
 
+// spreadElsewhere reports whether a blank line a spread item writes between two of blocks, its
+// own, spreads it wherever it stands: one after a block that is neither a list nor a footnote
+// definition, whose blank lines after them can be theirs.
+func spreadElsewhere(blocks []*Node) bool {
+	for index := 1; index < len(blocks); index++ {
+		if previous := blocks[index-1]; previous.Type != "footnote_definition" && !isList(previous) {
+			return true
+		}
+	}
+	return false
+}
+
 // itemBlocks writes blocks the browser editor's parser reads as a list item's lines - the item's
 // own, or those of a footnote definition the item holds - at indent, their lines' prefix, where
 // prefix is the list's. A tight item writes its blocks on consecutive lines, where a paragraph
@@ -505,6 +517,19 @@ func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string
 				// One blank line keeps a block that cannot open on the line after a paragraph off
 				// the paragraph the list ends in.
 				case !isList(child) && !opensAfterParagraph(child) && endsInParagraph(previous):
+					blanks = 1
+				}
+			} else if previous.Type == "footnote_definition" && r.quoteDepth > 0 && child.Type != "blockquote" && child.Type != "footnote_definition" && !isList(child) {
+				// In a quote the blank lines after a footnote definition are the definition's: one
+				// spreads the item only before a quote, a list or a definition, and two spread it
+				// before anything else (definitionBlanksInQuote). A spread item writes two where no
+				// blank line between two of its other blocks spreads it, and a tight one writes one
+				// only to keep a block that cannot open on the line after a paragraph off the
+				// definition's.
+				switch {
+				case spread && !spreadElsewhere(blocks):
+					blanks = 2
+				case spread || !opensAfterParagraph(child):
 					blanks = 1
 				}
 			}

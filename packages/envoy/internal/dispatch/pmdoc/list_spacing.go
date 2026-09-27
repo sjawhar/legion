@@ -249,9 +249,9 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		setSpread(list, spread, func(item ast.Node) bool {
 			// Blank lines after a list are that list's.
 			if next := item.NextSibling(); next != nil {
-				return blankBetweenBlocksBut(item, anyBlock) || blankBefore(next) && !endsWithList(item)
+				return blankBetweenBlocksBut(item, anyBlock, spreadsNothing) || blankBefore(next) && !endsWithList(item)
 			}
-			return blankBetweenBlocksBut(item, anyBlock) || lastSpread
+			return blankBetweenBlocksBut(item, anyBlock, spreadsNothing) || lastSpread
 		})
 	case quoted:
 		// The browser editor spaces a list in a typed block inside a quote by one blank line,
@@ -264,19 +264,33 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		if reason != "" {
 			return reason
 		}
-		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, anyBlock) })
+		setSpread(list, spread, func(item ast.Node) bool {
+			return blankBetweenBlocksBut(item, anyBlock, definitionBlanksInQuote(list, lines))
+		})
 	case footnoted:
 		setSpread(list, false, func(item ast.Node) bool {
-			return blankBetweenBlocksBut(item, startsContainer) || blankAfterItem(item, definition)
+			return blankBetweenBlocksBut(item, startsContainer, spreadsNothing) || blankAfterItem(item, definition)
 		})
 	default:
 		spread := false
 		for item := list.FirstChild().NextSibling(); item != nil; item = item.NextSibling() {
 			spread = spread || blankBefore(item)
 		}
-		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, spreadsNothing) })
+		setSpread(list, spread, func(item ast.Node) bool { return blankBetweenBlocksBut(item, spreadsNothing, spreadsNothing) })
 	}
 	return ""
+}
+
+// definitionBlanksInQuote accepts the blocks before which, in list's quote, the blank lines after a
+// footnote definition one of its items holds are the definition's and spread nothing, as the
+// browser editor's parser reads them: one blank line before anything but a quote, a list or a
+// footnote definition (startsContainer), which that line spreads the item before, as two blank
+// lines do before anything.
+func definitionBlanksInQuote(list ast.Node, lines sourceLines) func(ast.Node) bool {
+	blank := quoteBlankLineAt(quoteDepth(list))
+	return func(block ast.Node) bool {
+		return !startsContainer(block) && lines.blanksBefore(startOf(block), blank) < 2
+	}
 }
 
 // blankAfterDefinitionItem reports whether a blank line at the list's quote depth follows an item
@@ -480,8 +494,10 @@ func anyBlock(ast.Node) bool { return true }
 // of a footnote definition it holds, which the browser editor's parser reads as the item's lines -
 // but for the blank lines after a list the item holds, before a block listHolds accepts, which are
 // that list's: in a quote, before any block (anyBlock); in a footnote definition, before a quote,
-// a list or a footnote definition (startsContainer); elsewhere, before none (spreadsNothing).
-func blankBetweenBlocksBut(item ast.Node, listHolds func(ast.Node) bool) bool {
+// a list or a footnote definition (startsContainer); elsewhere, before none (spreadsNothing). The
+// blank lines after a footnote definition the item holds, before a block definitionHolds accepts,
+// are the definition's the same way (definitionBlanksInQuote).
+func blankBetweenBlocksBut(item ast.Node, listHolds, definitionHolds func(ast.Node) bool) bool {
 	for child := item.FirstChild(); child != nil; child = child.NextSibling() {
 		// Goldmark appends a backlink, an inline node, after a referenced footnote definition's
 		// last block when that block is not a paragraph; it is no block of the item's.
@@ -489,13 +505,14 @@ func blankBetweenBlocksBut(item ast.Node, listHolds func(ast.Node) bool) bool {
 			continue
 		}
 		_, afterList := child.PreviousSibling().(*ast.List)
-		if child != item.FirstChild() && blankBefore(child) && !(afterList && listHolds(child)) {
+		_, afterDefinition := child.PreviousSibling().(*extensionast.Footnote)
+		if child != item.FirstChild() && blankBefore(child) && !(afterList && listHolds(child)) && !(afterDefinition && definitionHolds(child)) {
 			return true
 		}
 		// In a footnote definition the item holds, blank lines after a list are that list's where
 		// they are in the item's own blocks, and before a quote, a list or a footnote definition, as
 		// in any footnote definition.
-		if _, definition := child.(*extensionast.Footnote); definition && blankBetweenBlocksBut(child, func(block ast.Node) bool { return listHolds(block) || startsContainer(block) }) {
+		if _, definition := child.(*extensionast.Footnote); definition && blankBetweenBlocksBut(child, func(block ast.Node) bool { return listHolds(block) || startsContainer(block) }, spreadsNothing) {
 			return true
 		}
 	}

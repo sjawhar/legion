@@ -222,3 +222,22 @@ And one whose quote goes on with a quote[^tr]:
     > :::
     >
     > > q
+
+In a quote, an item holding a definition[^qd] and a paragraph after one blank line:
+
+> - [^qd]: a
+>
+>   tail
+
+After two[^qe]:
+
+> - [^qe]: a
+>
+>
+>   tail
+
+And before a list[^qf]:
+
+> - [^qf]: a
+>
+>   - b
