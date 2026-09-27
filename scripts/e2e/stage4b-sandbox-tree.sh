@@ -1361,9 +1361,12 @@ mkdir -p "$state"
 cat >"$work/instructions.md" <<'EOF'
 # Stage 4b proof instructions
 
-This is a throwaway workflow proof on the disposable LEGSMOKE project. Do not act until a targeted
-human Dispatch message gives the next exact proof operation. Follow that instruction precisely, use
-the Go-daemon Legion tools and handoffs, and do not create work outside the issue's smoke branch.
+This is a throwaway workflow proof on the disposable LEGSMOKE project. A tree's root architect
+starts its tree from the daemon's `catch-up` notice as its role says: it writes the spec in the
+issue's own primary document and registers the gate, then waits. Apart from that, do not act until
+a targeted human Dispatch message gives the next exact proof operation. Follow that instruction
+precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside the issue's
+smoke branch.
 EOF
 write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
