@@ -1,10 +1,11 @@
 {
-  // Tsc sees an opaque declaration instead of opening the source-only upstream tree. Bun and
-  // Vite resolve the sources for runtime; see tsconfig.json and packages/dispatch/web/vite.config.ts.
+  // Tsc reads `upstream/` — the declarations generated from the pinned upstream sources — rather
+  // than opening those sources, which do not type-check. Bun and Vite resolve the sources for
+  // runtime; see tsconfig.json and packages/dispatch/web/vite.config.ts.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "paths": {
-      "proof-sdk-upstream/src/*": ["./src/upstream-runtime.d.ts"]
+      "proof-sdk-upstream/src/*": ["./upstream/*"]
     }
   }
 }

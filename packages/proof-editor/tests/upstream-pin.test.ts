@@ -1,10 +1,12 @@
 /**
- * The pin has to carry every fix the fork's `library` line carries, and has to agree with the
- * upstream type regions this package re-exports. Both otherwise fail silently: nothing in this
- * repository reads those editor modules until a browser renders a document with them.
+ * The pin has to carry every fix the fork's `library` line carries, and `upstream/` — the
+ * declarations tsc reads in its place (AGENTS.md § The upstream boundary) — has to be what the
+ * pinned sources emit. Both otherwise fail silently: nothing in this repository reads those
+ * editor modules until a browser renders a document with them, and a stale declaration is a
+ * shape tsc believes and the runtime does not have.
  *
- * Each case below is one member of that line, read where it lives, because none of them has an
- * exported seam a unit test could call. A cut that loses one — the first cut of the cleaned
+ * Each fix case below is one member of that line, read where it lives, because none of them has
+ * an exported seam a unit test could call. A cut that loses one — the first cut of the cleaned
  * line lost the cursor label — passes every other check in the repository.
  */
 
@@ -48,36 +50,13 @@ test("the pinned dependency renders replacement suggestions", () => {
   expect(marks).toMatch(/key: `replace-insert-\$\{mark\.id\}-\$\{replacementContent\}`/);
 });
 
-test("src/upstream-types.ts still describes the files it was copied from", () => {
-  const copied = readFileSync(join(import.meta.dir, "..", "src", "upstream-types.ts"), "utf8");
-  const regions = [
-    ...copied.matchAll(
-      /\/\* --- copied from proof-sdk src\/(\S+) @ c2697996 --- \*\/([\s\S]*?)\/\* --- end copy --- \*\//g
-    ),
-  ];
-  const named: Record<string, string[]> = {};
-  for (const [, path, body] of regions) {
-    const declarations = (body ?? "")
-      .split(/\n(?=export (?:type|interface) )/)
-      .slice(1)
-      .map((block) => block.trimEnd());
-    named[path ?? ""] = declarations.map((block) => block.split("\n")[0] ?? "");
-    const pinned = readFileSync(join(upstreamSrc, path ?? ""), "utf8");
-    for (const declaration of declarations) {
-      expect(pinned).toContain(declaration);
-    }
-  }
-  // Losing a region's markers would silently stop checking it, so the set is pinned by name.
-  expect(named).toEqual({
-    "editor/plugins/heatmap-decorations.ts": [
-      "export type HeatMapMode = 'hidden' | 'subtle' | 'background' | 'full';",
-    ],
-    "formats/marks.ts": [
-      "export type MarkKind =",
-      "export type SuggestionStatus = 'pending' | 'accepted' | 'rejected';",
-      "export interface MarkRange {",
-      "export interface CommentReply {",
-      "export interface StoredMark {",
-    ],
-  });
+test("upstream/ is what the pinned sources emit", async () => {
+  const generator =
+    await Bun.$`bun ${join(import.meta.dir, "..", "scripts", "upstream-declarations.ts")} --check`
+      .cwd(join(import.meta.dir, ".."))
+      .nothrow()
+      .quiet();
+  const output = generator.stdout.toString() + generator.stderr.toString();
+  expect(output).toContain("matches the pin");
+  expect(generator.exitCode).toBe(0);
 });

@@ -1,7 +1,6 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 import { $nodeSchema } from '@milkdown/kit/utils';
-import type { DOMOutputSpec, Node as ProseMirrorNode, NodeSpec } from '@milkdown/kit/prose/model';
+import type { DOMOutputSpec, Node as ProseMirrorNode } from '@milkdown/kit/prose/model';
+import type { MarkdownNode as ParsedMarkdownNode, NodeSchema } from '@milkdown/kit/transformer';
 
 import { withBlockIdSpec } from './editor/schema/block-ids.js';
 import { withDomAttributes } from './editor/schema/dom-attributes.js';
@@ -104,8 +103,8 @@ function schemaAttrs(type: BlockTypeSchema): Record<string, { default?: string |
   return Object.fromEntries(Object.entries(type.attributes).map(([name, attribute]) => [name, { default: attribute.default }]));
 }
 
-function directiveAttrs(type: BlockTypeSchema, attrs: Record<string, string> | undefined): Record<string, string | boolean | string[] | undefined> {
-  const parsed: Record<string, string | boolean | string[] | undefined> = {};
+function directiveAttrs(type: BlockTypeSchema, attrs: Record<string, string> | undefined): Record<string, string | boolean | readonly string[] | undefined> {
+  const parsed: Record<string, string | boolean | readonly string[] | undefined> = {};
   for (const [name, attribute] of Object.entries(type.attributes)) {
     const value = attrs?.[name];
     parsed[name] = value === undefined ? attribute.default : parseAttribute(type.name, name, attribute, value);
@@ -181,7 +180,7 @@ function parsedDomAttrs(type: BlockTypeSchema, dom: HTMLElement): Record<string,
 }
 
 /** The ProseMirror node spec of the typed block `type`, drawn by `renderBlock` when given. */
-export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRenderer): NodeSpec {
+export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRenderer): NodeSchema {
   return withBlockIdSpec({
     attrs: schemaAttrs(type),
     content: type.content,
@@ -206,7 +205,7 @@ export function typedBlockSpec(type: BlockTypeSchema, renderBlock?: HostBlockRen
       runner: (state, node, nodeType) => {
         const directive = node as MarkdownNode;
         state.openNode(nodeType, directiveAttrs(type, directive.attributes));
-        state.next(directive.children);
+        state.next(directive.children as unknown as ParsedMarkdownNode[]);
         state.closeNode();
       },
     },

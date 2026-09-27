@@ -1,5 +1,3 @@
-// @ts-nocheck — verbatim proof-sdk source. The fork emits this tree's declarations with
-// `noCheck` (its tsconfig.lib.json), so it has never type-checked; see AGENTS.md.
 /**
  * Normalizes CommonMark soft line breaks to a single space on markdown import.
  *
