@@ -476,6 +476,11 @@ for (const [shape, html, cells] of [
   ["text then a paragraph", "lead<p>b</p>", ["lead", "b"]],
   ["a paragraph then text", "<p>a</p>tail", ["a", "tail"]],
   [
+    "a paragraph then a table",
+    "<p>lead</p><table><tr><td>one</td><td>two</td></tr></table>",
+    ["lead", "one", "two"],
+  ],
+  [
     "a partial copy of three paragraphs",
     "<span>end of one</span><p>two</p><span>start of three</span>",
     ["end of one", "two", "start of three"],
