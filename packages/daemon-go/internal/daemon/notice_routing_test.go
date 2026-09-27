@@ -286,9 +286,8 @@ func TestNoNoticeWaitsOnASuspendedSubArchitect(t *testing.T) {
 }
 
 // A notice whose owning architect has ended waits on nobody: a claim that retired or failed will
-// not hold its role again, a suspended one only when re-admission or the operator starts it again,
-// with the tree's record rather than the notices it missed, and a lingering tree's architect is
-// suspended until re-admission. Such a row finishes
+// not hold its role again, and a lingering tree's architect is suspended until re-admission, which
+// starts it with the tree's record rather than the notices of its close. Such a row finishes
 // without delivery, with one log line naming the notice kind and the issue.
 func TestANoticeForAnEndedArchitectFinishesWithoutDelivery(t *testing.T) {
 	for _, tc := range []struct {
@@ -298,7 +297,6 @@ func TestANoticeForAnEndedArchitectFinishesWithoutDelivery(t *testing.T) {
 	}{
 		{name: "the architect's claim retired", state: supervise.StateRetired},
 		{name: "the architect's claim failed", state: supervise.StateFailed},
-		{name: "the architect's claim was suspended", state: supervise.StateSuspended},
 		// The linger's suspend of the architect is an outbox row of its own, which may not have run.
 		{name: "the tree lingers before its architect's suspend ran", state: supervise.StateWorking, lingers: true},
 	} {
@@ -324,5 +322,78 @@ func TestANoticeForAnEndedArchitectFinishesWithoutDelivery(t *testing.T) {
 				t.Fatalf("delivered %+v, %d rows left, log %q; want no delivery, the row finished, one line naming child-closed and LEGION-2", delivered, outboxRows(t, pool), logged.String())
 			}
 		})
+	}
+}
+
+// A root architect the operator suspended outside a linger comes back when the operator resumes it
+// (`legion claims resume` or `deliver`), so its notices are held for it, not finished: the row waits,
+// logged once, and is delivered once the architect holds its role again. The fence is per
+// architect, so the held rows hold no other architect's notices.
+func TestANoticeForAnOperatorSuspendedRootIsHeldUntilItHoldsItsRoleAgain(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateSuspended)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, time.Now()))
+	var logged bytes.Buffer
+	clock := time.Now()
+	publisher := &holderPublisher{}
+	publisher.setAbsent(architectTopic(t, "LEGION-1"))
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
+		project: "legion", now: func() time.Time { return clock }}
+
+	for tick := range 2 {
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+		clock = clock.Add(2 * time.Minute)
+	}
+	if _, delivered := publisher.snapshot(); len(delivered) != 0 || outboxRows(t, pool) != 1 || strings.Count(logged.String(), "msg=\"outbox notice waits for its architect\"") != 1 {
+		t.Fatalf("while the suspended root holds no role: delivered %+v, %d rows, log %q; want the row held, logged once", delivered, outboxRows(t, pool), logged.String())
+	}
+	publisher.setAbsent()
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run after the root holds its role again: %v", err)
+	}
+	if _, delivered := publisher.snapshot(); fmt.Sprint(deliveredKinds(t, delivered)) != "[pr-blocked to LEGION-1]" || outboxRows(t, pool) != 0 {
+		t.Fatalf("after the root holds its role again: delivered %v, %d rows left; want the held pr-blocked delivered", deliveredKinds(t, delivered), outboxRows(t, pool))
+	}
+}
+
+// An earlier notice's architect is found as its own kind routes it: a child's close starts at the
+// parent. A close held for the absent root architect therefore holds the root's later notices, even
+// though the closed child has a running sub-architect of its own, and when the root returns the
+// close arrives first, even when the later notice falls due before the held close does.
+func TestAHeldChildCloseHoldsTheArchitectsLaterNotices(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	noticeTree(t, pool, records, false)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateLaunching)
+	architectClaim(t, sup, "LEGION-2", supervise.StateWorking)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "child-closed", Role: claim.RoleArchitect, Reason: "LEGION-2 is done"}, time.Now()))
+	clock := time.Now()
+	publisher := &holderPublisher{}
+	publisher.setAbsent(architectTopic(t, "LEGION-1"))
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup, project: "legion",
+		now: func() time.Time { return clock }}
+	// The close is tried and held several times, so its backoff outgrows the later notice's.
+	for tick := range 5 {
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+		clock = clock.Add(20 * time.Second)
+	}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", record.Notice{Kind: "design-approved", Version: 3}, clock))
+	publisher.setAbsent()
+	for tick := range 8 {
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("tick %d after the root returned: %v", tick, err)
+		}
+		clock = clock.Add(20 * time.Second)
+	}
+	if _, delivered := publisher.snapshot(); fmt.Sprint(deliveredKinds(t, delivered)) != "[child-closed to LEGION-1 design-approved to LEGION-1]" || outboxRows(t, pool) != 0 {
+		t.Fatalf("delivered %v with %d rows left, want the held close first, then the later notice, both to the root", deliveredKinds(t, delivered), outboxRows(t, pool))
 	}
 }
