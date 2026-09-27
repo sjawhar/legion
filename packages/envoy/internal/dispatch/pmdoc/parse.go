@@ -592,6 +592,9 @@ func parseTypedDirective(directive *typedDirective, source []byte, footnotes map
 	if !directive.Closed && directive.Parent().Kind() == ast.KindDocument {
 		return nil, fmt.Errorf("%w: typed block %q is unclosed at document level", ErrSchema, directive.Name)
 	}
+	if _, lazy := directive.Attribute(lazyTypedParagraphAttr); lazy {
+		return nil, fmt.Errorf("%w: typed block %q holds a line continuing a paragraph in a typed block from outside the block's container, which the browser editor's parser reads as ending the typed block", ErrSchema, directive.Name)
+	}
 	typ, ok := typedBlock(directive.Name)
 	if !ok {
 		return nil, fmt.Errorf("%w: unknown typed block %q (known types: %s)", ErrSchema, directive.Name, strings.Join(typedBlockNames(), ", "))

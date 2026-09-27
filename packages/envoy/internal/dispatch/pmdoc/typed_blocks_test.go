@@ -366,6 +366,18 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     "malformed directives are not supported",
 		},
 		{
+			// The browser editor's parser continues no paragraph in a typed block lazily: the line
+			// ends the typed block, where goldmark reads it as the paragraph's.
+			name:     "a line continuing a paragraph in a typed block in a list item",
+			markdown: "- :::callout{#block-1 kind=\"note\" title=\"T\"}\n  p\ntail\n",
+			want:     "a line continuing a paragraph in a typed block from outside the block's container",
+		},
+		{
+			name:     "a line continuing a paragraph in a typed block in a quote",
+			markdown: "> :::callout{#block-1 kind=\"note\" title=\"T\"}\n> p\ntail\n",
+			want:     "a line continuing a paragraph in a typed block from outside the block's container",
+		},
+		{
 			name:     "Pandoc fenced div",
 			markdown: "::: {.callout}\nBody.\n:::\n",
 			want:     "Pandoc fenced divs and malformed directives are not supported",

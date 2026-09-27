@@ -112,7 +112,58 @@ func (p tabIndented) Continue(node ast.Node, reader gmtext.Reader, pc parser.Con
 	if p.opens != nil {
 		expandTabIndentation(reader, p.opens)
 	}
-	return p.BlockParser.Continue(node, reader, pc)
+	state := p.BlockParser.Continue(node, reader, pc)
+	recordEndedContainer(node, state, reader, pc)
+	return state
+}
+
+// endedContainerKey holds the list, list item, quote or footnote definition whose lines last ended
+// at a line that is not blank, and that line: goldmark reads such a line as continuing a paragraph
+// the container holds (lazyTypedParagraph) where it opens no block.
+var endedContainerKey = parser.NewContextKey()
+
+type endedContainer struct {
+	node ast.Node
+	line int
+}
+
+func recordEndedContainer(node ast.Node, state parser.State, reader gmtext.Reader, pc parser.Context) {
+	switch node.(type) {
+	case *ast.List, *ast.ListItem, *ast.Blockquote, *extensionast.Footnote:
+	default:
+		return
+	}
+	if line, _ := reader.PeekLine(); state&parser.Close == 0 || util.IsBlank(line) {
+		return
+	}
+	row, _ := reader.Position()
+	pc.Set(endedContainerKey, endedContainer{node: node, line: row})
+}
+
+// lazyTypedParagraphAttr marks a typed block holding a paragraph goldmark continued with a line from
+// outside a container around the typed block. The browser editor's parser continues no paragraph
+// in a typed block so; the line ends the typed block there (parseTypedDirective refuses it).
+var lazyTypedParagraphAttr = []byte("pmdoc-lazy-typed-paragraph")
+
+// lazyTypedParagraph marks the typed block between paragraph and the container whose lines ended at
+// the line goldmark is continuing paragraph with, if one stands there (lazyTypedParagraphAttr).
+func lazyTypedParagraph(paragraph ast.Node, reader gmtext.Reader, pc parser.Context) {
+	ended, ok := pc.Get(endedContainerKey).(endedContainer)
+	if row, _ := reader.Position(); !ok || ended.line != row {
+		return
+	}
+	var typed *typedDirective
+	for parent := paragraph.Parent(); parent != nil; parent = parent.Parent() {
+		if parent == ended.node {
+			if typed != nil {
+				typed.SetAttribute(lazyTypedParagraphAttr, true)
+			}
+			return
+		}
+		if directive, ok := parent.(*typedDirective); ok && typed == nil {
+			typed = directive
+		}
+	}
 }
 
 // footnoteReferenceParser is goldmark's footnote reference parser, with a reference whose label
@@ -468,6 +519,12 @@ func definitionsInPlace(root ast.Node, context parser.Context) {
 // Open reads the definition's opener without the padding a tab split by the containers' prefix
 // leaves ahead of it: goldmark's parser measures where the definition's text starts from the line
 // without that padding, so it took the label's first characters as the text (`]: def`).
+func (p footnoteDefinitionParser) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
+	state := p.BlockParser.Continue(node, reader, pc)
+	recordEndedContainer(node, state, reader, pc)
+	return state
+}
+
 func (p footnoteDefinitionParser) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	_, segment := reader.PeekLine()
 	offset := pc.BlockOffset()
@@ -523,6 +580,7 @@ func (p lineRecordingParagraph) Open(parent ast.Node, reader gmtext.Reader, pc p
 
 func (p lineRecordingParagraph) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
 	_, segment := reader.PeekLine()
+	lazyTypedParagraph(node, reader, pc)
 	state := p.BlockParser.Continue(node, reader, pc)
 	if state != parser.Close {
 		recordLine(segment, reader.Source(), pc)
