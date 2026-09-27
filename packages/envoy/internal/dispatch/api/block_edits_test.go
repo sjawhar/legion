@@ -599,7 +599,7 @@ func TestAcceptingASuggestionIsJudgedByTheDocumentItStores(t *testing.T) {
 		// accept changes it: text beside a stale break in it is stored, a new break is refused.
 		{name: "text beside a task item already read back as plain, in its list", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "Changed.", want: "- [ ] \n- [x] Changed.\n\nAfter.\n"},
 		{name: "nothing in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n", quote: "Body.", emptied: "Gone.", says: task},
-		{name: "two paragraphs in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "two\n\nparas", want: "MEASURE"},
+		{name: "two paragraphs in a task item, in a list already reading another back as plain", spec: "- [ ] Gone.\n- [x] Body.\n\nAfter.\n", quote: "Body.", emptied: "Gone.", with: "two\n\nparas", want: "- [ ] \n- [x] two\n\n  paras\n\nAfter.\n"},
 		{name: "text in a paragraph already reading back with a literal backslash", spec: "Body. more\\\nxyz\n\nAfter.\n", quote: "Body.", emptied: "xyz", with: "Changed.", want: "Changed. more\\\n\n\nAfter.\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

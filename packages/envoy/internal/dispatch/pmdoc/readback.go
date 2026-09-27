@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 )
 
 // skip names what a comparison leaves aside: the attributes it names, or all of them, and with
@@ -92,31 +93,28 @@ func misreads(want, got *Node, ignore skip) []misread {
 }
 
 func collectMisreads(want, got *Node, ignore skip, found *[]misread) {
-	add := func(differs, reason string) {
-		*found = append(*found, misread{id: blockIDOf(want), differs: want.Type + " " + differs, reason: reason})
+	add := func(id, differs, reason string) {
+		*found = append(*found, misread{id: id, differs: differs, reason: reason})
 	}
-	if want.Type != got.Type {
-		add("as "+got.Type, readDifference(want, got, ignore))
+	own := selfDifference(want, got, ignore)
+	switch {
+	case own.kind != "":
+		add(blockIDOf(want), want.Type+" as "+got.Type, own.kind)
 		return
-	}
-	if reason := attributeReason(want, got, ignore); reason != "" {
-		add(reason, reason)
+	case own.attribute != "":
+		add(blockIDOf(want), want.Type+" "+own.attribute, own.attribute)
 	}
 	if isTextblock(want.Type) {
-		if !inlineEqual(want.Children, got.Children) {
-			wanted, read := textContent(want), textContent(got)
-			add("text "+differingSpan(wanted, read), fmt.Sprintf("%s reads back holding %q, not %q", blockName(want.Type), read, wanted))
+		if own.text != "" {
+			add(blockIDOf(want), want.Type+" text "+own.textDiffers, own.text)
 		}
 		return
 	}
 	written := writtenChildren(want)
-	if len(written) == len(got.Children) {
-		for index, child := range written {
-			collectMisreads(child, got.Children[index], ignore, found)
-		}
-		return
+	pairs, unpaired := pairChildren(want.Type, written, got.Children, ignore)
+	for _, pair := range pairs {
+		collectMisreads(written[pair[0]], got.Children[pair[1]], ignore, found)
 	}
-	_, unpaired := alignChildren(want.Type, written, got.Children, ignore)
 	indexes := make([]int, 0, len(unpaired))
 	for index := range unpaired {
 		indexes = append(indexes, index)
@@ -124,8 +122,41 @@ func collectMisreads(want, got *Node, ignore skip, found *[]misread) {
 	sort.Ints(indexes)
 	for _, index := range indexes {
 		child := written[index]
-		*found = append(*found, misread{id: blockIDOf(child), differs: child.Type + " unpaired", reason: unpaired[index]})
+		add(blockIDOf(child), child.Type+" unpaired", unpaired[index])
 	}
+}
+
+// pairChildren pairs written, a parent's children as written, with back's: one to one when both
+// hold as many, so a pair that reads back otherwise is looked into, and otherwise as alignChildren
+// pairs them, with the children it cannot pair.
+func pairChildren(parent string, written, back []*Node, ignore skip) ([][2]int, map[int]string) {
+	if len(written) != len(back) {
+		return alignChildren(parent, written, back, ignore)
+	}
+	pairs := make([][2]int, len(written))
+	for index := range written {
+		pairs[index] = [2]int{index, index}
+	}
+	return pairs, nil
+}
+
+// ownDifference is how a block differs from its read-back apart from its child blocks: its kind,
+// its first differing attribute, and a textblock's text, each "" where they agree.
+type ownDifference struct {
+	kind, attribute, text, textDiffers string
+}
+
+func selfDifference(want, got *Node, ignore skip) ownDifference {
+	if want.Type != got.Type {
+		return ownDifference{kind: blockName(want.Type) + " reads back as " + blockName(got.Type)}
+	}
+	own := ownDifference{attribute: attributeReason(want, got, ignore)}
+	if isTextblock(want.Type) && !ignore.text && !inlineEqual(want.Children, got.Children) {
+		wanted, read := textContent(want), textContent(got)
+		own.text = fmt.Sprintf("%s reads back holding %q, not %q", blockName(want.Type), read, wanted)
+		own.textDiffers = differingSpan(wanted, read)
+	}
+	return own
 }
 
 // differingSpan is what wanted and read hold between the text they start and end with alike.
@@ -146,8 +177,10 @@ func differingSpan(wanted, read string) string {
 // holding what their markdown reads back as where the write left a shape the markdown cannot carry
 // but reads back unambiguously. With halves, an empty paragraph without a block id that the
 // renderer does not write goes, as Splice leaves the empty halves of the textblock a block
-// replacement lands in. Each list's and list item's
-// spread is the one its markdown reads back with. Blocks outside first to last are doc's own.
+// replacement lands in. Code text loses the line breaks that end it, which markdown drops. Each
+// list's and list item's spread is the one its markdown reads back with, paired as far down as
+// misreads pairs blocks, so a list that already reads back otherwise elsewhere takes it too.
+// Blocks outside first to last are doc's own.
 func AgreeWithReadBack(doc *Node, first, last int, halves bool) *Node {
 	out := &Node{Type: doc.Type, Attrs: doc.Attrs, Children: slices.Clone(doc.Children)}
 	for index := first; index <= last; index++ {
@@ -171,11 +204,14 @@ func AgreeWithReadBack(doc *Node, first, last int, halves bool) *Node {
 		out.Children = kept
 		last -= dropped
 	}
+	for _, child := range out.Children[first : last+1] {
+		trimCodeBreaks(child)
+	}
 	back, err := ReadBack(out)
 	if err != nil {
 		return out
 	}
-	pairs, _ := alignBlocks(StripAnchorMarks(out), back, skip{names: map[string]bool{"spread": true}})
+	pairs, _ := pairChildren("doc", writtenChildren(StripAnchorMarks(out)), back.Children, spreadAside)
 	writtenIndex := writtenIndexes(out)
 	for _, pair := range pairs {
 		if index := writtenIndex[pair[0]]; index >= first && index <= last {
@@ -183,6 +219,27 @@ func AgreeWithReadBack(doc *Node, first, last int, halves bool) *Node {
 		}
 	}
 	return out
+}
+
+// spreadAside compares blocks leaving their spread aside.
+var spreadAside = skip{names: map[string]bool{"spread": true}}
+
+// trimCodeBreaks drops the line breaks that end each code block's text under node, which the
+// renderer writes and the parser drops.
+func trimCodeBreaks(node *Node) {
+	if node.Type == "code_block" {
+		if last := len(node.Children) - 1; last >= 0 && node.Children[last].Type == "text" {
+			if text := strings.TrimRight(node.Children[last].Text, "\n"); text != "" {
+				node.Children[last].Text = text
+			} else {
+				node.Children = node.Children[:last]
+			}
+		}
+		return
+	}
+	for _, child := range node.Children {
+		trimCodeBreaks(child)
+	}
 }
 
 func dropUnwrittenHalves(node *Node) {
@@ -202,22 +259,21 @@ func dropUnwrittenHalves(node *Node) {
 }
 
 // adoptSpread gives node's lists and list items, which AgreeWithReadBack cloned, the spread their
-// read-back holds, where the two hold the same blocks.
+// read-back holds, pairing their blocks as misreads does.
 func adoptSpread(node, back *Node) {
+	if node.Type != back.Type || isTextblock(node.Type) {
+		return
+	}
 	if (node.Type == "bullet_list" || node.Type == "ordered_list" || node.Type == "list_item") && node.Attrs["spread"] != back.Attrs["spread"] {
 		if node.Attrs == nil {
 			node.Attrs = Attrs{}
 		}
 		node.Attrs["spread"] = back.Attrs["spread"]
 	}
-	if isTextblock(node.Type) {
-		return
-	}
 	written := writtenChildren(node)
-	for index, child := range written {
-		if index < len(back.Children) {
-			adoptSpread(child, back.Children[index])
-		}
+	pairs, _ := pairChildren(node.Type, written, back.Children, spreadAside)
+	for _, pair := range pairs {
+		adoptSpread(written[pair[0]], back.Children[pair[1]])
 	}
 }
 
@@ -365,22 +421,18 @@ func collectDrift(node, back *Node, drift map[string]bool) {
 // block as written: its kind, its blocks, its text or an attribute; "" when it reads back as
 // written. Attributes ignore names are not compared.
 func readDifference(want, got *Node, ignore skip) string {
-	if want.Type != got.Type {
-		return blockName(want.Type) + " reads back as " + blockName(got.Type)
+	own := selfDifference(want, got, ignore)
+	if own.kind != "" {
+		return own.kind
 	}
 	// A list's own attributes follow its items, which name a list the next one joins; any other
 	// block's come first, which names a task item that reads back plain rather than its text.
 	list := want.Type == "bullet_list" || want.Type == "ordered_list"
-	if !list {
-		if reason := attributeReason(want, got, ignore); reason != "" {
-			return reason
-		}
+	if !list && own.attribute != "" {
+		return own.attribute
 	}
 	if isTextblock(want.Type) {
-		if !ignore.text && !inlineEqual(want.Children, got.Children) {
-			return fmt.Sprintf("%s reads back holding %q, not %q", blockName(want.Type), textContent(got), textContent(want))
-		}
-		return ""
+		return own.text
 	}
 	written := writtenChildren(want)
 	for index := range max(len(written), len(got.Children)) {
@@ -398,10 +450,7 @@ func readDifference(want, got *Node, ignore skip) string {
 			return reason
 		}
 	}
-	if list {
-		return attributeReason(want, got, ignore)
-	}
-	return ""
+	return own.attribute
 }
 
 // attributeReason names the first attribute want and got hold with different values, or is "".
