@@ -177,11 +177,13 @@ function acceptedByOpener(thread: UnresolvedThread): boolean {
 /** What a Legion role posts on GitHub carries this marker (the listener reads the same one). */
 const LEGION_FOOTER = "<!-- legion:";
 
-/** The pull request author's answer to a bot's thread: `Fixed in <commit>: <what changed>` or
- * `Declined: <reason>`, the implementer's reply grammar for every review thread, after the same
- * leading space, tab, CR or LF `Accepted:` may follow. */
+/** The pull request author's answer to a bot's thread, as its reply's first line (after the same
+ * leading space, tab, CR or LF `Accepted:` may follow): `Fixed in <commit>: <what changed>` or
+ * `Declined: <reason>`, the implementer's reply grammar for every review thread. Anything below
+ * the first line is the reader's; the gate reads only line one. */
 function isDisposition(body: string): boolean {
-  return /^(?:Fixed in [0-9a-f]{7,40}|Declined): \S/.test(body.replace(/^[ \t\r\n]+/, ""));
+  const first = (body.replace(/^[ \t\r\n]+/, "").split("\n")[0] ?? "").replace(/\r$/, "");
+  return /^(?:Fixed in [0-9a-f]{7,40}|Declined): \S/.test(first);
 }
 
 /** True when a bot's thread was answered, in its newest submitted comment, by the pull request's

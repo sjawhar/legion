@@ -494,7 +494,8 @@ describe("legion threads resolve", () => {
 
   it("closes a bot's thread on the pull request author's disposition, as the Go CLI does", async () => {
     // The shared vector with threads_test.go: a bot never posts Accepted:, so its thread closes when
-    // the pull request's author answers with `Fixed in <commit>: …` or `Declined: …`; a Legion
+    // the pull request's author answers with `Fixed in <commit>: …` or `Declined: …` as its first
+    // line; a Legion
     // reviewer's thread (its review carries the Legion footer) and a person's are unchanged.
     const author = "legion-implementer[bot]";
     const bot: Opener = { type: "Bot", review: "Automated review" };
@@ -519,6 +520,25 @@ describe("legion threads resolve", () => {
               bot
             ),
             thread("vague", 3, "claude[bot]", { login: author, body: "Addressed it" }, false, bot),
+            thread(
+              "second-line",
+              8,
+              "claude[bot]",
+              { login: author, body: "Thanks for the catch.\nDeclined: the loop is bounded" },
+              false,
+              bot
+            ),
+            thread(
+              "multiline",
+              9,
+              "claude[bot]",
+              {
+                login: author,
+                body: "Declined: the loop is bounded\r\nThe bound is the page size.",
+              },
+              false,
+              bot
+            ),
             thread(
               "not-author",
               4,
@@ -570,11 +590,13 @@ describe("legion threads resolve", () => {
 
     const botReason =
       "not the opener's acceptance or the pull request author's disposition (Fixed in <commit>: … or Declined: …)";
-    expect(github.resolved).toEqual(["fixed", "declined"]);
+    expect(github.resolved).toEqual(["fixed", "declined", "multiline"]);
     expect(lines).toEqual([
       `resolved ${PR}1`,
       `resolved ${PR}2`,
       `left open ${PR}3 — newest reply by ${author} is ${botReason}`,
+      `left open ${PR}8 — newest reply by ${author} is ${botReason}`,
+      `resolved ${PR}9`,
       `left open ${PR}4 — newest reply by legion-reviewer[bot] is ${botReason}`,
       `left open ${PR}5 — newest reply by ${author} is an unsubmitted draft in a pending review`,
       `left open ${PR}6 — newest reply by ${author} is not an acceptance`,

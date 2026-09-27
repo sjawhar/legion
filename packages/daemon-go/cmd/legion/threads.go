@@ -122,9 +122,16 @@ type reviewThread struct {
 // legionFooter marks what a Legion role posts on GitHub (the listener reads the same marker).
 const legionFooter = "<!-- legion:"
 
-// disposition is the pull request author's answer to a bot's thread: `Fixed in <commit>: <what
-// changed>` or `Declined: <reason>`, the implementer's reply grammar for every review thread.
+// disposition is the pull request author's answer to a bot's thread, as its reply's first line:
+// `Fixed in <commit>: <what changed>` or `Declined: <reason>`, the implementer's reply grammar for
+// every review thread. Anything below the first line is the reader's; the gate reads only line one.
 var disposition = regexp.MustCompile(`^(?:Fixed in [0-9a-f]{7,40}|Declined): \S`)
+
+// firstLine is a reply's first line, after the leading space, tab, CR and LF Accepted: may follow.
+func firstLine(body string) string {
+	line, _, _ := strings.Cut(strings.TrimLeft(body, " \t\r\n"), "\n")
+	return strings.TrimSuffix(line, "\r")
+}
 
 // acceptedByOpener is whether the thread's newest submitted comment is its opener's Accepted:.
 func acceptedByOpener(thread reviewThread) bool {
@@ -136,7 +143,7 @@ func acceptedByOpener(thread reviewThread) bool {
 // a CI bot opens could never close.
 func disposedByAuthor(thread reviewThread) bool {
 	return thread.botOpened && thread.author != "" && thread.newestLogin == thread.author && thread.newestLogin != thread.openerLogin &&
-		disposition.MatchString(strings.TrimLeft(thread.newestBody, " \t\r\n"))
+		disposition.MatchString(firstLine(thread.newestBody))
 }
 
 func unresolvedReviewThreads(ctx context.Context, token string, repository ghrepo.Repository, number int) ([]reviewThread, error) {

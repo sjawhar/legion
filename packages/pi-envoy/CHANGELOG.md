@@ -36,7 +36,7 @@
 
 - `legion threads resolve` also resolves a thread a bot account opened (a CI bot's review, whose
   review carries no Legion footer) once the pull request's author answers it, in its newest
-  submitted comment, with `Fixed in <commit>: …` or `Declined: …`. A bot never posts `Accepted:`,
+  submitted comment, with `Fixed in <commit>: …` or `Declined: …` as its first line. A bot never posts `Accepted:`,
   so the merger's zero-open-threads check could never pass on a repository whose CI bot opens
   review threads. A Legion reviewer's thread and a person's still close only on the opener's
   `Accepted:`. The implementer and merger role texts say so (LEGION-208).

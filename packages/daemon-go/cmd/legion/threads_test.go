@@ -183,7 +183,8 @@ func TestThreadsResolveRejectsInvalidArgumentsBeforeGrantRedemption(t *testing.T
 
 // The shared vector with review-threads.test.ts for a bot's threads. A bot never posts Accepted:,
 // so a thread a bot opened closes when the pull request's author answers it, in its newest
-// submitted comment, with a disposition: `Fixed in <commit>: …` or `Declined: …`. A Legion
+// submitted comment, with a disposition as its first line: `Fixed in <commit>: …` or `Declined: …`
+// (a disposition below another first line does not count). A Legion
 // reviewer is an App too, but its review carries the Legion footer, and its threads close only on
 // its own Accepted:; a human's thread is unchanged.
 func TestThreadsResolveClosesABotsThreadOnTheAuthorsDisposition(t *testing.T) {
@@ -198,6 +199,8 @@ func TestThreadsResolveClosesABotsThreadOnTheAuthorsDisposition(t *testing.T) {
 		thread("fixed", "Bot", "claude[bot]", "Automated review", "legion-implementer[bot]", "Fixed in 1a2b3c4: moved the guard", "SUBMITTED"),
 		thread("declined", "Bot", "claude[bot]", "Automated review", "legion-implementer[bot]", " \t\r\nDeclined: the loop is bounded", "SUBMITTED"),
 		thread("vague", "Bot", "claude[bot]", "Automated review", "legion-implementer[bot]", "Addressed it", "SUBMITTED"),
+		thread("second-line", "Bot", "claude[bot]", "Automated review", "legion-implementer[bot]", "Thanks for the catch.\nDeclined: the loop is bounded", "SUBMITTED"),
+		thread("multiline", "Bot", "claude[bot]", "Automated review", "legion-implementer[bot]", "Declined: the loop is bounded\r\nThe bound is the page size.", "SUBMITTED"),
 		thread("not-author", "Bot", "claude[bot]", "Automated review", "legion-reviewer[bot]", "Declined: not ours", "SUBMITTED"),
 		thread("draft", "Bot", "claude[bot]", "Automated review", "legion-implementer[bot]", "Fixed in 1a2b3c4: drafted", "PENDING"),
 		thread("reviewer", "Bot", "legion-reviewer[bot]", "Round 2\n\n<!-- legion: {\"phase\":\"review\"} -->", "legion-implementer[bot]", "Fixed in 1a2b3c4: moved the guard", "SUBMITTED"),
@@ -212,6 +215,8 @@ func TestThreadsResolveClosesABotsThreadOnTheAuthorsDisposition(t *testing.T) {
 	want := "resolved https://github.test/thread/fixed\n" +
 		"resolved https://github.test/thread/declined\n" +
 		"left open https://github.test/thread/vague — newest reply by legion-implementer[bot] is " + bot + "\n" +
+		"left open https://github.test/thread/second-line — newest reply by legion-implementer[bot] is " + bot + "\n" +
+		"resolved https://github.test/thread/multiline\n" +
 		"left open https://github.test/thread/not-author — newest reply by legion-reviewer[bot] is " + bot + "\n" +
 		"left open https://github.test/thread/draft — newest reply by legion-implementer[bot] is an unsubmitted draft in a pending review\n" +
 		"left open https://github.test/thread/reviewer — newest reply by legion-implementer[bot] is not an acceptance\n" +
@@ -219,7 +224,7 @@ func TestThreadsResolveClosesABotsThreadOnTheAuthorsDisposition(t *testing.T) {
 	if stdout != want {
 		t.Fatalf("stdout = %q\nwant     %q", stdout, want)
 	}
-	if got := strings.Join(resolved(), ","); got != "fixed,declined" {
-		t.Fatalf("resolved = %s, want fixed,declined", got)
+	if got := strings.Join(resolved(), ","); got != "fixed,declined,multiline" {
+		t.Fatalf("resolved = %s, want fixed,declined,multiline", got)
 	}
 }

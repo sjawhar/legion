@@ -282,7 +282,7 @@ the round returns to implementing only once the reviewer's handoff is recorded, 
 committed by the review App; in round one the proof human, a GitHub App and so a bot account like a
 CI bot, also opens a file-level review thread with no Legion footer, and the round's correction
 must leave it resolved by the implementer's `legion threads resolve` after the implementer answers
-it with a disposition (`Fixed in <commit>: …` or `Declined: …`) — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
+it with a disposition as its reply's first line (`Fixed in <commit>: …` or `Declined: …`) — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
 implementer's pull request changed, which the run records and requires to be exactly one; the
 correction counts only in that file's patch on the pull request) and reaching testing only on
 that round's own implementer handoff (the daemon's phase record must hold the implementer's
