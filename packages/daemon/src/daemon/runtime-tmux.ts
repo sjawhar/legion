@@ -313,13 +313,12 @@ export class TmuxRuntime implements Runtime {
   /** Opens a fresh window named `name` running `paneArgv`. Both the first session check and the
    * recheck after a window creation step finds the session gone run through `ensureSession`, never
    * directly through `tmux.ensureSession`: concurrent creators therefore share one creation.
-   * A caller that created the session does not retry a failure while that session survives and
-   * the failure names neither shape below; it does retry a `no server running` failure --
-   * including after the new window was created but before its ownership marker could be
-   * recorded, recreating the session before retrying the window open -- and a `no such window`
-   * failure, where the just-opened window's own pane died so fast its marker never reached it
-   * while the session survived (LEGION-189): there the session needs no recreation, and the
-   * retry runs directly against it. */
+   * A caller that created the session does not retry a failure while that session survives; it
+   * does retry a `no server running` failure, including after the new window was created but
+   * before its ownership marker could be recorded. A window whose own pane exited before the
+   * marker reached it (`no such window`) is never retried: the pane's command already ran once,
+   * and retrying would run it again (LEGION-189, closed as delivered by #1204 -- see that PR's
+   * body for why a dead launch must be reported, not silently relaunched). */
   private async openWindow(
     name: string,
     paneArgv: string[]
@@ -337,17 +336,9 @@ export class TmuxRuntime implements Runtime {
       );
     } catch (firstError) {
       const first = firstError instanceof Error ? firstError.message : String(firstError);
-      const windowGone = tmux.NO_SUCH_WINDOW_STDERR.test(first);
-      if (initial.createdByCaller && !tmux.NO_SERVER_STDERR.test(first) && !windowGone) {
-        throw firstError;
-      }
+      if (initial.createdByCaller && !tmux.NO_SERVER_STDERR.test(first)) throw firstError;
       const recovery = await this.ensureSession();
-      // A `no such window` failure's own evidence is the session surviving: recovery finds it
-      // present (`sessionCreated` false) and no recreation is needed, so that case retries
-      // regardless. Any other failure only retries when this recheck actually recreated the
-      // session -- proof the first failure really was the session/server dying, not some
-      // unrelated bug the same still-live session would just reproduce.
-      if (!recovery.sessionCreated && !windowGone) throw firstError;
+      if (!recovery.sessionCreated) throw firstError;
       try {
         const window = await tmux.openWindow(
           this.deps.tmux,
@@ -358,17 +349,13 @@ export class TmuxRuntime implements Runtime {
           recovery.createdByCaller
         );
         console.error(
-          recovery.sessionCreated
-            ? `[legion] tmux new-window for ${name} failed after has-session reported ${session} present, and the session was gone by the time the window opened (${first}); recreated it and opened the window on a second attempt`
-            : `[legion] tmux window ownership marker for ${name} failed because its window vanished while ${session} survived (${first}); opened a fresh window on the same session on a second attempt`
+          `[legion] tmux new-window for ${name} failed after has-session reported ${session} present, and the session was gone by the time the window opened (${first}); recreated it and opened the window on a second attempt`
         );
         return window;
       } catch (retryError) {
         const retry = retryError instanceof Error ? retryError.message : String(retryError);
         throw new Error(
-          recovery.sessionCreated
-            ? `${retry} on the second attempt, after has-session reported ${session} present and then gone (first attempt: ${first})`
-            : `${retry} on the second attempt against the same still-live session ${session} (first attempt: ${first})`
+          `${retry} on the second attempt, after has-session reported ${session} present and then gone (first attempt: ${first})`
         );
       }
     }

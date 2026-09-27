@@ -1159,30 +1159,6 @@ describe("TmuxRuntime", () => {
     expect(server.commands.filter(isBootstrapKill)).toHaveLength(2);
   });
 
-  it("retries the window open on the same still-live session when the just-opened window vanishes before its ownership marker, needing no session recreation", async () => {
-    const harness = await tmuxHarness();
-    const { server } = harness;
-    server.windowOwnershipResult = {
-      exitCode: 1,
-      stderr: "no such window: @42",
-    };
-
-    const locator = await harness.runtime.spawn("root", harness.makeSpec("architect"));
-
-    expect(locator).toMatchObject({
-      runtime: "tmux",
-      tmuxWindowId: "@43",
-      tmuxPaneId: "%2",
-    });
-    const verbs = server.commands.map(verb);
-    expect(verbs.filter((value) => value === "has-session")).toHaveLength(2);
-    // The session never died: one creation only, and the retry -- against the same session --
-    // never re-kills the bootstrap window a first attempt already cleaned up.
-    expect(verbs.filter((value) => value === "new-session")).toHaveLength(1);
-    expect(verbs.filter((value) => value === "new-window")).toHaveLength(2);
-    expect(server.commands.filter(isBootstrapKill)).toHaveLength(1);
-  });
-
   it("serializes recovery after a new-window failure with a concurrent first spawn, so both roots open windows after one recreation", async () => {
     const harness = await racingHarness();
     const { server } = harness;
