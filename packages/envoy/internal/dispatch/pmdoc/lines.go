@@ -42,21 +42,26 @@ var bareMarkerLine = regexp.MustCompile(`^ {0,3}(?:[-+*]|[0-9]{1,9}[.)])[ \t]*$`
 
 // emptyItemGuard is a list parser that opens no list whose first item could not interrupt a
 // paragraph - an empty item, a marker with nothing after it on its line, or an ordered item
-// numbered from other than one - where it would, as the browser editor's parser reads it. Goldmark
-// refuses one only while the paragraph is the block last opened; that parser also refuses one
-// opening a container on a line that already interrupted the paragraph, so `- a\n  - -` is an item
-// holding the text `-`, `- a\n  > -` a quote holding it, and `a\n> 2. b` a quote holding the
-// paragraph `2. b`.
+// numbered anything but a lone `1` (orderedCannotInterrupt) - where it would, as the browser
+// editor's parser reads it. Goldmark refuses one only while the paragraph is the block last opened,
+// and there lets an item numbered `01.` interrupt it; that parser also refuses one opening a
+// container on a line that already interrupted the paragraph, so `- a\n  - -` is an item holding
+// the text `-`, `- a\n  > -` a quote holding it, and `a\n> 2. b` a quote holding the paragraph
+// `2. b`.
 type emptyItemGuard struct{ parser.BlockParser }
 
 func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	line, segment := reader.PeekLine()
-	if !bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && !orderedFromOtherThanOne(line) {
+	if !bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && !orderedCannotInterrupt(line) {
 		return p.BlockParser.Open(parent, reader, pc)
 	}
-	// The line opens a list whose first item could not interrupt a paragraph: an empty one, or an
-	// ordered one numbered from other than one. The browser editor's parser opens none on a line
-	// that interrupts a paragraph, nor after an indented code block, blank lines between or not.
+	// The line opens a list whose first item could not interrupt a paragraph. The browser editor's
+	// parser opens none on a line that interrupts a paragraph, whether the paragraph is the block
+	// last opened or the line opens a container first, nor after an indented code block, blank
+	// lines between or not.
+	if last, paragraph := pc.LastOpenedBlock().Node.(*ast.Paragraph); paragraph && last.Parent() == parent {
+		return nil, parser.NoChildren
+	}
 	if parent.ChildCount() == 0 && interruptsParagraph(parent, reader.Source(), lineStart(reader.Source(), segment.Start)) {
 		return nil, parser.NoChildren
 	}
@@ -69,11 +74,12 @@ func (p emptyItemGuard) Open(parent ast.Node, reader gmtext.Reader, pc parser.Co
 // orderedMarkerStart is an ordered list marker opening a line, its number captured.
 var orderedMarkerStart = regexp.MustCompile(`^ {0,3}([0-9]{1,9})[.)](?:[ \t]|\n|$)`)
 
-// orderedFromOtherThanOne reports whether line opens an ordered list item numbered from other than
-// one.
-func orderedFromOtherThanOne(line []byte) bool {
+// orderedCannotInterrupt reports whether line opens an ordered list item the browser editor's
+// parser lets interrupt no paragraph: one numbered anything but a lone `1`, so `01.`, `001)` and
+// `10.` as well as `2.`, where goldmark takes the number's value and lets `01.` interrupt one.
+func orderedCannotInterrupt(line []byte) bool {
 	match := orderedMarkerStart.FindSubmatch(line)
-	return match != nil && strings.TrimLeft(string(match[1]), "0") != "1"
+	return match != nil && string(match[1]) != "1"
 }
 
 // tabIndented is a block parser reading a line whose indentation holds a tab as CommonMark and the

@@ -14433,7 +14433,7 @@
   },
   {
     "name": "ordered-list-prefixes",
-    "markdown": "1\\. not a list\n2\\) also not a list\n\n- A tight item.\n  >\n  > 2. Quoted, numbered from two.\n- Another.\n  >\n  > > 3. Two quotes down.\n- An empty item.\n  >\n  > -\n",
+    "markdown": "1\\. not a list\n2\\) also not a list\n\n- A tight item.\n  >\n  > 2. Quoted, numbered from two.\n- Another.\n  >\n  > > 3. Two quotes down.\n- An empty item.\n  >\n  > -\n\nA paragraph line\n01. that no list interrupts.\n\nAnother\n001) likewise.\n\nAnd one\n1. that a list interrupts.\n\n> Quoted\n> 01. text.\n\nIn a definition[^o]:\n\n> [^o]: a\n>     01. b\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -14656,11 +14656,152 @@
               ]
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A paragraph line 01. that no list interrupts."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000023"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Another 001) likewise."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000024"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "And one"
+            }
+          ]
+        },
+        {
+          "type": "ordered_list",
+          "attrs": {
+            "order": 1,
+            "spread": false,
+            "blockId": "b-000025"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000026"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000027"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "that a list interrupts."
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000028"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000029"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "Quoted 01. text."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000030"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "In a definition"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "o"
+              }
+            },
+            {
+              "type": "text",
+              "text": ":"
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000031"
+          },
+          "content": [
+            {
+              "type": "footnote_definition",
+              "attrs": {
+                "label": "o",
+                "blockId": "b-000032"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000033"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "a 01. b"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AU4BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEgMS4gbm90IGEgbGlzdCAyKSBhbHNvIG5vdCBhIGxpc3QoAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMLYnVsbGV0X2xpc3QHAAEjAwlsaXN0X2l0ZW0HAAEkAwlwYXJhZ3JhcGgHAAElBgQAASYNQSB0aWdodCBpdGVtLigAASUHYmxvY2tJZAF3CGItMDAwMDA0hwElAwpibG9ja3F1b3RlBwABNQMMb3JkZXJlZF9saXN0BwABNgMJbGlzdF9pdGVtBwABNwMJcGFyYWdyYXBoBwABOAYEAAE5GlF1b3RlZCwgbnVtYmVyZWQgZnJvbSB0d28uKAABOAdibG9ja0lkAXcIYi0wMDAwMDgoAAE3BWxhYmVsAXcD4oCiKAABNwhsaXN0VHlwZQF3BmJ1bGxldCgAATcGc3ByZWFkAXkoAAE3B2Jsb2NrSWQBdwhiLTAwMDAwNygAATYFb3JkZXIBfQIoAAE2BnNwcmVhZAF5KAABNgdibG9ja0lkAXcIYi0wMDAwMDYoAAE1B2Jsb2NrSWQBdwhiLTAwMDAwNSgAASQFbGFiZWwBdwPigKIoAAEkCGxpc3RUeXBlAXcGYnVsbGV0KAABJAZzcHJlYWQBeSgAASQHYmxvY2tJZAF3CGItMDAwMDAzhwEkAwlsaXN0X2l0ZW0HAAFhAwlwYXJhZ3JhcGgHAAFiBgQAAWMIQW5vdGhlci4oAAFiB2Jsb2NrSWQBdwhiLTAwMDAxMIcBYgMKYmxvY2txdW90ZQcAAW0DCmJsb2NrcXVvdGUHAAFuAwxvcmRlcmVkX2xpc3QHAAFvAwlsaXN0X2l0ZW0HAAFwAwlwYXJhZ3JhcGgHAAFxBgQAAXIQVHdvIHF1b3RlcyBkb3duLigAAXEHYmxvY2tJZAF3CGItMDAwMDE1KAABcAVsYWJlbAF3A+KAoigAAXAIbGlzdFR5cGUBdwZidWxsZXQoAAFwBnNwcmVhZAF5KAABcAdibG9ja0lkAXcIYi0wMDAwMTQoAAFvBW9yZGVyAX0DKAABbwZzcHJlYWQBeSgAAW8HYmxvY2tJZAF3CGItMDAwMDEzKAABbgdibG9ja0lkAXcIYi0wMDAwMTIoAAFtB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAWEFbGFiZWwBdwPigKIoAAFhCGxpc3RUeXBlAXcGYnVsbGV0KAABYQZzcHJlYWQBeSgAAWEHYmxvY2tJZAF3CGItMDAwMDA5hwFhAwlsaXN0X2l0ZW0HAAGRAQMJcGFyYWdyYXBoBwABkgEGBAABkwEOQW4gZW1wdHkgaXRlbS4oAAGSAQdibG9ja0lkAXcIYi0wMDAwMTeHAZIBAwpibG9ja3F1b3RlBwABowEDC2J1bGxldF9saXN0BwABpAEDCWxpc3RfaXRlbQcAAaUBAwlwYXJhZ3JhcGgoAAGmAQdibG9ja0lkAXcIYi0wMDAwMjEoAAGlAQVsYWJlbAF3A+KAoigAAaUBCGxpc3RUeXBlAXcGYnVsbGV0KAABpQEGc3ByZWFkAXkoAAGlAQdibG9ja0lkAXcIYi0wMDAwMjAoAAGkAQZzcHJlYWQBeSgAAaQBB2Jsb2NrSWQBdwhiLTAwMDAxOSgAAaMBB2Jsb2NrSWQBdwhiLTAwMDAxOCgAAZEBBWxhYmVsAXcD4oCiKAABkQEIbGlzdFR5cGUBdwZidWxsZXQoAAGRAQZzcHJlYWQBeSgAAZEBB2Jsb2NrSWQBdwhiLTAwMDAxNigAASMGc3ByZWFkAXkoAAEjB2Jsb2NrSWQBdwhiLTAwMDAwMgA=",
-    "rendered_by_milkdown": "1\\. not a list 2) also not a list\n\n* A tight item.\n  > 2. Quoted, numbered from two.\n* Another.\n  > > 3. Two quotes down.\n* An empty item.\n  > *\n"
+    "yjs_update_v1_b64": "AX4BAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEgMS4gbm90IGEgbGlzdCAyKSBhbHNvIG5vdCBhIGxpc3QoAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMLYnVsbGV0X2xpc3QHAAEjAwlsaXN0X2l0ZW0HAAEkAwlwYXJhZ3JhcGgHAAElBgQAASYNQSB0aWdodCBpdGVtLigAASUHYmxvY2tJZAF3CGItMDAwMDA0hwElAwpibG9ja3F1b3RlBwABNQMMb3JkZXJlZF9saXN0BwABNgMJbGlzdF9pdGVtBwABNwMJcGFyYWdyYXBoBwABOAYEAAE5GlF1b3RlZCwgbnVtYmVyZWQgZnJvbSB0d28uKAABOAdibG9ja0lkAXcIYi0wMDAwMDgoAAE3BWxhYmVsAXcD4oCiKAABNwhsaXN0VHlwZQF3BmJ1bGxldCgAATcGc3ByZWFkAXkoAAE3B2Jsb2NrSWQBdwhiLTAwMDAwNygAATYFb3JkZXIBfQIoAAE2BnNwcmVhZAF5KAABNgdibG9ja0lkAXcIYi0wMDAwMDYoAAE1B2Jsb2NrSWQBdwhiLTAwMDAwNSgAASQFbGFiZWwBdwPigKIoAAEkCGxpc3RUeXBlAXcGYnVsbGV0KAABJAZzcHJlYWQBeSgAASQHYmxvY2tJZAF3CGItMDAwMDAzhwEkAwlsaXN0X2l0ZW0HAAFhAwlwYXJhZ3JhcGgHAAFiBgQAAWMIQW5vdGhlci4oAAFiB2Jsb2NrSWQBdwhiLTAwMDAxMIcBYgMKYmxvY2txdW90ZQcAAW0DCmJsb2NrcXVvdGUHAAFuAwxvcmRlcmVkX2xpc3QHAAFvAwlsaXN0X2l0ZW0HAAFwAwlwYXJhZ3JhcGgHAAFxBgQAAXIQVHdvIHF1b3RlcyBkb3duLigAAXEHYmxvY2tJZAF3CGItMDAwMDE1KAABcAVsYWJlbAF3A+KAoigAAXAIbGlzdFR5cGUBdwZidWxsZXQoAAFwBnNwcmVhZAF5KAABcAdibG9ja0lkAXcIYi0wMDAwMTQoAAFvBW9yZGVyAX0DKAABbwZzcHJlYWQBeSgAAW8HYmxvY2tJZAF3CGItMDAwMDEzKAABbgdibG9ja0lkAXcIYi0wMDAwMTIoAAFtB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAWEFbGFiZWwBdwPigKIoAAFhCGxpc3RUeXBlAXcGYnVsbGV0KAABYQZzcHJlYWQBeSgAAWEHYmxvY2tJZAF3CGItMDAwMDA5hwFhAwlsaXN0X2l0ZW0HAAGRAQMJcGFyYWdyYXBoBwABkgEGBAABkwEOQW4gZW1wdHkgaXRlbS4oAAGSAQdibG9ja0lkAXcIYi0wMDAwMTeHAZIBAwpibG9ja3F1b3RlBwABowEDC2J1bGxldF9saXN0BwABpAEDCWxpc3RfaXRlbQcAAaUBAwlwYXJhZ3JhcGgoAAGmAQdibG9ja0lkAXcIYi0wMDAwMjEoAAGlAQVsYWJlbAF3A+KAoigAAaUBCGxpc3RUeXBlAXcGYnVsbGV0KAABpQEGc3ByZWFkAXkoAAGlAQdibG9ja0lkAXcIYi0wMDAwMjAoAAGkAQZzcHJlYWQBeSgAAaQBB2Jsb2NrSWQBdwhiLTAwMDAxOSgAAaMBB2Jsb2NrSWQBdwhiLTAwMDAxOCgAAZEBBWxhYmVsAXcD4oCiKAABkQEIbGlzdFR5cGUBdwZidWxsZXQoAAGRAQZzcHJlYWQBeSgAAZEBB2Jsb2NrSWQBdwhiLTAwMDAxNigAASMGc3ByZWFkAXkoAAEjB2Jsb2NrSWQBdwhiLTAwMDAwMocBIwMJcGFyYWdyYXBoBwABtQEGBAABtgEtQSBwYXJhZ3JhcGggbGluZSAwMS4gdGhhdCBubyBsaXN0IGludGVycnVwdHMuKAABtQEHYmxvY2tJZAF3CGItMDAwMDIyhwG1AQMJcGFyYWdyYXBoBwAB5QEGBAAB5gEWQW5vdGhlciAwMDEpIGxpa2V3aXNlLigAAeUBB2Jsb2NrSWQBdwhiLTAwMDAyM4cB5QEDCXBhcmFncmFwaAcAAf4BBgQAAf8BB0FuZCBvbmUoAAH+AQdibG9ja0lkAXcIYi0wMDAwMjSHAf4BAwxvcmRlcmVkX2xpc3QHAAGIAgMJbGlzdF9pdGVtBwABiQIDCXBhcmFncmFwaAcAAYoCBgQAAYsCF3RoYXQgYSBsaXN0IGludGVycnVwdHMuKAABigIHYmxvY2tJZAF3CGItMDAwMDI3KAABiQIFbGFiZWwBdwPigKIoAAGJAghsaXN0VHlwZQF3BmJ1bGxldCgAAYkCBnNwcmVhZAF5KAABiQIHYmxvY2tJZAF3CGItMDAwMDI2KAABiAIFb3JkZXIBfQEoAAGIAgZzcHJlYWQBeSgAAYgCB2Jsb2NrSWQBdwhiLTAwMDAyNYcBiAIDCmJsb2NrcXVvdGUHAAGrAgMJcGFyYWdyYXBoBwABrAIGBAABrQIQUXVvdGVkIDAxLiB0ZXh0LigAAawCB2Jsb2NrSWQBdwhiLTAwMDAyOSgAAasCB2Jsb2NrSWQBdwhiLTAwMDAyOIcBqwIDCXBhcmFncmFwaAcAAcACBgQAAcECD0luIGEgZGVmaW5pdGlvbocBwQIDEmZvb3Rub3RlX3JlZmVyZW5jZSgAAdECBWxhYmVsAXcBb4cB0QIGBAAB0wIBOigAAcACB2Jsb2NrSWQBdwhiLTAwMDAzMIcBwAIDCmJsb2NrcXVvdGUHAAHWAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAdcCAwlwYXJhZ3JhcGgHAAHYAgYEAAHZAgdhIDAxLiBiKAAB2AIHYmxvY2tJZAF3CGItMDAwMDMzKAAB1wIFbGFiZWwBdwFvKAAB1wIHYmxvY2tJZAF3CGItMDAwMDMyKAAB1gIHYmxvY2tJZAF3CGItMDAwMDMxAA==",
+    "rendered_by_milkdown": "1\\. not a list 2) also not a list\n\n* A tight item.\n  > 2. Quoted, numbered from two.\n* Another.\n  > > 3. Two quotes down.\n* An empty item.\n  > *\n\nA paragraph line 01. that no list interrupts.\n\nAnother 001) likewise.\n\nAnd one\n\n1. that a list interrupts.\n\n> Quoted 01. text.\n\nIn a definition[^o]:\n\n> [^o]: a 01. b\n"
   },
   {
     "name": "paragraphs",

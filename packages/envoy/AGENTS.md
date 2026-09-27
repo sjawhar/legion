@@ -246,9 +246,8 @@ break is itself `INVALID_OP` when the matched textblock is a heading or a table 
 line break inside a code span or inline HTML there ends it too, and the replace is refused because
 the block would read back as blocks of another shape (`refuseReshapedReplacement`). A bare
 newline is a soft break, which renders as a space and reaches no line start; an ordered marker
-whose start number is not 1 cannot interrupt a paragraph, and leading zeros do not change that
-number, so `01.` and `001)` are refused with `1.`, while `02.`, `10.` and a run of zeros past the
-nine digits a start number may have (`0000000001.`) are not; and marked text opens with its
+interrupts a paragraph only numbered a lone `1`, as the browser editor's parser reads it, so `1.`
+and `1)` are refused, while `01.`, `001)`, `02.` and `10.` are not; and marked text opens with its
 mark's delimiter, not the marker — none of the three is refused. A batch that leaves the document's
 semantic identity unchanged — `nodeToken` over the whole tree, inline marks included — mints no
 version, named or not, and the response carries `changed: false` with `unchanged_ops` naming each
@@ -703,7 +702,10 @@ item cannot be written so, since its marker's line would carry the next block as
 and the browser reads no other form of it as a task: a task item whose emptied first paragraph has
 another block after it does not render, and an edit that would leave one is refused.
 An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
-whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
+whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`. Nor is
+an ordered item numbered anything but a lone `1` (`orderedCannotInterrupt`): goldmark takes the
+number's value and so lets `01.` interrupt a paragraph, where that parser reads `a` over `01. b` as one
+paragraph.
 
 Every document's lists are spaced as that parser reads them (`browserListSpacing`): outside
 quotes and footnote definitions a blank line between two items spreads the list, and one between
