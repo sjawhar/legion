@@ -121,6 +121,26 @@ func TestASecondCloseTellsTheArchitectOnceWhicheverOrderItsReopenArrives(t *test
 	}
 }
 
+// A close with no clock (from a listener that did not carry updated_at) cannot be newer than a
+// closed record, so it is a redelivery: the pull request stays closed and the architect is told
+// nothing more.
+func TestAClocklessCloseOfAClosedPullRequestTellsTheArchitectNothing(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-c",
+		HeadUpdatedAt: lateApplied, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+	if _, err := intake.ApplyFact(context.Background(), pool, "github", "close", lateClosed("head-c", time.Time{}), testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact close: %v", err)
+	}
+	var state record.PullRequestState
+	if err := pool.QueryRow(t.Context(), "select state from pull_requests where issue = 'LEGION-208'").Scan(&state); err != nil {
+		t.Fatalf("read the pull request: %v", err)
+	}
+	if got := architectNotices(t, pool); state != record.PullRequestClosed || len(got) != 0 {
+		t.Fatalf("the pull request is %s, with architect notices %+v; want closed, and none", state, got)
+	}
+}
+
 // GitHub never closes a merged pull request, so a close observed after the merge is older than
 // it, and the merge carries no clock that could fence it: a close of a pull request recorded
 // merged changes nothing and tells the architect nothing.
