@@ -3,12 +3,12 @@ import { Link } from "react-router-dom";
 
 import type { InboxRow } from "../../api/types";
 import {
-  askUrgencyHighBorder,
-  calloutWarningBg,
-  calloutWarningText,
+  borderDefault,
+  surfaceMutedBg,
   surfaceMutedStrongBg,
   textSecondaryHoverToPrimary,
   textSecondaryOnSurface,
+  textSecondaryOnSurfaceMuted,
 } from "../../theme/classes";
 import { formatAskAge } from "./ask-age";
 import { isSnoozed } from "./snooze";
@@ -58,11 +58,13 @@ export function BlockedOnYou({
   });
 
   const count = waiting.length;
-  // An alert, not a sentence: the whole strip is the target, and its left accent is the same
-  // amber a high-urgency ask card carries, so one hue means one thing across the screen.
+  // A count of every waiting ask, not one urgency, so the strip stays structural: the spec
+  // reserves the urgency hues for urgency and priority. `w-full` is load-bearing - below
+  // 1280 px an unlayered `a:not(.prose a) { display: inline-flex }` in styles.css beats
+  // Tailwind's `block`, and without it the strip sits beside the Mine/Everyone switch.
   return (
     <Link
-      className={`block rounded-lg border-l-4 px-3 py-2 text-sm font-medium ${calloutWarningBg} ${askUrgencyHighBorder} ${calloutWarningText}`}
+      className={`block w-full rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}
       to="/"
     >
       Blocked on you: {count} {count === 1 ? "item" : "items"}, oldest{" "}

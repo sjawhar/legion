@@ -73,18 +73,21 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
     }
 
     const blockingCard = page.getByTestId(`ask-${blocking.id}`);
-    // Session identifiers come first; the tmux target keeps its lower-priority slot, and the
-    // ask's own reference closes the line.
+    // The ask's own reference is on the provenance line; the session's own handles - its ID,
+    // its title, its tmux target - fold behind the author chip, so the line fits a phone and a
+    // 280 px margin without pushing the reference out of reach (LEGION-67).
     const reference = `dispatch://${issue.key}/ask/${blocking.id}`;
+    await expect(blockingCard.getByRole("button", { name: /^Copy / })).toHaveCount(1);
+    await blockingCard.getByRole("button", { expanded: false, name: /e2e-session/ }).click();
     const copyButtons = blockingCard.getByRole("button", { name: /^Copy / });
     await expect(copyButtons).toHaveCount(4);
     expect(
       await copyButtons.evaluateAll((buttons) => buttons.map((button) => button.ariaLabel))
     ).toEqual([
+      `Copy reference ${reference}`,
       "Copy session ID e2e-session",
       "Copy session title e2e-session-title",
       "Copy tmux target dev:4.7",
-      `Copy reference ${reference}`,
     ]);
     await blockingCard.getByRole("button", { name: "Copy session ID e2e-session" }).click();
     await expect(blockingCard.getByText("Copied", { exact: true })).toBeVisible();

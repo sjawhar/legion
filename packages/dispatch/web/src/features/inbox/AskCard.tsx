@@ -11,6 +11,7 @@ import {
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
+import { ChevronIcon } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import {
@@ -30,6 +31,7 @@ import {
   primaryButtonDisabled,
   primaryButtonEnabledHoverBg,
   surfaceBg,
+  textMutedHoverToSecondary,
   textMutedOnSurface,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
@@ -185,6 +187,7 @@ export function AskCard({
     onAnswered,
   });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
+  const [handlesOpen, setHandlesOpen] = useState(false);
   const [referencesOpen, setReferencesOpen] = useState(false);
   // One page can host the same ask twice (a decision block and the margin sheet), so the
   // panel each control names is this instance's.
@@ -219,6 +222,10 @@ export function AskCard({
   const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
   const sessionTitle = sessionAuthor?.origin?.session_title?.trim();
   const tmuxTarget = sessionAuthor?.origin?.tmux;
+  const handleCount =
+    (sessionAuthor === undefined ? 0 : 1) +
+    (sessionTitle === undefined || sessionTitle === "" ? 0 : 1) +
+    (tmuxTarget === undefined ? 0 : 1);
   const hasUrgencyNotch =
     !inBlock && (displayedAsk.urgency === "blocking" || displayedAsk.urgency === "high");
   // The thread's own "still open?" wording must track the post-answer ask, not the possibly
@@ -399,13 +406,15 @@ export function AskCard({
             <MarkdownBody markdown={displayedAsk.question} />
           </div>
         )}
-        {/* One provenance line under the question: whose turn it is first, because that is the
-            only part a reader acts on, then who asked, when, and the copy handles. It stays one
-            row at every width - the copy controls keep their 44 px tap target, so wrapping would
-            cost a second 44 px row of chrome - and scrolls sideways inside the card instead,
-            the same rule the issue header's metadata rail follows. */}
-        <p
-          className={`mt-1.5 flex items-center gap-x-1.5 overflow-x-auto text-xs whitespace-nowrap ${textMutedOnSurface}`}
+        {/* One provenance line under the question, in the spec's decided conversation grammar:
+            whose turn it is (the only part a reader acts on), who asked, when, and the ask's
+            own reference. The session's own handles - its ID, its title, its tmux target - are
+            chrome a reader wants perhaps once a week, so they fold behind the author chip and
+            open onto their own row. That keeps the line inside the card at 390 px and in a
+            280 px margin, where a single row could not hold five copy controls without pushing
+            the reference out of reach. */}
+        <div
+          className={`mt-1.5 flex flex-wrap items-center gap-x-1.5 text-xs ${textMutedOnSurface}`}
         >
           {turnLabel === null ? null : (
             <span
@@ -418,31 +427,44 @@ export function AskCard({
           {turnLabel === null ? null : <span aria-hidden="true">·</span>}
           {/* A block ask the server indexed with no pending author has an empty label; it still
               says when it was asked rather than opening with a dangling separator. */}
-          <span className="shrink-0">{authorLabel === "" ? "asked" : authorLabel}</span>
-          {sessionAuthor === undefined ? null : (
-            <CopyButton value={sessionAuthor.id} what="session ID">
-              ID
-            </CopyButton>
-          )}
-          {sessionTitle === undefined || sessionTitle === "" ? null : (
-            <CopyButton value={sessionTitle} what="session title">
-              title
-            </CopyButton>
+          {handleCount === 0 ? (
+            <span className="min-w-0 truncate">{authorLabel === "" ? "asked" : authorLabel}</span>
+          ) : (
+            <button
+              aria-expanded={handlesOpen}
+              className={`flex min-w-0 items-center gap-1 ${textMutedHoverToSecondary}`}
+              onClick={() => setHandlesOpen((open) => !open)}
+              type="button"
+            >
+              <span className="min-w-0 truncate">{authorLabel === "" ? "asked" : authorLabel}</span>
+              <ChevronIcon expanded={handlesOpen} />
+            </button>
           )}
           <span className="inline-flex shrink-0 items-center gap-x-1">
             <span aria-hidden="true">·</span>
             <Timestamp at={displayedAsk.created_at} />
           </span>
-          {tmuxTarget === undefined ? null : (
-            <span className="inline-flex shrink-0 items-center gap-x-1">
-              <span aria-hidden="true">·</span>
-              <CopyButton value={tmuxTarget} what="tmux target">
-                {tmuxTarget}
-              </CopyButton>
+          {reference === undefined ? null : <CopyRefButton route={reference} />}
+          {!handlesOpen ? null : (
+            <span className="flex basis-full flex-wrap items-center gap-x-1.5">
+              {sessionAuthor === undefined ? null : (
+                <CopyButton value={sessionAuthor.id} what="session ID">
+                  ID
+                </CopyButton>
+              )}
+              {sessionTitle === undefined || sessionTitle === "" ? null : (
+                <CopyButton value={sessionTitle} what="session title">
+                  title
+                </CopyButton>
+              )}
+              {tmuxTarget === undefined ? null : (
+                <CopyButton value={tmuxTarget} what="tmux target">
+                  {tmuxTarget}
+                </CopyButton>
+              )}
             </span>
           )}
-          {reference === undefined ? null : <CopyRefButton route={reference} />}
-        </p>
+        </div>
         <AskEditHistory ask={displayedAsk} edits={edits} />
         {referencedByNode}
       </div>

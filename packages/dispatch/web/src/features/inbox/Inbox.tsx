@@ -122,11 +122,13 @@ function AssignToMe({
         {write.pending ? "Assigning…" : "Assign to me"}
       </button>
       {write.failed ? (
-        <QueryError
-          message={write.error ?? `Could not assign ${issueKey} to you.`}
-          onRetry={write.retry}
-          retrying={write.pending}
-        />
+        <div className="basis-full">
+          <QueryError
+            message={write.error ?? `Could not assign ${issueKey} to you.`}
+            onRetry={write.retry}
+            retrying={write.pending}
+          />
+        </div>
       ) : null}
     </>
   );
@@ -180,16 +182,17 @@ function InboxItem({
       tabIndex={-1}
     >
       {/* One line: the issue this question belongs to on the left, the controls that defer or
-          reroute it on the right. Both stay on one line at every width - the title truncates
-          rather than pushing the controls into a second row. */}
-      <div className="mb-1.5 flex items-center gap-2">
-        <div className="flex min-w-0 flex-1 items-baseline gap-2">
+          reroute it on the right. It wraps rather than overlapping - a refusal from Snooze or
+          Assign to me is a full-width row inside the right group, so it never draws over the
+          issue key - and the reply chip truncates rather than squeezing the title away. */}
+      <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <div className="flex min-w-0 grow basis-48 items-baseline gap-2">
           {ask.document === undefined ? (
             owner === null ? (
               <p className={`truncate text-sm ${textMutedOnCanvas}`}>{title}</p>
             ) : (
               <Link
-                className={`flex min-w-0 items-baseline gap-2 text-sm ${linkText} ${linkHoverText}`}
+                className={`flex min-w-0 grow items-baseline gap-2 text-sm ${linkText} ${linkHoverText}`}
                 data-inbox-owner=""
                 to={buildIssuePath({ id: ask.id, key: owner, kind: "ask" })}
                 {...referenceTriggerProps({ key: owner, kind: "issue" })}
@@ -200,7 +203,7 @@ function InboxItem({
             )
           ) : (
             <Link
-              className={`min-w-0 truncate text-sm font-semibold ${linkText} ${linkHoverText}`}
+              className={`min-w-0 grow truncate text-sm font-semibold ${linkText} ${linkHoverText}`}
               data-inbox-owner=""
               to={buildProjectPath({
                 item: { id: ask.id, kind: "ask" },
@@ -217,9 +220,11 @@ function InboxItem({
               {ask.document.project} · {ask.document.name}
             </Link>
           )}
-          <InboxRowChip ask={ask} />
+          <span className="min-w-0 max-w-[40%] shrink truncate">
+            <InboxRowChip ask={ask} />
+          </span>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 flex-wrap items-center gap-1">
           {ask.issue_key === null ? null : (
             <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
           )}
