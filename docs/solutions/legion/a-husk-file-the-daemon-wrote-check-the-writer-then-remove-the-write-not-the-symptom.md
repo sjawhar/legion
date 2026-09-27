@@ -188,9 +188,10 @@ directory layout; that layout is a jj-version detail.
   neither got a `pull_request` run; `legion gh -- pr view 1039 --json mergeable,mergeStateStatus`
   said `CONFLICTING`/`DIRTY` (main had moved four commits under the branch). Read mergeability first
   ([conflicting-pr-gets-no-pull-request-ci](../github/conflicting-pr-gets-no-pull-request-ci.md)).
-  The rebase (`jj rebase -s 'roots(main@origin..@)' -d main@origin`, whole chain) was done while the
-  implementer phase was still active and no other role had been spawned — the one window in which
-  the implementer may rebase without asking
+  The rebase (`jj rebase -s 'roots(main@origin..@)' -d main@origin`, whole chain; superseded
+  2026-09-27 by LEGION-118 — resolve with a forward merge instead, `skills/legion-worker/SKILL.md`)
+  was done while the implementer phase was still active and no other role had been spawned — the
+  one window in which the implementer may rebase without asking
   ([completed-phase-touches-nothing-and-conflicting-is-reported-not-rebased](completed-phase-touches-nothing-and-conflicting-is-reported-not-rebased.md)).
 - **A conflict in a shared test file is resolved in the commit that owns the lines.** Main's new
   concurrent-clone test needed `readFile`, which the fix commit had dropped from the import; main's

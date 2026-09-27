@@ -74,8 +74,9 @@ Tell the architect before rebasing and say why the `MERGEABLE` read does not app
 ```bash
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch
 # 1. before-fingerprint at the current tip (see below for the fileset), keep the stripped diff
-# 2. the whole chain, so other roles' handoff commits move with yours
-jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin
+# 2. a forward merge, not a rewrite (LEGION-118: a rebase rooted at the chain's fork point also
+#    rewrites another tree's stacked branch; a merge is a genuine fast-forward instead)
+jj -R "$LEGION_WORKSPACE" new @ main@origin -m "merge: resolve conflict against main@origin"
 bun install --frozen-lockfile                      # main's lockfile may have moved
 cat .bun-version; bun --version                    # both 1.3.14 on the box; else: mise x bun@<pin> -- bun run build
 cd packages/claude-envoy

@@ -58,6 +58,11 @@ Rules that fall out:
 
 ## 2. Conflict-only rebase: resolve commit by commit, keep both sides, stop at a real change
 
+**Superseded 2026-09-27 (LEGION-118):** a rebase rooted at the branch's fork point also rewrites
+another tree's branch when one is stacked on it; resolve with a forward merge instead
+(`jj new @ main@origin -m "<message>"`, `skills/legion-worker/SKILL.md`). What follows records
+this PR's earlier workflow.
+
 `main` moved 40 commits while #980 waited (LEGION-21's runtime boundary, LEGION-30's idle-retire
 config key, #978's CLI change). `jj rebase -s <plan handoff> -d main@origin`, then for each
 conflicted task commit in order: `jj new <commit>`, resolve, `jj squash`. Every task stayed a

@@ -78,9 +78,10 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch
 # 1. before: the tip you are about to move
 jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | <tip>)" --to <tip> \
   --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum
-# 2. the whole chain, change ids kept (never `jj duplicate`, never an operation-log rollback)
-jj -R "$LEGION_WORKSPACE" rebase -b legion/<KEY> -d main@origin
-# 3. rebased-only: must EQUAL step 1 -- the text merge itself changed nothing in the product
+# 2. a forward merge, not a rewrite (LEGION-118: rebase forms rewrite descendants of a rewritten
+#    commit, including another tree's stacked branch; a merge is a genuine fast-forward instead)
+jj -R "$LEGION_WORKSPACE" new @ main@origin -m "merge: resolve conflict against main@origin"
+# 3. merged-only: must EQUAL step 1 -- the text merge itself changed nothing in the product
 # 4. adapt, gates, one commit, then the fingerprint again: differs by that commit alone
 ```
 

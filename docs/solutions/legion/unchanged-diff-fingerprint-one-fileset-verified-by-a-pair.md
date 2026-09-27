@@ -146,28 +146,27 @@ the rebase comment.
 
 ## 3. Procedure that survived four rounds and two rebases
 
-1. Before rebasing: `jj git fetch`, then hash the current tip with the one-fileset command and
+**Superseded 2026-09-27 (LEGION-118):** step 2 below used
+`jj rebase -s 'roots(main@origin..@)' -d main@origin`, which also rewrites another tree's branch
+when one is stacked on this chain. Use a forward merge instead — the steps below are updated to
+match.
+
+1. Before merging: `jj git fetch`, then hash the current tip with the one-fileset command and
    keep the number.
-2. `jj rebase -s 'roots(main@origin..@)' -d main@origin` — the whole chain, so the tester's and
-   reviewer's handoff commits move with yours.
-3. Resolve each conflicted commit at the commit that owns the file (`jj new <rev>`, edit the
-   file to the resolved text, `jj squash`), first conflicted commit first; the descendants
-   re-apply and often clear several commits at once. A later commit that rewrote the same
-   paragraph will conflict again — resolve it the same way. Never `jj op restore` in a shared
-   workspace. When only one commit owns the conflict and the working copy sits at the tip,
-   editing the file *there* and `jj squash --into <owning change id> <path>` does the same
-   without moving the working copy (LEGION-131: one call, six descendants cleared, and the
-   untracked-added `.omp/config.yml` never left disk).
-4. `jj new <tip>`, fold any stray empty working-copy commit the resolution left behind, run the
-   package's tests, lint, and typecheck at the tip, re-run every read-check grep.
+2. `jj -R "$LEGION_WORKSPACE" new @ main@origin -m "merge: resolve conflict against main@origin"`
+   — a forward merge, not a rewrite; the tester's and reviewer's handoff commits stay exactly
+   where they are.
+3. Resolve the conflict directly in that one merge commit (edit the markers; there is nothing to
+   squash, since the merge is the only new commit). Never `jj op restore` in a shared workspace.
+4. `jj new`, run the package's tests, lint, and typecheck at the resolved tip, re-run every
+   read-check grep.
 5. Hash the new tip; post one PR comment (Legion footer) in the form
    `rebase <old> → <new>; fingerprint <before> → <after>; unchanged|changed`, with the per-file
    attribution when changed.
-6. Push with `skills/legion-worker/SKILL.md`'s push procedure (record the pushed tip before step 1's rebase, as its *Rewriting
-   pushed commits* says, so the push is refused if another role pushed meanwhile), then re-read
-   `mergeable,mergeStateStatus` — `main`
-   can move again while CI queues (rebase 2 here was reported `CONFLICTING` within a minute of
-   the round-4 push).
+6. Push with `skills/legion-worker/SKILL.md`'s ordinary push procedure — a genuine fast-forward,
+   never *Rewriting pushed commits*, since nothing was rewritten — then re-read
+   `mergeable,mergeStateStatus`: `main` can move again while CI queues (rebase 2 here was reported
+   `CONFLICTING` within a minute of the round-4 push).
 
 ## Related
 
