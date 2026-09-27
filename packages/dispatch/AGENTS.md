@@ -326,8 +326,9 @@ while Firefox is unaffected, so that spec is the one that needs a second engine.
 WebKit beside Chromium for it (`bun run e2e:install` does the same locally).
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts` alone: Firefox's native
-editing puts text typed over a code block's last line before that line's newline, which Chromium
-and WebKit never do, so that spec is the one that needs a second engine. CI installs Firefox
+editing puts text typed over a code block's last line before that line's newline, and deletes a
+paragraph's hard break along with the text after it, which Chromium and WebKit never do, so that
+spec is the one that needs a second engine. CI installs Firefox
 beside Chromium for it (`bun run e2e:install` does the same locally).
 
 ## Phone acceptance

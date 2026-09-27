@@ -37,7 +37,7 @@ not reach them:
 | --- | --- |
 | `src/collab-cursor-plugin.ts` | The peer-cursor plugin: y-prosemirror's, except that a peer's caret is not drawn while it sits on the focused local caret, where Chromium and WebKit otherwise drop or misplace typing (LEGION-289); it is also biome-checked |
 | `src/editor/schema/dom-attributes.ts` | `withDomAttributes`, the DOM-output-spec helper lifted out of `block-ids.ts` so the typed-block schema can use it too |
-| `src/trailing-newline-input.ts` | Types over a selection that would leave its text block ending in a newline, where Firefox otherwise puts the text before that newline (LEGION-289); it is also biome-checked |
+| `src/trailing-newline-input.ts` | Types over a selection that would leave its text block ending in a newline, where Firefox otherwise puts the text before a code block's newline or deletes a paragraph's hard break (LEGION-289); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
 Eight kinds of edit are allowed in the copied files, and no others: the import specifiers of

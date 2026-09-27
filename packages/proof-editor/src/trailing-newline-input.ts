@@ -8,9 +8,11 @@ import { $prose } from "@milkdown/kit/utils";
  * Replacing the whole last line of a code block leaves the block's text ending in "\n" until the
  * typed text lands. Firefox's native editing puts that text before the newline instead of after
  * it ("const x = 1;hello\n" for "const x = 1;\nhello"), and does so in a plain contenteditable
- * without ProseMirror (LEGION-289). Chromium and WebKit insert it after. For that one shape the
- * text is inserted through ProseMirror's own typing path — the handleTextInput props first, so
- * input rules still run, then a plain insertText — and the browser's edit is prevented.
+ * without ProseMirror (LEGION-289). A paragraph's hard break reads as that newline too, and there
+ * Firefox deletes the break along with the selection ("first lineX"). Chromium and WebKit get
+ * both right. For that one shape the text is inserted through ProseMirror's own typing path — the
+ * handleTextInput props first, so input rules still run, then a plain insertText — and the
+ * browser's edit is prevented.
  */
 export const trailingNewlineInputPlugin = $prose(
   () =>

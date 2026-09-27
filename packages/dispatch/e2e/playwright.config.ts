@@ -57,8 +57,8 @@ export default defineConfig({
       testMatch: /collab-cursor\.e2e\.ts/,
       use: { ...devices["Desktop Safari"] },
     },
-    // Firefox's native editing mishandles a code block's trailing newline, so that spec also
-    // runs in Firefox.
+    // Firefox's native editing mishandles text typed over what follows a block's last line break,
+    // so that spec also runs in Firefox.
     {
       name: "firefox",
       testMatch: /code-line-replace\.e2e\.ts/,
