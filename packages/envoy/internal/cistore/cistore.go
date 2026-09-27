@@ -396,7 +396,7 @@ func (s *Store) applyWatched(entry nats.KeyValueEntry) {
 	s.mu.Unlock()
 
 	if malformed != nil {
-		slog.Warn("cistore watch evicted malformed value",
+		s.logger.Warn("cistore watch evicted malformed value",
 			slog.String("key", key),
 			slog.Uint64("revision", entry.Revision()),
 			slog.String("error", malformed.Error()),

@@ -10,6 +10,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/logging"
 )
 
 // maxRecordBytes and maxSettlementBytes bound a head's record and the settlement published from
@@ -36,7 +37,8 @@ const (
 // write that runs out of the budget logs `ci record exceeded its retry budget`, one JSON line
 // naming the head, the checks the record would have held (0 when no attempt read it), the attempts
 // it made, the observations it carried (each a delivery the webhook answers 503) and the last
-// attempt's error, so an alarm can count those 503s by their cause.
+// attempt's error, so an alarm can count those 503s by their cause. It is an ERROR because each
+// one means GitHub was answered 503.
 //
 // A write that would take the record past maxRecordBytes, or its settlement past
 // maxSettlementBytes, is refused with bus.ErrTooLarge, which a redelivery would meet again: the
@@ -64,7 +66,7 @@ func (s *Store) write(identity State, observations int, mutate func(*State) bool
 			time.Sleep(casBackoff(attempt - 1))
 		}
 		kv := s.watcher.KV()
-		entry, err := kvCall(s.nextRewatch(), func() (nats.KeyValueEntry, error) { return kv.Get(key) })
+		entry, err := kvCall(s.logger, s.nextRewatch(), func() (nats.KeyValueEntry, error) { return kv.Get(key) })
 		var st State
 		var rev uint64
 		switch {
@@ -117,7 +119,7 @@ func (s *Store) write(identity State, observations int, mutate func(*State) bool
 				return err
 			}
 		}
-		_, err = kvCall(s.nextRewatch(), func() (uint64, error) {
+		_, err = kvCall(s.logger, s.nextRewatch(), func() (uint64, error) {
 			if rev == 0 {
 				return kv.Create(key, buf)
 			}
@@ -184,8 +186,8 @@ var errKVRewatched = errors.New("cistore: store rewatched before the KV call was
 // the server applies it after the retry's write it conflicts, and if before, the retry's fresh
 // read finds the batch's observations already there and writes nothing. A call that panics
 // re-panics in its caller, as it would without the goroutine, so the batch fails (writeBatch); one
-// that panics after its caller has moved on is logged.
-func kvCall[T any](rewatched <-chan struct{}, call func() (T, error)) (T, error) {
+// that panics after its caller has moved on is logged through logger.
+func kvCall[T any](logger *logging.Logger, rewatched <-chan struct{}, call func() (T, error)) (T, error) {
 	type answer struct {
 		value    T
 		err      error
@@ -211,7 +213,7 @@ func kvCall[T any](rewatched <-chan struct{}, call func() (T, error)) (T, error)
 	case <-rewatched:
 		go func() {
 			if a := <-answered; a.panicked != nil {
-				slog.Error("cistore: a KV call given up on at a rewatch panicked", slog.String("panic", fmt.Sprint(a.panicked)))
+				logger.Error("cistore: a KV call given up on at a rewatch panicked", slog.String("panic", fmt.Sprint(a.panicked)))
 			}
 		}()
 		var zero T
