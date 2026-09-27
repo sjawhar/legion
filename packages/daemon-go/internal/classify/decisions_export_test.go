@@ -55,6 +55,17 @@ func TestBlockFixAttemptPublishesOnlyOncePerExhaustedCount(t *testing.T) {
 // A green settlement at an exhausted count is the fix that worked, not a blocked pull request: only
 // a red one reports the count, and only a red that stands for the head (HeadVerdict): a red a code
 // push left behind reports nothing.
+// A red sends the tree back only while it stands for the head: a red a code push left behind, whose
+// head no longer carries it, sends nothing back.
+func TestRedSendsBackOnlyOnTheRedThatStandsForTheHead(t *testing.T) {
+	if !RedSendsBack(record.PullRequest{HeadSHA: "head", CheckedHead: "head", Verdict: "red"}) {
+		t.Fatal("the head's own red did not send the tree back")
+	}
+	if RedSendsBack(record.PullRequest{HeadSHA: "fix", CheckedHead: "head", Verdict: "red"}) {
+		t.Fatal("a red that no longer stands for the head sent the tree back")
+	}
+}
+
 func TestBlockFixAttemptPublishesOnlyOnARedSettlement(t *testing.T) {
 	stale := record.PullRequest{HeadSHA: "fix", CheckedHead: "head", Verdict: "red", FixAttempts: 3}
 	if got, blocked := BlockFixAttempt(stale, 3); blocked || got.BlockedAttempts != 0 {

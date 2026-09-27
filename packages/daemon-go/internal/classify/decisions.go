@@ -259,16 +259,17 @@ func carriedBack(pushes []record.ClassifiedPush, head, earlier string) bool {
 	return false
 }
 
-// RedSendsBack says whether the verdict settled on the pull request's head sends an issue in
-// testing or reviewing back to implementing: it is red, the review App did not plan it (its
-// failing tests), and the head was not reached by a push that carries an approval across
+// RedSendsBack says whether the verdict that stands for the pull request's head (HeadVerdict) sends
+// an issue in testing or reviewing back to implementing: it is red, the review App did not plan it
+// (its failing tests), and the head was not reached by a push that carries an approval across
 // (carriesApproval). Such a push changed only .legion/, so the head's code is that of the head it
-// replaced, and a red there is the same code's second run: acting on it would let a flake stop a
-// reviewer mid-round and spend a fix attempt with no code changed. The review round decides that
-// red instead, since the reviewer waits for the settled verdict at its own handoff head. A head
-// whose push is not recorded yet is read as one that may change code.
+// replaced, and a red there is either that code's second run or the code head's own, carried to
+// the handoff head (SettlementFor). The round in progress decides it, since the reviewer waits for
+// the settled verdict at its own handoff head; acting on it would stop a reviewer mid-round and
+// spend a fix attempt with no code changed. A head whose push is not recorded yet is read as one
+// that may change code.
 func RedSendsBack(pr record.PullRequest) bool {
-	if pr.Verdict != "red" || pr.PlannedRed {
+	if HeadVerdict(pr) != "red" || pr.PlannedRed {
 		return false
 	}
 	for _, p := range pr.Pushes {
