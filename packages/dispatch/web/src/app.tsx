@@ -44,8 +44,6 @@ import {
   railAccentHoverText,
   railAccentText,
   railActiveBg,
-  railBadgeBg,
-  railBadgeText,
   railBg,
   railBorder,
   railDangerText,
@@ -53,6 +51,8 @@ import {
   railFocusOverlayText,
   railHoverBg,
   railMutedText,
+  railNeedsYouBadgeBg,
+  railNeedsYouBadgeText,
   railText,
   skeletonBg,
   statusConnecting,
@@ -74,6 +74,34 @@ const DocumentPage = lazy(() =>
 
 const AgentsPage = lazy(() =>
   import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage }))
+);
+
+const AgentConversationPage = lazy(() =>
+  import("./features/agent-view/AgentConversationPage").then((module) => ({
+    default: module.AgentConversationPage,
+  }))
+);
+
+const BroadcastsPage = lazy(() =>
+  import("./features/agents/BroadcastsPage").then((module) => ({ default: module.BroadcastsPage }))
+);
+
+const BroadcastPage = lazy(() =>
+  import("./features/agents/BroadcastPage").then((module) => ({ default: module.BroadcastPage }))
+);
+
+const CredentialRecordPage = lazy(() =>
+  import("./features/credentials/CredentialRecordPage").then((module) => ({
+    default: module.CredentialRecordPage,
+  }))
+);
+const MachineLoginPage = lazy(() =>
+  import("./features/credentials/MachineLoginPage").then((module) => ({
+    default: module.MachineLoginPage,
+  }))
+);
+const KeysPage = lazy(() =>
+  import("./features/credentials/KeysPage").then((module) => ({ default: module.KeysPage }))
 );
 
 function IssuePageFallback(): ReactNode {
@@ -446,7 +474,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               </Link>
               {needsYouCount === 0 ? null : (
                 <span
-                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railBadgeBg} ${railBadgeText}`}
+                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
                 >
                   Needs you {needsYouCount}
                 </span>
@@ -526,12 +554,18 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Routes>
                 <Route element={<InboxPage />} path="/" />
                 <Route element={<AgentsPage />} path="/agents" />
+                <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
+                <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
+                <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
                 <Route element={<IssuePage />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
                 <Route element={<ProjectPage />} path="/projects/:key/architecture" />
                 <Route element={<ProjectPage />} path="/projects/:key/issues" />
                 <Route element={<ProjectPage />} path="/projects/:key/documents" />
                 <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
+                <Route element={<CredentialRecordPage />} path="/credentials/:recordId" />
+                <Route element={<MachineLoginPage />} path="/credentials/machine" />
+                <Route element={<KeysPage />} path="/credentials/keys" />
                 <Route element={<SettingsPage />} path="/settings" />
                 <Route element={<NotFoundPage />} path="*" />
               </Routes>

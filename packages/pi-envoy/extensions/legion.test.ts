@@ -465,6 +465,7 @@ function sessionContext(
       ensureOnDisk,
     },
     setInterval: () => undefined,
+    setTimeout: () => undefined,
     ui: { notify: () => undefined },
   };
 }
@@ -2473,7 +2474,7 @@ describe("Legion OMP extension", () => {
       requests.filter((request) => request.path === "/legion/v1/grants").length;
     const mintsBefore = mints();
     // The spec's negatives plus the exact commands the legion-worker skill has every role run:
-    // the rebase revset, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
+    // the conflict merge, the fingerprint (a `|` inside quotes), the handoff split, the log filter.
     const allowed = [
       "jj restore src/x.ts",
       'jj -R "$LEGION_WORKSPACE" restore packages/pi-envoy/extensions/legion.ts',
@@ -2481,7 +2482,7 @@ describe("Legion OMP extension", () => {
       'jj -R "$LEGION_WORKSPACE" op log -n 5',
       "jj op show",
       'jj describe -m "undo this"',
-      "jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin",
+      'jj -R "$LEGION_WORKSPACE" new legion/LEGION-1 main@origin -m "merge: resolve conflict against main@origin"',
       'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | abc123)" --to abc123 --git --context 0 \'~(.legion | docs/solutions)\' | sed -e \'/^@@/d\' -e \'/^index /d\' | sha256sum',
       'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
       'jj -R "$LEGION_WORKSPACE" log -r \'description(glob:"undo*")\'',
@@ -5198,6 +5199,49 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
       block: true,
       reason: "the architect delegates all code work to phase workers",
     });
+  });
+
+  test("register_gate names the lookup and the reference when Dispatch cannot be reached", async () => {
+    const pane = await goPane({
+      role: "architect",
+      tree: "REPO-42",
+      issue: "REPO-42",
+      sessionId: "ses_go_gate",
+    });
+    await pane.start();
+    // The lookup reads the pane's Dispatch configuration when it runs, and fails to connect.
+    process.env.DISPATCH_URL = "http://dispatch.unreachable.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const paneFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      if (new URL(input.toString()).host === "dispatch.unreachable.test") {
+        throw new TypeError("Unable to connect. Is the computer able to access the url?");
+      }
+      return paneFetch(input, init);
+    }) as typeof fetch;
+    const legion = pane.tools.find((tool) => tool.name === "legion");
+    if (legion === undefined) throw new Error("the Go legion tool was not registered");
+
+    await expect(
+      legion.execute(
+        "go-gate",
+        { op: "register_gate", issue: "REPO-42", artifactId: "spec", version: 2 },
+        undefined,
+        undefined,
+        pane.context
+      )
+    ).resolves.toMatchObject({
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: 'register_gate could not look up document "spec" on REPO-42 in Dispatch: Unable to connect. Is the computer able to access the url?',
+        },
+      ],
+    });
+    expect(pane.requests.some((request) => request.path === "/legion/v1/gates/register")).toBe(
+      false
+    );
   });
 
   test("subscribes no Go role to an issue's notice topic", async () => {

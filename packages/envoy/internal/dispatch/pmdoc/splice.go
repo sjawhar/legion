@@ -663,7 +663,7 @@ func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool
 		// A block of the type under another id, or a minted one, is a different block and stays
 		// inside.
 		if _, typed := typedBlock(parent.Type); typed {
-			if rewritesBlock(source, parent) {
+			if RewritesBlock(source, parent) {
 				return nil, false
 			}
 			return source, true
@@ -672,10 +672,10 @@ func fitReplacement(parent, with, openingListItem *Node, hasPrefixParagraph bool
 	}
 }
 
-// rewritesBlock reports whether exactly one block of source, at any depth, is block itself
+// RewritesBlock reports whether exactly one block of source, at any depth, is block itself
 // rewritten: its type under its id. A rewrite may sit inside another block of the replacement (a
 // blockquote, a list item, a typed block under another id), which the climb then places.
-func rewritesBlock(source []*Node, block *Node) bool {
+func RewritesBlock(source []*Node, block *Node) bool {
 	rewrites := 0
 	for _, node := range source {
 		Walk(node, func(child *Node) bool {

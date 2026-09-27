@@ -29,8 +29,10 @@ import type {
   GraphReferences,
   Issue,
   IssueDetails,
+  IssuePriority,
   IssueRead,
   IssueReferences,
+  IssueRouteStatus,
   IssueSummary,
   Message,
   MessageRead,
@@ -73,7 +75,11 @@ export interface ListIssuesOptions {
   readonly status?: string;
   readonly parent?: string;
   readonly label?: string;
+  /** Each value repeats as `priority=`; `"none"` matches an issue with no priority. */
+  readonly priority?: readonly (IssuePriority | "none")[];
   readonly updated_since?: string;
+  /** Only open issues whose route is in this state. */
+  readonly route_status?: IssueRouteStatus;
 }
 
 export interface SearchOptions {
@@ -237,9 +243,23 @@ export class DispatchClient {
     return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
   }
 
-  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row. */
-  async getArchitectureSource(project: string): Promise<ArchitectureSource> {
-    return this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
+  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row, or `null`
+   *  when the project has none. Having none is an answer, not a failure: a current server says
+   *  `200 null`, an older one `404 SOURCE_NOT_FOUND`, and a client meets both while a rollout
+   *  mixes versions. Any other failure, a different 404 included, throws. */
+  async getArchitectureSource(project: string): Promise<ArchitectureSource | null> {
+    try {
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
+    } catch (error) {
+      if (
+        error instanceof DispatchServiceError &&
+        error.status === 404 &&
+        error.code === "SOURCE_NOT_FOUND"
+      ) {
+        return null;
+      }
+      throw error;
+    }
   }
 
   async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {
@@ -522,6 +542,8 @@ export class DispatchClient {
       for (const [name, value] of Object.entries(query)) {
         if (typeof value === "string" || typeof value === "number") {
           url.searchParams.set(name, String(value));
+        } else if (Array.isArray(value)) {
+          for (const item of value) url.searchParams.append(name, String(item));
         }
       }
     }

@@ -91,6 +91,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.merged(ctx, tx, fact)
 	case intake.PullRequestClosed:
 		return e.closed(ctx, tx, fact)
+	case intake.ClaimReady:
+		return e.claimReady(ctx, tx, fact)
 	case intake.ClaimFailed:
 		return e.claimFailed(ctx, tx, fact)
 	case intake.RetryOrEscalate:
@@ -127,7 +129,7 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 		return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
 	}
 	if fact.Status == "todo" && !claim.IsTreeRoot(issue.Key, issue.Tree) {
-		return intake.Result{}, e.reenterChild(ctx, tx, *issue, fact)
+		return intake.Result{}, e.ReenterChild(ctx, tx, *issue, fact)
 	}
 	return intake.Result{}, nil
 }
@@ -149,6 +151,7 @@ func (e *Engine) agentStatusWrite(ctx context.Context, tx pgx.Tx, issue record.I
 	e.log.Info("workflow: a claim session wrote a lifecycle status; the daemon re-asserts its own", "issue", issue.Key,
 		"session", fact.ActorSession, "wrote", fact.Status, "status", issue.Status)
 	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, record.ParentOf(fact.Parent), fact.Seq
+	issue.HandedOver = fact.HandedOver
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return false, err
 	}
@@ -169,25 +172,27 @@ func (e *Engine) recordChildUnderLiveTree(ctx context.Context, tx pgx.Tx, fact i
 	if err != nil || root == nil {
 		return intake.Result{}, err
 	}
-	live, err := e.liveTree(ctx, tx, *root)
+	live, err := record.TreeLive(ctx, e.store, tx, *root)
 	if err != nil || !live {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.enterChild(ctx, tx, *root, fact, root.Generation)
 }
 
-// reenterChild takes a recorded child set back to todo into a new run under its live tree, the way
+// ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
 // recordChildUnderLiveTree enters an unrecorded one: the run is the child's next generation, so no
 // row its previous run queued (its leaving's suspends) acts on it; the run it interrupted is
 // stopped, the previous run's facts are cleared, and the tree's architect is told. A child whose
 // tree is not live is an orphan, which admission, running after this handler, admits as a root of
-// its own.
-func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue, fact intake.DispatchIssue) error {
+// its own. fact carries the values the new generation takes — a live todo event's for a reopened
+// child, or the child's own already-recorded ones for admission's promotion of a stranded child no
+// live event ever reopened, so the run is exported for that caller too: one re-entry, not two.
+func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue, fact intake.DispatchIssue) error {
 	root, err := e.store.Issue(ctx, tx, child.Tree)
 	if err != nil || root == nil {
 		return err
 	}
-	live, err := e.liveTree(ctx, tx, *root)
+	live, err := record.TreeLive(ctx, e.store, tx, *root)
 	if err != nil || !live {
 		return err
 	}
@@ -214,7 +219,7 @@ func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err := e.enterChild(ctx, tx, *root, fact, next); err != nil {
 		return err
 	}
-	return e.notice(ctx, tx, child.Key, record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child.Key, root.Key)})
+	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
 }
 
 // enterChild records a todo child under root's live tree, admitted at generation, and starts its
@@ -222,7 +227,7 @@ func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
-		Generation: generation, Status: fact.Status, Rank: fact.Rank, LastDispatchSeq: fact.Seq}
+		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}
@@ -234,62 +239,6 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 		return e.transition(ctx, tx, child, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
 	}
 	return nil
-}
-
-func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered) (intake.Result, error) {
-	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil {
-		return intake.Result{}, err
-	}
-	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: fact.Version}
-	if e.cfg.DesignGate == config.DesignGateOff {
-		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.Version)
-	}
-	if err := e.store.PutGate(ctx, tx, gate); err != nil {
-		return intake.Result{}, err
-	}
-	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: fact.Version, Generation: issue.Generation}); err != nil {
-		return intake.Result{}, err
-	}
-	if !classify.DesignGateOpen(gate) {
-		return intake.Result{}, nil
-	}
-	if err := e.notice(ctx, tx, fact.Issue, record.Notice{Kind: "design-approved", Version: fact.Version}); err != nil {
-		return intake.Result{}, err
-	}
-	return intake.Result{}, e.advanceAdmittedTree(ctx, tx, *issue, gate)
-}
-
-func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.DispatchArtifact) (intake.Result, error) {
-	gate, err := e.store.Gate(ctx, tx, fact.Key)
-	if err != nil || gate == nil || gate.ArtifactID != fact.ArtifactID {
-		return intake.Result{}, err
-	}
-	wasOpen := classify.DesignGateOpen(*gate)
-	kind := classify.DesignGateEventKind(fact.Kind)
-	updated := classify.ApplyDesignGateEvent(*gate, kind, fact.Version)
-	if err := e.store.PutGate(ctx, tx, updated); err != nil {
-		return intake.Result{}, err
-	}
-	isOpen := classify.DesignGateOpen(updated)
-	if fact.Kind == intake.DispatchArtifactChangesRequested {
-		if err := e.notice(ctx, tx, fact.Key, record.Notice{Kind: "design-changes-requested", Version: fact.Version, Reason: fact.Reason}); err != nil {
-			return intake.Result{}, err
-		}
-	}
-	if !wasOpen && isOpen {
-		if err := e.notice(ctx, tx, fact.Key, record.Notice{Kind: "design-approved", Version: fact.Version}); err != nil {
-			return intake.Result{}, err
-		}
-		issue, err := e.store.Issue(ctx, tx, fact.Key)
-		if err != nil || issue == nil {
-			return intake.Result{}, err
-		}
-		if err := e.advanceAdmittedTree(ctx, tx, *issue, updated); err != nil {
-			return intake.Result{}, err
-		}
-	}
-	return intake.Result{}, e.advancePendingReady(ctx, tx, fact.Key, updated)
 }
 
 func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComplete) (intake.Result, error) {
@@ -408,10 +357,21 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	if err != nil {
 		return intake.Result{}, err
 	}
+	// An opened or reopened older than the recorded pull request's clock is a late redelivery,
+	// whichever pull request it names: a branch can carry a newer pull request after a merge or a
+	// park and rerun, and an earlier one's late event must not replace it. The workflow keeps one
+	// pull request per branch and assumes one is open at a time; two open at once from one branch,
+	// on different bases, are not modelled, and this fence can then keep the earlier one, whose
+	// close still tells the architect.
+	if recorded != nil && classify.LateLifecycle(fact.UpdatedAt, recorded.HeadUpdatedAt) {
+		return intake.Result{}, nil
+	}
 	if recorded != nil && recorded.Repo == fact.Repo && recorded.Number == fact.Number {
 		// GitHub sends opened once per pull request, so an opened for one already recorded is a
-		// redelivery whatever its clock; a reopen is fenced by its clock.
-		if !fact.Reopened || classify.LateLifecycle(fact.UpdatedAt, recorded.HeadUpdatedAt) {
+		// redelivery whatever its clock; a reopen's clock is left to the fence above. GitHub never
+		// reopens a merged pull request, so a reopen of one is older than the merge, which carries
+		// no clock to fence it.
+		if !fact.Reopened || recorded.State == record.PullRequestMerged {
 			return intake.Result{}, nil
 		}
 		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
@@ -669,13 +629,13 @@ func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	if err != nil || pr == nil || pr.State == record.PullRequestMerged || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
-	already := pr.State == record.PullRequestClosed && !fact.UpdatedAt.After(pr.HeadUpdatedAt)
+	repeated := classify.RepeatedClose(*pr, fact.UpdatedAt)
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}
 	pr.State = record.PullRequestClosed
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
-	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil || already {
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil || repeated {
 		return intake.Result{}, err
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)

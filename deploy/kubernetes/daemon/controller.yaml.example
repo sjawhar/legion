@@ -1,5 +1,5 @@
 # legion controller start --config controller.yaml [--daemon-url http://127.0.0.1:13370]
-# The operator-side file: the same key names as legion.yaml, only the twelve keys the controller
+# The operator-side file: the same key names as legion.yaml, only the thirteen keys the controller
 # needs; any other key is refused naming it. Relative paths resolve against this file's directory
 # (no ~ expansion).
 # The daemon's project, exactly as its legion.yaml writes it: `sjawhar/legion` and `sjawharlegion`
@@ -18,6 +18,13 @@ envoy_url: http://envoy-listener.example:9020
 envoy_token_file: ./envoy-token
 nats_urls:
   - nats://nats.example:4222
+# The NATS nkey user seed the controller's Envoy connection authenticates as (the providers
+# Secret's NATS_NKEY_SEED, the legion-pane user), in a file only you can read (chmod 0600): the
+# controller's Oh My Pi reads it through NATS_NKEY_SEED_FILE. Optional; the Go `legion controller
+# start` alone reads it (the TypeScript CLI refuses the key), and refuses a blank or unreadable
+# file, one its group or others can read, or one holding no nkey user seed, before it asks the
+# daemon for anything.
+# nats_nkey_seed_file: ./nats-seed
 # Dispatch, for the controller's native tools (both keys or neither).
 dispatch_url: https://dispatch.example
 dispatch_token_file: ./dispatch-token

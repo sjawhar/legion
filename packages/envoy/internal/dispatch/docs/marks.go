@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -297,48 +298,6 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 			return nil
 		}
 
-		// A suggestion's text reaches the document with line feeds alone (pmdoc.LineFeeds). It is
-		// stored so when the suggestion is created, but one created before that holds its text as
-		// sent.
-		with := pmdoc.LineFeeds(replaceWith)
-		if !accept {
-			with = ""
-		}
-		at, _ := pmdoc.ContainingTextblock(tree, range_.From)
-		code := at.Node.Type == "code_block"
-		var replacement *pmdoc.Node
-		if code {
-			replacement = codeReplacement(with)
-		} else if replacement, err = inlineAware(with, edgesOf(at, range_)); err != nil {
-			return err
-		}
-		next, err := pmdoc.Splice(tree, range_, replacement)
-		if errors.Is(err, pmdoc.ErrJoinEmptiesTypedBlock) {
-			return &ErrInvalidOp{Field: "anchor", Reason: "the suggestion runs into an ask or callout from the text before it, " +
-				"and replacing it would join the two and leave the ask or callout empty; suggest a change inside one of them"}
-		}
-		if errors.Is(err, pmdoc.ErrReplacementDoesNotFit) {
-			return &ErrInvalidOp{Field: "replace_with", Reason: "no part of the document can hold it where the suggestion sits " +
-				"(a table cell's whole text, for one, can only be replaced by inline text)"}
-		}
-		if err != nil {
-			return err
-		}
-		if code {
-			if err := refuseCodeThatReshapesItsBlock(tree, next, range_, at, "replace_with", with); err != nil {
-				return err
-			}
-		}
-		if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
-		}
-		// A reject's ask is not checked: it removes the text a browser insert added, which gives
-		// back the document the insert started from.
-		if accept {
-			if err := refuseBrokenAsks(tree, next); err != nil {
-				return err
-			}
-		}
 		// An accept is one implicit operation, so every run its own update inserts is its own and
 		// no tree diff tells them apart: recordInsertedText reads the blocks it inserted into and
 		// this hands them straight back (editBatch.writes, LEGION-269). It stamps no block ids -
@@ -348,14 +307,88 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		// left in a block with no id at all - the far half of a split, which no caller can
 		// address either - is simply not tracked, so the check under-reports there rather than
 		// naming a block nobody can name.
-		written := editBatch{tree: next, operations: 1}
-		return recordInsertedText(ctx, artifactID, id, fragment, since, written.writes, func() error {
-			var updateErr error
-			transact(func(txn *crdt.Transaction) {
-				updateErr = pmdoc.Update(txn, fragment, next)
+		write := func(next *pmdoc.Node) error {
+			written := editBatch{tree: next, operations: 1}
+			return recordInsertedText(ctx, artifactID, id, fragment, since, written.writes, func() error {
+				var updateErr error
+				transact(func(txn *crdt.Transaction) {
+					updateErr = pmdoc.Update(txn, fragment, next)
+				})
+				return updateErr
 			})
-			return updateErr
-		})
+		}
+		// A reject is not checked: it removes the text a browser insert added, which gives back
+		// the document the insert started from.
+		if !accept {
+			next, err := rejectedInsert(tree, id)
+			if err != nil {
+				return err
+			}
+			return write(next)
+		}
+
+		// A suggestion's text reaches the document with line feeds alone (pmdoc.LineFeeds). It is
+		// stored so when the suggestion is created, but one created before that holds its text as
+		// sent.
+		with := pmdoc.LineFeeds(replaceWith)
+		at, _ := pmdoc.ContainingTextblock(tree, range_.From)
+		code := at.Node.Type == "code_block"
+		var replacement *pmdoc.Node
+		if code {
+			var codeText string
+			codeText, range_ = acceptedCode(tree, with, at, range_)
+			replacement = codeReplacement(codeText)
+		} else if replacement, err = inlineAware(with, edgesOf(at, range_), opensDocument(tree, range_.From)); err != nil {
+			return err
+		}
+		// Accepted text stays inside every ask and comment anchor the suggestion lay wholly inside,
+		// as an edit's replacement does, and the suggestion's own mark goes with the text it
+		// replaced. Only text that stays in the textblock carries them: a block replacement can
+		// land a code block, which an ask's mark cannot cover.
+		inline := code || isInlineDocument(replacement)
+		if inline {
+			pmdoc.AddMarks(replacement, slices.DeleteFunc(pmdoc.AnchorMarksCovering(tree, range_), func(mark pmdoc.Mark) bool {
+				return mark.Type == string(MarkSuggestion) && mark.Attrs["id"] == id
+			}))
+		}
+		next, err := pmdoc.Splice(tree, range_, replacement)
+		if err != nil {
+			return acceptSpliceRefusal(err)
+		}
+		// The browser editor's table plugin pads a table the accept cut to its width, as it does
+		// after a reject, before anything reads the accept back, where the browser's accept writes
+		// the replacement where Splice does (padsLikeTheBrowser).
+		if padsLikeTheBrowser(tree, range_, at, inline) {
+			if next, err = padCutTables(tree, next, range_); err != nil {
+				return err
+			}
+		}
+		if code {
+			if err := refuseAcceptedCodeThatReshapes(tree, next, range_, at, with); err != nil {
+				return err
+			}
+		}
+		if next, err = settleAccepted(tree, next, range_, with); err != nil {
+			return err
+		}
+		if !insideAsk(at) {
+			if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
+				return err
+			}
+			if err := refuseReshapedAccept(tree, next, range_, at, with, replacement); err != nil {
+				return err
+			}
+		}
+		if err := pmdoc.RepeatedBlockID(tree, next, replacement); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidMarkdown, err)
+		}
+		if err := refuseBrokenAsks(tree, next); err != nil {
+			return err
+		}
+		if err := refuseMisreadAccept(tree, next, with); err != nil {
+			return err
+		}
+		return write(next)
 	})
 }
 

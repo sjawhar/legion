@@ -84,8 +84,9 @@ func TestApplyOpsReportsABatchThatWroteUpdatesAndNoMarkdownAsUnchanged(t *testin
 }
 
 // Canonical markdown renders no anchor mark, so a `replace` whose `with` equals its `find` reads
-// as identical text while the human comment anchor it covered is gone. That is a change, and the
-// version that records it must still be minted (Deep1326).
+// as identical text while the human comment anchor it covered is gone - a replace that runs past
+// an anchor's edge writes its text outside that anchor. That is a change, and the version that
+// records it must still be minted (Deep1326).
 func TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "Keep anchored words here.")
@@ -95,7 +96,7 @@ func TestApplyOpsReportsAnEditThatOnlyDropsAnAnchorMarkAsChanged(t *testing.T) {
 		t.Fatalf("anchor a comment: %v", err)
 	}
 	result, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
-		{Op: "replace", Find: "anchored words", With: "anchored words"},
+		{Op: "replace", Find: "Keep anchored words", With: "Keep anchored words"},
 	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	if err != nil {
 		t.Fatalf("replace over the anchor: %v", err)
@@ -396,6 +397,25 @@ func TestApplyOpsRejectsMarkdownOutsideProofSchema(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "keep\n")
+}
+
+// Table rows inserted before a table's header cell, which the table cannot hold there, are an
+// invalid insert naming its markdown, never an error the handler answers 500.
+func TestApplyOperationRefusesTableRowsBeforeAHeaderCell(t *testing.T) {
+	for _, test := range []struct{ spec, markdown string }{
+		{"| a | b |\n| --- | --- |\n| c | d |\n", "| x | y |"},
+		{"| a |\n| --- |\n| c |\n", "| a |\n| - |\n| b |"},
+	} {
+		tree, err := parseInput(test.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = applyOperation(tree, model.EditOp{Op: "insert", Before: "a", Markdown: test.markdown})
+		var invalid *ErrInvalidOp
+		if !errors.As(err, &invalid) || invalid.Field != "markdown" {
+			t.Fatalf("insert %q before a header cell: %v, want an invalid op on markdown", test.markdown, err)
+		}
+	}
 }
 
 func TestApplyOperationInsertsParagraphAfterTableContainingCellAnchor(t *testing.T) {
@@ -2405,5 +2425,57 @@ func TestApplyOperationReplaceStoresBlockSyntaxEscaped(t *testing.T) {
 				t.Fatalf("replace with %q stored %q, which does not read back as written (%v)", test.with, markdown, err)
 			}
 		})
+	}
+}
+
+// An insert's markdown is written into the document, so a leading `---` line is a rule, as `***`
+// is, and never the front matter that would swallow it. Only the document's start can hold front
+// matter, so an insert landing there, at `start` or before the first block, still opens the
+// document with a closed front-matter block.
+func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		op   model.EditOp
+		want string
+	}{
+		{"dashes after a paragraph", model.EditOp{Op: "insert", After: "Body.", Markdown: "---"}, "Intro.\n\nBody.\n\n---\n\nAfter.\n"},
+		{"dashes at the end", model.EditOp{Op: "insert", After: "end", Markdown: "---"}, "Intro.\n\nBody.\n\nAfter.\n\n---\n"},
+		{"a delimited block after a paragraph", model.EditOp{Op: "insert", After: "Body.", Markdown: "---\nx\n---"}, "Intro.\n\nBody.\n\n---\n\n## x\n\nAfter.\n"},
+		{"front matter at the start", model.EditOp{Op: "insert", Before: "start", Markdown: "---\ntitle: T\n---"}, "---\ntitle: T\n---\n\nIntro.\n\nBody.\n\nAfter.\n"},
+		{"front matter before the first block", model.EditOp{Op: "insert", Before: "Intro.", Markdown: "---\ntitle: T\n---"}, "---\ntitle: T\n---\n\nIntro.\n\nBody.\n\nAfter.\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			pmdoc.EnsureBlockIDs(tree)
+			next, err := applyOperation(tree, test.op)
+			if err != nil {
+				t.Fatalf("insert %q = %v", test.op.Markdown, err)
+			}
+			if markdown, err := renderTree(next); err != nil || markdown != test.want {
+				t.Fatalf("after inserting %q = %q (%v), want %q", test.op.Markdown, markdown, err, test.want)
+			}
+		})
+	}
+	// Only a closed block is front matter: an unclosed `---` at the start is a rule, as `***` is.
+	opening := map[string]string{}
+	for _, markdown := range []string{"---", "***"} {
+		tree, err := parseInput("Intro.\n\nBody.\n\nAfter.\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		pmdoc.EnsureBlockIDs(tree)
+		next, err := applyOperation(tree, model.EditOp{Op: "insert", Before: "start", Markdown: markdown})
+		if err != nil {
+			t.Fatalf("insert %q at the start = %v", markdown, err)
+		}
+		if opening[markdown], err = renderTree(next); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if opening["---"] != opening["***"] {
+		t.Fatalf("inserting `---` at the start = %q, want what `***` writes, %q", opening["---"], opening["***"])
 	}
 }

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from "node:fs";
 import { chmod, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -6,19 +6,82 @@ import path from "node:path";
  * own name (`LEGION_GRANT_FILE`, `envoy_token_file`, …), so the message reads as the operator
  * wrote it. A set pointer is authoritative: a missing, unreadable, or empty file is an error naming
  * both the variable and the path, never a fallback to the plain variable or to another source.
- * The one reader for every such pointer the daemon and its CLI resolve. */
+ * This and `readOwnerOnlySecretPointer`, which adds the owner-only rule, are the one reader for
+ * every such pointer the daemon and its CLI resolve; both read through `readTrimmedSecret`. */
 export function readSecretPointer(variable: string, file: string): string {
+  return readTrimmedSecret(variable, file, file);
+}
+
+/** `readSecretPointer` for a file only its owner may read — both NATS seeds and the operator token:
+ * `file` must be a regular file whose mode grants its group and others nothing. The file is opened
+ * once without blocking (a FIFO nobody writes cannot hang the caller), checked with `fstat` on that
+ * descriptor (`requireOwnerOnly`), and read from the same descriptor, so nothing swapped in at the
+ * path between the check and the read is ever read; a symlink resolves to its target. Refusals:
+ * `<variable> names <file>, which is not a regular file`, `<variable> <file> is readable by its
+ * group or others (mode 0640); chmod 0600 it`, and `readSecretPointer`'s. */
+export function readOwnerOnlySecretPointer(variable: string, file: string): string {
+  let fd: number;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  } catch (error) {
+    throw unreadableSecret(variable, file, error);
+  }
+  try {
+    requireOwnerOnly(variable, file, fd);
+    return readTrimmedSecret(variable, file, fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** `readOwnerOnlySecretPointer` without reading the contents, for `legion start --check-config`:
+ * the file is opened and checked the same way, so a file boot could not open (missing, a dangling
+ * symlink, one this user may not read), or one that is not a regular owner-only file, is refused in
+ * boot's words. Opening a file has no side effect; only what it holds is left unread. */
+export function checkOwnerOnlySecretPointer(variable: string, file: string): void {
+  let fd: number;
+  try {
+    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
+  } catch (error) {
+    throw unreadableSecret(variable, file, error);
+  }
+  try {
+    requireOwnerOnly(variable, file, fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Throws unless `fd`, open on `file`, is a regular file only its owner may read (`fstat`). */
+function requireOwnerOnly(variable: string, file: string, fd: number): void {
+  const stats = fstatSync(fd);
+  if (!stats.isFile()) throw new Error(`${variable} names ${file}, which is not a regular file`);
+  const permissions = stats.mode & 0o777;
+  if ((permissions & 0o077) !== 0) {
+    throw new Error(
+      `${variable} ${file} is readable by its group or others (mode 0${permissions.toString(8)}); chmod 0600 it`
+    );
+  }
+}
+
+/** The trimmed contents of `source` (`file` itself, or a descriptor open on it), refusing an
+ * unreadable or empty one in the words both pointer readers share. */
+function readTrimmedSecret(variable: string, file: string, source: string | number): string {
   let contents: string;
   try {
-    contents = readFileSync(file, "utf8");
+    contents = readFileSync(source, "utf8");
   } catch (error) {
-    throw new Error(
-      `${variable} names ${file}, which could not be read: ${error instanceof Error ? error.message : String(error)}`
-    );
+    throw unreadableSecret(variable, file, error);
   }
   const secret = contents.trim();
   if (!secret) throw new Error(`${variable} names ${file}, which is empty`);
   return secret;
+}
+
+function unreadableSecret(variable: string, file: string, error: unknown): Error {
+  return new Error(
+    `${variable} names ${file}, which could not be read: ${error instanceof Error ? error.message : String(error)}`
+  );
 }
 
 /** The one Dispatch bearer every pane shares, written once at daemon startup (`index.ts`). */

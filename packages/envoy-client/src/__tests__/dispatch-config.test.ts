@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveDispatchConfig } from "../dispatch-config";
+import { activeDispatchConfig, resolveDispatchConfig } from "../dispatch-config";
 
 function tempDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "dispatch-config-"));
@@ -177,5 +177,24 @@ describe("resolveDispatchConfig", () => {
       error:
         "repository dispatch.serverUrl requires dispatch.token from the same .opencode/envoy.json or DISPATCH_URL with DISPATCH_TOKEN",
     });
+  });
+});
+
+// The one "is Dispatch configured" check every host shares: a configuration that resolves is
+// returned with its URL and token, none is null, and a broken file throws rather than reading as
+// unconfigured.
+describe("activeDispatchConfig", () => {
+  test("returns the resolved URL and token, null when nothing is configured, and throws on a broken file", () => {
+    expect(
+      activeDispatchConfig(
+        { DISPATCH_URL: "http://dispatch.test/", DISPATCH_TOKEN: "env-token" },
+        { home: tempDir(), cwd: tempDir() }
+      )
+    ).toEqual({ enabled: true, url: "http://dispatch.test", token: "env-token", error: null });
+    expect(activeDispatchConfig({}, { home: tempDir(), cwd: tempDir() })).toBeNull();
+    const home = tempDir();
+    mkdirSync(path.join(home, ".config", "opencode"), { recursive: true });
+    writeFileSync(path.join(home, ".config", "opencode", "envoy.json"), "{not json");
+    expect(() => activeDispatchConfig({}, { home, cwd: tempDir() })).toThrow(/^dispatch config: /);
   });
 });

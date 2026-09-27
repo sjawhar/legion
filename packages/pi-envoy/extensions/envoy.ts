@@ -2,6 +2,9 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  type AgentStreamControlMessage,
+  agentStreamControlSubject,
+  agentStreamFramesSubject,
   agentSubject,
   DELIVERY_CAPABILITIES,
   type DeliveryCapability,
@@ -23,7 +26,8 @@ import {
   senderLabel,
 } from "@legion/envoy-client/delivery";
 import {
-  type DispatchConfigResolution,
+  type ActiveDispatchConfig,
+  activeDispatchConfig,
   resolveDispatchConfig,
 } from "@legion/envoy-client/dispatch-config";
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
@@ -52,6 +56,7 @@ import {
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import { AgentStreamPublisher } from "../src/agent-stream";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
 import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import {
@@ -61,7 +66,14 @@ import {
   legionRoleClaimBridge,
   type RoleRegainReason,
 } from "../src/legion/role-claim-bridge";
-import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
+import type {
+  PiApi,
+  SessionContext,
+  SessionSwitchReason,
+  SideTurn,
+  ToolResult,
+} from "../src/pi-types";
+import { sideTurn } from "../src/side-turn";
 import {
   isRegisteredSubagent,
   type SessionIdentityContext,
@@ -75,8 +87,9 @@ const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
 
 /**
- * Aside and Steer go through `pi.sendMessage` on every OMP build; BTW only where the host
- * exposes `pi.askEphemeral`, so a host without it advertises every capability but that one.
+ * Aside and Steer go through `pi.sendMessage` on every OMP build; BTW only where the host has a
+ * side turn (`sideTurn` in src/side-turn.ts), so a host without one advertises every capability
+ * but that one.
  */
 const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABILITIES.filter(
   (capability) => capability !== "btw"
@@ -119,9 +132,9 @@ function askPromptQuestionHead(question: string): string {
     normalized.push(firstLine.slice(segmentStart, index), " ");
     segmentStart = index + 1;
   }
-  return (normalized === undefined
-    ? firstLine
-    : `${normalized.join("")}${firstLine.slice(segmentStart)}`).trim();
+  return (
+    normalized === undefined ? firstLine : `${normalized.join("")}${firstLine.slice(segmentStart)}`
+  ).trim();
 }
 /**
  * What the hidden self-check asks the agent, over a snapshot of its own conversation. It names
@@ -224,10 +237,16 @@ interface AskAwarenessState {
   readonly checks: number;
 }
 
-/** A settle the stop-time check is about: its context, and how many runs had started by then. */
+/**
+ * A settle the stop-time check is about: its context and the side turn that context offers, how
+ * many runs had started by then, and the awareness generation then, so a user turn between the
+ * settle and its check is caught.
+ */
 interface AskSettle {
   readonly context: SessionContext;
+  readonly ask: SideTurn;
   readonly seenRun: number;
+  readonly generation: number;
 }
 
 interface LegionManagedEntry {
@@ -287,11 +306,6 @@ function resolveSkillsDirectory(): string {
 }
 const SKILLS_DIRECTORY = resolveSkillsDirectory();
 
-type ActiveDispatchConfig = DispatchConfigResolution & {
-  readonly url: string;
-  readonly token: string;
-};
-
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
   const defaults = envoyDefaultsFromEnvironment(process.env);
@@ -303,14 +317,8 @@ export default function envoyExtension(pi: PiApi): void {
   // without /reload-plugins; a file that has since broken fails the call with
   // its own error instead of quietly using the stale endpoint.
   const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() });
-  const activeDispatchConfig = (): ActiveDispatchConfig | null => {
-    const fresh = resolveDispatchConfig(process.env, { cwd: process.cwd() });
-    if (fresh.error !== null) throw new Error(`dispatch config: ${fresh.error}`);
-    if (!fresh.enabled || fresh.url === null || fresh.token === null) return null;
-    return fresh as ActiveDispatchConfig;
-  };
   const currentDispatchConfig = (): ActiveDispatchConfig => {
-    const config = activeDispatchConfig();
+    const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
     if (config === null) {
       throw new Error("Dispatch is no longer configured (dispatch.serverUrl/token missing)");
     }
@@ -412,10 +420,6 @@ export default function envoyExtension(pi: PiApi): void {
     );
   };
 
-  // The self-check is the whole trigger: a host without `pi.askEphemeral` can never nudge, so,
-  // like a headless run and a Legion-driven session, it does not pay the arming round trip
-  // either. The capability is the host's for the life of the process, so it is read once.
-  const askEphemeral = pi.askEphemeral;
   const overriddenTimeout = Number(process.env.ENVOY_SELF_CHECK_TIMEOUT_MS);
   const selfCheckTimeoutMs =
     Number.isFinite(overriddenTimeout) && overriddenTimeout > 0
@@ -437,7 +441,7 @@ export default function envoyExtension(pi: PiApi): void {
     requestedSessionID: string,
     since?: string
   ): Promise<{ readonly snapshot: OpenAsksResponse; readonly url: string } | null> => {
-    const config = activeDispatchConfig();
+    const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
     if (config === null) return null;
     const snapshot = await new DispatchClient(
       config.url,
@@ -578,13 +582,19 @@ export default function envoyExtension(pi: PiApi): void {
             "[envoy] dropping malformed Dispatch targeted delivery without a reply address"
           );
         } else if (rendered.delivery?.mode === "btw") {
-          if (pi.askEphemeral === undefined) {
+          const answer = sideTurn(pi, activeSessionContext);
+          if (shuttingDown) {
+            // A session that is shutting down starts no model call, but a frame can still drain in.
+            await postDispatchReply(rendered.delivery, {
+              error: "This OMP session is shutting down",
+            });
+          } else if (answer === undefined) {
             await postDispatchReply(rendered.delivery, {
               error: "This OMP host does not support BTW delivery",
             });
           } else {
             try {
-              const reply = await pi.askEphemeral({ prompt: rendered.delivery.body });
+              const reply = await answer({ prompt: rendered.delivery.body });
               await postDispatchReply(rendered.delivery, { body: reply.replyText });
             } catch (error) {
               await postDispatchReply(rendered.delivery, { error: messageFor(error) });
@@ -703,6 +713,95 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
+  // The live agent conversation stream (LEGION-232). This session's own turns, tool calls and
+  // streamed output become frames on a core-NATS subject the notification stream does not
+  // capture, so nothing is retained by the bus; the Dispatch relay forwards them to a human
+  // watching the session and writes none of it down. The publisher stays silent unless a viewer
+  // is attached, so a session nobody has open puts no conversation on the wire at all.
+  const agentStream = new AgentStreamPublisher({
+    now: () => Date.now(),
+    publish: (subject, payload) => connection?.publish(subject, codec.encode(payload)),
+  });
+  // The control subscription this session currently holds, and the id it was opened for.
+  let agentStreamControl: Subscription | undefined;
+  let agentStreamControlSession = "";
+
+  const pumpAgentStreamControl = async (
+    subscription: Subscription,
+    session: string
+  ): Promise<void> => {
+    try {
+      for await (const message of subscription) {
+        // Everything a control message can do runs inside this guard. Any client on the bus can
+        // publish here, and an unhandled throw ends the `for await` — nats.js unsubscribes, and
+        // the session goes deaf to watch and replay until the resubscribe delay below. A `null`
+        // payload parses cleanly and then throws on `.type`; a reply over the server's
+        // max_payload throws out of the publish.
+        try {
+          const parsed: unknown = JSON.parse(codec.decode(message.data));
+          if (typeof parsed !== "object" || parsed === null) continue;
+          const request = parsed as AgentStreamControlMessage;
+          if (request.type !== "replay" && request.type !== "watch") continue;
+          // The answer is taken before this message arms anything, so a bare replay request
+          // from a client that never attached a viewer gets an empty history, not the ring.
+          const reply = message.reply;
+          const answer =
+            request.type === "replay" && reply !== undefined
+              ? JSON.stringify(agentStream.replay(session))
+              : undefined;
+          agentStream.noteViewer();
+          if (answer === undefined || reply === undefined) continue;
+          connection?.publish(reply, codec.encode(answer));
+        } catch (error) {
+          logger.warn("envoy: agent stream control message failed", {
+            error: messageFor(error),
+            sessionID: session,
+          });
+        }
+      }
+    } catch {
+      // A dead iterator is a dropped connection, handled by the resubscribe below.
+    }
+    if (agentStreamControl === subscription) agentStreamControl = undefined;
+    if (shuttingDown || agentStreamControlSession !== session) return;
+    setTimeout(() => {
+      if (shuttingDown || agentStreamControlSession !== session) return;
+      void watchAgentStream(session).catch(() => undefined);
+    }, RESUBSCRIBE_DELAY_MS);
+  };
+
+  const watchAgentStream = async (session: string): Promise<void> => {
+    if (agentStreamControlSession === session && agentStreamControl !== undefined) return;
+    agentStreamControl?.unsubscribe();
+    agentStreamControl = undefined;
+    // A different session under the same extension instance is a different conversation: the
+    // ring still holds the previous one, and a viewer opening the new id must not be served it.
+    if (agentStreamControlSession !== session) agentStream.reset();
+    agentStreamControlSession = session;
+    const active = await ensureConnection();
+    const subscription = active.subscribe(agentStreamControlSubject(session));
+    agentStreamControl = subscription;
+    void pumpAgentStreamControl(subscription, session);
+  };
+
+  /** One of this session's messages, on its way to whoever has the session open. Only the
+   *  top-level instance publishes: a `task` subagent's instance never learns a session id, and
+   *  its work reaches the viewer as the parent's tool call anyway. */
+  const recordAgentStreamMessage = (message: unknown, streaming: boolean): void => {
+    if (sessionID === "") return;
+    agentStream.record(agentStreamFramesSubject(sessionID), message, streaming);
+  };
+
+  pi.on("message_start", async (event) => {
+    recordAgentStreamMessage(event.message, true);
+  });
+  pi.on("message_update", async (event) => {
+    recordAgentStreamMessage(event.message, true);
+  });
+  pi.on("message_end", async (event) => {
+    recordAgentStreamMessage(event.message, false);
+  });
+
   // The session stops holding its role: close the notice subjects it took for it, so a holder
   // another session replaced stops taking the role's wakes.
   const endRole = (): void => {
@@ -763,7 +862,9 @@ export default function envoyExtension(pi: PiApi): void {
       // titles assigned after session_start and later renames.
       title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
       capabilities:
-        typeof pi.askEphemeral === "function" ? DELIVERY_CAPABILITIES : CAPABILITIES_WITHOUT_BTW,
+        sideTurn(pi, activeSessionContext) === undefined
+          ? CAPABILITIES_WITHOUT_BTW
+          : DELIVERY_CAPABILITIES,
       driving: false,
       selfSubscribed: true,
     });
@@ -1056,6 +1157,9 @@ export default function envoyExtension(pi: PiApi): void {
     }
     await ensureConnection();
     await subscribe(currentTopic);
+    // A viewer's replay request and its watch pings reach the session here. Opening it costs
+    // one core subscription and publishes nothing: a session nobody opens stays silent.
+    await watchAgentStream(sessionID);
     if (resumed) {
       await recoverRegisteredInterests();
     }
@@ -1293,6 +1397,8 @@ export default function envoyExtension(pi: PiApi): void {
       subscriptions.clear();
       intentionallyClosed.clear();
       awaitingRetry.clear();
+      agentStreamControl = undefined;
+      agentStreamControlSession = "";
     }
   });
 
@@ -1352,7 +1458,7 @@ export default function envoyExtension(pi: PiApi): void {
   // nudge below, the snapshot's `as_of` becoming the period's baseline. A session the stop can
   // never nudge does not pay for it: the host awaits this handler, so a slow or unreachable
   // Dispatch would add up to `OPEN_ASKS_TIMEOUT_MS` to the head of each of its turns and then
-  // warn it about a reminder it never gets — and a host with no `pi.askEphemeral` cannot run the
+  // warn it about a reminder it never gets — and a host with no side turn cannot run the
   // self-check the nudge now turns on, so it is one of those sessions. `id === sessionID` is
   // deliberately not one of the conditions — a fresh TUI mints its id lazily and heals by drift,
   // so it would drop the first turn's arming.
@@ -1362,7 +1468,7 @@ export default function envoyExtension(pi: PiApi): void {
       id === "" ||
       event.prompt.trim() === "" ||
       !context.hasUI ||
-      askEphemeral === undefined ||
+      sideTurn(pi, context) === undefined ||
       legionManaged(id)
     ) {
       return undefined;
@@ -1431,43 +1537,45 @@ export default function envoyExtension(pi: PiApi): void {
     // failure (`error`), a truncation, or a run with no reply of its own answers the user's cancel,
     // or a failure, with a turn nobody asked for.
     const lastReply = event.messages?.findLast((message) => message.role === "assistant");
+    const ask = sideTurn(pi, context);
     if (
       event.willContinue === true ||
       lastReply?.stopReason !== "stop" ||
       !context.hasUI ||
       id === "" ||
+      ask === undefined ||
       !checkOwed(id)
     ) {
       return;
     }
+    const settle: AskSettle = { context, ask, seenRun: runSeq, generation: awarenessGeneration };
     if (askCheckInFlight) {
-      settledDuringCheck = { context, seenRun: runSeq };
+      settledDuringCheck = settle;
       return;
     }
     askCheckInFlight = true;
+    // The check runs after this handler returns, on the host's managed timer: a side turn
+    // started while an event handler is still running inherits that handler's abort signal
+    // (Oh My Pi 18.3), which the host fires at its 30 s handler budget, well inside the check's
+    // own `selfCheckTimeoutMs`. The host does not await `agent_end`, so nothing waits on it.
+    context.setTimeout(() => checkFromSettle(id, settle), 0);
+  });
+
+  // Every stop-time check owed from `first` on, with `askCheckInFlight` held throughout. Each
+  // pass after the first needs another real settle during the last, and every check that
+  // reaches the model counts against the period's cap, so this ends.
+  async function checkFromSettle(id: string, first: AskSettle): Promise<void> {
     try {
-      let settle: AskSettle | undefined = { context, seenRun: runSeq };
+      let settle: AskSettle | undefined = first;
       while (settle !== undefined) {
         await checkAtSettle(id, settle);
-        // A settle that arrived while that check was open is checked now if a check is still
-        // owed: the one a newer user turn arms, or the one a superseded verdict left owing —
-        // unless a run has started since that settle, whose own settle is where the check goes.
-        // Each pass needs another real settle during the last, and every check that reaches the
-        // model counts against the period's cap, so this ends.
         settle = takeSettledDuringCheck();
-        if (
-          settle?.context.sessionManager.getSessionId() !== id ||
-          settle.seenRun !== runSeq ||
-          !checkOwed(id)
-        ) {
-          settle = undefined;
-        }
       }
     } finally {
       askCheckInFlight = false;
       settledDuringCheck = undefined;
     }
-  });
+  }
 
   // Whether this session's current period still owes a stop-time check.
   function checkOwed(id: string): boolean {
@@ -1485,20 +1593,16 @@ export default function envoyExtension(pi: PiApi): void {
       askAwareness.period === 0 ||
       !askAwareness.check_due ||
       askAwareness.checks >= ASK_CHECKS_PER_PERIOD ||
-      askAwareness.baseline_as_of === null ||
-      askEphemeral === undefined
+      askAwareness.baseline_as_of === null
     );
   }
 
   // One stop-time check for `settle`, run with `askCheckInFlight` held. Staleness is judged
-  // against the run count read at that settle, never at the start of this call.
+  // against the run count and generation read at that settle, never at the start of this call.
   async function checkAtSettle(id: string, settle: AskSettle): Promise<void> {
-    const { context, seenRun } = settle;
+    const { context, ask, seenRun, generation } = settle;
     const period = askAwareness.period;
-    const generation = awarenessGeneration;
     const baseline = askAwareness.baseline_as_of;
-    // `checkOwed` held both at the call; restated so the compiler sees them in this scope.
-    if (baseline === null || askEphemeral === undefined) return;
     // Both awaits below are windows in which a new user turn can arm another period, a
     // session change can move the session, or the agent's own next run can open the ask this
     // check is about — which clears the check it owed. The re-checks read one list, so they
@@ -1512,6 +1616,11 @@ export default function envoyExtension(pi: PiApi): void {
       askAwareness.session_id !== id ||
       askAwareness.period !== period ||
       !askAwareness.check_due;
+    // A settle is checked only while it is still current. The timer runs the first one a
+    // macrotask after its stop, and one recorded while the last check was open waits for that
+    // check: a run, a user turn, or a session change can have overtaken either meanwhile.
+    // `baseline` is restated so the compiler sees it here.
+    if (baseline === null || !checkOwed(id) || stale() || runSeq !== seenRun) return;
     let open: { readonly snapshot: OpenAsksResponse; readonly url: string } | null;
     try {
       open = await queryOpenAsks(id, baseline);
@@ -1527,13 +1636,13 @@ export default function envoyExtension(pi: PiApi): void {
     // prompt, not a reason to suppress it. `opened_since` remains part of the snapshot's
     // contract, but does not alter the self-check.
     // The self-check: one hidden, tool-free model call over a snapshot of this conversation
-    // (`pi.askEphemeral`, the channel a targeted Dispatch BTW already uses), which adds nothing
+    // (`sideTurn`, the channel a targeted Dispatch BTW already uses), which adds nothing
     // to the transcript and which the user never sees. Only a WAITING verdict — the agent
     // saying it is waiting on a human for something its open asks do not cover — buys the visible
     // turn. PROCEEDING, any other answer, a timeout, and a failure are all silent, so an ordinary
     // settle costs one hidden call and shows nothing.
     //
-    // The bound is this handler's own clock, not the host's: the signal is still passed, so a
+    // The bound is the check's own clock, not the host's: the signal is still passed, so a
     // host that honours it stops paying for an answer nobody will read, but the await always
     // settles at `selfCheckTimeoutMs` whatever the host does. A host that ignored the signal
     // would otherwise hold `askCheckInFlight` — and with it every later check — for as long as
@@ -1543,7 +1652,10 @@ export default function envoyExtension(pi: PiApi): void {
     askCheckAbort = abort;
     let answered: Promise<string | undefined>;
     try {
-      answered = askEphemeral({ prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks), signal: abort.signal }).then(
+      answered = ask({
+        prompt: ASK_SELF_CHECK_PROMPT(open.snapshot.asks),
+        signal: abort.signal,
+      }).then(
         (reply): string | undefined => reply.replyText,
         (error: unknown): string | undefined => {
           // An abort this extension made — a superseded check, or its own timeout, which logs

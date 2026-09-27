@@ -81,6 +81,9 @@ nats_url=${LEGION_E2E_NATS_URL:-}
 # deletes with the rest.
 fixture=$root/scripts/e2e/fixtures/operator-route
 route_configmap=legion-operator-route-$run_label
+# The providers Secret the runtime names for the project (ProvidersSecretName), which the run creates
+# only when the operator's environment names a NATS nkey seed and lib/namespace-rig.sh deletes.
+providers_secret=legion-$run_label-providers
 # operator-close's tree, which no workflow issue backs: the run's own, named for the run, and its
 # worker's issue, a child in the same project. Both are issue keys (PROJECT-NUMBER), which the
 # daemon's spawn requires; the trailing digit keeps the child apart from the root.
@@ -426,6 +429,27 @@ create_route_configmap() {
     --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create ConfigMap $route_configmap"
   note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$run_label"
+}
+# create_providers_secret is the operator's step for the NATS nkey seed: a daemon with a seed (the
+# operator's NATS_NKEY_SEED_FILE, else NATS_NKEY_SEED, which the daemon inherits) points every pod
+# and the image probe at the providers Secret's NATS_NKEY_SEED key, so the run puts the same seed
+# there, from a 0600 file, never an argument. With neither set there is no seed and no Secret.
+create_providers_secret() {
+  local seed_file=$work/providers-nats-seed
+  if [ -n "${NATS_NKEY_SEED_FILE+set}" ]; then
+    (umask 077 && tr -d '[:space:]' <"$NATS_NKEY_SEED_FILE" >"$seed_file") || fail "NATS_NKEY_SEED_FILE names $NATS_NKEY_SEED_FILE, which could not be read"
+  elif [ -n "${NATS_NKEY_SEED+set}" ]; then
+    (umask 077 && printf '%s' "$NATS_NKEY_SEED" | tr -d '[:space:]' >"$seed_file")
+  else
+    note "[operator] no NATS nkey seed in the environment: no providers Secret"
+    return 0
+  fi
+  [ -s "$seed_file" ] || fail "the operator's NATS nkey seed is empty"
+  op create secret generic "$providers_secret" --from-file=NATS_NKEY_SEED="$seed_file" \
+    --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
+    fail "the operator could not create Secret $providers_secret"
+  rm -f "$seed_file"
+  note "[operator] Secret $providers_secret: NATS_NKEY_SEED from the operator's seed, label legion.dev/project=$run_label"
 }
 start_daemon() {
   env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -u GH_AGENT_APP_PRIVATE_KEY_B64 \
@@ -1337,14 +1361,18 @@ mkdir -p "$state"
 cat >"$work/instructions.md" <<'EOF'
 # Stage 4b proof instructions
 
-This is a throwaway workflow proof on the disposable LEGSMOKE project. Do not act until a targeted
-human Dispatch message gives the next exact proof operation. Follow that instruction precisely, use
-the Go-daemon Legion tools and handoffs, and do not create work outside the issue's smoke branch.
+This is a throwaway workflow proof on the disposable LEGSMOKE project. A tree's root architect
+starts its tree from the daemon's `catch-up` notice as its role says: it writes the spec in the
+issue's own primary document and registers the gate, then waits. Apart from that, do not act until
+a targeted human Dispatch message gives the next exact proof operation. Follow that instruction
+precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside the issue's
+smoke branch.
 EOF
 write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
 note "$out"
 create_route_configmap
+create_providers_secret
 production_baseline
 start_daemon
 start_interests_sampler
@@ -1373,14 +1401,12 @@ pod_shape_watcher 9>&- 7>&- &
 shape_pid=$!
 pass
 
-# drive_spec ISSUE: the architect writes its spec and registers the gate; with gates.design off the
-# daemon approves the registered version itself and the issue moves to planning.
+# drive_spec ISSUE: the architect registers the gate on its own (architect_registers_gate); with
+# gates.design off the daemon approves the registered version itself and the issue moves to
+# planning.
 drive_spec() {
-  local issue=$1 artifact
-  artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
-  wait_for_worker "$issue" architect
-  send_agent "$issue" architect "Stage 4b proof spec operation: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo, and say in it that a review of the pull request may ask for one more line appended to that same file, which is in scope. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at its current version. The design gate is off, so no approval is needed. Wait after registering."
-  until_true 600 "the $issue architect to register primary artifact $artifact" gate_registered "$issue" "$artifact"
+  local issue=$1
+  architect_registers_gate "$issue" "the $issue"
   wait_for_phase "$issue" planning
 }
 

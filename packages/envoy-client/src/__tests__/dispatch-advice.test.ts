@@ -57,10 +57,8 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
       );
     }
     if (target.pathname === "/api/v1/projects/DSP/architecture-source" && method === "GET") {
-      return new Response(JSON.stringify({ code: "SOURCE_NOT_FOUND", error: "source not found" }), {
-        status: 404,
-        headers: { "Content-Type": "application/json" },
-      });
+      // No source configured is the read's own answer, not a refusal.
+      return new Response("null", { headers: { "Content-Type": "application/json" } });
     }
     if (target.pathname === "/api/v1/issues/DSP-42/artifacts" && method === "POST") {
       return response(
@@ -115,6 +113,8 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
         )
       );
     }
+    if (target.pathname === "/api/v1/projects/DSP/artifacts" && method === "GET")
+      return response([]);
     if (target.pathname === "/api/v1/projects/DSP/artifacts/spec" && method === "GET") {
       return response({
         id: "artifact-42",

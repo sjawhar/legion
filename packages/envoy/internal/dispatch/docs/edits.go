@@ -790,7 +790,11 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 				op.With,
 			)}
 		}
+		// The text written over the match stays inside every ask and comment anchor the match lay
+		// wholly inside, so each anchor's quote is still the whole text it covers.
+		pmdoc.AddMarks(with, pmdoc.AnchorMarksCovering(tree, r))
 		next, err := pmdoc.Splice(tree, r, with)
+		err = invalidSchemaOp("with", err)
 		if err == nil && level != 0 {
 			next, err = pmdoc.SetHeadingLevel(next, r.From, level)
 		}
@@ -826,7 +830,8 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		return pmdoc.Splice(tree, r, empty)
+		out, err := pmdoc.Splice(tree, r, empty)
+		return out, invalidSchemaOp("find", err)
 	case "insert":
 		if op.Markdown == "" {
 			return nil, invalidOp("markdown")
@@ -842,13 +847,6 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if plainText && pmdoc.TargetSpansBlocks(tree, target) {
 			return nil, &ErrQuoteSpansBlocks{Quote: anchor}
 		}
-		with, err := parseInput(op.Markdown)
-		if err != nil {
-			return nil, invalidMarkdownOp("markdown", err)
-		}
-		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
-			return out, err
-		}
 		position := target.From
 		if after {
 			position = target.To
@@ -859,9 +857,17 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 				return nil, err
 			}
 		}
+		// Front matter opens only the document's start, so only there does the insert read it.
+		with, err := parseFragmentInput(op.Markdown, opensDocument(tree, position))
+		if err != nil {
+			return nil, invalidMarkdownOp("markdown", err)
+		}
+		if out, inserted, err := pmdoc.InsertTableRows(tree, target, op.Markdown, after); err != nil || inserted {
+			return out, invalidSchemaOp("markdown", err)
+		}
 		out, err := pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
 		if err != nil {
-			return nil, err
+			return nil, invalidSchemaOp("markdown", err)
 		}
 		if err := pmdoc.RepeatedBlockID(tree, out, with); err != nil {
 			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
@@ -1138,10 +1144,9 @@ func insertTarget(tree *pmdoc.Node, field, anchor string, occurrence *int) (pmdo
 // the replacement alone: `<div>x</div>` over a whole paragraph, at a list item's start or after a
 // hard break opens an HTML block the Proof schema does not carry, while the same HTML inside a
 // line, a table cell or a heading is inline HTML and is kept. A block that was already unreadable,
-// or another block that is, is no reason to refuse this replace. A replace stays inside its
-// textblock, so the block holds the same index before and after.
+// or another block that is, is no reason to refuse this replace.
 func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
+	_, unreadable, err := replacementBroke(before, after, match, pmdoc.BlockReadError)
 	if err != nil || unreadable == nil {
 		return err
 	}
@@ -1153,7 +1158,7 @@ func refuseUnreadableReplacement(before, after *pmdoc.Node, match pmdoc.Range, w
 // break inside a code span or inline HTML there ends the block, as a hard break would
 // (hasHardBreak), and the document reads back a heading and a paragraph, or a row as two rows.
 func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, with string) error {
-	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	_, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}
@@ -1161,21 +1166,6 @@ func refuseReshapedReplacement(before, after *pmdoc.Node, match pmdoc.Range, wit
 		"with %q is text the document reads back as another block where it lands (%v); write it inside a line of text",
 		with, reshaped,
 	)}
-}
-
-// replacementBroke is what check says of the document-level block holding the match after the
-// replace, when it said nothing of that block before: a block that already failed the check, or
-// another block that does, is no reason to refuse this replace. A replace stays inside its
-// textblock, so the block holds the same index before and after.
-func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (broke, err error) {
-	index, err := pmdoc.BlockIndex(before, match)
-	if err != nil {
-		return nil, err
-	}
-	if broke = check(after.Children[index]); broke == nil || check(before.Children[index]) != nil {
-		return nil, nil
-	}
-	return broke, nil
 }
 
 // unreadableReason says why a replace left its block unreadable and what to do instead, by cause.
@@ -1283,10 +1273,11 @@ func blockMarkerAfterHardBreak(inline []*pmdoc.Node) (marker, kind string) {
 	return "", ""
 }
 
-// inlineAware parses a suggestion's replacement as blocks, keeping the edge
-// whitespace of a replacement that stays inline.
-func inlineAware(markdown string, edges textEdges) (*pmdoc.Node, error) {
-	tree, err := parseInput(markdown)
+// inlineAware parses a suggestion's replacement as blocks written into the document, keeping the
+// edge whitespace of a replacement that stays inline. opensDocument says whether the replacement
+// lands where the document begins.
+func inlineAware(markdown string, edges textEdges, opensDocument bool) (*pmdoc.Node, error) {
+	tree, err := parseFragmentInput(markdown, opensDocument)
 	if err != nil {
 		return nil, err
 	}
@@ -1303,7 +1294,7 @@ func inlineAware(markdown string, edges textEdges) (*pmdoc.Node, error) {
 // this one, could read as that fence (pmdoc's typedFence). Code that only reads back with
 // different whitespace keeps its shape and is not refused.
 func refuseCodeThatReshapesItsBlock(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.TextblockAt, field, with string) error {
-	reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
+	_, reshaped, err := replacementBroke(before, after, match, pmdoc.BlockShapeError)
 	if err != nil || reshaped == nil {
 		return err
 	}

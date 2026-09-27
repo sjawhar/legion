@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { setInterests, setLiveSessions } from "./agents";
 import {
@@ -226,14 +226,32 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
   });
 
   try {
+    const streamResponse = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/events"
+    );
     const reloaded = page.reload();
-    await listRequested.promise;
+    // A reload is a cold client: the server starts its stream at the current head and replays
+    // nothing. Posting the hidden reply before that stream is open means the frame never
+    // reaches the page, no pending marker is ever set, and everything below passes without
+    // testing anything. Wait for the stream as the sibling above does.
+    await Promise.all([listRequested.promise, streamResponse]);
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
-    await page.waitForTimeout(150);
+    // The held Inbox response must not land until the browser has handled the hidden ask's
+    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on;
+    // a reply posted after it on the visible ask does. Event ids are delivered in order, so
+    // the marker appearing proves the frame before it was processed.
+    await createComment(
+      visibleIssue.key,
+      { ask_id: visibleAsk.id, body: "Ordering marker." },
+      session
+    );
+    await expect(
+      page.getByTestId(`ask-${visibleAsk.id}`).getByText("Ordering marker.")
+    ).toBeVisible();
     releaseList.resolve();
     await reloaded;
 
@@ -1032,7 +1050,9 @@ for (const refusal of [
       // Inbox the whole width) and on the line below when it is not (a phone). Asserting
       // "below" pinned one of those two layouts and went red on the other.
       const key = await page.locator("[data-inbox-owner]").first().boundingBox();
-      const alert = await retry.boundingBox();
+      // The refusal itself, not its Retry: the alert is the wide thing, and measuring the
+      // narrow control inside it checked something the assertion does not claim.
+      const alert = await row.getByRole("alert").boundingBox();
       expect(key).not.toBeNull();
       expect(alert).not.toBeNull();
       const overlaps =
@@ -1048,3 +1068,45 @@ for (const refusal of [
     }
   });
 }
+
+test("an ask card's time stays with its author, never opening a line of its own", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the provenance line only wraps where it must");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Provenance line" });
+  // A live session names itself in a sentence, so the author fills the line and the time is what
+  // the wrap lands on.
+  const author = {
+    actor: {
+      id: "e2e-long-author",
+      kind: "session" as const,
+      origin: {
+        session_title: "Reviewing PR #1489 LEGION-67 production-check screen fixes at 390px",
+        tmux: "dispatch:1.9",
+      },
+    },
+    as: "agent" as const,
+  };
+  await createAsk(issue.key, { question: "Where does the time sit?" }, author);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.locator("[data-testid^='ask-']").first();
+    await expect(card).toBeVisible();
+    const middle = async (locator: Locator) => {
+      const box = await locator.boundingBox();
+      return Math.round((box?.y ?? -1) + (box?.height ?? 0) / 2);
+    };
+    const chip = card.getByRole("button", { name: /Reviewing PR #1489/ });
+    const time = card.locator("time").first();
+    await expect(chip).toBeVisible();
+    await expect(time).toBeVisible();
+    // Who and when are one group: the separator that joins them never starts a line.
+    expect(await middle(time)).toBe(await middle(chip));
+  } finally {
+    await alice.close();
+  }
+});

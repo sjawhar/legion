@@ -288,7 +288,11 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // once nobody will hold that role for this notice — the claim has failed or retired, or its tree
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
-// notice either.
+// notice either. A publish the listener accepts but then cannot forward, to a session that is
+// registered but no longer running, comes back as a role-lane exception and is queued again
+// (rehold, notice_exceptions.go). The runner executes a row it leased from memory, so a row deleted
+// under its lease since (a catch-up a newer ready dropped) is found gone in the tree's snapshot and
+// finishes without a publish.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -297,6 +301,10 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		return errors.New("notice executor has no claim supervisor")
 	}
 	issue, tree, err := r.readNoticeTree(ctx, row)
+	if errors.Is(err, errNoticeRowGone) {
+		r.log.Info("outbox notice finished without publishing: its row was deleted under its lease", "row", row.ID, "kind", payload.Kind, "issue", row.Issue)
+		return nil
+	}
 	if errors.Is(err, errNoticeUnroutable) {
 		r.log.Error("outbox notice finished undelivered: it has no architect", "row", row.ID, "kind", payload.Kind, "issue", row.Issue, "error", err)
 		return nil
@@ -312,8 +320,8 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if earlier := earlierNoticeFor(tree, architect, runs); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
-	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
-	published := r.notices.Publish(ctx, roleTopicPrefix+string(architect), message, payload, fmt.Sprintf("legion-outbox:%d", row.ID))
+	notice, key := payload.Published(row.ID)
+	published := r.notices.Publish(ctx, roleTopicPrefix+string(architect), noticeSummary(payload.Kind, row.Issue), notice, key)
 	switch {
 	case published == nil:
 		return nil
@@ -337,7 +345,7 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
 	}
-	err := r.notices.Publish(ctx, roleTopicPrefix+payload.Role, payload.Packet, payload.Packet, fmt.Sprintf("legion-outbox:%d", row.ID))
+	err := r.notices.Publish(ctx, roleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
 	if errors.Is(err, notify.ErrNoHolder) {
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
 	}
@@ -354,8 +362,7 @@ func (r *outbox) controllerNotice(ctx context.Context, row record.OutboxRow, pay
 	if r.notices == nil {
 		return errors.New("controller notice executor has no Envoy publisher")
 	}
-	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
-	if err := r.notices.Publish(ctx, notify.ControllerTopic(r.project), message, record.Notice(payload), fmt.Sprintf("legion-outbox:%d", row.ID)); err != nil {
+	if err := r.notices.Publish(ctx, notify.ControllerTopic(r.project), noticeSummary(payload.Kind, row.Issue), record.Notice(payload), record.OutboxKey(row.ID)); err != nil {
 		return fmt.Errorf("publish controller notice for %s: %w", row.Issue, err)
 	}
 	return nil
@@ -444,6 +451,19 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			}
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("relaunch retired claim %s: %w", token, err)
+			}
+		}
+		// A start that finds a tree's root architect running is a re-admission while its session
+		// lived on. The linger suspends the root's claim, so that happens only when the claim was
+		// mid-launch when the suspend ran (the machine ignores a suspend while launching), or the
+		// re-admission's start ran before the suspend. No ready follows, and a ready is what tells
+		// the architect its tree (workflow's claimReady), so the start applies that fact itself,
+		// for the running launch, once per start row, and the architect is told its tree's new
+		// generation.
+		if claimTookRole(state) && claim.IsTreeArchitect(payload.Role, issue.Key, issue.Tree) {
+			if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("start-running:%s:%d", token, row.ID),
+				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation}, r.handlers...); err != nil {
+				return fmt.Errorf("tell the running architect of %s its tree: %w", issue.Key, err)
 			}
 		}
 		// A claim that, once relaunched, still holds a task of this row's phase and run that it will

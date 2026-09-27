@@ -352,3 +352,70 @@ test("the agent issue API returns POSSIBLE_DUPLICATE and force creates the issue
   expect(forced.status()).toBe(201);
   await expect(forced.json()).resolves.toMatchObject({ key: "CORE-2" });
 });
+
+// The hint names keys a touch reader does not have, and 33px of palette is 33px of hits, so it
+// shows only where a pointer that can hover exists.
+test("the palette's keyboard hints show for a pointer and not for a touch reader", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createIssue({ project: "CORE", title: "Conversation view" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    if (testInfo.project.name === "iphone") {
+      // No keyboard and no rail: the drawer carries the palette's own control.
+      await page.getByRole("button", { name: "Open navigation" }).click();
+      await page.getByRole("button", { name: /^search/i }).click();
+    } else {
+      await expect(page.getByRole("button", { name: /^search/i })).toBeVisible();
+      await page.locator("body").focus();
+      await page.keyboard.press("Control+k");
+    }
+    await page.getByRole("combobox", { name: "Search" }).fill("conversation");
+    await expect(page.getByRole("option").first()).toBeVisible();
+
+    const hints = page.getByTestId("search-keyboard-hints");
+    if (testInfo.project.name === "chromium") {
+      await expect(hints).toBeVisible();
+      await expect(hints).toContainText("to open");
+    } else {
+      await expect(hints).toBeHidden();
+    }
+  } finally {
+    await alice.close();
+  }
+});
+
+// The hits of one owner are a group named by the row above them, so a reader who cannot see
+// that row still hears which issue a hit belongs to.
+test("each palette group is named by its owner row", async ({ browser }, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "the grouping is independent of viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Conversation view" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: /^search/i })).toBeVisible();
+    await page.locator("body").focus();
+    await page.keyboard.press("Control+k");
+    await page.getByRole("combobox", { name: "Search" }).fill("conversation");
+    const group = page.getByRole("group", { name: new RegExp(`^${issue.key}: `) });
+    await expect(group).toBeVisible();
+    // The options are inside it, and the listbox still owns them.
+    await expect(group.getByRole("option").first()).toBeVisible();
+    // The owner row names the group and is not a second node in the accessibility tree, so a
+    // reader hears the owner once rather than twice. `aria-labelledby` computes a name from a
+    // hidden element, which is why the group above still has one.
+    const row = page.locator(`[id="search-group-issue:${issue.key}"]`);
+    await expect(row).toHaveAttribute("aria-hidden", "true");
+    // Exactly one node carries the owner's accessible name: the group.
+    await expect(page.getByRole("group", { name: new RegExp(`^${issue.key}: `) })).toHaveCount(1);
+  } finally {
+    await alice.close();
+  }
+});

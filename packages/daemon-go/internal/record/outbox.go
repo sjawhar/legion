@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -66,6 +67,22 @@ func MessageMarker(id int64) string {
 	return messageMarkerOpen + strconv.FormatInt(id, 10) + messageMarkerClose
 }
 
+// outboxKeyPrefix begins the dedupe key the runner publishes a row under.
+const outboxKeyPrefix = "legion-outbox:"
+
+// OutboxKey is the dedupe key the runner publishes outbox row id under, so the listener and the
+// plugin recognise a retried publish of the row as the same message.
+func OutboxKey(id int64) string {
+	return outboxKeyPrefix + strconv.FormatInt(id, 10)
+}
+
+// ParseOutboxKey is the row id OutboxKey names, and whether key is a key OutboxKey writes.
+func ParseOutboxKey(key string) (int64, bool) {
+	digits, found := strings.CutPrefix(key, outboxKeyPrefix)
+	id, err := strconv.ParseInt(digits, 10, 64)
+	return id, found && err == nil && id > 0 && OutboxKey(id) == key
+}
+
 // Posted is the message the runner posts for row id: the body, then the row's marker.
 func (m MessagePost) Posted(id int64) string {
 	return m.Body + messageSeparator + MessageMarker(id)
@@ -84,9 +101,60 @@ type Notice struct {
 	Verdict string      `json:"verdict,omitempty"`
 	Version int         `json:"version,omitempty"`
 	Reason  string      `json:"reason,omitempty"`
+	// Resends counts the times the notice was queued again after the listener could not forward
+	// it to its architect's session (the daemon's rehold), which stops at a cap.
+	Resends int `json:"resends,omitempty"`
+	// ResendOf is the outbox row a re-held copy copies. The copy is published under that row's
+	// dedupe key (OutboxKey), so a session that already has the notice recognises the copy. The
+	// row is the daemon's own bookkeeping: the executor publishes the notice without it.
+	ResendOf int64 `json:"resend_of,omitempty"`
+	// CatchUp is a catch-up notice's account of the tree, and absent from every other kind.
+	CatchUp *CatchUp `json:"catch_up,omitempty"`
+}
+
+// CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
+// (a catch-up notice), which is the architect's first instruction: admission launches it with no
+// task. It is the tree as the daemon records it then: the root's generation, the launch of the
+// architect's claim it was written for, the design gate policy and the root's gate, and every issue
+// of the tree.
+type CatchUp struct {
+	Generation uint64         `json:"generation"`
+	Launch     uint64         `json:"launch"`
+	Gate       CatchUpGate    `json:"gate"`
+	Issues     []CatchUpIssue `json:"issues"`
+}
+
+// CatchUpGate is the design gate as a catch-up states it: the project's policy (gates.design,
+// root-issues or off) and, once the architect has registered one, the root's registered document,
+// its latest version, and whether that version is approved.
+type CatchUpGate struct {
+	Policy   string `json:"policy"`
+	Artifact string `json:"artifact,omitempty"`
+	Version  int    `json:"version,omitempty"`
+	Open     bool   `json:"open"`
+}
+
+// CatchUpIssue is one issue of the tree as a catch-up lists it.
+type CatchUpIssue struct {
+	Key    string      `json:"key"`
+	Parent string      `json:"parent,omitempty"`
+	Title  string      `json:"title"`
+	Phase  phase.Phase `json:"phase"`
+	Status string      `json:"status"`
 }
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }
+
+// Published is the notice the runner publishes for outbox row id, and the dedupe key it goes under:
+// a re-held copy goes under the key of the row it copies, and without ResendOf.
+func (n Notice) Published(id int64) (Notice, string) {
+	if n.ResendOf == 0 {
+		return n, OutboxKey(id)
+	}
+	copied := n.ResendOf
+	n.ResendOf = 0
+	return n, OutboxKey(copied)
+}
 
 // ControllerNotice is a Notice for the project's controller topic (notify.ControllerTopic) alone,
 // in an outbox row of its own, so its publish retries apart from the architect's notice row. It is
@@ -290,6 +358,9 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if !validNoticeKind(value.Kind) {
 			return fmt.Errorf("unknown notice kind %q", value.Kind)
 		}
+		if (value.Kind == "catch-up") != (value.CatchUp != nil) {
+			return fmt.Errorf("a %s notice carries a catch-up only when it is one", value.Kind)
+		}
 	case ControllerNotice:
 		// A triage notice is the controller's alone: its root is unrecorded, so no architect owns it.
 		if value.Kind != "triage" && !validNoticeKind(value.Kind) {
@@ -326,7 +397,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status", "catch-up":
 		return true
 	default:
 		return false

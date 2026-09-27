@@ -159,7 +159,7 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: "LEGION-2", Title: "Root", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
-	row := mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now())
+	row := leasedOutboxRow(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now()))
 	publisher := &outboxPublisher{err: errors.New("listener unavailable")}
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 
@@ -1186,7 +1186,7 @@ func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 	if err := restarted.replayTerminal(context.Background(), []supervise.Claim{persisted}); err != nil {
 		t.Fatalf("repeat replay persisted ready claim: %v", err)
 	}
-	if got := handler.facts(); len(got) != 1 || got[0] != (intake.ClaimReady{Issue: persisted.Issue, Role: persisted.Role}) {
+	if got := handler.facts(); len(got) != 1 || got[0] != (intake.ClaimReady{Issue: persisted.Issue, Role: persisted.Role, Launch: persisted.Generation}) {
 		t.Fatalf("ready facts = %#v, want exactly one replayed ClaimReady", got)
 	}
 }
@@ -1405,7 +1405,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	provisioned, removed := 0, 0
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
-	admission := admit.New(records, 2, "legion", quietLogger())
+	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
@@ -1446,7 +1446,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	}
 
 	// The human sets the closed root back to todo.
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: true}, engine, admission); err != nil {
 		t.Fatalf("apply the todo: %v", err)
 	}
 	if err := runner.RunOnce(ctx); err != nil {
@@ -1476,7 +1476,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	putOutboxIssue(t, pool, records, root)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
-	admission := admit.New(records, 2, "legion", quietLogger())
+	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	clock := time.Now().Add(time.Hour)
 	removals, busy := 0, true
 	runner := &outbox{
@@ -1506,7 +1506,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	}
 
 	busy = false
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: true}, engine, admission); err != nil {
 		t.Fatalf("apply the todo: %v", err)
 	}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -1592,4 +1592,88 @@ func workspaceRemovals(t *testing.T, pool *pgxpool.Pool) int {
 		t.Fatalf("count workspace removal rows: %v", err)
 	}
 	return count
+}
+
+// A re-admission starts the root's architect again. The linger suspended it, so the start normally
+// resumes it and the resume's ready tells it its tree. It is still running in two cases: its claim
+// was mid-launch when the linger's suspend ran, which the machine ignores while launching, so it
+// came up during the linger and was told nothing; or the re-admission's start ran before the
+// linger's suspend. Then the start finds it working and only records itself: no ready follows, and
+// without a catch-up the architect would sit through the new generation untold. The start tells
+// it, as a ready would, for the launch that runs. A start that launches the claim tells nothing:
+// its ready will.
+func TestAStartThatFindsTheRootArchitectRunningTellsItItsTree(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 5}
+	putOutboxIssue(t, pool, records, root)
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	admission := admit.New(records, engine, 2, "legion", quietLogger())
+	runner := &outbox{
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		handlers: []intake.Handler{engine, admission}, now: time.Now, log: quietLogger(),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+		},
+	}
+	if err := runner.execute(ctx, mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: 1}, time.Now())); err != nil {
+		t.Fatalf("start the architect: %v", err)
+	}
+	catchUpReasons := func() []string {
+		t.Helper()
+		rows, err := pool.Query(ctx, "select (payload->>'reason') || ' launch=' || (payload->'catch_up'->>'launch') from outbox where kind = 'notice' and payload->>'kind' = 'catch-up' order by id")
+		if err != nil {
+			t.Fatalf("read the catch-ups: %v", err)
+		}
+		told, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatalf("scan the catch-ups: %v", err)
+		}
+		return told
+	}
+	if told := catchUpReasons(); len(told) != 0 {
+		t.Fatalf("the start that launched the architect queued catch-ups %q; want none before its ready", told)
+	}
+	token, err := claim.NewToken("legion", root.Key, claim.RoleArchitect)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _ := sup.Machine(token)
+	launch := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: token, Generation: launch},
+		supervise.RequestRegister{Claim: token, Generation: launch, Session: "ses-architect", SessionFile: "/tmp/architect.jsonl"},
+		supervise.RequestReady{Claim: token, Generation: launch, Session: "ses-architect"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+
+	// The tree is re-admitted at generation 2 while that architect still runs.
+	root.Generation = 2
+	putOutboxIssue(t, pool, records, root)
+	start := mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: 2}, time.Now())
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("start the running architect for generation 2: %v", err)
+	}
+	told := catchUpReasons()
+	want := fmt.Sprintf("the tree of LEGION-208 at generation 2 as the daemon records it now; start or resume it as your role says launch=%d", launch)
+	if len(told) != 1 || told[0] != want || machine.Claim().State != supervise.StateReady {
+		t.Fatalf("after the generation 2 start, catch-ups %q with the architect %s; want one, %q, and the architect left running", told, machine.Claim().State, want)
+	}
+
+	// That catch-up is delivered, and the same start row runs again (a retry after a lost finish).
+	if _, err := pool.Exec(ctx, "delete from outbox"); err != nil {
+		t.Fatalf("deliver the queued notices: %v", err)
+	}
+	if err := runner.execute(ctx, start); err != nil {
+		t.Fatalf("retry the generation 2 start: %v", err)
+	}
+	if told := catchUpReasons(); len(told) != 0 {
+		t.Fatalf("the retried start queued catch-ups %q; want none, the row having told the architect already", told)
+	}
 }

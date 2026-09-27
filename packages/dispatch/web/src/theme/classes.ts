@@ -692,3 +692,14 @@ export const newDividerLine = "bg-sky-200 dark:bg-sky-900";
 
 export const card = "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900";
 export const canvasText = "bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100";
+
+/**
+ * A 32 px fade at the trailing edge of a horizontally scrolling strip. It is a mask, not a
+ * colour: the strip's own content fades to nothing over the last 32 px, whatever surface is
+ * behind it, so it carries no palette role and stays correct in both schemes.
+ *
+ * A strip wears it only while it has somewhere left to scroll. Applied at the end of the scroll
+ * it would fade the last item, which nothing brings back into view.
+ */
+export const scrollFadeTrailing =
+  "[mask-image:linear-gradient(to_right,#000_calc(100%-32px),#0000)]";

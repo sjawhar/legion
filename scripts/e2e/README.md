@@ -233,8 +233,9 @@ domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-co
 either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
 neither value. The bridge connects to that upstream as the nkey user `NATS_NKEY_SEED_FILE` or
 `NATS_NKEY_SEED` in the operator's environment names, and without a credential when neither is set. Every process the rigs start against their own no-auth NATS (the listener, the Envoy Dispatch
-server, the Go daemon; stage 2 and the other local rigs unset both variables outright) runs without
-`NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
+server, the Go daemon; stage 2 and the other local rigs unset every variable below outright) runs without
+`NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, and the Go daemon also without the daemon seed's
+`NATS_DAEMON_NKEY_SEED`/`NATS_DAEMON_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
 users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, keeps the operator's seed. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
@@ -271,7 +272,9 @@ that names the rig's project key, then reads the operator's Envoy listener (`GET
 audit uses the Dispatch token already in `~/.config/opencode/envoy.json` and writes nothing.
 
 It proves admission order and slotless children, then drives a root from `todo` through an
-architect's spec and gate registration, the human approval, planner, implementer pull request,
+architect's spec and gate registration, which the architect does on its own (the proof never
+prompts it: its first turn is the daemon's `catch-up` notice, and the root's primary document is
+the proof's one-file smoke spec), the human approval, planner, implementer pull request,
 tester, reviewer, retro, merger READY, the ordinary human squash merge, production check, and
 architect sign-off. It also proves three changes-requested rounds, each posted by the reviewer
 pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
@@ -418,6 +421,24 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
+| `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker, `https://secrets.internal.trajectorylabs.com` (Plan D), never a development slot (below) |
+| `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the login this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator approves it with his own YubiKey during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
+| `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into `production/agent-secrets/legion-e2e-auto` (rule `LEGION_E2E_AUTO`: pod, automatic, inject) — the harness never sees the value itself, only its hash |
+| `LEGION_E2E_AGENT_SECRETS_BIN` | `$work/agent-secrets` (built by the script; not read from the environment) | the checkout's `agent-secrets` CLI (`packages/envoy/cmd/agent-secrets`), run directly from the devbox for the `secrets-old-uid-and-revocation` check's before/after-revocation reads |
+
+**Why the production broker, with dummy rules, and not a development slot.** A dispatch-project
+development slot cannot host this proof, for three reasons Plan D established: its broker verifies
+tokens of the *staging* cluster's issuer, and the pods this harness launches carry the production
+cluster's; it lives in the staging VPC and cannot reach production Dispatch; and it may not run a
+Dispatch of its own (the GitHub App's credentials cannot cross accounts), so it can issue no
+launcher credential — nothing, the daemon included, can enroll against it. Instead the proof runs
+against the **production broker** with a rules file carrying only two throwaway secrets
+(`LEGION_E2E_AUTO`: pod, automatic, inject; `LEGION_E2E_APPROVAL`: pod, approval by
+`login:<name>` naming the same login as `LEGION_E2E_AGENT_SECRETS_OPERATOR`, inject — contract v9
+permits only `operator` or `login:<name>` approvers, never `issue_assignee`; both 3600 s, Sami's
+values seeded after Plan D's apply) —
+"before any real secret moves" is exactly this state, and it is what spec Acceptance 2's "a live
+worker pod on a development slot" means here.
 
 Two identities, so the runtime is proven under exactly the RBAC it ships with. The runtime and
 the harness's own reads use the restricted one; the admin context only runs what an operator does
@@ -453,12 +474,19 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `provider-key` | the stub agent's environment (`/proc/<pid>/environ`) carries `STAGE4A_PROVIDER_KEY` equal to the run's providers Secret's `stage4a` key, read back through the admin context and never printed; the shim's (pid 1) carries no such variable |
 | `adopt-working-copy` | `AdoptWorkingCopy` with the implement App's bot identity; `jj log -r @ -T author` in `$LEGION_WORKSPACE` shows it |
 | `worker-colocated` | a worker spawned while the root runs requires the tree's node (podAffinity on `legion.dev/tree`, topology `kubernetes.io/hostname`) and runs there |
+| `secrets-two-pods-enrolled` | the root and the colocated worker — two pods on the operator's one ServiceAccount — are each enrolled with the broker on their hello, with the pod uid the runtime recorded; each carries exactly one projected token for audience `agent-secrets` (alone in its volume, the middleman token untouched beside it) and a 0600 `key.pem` and enrollment id owned by `legion`; `agent-secrets self --json` answers each with its own enrollment id and kind `pod`; the two ids differ |
+| `secrets-automatic-grant` | the root's `agent-secrets LEGION_E2E_AUTO -- …` runs with the automatic rule's value (proven by its sha256 against the operator's `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256`, never the value itself); the root's and the worker's separate `request`s each grant, with two distinct grant ids |
+| `secrets-cross-pod-negative` | the worker's `agent-secrets status`/`revoke` naming the root's request or grant id is 403 `NOT_YOURS`, and the root's grant still works after the attempt; the worker's own key beside a copy of the root's enrollment id is 401 `PROOF_INVALID` (the proof's thumbprint is not the enrollment's) |
+| `secrets-copied-token-negative` | an enrollment naming the worker's pod uid and thumbprint but the root's projected token is refused 403 `POD_IDENTITY_MISMATCH` — a copied token alone binds nothing |
+| `secrets-self-enroll-negative` | from inside the root's pod, an enroll attempt bearing the pod's own boot token as if it were a launcher credential is refused 401, and the pod's enrollment (`agent-secrets self`) is unchanged after |
+| `secrets-approval-ask` | a request for the approval-gated secret comes back pending with a credential-request record id (ruling 16: the broker's rules pick the approver at request time, naming no issue); the harness prints `STAGE4A: approve credential request <record id> for LEGION_E2E_APPROVAL on the Dispatch credential page as <operator>` and polls, exactly as the machine login does, for up to 10 minutes until the operator's real approval settles it granted (success), denied, or expired (both failures) — always attended, with no cancel-and-cleanup path |
 | `suspend` | Suspend of the worker: when it returns the runtime's watch no longer holds the claim; Sandbox `Suspended`, pod gone, tree PVC `Bound`, `Probe(recorded)` gone; over the settle window Observe delivers no observation of the worker evaluated after Suspend returned (an observation's `At` is stamped as its evaluation ends, and Observe re-reads the recorded incarnation before it sends) |
 | `no-affinity` | with the root suspended and no tree pod scheduled, a second worker carries no affinity, runs, and mounts the tree PVC; suspended, the resumed root carries none either |
 | `resume` | Resume of the first worker: the affinity is back, a new incarnation, a hello at the next generation with its token, and the marker holds exactly the old and new pod uids |
 | `same-agent-negative` | a Resume naming a session file the volume lacks: the init container refuses (`Refusing to start S4A-1 fresh`), observed as gone with the init log; resumed correctly, the marker holds two agents and never the refused pod |
 | `kill-pod` | `kubectl exec … sh -c 'kill 1'` on the worker: gone with the old uid and the main container's exit code; `Resume(prev=dead)` relaunches through `Suspended` (the Sandbox's generation moves by exactly two) |
 | `stale-incarnation` | across that relaunch, every observation carrying the new uid is alive or uncertain, the gone carried the old uid, and `Suspend(old)` leaves the Sandbox `Running` on the same pod |
+| `secrets-old-uid-and-revocation` | the worker's pod is killed and its claim resumed to a new uid. Before the kill, a copy of its key directory (the harness's instrument — the accepted boundary is that whoever holds a pod's key *is* that pod until the daemon revokes it or the lease ends) works from the devbox; after the daemon's revocation (on the observed `Gone`) the same copy is 401 `PROOF_INVALID`. An enrollment for the new pod naming the *old* uid is refused 403 `POD_IDENTITY_MISMATCH`; enrolled on its own hello instead, the resumed pod gets a fresh automatic grant |
 | `respawn-before-register` | a claim spawned on a token the resolver withholds, suspended before any hello, spawns again over its Sandbox: a new uid, the Secret's boot token rotated to generation 2's, and generation 2 registered |
 | `concurrent-provision` | a new tree's root and a child worker spawned at once: both provision their workspace, the two `workspace-init` runs do not overlap (the runtime serializes them; `flock` does not reach across gVisor pods), and the volume holds one clone, with both jj workspaces, that passes `git fsck --connectivity-only` |
 | `re-adopt` | the listener and runtime closed, one worker killed while none runs, then a fresh listener and `sandbox.New` with `ReconcileOrphans(known)`: the living claims are alive with their recorded incarnations and unchanged pods and Sandbox generations, the killed one is gone with its recorded uid, and every living shim says hello again with its current token |
@@ -603,7 +631,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`fixtures/operator-route`](fixtures/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
-| `spec-posted` | each admitted architect posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
+| `spec-posted` | each admitted architect, prompted by nothing but the daemon's `catch-up` notice, posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
 | `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node |
 | `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
 | `issue-cap-moves` | tree 2 to backlog frees its slot, tree 3 is admitted, and tree 2's pods are gone |
@@ -1070,6 +1098,10 @@ where an agent runs:
 | `assert_claim_endpoints ISSUE ROLE` | fails the check when the claim's process could reach a service outside the rig; every instruction runs it first |
 | `claim_session_text ISSUE ROLE` | prints the claim's session file, and fails when there is none |
 | `workspace_jj ISSUE ARGS…` | runs `jj ARGS…` in the issue's workspace |
+
+`new_issue TITLE [PARENT]` creates each issue a proof drives. A root carries the Dispatch label
+`legion`, which hands it to the Go daemon: the daemon admits no root without it. A child carries
+none, since it runs under its root's tree.
 
 Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
 the phase's worker runs a whole loop (a correction round, the retro) and the caller passes its own

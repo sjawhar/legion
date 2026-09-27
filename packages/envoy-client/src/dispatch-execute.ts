@@ -1,6 +1,7 @@
 import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
+  Advised,
   Artifact,
   Ask,
   AskRead,
@@ -23,6 +24,8 @@ import type {
   IssueDetails,
   IssuePriority,
   IssueReferences,
+  IssueRouteReach,
+  IssueRouteStatus,
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
@@ -353,6 +356,18 @@ function optionalPriority(
   return typeof value === "number" ? (value as IssuePriority) : undefined;
 }
 
+/** A `priority` filter list as the issue list takes it: null, meaning no priority, is `none`. */
+function optionalPriorityFilter(
+  args: Record<string, unknown>,
+  name: string
+): (IssuePriority | "none")[] | undefined {
+  const value = args[name];
+  // The zod spec already refused anything but a list of integers 0–3 and null.
+  return Array.isArray(value)
+    ? (value as (IssuePriority | null)[]).map((item) => item ?? "none")
+    : undefined;
+}
+
 /** The `components` argument as the server takes it; the zod spec already checked its shape. */
 function optionalComponents(
   args: Record<string, unknown>,
@@ -395,16 +410,11 @@ async function architectureGuidance(
   if (components.mode === "none" || components.ids.length > 0) return undefined;
 
   try {
-    await client.getArchitectureSource(project);
-    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
-  } catch (error) {
-    if (
-      error instanceof DispatchServiceError &&
-      error.status === 404 &&
-      error.code === "SOURCE_NOT_FOUND"
-    ) {
+    if ((await client.getArchitectureSource(project)) === null) {
       return undefined;
     }
+    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
+  } catch (error) {
     return `Could not check whether project ${project} has an architecture model: ${messageFor(error)}. ${architectureComponentsAction}`;
   }
 }
@@ -937,18 +947,36 @@ async function resolveOwnerArguments(
   return { args: { ...args, issue }, ref, owner: { kind: "issue", issue } };
 }
 
+/** The document `artifactReference` names among `artifacts`. A bare reference is an id, a slug,
+ * then a filename; a `canonical` one, the document part of a dispatch:// reference, is a slug by
+ * definition (the address the dashboard and Dispatch's own routes use), so its slug match is the
+ * document even where another document's filename is the same text. */
 function artifactByReference(
   artifacts: readonly Artifact[],
   artifactReference: string,
-  owner: "issue" | "project"
+  owner: "issue" | "project",
+  canonical: boolean
 ): Artifact {
-  const byIdOrSlug =
-    artifacts.find((candidate) => candidate.id === artifactReference) ??
-    artifacts.find((candidate) => candidate.slug === artifactReference);
-  if (byIdOrSlug !== undefined) return byIdOrSlug;
+  const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
+  if (canonical && bySlug !== undefined) return bySlug;
+  const byId = artifacts.find((candidate) => candidate.id === artifactReference);
+  if (byId !== undefined) return byId;
   const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
+  // Dispatch suffixes a slug two documents would share, so one document's filename can be
+  // another's slug; a bare reference both answer to names two documents, and only an id tells
+  // them apart. Only a document answers to its filename there, as in Dispatch's own fallback, so
+  // an image or file of that name names no second document.
+  if (bySlug !== undefined) {
+    const named = byName.filter(
+      (candidate) => candidate.id !== bySlug.id && candidate.kind === "doc"
+    );
+    if (named.length > 0) {
+      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
+    }
+    return bySlug;
+  }
   if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
   }
   const [artifact] = byName;
   if (artifact === undefined) {
@@ -960,28 +988,35 @@ function artifactByReference(
 async function resolveArtifact(
   client: DispatchClient,
   owner: Owner,
-  artifactReference: string | undefined
+  artifactReference: string | undefined,
+  { canonical = false }: { readonly canonical?: boolean } = {}
 ): Promise<ResolvedArtifact> {
   if (owner.kind === "project") {
     if (artifactReference === undefined) {
       throw new Error("artifact is required for a project document");
     }
-    try {
-      return {
-        owner,
-        artifact: await client.getProjectArtifact(owner.project, artifactReference),
-      };
-    } catch (error) {
-      // Project artifact routes resolve slugs. The unlinked-only collection gives project
-      // documents the same id, slug, then filename resolution as issue artifacts without
-      // allowing an issue-attached artifact of the same name to become the document owner.
-      if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
-      const artifacts = await client.listProjectArtifacts(owner.project, true);
-      return {
-        owner,
-        artifact: artifactByReference(artifacts, artifactReference, "project"),
-      };
-    }
+    // Project artifact routes resolve a slug, then a filename no other document shares, which is
+    // what a dispatch:// reference means.
+    const routed = await client
+      .getProjectArtifact(owner.project, artifactReference)
+      .catch((error: unknown) => {
+        if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
+        return undefined;
+      });
+    if (canonical && routed !== undefined) return { owner, artifact: routed };
+    // A bare reference is matched as an issue's is, over the project's unlinked documents with the
+    // route's answer among them: an id outranks another document's slug, and a slug another
+    // document's filename also answers to is refused. The unlinked-only collection keeps an
+    // issue-attached artifact of the same name from becoming the document owner.
+    const unlinked = await client.listProjectArtifacts(owner.project, true);
+    const artifacts =
+      routed === undefined
+        ? unlinked
+        : [routed, ...unlinked.filter((candidate) => candidate.id !== routed.id)];
+    return {
+      owner,
+      artifact: artifactByReference(artifacts, artifactReference, "project", canonical),
+    };
   }
   const issue = await client.getIssue(owner.issue);
   let artifact: Artifact | undefined;
@@ -990,7 +1025,7 @@ async function resolveArtifact(
       (candidate) => candidate.primary || candidate.id === issue.primary_artifact_id
     );
   } else {
-    artifact = artifactByReference(issue.artifacts, artifactReference, "issue");
+    artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
   }
   if (!artifact) {
     throw new Error(
@@ -1000,21 +1035,40 @@ async function resolveArtifact(
   return { owner, issue, artifact };
 }
 
+/** The id of the document an issue carries under `reference`: its artifact id, slug, or filename,
+ * or `spec` for its primary document, resolved as the Dispatch tools resolve an issue's `artifact`
+ * argument. A reference that names no document, or a filename two documents share, throws the
+ * same hint the Dispatch tools give. */
+export async function resolveIssueDocumentId(
+  client: DispatchClient,
+  issue: string,
+  reference: string
+): Promise<string> {
+  return (await resolveArtifact(client, { kind: "issue", issue }, reference)).artifact.id;
+}
+
 const documentHintLimit = 8;
 
+/** The refusal of a document reference: none matched, or several did, in which case `use` names
+ * what tells them apart (a slug, when several share a filename; the id, when one's slug is
+ * another's filename). */
 function documentReferenceProblem(
   reference: string,
-  documents: readonly Pick<Artifact, "slug" | "name">[],
+  documents: readonly Pick<Artifact, "id" | "slug" | "name">[],
   owner: "issue" | "project",
-  ambiguous = false
+  use?: "slug" | "id"
 ): string {
   const hints = documents
     .slice(0, documentHintLimit)
-    .map((document) => `${document.slug} (${document.name})`);
+    .map((document) =>
+      use === "id"
+        ? `${document.id} (${document.slug}, ${document.name})`
+        : `${document.slug} (${document.name})`
+    );
   const list = hints.length === 0 ? "none" : hints.join(", ");
-  return ambiguous
-    ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}`
-    : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
+  return use === undefined
+    ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`
+    : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
 }
 
 const askHintLimit = 8;
@@ -1137,6 +1191,35 @@ function holdsSession(claim: IssueClaim | null | undefined): boolean {
   return claim?.actor.kind === "session";
 }
 
+type RoutedIssue = Pick<Issue, "route"> & Partial<IssueRouteReach>;
+
+/** Whether the route is a role a live session holds, which the live registry names. */
+function routeHeldBySession(issue: RoutedIssue): boolean {
+  return issue.route_status === "live" && issue.route?.startsWith("role:") === true;
+}
+
+/**
+ * An issue's route as every agent surface reads it: where its messages go and whether that
+ * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
+ * nobody holds, or to a session that is not running, reaches nobody at the moment of the read,
+ * so it says so - and says "right now", because a restarting session is absent for minutes.
+ */
+function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {
+  if (issue.route === null) return "none";
+  const holder = issue.route_holder ?? null;
+  const reach: Record<IssueRouteStatus, string> = {
+    live:
+      routeHeldBySession(issue) && holder !== null
+        ? ` (held by ${titles?.get(holder) ?? holder})`
+        : "",
+    no_holder: issue.route.startsWith("role:")
+      ? " (nobody holds it right now)"
+      : " (that session is not running right now)",
+    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
+  };
+  return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
@@ -1160,7 +1243,7 @@ function issueSummary(
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
-    `Route: ${issue.route ?? "none"}`,
+    `Route: ${routeText(issue, titles)}`,
     ...(specApproval === undefined
       ? []
       : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
@@ -1590,6 +1673,14 @@ export async function executeDispatchTool(
   const args = (parsed.success ? parsed.data : ownerArguments.args) as ToolArguments;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
+  // The document part of the call's dispatch:// reference is a slug by definition; a document
+  // argument the reference does not supply is a bare one.
+  const refDocument =
+    ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
+  const resolveDocument = (documentOwner: Owner, reference: string | undefined) =>
+    resolveArtifact(client, documentOwner, reference, {
+      canonical: reference !== undefined && reference === refDocument,
+    });
   const owner =
     ownerArguments.owner?.kind === "issue"
       ? {
@@ -1674,6 +1765,7 @@ export async function executeDispatchTool(
     case "dispatch_issue_update": {
       const issueKey = issue();
       const status = optionalString(args, "status");
+      const reason = optionalString(args, "reason");
       const title = optionalString(args, "title");
       const route = optionalString(args, "route");
       const parent = optionalString(args, "parent");
@@ -1683,14 +1775,33 @@ export async function executeDispatchTool(
       const requestedLinks = Array.isArray(args.external_links)
         ? [...new Set(args.external_links as string[])]
         : undefined;
+      let before: IssueDetails;
+      try {
+        before = await client.getIssue(issueKey);
+      } catch (error) {
+        throw refusalWithCode(error);
+      }
+      // The schema admits reason only beside status done. A closed issue refuses messages,
+      // comments, and artifacts, so the reason is posted first and the close waits on it.
+      let closingNote: { readonly id: string; readonly ref: string } | undefined;
+      if (reason !== undefined) {
+        try {
+          const message = await client.message(issueKey, { body: reason, actor });
+          closingNote = {
+            id: message.id,
+            ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id),
+          };
+        } catch (error) {
+          throw refusalWithCode(error, "; the reason was not posted, so the close was not sent");
+        }
+      }
       // The server replaces the whole link set; the common call is "link the pull request
       // I just opened", so merge by URL and keep every existing link (and its kind).
-      let newLinks: string[] = [];
+      const linked = before.external_links.map((link) => link.url);
+      const newLinks = requestedLinks?.filter((url) => !linked.includes(url)) ?? [];
+      let after: Advised<Issue>;
       try {
-        const before = await client.getIssue(issueKey);
-        const linked = before.external_links.map((link) => link.url);
-        newLinks = requestedLinks?.filter((url) => !linked.includes(url)) ?? [];
-        const after = await client.updateIssue(issueKey, {
+        after = await client.updateIssue(issueKey, {
           ...(status === undefined ? {} : { status }),
           ...(title === undefined ? {} : { title }),
           ...(labels === undefined ? {} : { labels }),
@@ -1703,46 +1814,6 @@ export async function executeDispatchTool(
             : { external_links: [...before.external_links, ...newLinks.map((url) => ({ url }))] }),
           actor,
         });
-        const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
-        const changes = [
-          ...(status === undefined ? [] : [`status ${before.status} -> ${after.status}`]),
-          ...(title === undefined ? [] : [`title "${after.title}"`]),
-          ...(labels === undefined
-            ? []
-            : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`]),
-          ...(priority === undefined
-            ? []
-            : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`]),
-          ...(requestedLinks === undefined
-            ? []
-            : [
-                newLinks.length === 0
-                  ? `already linked ${requestedLinks.join(", ")} ${linkCount}`
-                  : `linked ${newLinks.join(", ")} ${linkCount}`,
-              ]),
-          ...(route === undefined
-            ? []
-            : [after.route === null ? "route cleared" : `route ${after.route}`]),
-          ...(parent === undefined
-            ? []
-            : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`]),
-          ...(components === undefined ? [] : [componentsChange(components, after.components)]),
-        ];
-        const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
-          setsStatus: status !== undefined,
-        });
-        return {
-          text: [
-            `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
-            ...adviceLines,
-          ].join("\n"),
-          details: {
-            issue: after.key,
-            status: after.status,
-            external_links: after.external_links.map((link) => link.url),
-            ...(after.advice === undefined ? {} : { advice: after.advice }),
-          },
-        };
       } catch (error) {
         // A URL links exactly one issue. A server from before EXTERNAL_LINK_TAKEN answers the
         // unique-index violation with 500 INTERNAL, which names nothing; say what it means.
@@ -1750,8 +1821,64 @@ export async function executeDispatchTool(
           error instanceof DispatchServiceError && error.status === 500 && newLinks.length > 0
             ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
             : "";
-        throw refusalWithCode(error, taken);
+        if (closingNote === undefined) throw refusalWithCode(error, taken);
+        // The reason is on the issue, so a blind retry would post it a second time: the error
+        // says where the first one is. Only a 4xx is a refusal that proves the issue is still
+        // open; after a 5xx, a timeout, or a transport error the close may have landed anyway.
+        const refused = error instanceof DispatchServiceError && error.status < 500;
+        const posted = `; the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
+        const landed = refused
+          ? `${posted} but the issue did not close. Retrying this call posts its reason again, so fix what refused the close, then retry with a reason that points at message ${closingNote.id}`
+          : `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again`;
+        if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken + landed);
+        throw new Error(`${error instanceof Error ? error.message : String(error)}${landed}`, {
+          cause: error,
+        });
       }
+      const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
+      const changes = [
+        ...(closingNote === undefined
+          ? []
+          : [`reason posted as message ${closingNote.id} (${closingNote.ref})`]),
+        ...(status === undefined ? [] : [`status ${before.status} -> ${after.status}`]),
+        ...(title === undefined ? [] : [`title "${after.title}"`]),
+        ...(labels === undefined
+          ? []
+          : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`]),
+        ...(priority === undefined
+          ? []
+          : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`]),
+        ...(requestedLinks === undefined
+          ? []
+          : [
+              newLinks.length === 0
+                ? `already linked ${requestedLinks.join(", ")} ${linkCount}`
+                : `linked ${newLinks.join(", ")} ${linkCount}`,
+            ]),
+        ...(route === undefined
+          ? []
+          : [after.route === null ? "route cleared" : `route ${after.route}`]),
+        ...(parent === undefined
+          ? []
+          : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`]),
+        ...(components === undefined ? [] : [componentsChange(components, after.components)]),
+      ];
+      const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
+        setsStatus: status !== undefined,
+      });
+      return {
+        text: [
+          `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
+          ...adviceLines,
+        ].join("\n"),
+        details: {
+          issue: after.key,
+          status: after.status,
+          external_links: after.external_links.map((link) => link.url),
+          ...(closingNote === undefined ? {} : { message: closingNote.id }),
+          ...(after.advice === undefined ? {} : { advice: after.advice }),
+        },
+      };
     }
     case "dispatch_claim": {
       const issueKey = issue();
@@ -1813,14 +1940,19 @@ export async function executeDispatchTool(
       const status = optionalString(args, "status");
       const parent = optionalString(args, "parent");
       const label = optionalString(args, "label");
+      const priority = optionalPriorityFilter(args, "priority");
       const updatedSince = optionalString(args, "updated_since");
+      // The zod spec already refused anything but one of ISSUE_ROUTE_STATUSES.
+      const routeStatus = optionalString(args, "route_status") as IssueRouteStatus | undefined;
       const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
       const issues = await client.listIssues({
         project,
         ...(status === undefined ? {} : { status }),
         ...(parent === undefined ? {} : { parent }),
         ...(label === undefined ? {} : { label }),
+        ...(priority === undefined ? {} : { priority }),
         ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
+        ...(routeStatus === undefined ? {} : { route_status: routeStatus }),
       });
       const rows = issues.slice(0, limit).map((row) => ({
         key: row.key,
@@ -1831,6 +1963,9 @@ export async function executeDispatchTool(
         labels: row.labels ?? [],
         open_asks: row.open_asks,
         claim: row.claim ?? null,
+        route: row.route ?? null,
+        route_status: row.route_status ?? null,
+        route_holder: row.route_holder ?? null,
         updated_at: row.updated_at,
       }));
       const titles = await liveSessionTitles(
@@ -1852,7 +1987,12 @@ export async function executeDispatchTool(
                     (row.open_asks === 0
                       ? ""
                       : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
-                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`)
+                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`) +
+                    // A route that reaches a live session changes nothing about the row; one
+                    // that reaches nobody, or cannot be judged, is what the owner audit reads.
+                    (row.route === null || row.route_status === "live" || row.route_status === null
+                      ? ""
+                      : ` · route ${routeText(row)}`)
                 ),
               ].join("\n"),
         details: { issues: rows },
@@ -1907,7 +2047,9 @@ export async function executeDispatchTool(
           client.getComments(issueKey)
         );
       } else if (ref !== null) {
-        const artifact = (await resolveArtifact(client, ref.owner, ref.artifact)).artifact;
+        const artifact = (
+          await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true })
+        ).artifact;
         document = artifact;
         id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () =>
           client.getArtifactComments(artifact.id)
@@ -1926,9 +2068,9 @@ export async function executeDispatchTool(
       const resolved =
         owner.kind === "project" || artifactReference === undefined
           ? owner.kind === "project"
-            ? await resolveArtifact(client, owner, artifactReference)
+            ? await resolveDocument(owner, artifactReference)
             : undefined
-          : await resolveArtifact(client, owner, artifactReference);
+          : await resolveDocument(owner, artifactReference);
       const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
@@ -1991,9 +2133,9 @@ export async function executeDispatchTool(
       const resolved =
         owner.kind === "project" || artifactReference === undefined
           ? owner.kind === "project"
-            ? await resolveArtifact(client, owner, artifactReference)
+            ? await resolveDocument(owner, artifactReference)
             : undefined
-          : await resolveArtifact(client, owner, artifactReference);
+          : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
       const replyTo = optionalString(args, "reply_to");
       const replyToAskReference = optionalString(args, "reply_to_ask");
@@ -2059,7 +2201,7 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_suggest": {
-      const resolved = await resolveArtifact(client, documentOwner(), stringArg(args, "artifact"));
+      const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
       const anchored = anchor(resolved.artifact, args);
       if (anchored === undefined) throw new Error("quote is required");
       const body = optionalString(args, "body");
@@ -2131,7 +2273,7 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_doc_edit": {
-      const resolved = await resolveArtifact(client, documentOwner(), stringArg(args, "artifact"));
+      const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
       const ops = args.ops as EditOp[];
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;
@@ -2202,7 +2344,7 @@ export async function executeDispatchTool(
         (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact"
           ? ownerArguments.ref.id
           : undefined);
-      const resolved = await resolveArtifact(client, documentOwner(), artifactReference);
+      const resolved = await resolveDocument(documentOwner(), artifactReference);
       const version = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
       const documentPromise = client.docRead(resolved.artifact.id, version);
       const marksPromise = openArtifactMarks(client, resolved);
@@ -2244,7 +2386,7 @@ export async function executeDispatchTool(
         (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact"
           ? ownerArguments.ref.id
           : undefined);
-      const resolved = await resolveArtifact(client, documentOwner(), artifactReference);
+      const resolved = await resolveDocument(documentOwner(), artifactReference);
       const result = await client.requestApproval(resolved.artifact.id, { actor });
       if (result.ask === null) {
         return {
@@ -2340,7 +2482,7 @@ export async function executeDispatchTool(
           ref.owner.kind === "issue"
             ? client.listIssueAsks(ref.owner.issue)
             : client.getArtifactAsks(
-                (await resolveArtifact(client, ref.owner, ref.artifact)).artifact.id,
+                (await resolveDocument(ref.owner, ref.artifact)).artifact.id,
                 "all"
               )
         );
@@ -2365,7 +2507,7 @@ export async function executeDispatchTool(
             ref.owner.kind === "issue"
               ? client.getComments(ref.owner.issue)
               : client.getArtifactComments(
-                  (await resolveArtifact(client, ref.owner, ref.artifact)).artifact.id
+                  (await resolveDocument(ref.owner, ref.artifact)).artifact.id
                 )
         );
         const comment = await client.getComment(id);
@@ -2397,11 +2539,7 @@ export async function executeDispatchTool(
         };
       }
       if (documentOwner().kind === "project") {
-        const resolved = await resolveArtifact(
-          client,
-          documentOwner(),
-          stringArg(args, "artifact")
-        );
+        const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
         const documentRef = dispatchDocumentRef(resolved.artifact.project, resolved.artifact.slug);
         return {
           text: [
@@ -2444,7 +2582,7 @@ export async function executeDispatchTool(
       const [references, graph, titles] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim)),
+        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
       ]);
       return {
         text: issueSummary(read.issue, read.events, references, graph, titles),

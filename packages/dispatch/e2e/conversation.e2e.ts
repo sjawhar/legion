@@ -10,6 +10,7 @@ import {
   createAsk,
   createComment,
   createIssue,
+  createIssueArtifact,
   createMessage,
   createProject,
   editAsk,
@@ -126,7 +127,7 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
       "Spec",
       "Conversation",
       "Children",
-      "Artifacts",
+      "Artifacts1",
     ]);
 
     await page.goto(`/issues/${issue.key}/conversation`);
@@ -406,9 +407,11 @@ test("Conversation coalesces answered asks and toggles activity without remounti
     const card = conversation.getByTestId(`ask-${ask.id}`);
     await expect(card.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(card.getByRole("radio", { name: "Hold" })).toBeVisible();
-    await expect(card.getByRole("button", { name: "Answer" })).toBeVisible();
+    // The timeline carries the compact density (the margin shows this same ask in full), so
+    // Answer appears with the choice rather than above an always-open composer.
     await card.getByRole("radio", { name: "Ship" }).check();
-    await card.getByRole("button", { name: "Answer" }).click();
+    await expect(card.getByRole("button", { exact: true, name: "Answer" })).toBeVisible();
+    await card.getByRole("button", { exact: true, name: "Answer" }).click();
     await expect(
       card.getByRole("list", { name: "Options" }).locator('li[data-selected="true"]')
     ).toContainText("Ship");
@@ -607,12 +610,13 @@ test("the iPhone Conversation fits controls and keeps the composer above the rev
       if (opacity === 0) {
         continue;
       }
-      const box = await control.boundingBox();
-      expect(box, `Conversation control ${index} has a layout box`).not.toBeNull();
-      expect(
-        box?.height ?? 0,
-        `Conversation control ${index} is a touch target`
-      ).toBeGreaterThanOrEqual(44);
+      // What a finger taps: a control wrapped in its own label is tapped through the label, so
+      // that is the target to measure. Demanding 44 px of the box itself drew a checkbox three
+      // times the size of every other control.
+      const height = await control.evaluate(
+        (element) => (element.closest("label") ?? element).getBoundingClientRect().height
+      );
+      expect(height, `Conversation control ${index} is a touch target`).toBeGreaterThanOrEqual(44);
     }
     const lastTurn = turn(page, "Phone turn 9");
     await lastTurn.hover();
@@ -646,5 +650,95 @@ test("the iPhone Conversation fits controls and keeps the composer above the rev
     await testInfo.attach("conversation phone", { contentType: "image/png", path: screenshot });
   } finally {
     await alice.close();
+  }
+});
+
+// A live session's title is free text and can be a whole sentence. An activity line that lets
+// its author set its own width pushed the line, the turns list and the document past the
+// viewport, so a reader scrolled sideways through the timeline.
+test("a long session title never widens the Conversation past its column", async ({
+  browser,
+}, testInfo) => {
+  const sessionId = "e2e-long-title-session";
+  const longTitle =
+    "Reviewing PR #1478 LEGION-67 conversation family visual polish pass at 390px and 1280px";
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Long author labels" });
+  // An upload is an activity line - `<author> added <name>` - so the session's title is the
+  // line's author column, which is the column under test.
+  await createIssueArtifact(
+    issue.key,
+    { content: "# Sketch\n", name: "Transcript sketch" },
+    { actor: { id: sessionId, kind: "session" }, as: "agent" }
+  );
+  if (!process.env.PLAYWRIGHT_BASE_URL) {
+    await setLiveSessions([{ session_id: sessionId, title: longTitle }]);
+  }
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    const width = testInfo.project.name === "chromium" ? 1280 : 390;
+    if (testInfo.project.name === "chromium") {
+      await page.setViewportSize({ height: 900, width });
+    }
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turns = page.getByRole("region", { name: "Conversation" }).locator("ol").first();
+    await expect(turns).toBeVisible();
+    // The line really is carrying that title, so the measurement below is not vacuous.
+    const activity = page
+      .locator('[data-kind="activity"]')
+      .filter({ hasText: "Transcript sketch" });
+    await expect(activity).toContainText("Reviewing PR #1478");
+
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      width
+    );
+    // The timeline never grows past the column it sits in.
+    const overflow = await turns.evaluate((node) => ({
+      client: (node.parentElement ?? node).clientWidth,
+      scroll: node.scrollWidth,
+    }));
+    expect(overflow.scroll).toBeLessThanOrEqual(overflow.client);
+
+    // Who and when are one group: the time never wraps alone onto the next row.
+    const authorBox = await activity.locator("span[title]").first().boundingBox();
+    const timeBox = await activity.locator("time").first().boundingBox();
+    expect(authorBox).not.toBeNull();
+    expect(timeBox).not.toBeNull();
+    expect(Math.abs((timeBox?.y ?? 0) - (authorBox?.y ?? 0))).toBeLessThanOrEqual(2);
+  } finally {
+    await context.close();
+  }
+});
+
+test("the Show activity checkbox is a checkbox, and its label is the touch target", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Activity toggle" });
+  await createComment(
+    issue.key,
+    { body: "A turn to show." },
+    { actor: { id: "e2e-activity", kind: "session" }, as: "agent" }
+  );
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const box = page.getByRole("checkbox", { name: "Show activity" });
+    await expect(box).toBeVisible();
+    const boxSize = await box.boundingBox();
+    // A checkbox is the size of a checkbox; 44 px belongs to the label around it.
+    expect(boxSize?.height ?? 0).toBeLessThanOrEqual(24);
+    expect(boxSize?.width ?? 0).toBeLessThanOrEqual(24);
+    const labelSize = await page
+      .locator("label")
+      .filter({ hasText: "Show activity" })
+      .boundingBox();
+    expect(labelSize?.height ?? 0).toBeGreaterThanOrEqual(44);
+  } finally {
+    await context.close();
   }
 });

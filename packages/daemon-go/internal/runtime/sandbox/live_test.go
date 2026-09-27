@@ -44,6 +44,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/sjawhar/legion/daemon/internal/agentsecrets"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -51,39 +52,48 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
 
-// liveCheck is one check of the harness: the name it prints, and what it runs.
+// liveCheck is one check of the harness: the name it prints, what it runs, and — when non-nil —
+// whether this run's inputs support it at all (SKIPPED-BLOCKED, not a failure).
 type liveCheck struct {
-	name string
-	run  func(*liveRig) error
+	name    string
+	run     func(*liveRig) error
+	blocked func(*liveRig) string
 }
 
 // liveChecks are the harness's checks, in the order they run: the one list of them, which a
 // development run's entry point is checked against. namespace-clean, the last check of the proof,
 // is the script's: it compares the namespace after the teardown, outside the harness.
 var liveChecks = []liveCheck{
-	{"identity", (*liveRig).checkIdentity},
-	{"installed", (*liveRig).checkInstalled},
-	{"boot-refusal-negative", (*liveRig).checkBootRefusal},
-	{"image-probe", (*liveRig).checkImageProbe},
-	{"image-probe-negative", (*liveRig).checkImageProbeRefusal},
-	{"root-ready", (*liveRig).checkRootReady},
-	{"gvisor", (*liveRig).checkGVisor},
-	{"operator-token", (*liveRig).checkOperatorToken},
-	{"pod-baseline", (*liveRig).checkPodBaseline},
-	{"provider-key", (*liveRig).checkProviderKey},
-	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy},
-	{"worker-colocated", (*liveRig).checkWorkerColocated},
-	{"suspend", (*liveRig).checkSuspend},
-	{"no-affinity", (*liveRig).checkNoAffinity},
-	{"resume", (*liveRig).checkResume},
-	{"same-agent-negative", (*liveRig).checkSameAgentNegative},
-	{"kill-pod", (*liveRig).checkKillPod},
-	{"stale-incarnation", (*liveRig).checkStaleIncarnation},
-	{"respawn-before-register", (*liveRig).checkRespawnBeforeRegister},
-	{"concurrent-provision", (*liveRig).checkConcurrentProvision},
-	{"re-adopt", (*liveRig).checkReAdopt},
-	{"orphan-sweep", (*liveRig).checkOrphanSweep},
-	{"release-tree", (*liveRig).checkReleaseTree},
+	{"identity", (*liveRig).checkIdentity, nil},
+	{"installed", (*liveRig).checkInstalled, nil},
+	{"boot-refusal-negative", (*liveRig).checkBootRefusal, nil},
+	{"image-probe", (*liveRig).checkImageProbe, nil},
+	{"image-probe-negative", (*liveRig).checkImageProbeRefusal, nil},
+	{"root-ready", (*liveRig).checkRootReady, nil},
+	{"gvisor", (*liveRig).checkGVisor, nil},
+	{"operator-token", (*liveRig).checkOperatorToken, nil},
+	{"pod-baseline", (*liveRig).checkPodBaseline, nil},
+	{"provider-key", (*liveRig).checkProviderKey, nil},
+	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy, nil},
+	{"worker-colocated", (*liveRig).checkWorkerColocated, nil},
+	{"secrets-two-pods-enrolled", (*liveRig).checkSecretsTwoPodsEnrolled, secretsBlocked},
+	{"secrets-automatic-grant", (*liveRig).checkSecretsAutomaticGrant, secretsBlocked},
+	{"secrets-cross-pod-negative", (*liveRig).checkSecretsCrossPodNegative, secretsBlocked},
+	{"secrets-copied-token-negative", (*liveRig).checkSecretsCopiedTokenNegative, secretsBlocked},
+	{"secrets-self-enroll-negative", (*liveRig).checkSecretsSelfEnrollNegative, secretsBlocked},
+	{"secrets-approval-ask", (*liveRig).checkSecretsApprovalAsk, secretsBlocked},
+	{"suspend", (*liveRig).checkSuspend, nil},
+	{"no-affinity", (*liveRig).checkNoAffinity, nil},
+	{"resume", (*liveRig).checkResume, nil},
+	{"same-agent-negative", (*liveRig).checkSameAgentNegative, nil},
+	{"kill-pod", (*liveRig).checkKillPod, nil},
+	{"stale-incarnation", (*liveRig).checkStaleIncarnation, nil},
+	{"secrets-old-uid-and-revocation", (*liveRig).checkSecretsOldUIDAndRevocation, secretsBlocked},
+	{"respawn-before-register", (*liveRig).checkRespawnBeforeRegister, nil},
+	{"concurrent-provision", (*liveRig).checkConcurrentProvision, nil},
+	{"re-adopt", (*liveRig).checkReAdopt, nil},
+	{"orphan-sweep", (*liveRig).checkOrphanSweep, nil},
+	{"release-tree", (*liveRig).checkReleaseTree, nil},
 }
 
 // The runtime's settings for the run: the boot timeout covers a Karpenter node coming up and the
@@ -136,6 +146,13 @@ type liveEnv struct {
 	// operatorPodFile is scripts/e2e/fixtures/operator-route/pod.yml, the operator's pod every
 	// launch carries; operatorConfigMap is the run's copy of the ConfigMap it names.
 	operatorPodFile, operatorConfigMap string
+	// The agent-secrets checks' inputs (AGENTC-393): the production broker, the login this run's
+	// machine login is approved by (an attended ceremony: the operator approves the printed code
+	// on the Dispatch credential page with his own YubiKey during the run), and the sha256 of the
+	// automatic rule's dummy value, and the checkout's agent-secrets binary. Every field here is
+	// read with os.Getenv, unlike the rest of liveEnv: unset is a blocked run of the secrets-*
+	// checks, never a refusal to start (secretsBlocked).
+	agentSecretsURL, agentSecretsOperator, agentSecretsAutoSHA, agentSecretsBin string
 }
 
 func readLiveEnv(t *testing.T) liveEnv {
@@ -149,21 +166,25 @@ func readLiveEnv(t *testing.T) liveEnv {
 		return value
 	}
 	env := liveEnv{
-		runtimeKubeconfig: get("LEGION_E2E_RUNTIME_KUBECONFIG"),
-		runtimeContext:    get("LEGION_E2E_RUNTIME_CONTEXT"),
-		operatorContext:   get("LEGION_E2E_OPERATOR_CONTEXT"),
-		namespace:         get("LEGION_E2E_NAMESPACE"),
-		project:           get("LEGION_E2E_PROJECT"),
-		image:             get("LEGION_E2E_IMAGE"),
-		streamHost:        get("LEGION_E2E_STREAM_HOST"),
-		streamPort:        get("LEGION_E2E_STREAM_PORT"),
-		appID:             get("LEGION_E2E_IMPLEMENT_APP_ID"),
-		appKeyName:        get("LEGION_E2E_IMPLEMENT_APP_KEY"),
-		record:            get("LEGION_E2E_RECORD"),
-		work:              get("LEGION_E2E_WORK"),
-		from:              os.Getenv("LEGION_E2E_FROM"),
-		operatorPodFile:   get("LEGION_E2E_OPERATOR_POD"),
-		operatorConfigMap: get("LEGION_E2E_OPERATOR_CONFIGMAP"),
+		runtimeKubeconfig:    get("LEGION_E2E_RUNTIME_KUBECONFIG"),
+		runtimeContext:       get("LEGION_E2E_RUNTIME_CONTEXT"),
+		operatorContext:      get("LEGION_E2E_OPERATOR_CONTEXT"),
+		namespace:            get("LEGION_E2E_NAMESPACE"),
+		project:              get("LEGION_E2E_PROJECT"),
+		image:                get("LEGION_E2E_IMAGE"),
+		streamHost:           get("LEGION_E2E_STREAM_HOST"),
+		streamPort:           get("LEGION_E2E_STREAM_PORT"),
+		appID:                get("LEGION_E2E_IMPLEMENT_APP_ID"),
+		appKeyName:           get("LEGION_E2E_IMPLEMENT_APP_KEY"),
+		record:               get("LEGION_E2E_RECORD"),
+		work:                 get("LEGION_E2E_WORK"),
+		from:                 os.Getenv("LEGION_E2E_FROM"),
+		operatorPodFile:      get("LEGION_E2E_OPERATOR_POD"),
+		operatorConfigMap:    get("LEGION_E2E_OPERATOR_CONFIGMAP"),
+		agentSecretsURL:      os.Getenv("LEGION_E2E_AGENT_SECRETS_URL"),
+		agentSecretsOperator: os.Getenv("LEGION_E2E_AGENT_SECRETS_OPERATOR"),
+		agentSecretsAutoSHA:  os.Getenv("LEGION_E2E_AGENT_SECRETS_AUTO_SHA256"),
+		agentSecretsBin:      os.Getenv("LEGION_E2E_AGENT_SECRETS_BIN"),
 	}
 	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
 	if err != nil {
@@ -239,12 +260,14 @@ type minted struct {
 }
 
 // registration is a hello the listener registered: the claim and generation of the Hello event,
-// and the hash of the token the resolver accepted for it.
+// the hash of the token the resolver accepted for it, and — when the shim's hello carried one —
+// the pod's agent-secrets session identity (AGENTC-393).
 type registration struct {
-	claim claim.Token
-	gen   uint64
-	hash  string
-	at    time.Time
+	claim    claim.Token
+	gen      uint64
+	hash     string
+	at       time.Time
+	identity *stream.AgentSecretsIdentity
 }
 
 // registry is the harness's store of boot tokens, which outlives every listener and runtime of
@@ -309,7 +332,9 @@ func (g *registry) resolve(bootToken string) (claim.Token, uint64, bool, bool) {
 func (g *registry) hello(event stream.Hello) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.accepted = append(g.accepted, registration{claim: event.Claim, gen: event.Generation, hash: g.pending[event.Claim], at: time.Now()})
+	g.accepted = append(g.accepted, registration{
+		claim: event.Claim, gen: event.Generation, hash: g.pending[event.Claim], at: time.Now(), identity: event.AgentSecrets,
+	})
 	close(g.changed)
 	g.changed = make(chan struct{})
 }
@@ -451,6 +476,13 @@ func (l *logRecorder) find(msg string) (map[string]string, bool) {
 	return nil, false
 }
 
+// liveEnrollment is one pod's agent-secrets enrollment as the harness (playing the daemon's
+// machine) holds it: the broker's id, and the pod incarnation it was enrolled for — so a claim
+// relaunched since (suspend/resume, kill/relaunch) is recognized as needing a fresh enrollment.
+type liveEnrollment struct {
+	id, incarnation string
+}
+
 // liveRig is the run: the two identities, the registry, and the current runtime instance.
 type liveRig struct {
 	t      *testing.T
@@ -485,6 +517,21 @@ type liveRig struct {
 		old, fresh runtime.Locator
 		gone       observed
 	}
+
+	// secrets is the broker client (AGENTC-393), nil when this run's inputs leave it
+	// unconfigured or the attended machine login started in newLiveRig never reached "issued"
+	// (secretsBlocked). secretsBlockReason is empty exactly when secrets is set: it holds the
+	// login's outcome — timed out, denied, or expired — for secretsBlocked to report through the
+	// same SKIPPED-BLOCKED path a missing env var takes, since a login
+	// outcome discovered at rig setup has nowhere else to surface before any check runs.
+	// enrollments is the harness's own enrollment of each claim's running pod, as the daemon's
+	// machine holds it; grants and requests are what checkSecretsAutomaticGrant records for
+	// checkSecretsCrossPodNegative to attack.
+	secrets            *agentsecrets.Client
+	secretsBlockReason string
+	enrollments        map[claim.Token]liveEnrollment
+	grants             map[claim.Token]string
+	requests           map[claim.Token]string
 }
 
 func TestStage4aSandboxRuntimeLive(t *testing.T) {
@@ -507,6 +554,12 @@ func TestStage4aSandboxRuntimeLive(t *testing.T) {
 }
 
 func (r *liveRig) run(check liveCheck) {
+	if check.blocked != nil {
+		if reason := check.blocked(r); reason != "" {
+			fmt.Printf("CHECK %s: SKIPPED-BLOCKED: %s\n", check.name, reason)
+			return
+		}
+	}
 	fmt.Printf("== %s\n", check.name)
 	started := time.Now()
 	if err := check.run(r); err != nil {
@@ -525,7 +578,10 @@ func note(who, format string, args ...any) {
 
 func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	ctx, cancel := context.WithCancel(context.Background())
-	r := &liveRig{t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})}}
+	r := &liveRig{
+		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})},
+		enrollments: map[claim.Token]liveEnrollment{}, grants: map[claim.Token]string{},
+	}
 	fail := func(format string, args ...any) {
 		fmt.Printf("CHECK identity: FAIL: "+format+"\n", args...)
 		t.FailNow()
@@ -553,6 +609,31 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	}
 	if r.dyn, err = dynamic.NewForConfig(own); err != nil {
 		fail("%v", err)
+	}
+	if env.agentSecretsURL != "" && env.agentSecretsOperator != "" {
+		client := &agentsecrets.Client{URL: env.agentSecretsURL, Operator: env.agentSecretsOperator}
+		code, err := client.Login(r.ctx)
+		if err != nil {
+			fail("%v", err)
+		}
+		fmt.Printf("STAGE4A: approve machine login code %s on the Dispatch credential page as %s\n", code, env.agentSecretsOperator)
+		var state agentsecrets.LoginState
+		pollErr := r.poll(10*time.Minute, "machine login "+code+" to be approved", func() (bool, error) {
+			state = client.LoginStatus()
+			return state.State != "pending", nil
+		})
+		switch {
+		case pollErr != nil:
+			r.secretsBlockReason = fmt.Sprintf("attended machine login (code %s) was not approved within 10m", code)
+		case state.State == "issued":
+			r.secrets = client
+		case state.State == "denied":
+			r.secretsBlockReason = fmt.Sprintf("attended machine login (code %s) was denied", code)
+		case state.State == "expired":
+			r.secretsBlockReason = fmt.Sprintf("attended machine login (code %s) expired before approval", code)
+		default:
+			r.secretsBlockReason = fmt.Sprintf("attended machine login (code %s) ended in unexpected state %q", code, state.State)
+		}
 	}
 
 	if r.pod, err = readOperatorPod(env); err != nil {
@@ -623,16 +704,23 @@ func (r *liveRig) startRuntime() error {
 		holder, _ := exec.Command("ss", "-Hltnp", "sport = :"+r.env.streamPort).CombinedOutput()
 		return fmt.Errorf("the worker stream cannot bind %s: %v; the port's holder: %s", address, err, strings.TrimSpace(string(holder)))
 	}
-	rt, err := New(ctx, r.rc, Options{
+	opts := Options{
 		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", TreeVolume: liveTreeVolume,
-		StreamURL:    address,
-		Tools:        Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
+		StreamURL: address,
+		Tools: Tools{
+			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion",
+			AgentSecrets: "/opt/legion/go/bin/agent-secrets",
+		},
 		Pod:          r.pod,
 		ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
 		Agent:        stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log,
-	})
+	}
+	if r.env.agentSecretsURL != "" {
+		opts.AgentSecrets = &AgentSecrets{URL: r.env.agentSecretsURL, Audience: "agent-secrets", TokenExpiry: time.Hour}
+	}
+	rt, err := New(ctx, r.rc, opts)
 	if err != nil {
 		stop()
 		return err

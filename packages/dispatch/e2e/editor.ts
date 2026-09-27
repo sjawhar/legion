@@ -54,26 +54,43 @@ export function cursorLabel(page: Page, name: string): Locator {
 /** Selects the first occurrence of `quote` inside the focused ProseMirror node the way a drag
  * does: a DOM Range plus the selectionchange ProseMirror's DOMObserver listens to. */
 export async function selectEditorText(page: Page, quote: string): Promise<void> {
+  await setEditorRange(page, quote, "whole");
+  await actionBar(page).waitFor({ state: "visible" });
+}
+
+/** Puts the caret directly before or after the first occurrence of `quote`, the way a click
+ * there does. */
+export function placeCaret(page: Page, edge: "before" | "after", quote: string): Promise<void> {
+  return setEditorRange(page, quote, edge);
+}
+
+async function setEditorRange(
+  page: Page,
+  quote: string,
+  extent: "whole" | "before" | "after"
+): Promise<void> {
   const editor = documentEditor(page);
   await editor.waitFor();
   await editor.focus();
-  await editor.evaluate((root, quote) => {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-      const index = node.textContent?.indexOf(quote) ?? -1;
-      if (index < 0) continue;
-      const range = document.createRange();
-      range.setStart(node, index);
-      range.setEnd(node, index + quote.length);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      document.dispatchEvent(new Event("selectionchange"));
-      return;
-    }
-    throw new Error(`quote is not in the editor: ${quote}`);
-  }, quote);
-  await actionBar(page).waitFor({ state: "visible" });
+  await editor.evaluate(
+    (root, { quote, extent }) => {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        const index = node.textContent?.indexOf(quote) ?? -1;
+        if (index < 0) continue;
+        const range = document.createRange();
+        range.setStart(node, extent === "after" ? index + quote.length : index);
+        range.setEnd(node, extent === "before" ? index : index + quote.length);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        document.dispatchEvent(new Event("selectionchange"));
+        return;
+      }
+      throw new Error(`quote is not in the editor: ${quote}`);
+    },
+    { quote, extent }
+  );
 }
 
 export async function deleteEditorText(page: Page, quote: string): Promise<void> {

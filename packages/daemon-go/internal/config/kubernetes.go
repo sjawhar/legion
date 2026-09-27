@@ -40,6 +40,9 @@ type Kubernetes struct {
 	Resources map[claim.Role]RoleResources
 	// Pod is what the operator adds to every pod (runtime.kubernetes.pod).
 	Pod PodConfig
+	// AgentSecrets is the secrets broker every pod is enrolled with (runtime.kubernetes.agent_secrets);
+	// nil when the deployment enrolls none, in which case pods carry no token for it.
+	AgentSecrets *AgentSecretsConfig
 }
 
 // Scheduling is where the pods may run beyond the Legion pool, which the runtime selects itself.
@@ -85,6 +88,82 @@ const (
 // (packages/daemon/src/daemon/image-ref.ts): the daemon must know exactly which image it probed.
 var imageDigestRef = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 
+// AgentSecretsConfig is `runtime.kubernetes.agent_secrets` (AGENTC-393 Plan C): the broker's base
+// URL, the operator login the daemon's own machine logins are approved by (the daemon runs its own
+// login at boot, on a background context, and logs the confirmation code once; no file ever
+// carries a launcher credential, since Login wins and holds it only in process memory), the
+// audience of the projected token every pod carries for it, and that token's lifetime. The audience
+// defaults to the broker's own (`agent-secrets`) and the lifetime to 3600 s, the most agent-c's
+// admission admits for a Legion worker token (components/identity/model_access.py,
+// LEGION_WORKER_TOKEN_MAX_EXPIRATION_SECONDS); the API server issues none under 600.
+type AgentSecretsConfig struct {
+	URL                string
+	Operator           string
+	Audience           string
+	TokenExpirySeconds int
+}
+
+const (
+	agentSecretsKey             = kubernetesKey + ".agent_secrets"
+	defaultAgentSecretsAudience = "agent-secrets"
+	defaultTokenExpirySeconds   = 3600
+	minTokenExpirySeconds       = 600
+	maxTokenExpirySeconds       = 3600
+)
+
+// readAgentSecrets reads `runtime.kubernetes.agent_secrets`: nil when absent, every member checked.
+func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
+	if value == nil {
+		return nil, nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", agentSecretsKey)
+	}
+	fields, err := members(value, agentSecretsKey, "url", "operator", "audience", "token_expiry_seconds")
+	if err != nil {
+		return nil, err
+	}
+	block := &AgentSecretsConfig{Audience: defaultAgentSecretsAudience, TokenExpirySeconds: defaultTokenExpirySeconds}
+	if block.URL, err = requiredString(fields["url"], agentSecretsKey+".url", ""); err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(block.URL)
+	if err != nil || !u.IsAbs() || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return nil, fmt.Errorf("%s.url must be an absolute URL with no path, query, fragment or user; got %q", agentSecretsKey, block.URL)
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return nil, fmt.Errorf("%s.url must use https unless the host is a loopback address; got %q", agentSecretsKey, block.URL)
+	}
+	block.URL = strings.TrimSuffix(block.URL, "/")
+	if block.Operator, err = requiredString(fields["operator"], agentSecretsKey+".operator", ""); err != nil {
+		return nil, err
+	}
+	if audience, err := optionalString(fields["audience"], agentSecretsKey+".audience"); err != nil {
+		return nil, err
+	} else if audience != "" {
+		block.Audience = audience
+	}
+	if fields["token_expiry_seconds"] != nil {
+		expiry, err := readInt(fields["token_expiry_seconds"], agentSecretsKey+".token_expiry_seconds")
+		if err != nil {
+			return nil, err
+		}
+		if expiry == nil || *expiry < minTokenExpirySeconds || *expiry > maxTokenExpirySeconds {
+			return nil, fmt.Errorf("%s.token_expiry_seconds must be between %d and %d", agentSecretsKey, minTokenExpirySeconds, maxTokenExpirySeconds)
+		}
+		block.TokenExpirySeconds = *expiry
+	}
+	return block, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // readKubernetes reads the `runtime.kubernetes` block, refusing any member it does not model and
 // any value a pod could not run with. What depends on keys outside the block is checked once the
 // whole file is read (checkKubernetesKeys).
@@ -94,7 +173,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"role_profiles")
+		"role_profiles", "agent_secrets")
 	if err != nil {
 		return nil, err
 	}
@@ -144,6 +223,9 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 		return nil, err
 	}
 	if block.Pod, err = readPod(fields["pod"]); err != nil {
+		return nil, err
+	}
+	if block.AgentSecrets, err = readAgentSecrets(fields["agent_secrets"]); err != nil {
 		return nil, err
 	}
 	return block, nil

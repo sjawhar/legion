@@ -235,9 +235,25 @@ func TestArchitectureSourcePutGetListAndDelete(t *testing.T) {
 	if components != 0 || depends != 0 || edges != 0 || snapshots != 1 {
 		t.Fatalf("after delete: components=%d depends=%d component edges=%d snapshots=%d; want 0/0/0/1", components, depends, edges, snapshots)
 	}
+	// A project with no source is not a missing resource: the read answers the question with
+	// null, so a caller never has to tell this case apart from a failure.
 	missing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/projects/CORE/architecture-source", nil, "alice")
-	if missing.Code != http.StatusNotFound || decodeBody[map[string]string](t, missing)["code"] != "SOURCE_NOT_FOUND" {
+	if missing.Code != http.StatusOK || strings.TrimSpace(missing.Body.String()) != "null" {
 		t.Fatalf("get after delete: status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	// A project that never had one answers the same way, and a project that does not exist at
+	// all is still a 404: no row covers both, and only the first of them is "no source".
+	if _, err := database.Pool.Exec(context.Background(),
+		`insert into projects (key, name) values ('OPS', 'Ops')`); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	unknown := dispatchRequest(t, handler, http.MethodGet, "/api/v1/projects/OPS/architecture-source", nil, "alice")
+	if unknown.Code != http.StatusOK || strings.TrimSpace(unknown.Body.String()) != "null" {
+		t.Fatalf("get for a project that never had a source: status=%d body=%s", unknown.Code, unknown.Body.String())
+	}
+	absent := dispatchRequest(t, handler, http.MethodGet, "/api/v1/projects/NOPE/architecture-source", nil, "alice")
+	if absent.Code != http.StatusNotFound {
+		t.Fatalf("get for a project that does not exist: status=%d body=%s", absent.Code, absent.Body.String())
 	}
 	if again := dispatchRequest(t, handler, http.MethodDelete, "/api/v1/projects/CORE/architecture-source", nil, "alice"); again.Code != http.StatusNotFound {
 		t.Fatalf("delete absent source: status=%d body=%s", again.Code, again.Body.String())

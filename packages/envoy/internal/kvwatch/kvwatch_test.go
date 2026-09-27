@@ -14,6 +14,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -54,7 +55,7 @@ func (s *seen) resetCount() int {
 
 // bucket opens the test bucket on its own connection, which the test can close to end a watcher
 // the way a lost connection does.
-func bucket(t *testing.T, uri string) (*natsgo.Conn, natsgo.KeyValue) {
+func bucket(t *testing.T, uri string) (*natsgo.Conn, bus.KeyValue) {
 	t.Helper()
 	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)
@@ -62,10 +63,7 @@ func bucket(t *testing.T, uri string) (*natsgo.Conn, natsgo.KeyValue) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	kv, err := js.KeyValue("kvwatch-test")
-	if err != nil {
-		kv, err = js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
-	}
+	kv, err := bus.EnsureKeyValue(js, &natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	if err != nil {
 		t.Fatalf("bucket: %v", err)
 	}
@@ -559,7 +557,7 @@ func TestConcurrentRewatchesOntoARecreatedBucketKeepTheNewKeys(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(slow.release) }) }
 	t.Cleanup(release)
 	into := newSeen()
-	w := kvwatch.New("test cache", slow, into.apply, into.reset)
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: slow}, into.apply, into.reset)
 	w.Start()
 	eventually(t, "the ghost key", func() bool { return into.has("ghost") })
 
@@ -635,7 +633,7 @@ func TestAWatchOfTheOldStreamDoesNotReplaceANewerOne(t *testing.T) {
 		}
 	})
 	into := newSeen()
-	w := kvwatch.New("test cache", held, into.apply, into.reset)
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, into.apply, into.reset)
 	w.Start()
 	select {
 	case <-held.watched:
@@ -699,7 +697,7 @@ func TestADiscardedWatchOfTheOldStreamIsDrainedUntilItEnds(t *testing.T) {
 		}
 	})
 	into := newSeen()
-	w := kvwatch.New("test cache", held, into.apply, into.reset)
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, into.apply, into.reset)
 	w.Start()
 	select {
 	case <-held.watched:
@@ -849,7 +847,7 @@ func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.
 		t.Fatalf("put live-key: %v", err)
 	}
 	into := newSeen()
-	w := kvwatch.New("probe cache", live, into.apply, into.reset)
+	w := kvwatch.New("probe cache", bus.KeyValue{KeyValue: live}, into.apply, into.reset)
 	t.Cleanup(w.Stop)
 	w.Start()
 	eventually(t, "the live bucket's key", func() bool { return into.has("live-key") })

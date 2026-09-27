@@ -655,35 +655,123 @@ func distance(left, right int) int {
 	return left - right
 }
 
-// FindMark finds the first document-contiguous range covered by a mark identity.
-func FindMark(doc *Node, markType, id string) (Range, string, bool) {
-	var quote strings.Builder
-	var marked Range
-	found := false
+// MarkSpans is the text a mark identity covers as ranges, in document order: its text runs, each
+// joined to the next when no text without the mark lies between them, so a run at a textblock's
+// end and one at the next textblock's start are one span across the boundary between them, as the
+// browser editor takes them, while text without the mark ends a span.
+func MarkSpans(doc *Node, markType, id string) []Range {
+	var spans []Range
+	between := false
 	walk(doc, func(node *Node, _ []int, pos, end int) bool {
 		if node.Type != "text" {
 			return true
 		}
 		if nodeMarkID(node, markType) != id {
-			return !found
-		}
-		if !found {
-			found = true
-			marked = Range{From: pos, To: end}
-			quote.WriteString(node.Text)
+			between = true
 			return true
 		}
-		if pos != marked.To {
-			quote.WriteByte(' ')
+		if last := len(spans) - 1; last >= 0 && !between {
+			spans[last].To = end
+		} else {
+			spans = append(spans, Range{From: pos, To: end})
 		}
-		marked.To = end
-		quote.WriteString(node.Text)
+		between = false
 		return true
 	})
-	if !found {
+	return spans
+}
+
+// FindMark finds the first document-contiguous range covered by a mark identity, the first of
+// its MarkSpans, and its text, the runs joined with a space where a block boundary lies between.
+func FindMark(doc *Node, markType, id string) (Range, string, bool) {
+	spans := MarkSpans(doc, markType, id)
+	if len(spans) == 0 {
 		return Range{}, "", false
 	}
+	marked := spans[0]
+	var quote strings.Builder
+	last := -1
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if pos >= marked.To {
+			return false
+		}
+		if node.Type != "text" || pos < marked.From {
+			return true
+		}
+		if last >= 0 && pos != last {
+			quote.WriteByte(' ')
+		}
+		quote.WriteString(node.Text)
+		last = end
+		return true
+	})
 	return marked, quote.String(), true
+}
+
+// anchorMarkTypes are the marks an ask or comment row anchors to: its quote is the text they
+// cover (FindMark).
+var anchorMarkTypes = map[string]bool{"proofComment": true, "proofSuggestion": true, "dispatchAsk": true}
+
+// AnchorMarksCovering returns each anchor mark that every text run inside r carries, which is
+// every anchor the range lies wholly inside. Text written over r belongs inside those anchors: a
+// replacement spliced in without them ends each one's run where it lands, and FindMark then reads
+// only the text before it. A range that runs past an anchor's edge has a run without it, so that
+// anchor keeps only the text the write leaves alone.
+func AnchorMarksCovering(doc *Node, r Range) []Mark {
+	var covering []Mark
+	first := true
+	walk(doc, func(node *Node, _ []int, pos, end int) bool {
+		if pos >= r.To {
+			return false
+		}
+		if node.Type != "text" || end <= r.From {
+			return true
+		}
+		if first {
+			first = false
+			for _, mark := range node.Marks {
+				if anchorMarkTypes[mark.Type] {
+					covering = append(covering, Mark{Type: mark.Type, Attrs: cloneAttrs(mark.Attrs)})
+				}
+			}
+			return len(covering) > 0
+		}
+		kept := covering[:0]
+		for _, mark := range covering {
+			if carriesMark(node, mark) {
+				kept = append(kept, mark)
+			}
+		}
+		covering = kept
+		return len(covering) > 0
+	})
+	return covering
+}
+
+func carriesMark(node *Node, want Mark) bool {
+	for _, mark := range node.Marks {
+		if mark.Type == want.Type && attrsEqual(mark.Attrs, want.Attrs) {
+			return true
+		}
+	}
+	return false
+}
+
+// AddMarks adds marks to every text node under node, in place.
+func AddMarks(node *Node, marks []Mark) {
+	if len(marks) == 0 {
+		return
+	}
+	if node.Type == "text" {
+		for _, mark := range marks {
+			node.Marks = append(node.Marks, Mark{Type: mark.Type, Attrs: cloneAttrs(mark.Attrs)})
+		}
+		sortMarks(node.Marks)
+		return
+	}
+	for _, child := range node.Children {
+		AddMarks(child, marks)
+	}
 }
 
 type MarkRef struct {

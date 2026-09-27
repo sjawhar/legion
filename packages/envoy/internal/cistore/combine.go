@@ -81,7 +81,7 @@ func (s *Store) writeBatch(key string, c *keyCombiner, own *pendingMutation, ide
 			panic(recovered)
 		}
 	}()
-	return s.write(identity, func(st *State) bool {
+	return s.write(identity, len(batch), func(st *State) bool {
 		changed := false
 		for _, pending := range batch {
 			if pending.mutate(st) {

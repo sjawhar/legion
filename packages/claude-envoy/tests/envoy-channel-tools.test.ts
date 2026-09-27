@@ -9,6 +9,9 @@ import {
   executeEnvoyTool,
 } from "../src/envoy-channel-server"
 import { SessionIdentity } from "../src/session-identity"
+import { isolatePaneEnvironment } from "./pane-environment"
+
+isolatePaneEnvironment()
 
 function sessionWith(followed: string[]): ChannelSession {
   return {
@@ -88,6 +91,7 @@ test("keeps Dispatch asks on Dispatch, follows no topic, and announces the follo
     port: 0,
     fetch: async (request) => {
       expect(new URL(request.url).pathname).toBe("/api/v1/issues/DSP-3/asks")
+      expect(request.headers.get("authorization")).toBe("Bearer test-token")
       expect(await request.json()).toMatchObject({
         question: "Approve the channel?",
         actor: { kind: "session", id: "ses_claude", origin: { host: "claude" } },

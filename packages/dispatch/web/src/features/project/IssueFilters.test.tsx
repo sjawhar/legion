@@ -11,6 +11,9 @@ import { IssueList } from "./IssueList";
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
+    route: null,
+    route_status: null,
+    route_holder: null,
     key: "CORE-1",
     labels: [],
     last_seq: 0,

@@ -79,6 +79,7 @@ func TestProductionImportsArePure(t *testing.T) {
 		}
 	}
 	allowed := map[string]bool{
+		"sort": true,
 		"time": true,
 		"github.com/sjawhar/legion/daemon/internal/record": true,
 	}

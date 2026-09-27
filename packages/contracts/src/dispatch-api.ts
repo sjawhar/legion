@@ -3,6 +3,7 @@ import type {
   ASK_URGENCIES,
   DOC_EDIT_OPS,
   ISSUE_COMPONENTS_MODES,
+  ISSUE_ROUTE_STATUSES,
   IssueStatus,
 } from "./dispatch-tools";
 
@@ -232,21 +233,42 @@ export interface Issue {
   readonly last_seq: number;
 }
 
+/**
+ * Whether an issue's route reaches a running session right now: `live` when a live session
+ * holds the role or the routed session is live, `no_holder` when nobody live holds the role (it
+ * is unclaimed or its holder's session lapsed) or the session is not live, `unknown` when the
+ * Envoy listener did not answer (never read as live).
+ */
+export type IssueRouteStatus = (typeof ISSUE_ROUTE_STATUSES)[number];
+
+/**
+ * Every issue read (the detail, the list, the pinned list) resolves this from one listener read
+ * per request. It is stored nowhere and is never on an event payload, which is why it is not a
+ * field of `Issue`. Both are null when the issue has no route.
+ */
+export interface IssueRouteReach {
+  readonly route_status: IssueRouteStatus | null;
+  /** The live session the route reaches; set only when `route_status` is `live`. */
+  readonly route_holder: string | null;
+}
+
 export interface IssueSummary
   extends Pick<
-    Issue,
-    | "key"
-    | "title"
-    | "status"
-    | "priority"
-    | "rank"
-    | "parent"
-    | "assignee"
-    | "claim"
-    | "components"
-    | "updated_at"
-    | "last_seq"
-  > {
+      Issue,
+      | "key"
+      | "title"
+      | "status"
+      | "priority"
+      | "rank"
+      | "parent"
+      | "assignee"
+      | "claim"
+      | "components"
+      | "route"
+      | "updated_at"
+      | "last_seq"
+    >,
+    IssueRouteReach {
   readonly labels?: string[];
   readonly open_asks: number;
 }
@@ -1530,7 +1552,7 @@ export interface EditArtifactInput {
   readonly actor?: Actor;
 }
 
-export interface IssueDetails extends Issue {
+export interface IssueDetails extends Issue, IssueRouteReach {
   readonly artifacts: Artifact[];
   readonly open_asks: Ask[];
   readonly children: IssueChild[];
@@ -1560,6 +1582,61 @@ export interface AskFollowersRead {
 export interface MessageRead {
   readonly message: Message;
   readonly replies: Message[];
+}
+
+/**
+ * One human message sent to many sessions at once. A broadcast is a grouping over the
+ * targeted messages Dispatch already sends, not a second delivery mechanism: every recipient
+ * gets an ordinary issue-less `Message` aimed at its own session, so each recipient's thread,
+ * retry and reply behave exactly as they do for a message sent from one agent card. This row
+ * is what they share.
+ */
+export interface Broadcast {
+  readonly id: string;
+  readonly author: Actor;
+  readonly body: string;
+  readonly delivery: MessageDeliveryMode;
+  readonly created_at: string;
+}
+
+/** A broadcast list row: the send, how many sessions it reached, and how many answered. */
+export interface BroadcastSummary extends Broadcast {
+  readonly recipients: number;
+  readonly replies: number;
+}
+
+/** One session's copy of a broadcast: the message it was sent, with its delivery attempts,
+ *  and the replies threaded under it. Delivery runs behind the create response, so a recipient
+ *  starts with no attempt; a recipient still carrying none has not been sent to. */
+export interface BroadcastRecipient {
+  readonly session_id: string;
+  readonly message: Message;
+  readonly replies: Message[];
+}
+
+export interface BroadcastRead extends Broadcast {
+  readonly recipients: BroadcastRecipient[];
+}
+
+/** A session the sender selected that was not sent to. A recipient that does not advertise
+ *  the chosen mode is excluded, never switched to another one: the mode is part of what the
+ *  sender said. Exclusions are reported here and never stored. */
+export interface BroadcastExclusion {
+  readonly session_id: string;
+  readonly title: string;
+  readonly reason: string;
+}
+
+export interface BroadcastCreated extends BroadcastRead {
+  readonly excluded: BroadcastExclusion[];
+}
+
+export interface CreateBroadcastInput {
+  readonly body: string;
+  readonly delivery: MessageDeliveryMode;
+  /** The sessions the human selected. A session named twice is one recipient; one that is no
+   *  longer live, or that does not advertise `delivery`, comes back under `excluded`. */
+  readonly session_ids: readonly string[];
 }
 
 export interface IssueRead {

@@ -106,7 +106,10 @@ A spec has two readers: the human who decides reads the **Summary** and **New si
   between two lanes or a halt condition, a question for the platform PO (see
   [Before you ask](#before-you-ask) under Asking).
 - Keep each section to one screen; work that exceeds one screen per section is two specs.
-- Update the spec as decisions land: the spec is the record, comments are the discussion.
+- Update the spec as decisions land: the spec is the record, comments are the discussion. It
+  records decisions and requirements, never progress: no status, timestamps, "Update HH:MMZ"
+  section, PR list, or handoff notes. Progress is not a Dispatch object at all; it lives in your
+  transcript and your pull request (see [Messages](#messages)).
 - Before sending it: no sections conflict, every requirement has exactly one reading, and the
   Summary and every ask block pass the phone test above.
 
@@ -224,10 +227,18 @@ status is." Waiting for the deploy lane is not a status and is never announced.
 ```ts
 // PATCH /api/v1/issues/{key} — status, title, labels, priority, external_links (merged by URL), route, parent
 dispatch_issue_update({ issue: "AGENTC-175", status: "testing" })
+dispatch_issue_update({ issue: "AGENTC-175", status: "done", reason: "Shipped in owner/repo#7; verified on the production dashboard." })
 dispatch_issue_update({ issue: "AGENTC-175", priority: 1 }) // 0–3; see Priority is yours to set
 dispatch_issue_update({ issue: "AGENTC-175", external_links: ["https://github.com/owner/repo/pull/7"] })
 dispatch_issue_update({ issue: "AGENTC-175", parent: "AGENTC-170" }) // same-project key; "" clears the parent
 ```
+
+Closing takes a `reason`, and the tool refuses `status: "done"` without one: it posts the reason on
+the issue as a message, then closes it, because a closed issue refuses messages, comments, and
+artifacts, so a reason left for later has nowhere to go. When the close fails after the post, the
+error names the posted message; after a timeout or a server error it also says the close may have
+landed, so read the issue's status first. A retry points its reason at the posted message rather
+than repeating it.
 
 The two clears differ: `priority` clears with `null`, while `parent` and `route` clear with `""`.
 Guessing the other one is a refusal either way.
@@ -266,20 +277,82 @@ start with the issue key; standalone project-document hit lines start with
 
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
+The check compares title words only (shared stemmed terms), never meaning: "four tests that fail a
+merge" pairs with "four CI gates that cannot fail a merge". So when you force past a candidate, give
+the new issue a title that names what differs where you can, and open its spec's Summary with the
+distinction from the named issue, citing it (`dispatch://KEY`), for whoever reads the next pairing.
 
 ## Reading a project's backlog
 
 To see the shape of a project rather than find a phrase, list its issues:
 ```ts
-dispatch_issues({ project, status?, parent?, label?, updated_since?, limit? })
+dispatch_issues({ project, status?, parent?, label?, priority?, route_status?, updated_since?, limit? })
 ```
 Each row carries the issue key, title, status, priority, parent, labels, its open-ask count, and
 when it last changed — a roadmap or backlog pass without opening every issue. Filter with `status`
-(a lifecycle status), `parent` (one issue's children), `label`, or `updated_since` (an RFC3339
-timestamp, for "what moved this week"). `limit` caps the rows at 50 by default and 250 at most.
+(a lifecycle status), `parent` (one issue's children), `label`, `priority` (a list of `0`–`3`, with
+`null` for an issue with no priority: `[0, 1]` is every P0 and P1), `route_status` (below), or
+`updated_since` (an RFC3339 timestamp, for "what moved this week"). `limit` caps the rows at 50 by
+default and 250 at most.
 
 This is not search: it matches no text. Use `dispatch_search` for a keyword or phrase, and
 `dispatch_issues` when you want every issue in a project and its current state.
+
+### The owner audit
+
+As the owner of a surface, list your area's P0 and P1 issues and staff or close each one nobody
+has started:
+```ts
+dispatch_issues({ project, priority: [0, 1], limit: 250 })
+```
+Every unclaimed row in `triage`, `icebox`, `backlog` or `todo` is a decision: someone takes it and
+builds it, or it closes. A row in `in_progress`, `testing`, `needs_review` or `retro`, or one that
+carries a claim, is work under way ([Issue status is yours to move](#issue-status-is-yours-to-move))
+and is not re-staffed. A todo with a finished spec reads as queued work that nobody is doing
+(LEGION-173 sat in todo for two weeks with a complete spec; AGENTC-1010's v4 plan sat in backlog
+with nobody building it).
+
+The audit finds four shapes:
+
+- **Unstaffed work.** A plan or measurement exists, and no one is building it.
+- **Unrecorded delivery.** An issue not yet in `testing` or `done`, claimed or not, has a merged PR
+  naming it. Check the change live, then move the issue (AGENTC-1033 sat at `triage` after its fix,
+  agent-c #20367, merged).
+- **Unrecorded practice.** Someone does the issue's work by hand, more than once, while the issue
+  sits in backlog (OPS-132, done by hand on every migration merge). It leaves no plan and no PR to
+  find; the tell is your own messages. Doing something by hand more than once means an issue is
+  wearing the wrong status.
+- **Unreachable route.** An open issue whose route names a role nobody holds, or a session that is
+  not running, reaches nobody, whatever its priority, and the priority filter above never finds
+  it. List it on its own:
+  ```ts
+  dispatch_issues({ project, route_status: "no_holder", limit: 250 })
+  ```
+  Each row reads `route role:sre (nobody holds it right now)` or `route session:<id> (that session
+  is not running right now)`. That is one read of the listener, and one read is a restart gap as
+  often as a vacancy: an agent box that restarts or resumes keeps the session id, but the session
+  is absent from the listener for minutes, and its role with it. On 2026-09-27, 58 of 63 session
+  routes one read showed as unreachable pointed at a single session that was moving between boxes.
+  So a route is unowned only when it is `no_holder` on two reads at least ten minutes apart: list
+  again after ten minutes and act on the issues both lists name. Confirm with the second
+  `dispatch_issues` read, not `envoy_role_get`: a role lookup releases the claim of a holder whose
+  session is absent from the registry as it answers. Then staff the role, re-route the
+  issue to a live holder, or clear the route and assign it (AGENTC-1065, a P2 production listener
+  503, sat routed to an unheld `role:sre` with no assignee). `route_status: "unknown"` means the
+  listener did not answer, so a route could not be judged; a `no_holder` filter refuses rather
+  than answer an empty list then.
+
+Run the audit as a step of a coordinator's loop, at each checkpoint, not as a habit: these shapes
+are found by running the check, not by noticing them.
+
+### Symptom versus cause
+
+When a symptom and its cause sit on different issues, the work accrues to the cause's issue, and
+the symptom's issue carries a pointer to it. Before posting a measurement or finding, search
+Dispatch for the failing identity's or component's name, and post on the issue whose title names
+the fix, not the one naming the symptom. A symptom issue gathering messages with no human response
+is the tell. (The production freeze was iterated on AGENTC-546, the failing gate, while its cause
+and answer sat on AGENTC-1010.)
 
 ## Asking
 
@@ -540,9 +613,8 @@ the document's approval state; `stale` means it was approved and then edited - r
 ## The Spec
 
 The spec holds requirements, design, acceptance, decisions, and rejected alternatives, structured per [Writing a spec](#writing-a-spec).
-It changes only when a decision or requirement changes, and every version that records one is named with `summary`. Never write
-progress, status, timestamps, an "Update HH:MMZ" section, a PR list, or handoff notes into the spec. Progress is not a
-Dispatch object at all: it lives in your transcript and your pull request (see [Messages](#messages)).
+It changes only when a decision or requirement changes, and every version that records one is named with `summary`. What it
+never carries is in [Rules](#rules) under Writing a spec.
 
 Read the current document before changing it:
 
@@ -551,7 +623,8 @@ dispatch_doc_read({ issue?, project?, artifact?, version?, ref? })
 ```
 It returns live or versioned markdown with open marks. A live read ends with a document token; `issue` with an
 omitted `artifact` reads the issue specification; a project needs `artifact`; and a
-`dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the id, slug, or filename.
+`dispatch://PROJECT/artifact/<document-ref>` ref supplies both, where `document-ref` is the slug (an id or a
+filename resolves when no document has that slug).
 
 Editing one is [Editing a document](references/document-edits.md): the shape of `dispatch_doc_edit`,
 how to quote the text you mean, one `replace` per paragraph, preconditions against a stale edit, and
@@ -689,7 +762,9 @@ Exactly one of `path` and `content` is required. It returns issue or project-doc
 Uploading the same `name` creates its next version — so uploading `spec.md` **replaces the issue's own specification**
 with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [Editing a document](references/document-edits.md)). Address an existing
 artifact by the slug shown in the upload result or by its filename, and a project document by its artifact id, slug, or filename; the
-slug also arrives on `artifact.created` events.
+slug also arrives on `artifact.created` events. Dispatch suffixes a slug two documents would share, so one document's
+filename can be another's slug (`plan v2` takes `plan-v2`, then a document named `plan-v2` takes `plan-v2-2`): a bare
+`artifact` that names both is refused with each one's id, while a `dispatch://` reference's document part is always the slug.
 
 **Where a deliverable goes.** Text the human must read to decide — a draft message, a proposal,
 a summary — goes in the spec as a section: the spec is the one document they open. A separate
@@ -833,7 +908,9 @@ message ref, it returns that message and its reply chain. Reads do not subscribe
 Every read ends with two sections from the reference graph. `Referenced by:` lists what points at the node — every document, ask,
 comment, or message that cites it, plus its structure: child issues, attached documents, anchored and owned asks and comments, replies,
 followers — and `Links:` lists what it cites. Each row is `- <edge kind> <node kind> dispatch://… (<excerpt> · <when>)`; for a
-document source the excerpt is the block containing the mention. Cross-project, always: a message on another project's issue that
+document source the excerpt is the start of the block holding the mention, and a whole list is one block, so every issue named in
+one list previews the list's first item. When a document references many issues and each backlink should read right, give each
+issue its own paragraph (or block), not an item of one list. Cross-project, always: a message on another project's issue that
 cites an ask shows up under that ask. So "what led to this decision" is one `dispatch_read` on the ask, and "who relies on this
 document" one read on the document. Cite with `dispatch://` references (below) whenever you name a node in a body — a bare id or
 title is invisible to the graph.

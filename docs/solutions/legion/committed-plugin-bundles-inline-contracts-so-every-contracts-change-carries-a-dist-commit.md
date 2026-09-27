@@ -74,8 +74,10 @@ Tell the architect before rebasing and say why the `MERGEABLE` read does not app
 ```bash
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch
 # 1. before-fingerprint at the current tip (see below for the fileset), keep the stripped diff
-# 2. the whole chain, so other roles' handoff commits move with yours
-jj -R "$LEGION_WORKSPACE" rebase -s 'roots(main@origin..@)' -d main@origin
+# 2. a forward merge from the bookmark, not `@` (LEGION-118: a rebase rooted at the chain's fork
+#    point rewrites another tree's stacked branch; merging from `@` risks an undescribed
+#    handoff-split leftover in the ancestry, which `jj git push` refuses)
+jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
 bun install --frozen-lockfile                      # main's lockfile may have moved
 cat .bun-version; bun --version                    # both 1.3.14 on the box; else: mise x bun@<pin> -- bun run build
 cd packages/claude-envoy
@@ -83,7 +85,7 @@ bun run check-dist                                 # reproduces CI's `dist/ is s
 bun run build                                      # `built envoy-channel, open-asks-hook into dist/`
 bun run check-dist                                 # must print `dist/ matches a fresh build`
 bun run lint && bun run typecheck                  # the job's other steps
-env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u DISPATCH_TOKEN bun test   # see worker-pane-shell-gotchas.md §2 / LEGION-173
+bun run test                                       # the job's test step
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" split -m 'chore(claude-envoy): rebuild committed bundles against <what changed>' packages/claude-envoy/dist
 ```
 
@@ -135,5 +137,5 @@ under `diff`). State the fileset you hashed in the rebase comment. The generated
   — the fingerprint command; §2 carries LEGION-131's two rebases.
 - [`conflict-only-rebases-keep-the-diff-auditable.md`](conflict-only-rebases-keep-the-diff-auditable.md)
   — what a conflict-forced rebase may and may not change.
-- [`worker-pane-shell-gotchas.md`](worker-pane-shell-gotchas.md) §2 — claude-envoy's own test that
-  reads the pane's `DISPATCH_TOKEN_FILE` (LEGION-173).
+- [`worker-pane-shell-gotchas.md`](worker-pane-shell-gotchas.md) §2 — claude-envoy's tests that
+  read the pane's `DISPATCH_TOKEN_FILE`, isolated since LEGION-173.

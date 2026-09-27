@@ -27,6 +27,14 @@
 # fixture's models.yml names;
 # STAGE4A_FROM a development entry point, which is never the proof; STAGE4A_EVIDENCE_DIR where the
 # transcript and the runtime's log go (default a fresh /tmp directory, kept and printed).
+#
+# The secrets-* checks (AGENTC-393) are optional and print CHECK <name>: SKIPPED-BLOCKED when
+# unconfigured: LEGION_E2E_AGENT_SECRETS_URL, LEGION_E2E_AGENT_SECRETS_OPERATOR (the login an
+# attended machine login is approved by, approved on the Dispatch credential page during the
+# run), and LEGION_E2E_AGENT_SECRETS_AUTO_SHA256. secrets-approval-ask's own credential request is
+# approved by that same LEGION_E2E_AGENT_SECRETS_OPERATOR, attended the same way as the machine
+# login: the harness polls, prints STAGE4A: approve credential request …, and waits up to 10
+# minutes for the operator's real approval. See scripts/e2e/README.md's Stage 4a section.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -39,6 +47,9 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
+agent_secrets_url=${LEGION_E2E_AGENT_SECRETS_URL:-}
+agent_secrets_operator=${LEGION_E2E_AGENT_SECRETS_OPERATOR:-}
+agent_secrets_auto_sha=${LEGION_E2E_AGENT_SECRETS_AUTO_SHA256:-}
 from=${STAGE4A_FROM:-}
 evidence=${STAGE4A_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4a-evidence.XXXXXXXX)}
 work=$(mktemp -d /tmp/legion-e2e4a.XXXXXXXX)
@@ -118,6 +129,11 @@ note "runtime identity: context $runtime_context in $runtime_kubeconfig; operato
 built=$(bash "$root/scripts/e2e/lib/built-from.sh" "$root") || fail "lib/built-from.sh could not read the source revision"
 while IFS= read -r line; do note "$line"; done <<<"$built"
 [ -z "$from" ] || note "STAGE4A_FROM=$from: a development run, never the proof"
+if [ -n "$agent_secrets_url" ]; then
+  note "agent-secrets: $agent_secrets_url"
+else
+  note "agent-secrets: none (the secrets-* checks report SKIPPED-BLOCKED)"
+fi
 
 begin snapshot
 snapshot "$evidence/namespace-before.txt" || fail "the operator could not list namespace $namespace"
@@ -145,7 +161,8 @@ pass
 
 begin build
 go -C "$root/packages/daemon-go" test -c -tags e2e -o "$work/stage4a.test" ./internal/runtime/sandbox
-note "built the e2e harness from the checkout"
+go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
+note "built the e2e harness and agent-secrets from the checkout"
 
 harness_ok=
 if env \
@@ -165,6 +182,10 @@ if env \
   LEGION_E2E_FROM="$from" \
   LEGION_E2E_OPERATOR_POD="$fixture/pod.yml" \
   LEGION_E2E_OPERATOR_CONFIGMAP="$route_configmap" \
+  LEGION_E2E_AGENT_SECRETS_URL="$agent_secrets_url" \
+  LEGION_E2E_AGENT_SECRETS_OPERATOR="$agent_secrets_operator" \
+  LEGION_E2E_AGENT_SECRETS_AUTO_SHA256="$agent_secrets_auto_sha" \
+  LEGION_E2E_AGENT_SECRETS_BIN="$work/agent-secrets" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m; then
   harness_ok=1
 fi

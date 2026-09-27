@@ -100,9 +100,7 @@ test("project routes render the project page and a project document route", asyn
   ]);
   const listProjectArtifacts = spyOn(api, "listProjectArtifacts").mockResolvedValue([]);
   // No architecture source: the bare project path opens on Issues.
-  const getArchitectureSource = spyOn(api, "getArchitectureSource").mockRejectedValue(
-    new ApiError(404, { code: "SOURCE_NOT_FOUND" })
-  );
+  const getArchitectureSource = spyOn(api, "getArchitectureSource").mockResolvedValue(null);
   const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue({
     created_at: "2026-09-10T00:00:00Z",
     created_by: { id: "alice", kind: "user" },

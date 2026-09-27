@@ -37,6 +37,7 @@ type ConsumerSpec struct {
 // daemon whose stream is missing refuses to boot instead of booting with no intake.
 type Consumers struct {
 	spec     ConsumerSpec
+	stream   jetstream.Stream
 	dispatch jetstream.Consumer
 	github   jetstream.Consumer
 }
@@ -75,7 +76,7 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
-	return &Consumers{spec: spec, dispatch: dispatch, github: github}, nil
+	return &Consumers{spec: spec, stream: stream, dispatch: dispatch, github: github}, nil
 }
 
 // openConsumer updates the durable consumer config names, keeping the start position it was created
@@ -94,13 +95,49 @@ func openConsumer(ctx context.Context, stream jetstream.Stream, config jetstream
 	return stream.UpdateConsumer(ctx, config)
 }
 
+// DispatchTarget is the notification stream's own current last sequence, read fresh from
+// JetStream. Boot reads it after Reconcile's own Dispatch listing (not before: a message
+// published between an earlier read and the listing would be in the listing but not counted),
+// so any record the listing shows behind Dispatch's log is caught up only once the Dispatch
+// consumer's ack floor reaches this position — a stream position, not a per-issue or per-message
+// count, so it needs no correction for redelivery, a nak, or messages the consumer's filter never
+// matches.
+func (c *Consumers) DispatchTarget(ctx context.Context) (int64, error) {
+	info, err := c.stream.Info(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read notification stream info: %w", err)
+	}
+	return int64(info.State.LastSeq), nil
+}
+
+// DispatchPosition is the Dispatch consumer's own current position, read fresh from JetStream:
+// the measurement Reconcile holds against DispatchTarget (DispatchConsumerPosition.Reached).
+func (c *Consumers) DispatchPosition(ctx context.Context) (DispatchConsumerPosition, error) {
+	info, err := c.dispatch.Info(ctx)
+	if err != nil {
+		return DispatchConsumerPosition{}, fmt.Errorf("read Dispatch consumer info: %w", err)
+	}
+	return positionOf(info), nil
+}
+
+func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
+	return DispatchConsumerPosition{
+		AckFloorStream: int64(info.AckFloor.Stream),
+		Idle:           info.NumPending == 0 && info.NumAckPending == 0,
+	}
+}
+
 // Run consumes both durable consumers until ctx ends, and returns the error of either one that
 // stops first. Every decoded fact enters ApplyFact; a committed transaction is acknowledged, a
 // rolled-back transaction is nacked with a delay, poison is terminated, and a committed refusal is
-// logged then acknowledged.
+// logged then acknowledged. The Dispatch consumer's own position, and admission's hold on it, are
+// the daemon's boot-owned concern (workflowRuntime.pollHoldRelease), not intake's: this loop knows
+// nothing about either.
 func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, handlers ...Handler) error {
 	group, consumeContext := errgroup.WithContext(ctx)
-	group.Go(func() error { return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, handlers) })
+	group.Go(func() error {
+		return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, handlers)
+	})
 	group.Go(func() error { return consumeConsumer(consumeContext, c.github, c.spec, pool, handlers) })
 	return group.Wait()
 }

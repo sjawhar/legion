@@ -25,6 +25,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
+import { CredentialRequestsSection } from "../credentials/CredentialRequestsSection";
 import { PriorityControl } from "../issue/PriorityControl";
 import { useIssueAssignee } from "../issue/useIssueAssignee";
 import { actorLabel } from "../refs/actor";
@@ -509,6 +510,7 @@ export function Inbox(): ReactNode {
   if (shown.length === 0 && held === undefined) {
     return (
       <div className="space-y-6">
+        <CredentialRequestsSection />
         {viewSwitch}
         {chip}
         <EmptyState
@@ -558,6 +560,7 @@ export function Inbox(): ReactNode {
       ref={viewport}
       rootRef={listRef}
     >
+      <CredentialRequestsSection />
       {viewSwitch}
       {chip}
       {agent === undefined ? <BlockedOnYou asks={inView(inbox.data)} /> : null}
