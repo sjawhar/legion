@@ -36935,7 +36935,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issues",
     example: { project: "AGENTC", route_status: "no_holder" },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is gone, whatever its priority: work that reads as routed and reaches nobody. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Rows are capped at limit (default 50, max 250), applied to the response here, not by the server.",
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Rows are capped at limit (default 50, max 250), applied to the response here, not by the server.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -36943,7 +36943,7 @@ var dispatchToolSpecs = [
       label: z2.string().describe("Optional label filter.").optional(),
       priority: z2.array(z2.number({ int: true, min: 0, max: 3 }).nullable(), { min: 1, max: 5 }).describe("Optional priority filter: one or more of 0 (P0, highest) through 3 (P3, lowest), and null " + "for an issue with no priority; an issue matching any listed value is returned.").optional(),
       updated_since: z2.string().describe("Optional RFC3339 timestamp; only issues updated at or after it.").optional(),
-      route_status: z2.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is gone. unknown: the Envoy listener did not answer.").optional(),
+      route_status: z2.enum(ISSUE_ROUTE_STATUSES).describe("Optional: only open issues whose route is in this state. live: a running session holds " + "the role or is the routed session. no_holder: nobody running holds the role, or the " + "session is not running, right now. unknown: the Envoy listener did not answer.").optional(),
       limit: z2.number({ int: true, min: 1, max: 250 }).describe("Maximum rows, 1-250; default 50.").optional()
     })
   },
@@ -39919,7 +39919,7 @@ function routeText(issue2, titles) {
   const holder = issue2.route_holder ?? null;
   const reach = {
     live: routeHeldBySession(issue2) && holder !== null ? ` (held by ${titles?.get(holder) ?? holder})` : "",
-    no_holder: issue2.route.startsWith("role:") ? " (nobody holds it)" : " (that session is gone)",
+    no_holder: issue2.route.startsWith("role:") ? " (nobody holds it right now)" : " (that session is not running right now)",
     unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
   };
   return issue2.route + (issue2.route_status == null ? "" : reach[issue2.route_status]);

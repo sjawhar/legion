@@ -138,8 +138,8 @@ test("marks only the rows whose route reaches nobody", async () => {
       .getAllByTestId("issue-route-unreachable")
       .map((marker) => [marker.closest("li")?.getAttribute("aria-label"), marker.textContent]);
     expect(marked).toEqual([
-      ["CORE-1 Unheld role", expect.stringContaining("Nobody holds it")],
-      ["CORE-2 Gone session", expect.stringContaining("Session gone")],
+      ["CORE-1 Unheld role", expect.stringContaining("Nobody holds it right now")],
+      ["CORE-2 Gone session", expect.stringContaining("Session not running")],
     ]);
   } finally {
     view.unmount();

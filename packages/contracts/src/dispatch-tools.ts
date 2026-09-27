@@ -891,7 +891,8 @@ export const dispatchToolSpecs = [
       "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " +
       "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " +
       'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' +
-      "session that is gone, whatever its priority: work that reads as routed and reaches nobody. " +
+      "session that is not running at the moment of the read, whatever its priority. A restarting " +
+      "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " +
       "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " +
       "Rows are capped at limit (default 50, max 250), applied to the response here, not by the server.",
     arguments: (z) => ({
@@ -915,7 +916,7 @@ export const dispatchToolSpecs = [
         .describe(
           "Optional: only open issues whose route is in this state. live: a running session holds " +
             "the role or is the routed session. no_holder: nobody running holds the role, or the " +
-            "session is gone. unknown: the Envoy listener did not answer."
+            "session is not running, right now. unknown: the Envoy listener did not answer."
         )
         .optional(),
       limit: z

@@ -1157,7 +1157,8 @@ function routeHeldBySession(issue: RoutedIssue): boolean {
 /**
  * An issue's route as every agent surface reads it: where its messages go and whether that
  * reaches anyone, from the `route_status` the server resolved on this read. A route to a role
- * nobody holds, or to a session that is gone, reads as routed and reaches nobody, so it says so.
+ * nobody holds, or to a session that is not running, reaches nobody at the moment of the read,
+ * so it says so - and says "right now", because a restarting session is absent for minutes.
  */
 function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): string {
   if (issue.route === null) return "none";
@@ -1167,7 +1168,9 @@ function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): st
       routeHeldBySession(issue) && holder !== null
         ? ` (held by ${titles?.get(holder) ?? holder})`
         : "",
-    no_holder: issue.route.startsWith("role:") ? " (nobody holds it)" : " (that session is gone)",
+    no_holder: issue.route.startsWith("role:")
+      ? " (nobody holds it right now)"
+      : " (that session is not running right now)",
     unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)",
   };
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);

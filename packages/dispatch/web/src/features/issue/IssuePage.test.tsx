@@ -273,7 +273,7 @@ test("IssuePage's header warns when nobody holds the route, and adds nothing whe
   try {
     const marker = within(await stateRow()).getByTestId("issue-route-unreachable");
     expect(marker.textContent).toContain("role:sre:");
-    expect(marker.textContent).toContain("Nobody holds it");
+    expect(marker.textContent).toContain("Nobody holds it right now");
   } finally {
     unheldView.unmount();
     unheld();

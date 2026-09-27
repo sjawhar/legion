@@ -1481,7 +1481,7 @@ describe("executeDispatchTool", () => {
     ]);
     // A route that reaches nobody is what the owner audit reads, so the row says so.
     expect(result.text).toContain("AGENTC-1 [todo] P1 First · 2 open asks · claimed by ");
-    expect(result.text).toContain(" · route role:sre (nobody holds it)");
+    expect(result.text).toContain(" · route role:sre (nobody holds it right now)");
     expect(result.details).toEqual({
       issues: [
         {
@@ -1555,14 +1555,16 @@ describe("executeDispatchTool", () => {
     };
 
     const unheld = await read({ route: "role:sre", route_status: "no_holder", route_holder: null });
-    expect(unheld.text).toContain("Route: role:sre (nobody holds it)\n");
+    expect(unheld.text).toContain("Route: role:sre (nobody holds it right now)\n");
     expect(unheld.agentCalls).toBe(0);
     const gone = await read({
       route: "session:ses-gone",
       route_status: "no_holder",
       route_holder: null,
     });
-    expect(gone.text).toContain("Route: session:ses-gone (that session is gone)\n");
+    expect(gone.text).toContain(
+      "Route: session:ses-gone (that session is not running right now)\n"
+    );
     const blind = await read({ route: "role:sre", route_status: "unknown", route_holder: null });
     expect(blind.text).toContain(
       "Route: role:sre (the Envoy listener did not answer, so whether it reaches anyone is unknown)\n"

@@ -323,16 +323,22 @@ The audit finds four shapes:
   find; the tell is your own messages. Doing something by hand more than once means an issue is
   wearing the wrong status.
 - **Unreachable route.** An open issue whose route names a role nobody holds, or a session that is
-  gone, reads as routed and is unowned, whatever its priority: its messages reach nobody. The
-  priority filter above never finds it, so list it on its own:
+  not running, reaches nobody, whatever its priority, and the priority filter above never finds
+  it. List it on its own:
   ```ts
   dispatch_issues({ project, route_status: "no_holder", limit: 250 })
   ```
-  Each row reads `route role:sre (nobody holds it)` or `route session:<id> (that session is gone)`.
-  Staff the role, re-route the issue to a live holder, or clear the route and assign it
-  (AGENTC-1065, a P2 production listener 503, sat routed to an unheld `role:sre` with no
-  assignee). `route_status: "unknown"` means the listener did not answer, so a route could not be
-  judged; a `no_holder` filter refuses rather than answer an empty list then.
+  Each row reads `route role:sre (nobody holds it right now)` or `route session:<id> (that session
+  is not running right now)`. That is one read of the listener, and one read is a restart gap as
+  often as a vacancy: an agent box that restarts or resumes keeps the session id, but the session
+  is absent from the listener for minutes, and its role with it. On 2026-09-27, 58 of 63 session
+  routes one read showed as unreachable pointed at a single session that was moving between boxes.
+  So a route is unowned only when it is `no_holder` on two reads at least ten minutes apart: list
+  again after ten minutes and act on the issues both lists name. Then staff the role, re-route the
+  issue to a live holder, or clear the route and assign it (AGENTC-1065, a P2 production listener
+  503, sat routed to an unheld `role:sre` with no assignee). `route_status: "unknown"` means the
+  listener did not answer, so a route could not be judged; a `no_holder` filter refuses rather
+  than answer an empty list then.
 
 Run the audit as a step of a coordinator's loop, at each checkpoint, not as a habit: these shapes
 are found by running the check, not by noticing them.
