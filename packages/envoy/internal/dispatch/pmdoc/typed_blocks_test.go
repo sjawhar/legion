@@ -415,6 +415,18 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     "a table a line opening another block would be a row of",
 		},
 		{
+			// A lone `-` under the rows is a setext underline to goldmark, which trims every line of
+			// the paragraph before its table transformer reads it, and then an empty list item.
+			name:     "indented code before a lone dash after a table",
+			markdown: "| a |\n| - |\n    code\n-\n",
+			want:     "a table a line opening another block would be a row of",
+		},
+		{
+			name:     "the same in a footnote definition",
+			markdown: "x[^a1]\n\n[^a1]: | a | b |\n    | --- | --- |\n    | 1 | 2 |\n        indented code\n    -\n",
+			want:     "a table a line opening another block would be a row of",
+		},
+		{
 			// The browser editor's parser keeps a list whose item holds its content five or more
 			// columns in open across the code's first line, and so reads the code's later lines as
 			// a second code block.

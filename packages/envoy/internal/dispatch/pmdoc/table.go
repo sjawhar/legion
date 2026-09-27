@@ -95,6 +95,9 @@ func (t lazyTableRows) transform(node *ast.Paragraph, reader gmtext.Reader, pc p
 		starts[index] = lineStart(reader.Source(), lines.At(index).Start)
 	}
 	segments := lines.Sliced(0, lines.Len())
+	if read, ok := node.Attribute(readLinesAttr); ok {
+		segments = read.([]gmtext.Segment)
+	}
 	lazy, _ := node.Attribute(lazyLinesAttr)
 	lazyStarts, _ := lazy.([]int)
 	node.SetLines(tabExpandedLines(lines, reader.Source()))
@@ -146,16 +149,30 @@ func markLazyRows(table *extensionast.Table, rows, lazy []int) {
 // the heading. The browser editor's parser, whose table is no paragraph, reads the line as the
 // table's row, as it reads any line that opens no other block, so the line stays the paragraph's -
 // all but a lone `-`, which opens an empty list item there, as goldmark's own handling leaves it.
+// That handling closes the paragraph, trimming the whitespace every line opens with, before the
+// table transformer reads it, so the lines are kept as read (readLinesAttr) for markBlockRows.
 type underlineAfterTable struct{ parser.BlockParser }
 
 func (p underlineAfterTable) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
-	line, _ := reader.PeekLine()
-	if paragraph, ok := pc.LastOpenedBlock().Node.(*ast.Paragraph); ok && paragraph.Parent() == parent &&
-		!bareMarkerLine.Match(bytes.TrimRight(line, "\n")) && formsTable(paragraph, reader.Source()) {
+	paragraph, ok := pc.LastOpenedBlock().Node.(*ast.Paragraph)
+	if !ok || paragraph.Parent() != parent || !formsTable(paragraph, reader.Source()) {
+		return p.BlockParser.Open(parent, reader, pc)
+	}
+	if line, _ := reader.PeekLine(); !bareMarkerLine.Match(bytes.TrimRight(line, "\n")) {
 		return nil, parser.NoChildren
 	}
-	return p.BlockParser.Open(parent, reader, pc)
+	// A copy, since the close trims the paragraph's lines in place.
+	lines := slices.Clone(paragraph.Lines().Sliced(0, paragraph.Lines().Len()))
+	node, state := p.BlockParser.Open(parent, reader, pc)
+	if node != nil {
+		paragraph.SetAttribute(readLinesAttr, lines)
+	}
+	return node, state
 }
+
+// readLinesAttr holds, on a paragraph goldmark closes for a setext underline, its lines as read,
+// before that close trims them (underlineAfterTable).
+var readLinesAttr = []byte("pmdoc-read-lines")
 
 // formsTable reports whether goldmark's table transformer reads a table in paragraph's lines,
 // trying it on a copy apart from the document.
