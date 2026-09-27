@@ -9,6 +9,9 @@ Retro is mandatory for every issue that passed review. The architect revives the
 implementer so the person with implementation context performs the retrospective, and the
 skill obtains a separate fresh-eyes perspective. Retro runs before merge.
 
+Every path this skill cites (`packages/...`, `docs/...`) is in sjawhar/legion, the Legion
+repository, which need not be the repository you are working in.
+
 ## Merge-gate ordering
 
 Follow this ordering exactly. It keeps the reviewed branch clean while preserving the

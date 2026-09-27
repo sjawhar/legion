@@ -10,9 +10,10 @@
 # the run non-zero, naming it.
 #
 # Run it as `bash scripts/e2e/controller-start-tmux.sh` from a checkout. Everything the run
-# creates is its own and goes on any exit: its scratch directory, the isolated OMP profile, the
-# tmux servers, and its Postgres and NATS containers. CONTROLLER_START_EVIDENCE_DIR (default a fresh
-# /tmp directory, kept and printed) keeps the daemon and listener logs.
+# creates is its own and goes on any exit: its scratch directory, which holds the isolated OMP
+# profile under the HOME the run gives its Oh My Pi processes (make_omp_home, lib/omp-home.sh),
+# the tmux servers, and its Postgres and NATS containers. CONTROLLER_START_EVIDENCE_DIR (default a
+# fresh /tmp directory, kept and printed) keeps the daemon and listener logs.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -36,6 +37,8 @@ ptoken=${project,,}
 nats_container=legion-e2e-controller-nats-$$
 pg_container=legion-e2e-controller-pg-$$
 state=$work/state
+omp_home=$work/omp-home
+profile_agent=$omp_home/.omp/profiles/$profile/agent
 ctl_state=$work/controller-state
 daemon_log=$evidence/logs/daemon.log
 check=setup
@@ -49,6 +52,8 @@ fail() { echo "FAIL $check: $*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/omp-home.sh
+. "$root/scripts/e2e/lib/omp-home.sh"
 
 # Unconditional: every run removes what it made, whatever it ended on.
 cleanup() {
@@ -61,7 +66,7 @@ cleanup() {
   stop_pid "$listener_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1
-  rm -rf "$HOME/.omp/profiles/$profile" "$work"
+  rm -rf "$work"
   [ -n "$ok" ] || echo "controller start e2e: FAIL (check $check)"
   echo "evidence: $evidence (logs/daemon.log, logs/listener.log, and checks/: each check's own output and the controller panes)"
   return 0
@@ -76,8 +81,9 @@ tm() { tmux -L accept "$@"; }
 state_json() { legion state --json --port "$daemon_port"; }
 envoy_role() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_port/v1/roles/$1"; }
 log_count() { jq -R --arg m "$1" 'fromjson? | select(.msg == $m)' "$daemon_log" | jq -s length; }
-# The operator's shell, less the running session's own OMP and Envoy variables.
-operator_env() { env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH OMP_PROFILE="$profile" "$@"; }
+# The operator's shell, less the running session's own OMP and Envoy variables, with the run's own
+# HOME for Oh My Pi.
+operator_env() { env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH HOME="$omp_home" OMP_PROFILE="$profile" "$@"; }
 # controller_omp STATE_DIR: the pid of the Oh My Pi `legion controller start` launched for STATE_DIR.
 controller_omp() {
   local p
@@ -94,6 +100,7 @@ env_of() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
 # ---- setup -----------------------------------------------------------------------------------------
 for tool in go docker jq curl tmux bun mise; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 mkdir -p "$state" "$work/xdg" "$work/tmux"
+make_omp_home "$omp_home"
 export XDG_STATE_HOME=$work/xdg TMUX_TMPDIR=$work/tmux
 pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
@@ -124,15 +131,15 @@ listener_pid=$!
 until_true 60 "the Envoy listener" curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_port/v1/sessions"
 
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --dest "$work/plugin")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
 want_contract=$(jq -r .legion.goDaemonApiVersion "$root/packages/pi-envoy/package.json")
 note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile, goDaemonApiVersion $want_contract"
 # The boot gate resolves the model of every task agent the prompts dispatch, so the profile names
 # their roles (@review, @oracle) and the default one model, served by a static-key provider that
 # listens nowhere: this proof takes no model turn, so no model is called and no credential the
 # machine carries decides the gate.
-mkdir -p "$HOME/.omp/profiles/$profile/agent"
-cat >"$HOME/.omp/profiles/$profile/agent/models.yml" <<'EOF'
+mkdir -p "$profile_agent"
+cat >"$profile_agent/models.yml" <<'EOF'
 providers:
   offline:
     baseUrl: http://127.0.0.1:9
@@ -143,7 +150,7 @@ providers:
       - id: m1
         name: M1
 EOF
-printf 'modelRoles:\n  default: offline/m1\n  review: offline/m1\n  oracle: offline/m1\n' >"$HOME/.omp/profiles/$profile/agent/config.yml"
+printf 'modelRoles:\n  default: offline/m1\n  review: offline/m1\n  oracle: offline/m1\n' >"$profile_agent/config.yml"
 
 (umask 077 && head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token")
 cat >"$work/legion.yaml" <<EOF
@@ -253,7 +260,7 @@ note "the daemon minted nothing; $ctl_state not created"
 pass
 
 begin controller-claims-the-role
-tm new-session -d -s ctl1 -x 200 -y 50 "cd '$work' && env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$evidence/checks/ctl1.stderr'; echo \$? >'$evidence/checks/ctl1.exit'; sleep 600"
+tm new-session -d -s ctl1 -x 200 -y 50 "cd '$work' && env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH HOME='$omp_home' OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$evidence/checks/ctl1.stderr'; echo \$? >'$evidence/checks/ctl1.exit'; sleep 600"
 until_true 180 "controllerLocator in the state" sh -c "'$work/legion' state --json --port $daemon_port | jq -e '.controllerLocator.sessionId != null'"
 locator1=$(state_json | jq -c .controllerLocator)
 session1=$(jq -r .sessionId <<<"$locator1")
@@ -269,7 +276,7 @@ note "daemon: api: controller registered $registered"
 omp1=$(controller_omp "$ctl_state") || fail "no omp process carries LEGION_STATE_DIR=$ctl_state"
 for pair in LEGION_CONTROLLER=1 LEGION_ROLE=controller LEGION_DAEMON_API=go "LEGION_PROJECT=$ptoken" \
   "LEGION_CONTROLLER_SECRET_FILE=$ctl_state/secrets/$role" "LEGION_GRANT_FILE=$ctl_state/secrets/$role-grant" \
-  "ENVOY_TOKEN_FILE=$work/envoy-token" "ENVOY_NATS_URL=$nats_url"; do
+  "ENVOY_TOKEN_FILE=$work/envoy-token" "ENVOY_NATS_URL=$nats_url" "HOME=$omp_home" "OMP_PROFILE=$profile"; do
   [ "$(env_of "$omp1" "${pair%%=*}")" = "${pair#*=}" ] || fail "omp $omp1 has ${pair%%=*}=$(env_of "$omp1" "${pair%%=*}"), want ${pair#*=}"
 done
 env_of "$omp1" PI_SHELL_PREFIX | grep -qF "'$ctl_state/worker-bin:$ctl_state/bin:'" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
@@ -277,7 +284,13 @@ env_of "$omp1" PI_SHELL_PREFIX | grep -qF "'$ctl_state/worker-bin:$ctl_state/bin
 tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qxF -- "--append-system-prompt" || fail "omp has no --append-system-prompt"
 ! tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qx -- "--mode\|rpc\|--resume.*" || fail "omp runs --mode rpc or --resume"
 [ "$(stat -c %a "$ctl_state/secrets/$role")" = 600 ] || fail "the secret file is not 0600"
-note "omp $omp1: LEGION_CONTROLLER=1 LEGION_DAEMON_API=go PI_SHELL_PREFIX over $ctl_state; secret only as a 0600 file; interactive (no --mode rpc)"
+note "omp $omp1: LEGION_CONTROLLER=1 LEGION_DAEMON_API=go PI_SHELL_PREFIX over $ctl_state; secret only as a 0600 file; interactive (no --mode rpc); HOME=$omp_home"
+# The profile Oh My Pi runs on is the run's own, inside its work directory (its plugin link and the
+# log each Oh My Pi start writes are there), and the operator's profile root holds none of it.
+ls "$omp_home/.omp/profiles/$profile/logs"/omp.*.log >/dev/null 2>&1 ||
+  fail "no Oh My Pi log under $omp_home/.omp/profiles/$profile"
+[ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
+note "the profile is $omp_home/.omp/profiles/$profile ($(cd "$omp_home/.omp/profiles/$profile" && printf '%s ' *)); $HOME/.omp/profiles/$profile does not exist"
 pass
 
 begin ctrl-c-reaches-omp-not-the-cli
@@ -321,7 +334,7 @@ if [ "$code" != 500 ] || ! grep -qF DISPATCH_UNAVAILABLE "$evidence/checks/grant
   fail "the grant answered $code $(cat "$evidence/checks/grant-before-second-start.json") before the second start, want 500 DISPATCH_UNAVAILABLE"
 fi
 note "the grant, before the second start → $code $(cat "$evidence/checks/grant-before-second-start.json")"
-tm new-session -d -s ctl2 -x 200 -y 50 "cd '$work' && env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$evidence/checks/ctl2.stderr'; echo \$? >'$evidence/checks/ctl2.exit'; sleep 600"
+tm new-session -d -s ctl2 -x 200 -y 50 "cd '$work' && env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH HOME='$omp_home' OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$evidence/checks/ctl2.stderr'; echo \$? >'$evidence/checks/ctl2.exit'; sleep 600"
 until_true 180 "controllerLocator to name a second session" sh -c "'$work/legion' state --json --port $daemon_port | jq -e --arg s '$session1' '.controllerLocator.sessionId != null and .controllerLocator.sessionId != \$s'"
 locator2=$(state_json | jq -c .controllerLocator)
 session2=$(jq -r .sessionId <<<"$locator2")

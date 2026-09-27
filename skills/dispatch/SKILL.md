@@ -312,6 +312,12 @@ and is not re-staffed. A todo with a finished spec reads as queued work that nob
 (LEGION-173 sat in todo for two weeks with a complete spec; AGENTC-1010's v4 plan sat in backlog
 with nobody building it).
 
+A close that says the defect cannot happen cites the code that makes it impossible. An issue
+closed because a rewrite forecloses it names the file and line in the rewrite that does so; a
+close that cannot name one is not foreclosed, it is unread. The cheapest way for a rewrite to reach
+parity is to port the code, defect included: LEGION-211's bare `git worktree prune`, filed against
+the TypeScript daemon, had been ported into the Go coordinator and was live in production.
+
 The audit finds four shapes:
 
 - **Unstaffed work.** A plan or measurement exists, and no one is building it.

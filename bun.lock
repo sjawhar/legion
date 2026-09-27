@@ -227,6 +227,7 @@
   },
   "patchedDependencies": {
     "@milkdown/plugin-clipboard@7.22.1": "patches/@milkdown%2Fplugin-clipboard@7.22.1.patch",
+    "prosemirror-tables@1.8.5": "patches/prosemirror-tables@1.8.5.patch",
     "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
   },
   "packages": {

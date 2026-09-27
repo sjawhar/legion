@@ -2,6 +2,7 @@ import { type Browser, expect, type Page, test } from "@playwright/test";
 
 import { getArtifactText, getIssue } from "./api";
 import { copy, documentEditor, openIssue, openWithCaret, paste, selectEditorText } from "./editor";
+import { engineTables, goReadBack } from "./read-back";
 import { resetDatabase } from "./seed";
 
 test.beforeEach(async () => {
@@ -735,3 +736,66 @@ test("a soft line break in markdown written through the API is a space in the ed
     await alice.close();
   }
 });
+
+// A pasted table whose first or last row is empty keeps its table and its cells. With an empty first
+// row the paste hung the page: prosemirror-tables' fixTables filled the cell-less header row with
+// body cells, which Milkdown's header row can't hold, so ProseMirror fitted them as a new row and
+// fixTables ran again, forever. With an empty last row, preset-gfm's paste rule counted the table's
+// columns in that row, found none, and replaced the table with an empty paragraph.
+const tableRows = (header: readonly string[], body: readonly string[], indent = "") =>
+  [header, header.map(() => ":---"), body]
+    .map((cells) => `${indent}| ${cells.join(" | ")} |\n`)
+    .join("");
+for (const [row, clipboard, header, body] of [
+  ["first", emptyFirstRow, ["", ""], ["a", "b"]],
+  ["last", emptyLastRow, ["a", "b"], ["", ""]],
+] as const) {
+  const rows = tableRows(header, body);
+  // Both readers give back the stored bytes exactly, except in a tight list item: pmdoc writes its
+  // blocks one line apart, so the paragraph after the table reads back as one more table row, in Go
+  // as in the engine (LEGION-290). There only the table's own rows read back.
+  for (const [context, spec, stored, indent, readsBackExactly] of [
+    ["a paragraph", "Intro end.\n", `Intro\n\n${rows}\n&#32;end.\n`, "", true],
+    [
+      "a callout",
+      ':::callout{#k1 kind="note"}\nIntro end.\n:::\n',
+      `:::callout{#k1 kind="note" title=""}\nIntro\n\n${rows}\n&#32;end.\n:::\n`,
+      "",
+      true,
+    ],
+    ["a heading", "# Intro end\n", `# Intro\n\n${rows}\n# &#32;end\n`, "", true],
+    [
+      "a nested list",
+      "- top\n  - Intro end\n",
+      `- top\n  - Intro\n${tableRows(header, body, "    ")}    &#32;end\n`,
+      "    ",
+      false,
+    ],
+  ] as const) {
+    test(`a table whose ${row} row is empty, pasted into ${context}, keeps its cells`, async ({
+      browser,
+    }) => {
+      const { alice, issue, page } = await openWithCaret(
+        browser,
+        "Table paste",
+        spec,
+        "Intro",
+        "end"
+      );
+      try {
+        await paste(page, clipboard);
+
+        await expect
+          .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+          .toBe(stored);
+        const [table] = engineTables(stored);
+        const goRead = await goReadBack(stored);
+        expect(table.slice(0, 2)).toEqual([header, body]);
+        expect(goRead).toContain(tableRows(header, body, indent));
+        expect(table.length === 2 && goRead === stored).toBe(readsBackExactly);
+      } finally {
+        await alice.close();
+      }
+    });
+  }
+}

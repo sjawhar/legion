@@ -225,12 +225,16 @@ and leaves no side effect), which is why the three removal tests in `workspace.t
   `jj log -r 'a@'` for an unregistered name: `Error: Workspace \`a\` doesn't have a working-copy
   commit`, exit 1 — check registration before asking for `a@`.
 - On 0.45.1 a colocated clone's `jj workspace add` creates a git worktree
-  (`git --git-dir=clone/.git worktree list` names it, `prunable` once the directory is gone) and
-  `git worktree prune` removes it after the forget; on **0.44.0** no git worktree is created and
-  the prune is a no-op, exit 0.
+  (`git --git-dir=clone/.git worktree list` names it, `prunable` once the directory is gone, unless
+  locked). The fork's `jj workspace forget` removes it only while its directory exists; forgotten
+  after the directory went, the entry stays, and a later `jj workspace add` at that path stops at
+  git's `is a missing but already registered worktree`. Removal and provisioning delete that one
+  entry themselves (docs/solutions/daemon/jj-git-worktree-interop.md). On **0.44.0** no git
+  worktree is created.
 - Order: delete the directory, then forget. Directory gone but still registered:
-  `jj workspace add … --name a` says `Error: Workspace named 'a' already exists` (exit 1) —
-  `createWorkspace`'s `already (registered|exists)` branch forgets, prunes, and adds again.
+  `jj workspace add … --name a` says `Error: Workspace named 'a' already exists` (exit 1), and
+  creates no git worktree — `createWorkspace`'s `already (registered|exists)` branch forgets and
+  adds again.
   Registration gone but directory present: `jj workspace update-stale` inside it says
   `Error: Nothing checked out in this workspace` (exit 1; 0.45.1 also
   `Removed Git worktree for …`) — the failure the wrong order would give every later provisioning.
@@ -263,7 +267,7 @@ jj -R clone workspace add a --name a --revision main; jj -R clone workspace add 
 (cd a && jj bookmark set legion/A -r @ && echo hi > f && jj new -m "a work 2")
 jj log -r '::a@ ~ ::(working_copies() ~ a@) ~ ::(bookmarks() | remote_bookmarks() | tags())' --no-graph -T 'commit_id ++ "\n"' --ignore-working-copy -R clone
 rm -rf a; jj abandon -r '<the ids, | -joined>' --ignore-working-copy -R clone; jj workspace forget a --ignore-working-copy -R clone
-git --git-dir=clone/.git worktree prune; (cd b && jj log -r 'all()')
+rm -rf clone/.git/worktrees/a; (cd b && jj log -r 'all()')   # a's own entry (named a in this fresh clone); never a bare prune
 # conflicted, one side a deletion: delete legion/D locally, move it on origin, fetch
 (cd clone && jj bookmark delete legion/D)
 git --git-dir=clone/.git push "$PWD/remote" <new commit>:refs/heads/legion/D; jj -R clone git fetch
