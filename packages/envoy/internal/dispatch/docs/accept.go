@@ -225,8 +225,8 @@ func padCutTables(before, after *pmdoc.Node, r pmdoc.Range) (*pmdoc.Node, error)
 // another, is never padded: the browser can join the two tables or rows, which Splice does not. An
 // inline replacement (text that stays in the textblock, or code's literal text) replaces the
 // matched range there as here; an empty one follows this accept's own rule, deleting the matched
-// text, where the browser's accept of an empty suggestion only clears its mark. Block content the
-// browser takes across two textblocks, which it replaces whole (pmdoc.MultiblockRange). Splice
+// text, where the browser's accept of an empty suggestion only clears its mark. The browser takes
+// block content across two textblocks and replaces both whole (pmdoc.MultiblockRange). Splice
 // replaces what the browser does only when the match is exactly those textblocks' content and the
 // first, at, is a document-level block, not one inside a callout, a quote, a list item or a table
 // cell. Other block content over a table, such as a list over one cell's whole text, is not padded
