@@ -1,15 +1,10 @@
 package natsauth_test
 
 import (
-	"bytes"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
-
-	"github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -105,63 +100,5 @@ func TestAnUnusableDaemonSeedIsAnErrorNamingItsSource(t *testing.T) {
 	}
 	if _, err := natsauth.DaemonSeed(shared, env(nil)); err == nil || !strings.HasSuffix(err.Error(), " is readable by its group or others (mode 0640); chmod 0600 it") {
 		t.Errorf("DaemonSeed(daemon-owned 0640 key file) = %v; want the 0600 refusal", err)
-	}
-}
-
-// A subscription and a publish the server refuses the connection are each logged at error naming
-// the subject, from the server's asynchronous refusal: the connection itself stays up and nothing
-// else surfaces them.
-func TestAPermissionTheServerRefusesIsLoggedAtError(t *testing.T) {
-	seed, public := testnats.User(t)
-	const denied, deniedPublish = "notifications.envoy.exceptions.notifications.role.>", "notifications.role.denied"
-	url := testnats.StartNkeyAuthorizedUsers(t, testnats.NkeyUser{
-		Public:      public,
-		Permissions: `{ subscribe: { deny: ["` + denied + `"] }, publish: { deny: ["` + deniedPublish + `"] } }`,
-	})
-	var out bytes.Buffer
-	log := slog.New(slog.NewTextHandler(&out, nil))
-	refused := make(chan struct{}, 2)
-	conn, err := natsauth.Connect([]string{url}, seed, nats.Timeout(5*time.Second),
-		natsauth.LogEvents(log),
-		// Runs after the option above: the test waits on the refusals it saw logged.
-		func(o *nats.Options) error {
-			logged := o.AsyncErrorCB
-			o.AsyncErrorCB = func(c *nats.Conn, s *nats.Subscription, err error) {
-				logged(c, s, err)
-				refused <- struct{}{}
-			}
-			return nil
-		})
-	if err != nil {
-		t.Fatalf("connect as the user: %v", err)
-	}
-	t.Cleanup(conn.Close)
-	if _, err := conn.SubscribeSync(denied); err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	if err := conn.Publish(deniedPublish, []byte("{}")); err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	if err := conn.Flush(); err != nil {
-		t.Fatalf("flush: %v", err)
-	}
-	for range 2 {
-		select {
-		case <-refused:
-		case <-time.After(10 * time.Second):
-			t.Fatalf("the server's refusals were not reported within 10s; log: %s", out.String())
-		}
-	}
-	logged := out.String()
-	for _, want := range []string{
-		`level=ERROR msg="NATS refused the daemon a permission: its NATS user lacks that grant" operation=subscription subject=` + denied,
-		`level=ERROR msg="NATS refused the daemon a permission: its NATS user lacks that grant" operation=publish subject=` + deniedPublish,
-	} {
-		if !strings.Contains(logged, want) {
-			t.Errorf("log = %s\nwant a line containing %s", logged, want)
-		}
-	}
-	if strings.Contains(logged, seed) {
-		t.Errorf("log carries the seed: %s", logged)
 	}
 }

@@ -366,7 +366,8 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	group, running := errgroup.WithContext(ctx)
 	group.Go(func() error {
 		if err := w.consumers.Run(running, w.pool, w.handlers...); err != nil {
-			return fmt.Errorf("workflow intake stopped: %w", err)
+			// A terminal close's cause is the connection's alone (natsauth.WithLastError).
+			return fmt.Errorf("workflow intake stopped: %w", natsauth.WithLastError(err, w.conn))
 		}
 		return nil
 	})

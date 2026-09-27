@@ -1,7 +1,9 @@
 package natsauth_test
 
 import (
+	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -18,9 +20,9 @@ import (
 
 // signalled is the option, after natsauth.LogEvents, that sends on each channel once the handler
 // LogEvents installed has run: the test waits on what it saw logged.
-func signalled(asyncErr, disconnected, reconnected chan<- struct{}) nats.Option {
+func signalled(asyncErr, disconnected, reconnected, closed chan<- struct{}) nats.Option {
 	return func(o *nats.Options) error {
-		logErr, logDisconnect, logReconnect := o.AsyncErrorCB, o.DisconnectedErrCB, o.ReconnectedCB
+		logErr, logDisconnect, logReconnect, logClose := o.AsyncErrorCB, o.DisconnectedErrCB, o.ReconnectedCB, o.ClosedCB
 		o.AsyncErrorCB = func(c *nats.Conn, s *nats.Subscription, err error) {
 			logErr(c, s, err)
 			notify(asyncErr)
@@ -34,6 +36,10 @@ func signalled(asyncErr, disconnected, reconnected chan<- struct{}) nats.Option 
 		o.ReconnectedCB = func(c *nats.Conn) {
 			logReconnect(c)
 			notify(reconnected)
+		}
+		o.ClosedCB = func(c *nats.Conn) {
+			logClose(c)
+			notify(closed)
 		}
 		return nil
 	}
@@ -76,6 +82,102 @@ func wait(t *testing.T, ch <-chan struct{}, what string, out *lockedBuffer) {
 	}
 }
 
+// A subscription and a publish the server refuses the connection are each logged at error naming
+// the subject, from the server's asynchronous refusal: the connection itself stays up, and
+// otherwise nats.go's default handler would write them to stderr alone.
+func TestAPermissionTheServerRefusesIsLoggedAtError(t *testing.T) {
+	seed, public := testnats.User(t)
+	const denied, deniedPublish = "notifications.envoy.exceptions.notifications.role.>", "notifications.role.denied"
+	url := testnats.StartNkeyAuthorizedUsers(t, testnats.NkeyUser{
+		Public:      public,
+		Permissions: `{ subscribe: { deny: ["` + denied + `"] }, publish: { deny: ["` + deniedPublish + `"] } }`,
+	})
+	var out lockedBuffer
+	refused := make(chan struct{}, 2)
+	conn, err := natsauth.Connect([]string{url}, seed, nats.Timeout(5*time.Second),
+		natsauth.LogEvents(slog.New(slog.NewTextHandler(&out, nil))),
+		signalled(refused, make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1)))
+	if err != nil {
+		t.Fatalf("connect as the user: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	if _, err := conn.SubscribeSync(denied); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := conn.Publish(deniedPublish, []byte("{}")); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	for range 2 {
+		wait(t, refused, "the server's refusal", &out)
+	}
+	logged := out.String()
+	for _, want := range []string{
+		`level=ERROR msg="NATS refused the daemon a permission: its NATS user lacks that grant" operation=subscription subject=` + denied,
+		`level=ERROR msg="NATS refused the daemon a permission: its NATS user lacks that grant" operation=publish subject=` + deniedPublish,
+	} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log = %s\nwant a line containing %s", logged, want)
+		}
+	}
+	if strings.Contains(logged, seed) {
+		t.Errorf("log carries the seed: %s", logged)
+	}
+}
+
+// A server's fatal -ERR closes the connection and hands its cause to no handler (the disconnect
+// handler gets nil), so an error that ends the daemon's consumers names it from the connection.
+func TestAFatalServerErrorIsNamedFromTheConnection(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	// A server that admits the client, answers its first PING, then ends it with an -ERR nats.go
+	// treats as fatal.
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = io.WriteString(c, `INFO {"server_id":"fake","version":"2.10.0","proto":1,"max_payload":1048576}`+"\r\n")
+		lines := bufio.NewReader(c)
+		for {
+			line, err := lines.ReadString('\n')
+			if err != nil {
+				return
+			}
+			if strings.HasPrefix(line, "PING") {
+				break
+			}
+		}
+		_, _ = io.WriteString(c, "PONG\r\n-ERR 'Unknown Protocol Operation'\r\n")
+		_, _ = io.Copy(io.Discard, c)
+	}()
+	var out lockedBuffer
+	closed := make(chan struct{}, 1)
+	conn, err := natsauth.Connect([]string{"nats://" + ln.Addr().String()}, "", nats.Timeout(5*time.Second),
+		natsauth.LogEvents(slog.New(slog.NewTextHandler(&out, nil))),
+		signalled(make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1), closed))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	wait(t, closed, "the close", &out)
+	stopped := errors.New("consume: the connection closed")
+	got := natsauth.WithLastError(stopped, conn)
+	if !errors.Is(got, stopped) || !strings.Contains(got.Error(), "Unknown Protocol Operation") {
+		t.Errorf("WithLastError = %q, want it to wrap %q and name the server's -ERR", got, stopped)
+	}
+	want := `level=ERROR msg="NATS connection closed" error="nats: Unknown Protocol Operation"`
+	if logged := out.String(); strings.Count(logged, "NATS connection closed") != 1 || !strings.Contains(logged, want) {
+		t.Errorf("log = %s\nwant exactly one line containing %s", logged, want)
+	}
+}
+
 // An asynchronous error other than a permission refusal is logged at warn with the subject of the
 // subscription it names: a slow consumer here.
 func TestAnAsynchronousErrorIsLoggedWithItsSubscriptionSubject(t *testing.T) {
@@ -83,7 +185,7 @@ func TestAnAsynchronousErrorIsLoggedWithItsSubscriptionSubject(t *testing.T) {
 	asyncErr := make(chan struct{}, 1)
 	conn, err := natsauth.Connect([]string{testnats.URL(t)}, "", nats.Timeout(5*time.Second),
 		natsauth.LogEvents(slog.New(slog.NewTextHandler(&out, nil))),
-		signalled(asyncErr, make(chan struct{}, 1), make(chan struct{}, 1)))
+		signalled(asyncErr, make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1)))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -117,11 +219,11 @@ func TestADisconnectAndItsReconnectAreLogged(t *testing.T) {
 	upstream := strings.TrimPrefix(testnats.URL(t), "nats://")
 	proxy := dropProxy(t, upstream)
 	var out lockedBuffer
-	disconnected, reconnected := make(chan struct{}, 1), make(chan struct{}, 1)
+	disconnected, reconnected, closed := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1)
 	conn, err := natsauth.Connect([]string{"nats://" + proxy.addr}, "", nats.Timeout(5*time.Second),
 		nats.ReconnectWait(10*time.Millisecond), nats.ReconnectJitter(0, 0),
 		natsauth.LogEvents(slog.New(slog.NewTextHandler(&out, nil))),
-		signalled(make(chan struct{}, 1), disconnected, reconnected))
+		signalled(make(chan struct{}, 1), disconnected, reconnected, closed))
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -129,7 +231,11 @@ func TestADisconnectAndItsReconnectAreLogged(t *testing.T) {
 	wait(t, disconnected, "the disconnect", &out)
 	wait(t, reconnected, "the reconnect", &out)
 	conn.Close()
+	wait(t, closed, "the close", &out)
 	logged := out.String()
+	if strings.Contains(logged, "NATS connection closed") {
+		t.Errorf("the connection's own close was logged: %s", logged)
+	}
 	for _, want := range []string{
 		`level=WARN msg="NATS connection lost" error=`,
 		`level=INFO msg="NATS connection restored" server=nats://` + proxy.addr + "\n",
