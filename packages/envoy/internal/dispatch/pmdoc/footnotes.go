@@ -115,7 +115,7 @@ func (footnotes) Extend(m goldmark.Markdown) {
 // written (definitionsInPlace) and writes no backlink.
 func footnoteParserOptions() []parser.Option {
 	return []parser.Option{
-		parser.WithBlockParsers(util.Prioritized(footnoteDefinitionParser{extension.NewFootnoteBlockParser()}, 999)),
+		parser.WithBlockParsers(util.Prioritized(endsContainers{footnoteDefinitionParser{extension.NewFootnoteBlockParser()}}, 999)),
 		parser.WithInlineParsers(util.Prioritized(footnoteReferenceParser{extension.NewFootnoteParser()}, 101)),
 	}
 }
@@ -176,14 +176,6 @@ func definitionsInPlace(root ast.Node, context parser.Context) {
 	if list, ok := root.FirstChild().(*extensionast.FootnoteList); ok {
 		root.RemoveChild(root, list)
 	}
-}
-
-// Continue records the definition as the container whose lines last ended, where a line that is
-// not blank ends them (recordEndedContainer).
-func (p footnoteDefinitionParser) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
-	state := p.BlockParser.Continue(node, reader, pc)
-	recordEndedContainer(node, state, reader, pc)
-	return state
 }
 
 // Open reads the definition's opener without the padding a tab split by the containers' prefix

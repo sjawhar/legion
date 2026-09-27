@@ -135,6 +135,16 @@ func (p tabIndented) Continue(node ast.Node, reader gmtext.Reader, pc parser.Con
 	if p.opens != nil {
 		expandTabIndentation(reader, p.opens)
 	}
+	return p.BlockParser.Continue(node, reader, pc)
+}
+
+// endsContainers is a container's block parser - a list's, a list item's, a quote's or a footnote
+// definition's - recording the line its container's lines last ended at (recordEndedContainer),
+// by which a paragraph inside tells a lazy continuation line from one that continues it
+// (lazilyEnded).
+type endsContainers struct{ parser.BlockParser }
+
+func (p endsContainers) Continue(node ast.Node, reader gmtext.Reader, pc parser.Context) parser.State {
 	state := p.BlockParser.Continue(node, reader, pc)
 	recordEndedContainer(node, state, reader, pc)
 	return state
@@ -151,11 +161,6 @@ type endedContainer struct {
 }
 
 func recordEndedContainer(node ast.Node, state parser.State, reader gmtext.Reader, pc parser.Context) {
-	switch node.(type) {
-	case *ast.List, *ast.ListItem, *ast.Blockquote, *extensionast.Footnote:
-	default:
-		return
-	}
 	if line, _ := reader.PeekLine(); state&parser.Close == 0 || util.IsBlank(line) {
 		return
 	}

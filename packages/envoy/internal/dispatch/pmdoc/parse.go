@@ -47,22 +47,26 @@ var blockReader = markdownReader{md: goldmark.New(
 // that would interrupt a paragraph (emptyItemGuard), its list, list item, setext heading and
 // fenced code parsers reading a tab in a line's indentation as the columns it spans, its indented
 // code parser measuring a blank line's columns as a line of code's (codeColumns), its setext
-// heading parser opening no heading under a table (underlineAfterTable), and every one placing the
-// block it opens where its text starts (tabIndented).
+// heading parser opening no heading under a table (underlineAfterTable), its list, list item and
+// quote parsers recording where their containers' lines end (endsContainers), and every one placing
+// the block it opens where its text starts (tabIndented).
 func blockParsers() []util.PrioritizedValue {
 	parsers := parser.DefaultBlockParsers()
 	listParser := reflect.TypeOf(parser.NewListParser())
 	listItemParser := reflect.TypeOf(parser.NewListItemParser())
 	setextParser := reflect.TypeOf(parser.NewSetextHeadingParser())
 	fenceParser := reflect.TypeOf(parser.NewFencedCodeBlockParser())
+	quoteParser := reflect.TypeOf(parser.NewBlockquoteParser())
 	codeParser := reflect.TypeOf(parser.NewCodeBlockParser())
 	for index, prioritized := range parsers {
 		block := prioritized.Value.(parser.BlockParser)
 		switch reflect.TypeOf(block) {
 		case listParser:
-			parsers[index].Value = tabIndented{emptyItemGuard{block}, listMarkerStart}
+			parsers[index].Value = tabIndented{endsContainers{emptyItemGuard{block}}, listMarkerStart}
 		case listItemParser:
-			parsers[index].Value = tabIndented{listItemColumns{block}, listMarkerStart}
+			parsers[index].Value = tabIndented{endsContainers{listItemColumns{block}}, listMarkerStart}
+		case quoteParser:
+			parsers[index].Value = tabIndented{endsContainers{block}, nil}
 		case setextParser:
 			parsers[index].Value = tabIndented{underlineAfterTable{block}, setextUnderline}
 		case fenceParser:
