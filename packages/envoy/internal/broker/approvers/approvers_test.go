@@ -199,6 +199,21 @@ func TestVerifyAssertionEnforcesOriginRpIDCounterAndLogin(t *testing.T) {
 		}
 	}()
 
+	// An assertion whose rpID disagrees with the origin's host is refused, even though
+	// clientData.origin itself matches exactly (webauthntest signs rpIdHash from rpID
+	// independently of the origin it puts in clientDataJSON).
+	func() {
+		tx, err := svc.Store.Pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		defer tx.Rollback(ctx)
+		wrongRPID := aliceAuth.Assert(t, "evil-rp-id.test", testOrigin, actionChallenge[:])
+		if _, err := svc.VerifyAssertion(ctx, tx, "alice", actionChallenge, wrongRPID); !errors.Is(err, ErrAssertionInvalid) {
+			t.Fatalf("wrong rpID assertion: err=%v, want %v", err, ErrAssertionInvalid)
+		}
+	}()
+
 	// An assertion signed by a different login's registered key is refused when the required
 	// login doesn't match the key's own login.
 	func() {

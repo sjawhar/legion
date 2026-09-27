@@ -56,6 +56,27 @@ func zeroAAGUID(t *testing.T, ca *webauthntest.CA) KeyEntry {
 	}
 }
 
+// certAAGUIDMismatch registers a fresh authenticator whose attested credential data carries
+// allowedAAGUID (so it passes the allow-list check) but whose attestation certificate's
+// id-fido-gen-ce-aaguid extension carries a different AAGUID, everything else about the
+// registration otherwise valid.
+func certAAGUIDMismatch(t *testing.T, ca *webauthntest.CA, allowedAAGUID uuid.UUID) KeyEntry {
+	t.Helper()
+	certAAGUID := uuid.New()
+	for certAAGUID == allowedAAGUID {
+		certAAGUID = uuid.New()
+	}
+	auth := ca.NewAuthenticatorWithCertAAGUID(t, allowedAAGUID, certAAGUID)
+	nonce := strings.Repeat("c", 64)
+	challenge := record.RegisterChallenge("sjawhar", nonce)
+	return KeyEntry{
+		CredentialID:   b64(auth.CredentialID),
+		ChallengeNonce: nonce,
+		Registration:   auth.Register(t, "dispatch.test", "https://dispatch.test", challenge[:]),
+		Seed:           true,
+	}
+}
+
 func TestVerifyRegistrationAcceptsPackedAndRefusesEverythingElse(t *testing.T) {
 	ca := webauthntest.NewCA(t)
 	aaguid := uuid.MustParse("ee882879-721c-4913-9775-3dfcce97072a")
@@ -75,8 +96,10 @@ func TestVerifyRegistrationAcceptsPackedAndRefusesEverythingElse(t *testing.T) {
 		"wrong origin":     withReg(good, auth.Register(t, "dispatch.test", "https://evil.test", challenge[:])),
 		"wrong login nonce": {CredentialID: good.CredentialID, ChallengeNonce: nonce,
 			Registration: auth.Register(t, "dispatch.test", "https://dispatch.test", ch(record.RegisterChallenge("mallory", nonce))), Seed: true},
-		"aaguid off list": offListAAGUID(t, ca),
-		"zero aaguid":     zeroAAGUID(t, ca),
+		"aaguid off list":                offListAAGUID(t, ca),
+		"zero aaguid":                    zeroAAGUID(t, ca),
+		"wrong rpID":                     withReg(good, auth.Register(t, "evil-rp-id.test", "https://dispatch.test", challenge[:])),
+		"aaguid cert extension mismatch": certAAGUIDMismatch(t, ca, aaguid),
 	} {
 		if _, err := v.VerifyRegistration("sjawhar", entry); err == nil {
 			t.Fatalf("%s accepted", name)

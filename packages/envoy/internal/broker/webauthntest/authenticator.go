@@ -130,6 +130,21 @@ type Authenticator struct {
 // leaf certificate signed by ca that carries the id-fido-gen-ce-aaguid extension.
 func (ca *CA) NewAuthenticator(t testing.TB, aaguid uuid.UUID) *Authenticator {
 	t.Helper()
+	return ca.newAuthenticator(t, aaguid, aaguid)
+}
+
+// NewAuthenticatorWithCertAAGUID is NewAuthenticator except the attestation certificate's
+// id-fido-gen-ce-aaguid extension carries certAAGUID while the attested credential data
+// (authData, what a Relying Party reads as "the AAGUID") carries dataAAGUID — for negative-case
+// testing of a Relying Party that must refuse a certificate whose extension AAGUID disagrees with
+// the attested one.
+func (ca *CA) NewAuthenticatorWithCertAAGUID(t testing.TB, dataAAGUID, certAAGUID uuid.UUID) *Authenticator {
+	t.Helper()
+	return ca.newAuthenticator(t, dataAAGUID, certAAGUID)
+}
+
+func (ca *CA) newAuthenticator(t testing.TB, dataAAGUID, certAAGUID uuid.UUID) *Authenticator {
+	t.Helper()
 
 	credKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -146,7 +161,7 @@ func (ca *CA) NewAuthenticator(t testing.TB, aaguid uuid.UUID) *Authenticator {
 		t.Fatalf("webauthntest: generate attestation key: %v", err)
 	}
 
-	aaguidValue, err := asn1.Marshal(aaguid[:])
+	aaguidValue, err := asn1.Marshal(certAAGUID[:])
 	if err != nil {
 		t.Fatalf("webauthntest: marshal AAGUID extension: %v", err)
 	}
@@ -154,7 +169,7 @@ func (ca *CA) NewAuthenticator(t testing.TB, aaguid uuid.UUID) *Authenticator {
 	tmpl := &x509.Certificate{
 		SerialNumber: mustSerial(t),
 		Subject: pkix.Name{
-			CommonName:         aaguid.String(),
+			CommonName:         certAAGUID.String(),
 			Organization:       []string{"webauthntest"},
 			OrganizationalUnit: []string{"Authenticator Attestation"},
 			Country:            []string{"US"},
@@ -183,7 +198,7 @@ func (ca *CA) NewAuthenticator(t testing.TB, aaguid uuid.UUID) *Authenticator {
 
 	return &Authenticator{
 		CredentialID: credentialID,
-		AAGUID:       aaguid,
+		AAGUID:       dataAAGUID,
 		key:          credKey,
 		attCert:      leaf,
 		attKey:       attKey,
