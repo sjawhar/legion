@@ -138,6 +138,9 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
       ? [userStateQuery().queryKey, inboxQuery().queryKey]
       : [];
   }
+  if (event.type === "user_agent_state.updated") {
+    return mainPayloadString(event, "login") === signedInLogin ? [["user-agent-state"]] : [];
+  }
   if (event.type === "subscription.remove_requested") {
     return [];
   }
@@ -334,6 +337,10 @@ const eventsByType: Record<EventType, readonly Event[]> = {
   "user_state.updated": [
     event("user_state.updated", { login: "alice" }, { issue_key: null }),
     event("user_state.updated", { login: "bob" }, { issue_key: null }),
+  ],
+  "user_agent_state.updated": [
+    event("user_agent_state.updated", { login: "alice", session_id: "s1" }, { issue_key: null }),
+    event("user_agent_state.updated", { login: "bob", session_id: "s1" }, { issue_key: null }),
   ],
   "issue.created": [event("issue.created")],
   "issue.updated": [event("issue.updated")],

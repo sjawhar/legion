@@ -1161,6 +1161,13 @@ export interface UserStateUpdatedEventPayload {
   readonly state: UserIssueState;
 }
 
+/** `user_agent_state.updated`: one viewer's Clear or read mark on one session's conversation
+ *  changed. It carries no state; the viewer's other tabs and devices refetch theirs. */
+export interface UserAgentStateUpdatedEventPayload {
+  readonly login: string;
+  readonly session_id: string;
+}
+
 /**
  * `issue.claimed` and `issue.released`: who is working the issue now, whose claim this one
  * replaced or cleared, and why. `previous_claim` is present on a takeover (the holder's
@@ -1217,6 +1224,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "user_state.updated";
       readonly payload: UserStateUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "user_agent_state.updated";
+      readonly payload: UserAgentStateUpdatedEventPayload;
     })
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })
@@ -1540,6 +1551,14 @@ export interface MessageReplyInput {
   /** The delivery attempt being answered; attempts count from 1. */
   readonly attempt: number;
   readonly actor: Actor;
+}
+
+/** What `POST /api/v1/messages/{id}/reply` answers for a body: the message, with `duplicate`
+ *  when the route posted nothing and handed back one the conversation already holds (the
+ *  answered attempt's stored reply, or a follow-up whose text the session already posted). A
+ *  Dispatch that predates follow-ups never sets it. */
+export interface MessageReplyResult extends Message {
+  readonly duplicate?: boolean;
 }
 
 interface CreateArtifactOptions {

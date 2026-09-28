@@ -39,15 +39,23 @@ export function useMarkRepliesRead(
       }
     }
   }
+  // The reply this view last sent a read mark for, so a re-render does not send it again. A
+  // failed write is retried twice with backoff; if it still fails the mark is cleared, so it is
+  // sent again when the unread count or the newest reply next changes or the view is reopened,
+  // rather than the badge staying up until the session replies once more.
   const marked = useRef<string | undefined>(undefined);
   const { mutate } = useMutation({
     mutationFn: (readThrough: string) =>
       api.putAgentState(sessionId, { read_through: readThrough }),
+    onError: () => {
+      marked.current = undefined;
+    },
     onSuccess: (next) =>
       queryClient.setQueryData<UserAgentStates>(userAgentStateQuery().queryKey, (current) => ({
         ...current,
         [sessionId]: next,
       })),
+    retry: 2,
   });
   useEffect(() => {
     if (unread === 0 || newest === undefined || marked.current === newest) return;

@@ -104,6 +104,41 @@ test("the live view shows the session's Dispatch replies to direct messages and 
   );
 });
 
+// A read mark that fails to save is sent again, so one failed request does not leave the badge
+// up until the session replies once more.
+test("the live view retries a read mark that failed to save", async () => {
+  spies.push(
+    spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "sami" }),
+    spyOn(api, "listAgents").mockResolvedValue([agent]),
+    spyOn(live, "readEventStream").mockReturnValue(new Promise<void>(() => undefined)),
+    spyOn(api, "listAgentMessages").mockResolvedValue(conversation),
+    spyOn(api, "getMyAgentState").mockResolvedValue({ [SESSION]: { unread_replies: 2 } })
+  );
+  const putAgentState = spyOn(api, "putAgentState")
+    .mockRejectedValueOnce(new Error("Dispatch is restarting"))
+    .mockImplementation(async (_session, input) => ({ ...input, unread_replies: 0 }));
+  spies.push(putAgentState);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { gcTime: 0, retry: false, staleTime: 0 } },
+  });
+  render(
+    <MemoryRouter initialEntries={[`/agents/${SESSION}/live`]}>
+      <QueryClientProvider client={queryClient}>
+        <Routes>
+          <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
+        </Routes>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  await waitFor(() => expect(putAgentState).toHaveBeenCalledTimes(2), { timeout: 4000 });
+  await waitFor(() =>
+    expect(
+      queryClient.getQueryData<Record<string, { unread_replies: number }>>(["user-agent-state"])
+    ).toMatchObject({ [SESSION]: { unread_replies: 0 } })
+  );
+});
+
 // A session's stored conversation holds every message sent to it: the viewer's direct messages,
 // other humans' direct messages, and issue messages targeted at it. Only the viewer's own read as
 // "you"; every other one names who wrote it, and an issue message names its issue.

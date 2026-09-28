@@ -38977,8 +38977,8 @@ class DispatchClient {
   async message(issue2, input) {
     return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "messages"], input);
   }
-  async messageReply(id, input) {
-    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input);
+  async messageReply(id, input, options = {}) {
+    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
   }
   async getMessage(issue2, id) {
     return this.#json("GET", [
@@ -40710,7 +40710,13 @@ ${followsAsk(askOwner)}`,
       const inReplyTo = messageInReplyTo(args);
       const body = stringArg(args, "body");
       if (owner === null && inReplyTo !== undefined) {
-        const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor });
+        const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor }, { followUp: true });
+        if (reply.duplicate === true && reply.body === body) {
+          return {
+            text: `Dispatch already has this exact text in the conversation (message ${reply.id}); ` + "nothing new was posted. Send different text if you have more to say.",
+            details: { message: reply.id, in_reply_to: inReplyTo, posted: false, duplicate: true }
+          };
+        }
         if (reply.body !== body) {
           return {
             text: `Message ${inReplyTo} was already answered by message ${reply.id}; Dispatch kept ` + "that reply and posted nothing. Wait for their next message rather than answering " + "this one again.",

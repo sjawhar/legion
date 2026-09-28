@@ -886,6 +886,15 @@ type MessageEventPayload struct {
 	ReferenceChangesPayload
 }
 
+// UserAgentStateEventPayload is `user_agent_state.updated`: one viewer's Clear or read mark on
+// one session's conversation changed. It names the viewer so their other open tabs and devices
+// refresh their unread badge; like the other issue-less conversation events it is owned by the
+// session, so it is ordered with that session's messages.
+type UserAgentStateEventPayload struct {
+	Login     string `json:"login"`
+	SessionID string `json:"session_id"`
+}
+
 // MessageDeliveryEventPayload is the user-visible result of one target delivery attempt.
 type MessageDeliveryEventPayload struct {
 	MessageID string `json:"message_id"`

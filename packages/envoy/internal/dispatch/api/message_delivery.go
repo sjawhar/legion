@@ -496,15 +496,18 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		// The attempt is answered. The same answer again, or an error report after it, is a
-		// retry and posts nothing; other text is the session having more to say in the same
-		// conversation, a follow-up threaded under its first reply.
-		if input.Body == nil || *input.Body == answer.Body {
+		// The attempt is answered. Without ?follow_up=true every call is a retry of that answer
+		// and posts nothing: the host's automatic BTW answer is sent that way, so a frame the
+		// session is handed twice can never post a second answer. With it, the session asked to
+		// say more: text it already posted in this conversation (its first reply, or an earlier
+		// follow-up) is a resend and posts nothing, and anything else is a follow-up threaded
+		// under its first reply. An error report after an answer is always a retry.
+		if input.Body == nil || !followUpRequested(r) || *input.Body == answer.Body {
 			if err := tx.Commit(r.Context()); err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
-			WriteJSON(w, http.StatusOK, answer)
+			WriteJSON(w, http.StatusOK, replyRead{Message: answer, Duplicate: true})
 			return
 		}
 		posted, err := scanMessage(tx.QueryRow(r.Context(), `
@@ -518,7 +521,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 				s.writeHandlerError(w, err)
 				return
 			}
-			WriteJSON(w, http.StatusOK, posted)
+			WriteJSON(w, http.StatusOK, replyRead{Message: posted, Duplicate: true})
 			return
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
@@ -535,7 +538,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.publish(event)
-		WriteJSON(w, http.StatusCreated, followUp)
+		WriteJSON(w, http.StatusCreated, replyRead{Message: followUp})
 		return
 	}
 	if attempt.State == "failed" && input.Error != nil {
@@ -589,7 +592,25 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	WriteJSON(w, http.StatusCreated, reply)
+	WriteJSON(w, http.StatusCreated, replyRead{Message: reply})
+}
+
+// replyRead is what the reply route answers with a message: the message, and `duplicate` when
+// the route posted nothing and handed back one the conversation already holds (an answered
+// attempt's stored reply, or a follow-up whose text the session already posted). A caller cannot
+// otherwise tell a resend from a send, since both carry the message it asked for.
+type replyRead struct {
+	model.Message
+	Duplicate bool `json:"duplicate,omitempty"`
+}
+
+// followUpRequested is the reply route's `?follow_up=true`: the session asking to post more in a
+// conversation whose attempt it already answered. It is a query parameter rather than a body
+// field because the route decodes its body strictly, so a Dispatch that predates follow-ups
+// would refuse a body naming it, where it ignores the parameter and answers with its stored
+// reply, which the tool already reports as "already answered".
+func followUpRequested(r *http.Request) bool {
+	return r.URL.Query().Get("follow_up") == "true"
 }
 
 // insertSessionReply writes a session's reply to parent in parent's conversation - its issue,

@@ -2246,14 +2246,31 @@ export async function executeDispatchTool(
         // is delivered as attempt 1 when it is created, and a later retry never retires that
         // row, so 1 is the attempt this session was handed. Dispatch takes the reply as proof
         // the message arrived whatever that attempt's receipt says.
-        const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor });
-        // Once the attempt is answered, Dispatch posts new text as this session's follow-up,
-        // threaded under its first reply, and answers the same text again with the reply it
-        // stored. A Dispatch that predates follow-ups keeps one reply per attempt: it answers
-        // any second call with the stored reply - often the host's own automatic BTW answer,
-        // sent before the model got here - and posts nothing. The stored body is how that reads
-        // apart from a send, so this says what happened instead of reporting a send that did
-        // not occur.
+        // A model calling dispatch_message means to post, so it asks to follow up: once the
+        // attempt is answered, Dispatch posts new text as this session's follow-up, threaded
+        // under its first reply. The host's automatic BTW answer never asks (delivery.ts), so a
+        // frame handed to the session twice cannot post a second answer.
+        const reply = await client.messageReply(
+          inReplyTo,
+          { body, attempt: 1, actor },
+          { followUp: true }
+        );
+        // Text this session already posted in the conversation (its first reply or an earlier
+        // follow-up) posts nothing, and Dispatch says so, so the session is not told it sent
+        // something new.
+        if (reply.duplicate === true && reply.body === body) {
+          return {
+            text:
+              `Dispatch already has this exact text in the conversation (message ${reply.id}); ` +
+              "nothing new was posted. Send different text if you have more to say.",
+            details: { message: reply.id, in_reply_to: inReplyTo, posted: false, duplicate: true },
+          };
+        }
+        // A Dispatch that predates follow-ups ignores `?follow_up=true` and keeps one reply per
+        // attempt: it answers any second call with the stored reply - often the host's own
+        // automatic BTW answer, sent before the model got here - and posts nothing. The stored
+        // body is how that reads apart from a send, so this says what happened instead of
+        // reporting a send that did not occur.
         if (reply.body !== body) {
           return {
             text:

@@ -671,7 +671,7 @@ describe("executeDispatchTool", () => {
       const target = new URL(String(url));
       calls.push({
         method: init?.method ?? "GET",
-        path: target.pathname,
+        path: `${target.pathname}${target.search}`,
         body: JSON.parse(init?.body as string),
       });
       if (target.pathname === `/api/v1/messages/${parent}/reply`) {
@@ -711,7 +711,8 @@ describe("executeDispatchTool", () => {
     expect(calls).toMatchObject([
       {
         method: "POST",
-        path: `/api/v1/messages/${parent}/reply`,
+        // The model means to post, so it asks to follow up once the attempt is answered.
+        path: `/api/v1/messages/${parent}/reply?follow_up=true`,
         body: { body: "On it.", attempt: 1, actor: { kind: "session", id: "ses_reader" } },
       },
       {
@@ -772,6 +773,43 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe(
       `Replied to message ${parent} with message reply-2, a follow-up threaded under your ` +
         `reply reply-1. dispatch_read({message: "${parent}"}) reads the conversation back.`
+    );
+  });
+
+  // Text the session already posted in the conversation (its first reply or an earlier
+  // follow-up) posts nothing; Dispatch hands back that message marked duplicate, and the session
+  // is told nothing new went out rather than that it replied.
+  test("says nothing new was posted when Dispatch already has the exact text", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (new URL(String(url)).pathname !== `/api/v1/messages/${parent}/reply`) {
+        throw new Error("unexpected request");
+      }
+      return response({
+        id: "reply-1",
+        issue_key: null,
+        body: JSON.parse(init?.body as string).body,
+        in_reply_to: parent,
+        duplicate: true,
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: { body: "Still running.", in_reply_to: parent },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "ses_reader",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toMatchObject({ message: "reply-1", posted: false, duplicate: true });
+    expect(result.text).toBe(
+      "Dispatch already has this exact text in the conversation (message reply-1); nothing new " +
+        "was posted. Send different text if you have more to say."
     );
   });
 

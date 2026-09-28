@@ -313,10 +313,13 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// A cutoff up to clearedBeforeSkew ahead of the server clock is accepted, so a browser a few
+	// seconds fast is not refused, but it is stored as no later than now: a reply that lands in
+	// the gap is still after the viewer's Clear and read mark, so it shows and it counts.
 	if clearedBefore != nil {
 		if _, err := tx.Exec(r.Context(), `
 			insert into user_agent_state (login, session_id, cleared_before)
-			values ($1, $2, $3)
+			values ($1, $2, least($3::timestamptz, now()))
 			on conflict (login, session_id) do update set cleared_before = excluded.cleared_before
 		`, actor.ID, sessionID, *clearedBefore); err != nil {
 			s.writeHandlerError(w, err)
@@ -326,7 +329,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	if readThrough != nil {
 		if _, err := tx.Exec(r.Context(), `
 			insert into user_agent_read (login, session_id, read_through)
-			values ($1, $2, $3)
+			values ($1, $2, least($3::timestamptz, now()))
 			on conflict (login, session_id) do update set
 				read_through = greatest(user_agent_read.read_through, excluded.read_through)
 		`, actor.ID, sessionID, *readThrough); err != nil {
@@ -334,10 +337,23 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The viewer's other open tabs and devices refresh their badge from this event rather than
+	// waiting for a focus or the next message. It is owned by the session, like its messages,
+	// so the outbox publishes it nowhere and it reaches only the dashboard's event stream.
+	event, err := s.appendEvent(r.Context(), tx, model.Event{
+		Type:    "user_agent_state.updated",
+		Actor:   actor,
+		Payload: model.UserAgentStateEventPayload{Login: actor.ID, SessionID: sessionID},
+	})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	s.publish(event)
 	states, err := s.loadUserAgentStates(r.Context(), actor.ID, &sessionID)
 	if err != nil {
 		s.writeHandlerError(w, err)

@@ -470,7 +470,8 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 // reads any of them, and a bearer names its session in ?session= and reads only one that session
 // is in (the root targets it, or it authored a reply). The session is the caller's own claim,
 // like `actor`, so this keeps a session from reading another session's direct conversation by
-// mistake; it is not an authorization boundary.
+// mistake; it is not an authorization boundary. Direct-conversation text also reaches every
+// authenticated caller through GET /api/v1/events; nothing in Dispatch restricts it by session.
 func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 	_, human, err := s.optionalActor(r)
 	if err != nil {
@@ -551,9 +552,21 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := "session:" + sessionID
+	// Newest activity first: a conversation moves up when anyone replies anywhere in it, so the
+	// 50 read here, and the newest one the Agents page opens on, are the ones that last moved,
+	// not the ones last started. A follow-up to an old direct message is never outside the window
+	// while a newer, quiet one is inside it.
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select m.id::text, m.issue_key, m.author, m.body, m.target, m.in_reply_to::text, m.created_at
 		from messages m
+		cross join lateral (
+			with recursive chain as (
+				select c.id, c.created_at from messages c where c.in_reply_to = m.id
+				union all
+				select c.id, c.created_at from messages c join chain on c.in_reply_to = chain.id
+			)
+			select max(created_at) as latest from chain
+		) activity
 		where m.in_reply_to is null
 		  and (
 			m.target = $1
@@ -562,7 +575,7 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 				where d.message_id = m.id and d.session_id = $2
 			)
 		  )
-		order by m.created_at desc, m.id desc
+		order by greatest(m.created_at, activity.latest) desc, m.id desc
 		limit 50
 	`, target, sessionID)
 	if err != nil {

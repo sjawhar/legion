@@ -1,16 +1,19 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // directConversation is a human's direct message to s1 on a fresh handler whose fake listener
-// delivers it, plus a way for s1 to answer that message's first delivery attempt.
+// delivers it, plus a way for s1 to answer that message's first delivery attempt the way
+// dispatch_message does, asking to follow up once it has answered.
 func directConversation(t *testing.T) (http.Handler, model.Message, func(body string) *httptest.ResponseRecorder, *[]map[string]any) {
 	t.Helper()
 	live := true
@@ -26,7 +29,7 @@ func directConversation(t *testing.T) (http.Handler, model.Message, func(body st
 	}
 	root := decodeBody[model.Message](t, created)
 	reply := func(body string) *httptest.ResponseRecorder {
-		return bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply", map[string]any{
+		return bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply?follow_up=true", map[string]any{
 			"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": body,
 		})
 	}
@@ -78,6 +81,55 @@ func TestSessionFollowUpToADirectMessageThreadsUnderItsFirstReply(t *testing.T) 
 	}
 	if attempt := conversation[0].Message.Deliveries[0]; attempt.ReplyID == nil || *attempt.ReplyID != first.ID {
 		t.Fatalf("answered attempt = %#v, want it to keep naming the first reply", attempt)
+	}
+}
+
+// replyResponse is the reply route's answer: the message, and whether it was already there.
+type replyResponse struct {
+	model.Message
+	Duplicate bool `json:"duplicate"`
+}
+
+// A follow-up is something the session asks for. Without ?follow_up=true an answered attempt
+// answers with its stored reply and posts nothing, as the host's automatic BTW answer relies on,
+// so a frame handed to the session twice cannot post a second answer. Whenever the route posts
+// nothing and hands back a message the conversation already holds, it says so.
+func TestAnsweredDeliveryPostsAFollowUpOnlyWhenAskedAndSaysWhenItPostedNothing(t *testing.T) {
+	handler, root, reply, _ := directConversation(t)
+	unflagged := func(body string) *httptest.ResponseRecorder {
+		return bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply", map[string]any{
+			"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": body,
+		})
+	}
+	answered := unflagged("Automatic answer.")
+	if answered.Code != http.StatusCreated {
+		t.Fatalf("first answer: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	first := decodeBody[replyResponse](t, answered)
+	if first.Duplicate {
+		t.Fatalf("first answer = %#v, want a fresh post", first)
+	}
+
+	again := unflagged("A second automatic answer to the same frame.")
+	if got := decodeBody[replyResponse](t, again); again.Code != http.StatusOK || got.ID != first.ID || !got.Duplicate {
+		t.Fatalf("unflagged second answer: status=%d %#v, want 200 with the stored answer marked duplicate", again.Code, got)
+	}
+
+	followed := reply("And a follow-up.")
+	followUp := decodeBody[replyResponse](t, followed)
+	if followed.Code != http.StatusCreated || followUp.Duplicate || followUp.InReplyTo == nil || *followUp.InReplyTo != first.ID {
+		t.Fatalf("flagged follow-up: status=%d %#v, want 201 under %s", followed.Code, followUp, first.ID)
+	}
+	for body, want := range map[string]string{"Automatic answer.": first.ID, "And a follow-up.": followUp.ID} {
+		resent := reply(body)
+		if got := decodeBody[replyResponse](t, resent); resent.Code != http.StatusOK || got.ID != want || !got.Duplicate {
+			t.Fatalf("resending %q: status=%d %#v, want 200 with %s marked duplicate", body, resent.Code, got, want)
+		}
+	}
+
+	conversation := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	if replies := conversation[0].Replies; len(replies) != 2 || replies[0].ID != first.ID || replies[1].ID != followUp.ID {
+		t.Fatalf("replies = %#v, want only the first answer and the one follow-up", replies)
 	}
 }
 
@@ -255,5 +307,70 @@ func TestAgentRepliesToADirectMessageAreUnreadForItsSenderUntilRead(t *testing.T
 		!parseTimestamp(t, *got.ClearedBefore).Equal(third.CreatedAt) || got.ReadThrough == nil ||
 		!parseTimestamp(t, *got.ReadThrough).Equal(second.CreatedAt) {
 		t.Fatalf("after a Clear: %#v, want nothing unread, cleared before %s, still read through %s", got, third.CreatedAt, second.CreatedAt)
+	}
+}
+
+// A browser clock running fast stamps a read mark or a Clear slightly in the future. The route
+// still accepts it, but stores it as no later than the server's now, so a reply that arrives in
+// that gap still counts as unread instead of being hidden by a mark the viewer never read past.
+func TestAFastBrowserClockNeitherHidesNorUncountsTheNextReply(t *testing.T) {
+	for _, field := range []string{"read_through", "cleared_before"} {
+		t.Run(field, func(t *testing.T) {
+			handler, _, reply, _ := directConversation(t)
+			ahead := time.Now().UTC().Add(30 * time.Second).Format(time.RFC3339Nano)
+			marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{field: ahead}, "alice")
+			if marked.Code != http.StatusOK {
+				t.Fatalf("mark 30s ahead: status=%d body=%s", marked.Code, marked.Body.String())
+			}
+			reply("Arrived inside the gap.")
+			if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 1 {
+				t.Fatalf("after a reply inside the gap: %#v, want it counted unread", got)
+			}
+		})
+	}
+}
+
+// A read mark or Clear is announced on the event stream with the login it belongs to, so the
+// viewer's other open tabs and devices refresh their badge instead of waiting for a focus.
+func TestAgentStateWriteAnnouncesItselfToTheViewersOtherDevices(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"read_through": time.Now().UTC().Format(time.RFC3339Nano),
+	}, "alice")
+	if marked.Code != http.StatusOK {
+		t.Fatalf("mark read: status=%d body=%s", marked.Code, marked.Body.String())
+	}
+	var login, session string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select payload->>'login', payload->>'session_id' from events where type = 'user_agent_state.updated'
+	`).Scan(&login, &session); err != nil {
+		t.Fatalf("read the user_agent_state.updated event: %v", err)
+	}
+	if login != "alice" || session != "s1" {
+		t.Fatalf("event names %s/%s, want alice/s1", login, session)
+	}
+}
+
+// A session's conversations list newest activity first: a reply to an older direct message moves
+// that conversation ahead of a newer one nobody has answered, so the one that last moved is the
+// one the Agents page opens on and is never the one left outside the list's window.
+func TestAgentConversationsListByLatestActivity(t *testing.T) {
+	handler, root, reply, _ := directConversation(t)
+	later := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "A newer question nobody has answered.", "delivery": "aside",
+	}, "alice")
+	if later.Code != http.StatusCreated {
+		t.Fatalf("second direct message: status=%d body=%s", later.Code, later.Body.String())
+	}
+	newer := decodeBody[model.Message](t, later)
+	reply("An answer to the older question.")
+
+	conversation := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	if len(conversation) != 2 || conversation[0].Message.ID != root.ID || conversation[1].Message.ID != newer.ID {
+		ids := []string{}
+		for _, read := range conversation {
+			ids = append(ids, read.Message.ID)
+		}
+		t.Fatalf("conversations = %v, want [%s (answered last) %s]", ids, root.ID, newer.ID)
 	}
 }

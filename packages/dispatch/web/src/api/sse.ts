@@ -28,6 +28,7 @@ const knownEventTypes: Record<EventType, true> = {
   "architecture.synced": true,
   "architecture.sync_failed": true,
   "user_state.updated": true,
+  "user_agent_state.updated": true,
   "issue.created": true,
   "issue.updated": true,
   "issue.closed": true,
@@ -382,6 +383,10 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     return payloadString(event, "login") === signedInLogin
       ? [userStateQuery().queryKey, inboxQuery().queryKey]
       : [];
+  }
+  if (event.type === "user_agent_state.updated") {
+    // Another tab or device of this viewer read or cleared a conversation: refresh the badge.
+    return payloadString(event, "login") === signedInLogin ? [userAgentStateQuery().queryKey] : [];
   }
   if (event.type === "subscription.remove_requested") {
     return [];
