@@ -57,6 +57,14 @@ export default defineConfig({
       testMatch: /collab-cursor\.e2e\.ts/,
       use: { ...devices["Desktop Safari"] },
     },
+    // The live view's phone layout (its keyboard cap, gutter and scroll locks) also runs in WebKit,
+    // the engine iOS Safari uses; only those rows, since the rest of the spec is engine-agnostic.
+    {
+      name: "webkit-iphone",
+      testMatch: /agent-view\.e2e\.ts/,
+      grep: /on a phone the live view|a document-scrolling route/,
+      use: { ...devices["iPhone 13"] },
+    },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
     // so that spec also runs in Firefox.
     {
