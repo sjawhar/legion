@@ -60,6 +60,8 @@ const OPERANDS = [
   "*//",
   "*//etc/ssh",
   "a/&",
+  "/tmp//etc",
+  "/tmp//home/op/.ssh",
 ];
 
 test("every pattern expansion is unknown or bash's own value, and never allows a target outside the roots", () => {

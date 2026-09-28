@@ -665,7 +665,10 @@ function patternExpansion(
           part.text === `${head}${part.replace.pattern.text}}`);
   const slashPattern = operator === "/" || operator === "//";
   if (!accounted || (slashPattern && part.replace?.pattern.text === "")) return unknownResult;
-  const value = literalText(operatorValue(part.parameter, st, ctx));
+  // An argument past the last one this shell knows it was given is unset, which bash expands empty.
+  const pastLast = /^[1-9][0-9]*$/.test(part.parameter) && st.positional !== undefined;
+  const raw = operatorValue(part.parameter, st, ctx);
+  const value = raw === undefined && pastLast ? "" : literalText(raw);
   if (value === undefined || value.length > MAX_PATTERN_VALUE || !isAscii(value)) {
     return unknownResult;
   }

@@ -850,6 +850,9 @@ describe("scripts a command runs", () => {
     // `bash <script>` with no arguments: `$1` is empty, so the target is `/cache`.
     expect(bash(`bash ${tail}`)).toContain("(/cache)");
     expect(bash(`bash ${tail} ${scratch}/mine`)).toBeUndefined();
+    // So is a pattern expansion of it: `${1#a}`, `${1%b}` and `${1//a/b}` over the empty string.
+    const patterned = script("positional-pattern.sh", `rm -rf "\${1#a}\${1%b}\${1//a/b}/cache"\n`);
+    expect(bash(`bash ${patterned}`)).toContain("(/cache)");
     // A shell that did not say what its arguments are keeps `$1` unknown.
     expect(bash('rm -rf "$1/cache"')).toContain("a positional parameter");
   });
