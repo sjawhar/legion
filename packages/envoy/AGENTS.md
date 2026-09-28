@@ -60,8 +60,8 @@ splice splits nor a repeat the live document already carries (a browser write ca
 settlement repairs it) refuse anything. Only a typed block's markdown can name its id.
 
 Markdown a caller writes is stored as its rendering, so a write whose rendering reads back as
-another document is refused, naming what reads back (`pmdoc.RefuseMisreadWrite`, over the accept
-path's `pmdoc.NewMisread`): `ParseForWrite` reads back the whole document a spec, an upload or a
+another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocument` for a whole
+document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` for an insert): `ParseForWrite` reads back the whole document a spec, an upload or a
 version writes (`400 INVALID_MARKDOWN`), and an `insert` is read back on the document it leaves
 against the one it started from, as an accept is (`400 INVALID_OP` on `markdown`). The reading
 rules refuse every shape they know first, so this refusal names one none of them reads, and each is
@@ -830,8 +830,9 @@ written in one order - link, strong, emphasis - so where a text still carries a 
 before it opened, and the order puts that mark after the text's other marks, the mark is closed and
 opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
 `*`, `**` and `*`), the parser reads one run. Such a run is kept where it reads back, as the parser
-then splits it as written; one that does not is written again with the marks still open kept open,
-then the marks the next text still carries, and the text's others opened inside them
+then splits it as written, and one that does not is written again in the plain respellings, as main
+writes it again. Only where none of those reads back is it written with the marks still open kept
+open, then the marks the next text still carries, and the text's others opened inside them
 (`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written
 `***a** b*`; a run that fuses nothing is written as before, so italic closed around a link keeps
 its bytes.

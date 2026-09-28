@@ -89,6 +89,19 @@ func TestRenderKeepsAFusedRunThatReadsBack(t *testing.T) {
 	})
 }
 
+// A fused run that does not read back is written again in the plain respellings, as main writes
+// it, before any spelling that keeps marks open: main's escaped bytes read back in both parsers,
+// so a keep-open spelling tried first changed a document main stores correctly.
+func TestRenderRespellsAFusedRunAsMainDoesBeforeKeepingMarksOpen(t *testing.T) {
+	assertRenders(t, []struct{ markdown, want string }{
+		{"- ****1**a__1***\n", "- \\*\\*\\**1****a\\_\\_1***\n"},
+		{"****b.**(c)***(c)\n", "\\*\\*\\**b.****(c)***(c)\n"},
+		{"# ****a___(c)**(c)*** *\n", "# \\*\\*\\**a\\_\\_\\_(c)****(c)*** \\*\n"},
+		{"> ****1**x's***b.*b.**\n", "> \\*\\**1****x's***b.*b.*\n"},
+		{"_(c)****a**a_Note:*** __\n", "\\_(c)\\*\\*\\**a****a\\_Note:*** \\_\\_\n"},
+	})
+}
+
 // A fused run that does not read back is written with no mark the next text still carries closed
 // and opened again between them: open marks stay open, and a text opens first the marks the text
 // after it carries.

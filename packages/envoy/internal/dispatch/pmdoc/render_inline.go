@@ -87,9 +87,9 @@ type lineCandidate struct {
 // opened again inside that text's other marks wherever the order puts it after them: bold inside
 // italic comes out as `*`, `**` and `*` side by side, one run of four asterisks. The parser splits
 // such a fused run as written where its flanking allows, so a fused first writing that reads back
-// is kept, as main writes it. One that does not is written again with open marks kept open
-// (keepingOpen), each such spelling kept only where it reads back with no delimiter run fused,
-// and then in the plain respellings.
+// is kept, as main writes it, and one that does not is written again in the plain respellings, as
+// main writes it again. Only where none of those reads back is it written with open marks kept
+// open (keepingOpen), each such spelling kept only where it reads back with no delimiter run fused.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
@@ -99,11 +99,11 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		return
 	}
 	written := string(r.b.Bytes()[from:])
-	var spellings []runSpelling
+	spellings := respellings(held, bareURL, false)
 	if fused {
-		spellings = respellings(held, bareURL, true)
+		spellings = append(spellings, respellings(held, bareURL, true)...)
 	}
-	for _, spelling := range append(spellings, respellings(held, bareURL, false)...) {
+	for _, spelling := range spellings {
 		r.b.Truncate(from)
 		fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
 		if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes) {
