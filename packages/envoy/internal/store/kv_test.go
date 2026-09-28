@@ -2439,18 +2439,29 @@ func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.D
 	return "nats://" + listener.Addr().String()
 }
 
-// The listener's own failure, through real nats.go: a link that stops passing bytes partway
-// through the revision scan must fail Open, not open the registry on the claims that happened to
-// arrive. nats.go's idle timer reports that stall as ErrKeyWatcherTimeout on Error() and then
-// sends the same nil entry a finished scan sends, so a reader that takes the nil for a finished
-// scan restores a snapshot missing most of the bucket, and every claim it misses is a restored
-// holder released a session TTL early. The link comes back after the hold, so a reader that took
-// the timer's marker for a finished scan is free to succeed with part of the bucket rather than
-// failing on a later request: that is the shape both a per-key read through Keys() and a bare
-// watch get wrong, and the shape this pins. Which error Open reports depends on how it reads the
-// bucket; that it reports one is the contract. The deterministic halves of both endings, including
-// that the timeout is carried, are in TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot.
-// The hold is longer than Open's JetStream MaxWait, so this costs that wait once.
+// The listener's own failure, through real nats.go: a link that goes quiet partway through the
+// revision scan and then comes back must fail Open, not open the registry on the claims that
+// happened to arrive. nats.go's idle timer reports the quiet as ErrKeyWatcherTimeout on Error()
+// and then sends the same nil entry a finished scan sends, so a reader that takes the nil for a
+// finished scan restores a snapshot missing most of the bucket, and every claim it misses is a
+// restored holder released a session TTL early. Which error Open reports depends on how it reads
+// the bucket; that it reports one is the contract. The deterministic halves of both endings,
+// including that the timeout is carried, are in
+// TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot.
+//
+// The stall shape is load-bearing and a weaker one hides the defect, so do not simplify it to a
+// link that stays down. stallingProxy holds the server's bytes past Open's JetStream MaxWait, so
+// the timer fires, and then sends them on, so the reader is free to carry on and succeed with part
+// of the bucket instead of failing on a later request. Held against three builds of this package:
+//
+//	88f9fbaa  Keys() plus a Get per key   FAIL  "restoring 232 of 400 claims", Open err=nil
+//	3fa4774d  one watch, closed-channel check only   FAIL  "restoring 232 of 400 claims", err=nil
+//	6ee51e4a  this build                  PASS  "the bucket's watch stopped after 232 keys: nats:
+//	                                            key watcher timed out waiting for initial keys"
+//
+// 88f9fbaa is main, so the defect predates the one-pass read: Keys() is itself a watch carrying
+// the same timer. With a stall that never recovers all three pass, main because its per-key Gets
+// then time out on a dead link — a second route to a failed start that hides the first.
 func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 	names := testBuckets(t)
 	direct, cleanup := connectNATS(t)
