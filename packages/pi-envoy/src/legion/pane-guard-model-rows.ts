@@ -535,4 +535,16 @@ export const PID_ROWS = [
     guard: "refused",
     ownChild: false,
   },
+  {
+    // A write whose file the guard cannot name may be this one, so every pid read from a file is
+    // forgotten (`forgetFileModels`, LEGION-355). `late` is a link this same command makes, so at
+    // check time there is nothing to resolve; under real bash the append lands on `pid`. This row
+    // is here rather than in the path battery because only this oracle can see a signal: the
+    // canary-HOME digest cannot, which is why the rule went untested until a reviewer deleted the
+    // line and every other test still passed.
+    name: "a write the guard cannot name may be the pid file",
+    payload: `${START_PID}; mkdir -p sub; ln -s sub late; echo 1 >> late/../pid; ${KILL_PID}`,
+    guard: "refused",
+    ownChild: false,
+  },
 ];

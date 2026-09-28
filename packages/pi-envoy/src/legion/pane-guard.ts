@@ -89,6 +89,7 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  readlinkSync,
   readSync,
   realpathSync,
   statSync,
@@ -494,6 +495,15 @@ function realish(abs: string, followFinal: boolean): string {
   return path.join(realExisting(path.dirname(resolved)), path.basename(resolved));
 }
 
+/** What a symlink names, for a refusal that has to say why it could not be followed. */
+function readlinkTarget(link: string): string {
+  try {
+    return readlinkSync(link);
+  } catch {
+    return "a target the guard cannot read";
+  }
+}
+
 /** A command's target as the kernel would open it, or why the guard cannot say. */
 type Resolved = { readonly real: string } | { readonly unknown: string };
 
@@ -562,9 +572,14 @@ function physical(cwd: string, text: string, followFinal: boolean): Resolved {
       // `candidate` holds no `..`, so this resolution is the kernel's.
       real = realpathSync(candidate);
     } catch (error) {
-      return {
-        unknown: `\`${candidate}\`, a link the guard cannot follow (${messageFor(error)})`,
-      };
+      // The link is there; what it points at is not, or points back at itself. Saying "no such
+      // file" of the link itself sends an agent looking for a path that exists.
+      const code = (error as NodeJS.ErrnoException).code;
+      const why =
+        code === "ENOENT"
+          ? `points at \`${readlinkTarget(candidate)}\`, which is not there`
+          : `cannot be followed (${messageFor(error)})`;
+      return { unknown: `the link \`${candidate}\` ${why}, so the guard cannot resolve this path` };
     }
   }
   return { real: pending.length === 0 ? real : path.join(real, ...pending) };
@@ -612,7 +627,11 @@ function describeRoots(roots: Roots): string {
     : `the issue workspace ${roots.workspace} and a directory of your own under ${roots.scratch}`;
 }
 
-type Verdict = { readonly ok: true } | { readonly ok: false; readonly resolution: string };
+type Verdict =
+  | { readonly ok: true }
+  /** `unresolved` means the guard could not say where the path leads at all, so a refusal must
+   * not go on to claim it is outside the roots — it may well be inside them. */
+  | { readonly ok: false; readonly resolution: string; readonly unresolved?: true };
 
 /** Whether an operation on `exp` stays inside the pane's writable roots. `overwrite` is a
  * redirection or `tee`: a device, or a file that does not exist yet, overwrites nothing. */
@@ -642,7 +661,9 @@ function judgePath(
       };
     }
     const resolved = physical(st.cwd ?? "/", text, options.follow || text.endsWith("/"));
-    if ("unknown" in resolved) return { ok: false, resolution: resolved.unknown };
+    if ("unknown" in resolved) {
+      return { ok: false, resolution: resolved.unknown, unresolved: true };
+    }
     const real = resolved.real;
     if (inWorkspace(real, roots) || inScratch(real, roots)) return { ok: true };
     if (options.overwrite && !existsSync(real)) return { ok: true };
@@ -665,7 +686,9 @@ function judgePath(
   const component = prefix.slice(slash + 1);
   const stemText = slash === -1 ? "." : slash === 0 ? "/" : prefix.slice(0, slash);
   const resolved = physical(st.cwd ?? "/", stemText, true);
-  if ("unknown" in resolved) return { ok: false, resolution: resolved.unknown };
+  if ("unknown" in resolved) {
+    return { ok: false, resolution: resolved.unknown, unresolved: true };
+  }
   // A glob component that starts with a dot can match `..`, which leaves the resolved directory.
   const dotGlob =
     piece.kind === "glob" && (component === "" ? piece.text : component).startsWith(".");
@@ -1160,6 +1183,25 @@ function substitutionInvocation(
   return { base: path.basename(name), command: node, rest: argv.slice(1) };
 }
 
+/** What GNU `dirname` prints: trailing separators stripped, the last component removed, then the
+ * separators before it stripped as well. `/` for a path of separators alone, `.` for a word with
+ * none. */
+function gnuDirname(text: string): string {
+  const trimmed = text.replace(/\/+$/, "");
+  if (trimmed === "") return "/";
+  const cut = trimmed.replace(/\/+[^/]+$/, "");
+  if (cut === trimmed) return ".";
+  return cut === "" ? "/" : cut;
+}
+
+/** What GNU `basename` prints: the last component of the operand with its trailing separators
+ * stripped, and `/` for a path of separators alone, where `path.basename` prints nothing. */
+function gnuBasename(text: string): string {
+  const trimmed = text.replace(/\/+$/, "");
+  if (trimmed === "") return text === "" ? "" : "/";
+  return trimmed.slice(trimmed.lastIndexOf("/") + 1);
+}
+
 function substitutionPath(base: string, list: readonly Arg[], st: State): string | undefined {
   if (!["dirname", "basename", "realpath", "readlink"].includes(base)) return undefined;
   const target = literalText(operands(list, "").operands.at(-1)?.exp);
@@ -1167,13 +1209,13 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
   // An empty operand names no path: dirname prints `.`, basename nothing, and realpath and
   // readlink fail and print nothing.
   if (target === "") return base === "dirname" ? "." : "";
-  // `dirname` is textual: it strips the last component of the operand and prints what is left,
-  // so a relative operand prints a relative path and `dirname e/../x` prints `e/..`, which the
-  // site that uses it resolves against the working directory as bash would.
-  if (base === "dirname") return path.dirname(target);
-  // `basename` is textual too: it prints the operand's last component, so `basename e/..` prints
-  // `..`, where resolving the operand first printed the parent directory's name.
-  if (base === "basename") return path.basename(target);
+  // Both are textual: they cut the operand's own text, so a relative operand prints a relative
+  // path and `dirname e/../x` prints `e/..`, which the site that uses it then resolves against
+  // the working directory as bash would. `path.dirname` is not the same function — it leaves a
+  // separator GNU strips (`a//b` is `a/` to Node and `a` to GNU), and one extra separator moves
+  // a later concatenation from a sibling of the workspace to a path inside it.
+  if (base === "dirname") return gnuDirname(target);
+  if (base === "basename") return gnuBasename(target);
   if (base === "readlink" && !list.some((arg) => literalText(arg.exp)?.includes("f")))
     return undefined;
   const resolved = physical(st.cwd, target, true);
@@ -1757,20 +1799,21 @@ function modelPidFile(st: State, ctx: Ctx, file: string, pid: Expansion | undefi
 }
 
 /** A write landed on a file the guard cannot name. It cannot say which file, so it says nothing
- * about any of them: every modelled file becomes unknown, every pid read from a file is forgotten,
- * and no script this command runs can be read afterwards — the one on disk may be the one that was
- * just written. Resolving to "the write went somewhere harmless" is the LEGION-349 mistake, and
- * leaving the other models standing is that mistake by omission: `ln -s sub late; echo <payload>
- * >> late/../run.sh; bash run.sh` appended to the very script it then ran.
+ * about any of them: every pid read from a file is forgotten, and no script this command runs can
+ * be read afterwards — the one on disk, or the one the model holds, may be the one that was just
+ * written. Resolving to "the write went somewhere harmless" is the LEGION-349 mistake, and
+ * leaving the models usable is that mistake by omission: `ln -s sub late; echo <payload> >>
+ * late/../run.sh; bash run.sh` appended to the very script it then ran.
+ *
+ * `ctx.unnameableWrite` is the whole mechanism for the file models. An earlier revision also
+ * overwrote each `files` entry with an unknown, which is redundant and was removed: every read of
+ * `files` that reaches a verdict goes through `runFile`, which refuses on the flag first. Measured
+ * rather than reasoned — with the loop deleted, `PATH_ROWS` is byte-identical and both suites
+ * pass. Narrow the flag and that loop has to come back.
  *
  * The third writer beside `modelWrite` and `modelPidFile`, and the only one that forgets in bulk,
- * so no site can drop the model without saying why. */
+ * so no site can drop a model without saying why. */
 function forgetFileModels(st: State, ctx: Ctx, why: string): void {
-  const files = st.files as Map<string, FileContents>;
-  const unknownFile: UnknownContents = {
-    why: `${why} names a file the guard cannot resolve, so it cannot tell which file was written`,
-  };
-  for (const file of files.keys()) files.set(file, unknownFile);
   (st.pidFiles as Map<string, Expansion>).clear();
   ctx.unnameableWrite.why ??= why;
 }
@@ -2257,14 +2300,20 @@ function checkRedirects(
           throw refusal(
             site,
             `the redirection \`${operator}\` would overwrite \`${redirect.target.text}\` (${verdict.resolution})`,
-            ctx
+            ctx,
+            verdict.unresolved
           );
         }
       }
       const target = literalText(exp);
       const file = target === undefined ? undefined : modelKey(st, target);
       if (file === undefined) {
-        if (target !== undefined) {
+        // Including a target whose text the guard cannot read at all — a substitution, a glob, a
+        // variable — since that may be any file too. Only for an append: `judgePath` above has
+        // already ruled on a truncating write, and where it allowed one whose target is wholly
+        // unknown it did so under the lenient-target rule, which is not this change's to revoke
+        // (doing so refuses four ordinary driver scripts and closes nothing an append does not).
+        if (appends) {
           forgetFileModels(st, ctx, `the redirection \`${operator} ${redirect.target.text}\``);
         }
         continue;
@@ -2476,12 +2525,13 @@ function printfText(list: readonly Arg[], limit: number, script = false): string
 }
 
 /** A path refusal: the rule, the pane's roots, and what to do instead. */
-function refusal(site: Site, detail: string, ctx: Ctx): Refusal {
-  return new Refusal(
-    site.snippet,
-    site.line,
-    `${detail}, outside ${describeRoots(ctx.roots)}. ${HINT}`
-  );
+function refusal(site: Site, detail: string, ctx: Ctx, unresolved = false): Refusal {
+  // A path the guard could not resolve is not known to be outside anything; saying so sends an
+  // agent to rewrite a target that may already be inside its own workspace.
+  const where = unresolved
+    ? `. Every target is resolved as the kernel resolves it, against ${describeRoots(ctx.roots)}`
+    : `, outside ${describeRoots(ctx.roots)}`;
+  return new Refusal(site.snippet, site.line, `${detail}${where}. ${HINT}`);
 }
 
 // --- Commands ----------------------------------------------------------------------------------
@@ -2903,12 +2953,14 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     case "cd":
     case "pushd": {
       const found = operands(rest, "");
-      changeDirectory(
-        found.operands[0],
-        found.options.some((option) => /^-[a-zA-Z]*P/.test(option)),
-        outer,
-        ctx
-      );
+      // Bash takes the LAST of `-L` and `-P`, across option words and within one (`-PL` is
+      // logical, `-LP` physical), so a `P` anywhere is not physical mode.
+      const mode = found.options
+        .filter((option) => /^-[a-zA-Z]+$/.test(option))
+        .flatMap((option) => [...option.slice(1)])
+        .filter((letter) => letter === "L" || letter === "P")
+        .at(-1);
+      changeDirectory(found.operands[0], mode === "P", outer, ctx);
       return;
     }
     case "popd":
@@ -3261,13 +3313,19 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         if (!append) {
           const verdict = judgePath(arg.exp, st, ctx, { follow: true, overwrite: true });
           if (!verdict.ok) {
-            throw refusal(site, `tee would overwrite \`${arg.text}\` (${verdict.resolution})`, ctx);
+            throw refusal(
+              site,
+              `tee would overwrite \`${arg.text}\` (${verdict.resolution})`,
+              ctx,
+              verdict.unresolved
+            );
           }
         }
         const target = literalText(arg.exp);
         const file = target === undefined ? undefined : modelKey(st, target);
         if (file === undefined) {
-          if (target !== undefined) forgetFileModels(st, ctx, `\`tee ${arg.text}\``);
+          // As in `checkRedirects`: `judgePath` above has ruled on a `tee` that is not appending.
+          if (append) forgetFileModels(st, ctx, `\`tee ${arg.text}\``);
           continue;
         }
         st.pidFiles.delete(file);
@@ -3627,7 +3685,8 @@ function checkTargets(
       throw refusal(
         site,
         `${program} would ${verb} \`${target.text}\` (${verdict.resolution})`,
-        ctx
+        ctx,
+        verdict.unresolved
       );
     }
     const text = literalText(target.exp);
@@ -4308,7 +4367,8 @@ function checkCode(
           throw refusal(
             { snippet: call, line: 1 },
             `${call} would ${verb} ${verdict.resolution}`,
-            ctx
+            ctx,
+            verdict.unresolved
           );
         }
       },

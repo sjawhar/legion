@@ -80,9 +80,15 @@ export function buildPathFixture(base: string): PathFixture {
   symlinkSync(path.join(home, ".ssh"), path.join(ws, "e"));
   symlinkSync(home, path.join(ws, "hs"));
   symlinkSync(path.join(ws, "sub"), path.join(ws, "in"));
+  // A link in the operator's home pointing back into the workspace: `cd`'s logical and physical
+  // modes land in different places through it, which is what `-L`/`-P` precedence decides.
+  symlinkSync(path.join(ws, "sub"), path.join(home, "mine"));
   // A link already on disk whose target is `..`: the control for a command that makes one itself.
   symlinkSync("..", path.join(ws, "sub", "up"));
   symlinkSync(path.join(home, ".gone"), path.join(ws, "dangling"));
+  // A link into a directory this workspace does not have yet: an ordinary build layout, and the
+  // cost of treating a non-final component the guard cannot follow as unknown.
+  symlinkSync(path.join(ws, "build", "out"), path.join(ws, "latest"));
   symlinkSync(path.join(ws, "loop2"), path.join(ws, "loop"));
   symlinkSync(path.join(ws, "loop"), path.join(ws, "loop2"));
   symlinkSync(path.join(home, ".ssh"), path.join(ws, "perm", "inner"));
@@ -577,6 +583,38 @@ export const PATH_ROWS: readonly PathRow[] = [
     command: "env -C e/.. rm -f .bashrc",
     dotdot: true,
   },
+
+  // Bash takes the LAST of `-L` and `-P`, across words and within one, so a `P` anywhere in
+  // the options is not physical mode. Reading it as physical sent the guard to the workspace
+  // while bash went logically to the home directory.
+  {
+    name: "cd.PL.logical",
+    family: "cwd",
+    role: "probe",
+    command: `cd -PL ../home/mine/.. && rm -f .bashrc`,
+    dotdot: true,
+  },
+  {
+    name: "cd.P.L.logical",
+    family: "cwd",
+    role: "probe",
+    command: `cd -P -L ../home/mine/.. && rm -f .bashrc`,
+    dotdot: true,
+  },
+  {
+    name: "cd.LP.physical",
+    family: "cwd",
+    role: "must-allow",
+    command: `cd -LP ../home/mine/.. && rm -f inside`,
+    dotdot: true,
+  },
+  {
+    name: "cd.L.P.physical",
+    family: "cwd",
+    role: "must-allow",
+    command: `cd -L -P ../home/mine/.. && rm -f inside`,
+    dotdot: true,
+  },
   {
     name: "cd.symlink.nodotdot",
     family: "cwd",
@@ -749,6 +787,23 @@ export const PATH_ROWS: readonly PathRow[] = [
     command: 'rm -f loop && ln -s "$HOME/.ssh" loop && rm -f loop/../.bashrc',
     dotdot: true,
   },
+
+  // A link into a directory the command creates: harmless in the ordinary build layout, and
+  // the same shape is a live bypass when what it creates is a link out of the workspace.
+  {
+    name: "danglingmid.created",
+    family: "unresolvable",
+    role: "probe",
+    command: `mkdir -p build/out && rm -rf latest/cache`,
+    dotdot: false,
+  },
+  {
+    name: "danglingmid.escapes",
+    family: "unresolvable",
+    role: "probe",
+    command: `mkdir -p build && ln -s "$HOME" build/out && rm -rf latest/keep`,
+    dotdot: false,
+  },
   {
     name: "absent.nodotdot.inside",
     family: "unresolvable",
@@ -896,6 +951,44 @@ bash unread.sh`,
     family: "unnameable",
     role: "must-allow",
     command: `echo 'echo hi' > made.sh; bash made.sh`,
+    dotdot: false,
+  },
+
+  // An append whose target the guard cannot read AT ALL is the same hazard as one it can read
+  // but cannot place: it may be any file, including the one about to run.
+  {
+    name: "unreadable.append.substitution",
+    family: "unnameable",
+    role: "probe",
+    command: `echo 'echo hi' > t.sh; echo 'rm -f "$HOME/.bashrc"' >> "$(echo t.sh)"; bash t.sh`,
+    dotdot: false,
+  },
+  {
+    name: "unreadable.append.glob",
+    family: "unnameable",
+    role: "probe",
+    command: `echo 'echo hi' > t.sh; echo 'rm -f "$HOME/.bashrc"' >> t.s?; bash t.sh`,
+    dotdot: false,
+  },
+  {
+    name: "unreadable.append.variable",
+    family: "unnameable",
+    role: "probe",
+    command: `echo 'echo hi' > t.sh; v=$(echo t.sh); echo 'rm -f "$HOME/.bashrc"' >> "$v"; bash t.sh`,
+    dotdot: false,
+  },
+  {
+    name: "unreadable.teeappend",
+    family: "unnameable",
+    role: "probe",
+    command: `echo 'echo hi' > t.sh; echo 'rm -f "$HOME/.bashrc"' | tee -a "$(echo t.sh)" >/dev/null; bash t.sh`,
+    dotdot: false,
+  },
+  {
+    name: "unreadable.write.lenient",
+    family: "unnameable",
+    role: "probe",
+    command: `echo 'echo hi' > t.sh; echo 'rm -f "$HOME/.bashrc"' > "$(echo t.sh)"; bash t.sh`,
     dotdot: false,
   },
   {
