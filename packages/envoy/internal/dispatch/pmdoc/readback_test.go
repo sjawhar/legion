@@ -49,3 +49,27 @@ func TestParsePadsAShortRowWithItsColumnsAlignment(t *testing.T) {
 		t.Errorf("ParseForWrite(%q) = %v, want the table stored", markdown, err)
 	}
 }
+
+// A bare URL ends where linkify stops, and a backslash escape stops it: `https://x.com/a\_b` reads
+// as the link `https://x.com/a` and the text `_b`. The renderer keeps that escape wherever the
+// character would otherwise continue the URL, so the document is stored as written and reads back
+// as it was read, rather than the link growing over the text on every write.
+func TestRenderKeepsTheEscapeThatEndsABareURL(t *testing.T) {
+	for _, char := range "!\"#$%&'()+,-./:;=>?@[]^_`{}~" {
+		markdown := "see https://x.com/a\\" + string(char) + "b c\n"
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q) = %v", markdown, err)
+		}
+		rendered, err := Render(doc)
+		if err != nil {
+			t.Fatalf("Render(Parse(%q)) = %v", markdown, err)
+		}
+		if rendered != markdown {
+			t.Errorf("Render(Parse(%q)) = %q, want it as written", markdown, rendered)
+		}
+		if _, err := ParseForWrite(markdown, nil); err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want it stored", markdown, err)
+		}
+	}
+}

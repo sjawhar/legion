@@ -77,27 +77,68 @@ type lineCandidate struct {
 // inlineWithEscapes writes one textblock's inline nodes. Delimiters in text the escape rules leave
 // alone can still pair into a mark the text never had, or break one it has: GFM reads a single
 // tilde as a strikethrough delimiter and refuses a run of three, and asterisks and underscores pair
-// across a hard break, around a reference or inside a link label. A run whose text holds one is
-// read back after it is written, and when it does not come back as written it is written again
-// with its text's tildes escaped, then with its asterisks and underscores escaped as well - each
-// kept only if it reads back, so a run that fails for another reason keeps the bytes it had.
+// across a hard break, around a reference or inside a link label. And linkify continues a bare URL
+// into the text written right after it, which a backslash escape had stopped as written. A run whose
+// text holds either is read back after it is written, and when it does not come back as written it
+// is written again with its text's tildes escaped, then with its asterisks and underscores escaped
+// as well, and then, after a bare URL, with the character that follows it escaped too - each kept
+// only if it reads back, so a run that fails for another reason keeps the bytes it had.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
-	r.writeInlineRun(nodes, prefix, context, delimitersAsRuled)
+	r.writeInlineRun(nodes, prefix, context, delimitersAsRuled, false)
 	held := delimitersInText(nodes)
-	if r.err != nil || held == delimitersAsRuled || r.runReadsBack(from, prefix, nodes) {
+	bareURL := textAfterBareURL(nodes, context.tableCell)
+	if r.err != nil || held == delimitersAsRuled && !bareURL || r.runReadsBack(from, prefix, nodes) {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
-	for escapes := held; escapes <= delimitersAll; escapes++ {
-		r.b.Truncate(from)
-		r.writeInlineRun(nodes, prefix, context, escapes)
-		if r.err == nil && r.runReadsBack(from, prefix, nodes) {
-			return
-		}
+	if held != delimitersAsRuled && r.rewriteReadsBack(from, nodes, prefix, context, held, delimitersAll, false) {
+		return
+	}
+	last := delimitersAll
+	if held == delimitersAsRuled {
+		last = delimitersAsRuled
+	}
+	if bareURL && r.rewriteReadsBack(from, nodes, prefix, context, held, last, true) {
+		return
 	}
 	r.b.Truncate(from)
 	r.b.WriteString(written)
+}
+
+// rewriteReadsBack writes the run since from again with each delimiter escape from first to last,
+// the character after each bare URL escaped as well when afterBareURL says so, and keeps the first
+// that reads back, reporting whether one did.
+func (r *renderer) rewriteReadsBack(from int, nodes []*Node, prefix string, context inlineContext, first, last delimiterEscapes, afterBareURL bool) bool {
+	for escapes := first; escapes <= last; escapes++ {
+		r.b.Truncate(from)
+		r.writeInlineRun(nodes, prefix, context, escapes, afterBareURL)
+		if r.err == nil && r.runReadsBack(from, prefix, nodes) {
+			return true
+		}
+	}
+	return false
+}
+
+// textAfterBareURL reports whether nodes write text right after a bare URL, which linkify can
+// continue into that text's first character.
+func textAfterBareURL(nodes []*Node, escapePipes bool) bool {
+	for index := 1; index < len(nodes); index++ {
+		if followsBareURL(nodes, index, escapePipes) {
+			return true
+		}
+	}
+	return false
+}
+
+// followsBareURL reports whether nodes[index] is text outside any link written right after a bare
+// URL (isBareURLLink), whose link linkify reads again from the text alone.
+func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
+	if index == 0 || nodes[index].Type != "text" || nodeHasMark(nodes[index], "link") {
+		return false
+	}
+	previous := nodes[index-1]
+	return previous.Type == "text" && nodeHasMark(previous, "link") && isBareURLLink(previous, visibleMarks(previous.Marks), escapePipes)
 }
 
 // runReadsBack reports whether the inline markdown written since from reads back as nodes: the
@@ -112,7 +153,7 @@ func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node) bool {
 	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
 }
 
-func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineContext, escapes delimiterEscapes) {
+func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineContext, escapes delimiterEscapes, afterBareURL bool) {
 	escapePipes := context.tableCell
 	var active []Mark
 	position := inlinePosition{atLineStart: context.startsLine, atTextStart: true}
@@ -153,6 +194,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				label:          label,
 				followed:       index+1 < len(nodes) || len(next) > 0,
 				delimiters:     escapes,
+				afterBareURL:   afterBareURL && followsBareURL(nodes, index, escapePipes),
 				heading:        context.heading,
 				marked:         len(next) > 0,
 				opener:         adjacentDelimiter(next[common:]),
@@ -405,7 +447,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 		}
 		if escape {
 			r.writeText(value[segmentStart:byteOffset])
-			r.writeSyntax(textEscape(char))
+			r.writeSyntax(textEscape(char, endsBareURL(byteOffset, char, context)))
 			segmentStart = byteOffset + width
 		}
 		lineEnd := char == '\n'

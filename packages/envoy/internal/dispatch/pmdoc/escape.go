@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
@@ -44,6 +45,10 @@ type escapeContext struct {
 	// delimiters is which of the text's delimiter characters are escaped beyond the rules, because
 	// the run they are in does not read back with them as written (inlineWithEscapes).
 	delimiters delimiterEscapes
+	// afterBareURL reports whether the text is written right after a bare URL, which linkify would
+	// continue into its first character, because the run does not read back with that character
+	// as written (inlineWithEscapes).
+	afterBareURL bool
 	// heading reports whether the text is a heading's.
 	heading bool
 	// marked reports whether the text is written inside a mark's syntax, where the parser keeps
@@ -57,9 +62,18 @@ type escapeContext struct {
 	opener, closer byte
 }
 
+// endsBareURL reports whether the character is ASCII punctuation opening text written right after
+// a bare URL, which linkify would continue the URL into unless a backslash stops it.
+func endsBareURL(offset int, char rune, context escapeContext) bool {
+	return offset == 0 && context.afterBareURL && char < utf8.RuneSelf && isASCIIPunctuation(byte(char))
+}
+
 // needsInlineEscape decides one character from the text alone.
 func needsInlineEscape(value string, offset int, char rune, context escapeContext) bool {
 	textLineStart := context.textLineStart
+	if endsBareURL(offset, char, context) {
+		return true
+	}
 	switch char {
 	case '\\':
 		// Before whitespace written as a reference, a backslash would escape its `&`; before a
@@ -138,8 +152,13 @@ func escaped(char rune) string {
 
 // textEscape is how the text writer spells an escaped character: a tilde as its numeric
 // reference, since the strikethrough parser refuses a delimiter run right after a tilde even when
-// a backslash escapes it, and anything else as escaped spells it.
-func textEscape(char rune) string {
+// a backslash escapes it, and anything else as escaped spells it - except the character that ends
+// a bare URL (endsBareURL), which is always a backslash, since linkify continues a URL through the
+// `&` that opens either reference.
+func textEscape(char rune, endsBareURL bool) string {
+	if endsBareURL {
+		return "\\" + string(char)
+	}
 	if char == '~' {
 		return numericEntity(char)
 	}
