@@ -185,27 +185,31 @@ describe("resolution", () => {
     expect(bash('d=$(readlink -f "$HOME/.ssh"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
   });
 
-  test("resolves the repository git rev-parse --show-toplevel names", () => {
+  test("never resolves git rev-parse --show-toplevel, whose answer config it cannot read decides", () => {
     const repo = path.join(workspace, "repo");
-    const checkout = path.join(home, "checkout");
-    for (const dir of [repo, checkout]) {
-      expect(spawnSync("git", ["init", "-q", dir]).status).toBe(0);
-    }
-    // An empty `.git` below the repository is not one; git walks past it, as the guard must.
-    mkdirSync(path.join(repo, "sub", ".git"), { recursive: true });
+    expect(spawnSync("git", ["init", "-q", repo]).status).toBe(0);
+    const bare = path.join(workspace, "bare");
+    expect(spawnSync("git", ["init", "-q", bare]).status).toBe(0);
+    expect(spawnSync("git", ["-C", bare, "config", "core.bare", "true"]).status).toBe(0);
+    const stale = path.join(workspace, "stale");
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(path.join(stale, ".git"), `gitdir: ${path.join(workspace, "moved-away")}\n`);
+    const toplevel = 'rm -rf "$(git rev-parse --show-toplevel)/.ssh"';
     try {
-      expect(
-        bash('r=$(git rev-parse --show-toplevel); rm -rf "$r/build"', path.join(repo, "sub"))
-      ).toBeUndefined();
-      expect(bash(`rm -rf "$(git -C ${checkout} rev-parse --show-toplevel)"`)).toContain(checkout);
-      // Git's answer moves with GIT_DIR and GIT_WORK_TREE, and no repository above is a failure.
-      expect(
-        bash('export GIT_WORK_TREE=/; rm -rf "$(git rev-parse --show-toplevel)/b"', repo)
-      ).toContain("a command's output");
-      expect(bash('rm -rf "$(git rev-parse --show-toplevel)/b"')).toContain("a command's output");
+      // Git prints the repository here, but a command before it in the same line, or the config it
+      // left, can move the answer (core.worktree), and in the others git prints nothing, so the
+      // path bash deletes is `/.ssh`.
+      for (const [command, cwd] of [
+        [toplevel, repo],
+        [`git config core.worktree "$HOME" && ${toplevel}`, repo],
+        [toplevel, bare],
+        [toplevel, stale],
+        [toplevel, path.join(repo, ".git", "refs")],
+      ] as const) {
+        expect(bash(command, cwd), `${command} in ${cwd}`).toContain("a command's output");
+      }
     } finally {
-      rmSync(repo, { recursive: true, force: true });
-      rmSync(checkout, { recursive: true, force: true });
+      for (const dir of [repo, bare, stale]) rmSync(dir, { recursive: true, force: true });
     }
   });
 

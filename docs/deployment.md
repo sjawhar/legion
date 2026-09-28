@@ -21,9 +21,9 @@ directory that holds the pane's `HOME` or `TMUX_TMPDIR` when either sits there (
 directory holds its Oh My Pi home). The guard cannot tell which other permitted `/tmp` directory
 belongs to this pane. It parses the command with a bash
 parser and resolves each target as bash would: through `$HOME`, `~`, variables set earlier in the
-same command, `$(mktemp -d)`, `cd`, braces, the paths `realpath`, `dirname`, `basename`,
-`readlink -f` and `git rev-parse --show-toplevel` print, pattern replacement and removal of a known
-value (`${v//a/b}`, `${v#*:}`), a function's output, command substitutions, and the scripts the
+same command, `$(mktemp -d)`, `cd`, braces, the paths `realpath`, `dirname`, `basename` and
+`readlink -f` print, pattern replacement and removal of a known value (`${v//a/b}`, `${v#*:}`), a
+function's output, command substitutions, and the scripts the
 command runs (`bash <file>`, `sh -c`, `source`, a heredoc fed to a shell, a script run by path,
 python/node/bun scripts, one it writes first), with the arguments it gives them: an argument loop
 (`while [ $# -gt 0 ]; do case "$1" in ...`) over arguments it knows is walked as bash runs it. A

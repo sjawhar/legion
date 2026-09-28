@@ -273,9 +273,12 @@ every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify, `LEGION_WORK
 it adds nothing to either daemon contract. Commands are parsed with `unbash` (a bash parser,
 bundled into `dist/legion.js`) and walked as bash would run them: word expansion with quoting,
 tilde, variables assigned earlier (`$(mktemp -d)` is a fresh `/tmp` path, and `printf -v` assigns),
-`cd`, brace expansion, the paths `realpath`, `dirname`, `basename`, `readlink -f` and
-`git rev-parse --show-toplevel` print (the last only where git would find a repository it accepts),
-pattern replacement and removal of a known value (`${v//a/b}`, `${v#*:}`; a replacement holding `&`
+`cd`, brace expansion, the paths `realpath`, `dirname`, `basename` and `readlink -f` print (never
+`git rev-parse --show-toplevel`, whose answer the repository's config decides and an earlier
+command in the same line can rewrite), pattern replacement and removal of a known value
+(`${v//a/b}`, `${v#*:}`; a replacement holding `&`, an operand the parser splits differently from
+bash, and an empty pattern after `/` or `//` stay unknown), command substitutions, subshells and
+branches, functions, wrappers (`sudo`, `env`,
 stays unknown), command substitutions, subshells and branches, functions, wrappers (`sudo`, `env`,
 `timeout`, ...), and the scripts a command runs or writes first, whose refusal names the script and
 line. A script or function run

@@ -121,8 +121,8 @@
   (LEGION-300). A script or function run with arguments the guard knows has them as `$1`, `$#` and
   `${1:-…}`, so an argument loop (`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`)
   is walked pass by pass, and a `case` on a known word takes its one matching item. It also resolves
-  `$(git rev-parse --show-toplevel)` where git would print the repository, pattern replacement and
-  removal of a known value (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`, a function whose output
+  pattern replacement and removal of a known value (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`,
+  a function whose output
   passes through `(umask 077 && …)`, and a script a brace group writes from here-documents and
   `printf` before running it. A variable every branch leaves empty or holding a pid of this shell's
   (a retry loop's `pid=$!`) is still a pid it may signal. A target it cannot resolve is still

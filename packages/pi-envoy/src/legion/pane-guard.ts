@@ -266,14 +266,6 @@ const FILE_COMMANDS = new Set([
   "chgrp",
 ]);
 const SIGNAL_COMMANDS = new Set(["kill", "pkill", "killall", "killall5"]);
-/** Variables that change which directory `git rev-parse --show-toplevel` finds, or whether it finds
- * one. */
-const GIT_DISCOVERY_VARIABLES = [
-  "GIT_DIR",
-  "GIT_WORK_TREE",
-  "GIT_CEILING_DIRECTORIES",
-  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
-];
 
 /** Commands that do not add a path to a function's stdout. */
 const FUNCTION_OUTPUT_SILENT: Record<string, true> = {
@@ -788,10 +780,7 @@ function commandOutput(
       return [[literal(st.cwd)]];
     }
     if (invocation.base === "mktemp") return [mktempPath(invocation.command, st, ctx)];
-    const resolved =
-      invocation.base === "git"
-        ? gitTopLevel(invocation.rest, st, ctx)
-        : substitutionPath(invocation.base, invocation.rest, st);
+    const resolved = substitutionPath(invocation.base, invocation.rest, st);
     if (resolved !== undefined) return [[literal(resolved)]];
   }
   if (only?.type === "AndOr" && only.operators.length === 1 && only.operators[0] === "&&") {
@@ -819,66 +808,6 @@ function substitutionInvocation(
   const name = literalText(argv[0]?.exp);
   if (name === undefined) return undefined;
   return { base: path.basename(name), command: node, rest: argv.slice(1) };
-}
-
-/** What `git [-C DIR] rev-parse --show-toplevel` prints: the nearest directory at or above the
- * working directory (or DIR) holding a repository git accepts, symlinks resolved. Unknown wherever
- * git could print something else or fail and print nothing, which would leave the command's path
- * empty: a variable that moves git's discovery, no `git` on the pane's PATH, a repository another
- * user owns (git refuses it as dubious), or no repository above. */
-function gitTopLevel(list: readonly Arg[], st: State, ctx: Ctx): string | undefined {
-  let words = list.map((arg) => literalText(arg.exp));
-  let start = st.cwd;
-  if (words[0] === "-C") {
-    const directory = words[1];
-    if (directory === undefined || start === undefined) return undefined;
-    start = path.resolve(start, directory);
-    words = words.slice(2);
-  }
-  if (start === undefined || words.length !== 2) return undefined;
-  if (words[0] !== "rev-parse" || words[1] !== "--show-toplevel") return undefined;
-  if (GIT_DISCOVERY_VARIABLES.some((name) => lookup(name, st, ctx) !== undefined)) return undefined;
-  const searchPath = literalText(lookup("PATH", st, ctx));
-  if (!searchPath?.split(":").some((dir) => dir !== "" && existsSync(path.join(dir, "git")))) {
-    return undefined;
-  }
-  try {
-    if (!statSync(start).isDirectory()) return undefined;
-  } catch {
-    return undefined;
-  }
-  for (let directory = realExisting(start); ; directory = path.dirname(directory)) {
-    if (isGitRepository(directory)) {
-      return statSync(directory).uid === process.getuid?.() ? directory : undefined;
-    }
-    if (directory === "/") return undefined;
-  }
-}
-
-/** Whether `directory/.git` is a repository git's discovery stops at: a directory, or a `gitdir:`
- * file naming one, holding `HEAD`, with `objects` and `refs` in it or in the `commondir` it names
- * (a worktree's). Git walks past a `.git` that is neither. */
-function isGitRepository(directory: string): boolean {
-  const dotGit = path.join(directory, ".git");
-  try {
-    let gitDir = dotGit;
-    if (statSync(dotGit).isFile()) {
-      const pointer = /^gitdir: (.+)$/m.exec(readFileSync(dotGit, "utf8"))?.[1]?.trim();
-      if (pointer === undefined) return false;
-      gitDir = path.resolve(directory, pointer);
-    }
-    const commonFile = path.join(gitDir, "commondir");
-    const common = existsSync(commonFile)
-      ? path.resolve(gitDir, readFileSync(commonFile, "utf8").trim())
-      : gitDir;
-    return (
-      statSync(path.join(gitDir, "HEAD")).isFile() &&
-      statSync(path.join(common, "objects")).isDirectory() &&
-      statSync(path.join(common, "refs")).isDirectory()
-    );
-  } catch {
-    return false;
-  }
 }
 
 function substitutionPath(base: string, list: readonly Arg[], st: State): string | undefined {
