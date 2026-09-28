@@ -1,13 +1,13 @@
 package bus
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -860,11 +860,11 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 	return c.PublishCoreTo(item.Topic, item)
 }
 
-// PublishCoreTo publishes item directly to subject and flushes, so a nil error means the server
-// accepted it: a publish NATS denies (a permissions violation of a per-client grant) or a flush
-// that fails returns an error, and so does any other error the server reports before the flush
-// answers (confirmPublished). The subject can differ from item.Topic when an authoritative router
-// forwards an envelope while retaining its original topic for the recipient.
+// PublishCoreTo publishes item directly to subject and confirms the server accepted it
+// (publishConfirmed), so a nil error means it did: a publish NATS denies (a permissions violation
+// of a per-client grant), a flush that fails and a publish the server cannot be shown to have
+// accepted all return an error. The subject can differ from item.Topic when an authoritative
+// router forwards an envelope while retaining its original topic for the recipient.
 func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err
@@ -878,101 +878,8 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	conn := c.Conn
-	before := observe(conn)
-	if err := conn.Publish(subject, data); err != nil {
-		return c.refused(err, len(data))
-	}
 	deadline, _ := ctx.Deadline()
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		return fmt.Errorf("bus: publish window elapsed before the publish to %q was flushed", subject)
-	}
-	if err := conn.FlushTimeout(remaining); err != nil {
-		return fmt.Errorf("bus: flush publish to %q: %w", subject, err)
-	}
-	return confirmPublished(conn, subject, before)
-}
-
-// ErrPublishDenied is returned, wrapping nats.ErrPermissionViolation and the server's own text,
-// for a core publish the server refused under its connection's publish permissions.
-var ErrPublishDenied = errors.New("NATS denied the publish")
-
-// connState is what confirmPublished compares across a core publish and its flush.
-type connState struct {
-	lastError  error
-	connected  bool
-	reconnects uint64
-}
-
-// observe reads the last error, then whether the connection is connected, then its reconnect
-// count, in that order, so that a reconnect's clearing of the last error is always seen with one of
-// the other two (confirmPublished).
-func observe(conn *nats.Conn) connState {
-	lastError := conn.LastError()
-	connected := conn.IsConnected()
-	return connState{lastError: lastError, connected: connected, reconnects: conn.Stats().Reconnects}
-}
-
-// confirmPublished reports whether a core publish to subject, made after before was observed and
-// followed by a flush that succeeded, may count as accepted by the server.
-//
-// Core NATS acknowledges nothing: the server answers a publish its connection may not make with
-// `-ERR 'Permissions Violation for Publish to "<subject>"'` and drops it, and nats.go reports that
-// only to the async error callback. It does record it first, synchronously: the one read loop
-// parses the -ERR (processErr) and sets the connection's last error (processTransientError, under
-// the connection's lock) before it parses anything after it. The server queues that -ERR on the
-// connection's outbound buffer while it processes the PUB, before it processes the flush's PING and
-// queues the PONG behind it, so a flush that returns has already seen the -ERR recorded.
-//
-// nats.go keeps only the last error, one per connection, so a violation cannot be attributed to
-// one publish when other goroutines publish on the same connection: another error recorded after
-// ours would overwrite it. So any change of the last error across the publish and its flush fails
-// the publish, named as ErrPublishDenied when the error is the violation of this very subject, and
-// as unconfirmed otherwise; the cost is that a concurrent failure elsewhere on the connection fails
-// this publish too, and its caller retries it.
-//
-// A reconnect clears the last error (doReconnect), so a connection that drops right behind the
-// flush's PONG would read as unchanged. The clear happens only after the drop has marked the
-// connection reconnecting (processOpErr), and a reconnect counts itself before it marks the
-// connection connected again, both under the connection's lock; so reading the error, then the
-// status, then the count, a cleared error comes with a status that is not connected or a count
-// that moved, and either fails the publish as unconfirmed. Not connected is IsConnected, which
-// counts a draining connection as connected, so a publish during Drain still confirms, and a
-// closed one as not.
-//
-// One change goes unseen: the last error set to a shared nats.go value (ErrSlowConsumer,
-// ErrMaxSubscriptionsExceeded), then this publish's violation, then that same value again, all
-// between the two observations. nats.go exposes no error counter to tell that from no change, and
-// the only subscriptions on Dispatch's outbox connection are the reply inboxes of its own
-// JetStream requests (its agent stream dials a separate connection), which are not busy enough to
-// be a slow consumer; so it is accepted.
-func confirmPublished(conn *nats.Conn, subject string, before connState) error {
-	after := observe(conn)
-	if !after.connected || after.reconnects != before.reconnects {
-		return fmt.Errorf("bus: NATS disconnected during the publish to %q, so it is not known to have been accepted", subject)
-	}
-	if sameError(after.lastError, before.lastError) {
-		return nil
-	}
-	if errors.Is(after.lastError, nats.ErrPermissionViolation) &&
-		strings.Contains(after.lastError.Error(), fmt.Sprintf("Publish to %q", subject)) {
-		return fmt.Errorf("bus: %w to %q: %w", ErrPublishDenied, subject, after.lastError)
-	}
-	return fmt.Errorf("bus: NATS reported an error during the publish to %q, so it is not known to have been accepted: %w",
-		subject, after.lastError)
-}
-
-// sameError reports whether a and b are the same error value. nats.go records each permissions
-// violation as a new error (processErr), so a denial never equals the error it replaced; a shared
-// nats.go value recorded again (confirmPublished names the ones that matter) does. A value of a
-// type that cannot be compared counts as different rather than panicking.
-func sameError(a, b error) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	kind := reflect.TypeOf(a)
-	return kind == reflect.TypeOf(b) && kind.Comparable() && a == b
+	return c.publishConfirmed(c.Conn, subject, "", data, deadline)
 }
 
 // ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
@@ -992,7 +899,7 @@ var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 // whose non-empty JetStream publish acknowledgement is not a receiver receipt.
 // The flush is bounded by the same window as the receipt wait, so the call
 // never outlives timeout by the client's default 10 s flush. A forward the
-// server denied returns at once; one confirmPublished cannot confirm for
+// server denied returns at once; one publishConfirmed cannot confirm for
 // another reason still waits, since a receipt proves it was delivered, and
 // returns that reason instead of ErrReceiptTimeout if none arrives.
 func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
@@ -1016,25 +923,11 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 		return err
 	}
 	defer receipt.Unsubscribe()
-	before := observe(conn)
-	if err := conn.PublishRequest(subject, inbox, data); err != nil {
-		return c.refused(err, len(data))
+	err = c.publishConfirmed(conn, subject, inbox, data, deadline)
+	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
+		return err
 	}
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		return fmt.Errorf("bus: request window of %s elapsed before the forward was flushed", timeout)
-	}
-	if err := conn.FlushTimeout(remaining); err != nil {
-		return fmt.Errorf("bus: flush forward: %w", err)
-	}
-	unconfirmed := confirmPublished(conn, subject, before)
-	if errors.Is(unconfirmed, ErrPublishDenied) {
-		return unconfirmed
-	}
-	timedOut := ErrReceiptTimeout
-	if unconfirmed != nil {
-		timedOut = unconfirmed
-	}
+	timedOut := cmp.Or(err, ErrReceiptTimeout)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
