@@ -79,7 +79,9 @@ func testConfig(t *testing.T) config.Config {
 	// The API port is held from here until the daemon binds it (heldListen): a port found free
 	// and closed again is any process's to take first. The worker stream port is always 0: the
 	// listener resolves it at bind time and reports the kernel's choice, so nothing needs holding
-	// for it.
+	// for it. zero is a value config.Load refuses (config.go:871-874, "worker_stream_port must be a
+	// positive integer"): it is a fixture, never a configuration. The derivation from a real port
+	// is pinned by TestPrepareDerivesTheWorkerStreamAddressFromWorkerStreamPort.
 	port := holdPort(t)
 	return config.Config{
 		Project:                                 "TEST" + randomSuffix(t),

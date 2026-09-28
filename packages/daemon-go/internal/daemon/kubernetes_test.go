@@ -164,6 +164,9 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	} else {
 		conn.Close()
 	}
+	if bound := bootField(t, logged.String(), "workerStream"); address != bound {
+		t.Errorf("the runtime was told to have shims dial %q, want %q, the address the stream listener bound", address, bound)
+	}
 	if apps != tokens {
 		t.Errorf("the runtime was handed App tokens %v, want the workflow's", apps)
 	}
@@ -175,6 +178,24 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	if strings.Contains(logged.String(), `"stage":"worker-bin"`) {
 		t.Errorf("the boot installed the pane launcher:\n%s", logged.String())
 	}
+}
+
+// bootField is one field of the "legion daemon started" line in a daemon's JSON log.
+func bootField(t *testing.T, logged, field string) string {
+	t.Helper()
+	for _, line := range strings.Split(logged, "\n") {
+		var entry map[string]any
+		if json.Unmarshal([]byte(line), &entry) != nil || entry["msg"] != "legion daemon started" {
+			continue
+		}
+		value, ok := entry[field].(string)
+		if !ok {
+			t.Fatalf("the boot line has no string %s: %s", field, line)
+		}
+		return value
+	}
+	t.Fatalf("no \"legion daemon started\" line in:\n%s", logged)
+	return ""
 }
 
 // The address every pod's shim dials derives from runtime.kubernetes's own worker_stream_port
