@@ -186,15 +186,19 @@ the current priorities that the roadmap, dispatch://AGENTC-34, names (Sami, 2026
 dispatch://AGENTC-34/ask/1aeb8f2e-0950-4eaa-aaac-24286c9dd3ca; the question proposed two, and his
 answer set three). Past three, or holding one off the priorities: push any unfinished work, say
 where in one comment on the issue, move it to `backlog` and clear its route. Each issue counts on
-its own; a child does not ride under its parent's slot. Never write the status of an issue that
-carries the `legion` label, or of any issue under one: the Legion daemon writes those statuses,
-and moving one of its admitted roots out of its flow parks the tree and stops its workers.
+its own; a child does not ride under its parent's slot. In-flight issues with no owner at all go
+back to `backlog` as well: no claim or route held by a live session, no Dispatch activity in the
+last day, and no pull request moving on GitHub (an owner working there leaves no Dispatch trace).
+The order keeper sweeps those. Never write the status of an issue that carries the `legion`
+label, or of any issue under one: the Legion daemon writes those statuses, and moving one of its
+admitted roots out of its flow parks the tree and stops its workers.
 
 One agent keeps the backlog's order against those priorities, with Sami
 (dispatch://AGENTC-34/ask/f6780f9e-8b96-49eb-9be7-7c7f2036d5cc). Setting an issue's priority
 stays yours ([Priority is yours to set](#priority-is-yours-to-set)); reordering the board does not.
 When the top of the backlog looks wrong, or a priority's next step is not yet a ready issue,
-publish it to `notifications.role.backlog-order` instead of reordering the board yourself.
+publish it to `notifications.role.backlog-order`, which the order keeper holds, instead of
+reordering the board yourself.
 
 ## Claim the issue before you work it
 
@@ -324,7 +328,7 @@ This is not search: it matches no text. Use `dispatch_search` for a keyword or p
 
 ### The owner audit
 
-As the owner of a surface, list your area's P0 and P1 issues and staff or close each one nobody
+As the owner of a surface, list the project's P0 and P1 issues and staff or close each one nobody
 has started:
 ```ts
 dispatch_issues({ project, priority: [0, 1], limit: 250 })
