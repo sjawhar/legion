@@ -17,15 +17,13 @@ every write of the record stamps.
 1. `Record` and `RecordSuite` CAS-update the aggregate. A new record starts at
    generation 0; every later aggregate-hash change and every re-arm advances the
    state version, then clears `SettledEmitted`.
-2. The reconcile loop reads its rebuildable cache and selects every quiet, terminal
-   state without an emitted or live claim, whichever commit of the pull request it is for. A claim older
-   than twice the debounce interval is reclaimed. A record without `schema` was last written by a
-   listener that settled only its pull request's head, and is selected only while its
-   `last_event_at` is within the debounce plus one minute (see below); the check comes before the
-   reclaim.
-3. `ClaimSettlement` re-reads durable state, verifies the expected hash, generation,
-   terminality, debounce window and that same grace, then CAS-writes the hash-bound claim. A
-   mismatch publishes nothing.
+2. The reconcile loop reads its rebuildable cache and selects every record `due` to settle:
+   unsettled, terminal, quiet for the debounce and, when it has no `schema`, inside the handover
+   grace (see below), whichever commit of the pull request it is for. It checks that before a
+   claim older than twice the debounce interval is reclaimed.
+3. `ClaimSettlement` re-reads durable state, verifies the expected hash, generation and no live
+   claim, applies `due` to the durable record, then CAS-writes the hash-bound claim. A mismatch
+   publishes nothing.
 4. The claimant renders that durable snapshot and publishes with
    `github.checks.<owner>/<repo>.pr.<number>.<sha>.g<generation>`.
 5. `MarkSettled` records the emission in `EmittedCount` and clears its claim. A
@@ -42,20 +40,27 @@ A listener that settled only a pull request's head left every other terminal com
 unsettled until the bucket's seven-day TTL; on 2026-09-28 production held 1,442 of them across
 595 `pr.<n>.checks` subjects, the youngest six minutes old and the median 65 hours. Settling them
 would publish verdicts days late, which an agent waiting on its head can read as its head's. So a
-record without `schema` settles only within the handover grace, the debounce plus one minute: a
-head that finished just before the old listener was replaced is still owed its settlement, and a
-rolling deploy overlaps the two listeners, so the gap it must cover is at most the tens of seconds
-a replacement without overlap takes. Past the grace such a record never settles. It stays
+record without `schema` settles only in `[debounce, debounce + 2 min)` after its last event. A
+head that finished just before the old listener was replaced is still owed its settlement, and
+the window must cover the time between the old listener's last tick and the new one's first:
+production's ECS rollouts take 0.6 to 20.5 s from SIGTERM to ready (once 58.9 s), and the on-prem
+compose deploy is stop-then-start, with a 30 s stop grace and two 30 s fail-open cache gates before
+the first tick. Past the band such a record never settles. It stays
 `settled_emitted: false` with no `schema` until the TTL expires it; that is expected, and it is
 history, not pending work. An observation that changes the record (a new check run, a re-run, a
 suite) stamps it, and the commit then settles as any other; a redelivery of what the record already
-holds writes nothing. A stamped record is never held back, so a settlement pending across a restart
-of the listener still publishes; a process-start cutoff would drop those.
+holds writes nothing. A stamped record, of any schema, is never held back, so a settlement pending
+across a restart of the listener still publishes; a process-start cutoff would drop those. A record
+without a schema whose `last_event_at` is ahead of the listener's clock publishes once wall time
+reaches its band, and raising `ENVOY_CI_DEBOUNCE` moves the band's far edge, admitting the records
+in the added slice.
 
 A head-gated listener (legion 9de053a2, or 1ad2466c) run after a rollback decodes a stamped record,
 ignoring the field it does not know, and does not mistake it for a head record, which it recognizes
 by `kind`; its own writes drop the stamp. Seven days after the last head-gated listener stops, no
-unstamped record remains.
+record without a schema remains. Until then a head-gated listener still running settles backlog
+records as their head records expire, and one upgraded to a build carrying #1526 but not this rule
+publishes the whole backlog, so every head-gated listener moves straight to a build with this rule.
 
 ## Envelope
 

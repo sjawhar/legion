@@ -28,8 +28,8 @@ type Publisher interface {
 // skip-checks trailer runs no CI, so the settlement that stands for it is the
 // earlier head's, which can settle after the new head arrives. Consumers decide
 // which SHA a settlement stands for. A record a head-gated listener left
-// terminal and unsettled settles only within the handover grace
-// (legacyBacklog). The store's CAS makes the loop idempotent across replicas.
+// terminal and unsettled settles only within the handover grace (due,
+// legacyBacklog). The store's CAS makes the loop idempotent across replicas.
 func StartSummaryLoop(ctx context.Context, store *Store, pub Publisher, debounce, tick time.Duration, logger *logging.Logger) {
 	t := time.NewTicker(tick)
 	go func() {
@@ -50,14 +50,9 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 	now := time.Now().UnixMilli()
 	staleBefore := now - (2 * debounce).Milliseconds()
 	for _, cached := range store.List() {
-		if now-cached.LastEventAt < debounce.Milliseconds() {
-			continue
-		}
-		if cached.SettledEmitted || !settlementReady(cached) {
-			continue
-		}
-		if legacyBacklog(cached, now, debounce) {
-			// Checked before a stale claim is reclaimed: the reclaim's write would stamp the record.
+		if !due(cached, now, debounce) {
+			// Checked before a stale claim is reclaimed: the reclaim's write would stamp a record
+			// without a schema.
 			continue
 		}
 		key := Key(cached.Owner, cached.Repo, cached.Number, cached.SHA)
