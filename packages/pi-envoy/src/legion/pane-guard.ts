@@ -26,7 +26,16 @@
  * a command writes is read whole up to `MAX_SCRIPT_BYTES`, as one on disk is, and past it is one
  * the guard cannot read (`readable`). A `>>` append adds to the model the guard holds of that
  * file: with no model the file is one it cannot read, never an empty one, or a no-op append would
- * leave it reading the file as holding only what was appended (LEGION-349). `tee -a` is stricter
+ * leave it reading the file as holding only what was appended (LEGION-349). The model's own
+ * property is narrower than "a file this command wrote": an entry is whatever the redirection
+ * path and `tee` record into this command's state, so it takes a write whose content the guard
+ * renders (`echo >`, `printf >`, `cat > <<EOF`, `tee f <<EOF`) and it takes one from anywhere the
+ * walk carried that state — a region the shell may never enter included, since `if`, `else`, `&&`,
+ * `||`, `case`, `while`, `until` and a `for` whose word list the guard cannot decide are all
+ * walked. Such a write seeds a model for code that never runs, the residual LEGION-354 closes.
+ * A write the walk never reaches records nothing, and neither does one it judges elsewhere: a
+ * `trap` handler's body is read and refused on its own line, but its writes never reach this
+ * model, not even on `EXIT`. `tee -a` is stricter
  * and deliberately so: it leaves the file unknown whatever the model, since the guard does not
  * render what `tee` writes, so appending with `tee -a` to a file this command wrote and then
  * running it is refused where `>>` is allowed. Neither rule asks the filesystem what a file
@@ -1962,8 +1971,13 @@ function checkRedirects(
       // whatever is on disk, which the guard has not read, so it is unknown and never empty.
       // Taking it as empty left one no-op append (`echo '' >> f`) making the guard read the file
       // as holding only what was appended, a destructive line already there running unseen
-      // (LEGION-349). Nothing here asks the filesystem: a path absent at check time is one an
-      // earlier stage of the same command can fill (`cp evil.sh t; echo hi >> t; bash t`).
+      // (LEGION-349). A model means "a path a rendered write in this command named", wherever the
+      // walk read that write: `files` is shared across regions, so `false && echo ok > f`, and the
+      // same inside `if`, `case`, `while`, `until` or a `for` whose list the guard cannot decide,
+      // seeds one for code the shell never runs. Until LEGION-354 blurs a write the shell may not
+      // reach, this rule holds for a path no rendered write in the command named. Nothing here
+      // asks the filesystem either: a path absent at check time is one an earlier stage of the
+      // same command can fill (`cp evil.sh t; echo hi >> t; bash t`).
       const before = appends ? (st.files.get(file) ?? null) : "";
       st.files.set(
         file,

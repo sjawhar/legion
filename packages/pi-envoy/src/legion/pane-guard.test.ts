@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createPaneGuard, type PaneGuard } from "./pane-guard";
@@ -1288,6 +1288,44 @@ describe("scripts a command runs", () => {
     expect(bash(`echo hi >> ${existing}`)).toBeUndefined();
     expect(bash("echo hi >> ~/.bashrc")).toBeUndefined();
     expect(bash(`echo 'echo hi' > ${fresh}; bash ${fresh}`)).toBeUndefined();
+    // The rows above hold for a path no redirect in the command named, which is what a model is.
+    // A `>` the walk read but the shell never runs seeds one — `files` is shared across branches —
+    // so this composition is still allowed, unchanged from before this rule and identical at main.
+    // It is the residual LEGION-354 closes; when a branch write leaves the file unknown, this line
+    // becomes a refusal and must flip rather than be deleted.
+    expect(
+      bash(`false && echo ok > ${existing}; echo '' >> ${existing}; bash ${existing}`)
+    ).toBeUndefined();
+    // A path whose `..` crosses a symlink: the guard's key is lexical, the kernel's is not, so the
+    // file the append and the run open is not the one the key names. The model rule closes the
+    // append-carrying form structurally, by never consulting a path's contents at all — which is
+    // why it has a row: a future change that reintroduces any disk or path probe reopens it. The
+    // bare `bash lnk/../danger.sh` is `runFile`'s own resolution and is not this rule's.
+    // Its own tree, with the link pointing at a SIBLING: no directory is its own ancestor through
+    // the link, so nothing that walks the scratch root can loop, and the tree is removed after.
+    const root = path.join(scratch, "sym-349");
+    const link = path.join(root, "a", "lnk-349");
+    const opened = path.join(root, "danger-349.sh");
+    mkdirSync(path.join(root, "a"), { recursive: true });
+    mkdirSync(path.join(root, "b"), { recursive: true });
+    symlinkSync(path.join(root, "b"), link);
+    writeFileSync(opened, 'rm -rf "$HOME"\n');
+    // The kernel resolves `lnk-349/..` to `sym-349`, so the append and the run open
+    // `sym-349/danger-349.sh`; a lexical resolver stops at `a`, naming a path that holds nothing.
+    // The `..` has to survive into the command text, so the word is built by concatenation:
+    // `path.join` would normalise it away and this row would silently become the fresh-file row
+    // above. The three assertions below fail loudly if that ever happens.
+    const through = `${link}/../danger-349.sh`;
+    try {
+      expect(through).toContain("lnk-349/..");
+      expect(existsSync(opened)).toBe(true);
+      expect(existsSync(path.resolve(through))).toBe(false);
+      expect(bash(`echo hi >> ${through}; bash ${through}`)).toContain(
+        "cannot read before running it"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("reads a script a brace group writes from here-documents and printf before running it", () => {

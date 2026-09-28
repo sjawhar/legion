@@ -54,20 +54,26 @@ evaluate (the `eval` tool's kernels included; known prefixes are still judged), 
 the guard does not read (`perl`, `ruby`, `awk`), commands outside the families above that overwrite
 a destination (`cp`, `dd`, `ln -f`, `install`), an edit in place (`sed -i`), a directory reached
 through a `cd` that failed, and the `write` and `edit` tools. A `>>` append to a file the guard
-holds no model of — one it did not itself see written earlier in the same command — leaves that
-file's contents unknown, never empty: the append is allowed, and running that file in the same
-command is refused rather than read as holding only what was appended. A file the same command
-wrote is read as its model says, so writing a script with `>` and then running it still works.
-`tee -a` is stricter: it leaves the file unknown whatever the guard knew, so appending with it to
-a file this command wrote and then running that file is refused where `>>` is allowed. Neither
-rule asks the filesystem what a file holds, since an earlier stage of the same command can change
-that. The guard checks a destination for `rsync`, extract-mode `tar`, and `unzip` when it
-can identify one. It also cannot distinguish one pane's allowed `/tmp` directory from another. A
-running shell started through `hub` can receive later unguarded input, and `xd://debug` can launch
-an unguarded program. The documented residuals are `git -C <path> clean`, Python loop values, an
-aliased CommonJS `require`, an `eval` trap whose outer exit timing is not modeled, an `rsync`
-destination followed by an unrecognised valued option, and a `TMUX` value that begins with a comma
-and therefore names no socket path.
+holds no model of — one no redirect or `tee` in the same command named — leaves that file's
+contents unknown, never empty: the append is allowed, and running that file in the same command is
+refused rather than read as holding only what was appended. A file the same command wrote is read
+as its model says, so writing a script with `>` and then running it still works. The model is per
+command, and it records a write whose content the guard renders (`echo >`, `printf >`,
+`cat > <<EOF`, `tee f <<EOF`) wherever it read that write, whether or not the shell would run it:
+the guard reads every region whose execution it cannot decide, so such a write under
+`false &&`, `true ||`, an `if` or `case` arm the shell skips, a `while`/`until` body that never
+runs, or a `for` whose word list it cannot decide still counts, and an append after it is read
+rather than unknown. That is a residual of this model, and it closes once a write the shell may
+never reach leaves the file unknown. `tee -a` is stricter: it leaves the file unknown whatever the
+guard knew, so appending with it to a file this command wrote and then running that file is refused
+where `>>` is allowed. Neither rule asks the filesystem what a file holds, since an earlier stage of
+the same command can change that. The guard checks a destination for `rsync`, extract-mode `tar`,
+and `unzip` when it can identify one. It also cannot distinguish one pane's allowed `/tmp` directory
+from another. A running shell started through `hub` can receive later unguarded input, and
+`xd://debug` can launch an unguarded program. The documented residuals are `git -C <path> clean`,
+Python loop values, an aliased CommonJS `require`, an `eval` trap whose outer exit timing is not
+modeled, an `rsync` destination followed by an unrecognised valued option, and a `TMUX` value that
+begins with a comma and therefore names no socket path.
 This is a mistake-guard, not a sandbox: it exists because an agent probe deleted the operator's home
 directory. LEGION-122 and the Kubernetes pod boundary are the hard isolation controls.
 
