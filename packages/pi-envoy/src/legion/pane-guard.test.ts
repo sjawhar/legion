@@ -221,6 +221,71 @@ describe("resolution", () => {
     expect(bash('D="$HOME"; unset D; rm -rf "$LEGION_WORKSPACE/$D"')).toBeUndefined();
   });
 
+  test("follows every write to a variable, and forgets what a write it cannot read may change", () => {
+    const safe = 'd="$LEGION_WORKSPACE/safe"';
+    const array = 'd=("$LEGION_WORKSPACE/safe")';
+    for (const command of [
+      // A scalar write to an array's name is its element 0.
+      `${array}; printf -v d '%s' "$HOME/.ssh"; rm -rf "\${d[0]}"`,
+      `${array}; declare d="$HOME/.ssh"; rm -rf "\${d[0]}"`,
+      `${array}; read -r d <<< "$HOME/.ssh"; rm -rf "\${d[0]}"`,
+      `${array}; for d in "$HOME/.ssh"; do rm -rf "\${d[0]}"; done`,
+      // An array element or a quoted assignment named to a builtin.
+      `${safe}; printf -v 'd[0]' '%s' "$HOME/.ssh"; rm -rf "$d"`,
+      `${safe}; read -r 'd[0]' <<< "$HOME/.ssh"; rm -rf "$d"`,
+      `${safe}; declare 'd[0]'="$HOME/.ssh"; rm -rf "$d"`,
+      `${safe}; declare "d=$HOME/.ssh"; rm -rf "$d"`,
+      `${safe}; export "d=$HOME/.ssh"; rm -rf "$d"`,
+      // A name the guard cannot read may be any variable, one from the pane's environment too.
+      `${safe}; printf -v "$(cat n)" '%s' "$HOME/.ssh"; rm -rf "$d"`,
+      `${safe}; declare "$(cat n)=$HOME/.ssh"; rm -rf "$d"`,
+      `read -r "$(cat n)" <<< "$HOME"; rm -rf "$LEGION_WORKSPACE/x"`,
+      `${safe}; unset "$(cat n)"; rm -rf "/\${d+$LEGION_WORKSPACE/w}"`,
+      `${safe}; eval "$(cat f)"; rm -rf "$d"`,
+      // `${d:=x}` and `${d=x}` assign the operand.
+      `unset d; : "\${d:=$HOME/.ssh}"; rm -rf "$d"`,
+      `unset d; : "\${d=$HOME/.ssh}"; rm -rf "$d"`,
+      // Arithmetic and `wait -p` assign.
+      `${safe}; (( d = 0 )); rm -rf "/$d"`,
+      `${safe}; : $(( d += 1 )); rm -rf "/$d"`,
+      `${safe}; let d=0; rm -rf "/$d"`,
+      `${safe}; for ((d = 0; d < 1; d++)); do :; done; rm -rf "/$d"`,
+      `${safe}; sleep 1 & wait -p d; rm -rf "/$d"`,
+      // A function's local is the caller's variable again once it returns, and one that is local
+      // on some paths only may be either.
+      `d="$HOME/.ssh"; f() { local d="$LEGION_WORKSPACE/x"; }; f; rm -rf "$d"`,
+      `d="$HOME/.ssh"; f() { declare d; d="$LEGION_WORKSPACE/x"; }; f; rm -rf "$d"`,
+      `${safe}; f() { if [ -n "$Z" ]; then local d; fi; d="$HOME/.ssh"; }; f; rm -rf "$d"`,
+      // A branch that may leave a name unset leaves whether it is set unknown.
+      `if [ -n "$Z" ]; then d=x; fi; rm -rf "/\${d+$LEGION_WORKSPACE/w}"`,
+      `d=x; if [ -n "$Z" ]; then unset d; fi; rm -rf "/\${d+$LEGION_WORKSPACE/w}"`,
+      // `unset -f` removes a function, so its name runs the command again.
+      "rm() { :; }; unset -f rm; rm -rf ~",
+      "rm() { :; }; unset rm; rm -rf ~",
+      // A plain assignment to an array's name keeps its other elements.
+      `d=("$LEGION_WORKSPACE/a" "$HOME/.ssh"); d="$LEGION_WORKSPACE/x"; rm -rf "\${d[@]}"`,
+      // `readonly` refuses a later write, and `-u`, `-l` and `-i` rewrite it.
+      `d="$HOME/.ssh"; readonly d; printf -v d '%s' "$LEGION_WORKSPACE/x"; rm -rf "$d"`,
+      `d="$HOME/.ssh"; if [ -n "$Z" ]; then readonly d; fi; d="$LEGION_WORKSPACE/x"; rm -rf "$d"`,
+      `declare -u d; d="$LEGION_WORKSPACE/x"; rm -rf "$d"`,
+      `declare -i n; n="$LEGION_WORKSPACE"; rm -rf "/$n"`,
+    ]) {
+      expect(bash(command), command).toBeDefined();
+    }
+    // A nameref's writes land in another variable, which the guard does not follow.
+    expect(bash('declare -n r=d; r="$HOME/.ssh"; rm -rf "$d"')).toContain("nameref");
+    for (const command of [
+      `d=("$HOME/.ssh" "$LEGION_WORKSPACE/b"); printf -v d "%s" "$LEGION_WORKSPACE/a"; rm -rf "\${d[0]}"`,
+      'd="$LEGION_WORKSPACE/x"; f() { local d="$HOME/.ssh"; }; f; rm -rf "$d"',
+      `unset d; : "\${d:=$LEGION_WORKSPACE/x}"; rm -rf "$d"`,
+      'n=d; printf -v "$n" "%s" "$LEGION_WORKSPACE/x"; rm -rf "$d"',
+      'f() { local d="$LEGION_WORKSPACE/$1"; rm -rf "$d"; }; f a',
+      'readonly d="$LEGION_WORKSPACE/x"; export d; rm -rf "$d"',
+    ]) {
+      expect(bash(command), command).toBeUndefined();
+    }
+  });
+
   test("resolves the paths realpath, dirname, basename and readlink -f print", () => {
     expect(bash('d=$(realpath -m -- "$LEGION_WORKSPACE/a/../b"); rm -rf "$d"')).toBeUndefined();
     expect(bash('d=$(realpath -m -- "$HOME/a/../.ssh"); rm -rf "$d"')).toContain(

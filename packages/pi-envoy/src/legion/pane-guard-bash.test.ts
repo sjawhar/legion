@@ -242,3 +242,69 @@ test("a function's arguments are bash's own, and never let a target outside the 
   );
   expect(outside.length).toBeGreaterThan(commands.length / 10);
 });
+
+test("every write to a variable is bash's own, and never leaves a stale value to let a target through", () => {
+  // A variable, an array, an element, a variable already outside the roots, one `readonly` and
+  // one `-u` uppercases, before a write by a builtin that names it, a plain assignment, arithmetic,
+  // `:=`, or a function's `local`; then a read of the name, its element 0, its elements, and
+  // whether it is set. Its 4,416 cases take several seconds, past bun's default timeout.
+  const befores = [
+    'd="$LEGION_WORKSPACE/safe"',
+    'd=("$LEGION_WORKSPACE/safe")',
+    'd[0]="$LEGION_WORKSPACE/safe"',
+    'd=("$LEGION_WORKSPACE/safe" "$LEGION_WORKSPACE/b")',
+    'd=("$LEGION_WORKSPACE/safe" "$HOME/.ssh")',
+    'd="$HOME/.ssh"',
+    'd="$HOME/.ssh"; readonly d',
+    "declare -u d",
+  ];
+  const names = ["d", "'d[0]'", "d[0]", '"d[1-1]"', '"$(echo d)"', `"$(echo 'd[0]')"`];
+  const named = (name: string) => [
+    `printf -v ${name} '%s' "$HOME/.ssh"`,
+    `printf -v${name} '%s' "$HOME/.ssh"`,
+    `read -r ${name} <<< "$HOME/.ssh"`,
+    `IFS= read -r ${name} <<< "$HOME/.ssh"`,
+    `read -ra ${name} <<< "$HOME/.ssh"`,
+    `mapfile -t ${name} <<< "$HOME/.ssh"`,
+    `getopts x: ${name} -x "$HOME/.ssh" || :`,
+    `declare ${name}="$HOME/.ssh"`,
+    `typeset ${name}="$HOME/.ssh"`,
+    `export ${name}="$HOME/.ssh"`,
+    `readonly ${name}="$HOME/.ssh"`,
+    `eval ${name}='"$HOME/.ssh"'`,
+    `unset ${name}`,
+  ];
+  const writers = [
+    ...names.flatMap(named),
+    'd="$LEGION_WORKSPACE/x"',
+    'd=("$LEGION_WORKSPACE/x")',
+    "(( d = 0 ))",
+    ": $(( d++ ))",
+    "let d=0",
+    "for ((d = 0; d < 1; d++)); do :; done",
+    "sleep 0 & wait -p d",
+    `: "\${d:=$HOME/.ssh}"`,
+    `unset d; : "\${d=$HOME/.ssh}"`,
+    'for d in "$HOME/.ssh"; do :; done',
+    'f() { local d="$LEGION_WORKSPACE/x"; }; f',
+    'f() { declare d; d="$LEGION_WORKSPACE/x"; }; f',
+    'f() { if [ -n "$Z" ]; then local d; fi; d="$HOME/.ssh"; }; f',
+    'if [ -n "$Z" ]; then unset d; fi',
+  ];
+  const reads = [
+    'rm -rf "$d"',
+    'rm -rf "/$d"',
+    `rm -rf "\${d[0]}"`,
+    `rm -rf "\${d[@]}"`,
+    `rm -rf "/\${d+$LEGION_WORKSPACE/w}"`,
+    `rm -rf "\${d-$HOME/.ssh}"`,
+  ];
+  const commands = befores.flatMap((before) =>
+    writers.flatMap((writer) => reads.map((read) => `${before}; ${writer}; ${read}`))
+  );
+  const outside = outsideCases(commands);
+  expect(outside.filter((command) => guard.bash(command, workspace, env) === undefined)).toEqual(
+    []
+  );
+  expect(outside.length).toBeGreaterThan(commands.length / 10);
+}, 60_000);

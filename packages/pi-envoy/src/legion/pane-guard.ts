@@ -29,6 +29,19 @@
  * rather than empty; a pattern it cannot split as bash does leaves the whole expansion unknown; and
  * a word that may be several arguments or none leaves the arguments it is among unknown.
  *
+ * The same holds for writes: every write a command makes to a variable reaches the guard's model,
+ * and one it cannot model leaves the value unknown rather than the one already approved. A builtin
+ * that assigns by name (`printf -v`, `read`, `mapfile`, `getopts`, `declare` and its kin, `unset`,
+ * `wait -p`), arithmetic, `${v:=x}`, a loop variable and a plain assignment to an array's name all
+ * assign as bash does; a function's `local` is the caller's variable again once it returns; a
+ * name with `readonly`, `-i`, `-l` or `-u` is unknown after a write, which bash refuses or
+ * rewrites; and a write under a name the guard cannot read, or `eval` of text it cannot read,
+ * leaves every variable unknown and possibly unset, the pane's environment included. A nameref
+ * (`declare -n`) is refused, since its writes land elsewhere. Text `eval` runs that the guard
+ * cannot read is outside what it sees in any case (`docs/deployment.md`, "The pane guard"):
+ * besides running commands the guard never judges, it can make a name read-only, so that a later
+ * write the guard trusts is refused.
+ *
  * A `trap` handler's body is judged once, against the state of the shell that set it after that
  * shell's last statement, where bash runs an EXIT handler; a subshell's handlers (a substitution,
  * `( … )`, a pipeline's part, a coprocess, a backgrounded command) are judged at the subshell's
@@ -105,6 +118,13 @@ interface Piece {
   readonly unset?: true;
   /** Only on `NO_ELEMENTS`'s piece. */
   readonly noElements?: true;
+  /** A value whose name may also be unset: a branch may have unset it, or a write the guard could
+   * not read (`forgetVariables`). Whether it is set is unknown, so `-` and `+` cannot decide. */
+  readonly maybeUnset?: true;
+  /** A value whose name has an attribute with which bash refuses a later write (`readonly`,
+   * `declare -r`) or rewrites it (`-i`, `-l`, `-u`): such a write leaves the name unknown
+   * (`attributed`), whichever bash did. */
+  readonly rewrites?: true;
 }
 type Expansion = readonly Piece[];
 
@@ -119,6 +139,13 @@ function isUnset(value: Expansion | undefined): boolean {
 /** `$@`, `$*` or `${arr[@]}` over no elements: empty text, and no argument when it is all of a word
  * (`f "$@" x` gives f one argument). An element that is empty is an ordinary empty piece. */
 const NO_ELEMENTS: Piece = { kind: "literal", text: "", noElements: true };
+
+/** The key under which `vars` holds the value of every name it does not list, once the shell ran
+ * a write the guard could not read (`forgetVariables`): any name, one from the pane's environment
+ * included, may since have been assigned or unset. */
+const ANY_NAME = "\u0000";
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ARRAY_ELEMENT = /^([A-Za-z_][A-Za-z0-9_]*)\[.*\]$/s;
 
 /** One argument of a command: the word as written (for the refusal) and one of its expansions
  * (brace expansion and `"$@"` give a word several). `fields` says when bash may not make it one
@@ -182,6 +209,10 @@ interface State {
   /** The handlers this shell set with `trap`. Each body runs when this shell finishes, against its
    * state after its last statement; a subshell starts with none (`subshell`). */
   traps: readonly Trap[];
+  /** Inside a function: the names it made local (`local`, or `declare` and `typeset` without
+   * `-g`), which bash gives back to the caller when it returns; true for a name every path so far
+   * made local, false for one only some did. Undefined outside a function. */
+  locals: Map<string, boolean> | undefined;
 }
 
 interface FunctionDefinition {
@@ -545,13 +576,97 @@ function unquotedLiteral(
 }
 
 /** A variable's value: this command's assignments, then the pane's environment; undefined for one
- * this command unset. */
+ * this command unset. Once a write the guard could not read ran, a name it does not list is
+ * unknown (`ANY_NAME`). */
 function lookup(name: string, st: State, ctx: Ctx): Expansion | undefined {
   const own = st.vars.get(name);
   if (own !== undefined) return isUnset(own) ? undefined : own;
+  const any = st.vars.get(ANY_NAME);
+  if (any !== undefined) return any;
   if (name === "PWD" && st.cwd !== undefined) return [literal(st.cwd)];
   const value = ctx.env[name];
   return value === undefined ? undefined : [literal(value)];
+}
+
+/** `name=value` as bash makes it: an array of that name keeps its other elements and holds the
+ * value at 0. A name with an attribute that refuses or rewrites the write is unknown after. */
+function assignScalar(st: State, name: string, value: Expansion): void {
+  if (attributed(st, name)) {
+    keepAttributed(st, name);
+    return;
+  }
+  st.vars.set(name, value);
+  const elements = st.arrays.get(name);
+  if (elements !== undefined) st.arrays.set(name, new Map(elements).set("0", value));
+}
+
+/** Whether `name` has an attribute bash refuses or rewrites a write with (`Piece.rewrites`). */
+function attributed(st: State, name: string): boolean {
+  return st.vars.get(name)?.some((piece) => piece.rewrites === true) === true;
+}
+
+/** A write to an attributed name: bash refused it or rewrote the value, so the name, and each of
+ * its elements, is unknown and keeps the attribute, and may be unset if it was, or may have been,
+ * before (a refused write leaves it as it was). */
+function keepAttributed(st: State, name: string, unsets = false): void {
+  const before = st.vars.get(name);
+  const maybeUnset =
+    unsets ||
+    before === undefined ||
+    isUnset(before) ||
+    before.some((piece) => piece.maybeUnset === true);
+  const kept: Expansion = [
+    {
+      ...unknown(
+        `\`$${name}\`, whose \`readonly\`, \`-i\`, \`-l\` or \`-u\` refuses or rewrites a write`
+      ),
+      rewrites: true,
+      ...(maybeUnset ? { maybeUnset: true as const } : {}),
+    },
+  ];
+  st.vars.set(name, kept);
+  if (st.arrays.has(name)) st.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, kept]]));
+}
+
+/** A builtin's write to the variable it names (`printf -v`, `read`, `declare`, `wait -p`, an
+ * arithmetic assignment): a plain name as `assignScalar`; an array element (`d[0]`), whose index
+ * the guard does not evaluate there, leaves that array and its name unknown; and a name the guard
+ * cannot read may be any variable (`forgetVariables`). A name bash refuses as no identifier
+ * assigns nothing. `writer` names the write for a refusal. */
+function assignByName(st: State, name: string | undefined, value: Expansion, writer: string): void {
+  if (name === undefined) {
+    forgetVariables(st, `a variable ${writer} assigns under a name the guard cannot read`);
+    return;
+  }
+  if (IDENTIFIER.test(name)) {
+    assignScalar(st, name, value);
+    return;
+  }
+  const base = ARRAY_ELEMENT.exec(name)?.[1];
+  if (base === undefined) return;
+  if (attributed(st, base)) {
+    keepAttributed(st, base, true);
+    return;
+  }
+  // `unset 'd[0]'` of an array's last element leaves it unset.
+  const element: Expansion = [
+    { ...unknown(`\`$${base}\`, whose element ${writer} assigns`), maybeUnset: true },
+  ];
+  st.vars.set(base, element);
+  st.arrays.set(base, new Map([[UNKNOWN_ARRAY_INDEX, element]]));
+}
+
+/** After a write the guard cannot read: any variable may have been assigned or unset, so every
+ * value this shell holds, and every name it does not list (`ANY_NAME`), is unknown and may be
+ * unset until the command assigns it again. */
+function forgetVariables(st: State, why: string): void {
+  const forgotten: Expansion = [{ ...unknown(why), maybeUnset: true }];
+  const kept: Expansion = [{ ...unknown(why), maybeUnset: true, rewrites: true }];
+  for (const name of st.vars.keys()) st.vars.set(name, attributed(st, name) ? kept : forgotten);
+  st.vars.set(ANY_NAME, forgotten);
+  for (const name of st.arrays.keys()) {
+    st.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, forgotten]]));
+  }
 }
 
 function resolveArrayIndex(index: string | undefined, st: State, ctx: Ctx): string | undefined {
@@ -622,7 +737,8 @@ function operatorValue(
   const unknownValue = [unknown(`\`$${name}\``)];
   if (!/^([0-9]+|[@*#?$!-])$/.test(name)) {
     const value = lookup(name, st, ctx);
-    return value === undefined ? { set: false, value: [] } : { set: true, value };
+    if (value === undefined) return { set: false, value: [] };
+    return { set: value.some((piece) => piece.maybeUnset === true) ? undefined : true, value };
   }
   if (/^[1-9][0-9]*$/.test(name) || name === "@" || name === "*") {
     if (st.positional === undefined) return { set: undefined, value: unknownValue };
@@ -683,17 +799,26 @@ function parameterExpansion(
   const undecided = [[unknown(`\`${part.text}\``)]];
   const operand = (): Piece[][] =>
     part.operand === undefined ? [[literal("")]] : expandWord(part.operand, st, ctx);
+  // `:=` and `=` assign the operand they take (bash refuses it for a special parameter). When the
+  // guard cannot tell whether they take it, the variable is set after, to a value it cannot know.
+  const assigning = (result: Piece[][], maybe: boolean): Piece[][] => {
+    if ((operator === ":=" || operator === "=") && IDENTIFIER.test(name)) {
+      const only = result.length === 1 && !maybe ? result[0] : undefined;
+      assignScalar(st, name, only ?? [unknown(`\`$${name}\`, which \`${part.text}\` may assign`)]);
+    }
+    return result;
+  };
   switch (operator) {
     case ":-":
     case ":=":
       if (surelyNonEmpty) return parameter(name, quoted, st, ctx);
-      if (!known) return undecided;
-      return nonEmpty ? parameter(name, quoted, st, ctx) : operand();
+      if (!known) return assigning(undecided, true);
+      return nonEmpty ? parameter(name, quoted, st, ctx) : assigning(operand(), false);
     case "-":
     case "=":
       // Only whether the parameter is set decides.
-      if (set === undefined) return undecided;
-      return set ? parameter(name, quoted, st, ctx) : operand();
+      if (set === undefined) return assigning(undecided, true);
+      return set ? parameter(name, quoted, st, ctx) : assigning(operand(), false);
     case ":+":
       if (surelyNonEmpty) return operand();
       if (!known) return undecided;
@@ -1079,15 +1204,36 @@ function visitWord(word: Word | undefined, st: State, ctx: Ctx): void {
   if (word !== undefined) visitParts(word.parts, st, ctx);
 }
 
+const ARITHMETIC_ASSIGNMENTS = new Set([
+  "=",
+  "+=",
+  "-=",
+  "*=",
+  "/=",
+  "%=",
+  "<<=",
+  ">>=",
+  "&=",
+  "^=",
+  "|=",
+]);
+
+/** Walks an arithmetic expression, which assigns: `d = 0`, `d += 1`, `d++` and `--d` leave `d` a
+ * number the guard does not compute, and a name written with an expansion (`$n = 1`) may be any
+ * variable. */
 function visitArithmetic(expression: ArithmeticExpression | undefined, st: State, ctx: Ctx): void {
   if (expression === undefined) return;
   switch (expression.type) {
     case "ArithmeticBinary":
       visitArithmetic(expression.left, st, ctx);
       visitArithmetic(expression.right, st, ctx);
+      if (ARITHMETIC_ASSIGNMENTS.has(expression.operator)) assignArithmetic(expression.left, st);
       break;
     case "ArithmeticUnary":
       visitArithmetic(expression.operand, st, ctx);
+      if (expression.operator === "++" || expression.operator === "--") {
+        assignArithmetic(expression.operand, st);
+      }
       break;
     case "ArithmeticTernary":
       visitArithmetic(expression.test, st, ctx);
@@ -1104,6 +1250,13 @@ function visitArithmetic(expression: ArithmeticExpression | undefined, st: State
       walkSubstitution(expression.script, expression.inner, expression.text, st, ctx);
       break;
   }
+}
+
+function assignArithmetic(target: ArithmeticExpression, st: State): void {
+  if (target.type !== "ArithmeticWord") return;
+  const name = /[$`]/.test(target.value) ? undefined : target.value;
+  const number = [unknown(`\`$${target.value}\`, an arithmetic result`)];
+  assignByName(st, name, number, "an arithmetic expression");
 }
 
 function visitTest(expression: TestExpression, st: State, ctx: Ctx): void {
@@ -1155,6 +1308,7 @@ function clone(st: State): State {
     traps: [...st.traps],
     runningFunctions: new Set(st.runningFunctions),
     pidFiles: st.pidFiles,
+    locals: st.locals === undefined ? undefined : new Map(st.locals),
   };
 }
 
@@ -1167,8 +1321,10 @@ function clone(st: State): State {
  * After branches that may or may not run: everything a branch leaves in this shell, since any of
  * them may be the one that ran. A variable, the positional parameters (`shift`, `set --`) or the
  * working directory the branches leave differently is unknown, a function name holds every
- * definition they leave (`Callee`), and a handler any of them sets stays. A variable every branch
- * leaves empty or a pid this shell started (`$!` in a retry loop, empty had it not run) stays a pid
+ * definition they leave (`Callee`), and a handler any of them sets stays. A variable some branch
+ * may leave unset is also unknown in whether it is set (`maybeUnset`), and a name a function makes
+ * local on some branches only is local on some paths (`locals`). A variable every branch leaves
+ * empty or a pid this shell started (`$!` in a retry loop, empty had it not run) stays a pid
  * that is safe to signal. Not merged: `files` and `pidFiles`, which every branch shares; `output`,
  * which each caller compares itself (`outputChanged`); and `runningFunctions`, which only a
  * function's own walk changes. */
@@ -1189,10 +1345,35 @@ function merge(target: State, branches: readonly State[]): void {
             (value.length > 0 && value.every((piece) => piece.descendantPid === true)))
         );
       });
+      const maybeUnset = branches.some((branch) => {
+        const value = branch.vars.get(name);
+        return value === undefined || isUnset(value) || value.some((piece) => piece.maybeUnset);
+      });
+      const rewrites = branches.some((branch) => attributed(branch, name));
+      const merged = unknown(
+        `\`$${name}\`, which a branch sets differently`,
+        signalSafe ? true : undefined
+      );
       target.vars.set(name, [
-        unknown(`\`$${name}\`, which a branch sets differently`, signalSafe ? true : undefined),
+        {
+          ...merged,
+          ...(maybeUnset ? { maybeUnset: true as const } : {}),
+          ...(rewrites ? { rewrites: true as const } : {}),
+        },
       ]);
     }
+  }
+  if (target.locals !== undefined) {
+    const locals = new Map<string, boolean>();
+    for (const branch of branches) {
+      for (const name of branch.locals?.keys() ?? []) {
+        locals.set(
+          name,
+          branches.every((other) => other.locals?.get(name) === true)
+        );
+      }
+    }
+    target.locals = locals;
   }
   const arrayNames = new Set<string>();
   for (const branch of branches) for (const name of branch.arrays.keys()) arrayNames.add(name);
@@ -1560,7 +1741,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       if (node.type === "For" && known.every((w) => w !== undefined) && known.length <= 16) {
         for (const value of known) {
           const body = clone(st);
-          body.vars.set(name, [literal(value as string)]);
+          assignScalar(body, name, [literal(value as string)]);
           walkList(node.body.commands, body, ctx);
           branches.push(body);
         }
@@ -1572,12 +1753,15 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
             text === "" || (word.exp.length > 0 && word.exp.every((piece) => piece.descendantPid))
           );
         });
-        body.vars.set(
+        assignScalar(
+          body,
           name,
           signalSafe
             ? [unknown(`\`$${name}\`, a loop variable`, true)]
             : [unknown(`\`$${name}\`, a loop variable`)]
         );
+        if (node.type === "Select")
+          assignScalar(body, "REPLY", [unknown("`$REPLY`, read from input")]);
         walkList(node.body.commands, body, ctx);
         branches.push(body);
       }
@@ -1869,10 +2053,20 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
     const value = arrayAssignment
       ? [unknown(`\`$${assignment.name}\`, an array or appended value`, descendantPid || undefined)]
       : expanded;
-    overlay.set(assignment.name, value);
+    // A name whose attribute refuses or rewrites the write is unknown to the command it prefixes.
+    overlay.set(
+      assignment.name,
+      attributed(st, assignment.name)
+        ? [{ ...unknown(`\`$${assignment.name}\`, an attributed variable`), rewrites: true }]
+        : value
+    );
     // `a=1 b=$a` alone assigns left to right in this shell.
     if (command.name === undefined) {
-      if (arrayAssignment) {
+      if (!arrayAssignment) {
+        assignScalar(st, assignment.name, value);
+      } else if (attributed(st, assignment.name)) {
+        keepAttributed(st, assignment.name);
+      } else {
         const elements =
           assignment.array !== undefined && !assignment.append
             ? new Map<string, Expansion>()
@@ -1910,10 +2104,8 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
           }
         }
         st.arrays.set(assignment.name, elements);
-      } else {
-        st.arrays.delete(assignment.name);
+        st.vars.set(assignment.name, value);
       }
-      st.vars.set(assignment.name, value);
     }
   }
   const words = command.name === undefined ? command.suffix : [command.name, ...command.suffix];
@@ -2093,6 +2285,7 @@ function runFunction(
     positional: positionalOf(args),
     source: definition.source,
     script: definition.file ?? outer.script,
+    locals: new Map(),
   };
   child.runningFunctions.add(name);
   try {
@@ -2100,9 +2293,11 @@ function runFunction(
   } catch (error) {
     locateRefusal(error, definition.file);
   }
+  returnLocals(name, child, outer);
   // A call runs in this shell, so everything the body leaves stays: the copy-back rule on `merge`
   // holds here too. Not carried: the positional parameters, which bash restores to the caller's
-  // when a function returns; `files` and `pidFiles` (shared); and `runningFunctions`.
+  // when a function returns; `locals`, the call's own frame, whose names `returnLocals` has
+  // handed back; `files` and `pidFiles` (shared); and `runningFunctions`.
   outer.vars = child.vars;
   outer.exported = child.exported;
   outer.arrays.clear();
@@ -2113,6 +2308,37 @@ function runFunction(
   outer.traps = child.traps;
   outer.output = child.output;
   outer.backgroundStarted ||= child.backgroundStarted;
+}
+
+/** A returning function's locals are the caller's variables again: a name every path made local
+ * gets back the value, array and export it had at the call; one only some paths made local may be
+ * either, so it is unknown and may be unset unless both agree. */
+function returnLocals(name: string, child: State, caller: State): void {
+  for (const [local, everyPath] of child.locals ?? []) {
+    const value = caller.vars.get(local);
+    const elements = caller.arrays.get(local);
+    if (everyPath) {
+      if (value === undefined) child.vars.delete(local);
+      else child.vars.set(local, value);
+      if (elements === undefined) child.arrays.delete(local);
+      else child.arrays.set(local, new Map(elements));
+      if (caller.exported.has(local)) child.exported.add(local);
+      else child.exported.delete(local);
+      continue;
+    }
+    const same =
+      JSON.stringify(child.vars.get(local) ?? null) === JSON.stringify(value ?? null) &&
+      JSON.stringify([...(child.arrays.get(local) ?? [])]) ===
+        JSON.stringify([...(elements ?? [])]);
+    if (same) continue;
+    const either: Expansion = [
+      { ...unknown(`\`$${local}\`, local to \`${name}\` on some paths`), maybeUnset: true },
+    ];
+    child.vars.set(local, either);
+    if (elements !== undefined || child.arrays.has(local)) {
+      child.arrays.set(local, new Map([[UNKNOWN_ARRAY_INDEX, either]]));
+    }
+  }
 }
 
 function functionOutput(
@@ -2129,6 +2355,7 @@ function functionOutput(
     source: definition.source,
     script: definition.file ?? outer.script,
     output: [],
+    locals: new Map(),
   };
   child.runningFunctions.add(name);
   try {
@@ -2213,37 +2440,69 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     case "typeset":
     case "local":
     case "readonly":
-      declaration(base, rest, outer, ctx);
+      declaration(base, rest, outer, ctx, site);
       return;
-    case "unset":
-      for (const arg of operands(rest, "").operands) {
-        const variable = literalText(arg.exp);
-        if (variable !== undefined) {
-          outer.vars.set(variable, UNSET);
-          outer.exported.delete(variable);
-          outer.arrays.delete(variable);
+    case "unset": {
+      const found = operands(rest, "");
+      const functionsOnly = found.options.some((option) => /^-[a-zA-Z]*f/.test(option));
+      const variablesOnly = found.options.some((option) => /^-[a-zA-Z]*v/.test(option));
+      for (const arg of found.operands) {
+        const name = literalText(arg.exp);
+        // `unset -f`, and a plain `unset` of a name no variable holds, remove a function, so the
+        // name runs the command of that name again.
+        if (!variablesOnly) {
+          if (name === undefined) {
+            for (const [fn, callee] of outer.functions) outer.functions.set(fn, orCommand(callee));
+          } else {
+            const callee = outer.functions.get(name);
+            const held = functionsOnly ? undefined : lookup(name, outer, ctx);
+            if (callee !== undefined && held === undefined) outer.functions.delete(name);
+            else if (callee !== undefined && held?.some((piece) => piece.maybeUnset)) {
+              outer.functions.set(name, orCommand(callee));
+            }
+          }
         }
+        if (functionsOnly) continue;
+        if (name === undefined || !IDENTIFIER.test(name)) {
+          assignByName(outer, name, [], "`unset`");
+          continue;
+        }
+        // Bash refuses to unset a `readonly` name, and unsets an `-i`, `-l` or `-u` one.
+        if (attributed(outer, name)) {
+          keepAttributed(outer, name, true);
+          continue;
+        }
+        outer.vars.set(name, UNSET);
+        outer.exported.delete(name);
+        outer.arrays.delete(name);
       }
       return;
+    }
     case "read":
     case "mapfile":
     case "readarray":
     case "getopts": {
-      const found = operands(rest, base === "read" || base === "getopts" ? "adnNptui" : "");
-      const names = base === "getopts" ? found.operands.slice(1, 2) : found.operands;
-      const arrayAt = base === "read" ? rest.findIndex((arg) => literalText(arg.exp) === "-a") : -1;
-      const readsArray = base === "mapfile" || base === "readarray" || arrayAt !== -1;
-      const destinations =
-        arrayAt === -1 || rest[arrayAt + 1] === undefined ? names : [rest[arrayAt + 1] as Arg];
-      for (const arg of destinations) {
-        const variable = literalText(arg.exp);
-        if (variable !== undefined) {
-          outer.vars.set(variable, [unknown(`\`$${variable}\`, read from input`)]);
-          if (readsArray) {
-            const unknownArray = [unknown(`\`$${variable}\`, read from input`)];
-            outer.arrays.set(variable, new Map([[UNKNOWN_ARRAY_INDEX, unknownArray]]));
-          }
-        }
+      readInput(base, rest, outer);
+      return;
+    }
+    case "wait": {
+      // `wait -p NAME` assigns NAME the pid of the job it waited for, or nothing.
+      for (const [index, arg] of rest.entries()) {
+        if (!/^-[a-zA-Z]*p$/.test(literalText(arg.exp) ?? "")) continue;
+        // With no job left to report it unsets NAME.
+        const pid = [{ ...unknown("the pid `wait -p` assigns", true), maybeUnset: true as const }];
+        assignByName(outer, literalText(rest[index + 1]?.exp), pid, "`wait -p`");
+      }
+      return;
+    }
+    case "let": {
+      // Each argument is an arithmetic expression, assigning as `(( … ))` does.
+      for (const arg of rest) {
+        const text = literalText(arg.exp);
+        const command =
+          text === undefined ? undefined : parse(`(( ${text} ))`).commands[0]?.command;
+        if (command?.type === "ArithmeticCommand") visitArithmetic(command.expression, outer, ctx);
+        else forgetVariables(outer, "a variable `let` assigns in text the guard cannot read");
       }
       return;
     }
@@ -2269,26 +2528,36 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     }
     case "printf": {
       // `-v NAME` or `-vNAME`, printf's one option, comes first.
-      const first = literalText(rest[0]?.exp);
-      const joined = first?.startsWith("-v") === true && first.length > 2;
-      const variable =
-        first === "-v" ? literalText(rest[1]?.exp) : joined ? first.slice(2) : undefined;
-      if (variable !== undefined) {
+      const head = rest[0]?.exp ?? [];
+      const leading = head[0];
+      const spaced = literalText(head) === "-v";
+      const joined =
+        !spaced &&
+        leading?.kind === "literal" &&
+        leading.text.startsWith("-v") &&
+        (leading.text.length > 2 || head.length > 1);
+      if (spaced || joined) {
+        const variable = spaced
+          ? literalText(rest[1]?.exp)
+          : literalText([
+              { ...(leading as Piece), text: leading?.text.slice(2) ?? "" },
+              ...head.slice(1),
+            ]);
         // `printf -v NAME '%s' VALUE` assigns VALUE as it is, a pid of this shell's included;
         // another format assigns what printf renders, known only when every part of it is.
-        const printed = rest.slice(joined ? 1 : 2);
+        const printed = rest.slice(spaced ? 2 : 1);
         const [format, value, ...others] = printed;
+        let assigned: Expansion;
         if (literalText(format?.exp) === "%s" && value !== undefined && others.length === 0) {
-          outer.vars.set(variable, value.exp);
+          assigned = value.exp;
         } else {
           const text = printfText(printed);
-          outer.vars.set(
-            variable,
+          assigned =
             text === undefined || text.includes(UNKNOWN_MARKER)
-              ? [unknown(`\`$${variable}\` (printf -v)`)]
-              : [literal(text)]
-          );
+              ? [unknown(`\`$${variable ?? "?"}\` (printf -v)`)]
+              : [literal(text)];
         }
+        assignByName(outer, variable, assigned, "`printf -v`");
         return;
       }
       if (outer.output !== undefined && !stdoutRedirected) {
@@ -2300,13 +2569,12 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     case "eval": {
-      runText(
-        rest.map((arg) => runtimeText(arg.exp)).join(" "),
-        "the `eval` text",
-        outer,
-        ctx,
-        site
-      );
+      const text = rest.map((arg) => runtimeText(arg.exp)).join(" ");
+      runText(text, "the `eval` text", outer, ctx, site);
+      // What the guard could not read of the text may assign any variable.
+      if (text.includes(UNKNOWN_MARKER)) {
+        forgetVariables(outer, "a variable `eval` of text the guard cannot read may assign");
+      }
       return;
     }
     case "trap": {
@@ -2621,37 +2889,182 @@ function changeDirectory(target: Arg | undefined, st: State, ctx: Ctx): void {
   st.cwd = path.resolve(st.cwd, text);
 }
 
-function declaration(builtin: string, list: readonly Arg[], st: State, ctx: Ctx): void {
-  const array = list.some((arg) => /^-[a-zA-Z]*[aA]/.test(literalText(arg.exp) ?? ""));
+/** `export`, `declare`, `typeset`, `local` and `readonly` over their arguments. A name is the
+ * expanded argument's text before its first `=`, so `declare "d=x"` assigns `d`, and a name the
+ * guard cannot read may be any variable (`assignByName`). `-n` makes a nameref, whose later writes
+ * land in the variable it names, which the guard does not follow, so it refuses; `-f` and `-F`
+ * name functions. Inside a function, `local`, and `declare` or `typeset` without `-g`, make a name
+ * local to it (`locals`), unset until assigned; `local` outside one assigns nothing, as bash
+ * refuses it. `readonly` and `-r` keep the value and refuse later writes, and `-i`, `-l` and `-u`
+ * rewrite this value and later ones, so the name carries the attribute (`Piece.rewrites`). */
+function declaration(builtin: string, list: readonly Arg[], st: State, ctx: Ctx, site: Site): void {
+  const options = list
+    .map((arg) => literalText(arg.exp) ?? "")
+    .filter((text) => /^[-+][a-zA-Z]+$/.test(text));
+  const option = (letter: string) =>
+    options.some((text) => text.startsWith("-") && text.includes(letter));
+  if (builtin !== "export" && option("n")) {
+    throw new Refusal(
+      site.snippet,
+      site.line,
+      "the guard does not follow a nameref (`declare -n`), whose writes land in the variable it names"
+    );
+  }
+  if (option("f") || option("F")) return;
+  if (builtin === "local" && st.locals === undefined) return;
+  const array = option("a") || option("A");
+  const exports = builtin === "export" || option("x");
+  const keeps = builtin === "readonly" || option("r");
+  const rewrites = option("i") || option("l") || option("u");
+  const locals =
+    builtin === "local" || ((builtin === "declare" || builtin === "typeset") && !option("g"))
+      ? st.locals
+      : undefined;
+  const writer = `\`${builtin}\``;
   for (const arg of list) {
-    const first = arg.exp[0];
-    const equals = arg.text.indexOf("=");
-    const variable = equals === -1 ? literalText(arg.exp) : arg.text.slice(0, equals);
-    if (variable === undefined || variable.startsWith("-")) continue;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) continue;
-    if (builtin === "export") st.exported.add(variable);
-    if (equals === -1) continue;
-    let value =
-      first?.kind === "literal" && first.text.startsWith(`${variable}=`)
-        ? [
-            ...(first.text.length === equals + 1 ? [] : [literal(first.text.slice(equals + 1))]),
-            ...arg.exp.slice(1),
-          ]
-        : [...arg.exp];
-    // Tilde expands after an assignment's `=` in a declaration's argument too.
-    if (arg.text.charAt(equals + 1) === "~" && arg.text.startsWith(`${variable}=~`)) {
-      value = [...unquotedLiteral(arg.text.slice(equals + 1), 0, st, ctx), ...arg.exp.slice(1)];
+    const text = literalText(arg.exp);
+    if (text !== undefined && /^[-+][a-zA-Z]+$/.test(text)) continue;
+    const { name, value: assigned } = nameAndValue(arg);
+    if (name === undefined) {
+      forgetVariables(st, `a variable ${writer} assigns under a name the guard cannot read`);
+      continue;
     }
-    st.vars.set(variable, array ? [unknown(`\`$${variable}\`, an array`)] : value);
-    if (array) {
-      if (arg.text.slice(equals + 1) === "()") {
-        st.arrays.set(variable, new Map());
-      } else {
-        const unknownArray = [unknown(`\`$${variable}\`, an array assignment`)];
-        st.arrays.set(variable, new Map([[UNKNOWN_ARRAY_INDEX, unknownArray]]));
+    const base = ARRAY_ELEMENT.exec(name)?.[1] ?? name;
+    if (!IDENTIFIER.test(base)) continue;
+    if (exports) st.exported.add(base);
+    // Bash refuses the write, or rewrites the value it takes; `export` or `readonly` of an
+    // attributed name alone changes nothing.
+    if (rewrites || (attributed(st, base) && (assigned !== undefined || locals !== undefined))) {
+      keepAttributed(st, base);
+      continue;
+    }
+    if (attributed(st, base)) continue;
+    if (locals !== undefined) {
+      locals.set(base, true);
+      if (assigned === undefined) {
+        st.vars.set(base, UNSET);
+        st.arrays.delete(base);
       }
     }
+    if (assigned === undefined) {
+      if (keeps) markKept(st, base, ctx);
+      continue;
+    }
+    // Tilde expands after an assignment's `=` in a declaration's argument too.
+    const value = arg.text.startsWith(`${name}=~`)
+      ? [...unquotedLiteral(arg.text.slice(name.length + 1), 0, st, ctx), ...arg.exp.slice(1)]
+      : assigned;
+    if (!array || name !== base) {
+      assignByName(st, name, value, writer);
+    } else {
+      st.vars.set(name, [unknown(`\`$${name}\`, an array`)]);
+      if (arg.text === `${name}=()`) {
+        st.arrays.set(name, new Map());
+      } else {
+        const unknownArray = [unknown(`\`$${name}\`, an array assignment`)];
+        st.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, unknownArray]]));
+      }
+    }
+    if (keeps) markKept(st, base, ctx);
   }
+}
+
+/** `readonly NAME`: the value NAME holds now, from the pane's environment or unset included,
+ * stays, and a later write is refused (`Piece.rewrites`). */
+function markKept(st: State, name: string, ctx: Ctx): void {
+  const held = st.vars.get(name) ?? lookup(name, st, ctx) ?? UNSET;
+  const value = held.length === 0 ? [literal("")] : held;
+  st.vars.set(
+    name,
+    value.map((piece) => ({ ...piece, rewrites: true }))
+  );
+}
+
+/** `read`, `mapfile`/`readarray` and `getopts`, which assign what they read, unknown to the guard:
+ * `read` its names (`REPLY` when it has none) or the array `-a` names, `mapfile` its array
+ * (`MAPFILE` when it has none), and `getopts` its name, `OPTARG` and `OPTIND`. An option that takes
+ * a value takes it spelled apart or joined (`read -ra arr`, `read -rarr`). */
+function readInput(builtin: string, rest: readonly Arg[], st: State): void {
+  const valued = builtin === "read" ? "adinNptu" : builtin === "getopts" ? "" : "dnOsuCc";
+  const writer = `\`${builtin}\``;
+  const input = (name: string | undefined): Expansion => [
+    unknown(`\`$${name ?? "?"}\`, read from input`),
+  ];
+  let array: Arg | undefined;
+  let arrayOption = false;
+  const names: Arg[] = [];
+  let options = builtin !== "getopts";
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i] as Arg;
+    const text = literalText(arg.exp);
+    if (options && text === "--") {
+      options = false;
+      continue;
+    }
+    if (options && text !== undefined && /^-./.test(text)) {
+      for (let j = 1; j < text.length; j += 1) {
+        const flag = text.charAt(j);
+        if (!valued.includes(flag)) continue;
+        const attached = text.slice(j + 1);
+        i += attached === "" ? 1 : 0;
+        const value = attached === "" ? rest[i] : { text: attached, exp: [literal(attached)] };
+        if (flag === "a" && builtin === "read") {
+          arrayOption = true;
+          array = value;
+        }
+        break;
+      }
+      continue;
+    }
+    options = false;
+    names.push(arg);
+  }
+  const fill = (arg: Arg | undefined, fallback: string): void => {
+    const name = arg === undefined ? fallback : literalText(arg.exp);
+    if (name === undefined || !IDENTIFIER.test(name) || attributed(st, name)) {
+      assignByName(st, name, input(name), writer);
+      return;
+    }
+    st.vars.set(name, input(name));
+    st.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, input(name)]]));
+  };
+  if (builtin === "getopts") {
+    const name = names[1];
+    if (name !== undefined) assignByName(st, literalText(name.exp), input(name.text), writer);
+    for (const variable of ["OPTARG", "OPTIND"]) assignScalar(st, variable, input(variable));
+  } else if (builtin !== "read") {
+    fill(names[0], "MAPFILE");
+  } else if (arrayOption) {
+    if (array !== undefined) fill(array, "");
+  } else if (names.length === 0) {
+    assignScalar(st, "REPLY", input("REPLY"));
+  } else {
+    for (const name of names) assignByName(st, literalText(name.exp), input(name.text), writer);
+  }
+}
+
+/** A function's callee after an `unset` that may have removed it: its name may run the command
+ * of that name too. */
+function orCommand(callee: Callee): Callee {
+  return callee.includes(undefined) ? callee : [...callee, undefined];
+}
+
+/** A declaration argument's name, its expanded text before the first `=` (undefined when the
+ * guard cannot read it), and the value after that `=` (undefined when it has none). */
+function nameAndValue(arg: Arg): { name: string | undefined; value: Expansion | undefined } {
+  let name = "";
+  for (const [index, piece] of arg.exp.entries()) {
+    if (piece.kind !== "literal") return { name: undefined, value: undefined };
+    const equals = piece.text.indexOf("=");
+    if (equals === -1) {
+      name += piece.text;
+      continue;
+    }
+    const rest = piece.text.slice(equals + 1);
+    const value = [...(rest === "" ? [] : [{ ...piece, text: rest }]), ...arg.exp.slice(index + 1)];
+    return { name: name + piece.text.slice(0, equals), value };
+  }
+  return { name, value: undefined };
 }
 
 function checkTargets(
@@ -2948,9 +3361,13 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
   // A name unset here is not in the child's environment either, the pane's included.
   for (const [name, value] of st.vars) if (isUnset(value)) vars.set(name, value);
   for (const [name, value] of overlay) vars.set(name, value);
+  const exported = new Set(vars.keys());
+  // After a write the guard could not read, any name may have been exported with any value.
+  const any = st.vars.get(ANY_NAME);
+  if (any !== undefined) vars.set(ANY_NAME, any);
   return {
     vars,
-    exported: new Set(vars.keys()),
+    exported,
     cwd: st.cwd,
     cwdWhy: st.cwdWhy,
     positional: [],
@@ -2967,6 +3384,7 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
     functions: new Map(),
     traps: [],
     runningFunctions: new Set(),
+    locals: undefined,
   };
 }
 
@@ -3245,6 +3663,8 @@ function runFile(
         st.traps = child.traps;
         st.output = child.output;
         st.backgroundStarted ||= child.backgroundStarted;
+        // A `local` in a file sourced inside a function belongs to that function's frame.
+        st.locals = child.locals;
       }
     } else checkCode(language, content, st, ctx);
   } catch (error) {
@@ -3465,6 +3885,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     arrays: new Map(),
     functions: new Map(),
     traps: [],
+    locals: undefined,
   });
   const run = (ctx: Ctx, attempt: () => void, fallback: string): string | undefined => {
     try {
