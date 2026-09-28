@@ -8,9 +8,10 @@
  *
  * A pane may delete, move, truncate, overwrite, or recursively change the mode or owner of paths
  * under its writable roots only: its issue workspace (`LEGION_WORKSPACE`, `.jj` included) and any
- * directory below `/tmp` except `/tmp` itself, a glob over it, or the tmux and ssh socket
- * directories there. The guard cannot tell which permitted `/tmp` directory belongs to the pane. A
- * pane signals only processes descended from its own Oh My Pi process.
+ * directory below `/tmp` except `/tmp` itself, a glob over it, the tmux and ssh socket directories
+ * there, or the one holding the pane's `HOME` or `TMUX_TMPDIR`. The guard cannot tell which other
+ * permitted `/tmp` directory belongs to the pane. A pane signals only processes descended from its
+ * own Oh My Pi process.
  *
  * Commands are parsed by `unbash`, a bash parser, and the guard follows what bash would do with
  * them: quoting, `$HOME`, `~`, variables assigned earlier in the same command (`$(mktemp -d)`
@@ -20,6 +21,13 @@
  * `pane-guard-code.ts`). A command the parser reports as malformed is refused, and so is a target
  * the guard cannot resolve (a variable read from input, a command's output): it never guesses.
  * A command whose walk visits more than `MAX_WALK_STEPS` nodes is refused, never allowed unread.
+ *
+ * Every value the guard produces is known, unset, or unknown, and never one standing in for
+ * another: a value it cannot know taken as some harmless concrete one (the empty string, the text
+ * left as it was, a parameter taken as unset) turns a refusal into a silent allow. So an argument
+ * of a shell whose arguments it does not know is unknown, set or not; `unset` leaves a name unset
+ * rather than empty; a pattern it cannot split as bash does leaves the whole expansion unknown; and
+ * a word that may be several arguments or none leaves the arguments it is among unknown.
  *
  * A `trap` handler's body is judged once, against the state of the shell that set it after that
  * shell's last statement, where bash runs an EXIT handler; a subshell's handlers (a substitution,
@@ -592,15 +600,33 @@ function elements(values: readonly Expansion[], joined: boolean): Piece[][] {
   return values.length === 0 ? [[NO_ELEMENTS]] : values.map((value) => [...value]);
 }
 
-/** A parameter's value as an operator (`${1:-x}`) tests it: a special parameter from what the
- * shell holds (`$1` from its arguments, unset past the last), any other name from `lookup`. */
-function operatorValue(name: string, st: State, ctx: Ctx): Expansion | undefined {
-  if (!/^([0-9]+|[@*#?$!-])$/.test(name)) return lookup(name, st, ctx);
-  if (/^[1-9][0-9]*$/.test(name) && st.positional !== undefined) {
-    return st.positional[Number(name) - 1];
+/** A parameter as an operator (`${D-x}`, `${1:-x}`) tests it: whether it is set, undefined when the
+ * guard cannot tell (an argument of a shell whose arguments it does not know, `$!` before any
+ * background job it saw), and its value when set. A special parameter comes from what the shell
+ * holds (`$1` from its arguments, unset past the last), any other name from `lookup`. */
+function operatorValue(
+  name: string,
+  st: State,
+  ctx: Ctx
+): { readonly set: boolean | undefined; readonly value: Expansion } {
+  const unknownValue = [unknown(`\`$${name}\``)];
+  if (!/^([0-9]+|[@*#?$!-])$/.test(name)) {
+    const value = lookup(name, st, ctx);
+    return value === undefined ? { set: false, value: [] } : { set: true, value };
   }
+  if (/^[1-9][0-9]*$/.test(name) || name === "@" || name === "*") {
+    if (st.positional === undefined) return { set: undefined, value: unknownValue };
+    const value =
+      name === "@" || name === "*"
+        ? st.positional.length === 0
+          ? undefined
+          : elements(st.positional, true)[0]
+        : st.positional[Number(name) - 1];
+    return value === undefined ? { set: false, value: [] } : { set: true, value };
+  }
+  if (name === "!" && !st.backgroundStarted) return { set: undefined, value: unknownValue };
   const alternatives = parameter(name, true, st, ctx);
-  return alternatives.length === 1 ? alternatives[0] : [unknown(`\`$${name}\``)];
+  return { set: true, value: alternatives.length === 1 ? (alternatives[0] ?? []) : unknownValue };
 }
 
 function parameterExpansion(
@@ -637,30 +663,33 @@ function parameterExpansion(
   }
   const operator = part.operator;
   if (operator === undefined) return parameter(name, quoted, st, ctx);
-  const value = operatorValue(name, st, ctx);
-  const set = value !== undefined;
-  const nonEmpty = set && value.map((p) => p.text).join("") !== "";
-  const known = !set || value.every((p) => p.kind === "literal");
+  const { set, value } = operatorValue(name, st, ctx);
+  const nonEmpty = set === true && value.map((p) => p.text).join("") !== "";
+  const known = set === false || (set === true && value.every((p) => p.kind === "literal"));
   // A value holding known text or a pid this shell started is non-empty whatever else it holds.
   const surelyNonEmpty =
-    set && value.some((p) => p.descendantPid === true || (p.kind === "literal" && p.text !== ""));
+    set === true &&
+    value.some((p) => p.descendantPid === true || (p.kind === "literal" && p.text !== ""));
+  const undecided = [[unknown(`\`${part.text}\``)]];
   const operand = (): Piece[][] =>
     part.operand === undefined ? [[literal("")]] : expandWord(part.operand, st, ctx);
   switch (operator) {
     case ":-":
     case ":=":
       if (surelyNonEmpty) return parameter(name, quoted, st, ctx);
-      if (!known) return [[unknown(`\`${part.text}\``)]];
+      if (!known) return undecided;
       return nonEmpty ? parameter(name, quoted, st, ctx) : operand();
     case "-":
     case "=":
-      // Only whether the parameter is set decides, and that the guard knows.
+      // Only whether the parameter is set decides.
+      if (set === undefined) return undecided;
       return set ? parameter(name, quoted, st, ctx) : operand();
     case ":+":
       if (surelyNonEmpty) return operand();
-      if (!known) return [[unknown(`\`${part.text}\``)]];
+      if (!known) return undecided;
       return nonEmpty ? operand() : [[literal("")]];
     case "+":
+      if (set === undefined) return undecided;
       return set ? operand() : [[literal("")]];
     case ":?":
     case "?":
@@ -694,10 +723,13 @@ function patternExpansion(
           part.text === `${head}${part.replace.pattern.text}}`);
   const slashPattern = operator === "/" || operator === "//";
   if (!accounted || (slashPattern && part.replace?.pattern.text === "")) return unknownResult;
-  // An argument past the last one this shell knows it was given is unset, which bash expands empty.
-  const pastLast = /^[1-9][0-9]*$/.test(part.parameter) && st.positional !== undefined;
-  const raw = operatorValue(part.parameter, st, ctx);
-  const value = raw === undefined && pastLast ? "" : literalText(raw);
+  // Unset expands empty: an argument past the last one this shell knows it was given, or a name it
+  // unset. A name merely absent from the command may still be in the environment bash runs with.
+  const { set, value: held } = operatorValue(part.parameter, st, ctx);
+  const knownUnset =
+    set === false &&
+    (/^([1-9][0-9]*|[@*])$/.test(part.parameter) || isUnset(st.vars.get(part.parameter)));
+  const value = set === true ? literalText(held) : knownUnset ? "" : undefined;
   if (value === undefined || value.length > MAX_PATTERN_VALUE || !isAscii(value)) {
     return unknownResult;
   }

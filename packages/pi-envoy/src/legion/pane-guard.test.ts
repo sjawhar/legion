@@ -922,8 +922,8 @@ describe("scripts a command runs", () => {
     for (const command of [
       'set --; f() { rm -rf "$1"; }; f "$@" "$HOME/.ssh"',
       'set --; set -- "$@" "$HOME/.ssh"; rm -rf "$1"',
-      'arr=(); f() { rm -rf "$1"; }; f "${arr[@]}" "$HOME/.ssh"',
-      'arr=(""); f() { rm -rf "$2"; }; f "${arr[@]}" "$HOME/.ssh"',
+      `arr=(); f() { rm -rf "$1"; }; f "\${arr[@]}" "$HOME/.ssh"`,
+      `arr=(""); f() { rm -rf "$2"; }; f "\${arr[@]}" "$HOME/.ssh"`,
     ]) {
       expect(bash(command), command).toContain(path.join(home, ".ssh"));
     }
@@ -936,8 +936,13 @@ describe("scripts a command runs", () => {
     expect(bash(`f() { rm -rf "\${1:-$LEGION_WORKSPACE/build}"; }; f "$HOME"`)).toContain(home);
     // With no argument the default is what runs.
     expect(bash(`bash ${defaulted}`)).toBeUndefined();
-    // A shell that did not say what its arguments are cannot say whether the default applies.
-    expect(bash(`rm -rf "\${1:-$LEGION_WORKSPACE/build}"`)).toBeDefined();
+    // A shell that did not say what its arguments are cannot say whether the default applies, nor
+    // whether `$1` is set at all: bash, given none, makes `/${1+x}` the root.
+    for (const operator of [":-", "-", ":+", "+"]) {
+      expect(bash(`rm -rf "/\${1${operator}$LEGION_WORKSPACE/build}"`), operator).toContain(
+        "rm would delete"
+      );
+    }
   });
 
   test("does not know the arguments after a shift in a branch it cannot decide", () => {
