@@ -85,47 +85,33 @@ type lineCandidate struct {
 //
 // And the marks are written in one order, so a mark the next text still carries is closed and
 // opened again inside that text's other marks wherever the order puts it after them: bold inside
-// italic comes out as `*`, `**` and `*` side by side, one run of four asterisks, which the parser
-// cannot split as written. A run written with such a fused delimiter run is written first with
-// open marks kept open (keepingOpen), kept only where that reads back with no delimiter run fused,
-// and otherwise written as a run whose marks fuse nowhere is.
+// italic comes out as `*`, `**` and `*` side by side, one run of four asterisks. The parser splits
+// such a fused run as written where its flanking allows, so a fused first writing that reads back
+// is kept, as main writes it. One that does not is written again with open marks kept open
+// (keepingOpen), each such spelling kept only where it reads back with no delimiter run fused,
+// and then in the plain respellings.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
 	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
 	held := delimitersInText(nodes)
 	bareURL := textAfterBareURL(nodes, context.tableCell)
-	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused || !fused && r.runReadsBack(from, prefix, nodes) {
+	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused || r.runReadsBack(from, prefix, nodes) {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
+	var spellings []runSpelling
 	if fused {
-		if r.rewriteReadsBack(from, nodes, prefix, context, respellings(held, bareURL, true), true) {
-			return
-		}
-		r.b.Truncate(from)
-		r.b.WriteString(written)
-		if r.runReadsBack(from, prefix, nodes) {
-			return
-		}
+		spellings = respellings(held, bareURL, true)
 	}
-	if r.rewriteReadsBack(from, nodes, prefix, context, respellings(held, bareURL, false), false) {
-		return
+	for _, spelling := range append(spellings, respellings(held, bareURL, false)...) {
+		r.b.Truncate(from)
+		fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
+		if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes) {
+			return
+		}
 	}
 	r.b.Truncate(from)
 	r.b.WriteString(written)
-}
-
-// rewriteReadsBack writes the run since from in each of spellings in turn and keeps the first that
-// reads back, and, when unfused says so, writes no fused delimiter run, reporting whether one did.
-func (r *renderer) rewriteReadsBack(from int, nodes []*Node, prefix string, context inlineContext, spellings []runSpelling, unfused bool) bool {
-	for _, spelling := range spellings {
-		r.b.Truncate(from)
-		fused := r.writeInlineRun(nodes, prefix, context, spelling)
-		if r.err == nil && !(unfused && fused) && r.runReadsBack(from, prefix, nodes) {
-			return true
-		}
-	}
-	return false
 }
 
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its

@@ -74,19 +74,34 @@ func TestRenderKeepsTheEscapeThatEndsABareURL(t *testing.T) {
 	}
 }
 
-// A mark the next text still carries stays open around the marks that text adds: bold inside
-// italic is written `*a **b** c*`. Closing the italic and opening both again writes `*`, `**` and
-// `*` side by side, one run of four asterisks that reads back with bold twice, and every write-back
-// of that reading added two more.
-func TestRenderKeepsAMarkOpenAroundTheMarksInsideIt(t *testing.T) {
-	for _, c := range []struct{ markdown, want string }{
-		{"*a **b** c*\n", "*a **b** c*\n"},
-		{"_a **b** c_\n", "*a **b** c*\n"},
-		{"*a **b** c **d** e*\n", "*a **b** c **d** e*\n"},
+// A fused delimiter run that reads back is written as main writes it: the parser splits it as
+// written, and the browser editor's parser reads the same bytes as the same tree.
+func TestRenderKeepsAFusedRunThatReadsBack(t *testing.T) {
+	assertRenders(t, []struct{ markdown, want string }{
+		{"*x**b***\n", "*x****b***\n"},
+		{"_p x**b**_ q\n", "*p x****b*** q\n"},
+		{"> *x**b***\n", "> *x****b***\n"},
+		{"- *x**b***\n", "- *x****b***\n"},
+		{"*a **b** c*\n", "*a&#32;****b****&#32;c*\n"},
+		{"*a **b** c **d** e*\n", "*a&#32;****b****&#32;c&#32;****d****&#32;e*\n"},
+		{"| *a **b** c* |\n| --- |\n", "| *a&#32;****b****&#32;c* |\n| --- |\n"},
+		{"> _&#42; ~ it's **`` x ``**_\n", "> *\\* ~ it's&#32;****`x`***\n"},
+	})
+}
+
+// A fused run that does not read back is written with open marks kept open, so that no mark the
+// next text still carries is closed and opened again inside that text's other marks.
+func TestRenderKeepsAMarkOpenWhereAFusedRunDoesNotReadBack(t *testing.T) {
+	assertRenders(t, []struct{ markdown, want string }{
 		{"*a **b [l](https://e.com/u) c** d*\n", "*a **b [l](https://e.com/u) c** d*\n"},
-		{"> *a **b** c*\n", "> *a **b** c*\n"},
-		{"| *a **b** c* |\n| --- |\n", "| *a **b** c* |\n| --- |\n"},
-	} {
+		{"*a **b***\n", "*a **b***\n"},
+	})
+}
+
+// assertRenders requires each markdown to render as want and to be stored by ParseForWrite.
+func assertRenders(t *testing.T, cases []struct{ markdown, want string }) {
+	t.Helper()
+	for _, c := range cases {
 		doc, err := Parse(c.markdown)
 		if err != nil {
 			t.Fatalf("Parse(%q) = %v", c.markdown, err)
