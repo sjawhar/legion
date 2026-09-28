@@ -164,6 +164,11 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	} else {
 		conn.Close()
 	}
+	// Both sides here are the listener's own Addr(), so this pins what p.newRuntime was told, not
+	// the address itself: that the returned address names a real worker-stream socket is proved
+	// by internal/stream's dial-and-hello tests, not by the dial above (a bare TCP connect, which
+	// proves only that something is listening). A requested-rather-than-bound address fails the
+	// :0 check above.
 	if bound := bootField(t, logged.String(), "workerStream"); address != bound {
 		t.Errorf("the runtime was told to have shims dial %q, want %q, the address the stream listener bound", address, bound)
 	}
