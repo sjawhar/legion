@@ -21,7 +21,20 @@ let env: NodeJS.ProcessEnv;
 const repository = path.resolve(import.meta.dir, "../../../..");
 
 // Where the guard refuses each tracked shell script: the innermost `file:line` its refusal names.
-// When a refusal moves on purpose, regenerate it as pane-guard-scripts.ts says.
+// It is regenerated with pane-guard-scripts.ts, never edited by hand. A failure has one of two
+// shapes, and they want opposite responses:
+//
+// - Entries changed (`Expected - N`, `Received + N`) for files the branch contains: a refusal moved
+//   to another line or file. If the guard or the script changed it on purpose, regenerate;
+//   otherwise the change is the finding.
+// - An entry added or removed for a file the branch does not contain: the table is derived from the
+//   checkout, and CI tests a pull request merged with main, so a script that lands on main changes
+//   this expectation without the branch changing. Merge main forward and regenerate. An entry added
+//   by hand for a file the branch lacks fails the other way on the branch itself.
+//
+// This is the accepted cost of recording `file:line` rather than a substring of each refusal, which
+// is what makes a refusal that moves fail here. The test is not flaky: it is right about a
+// population that changed.
 const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   // Writes or deletes under the operator's home: the dispatch backups, a profile's plugin tree.
   "packages/envoy/deploy/scripts/autodeploy.sh": "packages/envoy/deploy/scripts/autodeploy.sh:145",
@@ -35,6 +48,10 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/stage3-4b13b-acceptance.sh:1254",
   "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/stage3-devbox-workflow.sh:1136",
   "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:999",
+  // Ends its session on the shared default tmux server, where `kill-session` can end anyone's, and
+  // then deletes its Claude project directory under the operator's home.
+  "packages/claude-envoy/scripts/smoke-clear-rebind.sh":
+    "packages/claude-envoy/scripts/smoke-clear-rebind.sh:42",
   // A library run bare, without the arguments every caller passes: bash stops at its argument
   // check, and the guard, which walks a command whatever a test before it decides, reaches the
   // paths an empty argument makes (`--control`, `--dest`).

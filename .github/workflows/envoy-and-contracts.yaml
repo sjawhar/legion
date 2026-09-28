@@ -72,9 +72,15 @@ jobs:
             contracts:
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
+              # A lockfile or root manifest change moves what the package resolves (#1519 nested
+              # a second zod under contracts through the lock alone).
+              - 'package.json'
+              - 'bun.lock'
             envoy_client:
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
+              - 'package.json'
+              - 'bun.lock'
             envoy:
               - 'packages/envoy/**'
               - 'packages/proof-editor/**'
@@ -82,6 +88,9 @@ jobs:
               - 'skills/dispatch/**'
               - 'go.work'
               - 'go.work.sum'
+              # Its bun run gen:go step imports contracts' zod schemas.
+              - 'package.json'
+              - 'bun.lock'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, must run it.
@@ -97,14 +106,20 @@ jobs:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
+              - 'package.json'
+              - 'bun.lock'
             claude_plugin:
               - 'packages/claude-envoy/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
+              - 'package.json'
+              - 'bun.lock'
             pi_envoy:
               - 'packages/pi-envoy/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
+              - 'package.json'
+              - 'bun.lock'
               # The Oh My Pi pin the phase-stall test runs (extensions/legion-phase-stall-omp.test.ts).
               - 'packages/daemon/src/daemon/omp-pin.ts'
               - '.github/actions/install-omp/**'
