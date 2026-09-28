@@ -141,12 +141,18 @@ interface Trap {
 
 /** A `trap` operand as bash names the condition: case aside, `0` is `EXIT`, and a signal may carry
  * its `SIG` prefix (`SIGINT` is `INT`). `SIGEXIT` is no condition bash knows, so it stays as
- * written and matches nothing. */
+ * written and matches nothing. Signal numbers other than `0` are not translated, so a removal
+ * naming one (`trap - 2`) removes nothing: the handler stays and is walked. */
 function trapSignal(operand: string): string {
   const name = operand.toUpperCase();
   if (name === "0") return "EXIT";
   return name.startsWith("SIG") && name !== "SIGEXIT" ? name.slice(3) : name;
 }
+
+/** The condition a handler records for a `trap` operand the guard cannot read. `trapSignal`
+ * names every readable one in capitals, and a removal leaves out the operands it cannot read, so
+ * no removal names this: the handler stays and is walked. */
+const UNREADABLE_CONDITION = "an unreadable condition";
 
 /** What a refusal names: the simple command it came from, where that command sits, and the
  * rule. A refusal inside a script is rethrown by the command that ran it with the script's
@@ -186,9 +192,10 @@ interface Site {
 const MAX_DEPTH = 8;
 /** The syntax nodes one command's walk may visit before the guard refuses it as too large to judge.
  * The repository's largest tracked script, `scripts/e2e/stage4b-sandbox-tree.sh`, reaches its
- * first refusal after about 20,700, in about half a second through the guard on a loaded devbox.
- * What a node costs depends on what it does (a script it reads and parses costs far more than a
- * `:`), so the budget bounds a walk's size, not its time. */
+ * first refusal after about 20,700, in about a third of a second through the guard on a loaded
+ * devbox. What a node costs depends on what it does: 100,000 `true;` walk in about 200 ms, while a
+ * budget's worth of `rm -rf a;`, each target resolved against the pane's roots, takes about
+ * 490 ms. So the budget bounds a walk's size, not its time. */
 const MAX_WALK_STEPS = 100_000;
 const MAX_ALTERNATIVES = 64;
 const MAX_SCRIPT_BYTES = 1024 * 1024;
@@ -1657,24 +1664,38 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     }
     case "trap": {
       const [handler, ...conditions] = operands(rest, "").operands;
-      const text = literalText(handler?.exp);
-      // A condition the guard cannot read could be any of them: a removal names none it can apply,
-      // and a handler set for it is still walked.
-      const named = conditions.map((arg) => trapSignal(literalText(arg.exp) ?? ""));
+      if (handler === undefined) return;
+      const text = literalText(handler.exp);
+      // A condition the guard cannot read could be any condition. A removal resets only the
+      // conditions it can read, so `trap - "$x"` resets nothing; a handler set for one records
+      // UNREADABLE_CONDITION, which no removal names, so it stays and is walked.
+      const readable = conditions.map((arg) => literalText(arg.exp));
       if (text === "-") {
         // `trap - INT` resets INT and leaves every other handler, the EXIT one included; `trap -`
         // naming nothing is a usage error that resets nothing.
+        const named = readable.flatMap((condition) =>
+          condition === undefined ? [] : [trapSignal(condition)]
+        );
         outer.traps = outer.traps.flatMap((trap) => {
           const signals = trap.signals.filter((signal) => !named.includes(signal));
           return signals.length === 0 ? [] : [{ ...trap, signals }];
         });
-      } else if (text !== undefined && !text.startsWith("-")) {
+      } else if (text === undefined) {
+        throw new Refusal(
+          site.snippet,
+          site.line,
+          `the guard cannot read the handler this \`trap\` sets, \`${handler.text}\` (${handler.exp.find((piece) => piece.kind !== "literal")?.why ?? "a value the guard cannot know"}), so it cannot check what runs when this shell exits; write the handler out, or put it in a function`
+        );
+      } else if (!text.startsWith("-")) {
+        const signals = readable.map((condition) =>
+          condition === undefined ? UNREADABLE_CONDITION : trapSignal(condition)
+        );
         outer.traps = [
           ...outer.traps,
           {
             text,
             site,
-            signals: named.length === 0 ? ["EXIT"] : named,
+            signals: signals.length === 0 ? ["EXIT"] : signals,
             file: outer.script ?? outer.source,
           },
         ];

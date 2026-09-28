@@ -351,6 +351,39 @@ describe("scripts a command runs", () => {
     }
     // A handler for several conditions stays for the ones not reset, and its body is reachable.
     expect(bash(`trap 'rm -rf "$HOME/y"' EXIT INT; trap - EXIT; echo done`)).toContain(home);
+    // A signal number other than 0 is not translated, so a removal naming one removes nothing.
+    expect(bash(`trap 'rm -rf "$HOME/y"' INT; trap - 2; echo done`)).toContain(home);
+  });
+
+  test("keeps a handler set for a condition it cannot read, whatever a removal names", () => {
+    const set = (condition: string) => `trap 'rm -rf "$HOME/y"' ${condition}`;
+    // bash runs the handler in every one of these: an unreadable condition could be any.
+    for (const command of [
+      `${set('"$(echo EXIT)"')}; trap - "$(echo INT)"`,
+      `a=$(cat); b=$(cat); ${set('"$a"')}; trap - "$b"`,
+      `s=$(cat /dev/stdin); ${set('"$s"')}; trap - "$s"`,
+      `( ${set('"$(echo EXIT)"')}; trap - "$(echo INT)" )`,
+      `${set('"$(echo EXIT)"')}; trap - EXIT`,
+      `${set("EXIT")}; trap - "$(echo INT)"`,
+      set('"$(echo EXIT)"'),
+      `trap - "$(echo INT)"; ${set('"$(echo EXIT)"')}`,
+    ]) {
+      expect(bash(command)).toContain(home);
+    }
+    // One unreadable removal keeps every handler set for an unreadable condition.
+    expect(
+      bash(`${set('"$(echo EXIT)"')}; trap 'rm -rf "$HOME/z"' "$(echo TERM)"; trap - "$(echo INT)"`)
+    ).toContain(home);
+    // Conditions that resolve are matched as written.
+    expect(bash(`a=EXIT; b=INT; ${set('"$a"')}; trap - "$b"`)).toContain(home);
+    expect(bash(`a=EXIT; ${set('"$a"')}; trap - "$a"`)).toBeUndefined();
+  });
+
+  test("refuses a trap whose handler it cannot read", () => {
+    expect(bash('c=$(cat); trap "$c" EXIT')).toContain("cannot read the handler");
+    expect(
+      bash('cleanup() { rm -rf "$LEGION_WORKSPACE/build"; }; trap cleanup EXIT')
+    ).toBeUndefined();
   });
 
   test("walks `! command`, a pipeline of one, in this shell", () => {
