@@ -3447,10 +3447,14 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     ) {
       workspace = undefined;
     }
+    // A home or tmux directory under the scratch root is not the pane's scratch: the /tmp
+    // directory holding it is protected whole, as a rig's run directory holds its OMP home.
     const protectedScratch = [...PROTECTED_SCRATCH];
     const tmuxDir = env.TMUX_TMPDIR === undefined ? undefined : realish(env.TMUX_TMPDIR, true);
-    if (tmuxDir?.startsWith(`${scratch}/`)) {
-      protectedScratch.push(tmuxDir.slice(scratch.length + 1).split("/")[0] ?? "");
+    for (const owned of [tmuxDir, home]) {
+      if (owned?.startsWith(`${scratch}/`)) {
+        protectedScratch.push(owned.slice(scratch.length + 1).split("/")[0] ?? "");
+      }
     }
     return { workspace, scratch, protectedScratch };
   };

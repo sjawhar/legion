@@ -16,8 +16,10 @@ A `bash` command, `eval` code, or `hub` process start may delete (`rm`, `unlink`
 `find -exec rm`, `shred`), move (`mv`), truncate (`truncate`), overwrite by redirection or `tee`
 (an existing file only), or recursively change the mode or owner (`chmod -R`, `chown -R`) of paths
 under the pane's issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and any directory below
-`/tmp` except `/tmp` itself, a glob over it, and its tmux and ssh socket directories. The guard
-cannot tell which permitted `/tmp` directory belongs to this pane. It parses the command with a bash
+`/tmp` except `/tmp` itself, a glob over it, its tmux and ssh socket directories, and the `/tmp`
+directory that holds the pane's `HOME` or `TMUX_TMPDIR` when either sits there (an e2e rig's run
+directory holds its Oh My Pi home). The guard cannot tell which other permitted `/tmp` directory
+belongs to this pane. It parses the command with a bash
 parser and resolves each target as bash would: through `$HOME`, `~`, variables set earlier in the
 same command, `$(mktemp -d)`, `cd`, braces, the paths `realpath`, `dirname`, `basename`,
 `readlink -f` and `git rev-parse --show-toplevel` print, pattern replacement and removal of a known

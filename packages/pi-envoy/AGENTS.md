@@ -263,8 +263,9 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 subagents: the check runs in the `tool_call` hook ahead of the subagent exemption, beside
 `PANE_RULES`) to the boundary `docs/deployment.md` "The pane guard" describes: no deletion, move,
 truncation, overwrite of an existing file, or recursive mode or owner change outside
-`LEGION_WORKSPACE` and any directory below `/tmp` except `/tmp` itself, a glob over it, and the
-tmux and ssh socket directories. The guard cannot tell which allowed `/tmp` directory belongs to
+`LEGION_WORKSPACE` and any directory below `/tmp` except `/tmp` itself, a glob over it, the tmux
+and ssh socket directories, and the `/tmp` directory holding the pane's `HOME` or `TMUX_TMPDIR`
+(a rig's run directory). The guard cannot tell which other allowed `/tmp` directory belongs to
 the pane. A TypeScript-daemon root, which has no `LEGION_WORKSPACE` and whose bash is one `legion`
 command, gets the `/tmp` root alone. No signal reaches a process that is not a descendant of the
 pane's Oh My Pi process (`/proc` read at check time). It reads the variables both daemons set on

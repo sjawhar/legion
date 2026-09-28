@@ -122,6 +122,35 @@ describe("the pane guard's command families", () => {
       expect(bash(`cd ~ && ${build(".bashrc")}`)).toContain(path.join(home, ".bashrc"));
     });
   }
+
+  // A rig's make_omp_home puts the pane's HOME in the run's own /tmp directory, beside its state.
+  for (const [family, build] of Object.entries(FAMILIES)) {
+    test(`${family}: a HOME under /tmp keeps its files, and the run directory holding it is refused whole`, () => {
+      const run = path.join(scratch, "legion-e2e-run");
+      const rigHome = path.join(run, "omp-home");
+      const rigWorkspace = path.join(run, "state", "workspaces", "LEGION-2");
+      mkdirSync(path.join(rigHome, ".ssh"), { recursive: true });
+      mkdirSync(rigWorkspace, { recursive: true });
+      writeFileSync(path.join(rigHome, ".ssh", "id_ed25519"), "key");
+      writeFileSync(path.join(rigHome, ".bashrc"), "profile");
+      writeFileSync(path.join(rigWorkspace, "notes.txt"), "notes");
+      const rigGuard = createPaneGuard({ workspace: rigWorkspace, ompPid: process.pid, scratch });
+      const rigEnv = { ...env, HOME: rigHome, LEGION_WORKSPACE: rigWorkspace };
+      const rig = (command: string): string | undefined =>
+        rigGuard.bash(command, rigWorkspace, rigEnv);
+      try {
+        for (const target of ['"$HOME/.bashrc"', "~/.ssh/id_ed25519", run]) {
+          expect(rig(build(target)), target).toContain("outside the issue workspace");
+        }
+        // The rig's workspace and the pane's own /tmp directories stay writable.
+        for (const target of ['"$LEGION_WORKSPACE/notes.txt"', `${scratch}/mine/notes.txt`]) {
+          expect(rig(build(target)), target).toBeUndefined();
+        }
+      } finally {
+        rmSync(run, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 describe("resolution", () => {

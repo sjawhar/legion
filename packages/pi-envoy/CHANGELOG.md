@@ -131,6 +131,13 @@
   (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `omp-roundtrip.sh`) run their sessions
   on their own tmux server, so the guard allows their cleanup. `src/legion/pane-guard-walk.ts`
   prints every refusal a script meets, not only the first.
+- A pane whose `HOME` sits under `/tmp` keeps it (LEGION-300). The guard counted every directory
+  below `/tmp` as the pane's scratch, so where an e2e rig's `make_omp_home` puts the pane's home
+  (`/tmp/<run>/omp-home`), `rm -rf ~`, `rm -rf "$HOME/.ssh"` and `rm -rf /tmp/<run>` were allowed:
+  the 2026-09-13 incident's shape, in the panes that run the most unattended agents. The `/tmp`
+  directory holding `HOME` is now protected whole, as the one holding `TMUX_TMPDIR` already was;
+  the workspace inside it stays writable. A pane whose home is outside `/tmp` (`/home/ubuntu`, the
+  daemon's state home) was never exposed.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot
