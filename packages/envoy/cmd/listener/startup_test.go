@@ -112,8 +112,9 @@ func TestAWebhookIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 
 // A listener built before the KV key check stored role claims, interests, sessions and CI records
 // under keys this one refuses to write (testnats.LegacyKeys), and every listener on that NATS reads
-// those buckets as it starts. It must start healthy over them and serve the ordinary keys beside
-// them: one stored role must not keep every listener from starting.
+// the first three buckets as it starts, and the CI bucket when it mounts the GitHub webhook route.
+// It must start healthy over them and serve the ordinary keys beside them: one stored role must not
+// keep every listener from starting.
 func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 	client, err := bus.ConnectOwningStream([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
@@ -165,7 +166,7 @@ func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 		}
 	}
 
-	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "startup-legacy")
+	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "startup-legacy", githubWebhookEnv...)
 	listener.waitHealthy(t)
 	request, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/v1/roles/reviewer", nil)
 	if err != nil {
@@ -175,6 +176,139 @@ func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 	if status, answer := do(t, request); status != http.StatusOK || !strings.Contains(answer, `"holder":"ses_live"`) {
 		t.Fatalf("GET /v1/roles/reviewer beside the earlier listener's keys: status %d %q, want 200 naming ses_live\n%s", status, answer, listener.output.String())
 	}
+}
+
+// githubWebhookEnv mounts the listener's GitHub webhook route, the one route that uses the CI store.
+var githubWebhookEnv = []string{"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_SECRET=ci-route-secret", "ENVOY_REVIEWER_APP_ID=1"}
+
+// seedDueCIRecord creates the CI bucket as the listener creates it and stores one commit whose
+// checks finished a minute ago and have not settled, so any summary loop reading the bucket settles
+// it on its next tick. It returns the bucket and the record's key.
+func seedDueCIRecord(t *testing.T, client *bus.Client) (natsgo.KeyValue, string) {
+	t.Helper()
+	kv, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: cistore.Bucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 7 * 24 * time.Hour})
+	if err != nil {
+		t.Fatalf("create the CI bucket: %v", err)
+	}
+	sha := strings.Repeat("d", 40)
+	key := cistore.Key("acme", "widgets", "7", sha)
+	record := `{"owner":"acme","repo":"widgets","number":"7","sha":"` + sha + `",` +
+		`"checks":{"build":{"name":"build","check_run_id":42,"url":"https://github.com/acme/widgets/runs/42","status":"completed","conclusion":"success","observed_at":"2026-09-28T13:00:00Z"}},` +
+		`"suites":{},"last_event_at":` + strconv.FormatInt(time.Now().Add(-time.Minute).UnixMilli(), 10) + `,` +
+		`"generation":1,"emitted_count":0,"settled_emitted":false,"schema":1}`
+	if _, err := kv.Put(key, []byte(record)); err != nil {
+		t.Fatalf("store the CI record: %v", err)
+	}
+	return kv, key
+}
+
+// ciChecksSubject is the settlement topic of seedDueCIRecord's commit.
+var ciChecksSubject = contracts.GithubSubject("acme", "widgets", "pr.7.checks")
+
+// ciSettled reports whether the stream holds a settlement of seedDueCIRecord's commit.
+func ciSettled(t *testing.T, client *bus.Client) bool {
+	t.Helper()
+	_, err := client.JS().GetLastMsg(bus.Stream, ciChecksSubject)
+	if errors.Is(err, natsgo.ErrMsgNotFound) {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("read the stream's last %s: %v", ciChecksSubject, err)
+	}
+	return true
+}
+
+// A listener that mounts no GitHub webhook route receives no check webhook, so it has nothing to
+// record in the CI bucket and leaves it alone: no watch (whose initial scan of every record, 62 MB
+// in production, is what a listener reaching NATS over a relayed link cannot take), no summary loop
+// (the listeners that receive GitHub webhooks settle every record), and a /healthz that calls the CI
+// cache not applicable instead of waiting on it. Seeded with a record any summary loop would settle,
+// it creates no consumer on the CI bucket's stream, publishes no settlement, and reports healthy.
+func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
+	client := setupTestNATS(t)
+	t.Cleanup(client.Close)
+	kv, key := seedDueCIRecord(t, client)
+
+	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "no-github-route")
+	listener.waitHealthy(t)
+	// The positive control, TestAListenerWithAGitHubRouteSettlesTheCIBucket, settles this seed
+	// within a few one-second ticks of turning healthy; five seconds covers them.
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(250 * time.Millisecond) {
+		consumers := 0
+		for range client.JS().ConsumerNames("KV_" + cistore.Bucket) {
+			consumers++
+		}
+		if consumers != 0 {
+			t.Fatalf("the CI bucket's stream has %d consumers under a listener with no GitHub route, want 0: it watches the bucket\n%s", consumers, listener.output.String())
+		}
+		if ciSettled(t, client) {
+			t.Fatalf("a listener with no GitHub route published a settlement on %s: it runs the CI summary loop\n%s", ciChecksSubject, listener.output.String())
+		}
+	}
+	entry, err := kv.Get(key)
+	if err != nil {
+		t.Fatalf("read the seeded CI record: %v", err)
+	}
+	if entry.Revision() != 1 {
+		t.Fatalf("the seeded CI record is at revision %d, want 1: a listener with no GitHub route wrote it", entry.Revision())
+	}
+
+	status, health := do(t, mustRequest(t, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/healthz"))
+	if status != http.StatusOK || !strings.Contains(health, `"status":"healthy"`) || !strings.Contains(health, `"ci_cache":"not_applicable"`) {
+		t.Fatalf("/healthz under a listener with no GitHub route: %d %s, want 200 healthy with ci_cache not_applicable", status, health)
+	}
+	if _, metrics := do(t, mustRequest(t, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/metrics")); strings.Contains(metrics, "envoy_ci_legacy_records_held") {
+		t.Fatalf("/metrics under a listener with no GitHub route carries envoy_ci_legacy_records_held, which only a summary loop sets:\n%s", metrics)
+	}
+}
+
+// A listener that mounts the GitHub webhook route opens the CI store and runs the summary loop, so
+// the record seedDueCIRecord leaves settles: the settlement reaches the stream and the record is
+// marked settled. It is the positive control for the test above.
+func TestAListenerWithAGitHubRouteSettlesTheCIBucket(t *testing.T) {
+	client := setupTestNATS(t)
+	t.Cleanup(client.Close)
+	kv, key := seedDueCIRecord(t, client)
+
+	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "github-route", githubWebhookEnv...)
+	listener.waitHealthy(t)
+	healthy := time.Now()
+	for !ciSettled(t, client) {
+		if time.Since(healthy) > 15*time.Second {
+			t.Fatalf("a listener with the GitHub route published no settlement on %s within 15s of turning healthy\n%s", ciChecksSubject, listener.output.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Logf("settled %s after turning healthy", time.Since(healthy).Round(10*time.Millisecond))
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+		entry, err := kv.Get(key)
+		if err != nil {
+			t.Fatalf("read the seeded CI record: %v", err)
+		}
+		var state cistore.State
+		if err := json.Unmarshal(entry.Value(), &state); err != nil {
+			t.Fatalf("decode the seeded CI record: %v", err)
+		}
+		if state.SettledEmitted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the settled CI record is not marked settled: %s", entry.Value())
+		}
+	}
+	if _, health := do(t, mustRequest(t, http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/healthz")); strings.Contains(health, "ci_cache") {
+		t.Fatalf("/healthz under a listener with the GitHub route: %s, want no ci_cache field, as before", health)
+	}
+}
+
+// mustRequest builds an unauthenticated request.
+func mustRequest(t *testing.T, method, url string) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(method, url, nil)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, url, err)
+	}
+	return request
 }
 
 // do sends request and returns its status and body.

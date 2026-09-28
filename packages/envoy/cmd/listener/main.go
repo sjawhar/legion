@@ -38,8 +38,9 @@ type listenerDeps struct {
 	client   *bus.Client
 	registry *store.Registry
 	sessions *session.SessionRegistry
-	ciStore  *cistore.Store
-	// caches lists the three stores above, for the sites that treat every cache alike.
+	// ciStore is nil on a listener that mounts no GitHub webhook route, the one route that uses it.
+	ciStore *cistore.Store
+	// caches lists the stores above that are open, for the sites that treat every cache alike.
 	caches []listenerCache
 	// consumer names the durable whose lag /healthz reports.
 	consumer   string
@@ -62,13 +63,17 @@ type listenerCache struct {
 }
 
 // listenerCaches lists the caches the listener keeps. It is the one place that names them, so
-// rewatch, self-health, /healthz and shutdown each reach every cache.
+// rewatch, self-health, /healthz and shutdown each reach every cache. ciStore is nil on a listener
+// that mounts no GitHub webhook route, and then no site reaches a CI cache.
 func listenerCaches(registry *store.Registry, sessions *session.SessionRegistry, ciStore *cistore.Store) []listenerCache {
-	return []listenerCache{
+	caches := []listenerCache{
 		{name: "interest", cache: registry},
 		{name: "session", cache: sessions},
-		{name: "CI", cache: ciStore},
 	}
+	if ciStore != nil {
+		caches = append(caches, listenerCache{name: "CI", cache: ciStore})
+	}
+	return caches
 }
 
 // Canonical policy for the listener's durable consumer. DeliverSubject is
@@ -382,7 +387,8 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // published deps, 200 "healthy" with the durable consumer's lag once every dependency answers,
 // 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a cache's
 // watcher has stopped or the durable consumer is gone, and 200 "degraded" for a transient KV
-// failure the self-health monitor and the NATS reconnect retry.
+// failure the self-health monitor and the NATS reconnect retry. A listener that mounts no GitHub
+// webhook route keeps no CI cache, and its answer carries "ci_cache": "not_applicable".
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -418,6 +424,9 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		for k, v := range sessionHealthFields(d.sessions) {
 			response[k] = v
 		}
+		if d.ciStore == nil {
+			response["ci_cache"] = "not_applicable"
+		}
 		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer)
 		if err != nil {
 			writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
@@ -445,16 +454,16 @@ func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, 
 }
 
 // webhookRoute is one configured webhook path and the handler it serves over the only
-// dependencies a webhook uses: the NATS client it publishes through and the CI store it records
-// checks in.
+// dependencies a webhook uses: the NATS client it publishes through and the CI store the GitHub
+// route records checks in, which main opens only when that route is configured.
 type webhookRoute struct {
 	path    string
 	handler func(*bus.Client, *cistore.Store) http.Handler
 }
 
 // webhookRoutes lists the webhook routes the configuration enables. main registers the paths
-// before NATS is up, so they answer 503 while it connects, and builds the handlers once NATS and
-// the CI store are open.
+// before NATS is up, so they answer 503 while it connects, and builds the handlers once NATS and,
+// for the GitHub route, the CI store are open.
 func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
 	var routes []webhookRoute
 	if github := cfg.GitHub; github != nil {
@@ -493,9 +502,10 @@ func (g *startingGate) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	mux.ServeHTTP(w, r)
 }
 
-// openWebhooks builds the webhook routes over NATS and the CI store and opens the webhook gate onto
-// them. A webhook waits on nothing else: the durable consumer's bind in particular waits out a
-// rolling deploy's old task, and GitHub does not redeliver a delivery refused in that window.
+// openWebhooks builds the webhook routes over NATS and the CI store (nil without the GitHub route)
+// and opens the webhook gate onto them. A webhook waits on nothing else: the durable consumer's
+// bind in particular waits out a rolling deploy's old task, and GitHub does not redeliver a
+// delivery refused in that window.
 func openWebhooks(gate *startingGate, hooks []webhookRoute, client *bus.Client, ciStore *cistore.Store) {
 	routes := http.NewServeMux()
 	for _, hook := range hooks {
@@ -559,7 +569,12 @@ func main() {
 	messagesDelivered := met.NewCounter("envoy_messages_delivered_total", "Total message delivery attempts")
 	messagesNAKed := met.NewCounter("envoy_messages_naked_total", "Total messages NAK'd for retry")
 	deliveryDuration := met.NewHistogram("envoy_delivery_duration_seconds", "Duration of message delivery attempts", metrics.DefaultBuckets)
-	ciLegacyHeld := met.NewGauge("envoy_ci_legacy_records_held", "CI records a head-gated listener left unsettled that the last summary tick held back")
+	// The CI summary loop runs only beside the GitHub webhook route (Phase 6b2), so only a listener
+	// that mounts it carries the gauge the loop sets.
+	var ciLegacyHeld *metrics.Gauge
+	if webhookCfg.GitHub != nil {
+		ciLegacyHeld = met.NewGauge("envoy_ci_legacy_records_held", "CI records a head-gated listener left unsettled that the last summary tick held back")
+	}
 	met.NewGaugeFunc("envoy_active_sessions", "Number of active sessions", func() int64 {
 		d := deps.Load()
 		if d == nil {
@@ -591,9 +606,9 @@ func main() {
 	// GaugeFunc for consumer pending — queries NATS at scrape time
 
 	// The webhook and /v1 routes answer 503 "service starting" until their dependencies are open,
-	// each behind its own gate: the webhooks once NATS and the CI store are (Phase 5), /v1 once every
-	// store and the durable consumer are (Phase 6). The webhook paths reach their gate bare, /v1
-	// through apiAuth.
+	// each behind its own gate: the webhooks once NATS and, for the GitHub route, the CI store are
+	// (Phase 5), /v1 once every store and the durable consumer are (Phase 6). The webhook paths
+	// reach their gate bare, /v1 through apiAuth.
 	var webhookGate, v1Gate startingGate
 	hooks := webhookRoutes(webhookCfg)
 	for _, hook := range hooks {
@@ -645,9 +660,20 @@ func main() {
 	// CI-summary aggregation state. Its WatchAll cache warms asynchronously like the registries
 	// below; the summary loop tolerates an empty cache until it fills. It opens ahead of them, as the
 	// one store the webhooks need, and after the durable check, so a refused start opens no bucket.
-	ciStore, err := cistore.Open(client.Conn, logger, cistore.WithReplicas(cfg.NATSReplicas), cistore.WithTTL(7*24*time.Hour))
-	if err != nil {
-		log.Fatal(err)
+	//
+	// Only the GitHub webhook route records checks in it, and the listeners that receive GitHub
+	// webhooks publish every CI settlement, so a listener without the route opens no CI store and
+	// runs no summary loop. It must not scan the bucket either: the watch delivers every record as
+	// it starts (62 MB in production), and over a relayed link that burst holds up the replies the
+	// stores below wait on past their 10 s deadline.
+	var ciStore *cistore.Store
+	if webhookCfg.GitHub != nil {
+		ciStore, err = cistore.Open(client.Conn, logger, cistore.WithReplicas(cfg.NATSReplicas), cistore.WithTTL(7*24*time.Hour))
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		logger.Info("CI store not opened: no GitHub webhook route, so this listener records and settles no checks")
 	}
 	openWebhooks(&webhookGate, hooks, client, ciStore)
 	logger.Info("envoy-listener webhooks open (NATS connected)")
@@ -817,20 +843,22 @@ func main() {
 	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
 	registry.StartRoleClaimReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, sessions.TTL())
 
-	// Phase 6b2: Start the CI summary loop. It emits one pr.<n>.checks event
-	// once a commit's checks settle, for every commit of a pull request, its
-	// head or not; new runs re-arm settlement. The
-	// debounce window is ENVOY_CI_DEBOUNCE (default 5s).
-	ciDebounce := 5 * time.Second
-	if v := os.Getenv("ENVOY_CI_DEBOUNCE"); v != "" {
-		if d, perr := time.ParseDuration(v); perr == nil {
-			ciDebounce = d
-		} else {
-			logger.Warn("invalid ENVOY_CI_DEBOUNCE; using default", slog.String("value", v), slog.String("error", perr.Error()))
-		}
-	}
+	// Phase 6b2: Start the CI summary loop, on a listener that opened the CI store. It emits one
+	// pr.<n>.checks event once a commit's checks settle, for every commit of a pull request, its
+	// head or not; new runs re-arm settlement. The debounce window is ENVOY_CI_DEBOUNCE (default
+	// 5s).
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
-	cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
+	if ciStore != nil {
+		ciDebounce := 5 * time.Second
+		if v := os.Getenv("ENVOY_CI_DEBOUNCE"); v != "" {
+			if d, perr := time.ParseDuration(v); perr == nil {
+				ciDebounce = d
+			} else {
+				logger.Warn("invalid ENVOY_CI_DEBOUNCE; using default", slog.String("value", v), slog.String("error", perr.Error()))
+			}
+		}
+		cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
+	}
 
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
 	// the listener. Terminal watcher/consumer failures are rebuilt immediately;

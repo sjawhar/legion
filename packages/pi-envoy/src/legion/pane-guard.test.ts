@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createPaneGuard, type PaneGuard } from "./pane-guard";
@@ -1245,6 +1245,89 @@ describe("scripts a command runs", () => {
     expect(bash(`python3 - <<PY\nprint("a\\n")\nPY`)).toBeUndefined();
   });
 
+  test("an append to a file it has no model of leaves the file unknown, never empty", () => {
+    // LEGION-349: an append was taken as an empty prefix, so one no-op append to a file the guard
+    // had not read made it believe the file held only what was appended — a one-command bypass for
+    // any content, since the write tool puts it there by a permitted route. The model is the whole
+    // rule: what is on disk at check time is a state an earlier stage of the same command chooses.
+    const existing = script("unread.sh", 'rm -rf "$HOME"\n');
+    const existingPy = script("unread.py", `import shutil\nshutil.rmtree("${home}")\n`);
+    const fresh = path.join(scratch, "mine", "fresh.sh");
+    const copied = path.join(scratch, "mine", "copied.sh");
+    expect(bash(`bash ${existing}`)).toContain(home);
+    for (const [index, command] of [
+      `echo '' >> ${existing}; bash ${existing}`,
+      `echo harmless >> ${existing}; bash ${existing}`,
+      `echo one two three >> ${existing}; bash ${existing}`,
+      `printf '\\n' >> ${existing}; bash ${existing}`,
+      `cat >> ${existing} <<'EOF'\n# note\nEOF\nbash ${existing}`,
+      `cat >> ${existing} <<'EOF'\n# note\nEOF\n. ${existing}`,
+      `echo '' >> ${existing}; . ${existing}`,
+      `echo '' &>> ${existing}; bash ${existing}`,
+      `echo '' >> ${existing}; bash ${existing} "$HOME"`,
+      `echo '' >> ${existingPy}; python3 ${existingPy}`,
+      // A file absent at check time that an earlier stage of the same command fills: asking the
+      // filesystem would have answered the payload's way.
+      `cp ${existing} ${copied}; echo hi >> ${copied}; bash ${copied}`,
+      `echo 'echo hi' >> ${fresh}; bash ${fresh}`,
+    ].entries()) {
+      expect(bash(command), `row ${index}: ${command.slice(0, 60)}`).toContain(
+        "cannot read before running it"
+      );
+    }
+    // An append it can model is still read line by line, not blurred: the file this command wrote.
+    const appended = path.join(scratch, "mine", "appended.sh");
+    expect(
+      bash(`echo 'echo hi' > ${appended}; echo 'echo bye' >> ${appended}; bash ${appended}`)
+    ).toBeUndefined();
+    expect(
+      bash(`echo 'echo hi' > ${appended}; echo 'rm -rf "$HOME"' >> ${appended}; bash ${appended}`)
+    ).toContain(home);
+    // An append that runs nothing is allowed, inside the roots and outside them, and a `>` to a
+    // file with no model still writes a model.
+    expect(bash(`echo hi >> ${existing}`)).toBeUndefined();
+    expect(bash("echo hi >> ~/.bashrc")).toBeUndefined();
+    expect(bash(`echo 'echo hi' > ${fresh}; bash ${fresh}`)).toBeUndefined();
+    // The rows above hold for a path no redirect in the command named, which is what a model is.
+    // A `>` the walk read but the shell never runs seeds one — `files` is shared across branches —
+    // so this composition is still allowed, unchanged from before this rule and identical at main.
+    // It is the residual LEGION-354 closes; when a branch write leaves the file unknown, this line
+    // becomes a refusal and must flip rather than be deleted.
+    expect(
+      bash(`false && echo ok > ${existing}; echo '' >> ${existing}; bash ${existing}`)
+    ).toBeUndefined();
+    // A path whose `..` crosses a symlink: the guard's key is lexical, the kernel's is not, so the
+    // file the append and the run open is not the one the key names. The model rule closes the
+    // append-carrying form structurally, by never consulting a path's contents at all — which is
+    // why it has a row: a future change that reintroduces any disk or path probe reopens it. The
+    // bare `bash lnk/../danger.sh` is `runFile`'s own resolution and is not this rule's.
+    // Its own tree, with the link pointing at a SIBLING: no directory is its own ancestor through
+    // the link, so nothing that walks the scratch root can loop, and the tree is removed after.
+    const root = path.join(scratch, "sym-349");
+    const link = path.join(root, "a", "lnk-349");
+    const opened = path.join(root, "danger-349.sh");
+    mkdirSync(path.join(root, "a"), { recursive: true });
+    mkdirSync(path.join(root, "b"), { recursive: true });
+    symlinkSync(path.join(root, "b"), link);
+    writeFileSync(opened, 'rm -rf "$HOME"\n');
+    // The kernel resolves `lnk-349/..` to `sym-349`, so the append and the run open
+    // `sym-349/danger-349.sh`; a lexical resolver stops at `a`, naming a path that holds nothing.
+    // The `..` has to survive into the command text, so the word is built by concatenation:
+    // `path.join` would normalise it away and this row would silently become the fresh-file row
+    // above. The three assertions below fail loudly if that ever happens.
+    const through = `${link}/../danger-349.sh`;
+    try {
+      expect(through).toContain("lnk-349/..");
+      expect(existsSync(opened)).toBe(true);
+      expect(existsSync(path.resolve(through))).toBe(false);
+      expect(bash(`echo hi >> ${through}; bash ${through}`)).toContain(
+        "cannot read before running it"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("reads a script a brace group writes from here-documents and printf before running it", () => {
     const writer = (value: string): string =>
       script(
@@ -1891,5 +1974,42 @@ describe("a word the guard cannot read", () => {
     // A cluster with no destination option in it is still just an extract.
     expect(bash("tar -xf a.tar")).toBeUndefined();
     expect(bash("tar -xC . -f a.tar")).toBeUndefined();
+  });
+
+  test("breaks a tmux line on a `;` at the end of a word, and keeps the word", () => {
+    // Verified against real tmux 3.7c on a private socket: `tmux -S s 'kill-server;'` leaves the
+    // server dead, so the trailing `;` separates and the rest of the word IS the subcommand;
+    // `'killserver;'` answers `unknown command: killserver` and leaves it alive, so the word
+    // must be kept stripped rather than joined across the `;`. Testing for a word that is
+    // exactly `;` made `list-sessions;` the subcommand and swallowed the kill after it — with no
+    // unreadable word anywhere on the line.
+    const outside = 'tmux -S "$HOME/s"';
+    expect(bash(`${outside} 'list-sessions;' kill-server`)).toContain("needs a socket");
+    expect(bash(`${outside} list-sessions\\; kill-server`)).toContain("needs a socket");
+    expect(bash(`${outside} 'kill-server;'`)).toContain("needs a socket");
+    // A trailing `;` the guard read is not speculative, so the segment it opens is judged even
+    // when its subcommand is the only thing in it.
+    expect(bash(`${outside} 'list-sessions;'`)).toBeUndefined();
+    expect(bash(`${outside} 'list-sessions;' list-clients`)).toBeUndefined();
+  });
+
+  test("takes one timeout reading per word standing where the duration could", () => {
+    // With two unreadable words neither the stopped scan nor the fully read one names the real
+    // program: the first takes the second word as the duration, the second walks past both.
+    expect(bash('a=$(cat f); b=$(cat g); timeout "$a" "$b" rm -rf "$HOME"')).toContain(home);
+    expect(bash('a=$(cat f); b=$(cat g); c=$(cat h); timeout "$a" "$b" "$c" rm -rf ~')).toContain(
+      home
+    );
+    expect(bash('a=$(cat f); b=$(cat g); timeout "$a" "$b" rm -rf notes.txt')).toBeUndefined();
+  });
+
+  test("reads the whole leading literal run of a word, not its first piece", () => {
+    // A quote opening inside the option text splits it into several literal pieces, and reading
+    // only the first stopped at `-` or `--dir`, hiding the option the word carries.
+    expect(bash('d=$(cat f); tar x -"C$d" -f a.tar')).toBeDefined();
+    expect(bash('d=$(cat f); tar x --dir"ectory=$d" -f a.tar')).toBeDefined();
+    expect(bash('d=$(cat f); unzip a.zip -"d$d"')).toBeDefined();
+    // The prefix still rules out what it can, so an assignment is no option however it is quoted.
+    expect(bash('f() { local roo"t=$1"; rm -rf "$root"; }; f notes.txt')).toBeUndefined();
   });
 });

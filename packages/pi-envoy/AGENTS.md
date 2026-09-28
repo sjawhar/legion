@@ -334,12 +334,16 @@ not.
 Four site-specific rules follow from the same principle. An option may carry its value inside its
 own word wherever the option stands, in a cluster included (`-C"$dir"`, `-xC"$dir"`,
 `--directory="$d"`), and that carried value is the one judged: taking the next word instead both
-passed the command and named a path it never touched. `tmux` takes one subcommand per segment and
-a literal `;` argument starts another, so every segment is scanned, a word the guard cannot read
-may itself be that `;`, and its server options are matched on the prefix it can read, so
-`-S"$sock"` is an option rather than the segment's subcommand. `timeout` has both readings of a
-word standing where its duration does dispatched (`unwrap`'s `alt`), since that word may be one
-of its options instead, putting the program after the duration. A `busybox` or `toybox` applet
+passed the command and named a path it never touched. `tmux` takes one subcommand per segment, and
+a `;` starts another whether it is a word of its own or sits at the END of one — real tmux takes
+`'kill-server;'` as a kill, verified on a private socket — so the trailing `;` is stripped and the
+word it leaves is that segment's subcommand; every segment is scanned, a word the guard cannot
+read may itself be that `;`, and its server options are matched on the prefix it can read, so
+`-S"$sock"` is an option rather than the segment's subcommand. `timeout` has one reading
+dispatched per word standing where its duration could (`unwrap`'s `alts`), since each such word
+may be one of its options instead, putting the program after the duration: with two of them
+neither the stopped scan nor the fully read one names the real program. A `busybox` or `toybox`
+applet
 word it cannot read is refused outright: no reading of it is harmless, because the binary carries
 `halt`, `poweroff` and `reboot` as well as `rm`, `sh` and `killall`, and those three need no
 operand. `unwrap` promotes only an applet word it can read, and promoting restarts its loop, so
@@ -349,11 +353,13 @@ Two members of the family stay open on purpose, because the program they name is
 documented residual already covers: a command whose own name the guard cannot read (`"$cmd" -rf ~`)
 and the program word of `xargs`. A wrapper's unreadable option word is *not* one of them — the
 program is written plainly right after it — so `sudo "$flag" rm -rf ~` and `env "$flag" rm -rf ~`
-are refused. Four narrower residuals are measured and recorded: a destination option whose own
-letter falls past the readable prefix (`tar -"C$dir"`, `tar --dir"ectory=$dir"`, `unzip -"d$dir"`);
-a tmux segment that exists only because a word may have been the `;` and whose subcommand is also
-unreadable, two unknowns deep and so the same shape as an unreadable command name; and two
-over-refusals, `python3 "$flag" <script>` and an unquoted `chmod $mode <path>`.
+are refused. Two narrower residuals are measured and recorded: a tmux segment that exists only
+because a word may have been the `;` and whose subcommand is also unreadable, two unknowns deep
+and so the same shape as an unreadable command name; and one over-refusal, an unquoted
+`chmod $mode <path>`, where that one word may be both the option and a path. A `python3 "$flag"
+<script>` over-refusal was recorded here and is withdrawn: it does not exist — a harmless script
+outside the roots is allowed, and the one shape that refuses is a script whose own contents are
+dangerous, which its readable ablation `python3 -E <script>` refuses too.
 
 A write to a variable that the guard sees reaches its model, and one it cannot model leaves the
 value unknown, never the one already approved: a builtin that assigns by name (`printf -v`,

@@ -66,23 +66,23 @@ not.
 
 An option may also carry its value inside its own word, wherever the option stands (`-C"$dir"`,
 `-xC"$dir"`, `--directory="$d"`), and that carried value is the one judged. `tmux` is scanned per
-segment, a literal `;` argument starting another, since a command after a `;` reaches the same
-server; a word the guard cannot read may itself be that `;`, and its server options are read by
-the prefix it can see, so `-S"$sock"` is an option and not the subcommand. `timeout` has both
-readings of a word standing where its duration does taken, since that word may be an option
-instead. A `busybox` or `toybox` applet word the guard cannot read is refused outright: no
+segment, a `;` starting another whether it stands as its own word or at the end of one (real tmux
+takes `'kill-server;'` as a kill), since a command after a `;` reaches the same server; a word the
+guard cannot read may itself be that `;`, and its server options are read by the prefix it can
+see, so `-S"$sock"` is an option and not the subcommand. `timeout` has one reading judged per word
+standing where its duration could, since each may be an option instead. A `busybox` or `toybox`
+applet word the guard cannot read is refused outright: no
 reading of it is harmless, because that binary carries `halt`, `poweroff` and `reboot` besides
 `rm`, `sh` and `killall`, and those need no operand.
 
 Two members of the family stay open, and both name an open set of programs the residual below
 already covers: a command whose own name the guard cannot read, and the program word of `xargs`.
 A wrapper's unreadable option word is not one of them, since the program it runs is written
-plainly after it. Four narrower residuals are known and measured: a destination option whose
-own letter the guard cannot read (`tar -"C$dir"`, `tar --dir"ectory=$dir"`, `unzip -"d$dir"`),
-where the readable prefix does not reach the option; a tmux segment that exists only because a
-word may have been the `;` and whose subcommand is also unreadable, which is two unknowns deep;
-and, in the other direction, two over-refusals — `python3 "$flag" <script>` and an unquoted
-`chmod $mode <path>`.
+plainly after it. Two narrower residuals are known and measured: a tmux segment that exists only
+because a word may have been the `;` and whose subcommand is also unreadable, which is two
+unknowns deep and so the same shape as an unreadable command name; and, in the other direction,
+one over-refusal — an unquoted `chmod $mode <path>`, where the one word may be both the option
+and a path.
 
 The guard reads text before it runs, so it cannot see what is only decided at run time: a compiled
 program or anything a command runs without naming it on the command line (a `make` target, a test
@@ -90,14 +90,28 @@ runner, `npm run`), a program whose name is itself a variable or a command's out
 (`$cmd`, `eval "$(tool)"`), Python or JavaScript whose paths or pids come from values it cannot
 evaluate (the `eval` tool's kernels included; known prefixes are still judged), and interpreters
 the guard does not read (`perl`, `ruby`, `awk`), commands outside the families above that overwrite
-a destination (`cp`, `dd`, `ln -f`, `install`), append writes (`>>`, `tee -a`, `sed -i`), a
-directory reached through a `cd` that failed, and the `write` and `edit` tools. The guard checks a
-destination for `rsync`, extract-mode `tar`, and `unzip` when it can identify one. It also cannot
-distinguish one pane's allowed `/tmp` directory from another. A running shell started through `hub`
-can receive later unguarded input, and `xd://debug` can launch an unguarded program. The documented
-residuals are `git -C <path> clean`, Python loop values, an aliased CommonJS `require`, an `eval`
-trap whose outer exit timing is not modeled, an `rsync` destination followed by an unrecognised
-valued option, and a `TMUX` value that begins with a comma and therefore names no socket path.
+a destination (`cp`, `dd`, `ln -f`, `install`), an edit in place (`sed -i`), a directory reached
+through a `cd` that failed, and the `write` and `edit` tools. A `>>` append to a file the guard
+holds no model of — one no redirect or `tee` in the same command named — leaves that file's
+contents unknown, never empty: the append is allowed, and running that file in the same command is
+refused rather than read as holding only what was appended. A file the same command wrote is read
+as its model says, so writing a script with `>` and then running it still works. The model is per
+command, and it records a write whose content the guard renders (`echo >`, `printf >`,
+`cat > <<EOF`, `tee f <<EOF`) wherever it read that write, whether or not the shell would run it:
+the guard reads every region whose execution it cannot decide, so such a write under
+`false &&`, `true ||`, an `if` or `case` arm the shell skips, a `while`/`until` body that never
+runs, or a `for` whose word list it cannot decide still counts, and an append after it is read
+rather than unknown. That is a residual of this model, and it closes once a write the shell may
+never reach leaves the file unknown. `tee -a` is stricter: it leaves the file unknown whatever the
+guard knew, so appending with it to a file this command wrote and then running that file is refused
+where `>>` is allowed. Neither rule asks the filesystem what a file holds, since an earlier stage of
+the same command can change that. The guard checks a destination for `rsync`, extract-mode `tar`,
+and `unzip` when it can identify one. It also cannot distinguish one pane's allowed `/tmp` directory
+from another. A running shell started through `hub` can receive later unguarded input, and
+`xd://debug` can launch an unguarded program. The documented residuals are `git -C <path> clean`,
+Python loop values, an aliased CommonJS `require`, an `eval` trap whose outer exit timing is not
+modeled, an `rsync` destination followed by an unrecognised valued option, and a `TMUX` value that
+begins with a comma and therefore names no socket path.
 This is a mistake-guard, not a sandbox: it exists because an agent probe deleted the operator's home
 directory. LEGION-122 and the Kubernetes pod boundary are the hard isolation controls.
 

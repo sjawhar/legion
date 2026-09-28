@@ -24,7 +24,22 @@
  * no value the guard builds is longer than `MAX_VALUE_LENGTH`: past it (a replacement of a
  * replacement, `x="$x$x"` repeated) a value is unknown, since building one held the pane. A script
  * a command writes is read whole up to `MAX_SCRIPT_BYTES`, as one on disk is, and past it is one
- * the guard cannot read (`readable`).
+ * the guard cannot read (`readable`). A `>>` append adds to the model the guard holds of that
+ * file: with no model the file is one it cannot read, never an empty one, or a no-op append would
+ * leave it reading the file as holding only what was appended (LEGION-349). The model's own
+ * property is narrower than "a file this command wrote": an entry is whatever the redirection
+ * path and `tee` record into this command's state, so it takes a write whose content the guard
+ * renders (`echo >`, `printf >`, `cat > <<EOF`, `tee f <<EOF`) and it takes one from anywhere the
+ * walk carried that state — a region the shell may never enter included, since `if`, `else`, `&&`,
+ * `||`, `case`, `while`, `until` and a `for` whose word list the guard cannot decide are all
+ * walked. Such a write seeds a model for code that never runs, the residual LEGION-354 closes.
+ * A write the walk never reaches records nothing, and neither does one it judges elsewhere: a
+ * `trap` handler's body is read and refused on its own line, but its writes never reach this
+ * model, not even on `EXIT`. `tee -a` is stricter
+ * and deliberately so: it leaves the file unknown whatever the model, since the guard does not
+ * render what `tee` writes, so appending with `tee -a` to a file this command wrote and then
+ * running it is refused where `>>` is allowed. Neither rule asks the filesystem what a file
+ * holds: at check time that is a state an earlier stage of the same command can choose.
  *
  * Every value the guard produces is known, unset, or unknown, and never one standing in for
  * another: a value it cannot know taken as some harmless concrete one (the empty string, the text
@@ -1271,13 +1286,20 @@ function literalText(exp: Expansion | undefined): string | undefined {
 
 /** What the guard can read of a word: its leading literal text, and whether that is all of it.
  * `-C` reads whole, `root="$1"` reads as `root=` and not whole, `"$flag"` as nothing and not
- * whole. A word it cannot read whole still constrains what the word can be, and that prefix is
- * the difference between refusing `fuser "$flag" f` and refusing every `local root="$1"`. */
+ * whole. The leading text is the whole leading RUN of literal pieces, not the first piece alone:
+ * a quote boundary splits `-"C$dir"` into a literal `-` and the quoted part, so reading only the
+ * first piece stopped at `-` and hid the `-C` that word carries. A word it cannot read whole
+ * still constrains what the word can be, and that prefix is the difference between refusing
+ * `fuser "$flag" f` and refusing every `local root="$1"`. */
 function readableWord(arg: Arg): { text: string; whole: boolean } {
   const whole = literalText(arg.exp);
   if (whole !== undefined) return { text: whole, whole: true };
-  const first = arg.exp[0];
-  return { text: first?.kind === "literal" ? first.text : "", whole: false };
+  let text = "";
+  for (const piece of arg.exp) {
+    if (piece.kind !== "literal") break;
+    text += piece.text;
+  }
+  return { text, whole: false };
 }
 
 /** Whether a word may be an option `matches` accepts. A word the guard reads whole answers the
@@ -2050,10 +2072,21 @@ function checkRedirects(
         content = printfText(command.args, MAX_SCRIPT_BYTES, true) ?? null;
       }
       st.pidFiles.delete(file);
-      const before = appends ? st.files.get(file) : "";
+      // An append adds to the model of that file, and to nothing else: with no model the file is
+      // whatever is on disk, which the guard has not read, so it is unknown and never empty.
+      // Taking it as empty left one no-op append (`echo '' >> f`) making the guard read the file
+      // as holding only what was appended, a destructive line already there running unseen
+      // (LEGION-349). A model means "a path a rendered write in this command named", wherever the
+      // walk read that write: `files` is shared across regions, so `false && echo ok > f`, and the
+      // same inside `if`, `case`, `while`, `until` or a `for` whose list the guard cannot decide,
+      // seeds one for code the shell never runs. Until LEGION-354 blurs a write the shell may not
+      // reach, this rule holds for a path no rendered write in the command named. Nothing here
+      // asks the filesystem either: a path absent at check time is one an earlier stage of the
+      // same command can fill (`cp evil.sh t; echo hi >> t; bash t`).
+      const before = appends ? (st.files.get(file) ?? null) : "";
       st.files.set(
         file,
-        content === null || before === null ? null : readable(`${before ?? ""}${content}`)
+        content === null || before === null ? null : readable(`${before}${content}`)
       );
       if (
         writes &&
@@ -2382,19 +2415,20 @@ function operands(
 
 /** Strips the programs that run another program unchanged: `sudo rm` is `rm`.
  *
- * `alt` is a second argv the same command line may run, for the one wrapper where a word the
- * guard cannot read leaves two programs possible rather than one: `timeout` takes a duration
- * after its options, so an unreadable word there may be an option, making the word after the
- * duration the program, or the duration itself, making the next word the program. Both are
- * dispatched; taking only one of them left `timeout "$opt" 5 rm -rf ~` or
- * `timeout "$duration" rm -rf ~` unchecked, depending on which was chosen. */
+ * `alts` are the other argvs the same command line may run, for the one wrapper where words the
+ * guard cannot read leave more than one program possible: `timeout` takes a duration after its
+ * options, so each unreadable word there may be an option, leaving the program after the
+ * duration, or the duration itself, leaving the program next. There is one reading per stop
+ * position the scan passed, not two — with two unreadable words neither the stopped scan nor the
+ * fully read one names the real program, which is how
+ * `timeout "$opt" "$duration" rm -rf ~` went unchecked. */
 function unwrap(
   argv: readonly Arg[],
   st: State,
   ctx: Ctx,
   site: Site
-): { argv: readonly Arg[]; st: State; alt?: readonly Arg[] } {
-  let alt: readonly Arg[] | undefined;
+): { argv: readonly Arg[]; st: State; alts: readonly (readonly Arg[])[] } {
+  const alts: (readonly Arg[])[] = [];
   let list = argv;
   let state = st;
   for (let guard = 0; guard < 16; guard += 1) {
@@ -2455,7 +2489,7 @@ function unwrap(
     else if (base === "exec") list = skip("a");
     else if (base === "command") {
       const flags = rest.map((arg) => literalText(arg.exp));
-      if (flags[0] === "-v" || flags[0] === "-V") return { argv: [], st: state };
+      if (flags[0] === "-v" || flags[0] === "-V") return { argv: [], st: state, alts };
       list = skip("");
     } else if (base === "stdbuf") list = skip("ioe", ["--input", "--output", "--error"]);
     else if (base === "ionice") list = skip("cnt", ["--class", "--classdata"]);
@@ -2464,11 +2498,18 @@ function unwrap(
       // the duration, so the program is the one after it.
       const stopped = skip("sk", ["--signal", "--kill-after"], true);
       list = stopped.slice(1);
-      // The option reading: that word was one of `timeout`'s options, so the duration is the
-      // next readable word and the program the one after that. When the scan did not stop early
-      // the two readings agree and there is nothing extra to dispatch.
+      // Every unreadable word between the two stop points is a reading of its own: it may be the
+      // duration, making the next word the program. With one such word the fully read scan
+      // covers it; with two, neither that scan nor the stopped one names the real program.
+      for (let at = rest.length - stopped.length; at < rest.length; at += 1) {
+        if (literalText(rest[at]?.exp) !== undefined) break;
+        alts.push(rest.slice(at + 1));
+      }
+      // The all-options reading: every word the scan passed was one of `timeout`'s options, so
+      // the duration is the next readable word and the program the one after that. When the scan
+      // did not stop early this agrees with `stopped` and there is nothing extra to dispatch.
       const read = skip("sk", ["--signal", "--kill-after"]);
-      if (read.length !== stopped.length) alt = read.slice(1);
+      if (read.length !== stopped.length) alts.push(read.slice(1));
     } else if (base === "env") {
       let i = 0;
       const overlay = new Map<string, Expansion>();
@@ -2537,7 +2578,7 @@ function unwrap(
       }
     } else break;
   }
-  return { argv: list, st: state, alt };
+  return { argv: list, st: state, alts };
 }
 
 function runFunction(
@@ -2638,11 +2679,11 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
   const unwrapped = unwrap(invocation.args, outer, ctx, invocation.site);
   const argv = unwrapped.argv;
   const st = unwrapped.st;
-  // The second program the line may run, when a word the guard cannot read left two possible
-  // (`unwrap`'s `alt`). It is walked for its refusal alone, in a state of its own, since only one
-  // of the two readings is what bash will do and neither may be recorded as what happened.
-  if (unwrapped.alt !== undefined) {
-    dispatch({ ...invocation, args: unwrapped.alt }, clone(outer), ctx);
+  // Every other program the line may run, when the words the guard cannot read leave more than
+  // one possible (`unwrap`'s `alts`). Each is walked for its refusal alone, in a state of its
+  // own, since only one reading is what bash will do and none may be recorded as what happened.
+  for (const other of unwrapped.alts) {
+    dispatch({ ...invocation, args: other }, clone(outer), ctx);
   }
   const name = literalText(argv[0]?.exp);
   // A command whose name is itself a variable or a substitution runs a program the guard cannot
@@ -3095,6 +3136,10 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         if (target !== undefined && st.cwd !== undefined) {
           const file = path.resolve(st.cwd, target);
           st.pidFiles.delete(file);
+          // `tee -a` leaves the file unknown whatever the model, which is stricter than the `>>`
+          // rule in `checkRedirects` and stays so on purpose: routing it through that rule would
+          // start reading a file `tee` appended to, and the guard does not render what `tee`
+          // writes. So `tee -a` onto a file this command wrote, then run, is refused.
           const text = heredoc === undefined ? null : heredocText(heredoc);
           st.files.set(file, append || text === null ? null : readable(text));
         }
@@ -3165,9 +3210,19 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       const segments: Segment[] = [current];
       for (const arg of rest) {
         const word = literalText(arg.exp);
-        if (word !== ";") current.words.push(arg);
-        if (word === ";" || word === undefined || arg.fields === "unknown") {
-          current = { words: [], speculative: word !== ";" };
+        // Real tmux takes a `;` at the END of a word as the separator too, so `list-sessions;`
+        // is the subcommand `list-sessions` and starts a new command after it. Testing only for
+        // a word that is exactly `;` made `list-sessions;` the subcommand itself and swallowed
+        // the kill standing after it. A trailing `;` is one the guard READ, so the segment it
+        // starts is not speculative.
+        const trailing = word !== ";" && word !== undefined && word.endsWith(";");
+        if (trailing) current.words.push({ text: arg.text, exp: [literal(word.slice(0, -1))] });
+        else if (word !== ";") current.words.push(arg);
+        if (word === ";" || trailing) {
+          current = { words: [], speculative: false };
+          segments.push(current);
+        } else if (word === undefined || arg.fields === "unknown") {
+          current = { words: [], speculative: true };
           segments.push(current);
         }
       }
