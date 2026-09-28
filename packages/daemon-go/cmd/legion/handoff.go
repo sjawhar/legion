@@ -181,7 +181,7 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 		return 1
 	}
 	if *ready {
-		if err := readyChecks(ctx, workspace, current); err != nil {
+		if err := readyChecks(ctx, workspace, current, stdout); err != nil {
 			fmt.Fprintf(stderr, "legion handoff complete: READY refused: %v\n", err)
 			return 1
 		}
@@ -298,8 +298,7 @@ func standingCommit(jj, workspace string) (string, error) {
 type paneIssue struct {
 	Phase       phase.Phase `json:"phase"`
 	PullRequest *struct {
-		Number int    `json:"number"`
-		Head   string `json:"head"`
+		Number int `json:"number"`
 	} `json:"pullRequest"`
 }
 

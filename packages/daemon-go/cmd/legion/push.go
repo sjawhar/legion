@@ -23,30 +23,40 @@ import (
 // (classify.SettlementFor).
 const skipChecksTrailer = "skip-checks: true"
 
-var skipChecksLine = regexp.MustCompile(`^skip-checks: ?true\s*$`)
+// skipChecksLine matches the trailer as a message's line. Case and a trailing carriage return are
+// matched because the strip is what the invariant below is derived from: a line this missed would
+// be left on a code head, and the check that the head ends as the rule says compares against that
+// same strip, so it would agree. Whether GitHub itself honours "Skip-Checks: true" or a CRLF
+// message is undocumented and unverified here - this is defence in depth, not a claim about GitHub.
+var skipChecksLine = regexp.MustCompile(`(?i)^skip-checks: ?true\s*$`)
 
 // withoutSkipChecks is message without a skip-checks line in its final paragraph, where a trailer
 // lives, with trailing space trimmed. The line can be followed there by trailers jj appended after
 // an earlier push wrote it (templates.commit_trailers); GitHub honours it only as the last line, so
-// such a message runs CI, but the rule is the push's to state, not GitHub's parser's.
+// such a message runs CI, but the rule is the push's to state, not GitHub's parser's. A message
+// with no blank line is one paragraph, and its skip-checks line counts the same: anchoring on the
+// last blank line left such a message unchanged, and markHead's read-back never runs on a message
+// it does not change, so a code push carried the trailer to GitHub and skipped the CI it owed.
 func withoutSkipChecks(message string) string {
-	message = strings.TrimRight(message, " \t\n")
-	split := strings.LastIndex(message, "\n\n")
-	if split < 0 {
-		return message
+	message = strings.TrimRight(message, " \t\r\n")
+	body, paragraph := "", message
+	if split := strings.LastIndex(message, "\n\n"); split >= 0 {
+		body, paragraph = strings.TrimRight(message[:split], " \t\r\n"), message[split+2:]
 	}
+	lines := strings.Split(paragraph, "\n")
 	var kept []string
-	for _, line := range strings.Split(message[split+2:], "\n") {
+	for _, line := range lines {
 		if !skipChecksLine.MatchString(line) {
 			kept = append(kept, line)
 		}
 	}
-	if len(kept) == len(strings.Split(message[split+2:], "\n")) {
+	switch {
+	case len(kept) == len(lines):
 		return message
-	}
-	body := strings.TrimRight(message[:split], " \t\n")
-	if len(kept) == 0 {
+	case len(kept) == 0:
 		return body
+	case body == "":
+		return strings.Join(kept, "\n")
 	}
 	return body + "\n\n" + strings.Join(kept, "\n")
 }
@@ -63,10 +73,28 @@ the branch: the planner's .legion/plan.json, the tester's .legion/test.json, and
 .legion/review.json whose verdict is "changes_requested". Its head commit then ends with GitHub's
 "skip-checks: true" trailer, so the push starts no workflow, and the Go daemon carries the code
 head's verdict to it. Every other push runs CI in full: one carrying code, a reviewer round with
-any other verdict or none, the .legion/ deletion, and a rewrite. No commit of the push may touch a
-path outside .legion/, even one a later commit undoes: the daemon classifies the push from the
-union of its commits' paths, so a head this rule skipped over such a commit would carry no verdict
-at all. A trailer an earlier push left on @- is removed. Never add or remove the trailer yourself.
+any other verdict or none, the .legion/ deletion, and a rewrite. The paths are read from the
+push's commits, not from its net tree diff: no commit may touch a path outside those three, even
+one a later commit undoes, because the daemon classifies the push from the union of its commits'
+paths and a head this rule skipped over such a commit would carry no verdict at all. A trailer an
+earlier push left on @- is removed. Never add or remove the trailer yourself.
+
+Those three files are an allow-list, narrower than the sentence that opens this rule: .legion/
+implement.json and .legion/architect.json are excluded although their phases are also followed by
+a later push. Narrower is the safe direction and the only one. The daemon's carry rule accepts any
+.legion/ path (classify.ClassifyPush), so every head this command skips is one it will carry a
+verdict to; widening the set here without widening that rule is what breaks, and the row "the
+implementer's handoff alone" in TestPushSkipsCIOnlyForHandoffsALaterPushFollows pins the
+exclusion. Do not reconcile the two by widening this set.
+
+Reading the paths from the commits also bounds their union at three, so the listener's cap on the
+paths it publishes - past which it marks the list truncated, which the daemon reads as an
+unclassifiable push and carries nothing for - can never be reached by a push this skips.
+
+GitHub also starts no workflow for a push whose head message carries [skip ci], [ci skip],
+[no ci], [skip actions] or [actions skip], anywhere in the message rather than only as its last
+line. Whether a push skips is this command's to decide, so a head whose message carries one of
+those is refused before anything is pushed, naming the keyword.
 
 GitHub honours the trailer only as the message's last line, so the push describes @- with jj's
 templates.commit_trailers empty (the trailers @- already carries stay above it) and reads the
@@ -174,13 +202,19 @@ func push(workspaceFlag string, stdout, stderr io.Writer) error {
 // GitHub lists a forced push's commits since the merge base, so the daemon carries nothing across
 // it.
 //
-// The daemon asks the same question of the same push from the union of its commits'
-// added/removed/modified paths (the listener's changed_paths, githubPushChangedPaths in
-// packages/envoy/internal/contracts/normalize.go), not from the net tree diff, so this asks it that
-// way too: a push whose commits touch a path outside .legion/ and then undo it is handoff-only to a
-// net diff and code-changing to classify.ClassifyPush, and a head that skips CI while the daemon
-// refuses to carry a verdict to it ends with no verdict at all — a fix attempt counted against a
-// push that changed no code, and a red that does not send the tree back until the next full push.
+// The permitted paths are asked once, of the commits rather than of the net tree diff, because the
+// daemon classifies the push from the union of its commits' added/removed/modified paths (the
+// listener's changed_paths, githubPushChangedPaths in
+// packages/envoy/internal/contracts/normalize.go). A push whose commits touch another path and
+// then undo it is handoff-only to a net diff and code-changing to classify.ClassifyPush, and a
+// head that skips CI while the daemon refuses to carry a verdict to it ends with no verdict at all
+// - a fix attempt counted against a push that changed no code, and a red that does not send the
+// tree back until the next full push. Asking it of the commits also bounds the union at three
+// paths, so the listener's cap on the paths it publishes, which marks a capped list truncated and
+// reaches the daemon as Unknown, can never be reached by a push this skips.
+//
+// The net diff is then read for what only it can say: that the push changes something at all, that
+// each handoff is present at @- rather than deleted, and that a review is a request for changes.
 func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
 	if rewritten != "" {
 		return false, nil
@@ -189,7 +223,8 @@ func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
 	if base == "" {
 		base = "heads(::@- & ::trunk())"
 	}
-	touching, err := pushJJ(jj, dir, "log", "--no-graph", "-T", `commit_id ++ "\n"`, "-r", base+`..@- & files(~".legion/**")`)
+	const permitted = `files(~".legion/plan.json" & ~".legion/test.json" & ~".legion/review.json")`
+	touching, err := pushJJ(jj, dir, "log", "--no-graph", "-T", `commit_id ++ "\n"`, "-r", base+"..@- & "+permitted)
 	if err != nil || touching != "" {
 		return false, err
 	}
@@ -198,9 +233,6 @@ func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
 		return false, err
 	}
 	for _, path := range strings.Split(changed, "\n") {
-		if path != ".legion/plan.json" && path != ".legion/test.json" && path != ".legion/review.json" {
-			return false, nil
-		}
 		// A deleted handoff is no handoff: `jj file show` of a path @- does not hold fails.
 		content, err := pushJJ(jj, dir, "file", "show", "-r", "@-", fmt.Sprintf("root:%q", path))
 		if err != nil {
@@ -218,38 +250,62 @@ func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
 	return true, nil
 }
 
+// skipKeywords are GitHub's bracket keywords: a push whose head message carries one of them
+// anywhere, not only as its last line, starts no workflow run. They are the same end state as the
+// trailer through a different spelling, and nothing in the message writes them by accident - this
+// repository's own release bot writes "chore: release ... [skip ci]" subjects, so the string is in
+// the corpus a worker reads and copies. Case and a hyphen in place of the space are matched too:
+// refusing a message GitHub would have run costs a describe, and missing one costs a code head no
+// CI ran on.
+var skipKeywords = regexp.MustCompile(`(?i)\[(?:skip[ -]ci|ci[ -]skip|no[ -]ci|skip[ -]actions|actions[ -]skip)\]`)
+
 // markHead ends @-'s message with the skip-checks trailer when the push skips CI and removes one
 // otherwise, describing @- only when its message changes. GitHub honours the trailer only as the
 // message's last line, and jj appends templates.commit_trailers to every message it describes (a
 // pane's overlay adds its Omp-Session trailer, which the message already carries from the commit),
-// so the describe runs with that template empty. The message is then read back: the property the
-// push owes GitHub is one of the pushed message, so a head whose message does not end as the rule
-// says is refused before anything is pushed, naming the line it ends with.
+// so the describe runs with that template empty.
+//
+// The property the push owes GitHub is one of the pushed message, so the message this function
+// leaves on @- is asserted before anything is pushed, and the assertion runs on every path
+// through it - the described message and the one already correct alike. An assertion reached only
+// from the branch that describes is not a guarantee: both defects this closes arrived through a
+// return that never made it there.
+//
+// Two things are asserted. The message must end as the rule says, naming the line it ends with
+// when it does not. And it must carry none of GitHub's bracket keywords, which start no workflow
+// run wherever they stand in the message rather than only as its last line: whether a push skips
+// is this command's decision, and a message carrying one takes it away without the last line ever
+// looking wrong.
 func markHead(jj, dir string, skip bool) error {
 	message, err := pushJJ(jj, dir, "log", "--no-graph", "-T", "description", "-r", "@-")
 	if err != nil {
 		return err
 	}
+	// A carriage return hides the blank line the trailer paragraph is found by, and jj drops it on
+	// the way back in, so both the strip and the comparison read the message jj would store.
+	message = strings.TrimRight(strings.ReplaceAll(message, "\r\n", "\n"), " \t\r\n")
 	want := withoutSkipChecks(message)
 	if skip {
 		want += "\n\n\n" + skipChecksTrailer
 	}
-	if want == strings.TrimRight(message, " \t\n") {
-		return nil
+	if want != message {
+		if _, err := pushJJ(jj, dir, "--config", `templates.commit_trailers=""`, "describe", "-r", "@-", "-m", want); err != nil {
+			return err
+		}
+		if message, err = pushJJ(jj, dir, "log", "--no-graph", "-T", "description", "-r", "@-"); err != nil {
+			return err
+		}
+		message = strings.TrimRight(strings.ReplaceAll(message, "\r\n", "\n"), " \t\r\n")
 	}
-	if _, err := pushJJ(jj, dir, "--config", `templates.commit_trailers=""`, "describe", "-r", "@-", "-m", want); err != nil {
-		return err
-	}
-	described, err := pushJJ(jj, dir, "log", "--no-graph", "-T", "description", "-r", "@-")
-	if err != nil {
-		return err
-	}
-	if described != want {
-		lines := strings.Split(described, "\n")
+	if message != want {
+		lines := strings.Split(message, "\n")
 		if skip {
 			return fmt.Errorf("@-'s message ends with %q after legion push described it, not with GitHub's %q trailer, so GitHub would run the CI this push skips; nothing was pushed", lines[len(lines)-1], skipChecksTrailer)
 		}
 		return fmt.Errorf("@-'s message ends with %q after legion push described it, not as its message without the %q trailer; nothing was pushed", lines[len(lines)-1], skipChecksTrailer)
+	}
+	if keyword := skipKeywords.FindString(message); keyword != "" {
+		return fmt.Errorf("@-'s message carries GitHub's %s keyword, which starts no workflow run for this push wherever it stands in the message: legion push decides whether a push skips CI, so take it out of the message and push again; nothing was pushed", keyword)
 	}
 	return nil
 }

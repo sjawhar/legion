@@ -209,3 +209,90 @@ func TestPushRunsAPushWhoseCommitsTouchCodeInFull(t *testing.T) {
 		t.Fatalf("the push = %d %q, pushed %q; want it run in full", code, output, pushed)
 	}
 }
+
+// A code push must not reach GitHub with the trailer as its last line, whatever spelling the
+// message carries it in. Each of these reached the end of legion push: a message with no blank
+// line is one paragraph, so anchoring the strip on the last blank line left it untouched; a
+// differently-cased line did not match the strip at all; and a CRLF message has no "\n\n" to
+// anchor on either. markHead describes only a message it changes, so on each of them nothing was
+// described and the assertion that the head ends as the rule says never ran. The strip now reads
+// the whole message as its own final paragraph and matches case and a carriage return, and the
+// assertion runs whether or not anything was described. Whether GitHub honours the cased and CRLF
+// spellings is undocumented and was not verified: this is defence in depth.
+func TestPushTakesATrailerOffACodeHeadInEverySpelling(t *testing.T) {
+	r := newPushRig(t)
+	r.commit("widget: add the line", map[string]string{"widget.txt": "one\n"})
+	if code, output := r.push(); code != 0 {
+		t.Fatalf("the code push = %d %q", code, output)
+	}
+	for _, message := range []string{
+		"widget: fix the line\nskip-checks: true",
+		"widget: fix the line\n\nSkip-Checks: true",
+		"widget: fix the line\r\n\r\nskip-checks: true",
+	} {
+		r.commit("widget: fix the line", map[string]string{"widget.txt": message})
+		// The describe runs with the trailer template off, as markHead's does, so the message is
+		// exactly this shape: nothing for the strip to move, and nothing for a describe to change.
+		r.run("--config", `templates.commit_trailers=""`, "describe", "-r", "@-", "-m", message)
+		code, output := r.push()
+		pushed := r.pushed()
+		if code != 0 || strings.Contains(strings.ToLower(pushed), "skip-checks") {
+			t.Fatalf("the code push of %q = %d %q, pushed %q; want the trailer taken off", message, code, output, pushed)
+		}
+	}
+}
+
+// The permitted paths are asked of the push's commits, so a handoff outside the three is caught
+// even when no net diff of the push mentions it. The daemon would classify this push handoff-only
+// and carry a verdict to it, so the skipped head would not be verdictless - but the rule is the
+// three files, and a push that wrote .legion/implement.json is not one of them whatever a later
+// commit does to it.
+func TestPushRunsAPushWhoseCommitsTouchAnotherHandoffInFull(t *testing.T) {
+	r := newPushRig(t)
+	r.commit("widget: add the line", map[string]string{"widget.txt": "one\n"})
+	if code, output := r.push(); code != 0 {
+		t.Fatalf("the code push = %d %q", code, output)
+	}
+	tip := r.run("log", "--no-graph", "-T", "commit_id", "-r", `remote_bookmarks(exact:"legion/LEGION-7", exact:"origin")`)
+	r.commit("implement: record handoff", map[string]string{".legion/implement.json": "{}\n"})
+	r.commit("implement: drop the handoff again", map[string]string{".legion/implement.json": ""})
+	r.commit("test: record handoff", map[string]string{".legion/test.json": "{}\n"})
+	if net := r.run("diff", "--name-only", "--from", tip, "--to", "@-"); net != ".legion/test.json" {
+		t.Fatalf("the push's net diff is %q; want the tester's handoff alone", net)
+	}
+	code, output := r.push()
+	pushed := r.pushed()
+	if code != 0 || strings.Contains(pushed, "skip-checks") {
+		t.Fatalf("the push = %d %q, pushed %q; want it run in full", code, output, pushed)
+	}
+}
+
+// GitHub starts no workflow run for a push whose head message carries one of its bracket keywords,
+// wherever it stands in the message rather than only as its last line, so a message carrying one
+// decides what legion push decides. This repository's own release bot writes "[skip ci]" subjects,
+// so it is a string a worker reads and copies. The push is refused before anything is pushed, and
+// the branch does not move.
+func TestPushRefusesAHeadWhoseMessageCarriesACIKeyword(t *testing.T) {
+	r := newPushRig(t)
+	r.commit("widget: add the line", map[string]string{"widget.txt": "one\n"})
+	if code, output := r.push(); code != 0 {
+		t.Fatalf("the code push = %d %q", code, output)
+	}
+	first := r.pushed()
+	for _, message := range []string{
+		"chore: release the widget [skip ci]",
+		"widget: fix the line\n\n[ci skip] while the sandbox is down",
+		"widget: fix the line\n\nNo CI needed [NO CI]",
+	} {
+		r.commit(message, map[string]string{"widget.txt": message})
+		code, output := r.push()
+		if code != 1 || !strings.Contains(output, "keyword") || r.pushed() != first {
+			t.Fatalf("the push of %q = %d %q, remote %q; want a refusal leaving %q", message, code, output, r.pushed(), first)
+		}
+		r.run("describe", "-r", "@-", "-m", "widget: fix the line")
+		if code, output := r.push(); code != 0 {
+			t.Fatalf("the push after the keyword was taken out = %d %q", code, output)
+		}
+		first = r.pushed()
+	}
+}

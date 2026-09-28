@@ -24,7 +24,12 @@ var githubRemote = regexp.MustCompile(`^(?:https://github\.com/|git@github\.com:
 // have succeeded on the pull request's head. A head whose push skipped CI when it should not have
 // (legion push's rule) reports none of them; it is refused here, naming the head and the check,
 // rather than left for GitHub to block the human merge.
-func readyChecks(ctx context.Context, workspace string, issue paneIssue) error {
+//
+// A base branch that requires no check has nothing to refuse, and READY is published. It says so
+// on stdout rather than reading like a head whose every required check was read and passed: a
+// private repository on the free plan can define no ruleset, so this is the ordinary state of the
+// smoke sandbox, and a merger there has no check-based gate on the head at all.
+func readyChecks(ctx context.Context, workspace string, issue paneIssue, stdout io.Writer) error {
 	if issue.PullRequest == nil || issue.PullRequest.Number <= 0 {
 		return fmt.Errorf("the daemon records no pull request for %s", os.Getenv("LEGION_ISSUE"))
 	}
@@ -58,6 +63,7 @@ func readyChecks(ctx context.Context, workspace string, issue paneIssue) error {
 		return err
 	}
 	if len(required) == 0 {
+		fmt.Fprintf(stdout, "[handoff] no check is required on %q of %s, so READY was published without reading the head's checks\n", pull.Base.Ref, repository)
 		return nil
 	}
 	results, err := headCheckResults(ctx, github, pull.Head.SHA)

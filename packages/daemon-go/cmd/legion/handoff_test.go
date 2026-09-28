@@ -743,8 +743,10 @@ func TestHandoffCompleteReadyOnARepositoryWhosePlanHasNoRulesets(t *testing.T) {
 			var out, errb bytes.Buffer
 			code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb)
 			if tc.posted {
-				if code != 0 || len(*bodies) != 1 {
-					t.Fatalf("READY = %d, daemon read %v, stderr %q; want it posted", code, *bodies, errb.String())
+				// A base branch requiring no check has nothing to refuse, and READY says so rather
+				// than reading like a head whose every required check was read and passed.
+				if code != 0 || len(*bodies) != 1 || !strings.Contains(out.String(), `no check is required on "main" of acme/widgets`) {
+					t.Fatalf("READY = %d, daemon read %v, stdout %q, stderr %q; want it posted, saying it read no checks", code, *bodies, out.String(), errb.String())
 				}
 				return
 			}
