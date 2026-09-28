@@ -1255,7 +1255,17 @@ function gnuBasename(text: string): string {
 
 function substitutionPath(base: string, list: readonly Arg[], st: State): string | undefined {
   if (!["dirname", "basename", "realpath", "readlink"].includes(base)) return undefined;
-  const target = literalText(operands(list, "").operands.at(-1)?.exp);
+  const found = operands(list, "");
+  if (
+    base === "basename" &&
+    found.options.some(
+      (option) =>
+        option === "--multiple" || option.startsWith("--suffix") || /^-[^-]*[as]/.test(option)
+    )
+  ) {
+    return undefined;
+  }
+  const target = literalText(found.operands[0]?.exp);
   if (target === undefined || st.cwd === undefined) return undefined;
   // An empty operand names no path: dirname prints `.`, basename nothing, and realpath and
   // readlink fail and print nothing.
@@ -2413,14 +2423,10 @@ function checkRedirects(
       const target = literalText(exp);
       const file = target === undefined ? undefined : modelKey(st, target);
       if (file === undefined) {
-        // Including a target whose text the guard cannot read at all — a substitution, a glob, a
-        // variable — since that may be any file too. Only for an append: `judgePath` above has
-        // already ruled on a truncating write, and where it allowed one whose target is wholly
-        // unknown it did so under the lenient-target rule, which is not this change's to revoke
-        // (doing so refuses four ordinary driver scripts and closes nothing an append does not).
-        if (appends) {
-          forgetFileModels(st, ctx, `the redirection \`${operator} ${redirect.target.text}\``);
-        }
+        // A target whose text the guard cannot read at all — a substitution, a glob, a variable —
+        // may be any file, including the one about to run. A truncating write has the same effect
+        // on that later run as an append, so either makes every modelled file unknown.
+        forgetFileModels(st, ctx, `the redirection \`${operator} ${redirect.target.text}\``);
         continue;
       }
       let content: string | null = null;
@@ -2636,7 +2642,10 @@ function refusal(site: Site, detail: string, ctx: Ctx, unresolved = false): Refu
   const where = unresolved
     ? `. Every target is resolved as the kernel resolves it, against ${describeRoots(ctx.roots)}`
     : `, outside ${describeRoots(ctx.roots)}`;
-  return new Refusal(site.snippet, site.line, `${detail}${where}. ${HINT}`);
+  const hint = unresolved
+    ? "Create the missing path component in an earlier command, then run this command."
+    : HINT;
+  return new Refusal(site.snippet, site.line, `${detail}${where}. ${hint}`);
 }
 
 // --- Commands ----------------------------------------------------------------------------------
@@ -3115,9 +3124,13 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           rest.length === 1 && rest[0] !== undefined ? [...outer.output, rest[0].exp] : undefined;
       }
       return;
-    case "cd":
-    case "pushd": {
+    case "cd": {
       const found = operands(rest, "");
+      if (found.options.some((option) => !/^-[LPe@]+$/.test(option))) {
+        outer.cwd = undefined;
+        outer.cwdWhy = "`cd` with an option the guard does not model";
+        return;
+      }
       // Bash takes the LAST of `-L` and `-P`, across option words and within one (`-PL` is
       // logical, `-LP` physical), so a `P` anywhere is not physical mode.
       const mode = found.options
@@ -3126,6 +3139,21 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         .filter((letter) => letter === "L" || letter === "P")
         .at(-1);
       changeDirectory(found.operands[0], mode === "P", outer, ctx);
+      return;
+    }
+    case "pushd": {
+      const found = operands(rest, "");
+      const operand = literalText(found.operands[0]?.exp);
+      if (
+        found.options.length > 0 ||
+        found.operands[0] === undefined ||
+        operand?.startsWith("+") === true
+      ) {
+        outer.cwd = undefined;
+        outer.cwdWhy = "`pushd` with a directory stack or option the guard does not model";
+        return;
+      }
+      changeDirectory(found.operands[0], false, outer, ctx);
       return;
     }
     case "popd":
@@ -3535,8 +3563,8 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         const target = literalText(arg.exp);
         const file = target === undefined ? undefined : modelKey(st, target);
         if (file === undefined) {
-          // As in `checkRedirects`: `judgePath` above has ruled on a `tee` that is not appending.
-          if (append) forgetFileModels(st, ctx, `\`tee ${arg.text}\``);
+          // As in `checkRedirects`, a target `tee` cannot name may be the script it runs next.
+          forgetFileModels(st, ctx, `\`tee ${arg.text}\``);
           continue;
         }
         st.pidFiles.delete(file);

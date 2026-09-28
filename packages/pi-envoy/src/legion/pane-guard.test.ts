@@ -45,19 +45,24 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   // Deletes the backups `find` lists: a path read from a command's output.
   "packages/envoy/deploy/scripts/autodeploy_test.sh":
     "packages/envoy/deploy/scripts/autodeploy.sh:80",
-  // Kills the processes a query selects (`$(run_processes)`, `first_child`), not pids it started.
-  "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/controller-start-tmux.sh:67",
+  // The directory-stack model is deliberately unknown; the command's own `-c` text then runs.
+  "scripts/e2e/controller-start-tmux.sh": "its `-c` text:1",
   // A library run bare, without the arguments every caller passes: bash stops at its argument
   // check, and the guard, which walks a command whatever a test before it decides, reaches the
   // paths an empty argument makes (`--control`, `--dest`).
   "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:99",
+  // An unnameable write can replace the script it runs next. These two driver scripts exercise
+  // that shape; the other two changed scripts were already refused, so their refusal site moved.
+  ".github/scripts/check-bun-version.test.sh": ".github/scripts/check-bun-version.test.sh:74",
+  ".github/scripts/check-image-trigger-paths.test.sh":
+    ".github/scripts/check-image-trigger-paths.test.sh:75",
   // Runs the gateway key command it writes, whose `command=(%s)` line takes a value built from
   // `$(command -v hawk-token)`: a script the guard cannot read. The drivers run it before any pane.
   "scripts/e2e/lib/install-model-gateway.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
   "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
   "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
   "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
-  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/workflow.sh:94",
 };
 
 beforeAll(() => {
@@ -202,6 +207,13 @@ describe("resolution", () => {
     expect(bash('d="$(mktemp -d)"; cd "$d"; rm -rf *')).toBeUndefined();
     expect(bash(`rm -rf "\${WORK:-$LEGION_WORKSPACE/build}"`)).toBeUndefined();
     expect(bash(`rm -rf "\${HOME:-/nowhere}"`)).toContain(home);
+  });
+
+  test("tells an unresolvable in-workspace path how to become resolvable", () => {
+    const reason = bash("rm -rf out/tmp/../old");
+    expect(reason).toContain("cannot know where the `..` after it leads");
+    expect(reason).toContain("Create the missing path component in an earlier command");
+    expect(reason).not.toContain("Name a path under $LEGION_WORKSPACE");
   });
 
   test("keeps a variable unset after unset, apart from empty and from the pane's environment", () => {

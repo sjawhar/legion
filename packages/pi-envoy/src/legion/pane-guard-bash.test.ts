@@ -1,11 +1,20 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createPaneGuard, type PaneGuard } from "./pane-guard";
 import { DESTRUCTIVE, KILL_PID, type Live, MODEL_ROWS, PID_ROWS } from "./pane-guard-model-rows";
 import {
+  buildPathFixture,
   DOTDOT_COMPONENT,
   measureAllPathRows,
   PATH_ROWS,
@@ -48,6 +57,11 @@ function insideRoots(target: string): boolean {
   return (
     target === workspace || target.startsWith(`${workspace}/`) || target.startsWith(`${scratch}/`)
   );
+}
+
+function removePathFixture(root: string): void {
+  chmodSync(path.join(root, "ws", "perm"), 0o755);
+  rmSync(root, { recursive: true, force: true });
 }
 
 /** The cases bash puts a target outside the roots in, each run by one bash as a subshell whose
@@ -407,6 +421,137 @@ test("a target is judged as the kernel resolves it, not as the text reads", () =
     rmSync(root, { recursive: true, force: true });
   }
 }, 180_000);
+
+test("matches bash's directory builtins without inventing a directory stack", () => {
+  const destructive = [
+    "cd ../home; pushd -P mine/..; rm -f .bashrc",
+    'cd ../home; pushd -n "$LEGION_WORKSPACE"; rm -f .bashrc',
+    'cd ../home; pushd "$LEGION_WORKSPACE" >/dev/null; pushd +1 >/dev/null; rm -f .bashrc',
+    'cd ../home; cd -Z "$LEGION_WORKSPACE"; rm -f .bashrc',
+  ];
+  for (const command of destructive) {
+    const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-directory-"));
+    try {
+      const fixture = buildPathFixture(root);
+      const fixtureEnv = {
+        HOME: fixture.home,
+        LEGION_WORKSPACE: fixture.workspace,
+        TMPDIR: fixture.scratch,
+        PATH: process.env.PATH,
+      };
+      const fixtureGuard = createPaneGuard({
+        workspace: fixture.workspace,
+        ompPid: process.pid,
+        scratch: fixture.scratch,
+      });
+      expect(fixtureGuard.bash(command, fixture.workspace, fixtureEnv), command).toBeDefined();
+      const run = spawnSync("bash", ["-c", command], {
+        cwd: fixture.workspace,
+        env: fixtureEnv,
+      });
+      expect(run.status, command).toBe(0);
+      expect(existsSync(path.join(fixture.home, ".bashrc")), command).toBe(false);
+    } finally {
+      removePathFixture(root);
+    }
+  }
+
+  const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-directory-stack-"));
+  try {
+    const fixture = buildPathFixture(root);
+    const fixtureEnv = {
+      HOME: fixture.home,
+      LEGION_WORKSPACE: fixture.workspace,
+      TMPDIR: fixture.scratch,
+      PATH: process.env.PATH,
+    };
+    const fixtureGuard = createPaneGuard({
+      workspace: fixture.workspace,
+      ompPid: process.pid,
+      scratch: fixture.scratch,
+    });
+    expect(fixtureGuard.bash("pushd; rm -f inside", fixture.workspace, fixtureEnv)).toContain(
+      "directory stack"
+    );
+    expect(
+      fixtureGuard.bash(
+        'pushd "$LEGION_WORKSPACE" >/dev/null; rm -f inside',
+        fixture.workspace,
+        fixtureEnv
+      )
+    ).toBeUndefined();
+  } finally {
+    removePathFixture(root);
+  }
+}, 60_000);
+
+test("uses basename's first operand and refuses options it does not model", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-basename-"));
+  try {
+    const fixture = buildPathFixture(root);
+    const fixtureEnv = {
+      HOME: fixture.home,
+      LEGION_WORKSPACE: fixture.workspace,
+      TMPDIR: fixture.scratch,
+      PATH: process.env.PATH,
+    };
+    const fixtureGuard = createPaneGuard({
+      workspace: fixture.workspace,
+      ompPid: process.pid,
+      scratch: fixture.scratch,
+    });
+    const command = 'rm -rf "$LEGION_WORKSPACE/$(basename .. x)/home/keep"';
+    expect(fixtureGuard.bash(command, fixture.workspace, fixtureEnv), command).toBeDefined();
+    const run = spawnSync("bash", ["-c", command], { cwd: fixture.workspace, env: fixtureEnv });
+    expect(run.status).toBe(0);
+    expect(existsSync(path.join(fixture.home, "keep"))).toBe(false);
+    expect(
+      fixtureGuard.bash(
+        'rm -f "$(basename -s ignored "$HOME/.ssh")"',
+        fixture.workspace,
+        fixtureEnv
+      )
+    ).toBeDefined();
+  } finally {
+    removePathFixture(root);
+  }
+});
+
+test("blurs models after any write whose target it cannot name", () => {
+  const commands = [
+    `echo 'echo hi' > t.sh; echo 'rm -f "$HOME/.bashrc"' > "$LEGION_WORKSPACE/$(echo t.sh)"; bash t.sh`,
+    `echo 'rm -f "$HOME/.bashrc"' > "$LEGION_WORKSPACE/$(echo t.sh)"; bash t.sh`,
+    `echo 'rm -f "$HOME/.bashrc"' > "./$(echo t.sh)"; bash t.sh`,
+    `echo 'echo hi' > t.sh; echo 'rm -f "$HOME/.bashrc"' > t.s[h]; bash t.sh`,
+    `echo 'rm -f "$HOME/.bashrc"' | tee "$LEGION_WORKSPACE/$(echo t.sh)" >/dev/null; bash t.sh`,
+  ];
+  for (const command of commands) {
+    const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-unnameable-write-"));
+    try {
+      const fixture = buildPathFixture(root);
+      const fixtureEnv = {
+        HOME: fixture.home,
+        LEGION_WORKSPACE: fixture.workspace,
+        TMPDIR: fixture.scratch,
+        PATH: process.env.PATH,
+      };
+      const fixtureGuard = createPaneGuard({
+        workspace: fixture.workspace,
+        ompPid: process.pid,
+        scratch: fixture.scratch,
+      });
+      expect(fixtureGuard.bash(command, fixture.workspace, fixtureEnv), command).toBeDefined();
+      const run = spawnSync("bash", ["-c", command], {
+        cwd: fixture.workspace,
+        env: fixtureEnv,
+      });
+      expect(run.status, command).toBe(0);
+      expect(existsSync(path.join(fixture.home, ".bashrc")), command).toBe(false);
+    } finally {
+      removePathFixture(root);
+    }
+  }
+}, 60_000);
 
 test("a file a branch or an unwaited command writes is never modelled as its text", () => {
   const observed: string[] = [];
