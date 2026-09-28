@@ -669,7 +669,7 @@ test("on a phone the open composer keeps its height budget at forty recipients, 
     expect(heightAtTwo).toBeLessThanOrEqual(viewport.height * 0.4);
 
     // Forty recipients: the count stays exact, and one line of chips keeps the composer at the
-    // height two gave it (221.7 px, 33.4%).
+    // height two gave it (222.0 px, 33.43%).
     await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
     await expect(
       composer.getByRole("heading", { name: "Broadcast to 40 of 40 selected" })
@@ -775,6 +775,74 @@ test("a narrow or short screen gets the compact composer, filled within 45% of i
       expect
         .soft((await composer.boundingBox())?.height ?? Infinity, `${size.width}x${size.height}`)
         .toBeLessThanOrEqual(size.height * 0.45);
+    }
+  } finally {
+    await alice.close();
+  }
+});
+
+test("with half the recipients unable to take the mode, the compact composer keeps its budget and every exclusion stays reachable on one line", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+  // Planners 21 to 40 advertise `aside` only, so the default BTW mode excludes them. Every
+  // earlier budget fixture excluded nobody, so the Excluded line never rendered there.
+  await setLiveSessions(
+    fortyPlanners().map((session, index) =>
+      index < 20 ? session : { ...session, capabilities: ["aside"] }
+    )
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 664, width: 390 });
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const message = composer.getByRole("textbox", { name: "Broadcast message" });
+    await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
+    await expect(
+      composer.getByRole("heading", { name: "Broadcast to 20 of 40 selected" })
+    ).toBeVisible();
+    const excluded = composer.getByText(/^Excluded:/);
+
+    // Soft, so each viewport reports on its own.
+    for (const size of [
+      { height: 664, width: 390 },
+      { height: 390, width: 844 },
+      { height: 375, width: 667 },
+    ]) {
+      const at = `${size.width}x${size.height}`;
+      await page.setViewportSize(size);
+      await fillUntilStable(message);
+      expect
+        .soft((await composer.boundingBox())?.height ?? Infinity, at)
+        .toBeLessThanOrEqual(size.height * 0.45);
+
+      // All twenty stay named on the line, and its last name scrolls into view.
+      for (let index = 21; index <= 40; index += 1) {
+        await expect.soft(excluded, at).toContainText(`Planner ${index} (does not advertise btw)`);
+      }
+      const last = await excluded.evaluate((element) => {
+        const lastName = "Planner 40";
+        const scrolls = element.scrollWidth > element.clientWidth;
+        const text = [...element.childNodes].find((node) => node.textContent?.includes(lastName));
+        if (text === undefined) return { scrolls, visible: false };
+        const range = document.createRange();
+        const start = text.textContent?.indexOf(lastName) ?? 0;
+        range.setStart(text, start);
+        range.setEnd(text, start + lastName.length);
+        // Scroll the line so the name's left edge meets the line's, then read both again.
+        element.scrollLeft +=
+          range.getBoundingClientRect().left - element.getBoundingClientRect().left;
+        const [name, line] = [range.getBoundingClientRect(), element.getBoundingClientRect()];
+        return {
+          scrolls,
+          visible: name.left >= line.left - 0.5 && name.right <= line.right + 0.5,
+        };
+      });
+      expect.soft(last, at).toEqual({ scrolls: true, visible: true });
     }
   } finally {
     await alice.close();

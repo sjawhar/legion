@@ -69,10 +69,6 @@ import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
-/** The broadcast composer's excluded-recipients and send-error lines: full width in the compact
- *  grid, and below the controls on a short screen. */
-const composerNotice = `mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-2 narrow-or-short:mt-0 short:order-3 short:col-span-4 ${dangerText}`;
-
 /** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
 function isInactive(agent: Agent, now: number): boolean {
   return now - agent.last_seen >= INACTIVE_AFTER_MS;
@@ -1036,16 +1032,16 @@ function BroadcastComposer({
   return (
     <section
       aria-label="Broadcast"
-      className={`sticky bottom-0 z-10 mt-3 max-h-[50vh] overflow-y-auto rounded-xl border p-3 narrow-or-short:grid narrow-or-short:grid-cols-[auto_1fr] narrow-or-short:items-center narrow-or-short:gap-2 short:grid-cols-[auto_minmax(0,1fr)_auto_auto] ${card} ${borderDefault}`}
+      className={`sticky bottom-0 z-10 mt-3 max-h-[50vh] overflow-y-auto rounded-xl border p-3 narrow-or-short:grid narrow-or-short:grid-cols-[auto_minmax(0,1fr)_auto] narrow-or-short:items-center narrow-or-short:gap-2 short:grid-cols-[auto_minmax(0,1fr)_auto_auto] ${card} ${borderDefault}`}
     >
       <h2
-        className={`text-sm font-semibold narrow-or-short:col-span-2 narrow-or-short:truncate short:col-span-1 ${textPrimaryOnCanvas}`}
+        className={`text-sm font-semibold narrow-or-short:col-span-full narrow-or-short:truncate short:col-span-1 ${textPrimaryOnCanvas}`}
       >
         Broadcast to {recipients.length} of {selected.size} selected
       </h2>
       <ul
         aria-label="Selected agents"
-        className="mt-2 flex flex-wrap gap-2 narrow-or-short:col-span-2 narrow-or-short:mt-0 narrow-or-short:flex-nowrap narrow-or-short:overflow-x-auto short:col-span-3"
+        className="mt-2 flex flex-wrap gap-2 narrow-or-short:col-span-full narrow-or-short:mt-0 narrow-or-short:flex-nowrap narrow-or-short:overflow-x-auto short:col-span-3"
       >
         {[...selected].map((sessionID) => {
           const agent = agents.find((candidate) => candidate.session_id === sessionID);
@@ -1082,14 +1078,19 @@ function BroadcastComposer({
       </div>
       <textarea
         aria-label="Broadcast message"
-        className={`mt-2 block w-full rounded-lg border px-3 py-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-2 narrow-or-short:mt-0 narrow-or-short:max-h-32 narrow-or-short:min-h-16! narrow-or-short:field-sizing-content short:max-h-16 ${inputClasses(true)}`}
+        className={`mt-2 block w-full rounded-lg border px-3 py-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-full narrow-or-short:mt-0 narrow-or-short:max-h-32 short:col-span-2 narrow-or-short:min-h-16! narrow-or-short:field-sizing-content short:max-h-16 ${inputClasses(true)}`}
         onChange={(event) => setBody(event.target.value)}
         placeholder="One message, sent to each selected agent"
         rows={3}
         value={body}
       />
       {excluded.length === 0 ? null : (
-        <p className={composerNotice}>
+        // In the compact grid the exclusions are one line that scrolls sideways, like the chips:
+        // between the mode and Send on a narrow screen, and as a third line under them on a
+        // short one. Every excluded session stays in it, and on its chip, by name.
+        <p
+          className={`mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1 ${dangerText}`}
+        >
           Excluded:{" "}
           {excluded
             .map((item) => `${sessionLabel(item.sessionID, item.title)} (${item.reason})`)
@@ -1098,12 +1099,14 @@ function BroadcastComposer({
         </p>
       )}
       {send.isError ? (
-        <p className={composerNotice}>
+        <p
+          className={`mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-full narrow-or-short:mt-0 short:order-3 ${dangerText}`}
+        >
           Could not send: {send.error instanceof Error ? send.error.message : "network error"}
         </p>
       ) : null}
       <button
-        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold narrow-or-short:order-2 narrow-or-short:mt-0 narrow-or-short:justify-self-end ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4 ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
         disabled={recipients.length === 0 || body.trim() === "" || send.isPending}
         onClick={() => send.mutate()}
         type="button"
