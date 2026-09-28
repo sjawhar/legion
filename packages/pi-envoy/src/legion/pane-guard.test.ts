@@ -405,6 +405,76 @@ describe("scripts a command runs", () => {
     expect(bash(`for i in 1; do d=$(mktemp -d); trap 'rm -rf "$d"' EXIT; done`)).toBeUndefined();
   });
 
+  test("judges a lifted handler with a value the shell assigns after the construct", () => {
+    const set = `t=$(mktemp -d); trap 'rm -rf "$t"' EXIT`;
+    // A single-quoted handler reads `$t` when it runs, so an assignment after the branch wins.
+    for (const command of [
+      `if true; then ${set}; fi; t="$HOME/y"`,
+      `if true; then if true; then ${set}; fi; fi; t="$HOME/y"`,
+      `for i in a; do ${set}; done; t="$HOME/y"`,
+      `for i in a b; do if true; then ${set}; fi; done; t="$HOME/y"`,
+      `while true; do ${set}; break; done; t="$HOME/y"`,
+      `case x in x) ${set};; esac; t="$HOME/y"`,
+      `t=$(mktemp -d); if true; then trap 'rm -rf "$t"' EXIT; fi; t="$HOME/y"`,
+      `if true; then ${set}; fi; export t="$HOME"`,
+      `f() { if true; then ${set}; fi; }; f; t="$HOME/y"`,
+    ]) {
+      expect(bash(command)).toContain(home);
+    }
+    // Blurred again by a later branch or loop that may give it another value.
+    for (const command of [
+      `if true; then ${set}; fi; if [ -n "$x" ]; then t="$HOME/y"; fi`,
+      `if true; then ${set}; fi; for i in 1; do t="$HOME/y"; done`,
+    ]) {
+      expect(bash(command)).toContain("which a branch sets differently");
+    }
+    expect(bash(`if true; then ${set}; fi; t=$(cat)`)).toContain("(a command's output)");
+    expect(
+      bash(`if true; then t="$HOME"; trap 'rm -rf "$t"' EXIT; fi; t=$(mktemp -d)`)
+    ).toBeUndefined();
+    // A double-quoted handler froze the value when it was set; a later assignment changes nothing.
+    expect(
+      bash(`if true; then t=$(mktemp -d); trap "rm -rf $t" EXIT; fi; t="$HOME/y"`)
+    ).toBeUndefined();
+    expect(bash(`if true; then t="$HOME/y"; trap "rm -rf $t" EXIT; fi; t=$(mktemp -d)`)).toContain(
+      home
+    );
+  });
+
+  test("runs every definition a branch or loop body may have left for a name", () => {
+    const f = `f() { rm -rf "$HOME/y"; }`;
+    for (const command of [
+      `if true; then ${f}; fi; f`,
+      `if false; then :; else ${f}; fi; f`,
+      `for i in a; do ${f}; done; f`,
+      `for ((i = 0; i < 1; i++)); do ${f}; done; f`,
+      `while true; do ${f}; break; done; f`,
+      `select x in a; do ${f}; break; done; f`,
+      `case a in a) ${f};; esac; f`,
+      `f() { :; }; if true; then ${f}; fi; f`,
+      `if true; then ${f}; else f() { :; }; fi; f`,
+      `if true; then f() { :; }; else ${f}; fi; f`,
+      `if true; then ${f}; fi; x=$(f)`,
+      `if true; then h() { rm -rf "$HOME/y"; }; fi; trap h EXIT`,
+      // A path that defined no `rm` runs the command itself.
+      `if true; then rm() { :; }; fi; rm -rf "$HOME/y"`,
+      'g() { h() { rm -rf "$HOME/y"; }; };' +
+        ' if [ -n "$a" ]; then g; fi; if [ -n "$b" ]; then g; fi; h',
+      `if [ -n "$y" ]; then e() { echo "$HOME"; }; else e() { echo "$TMPDIR/a"; }; fi;` +
+        ' rm -rf "$(e)"',
+    ]) {
+      expect(bash(command)).toContain(home);
+    }
+    expect(bash(`if true; then f() { echo hi; }; fi; f`)).toBeUndefined();
+    expect(bash(`if true; then f() { :; }; else f() { echo x; }; fi; f`)).toBeUndefined();
+    expect(
+      bash(
+        `if [ -n "$y" ]; then e() { echo "$TMPDIR/a"; }; else e() { echo "$TMPDIR/b"; }; fi;` +
+          ' rm -rf "$(e)"'
+      )
+    ).toBeUndefined();
+  });
+
   test("walks a backgrounded command in a subshell", () => {
     const cleanup = 'cleanup() { rm -rf "$HOME"; }; trap cleanup EXIT; f() { trap - EXIT; }';
     // `f &` clears only its own subshell's handler, so the parent's still runs at exit.

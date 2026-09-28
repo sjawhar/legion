@@ -24,12 +24,16 @@
  * A `trap` handler's body is judged once, against the state of the shell that set it after that
  * shell's last statement, where bash runs an EXIT handler; a subshell's handlers (a substitution,
  * `( … )`, a pipeline's part, a coprocess, a backgrounded command) are judged at the subshell's
- * end. A handler set inside a branch or loop body is judged with the variables that body gave it,
- * since the merged state after the construct may no longer know them. A handler that would be
- * dangerous only at an earlier exit (an `exit` before a later assignment makes its target safe) is
- * not caught: the guard does not model where a shell exits. A handler whose text the guard cannot
- * read is refused; one it can read that runs a command it cannot (`trap 'eval "$c"' EXIT`) is
- * judged as any such command is, the residual above.
+ * end. The text judged is the one bash stores: a double-quoted handler's variables were expanded
+ * when it was set, and a single-quoted one reads its own when it runs. So a handler set inside a
+ * branch or loop body is judged with the variables that body gave it, which the merged state after
+ * the construct may no longer know, except a name the shell assigns after the construct, whose new
+ * value is the one it reads. A function a branch or loop body defines is every definition a path
+ * may have left: a call runs each, and the command of that name where a path defined none. A
+ * handler that would be dangerous only at an earlier exit (an `exit` before a later assignment
+ * makes its target safe) is not caught: the guard does not model where a shell exits. A handler
+ * whose text the guard cannot read is refused; one it can read that runs a command it cannot
+ * (`trap 'eval "$c"' EXIT`) is judged as any such command is, the residual above.
  */
 import {
   closeSync,
@@ -120,7 +124,7 @@ interface State {
   /** Per-element values of shell arrays. */
   readonly arrays: Map<string, Map<string, Expansion>>;
   /** Functions available in this shell, with their definition source for diagnostic locations. */
-  functions: Map<string, FunctionDefinition>;
+  functions: Map<string, Callee>;
   /** Functions whose current body walk has not returned; recursive calls add no new code to check. */
   readonly runningFunctions: Set<string>;
   /** The handlers this shell set with `trap`. Each body runs when this shell finishes, against its
@@ -134,6 +138,15 @@ interface FunctionDefinition {
   readonly file: string | undefined;
 }
 
+/** What a name runs as: each function definition a path through the command may have left, and
+ * `undefined` for a path that left none, where the name runs as a command. A definition alone is
+ * the ordinary case; a name a branch or loop body defines has more than one. */
+type Callee = readonly (FunctionDefinition | undefined)[];
+
+/** One definition per `Function` node, so a definition walked again (a function called in two
+ * branches) is one candidate where they meet, not one per walk. */
+const definitions = new WeakMap<Node, Callee>();
+
 interface Trap {
   readonly text: string;
   readonly site: Site;
@@ -141,9 +154,11 @@ interface Trap {
    * body is reachable, so each is walked; the set is what `trap - <signal>` removes. */
   readonly signals: readonly string[];
   readonly file: string;
-  /** The variables of the branch or loop body that set it, captured when `merge` lifts it out, so
-   * it is judged with the values that body gave them rather than the ones the merge blurs. */
+  /** For a handler `merge` lifted out of a branch or loop body: that body's variables, and the
+   * values the merge left for them. A handler reads its variables when it runs, so a body's value
+   * stands only while the shell still holds the value that merge wrote (`handlerVars`). */
   readonly vars?: ReadonlyMap<string, Expansion>;
+  readonly merged?: ReadonlyMap<string, Expansion>;
   /** Names bound to the pids of this shell's children a double-quoted handler expanded when it was
    * set (`trap "kill $pid" EXIT`), which its text reads back. */
   readonly pids?: ReadonlyMap<string, Expansion>;
@@ -595,11 +610,33 @@ function substitution(
   }
   const only = script?.commands.length === 1 ? script.commands[0]?.command : undefined;
   const invocation = substitutionInvocation(only, st, ctx);
-  const definition = invocation === undefined ? undefined : st.functions.get(invocation.base);
-  if (definition !== undefined && invocation !== undefined) {
-    const output = functionOutput(invocation.base, definition, invocation.rest, st, ctx);
-    if (output !== undefined) return output.map((value) => [...value]);
+  const callee = invocation === undefined ? undefined : st.functions.get(invocation.base);
+  if (callee !== undefined && invocation !== undefined) {
+    const alternatives: Piece[][] = [];
+    let external = false;
+    for (const definition of callee) {
+      const output =
+        definition === undefined
+          ? undefined
+          : functionOutput(invocation.base, definition, invocation.rest, st, ctx);
+      if (output !== undefined) alternatives.push(...output.map((value) => [...value]));
+      else external = true;
+    }
+    return external
+      ? [...alternatives, ...commandOutput(only, invocation, text, st, ctx)]
+      : alternatives;
   }
+  return commandOutput(only, invocation, text, st, ctx);
+}
+
+/** The value of a substitution that runs a command rather than one of this shell's functions. */
+function commandOutput(
+  only: Node | undefined,
+  invocation: ReturnType<typeof substitutionInvocation>,
+  text: string,
+  st: State,
+  ctx: Ctx
+): Piece[][] {
   if (invocation !== undefined) {
     if (invocation.base === "pwd" && invocation.rest.length === 0 && st.cwd !== undefined) {
       return [[literal(st.cwd)]];
@@ -898,8 +935,13 @@ function clone(st: State): State {
   };
 }
 
-/** After branches that may or may not run: a variable or working directory the branches leave
- * differently is unknown. */
+/** After branches that may or may not run: everything a branch leaves in this shell, since any of
+ * them may be the one that ran. A variable or working directory the branches leave differently is
+ * unknown, a function name holds every definition they leave (`Callee`), and a handler any of them
+ * sets stays. Not merged: `files` and `pidFiles`, which every branch shares; `output`, which each
+ * caller compares itself (`outputChanged`); `runningFunctions`, which only a function's own walk
+ * changes; and the positional parameters, so a `shift` or `set --` inside a branch leaves the
+ * arguments as they were before it. */
 function merge(target: State, branches: readonly State[]): void {
   const names = new Set<string>();
   for (const branch of branches) for (const name of branch.vars.keys()) names.add(name);
@@ -937,18 +979,52 @@ function merge(target: State, branches: readonly State[]): void {
     for (const name of branch.exported) target.exported.add(name);
     target.backgroundStarted ||= branch.backgroundStarted;
   }
-  // A handler a branch or loop body sets stays set after it, as bash keeps it. It carries that
-  // body's variables, captured at the innermost merge that lifts it out, since the merged state
-  // may already have blurred the ones it reads (`t=$(mktemp); trap 'rm -f "$t"' EXIT` in an `if`).
-  // A removal inside a branch that may not run resets nothing here.
+  const functionNames = new Set<string>();
+  for (const branch of branches)
+    for (const name of branch.functions.keys()) functionNames.add(name);
+  const functions = new Map<string, Callee>();
+  for (const name of functionNames) {
+    const callees = branches.map((branch) => branch.functions.get(name));
+    const first = callees[0];
+    if (first !== undefined && callees.every((callee) => callee === first)) {
+      functions.set(name, first);
+      continue;
+    }
+    const candidates = new Set<FunctionDefinition | undefined>();
+    for (const callee of callees)
+      for (const definition of callee ?? [undefined]) candidates.add(definition);
+    functions.set(name, [...candidates]);
+  }
+  target.functions = functions;
+  // A handler a branch or loop body sets stays set after it, as bash keeps it. It carries the
+  // variables that body left, since the merged state may already have blurred the ones it reads
+  // (`t=$(mktemp); trap 'rm -f "$t"' EXIT` in an `if`), beside the values this merge wrote for
+  // them. A removal inside a branch that may not run resets nothing here.
   const lifted: Trap[] = [];
+  let merged: ReadonlyMap<string, Expansion> | undefined;
   for (const branch of branches) {
     for (const trap of branch.traps) {
-      if (target.traps.includes(trap) || lifted.includes(trap)) continue;
-      lifted.push(trap.vars === undefined ? { ...trap, vars: branch.vars } : trap);
+      if (target.traps.includes(trap)) continue;
+      merged ??= new Map(target.vars);
+      lifted.push({ ...trap, vars: handlerVars(trap, branch.vars), merged });
     }
   }
   target.traps = [...target.traps, ...lifted];
+}
+
+/** The variables a handler runs with in a shell whose variables are `vars`. For a handler lifted
+ * out of a branch, a name the shell still holds as the merge that lifted it wrote it takes the
+ * value that branch left, since the handler runs only on a path where that branch ran; a name
+ * assigned since holds its new value, which is the one the handler reads when it runs. */
+function handlerVars(
+  trap: Trap,
+  vars: ReadonlyMap<string, Expansion>
+): ReadonlyMap<string, Expansion> {
+  const { vars: branch, merged } = trap;
+  if (branch === undefined || merged === undefined) return vars;
+  const out = new Map(vars);
+  for (const [name, value] of branch) if (vars.get(name) === merged.get(name)) out.set(name, value);
+  return out;
 }
 
 function lineOf(source: string, pos: number): number {
@@ -992,11 +1068,11 @@ function subshell(st: State, patch?: Partial<State>): State {
 }
 
 /** Runs the body of every handler this shell set, at its end: each against the state after the
- * shell's last statement, with the variables of the branch that set it (`Trap.vars`) and the pids
- * it expanded (`Trap.pids`) over it. */
+ * shell's last statement, with the variables of the branch that set it where the shell still holds
+ * what the merge wrote for them (`handlerVars`), and the pids it expanded (`Trap.pids`) over it. */
 function runSetTraps(st: State, ctx: Ctx): void {
   for (const trap of st.traps) {
-    const vars = new Map([...st.vars, ...(trap.vars ?? []), ...(trap.pids ?? [])]);
+    const vars = new Map([...handlerVars(trap, st.vars), ...(trap.pids ?? [])]);
     try {
       runText(
         trap.text,
@@ -1177,10 +1253,16 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       if (branches.some((branch) => outputChanged(before, branch.output))) st.output = undefined;
       return;
     }
-    case "Function":
-      st.functions.set(node.name.value, { body: node.body, source: st.source, file: st.script });
+    case "Function": {
+      let callee = definitions.get(node);
+      if (callee === undefined) {
+        callee = [{ body: node.body, source: st.source, file: st.script }];
+        definitions.set(node, callee);
+      }
+      st.functions.set(node.name.value, callee);
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
       return;
+    }
     case "Coproc": {
       const before = st.output;
       const child = subshell(st);
@@ -1589,9 +1671,25 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
   const base = path.basename(name);
   const rest = argv.slice(1);
   const site = invocation.site;
-  const functionDefinition = outer.functions.get(base);
-  if (functionDefinition !== undefined) {
-    runFunction(base, functionDefinition, rest, outer, ctx);
+  const callee = outer.functions.get(base);
+  if (callee !== undefined) {
+    const [only] = callee;
+    if (callee.length === 1 && only !== undefined) {
+      runFunction(base, only, rest, outer, ctx);
+      return;
+    }
+    // Each definition a branch may have left, and the command where a path left none, runs as a
+    // branch of its own.
+    const runs = callee.map((definition) => {
+      const run = clone(outer);
+      if (definition !== undefined) runFunction(base, definition, rest, run, ctx);
+      else {
+        run.functions.delete(base);
+        dispatch(invocation, run, ctx);
+      }
+      return run;
+    });
+    merge(outer, runs);
     return;
   }
   const stdoutRedirected = invocation.redirects.some(

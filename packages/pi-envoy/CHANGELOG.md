@@ -88,7 +88,13 @@
   (`trap 'eval "$c"' EXIT`) is judged as any such command is.
 - A handler set inside an `if`, `case` or loop body stays set after it, as bash keeps it, judged
   with the variables that body gave it: `if true; then trap 'rm -rf "$HOME/y"' EXIT; fi` was
-  allowed, and `if true; then t=$(mktemp); trap 'rm -f "$t"' EXIT; fi` still is. A backgrounded
+  allowed, and `if true; then t=$(mktemp); trap 'rm -f "$t"' EXIT; fi` still is. A name assigned
+  after the construct takes its new value, which is what a single-quoted handler reads at exit, so
+  `…; fi; t="$HOME/y"` is refused; a double-quoted handler keeps the values it expanded when it was
+  set. A function an `if`, `case` or loop body defines is every definition a path may have left: a
+  call runs each, and the command itself where a path defined none. Before, a definition inside a
+  branch was dropped, so `if true; then f() { rm -rf "$HOME/y"; }; fi; f` was allowed, and one that
+  replaced an earlier definition was judged by the earlier one. A backgrounded
   command (`f &`) is walked in a subshell, so its `trap - EXIT` no longer clears the parent's
   handler, and nothing else it changes reaches the parent.
 - The guard walks up to 100,000 nodes of one command before refusing it as too large to judge,
