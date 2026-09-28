@@ -2213,8 +2213,14 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     case "shift": {
-      const count = Number(literalText(rest[0]?.exp) ?? "1");
-      outer.positional = Number.isInteger(count) ? outer.positional?.slice(count) : undefined;
+      // Bash shifts nothing when the count is negative, not a number, or exceeds `$#`; a count the
+      // guard cannot read leaves the arguments unknown.
+      const text = rest.length === 0 ? "1" : literalText(rest[0]?.exp);
+      if (text === undefined) outer.positional = undefined;
+      else if (/^[0-9]+$/.test(text) && outer.positional !== undefined) {
+        const count = Number(text);
+        if (count <= outer.positional.length) outer.positional = outer.positional.slice(count);
+      }
       return;
     }
     case "printf": {

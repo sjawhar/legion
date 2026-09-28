@@ -794,6 +794,24 @@ describe("scripts a command runs", () => {
     expect(bash('rm -rf "$1/cache"')).toContain("a positional parameter");
   });
 
+  test("keeps every argument after a shift bash refuses: past the last, or negative", () => {
+    const ssh = path.join(home, ".ssh");
+    // Bash shifts nothing when the count exceeds `$#` or is negative; `$1` is still the first.
+    const overShift = script("over-shift.sh", 'shift 2\nrm -rf "$1"\n');
+    for (const command of [
+      'set -- "$HOME/.ssh" b; shift 3; rm -rf "$1"',
+      'set -- "$HOME/.ssh"; shift 2; rm -rf "$1"',
+      'set -- "$HOME/.ssh" b; shift -1; rm -rf "$1"',
+      'set -- "$HOME/.ssh"; shift 2; rm -rf "$@"',
+      'f() { shift 2; rm -rf "$1"; }; f "$HOME/.ssh"',
+      `bash ${overShift} "$HOME/.ssh"`,
+    ]) {
+      expect(bash(command), command).toContain(ssh);
+    }
+    // A shift within the count still moves the arguments.
+    expect(bash('set -- "$HOME/.ssh" "$LEGION_WORKSPACE/b"; shift; rm -rf "$1"')).toBeUndefined();
+  });
+
   test("tests a positional parameter's operator expansion against the argument it holds", () => {
     const defaulted = script("positional-default.sh", `rm -rf "\${1:-$LEGION_WORKSPACE/build}"\n`);
     expect(bash(`bash ${defaulted} "$HOME"`)).toContain(home);

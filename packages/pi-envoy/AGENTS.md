@@ -279,7 +279,6 @@ command in the same line can rewrite), pattern replacement and removal of a know
 (`${v//a/b}`, `${v#*:}`; a replacement holding `&`, an operand the parser splits differently from
 bash, and an empty pattern after `/` or `//` stay unknown), command substitutions, subshells and
 branches, functions, wrappers (`sudo`, `env`,
-stays unknown), command substitutions, subshells and branches, functions, wrappers (`sudo`, `env`,
 `timeout`, ...), and the scripts a command runs or writes first, whose refusal names the script and
 line. A script or function run
 with arguments the guard knows has them as its positional parameters (`$#` their count, one past
