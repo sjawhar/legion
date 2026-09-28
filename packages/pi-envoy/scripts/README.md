@@ -7,7 +7,10 @@ plugin. It launches a real, interactive `omp` session (TUI mode, never `-p`)
 in a scratch tmux session and a throwaway directory outside any repo
 checkout, so the only extension that loads is whatever is materialized at
 `~/.omp/plugins/node_modules` — never a local source checkout via a repo's
-own `omp.extensions` manifest. It drives the session with `tmux send-keys` to
+own `omp.extensions` manifest. The session runs on the smoke's own tmux
+server, on a socket in that throwaway directory, and the script prints the
+`tmux -S <socket> attach -t <session>` line that watches it. It drives the
+session with `tmux send-keys` to
 call `envoy_role_set` and wait for a message, publishes to that role's
 namespaced topic through the live Envoy HTTP API, asserts the session wrote
 the exact payload to disk, then kills the session and asserts teardown: the
@@ -94,4 +97,7 @@ blackholed Envoy fails at its stated timeout instead of quietly stretching it.
 | 1 | Any assertion failed — see the `FAIL:` line for which one, plus a captured pane or HTTP status. |
 
 Cleanup (`tmux kill-session`, `rm -rf` the temp dir) runs in an exit trap on
-every exit path, so a failed run leaves nothing behind either.
+every exit path, so a failed run leaves nothing behind either. Both smokes run
+their tmux on a private socket in their temp dir, so the kill can end only the
+session the smoke started; on the shared default server it could end anyone's,
+and the Legion pane guard refuses it there.

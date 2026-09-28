@@ -44,6 +44,10 @@ readonly target_session="claude-channel-smoke-${nonce}"
 readonly message="channel-smoke-payload-${nonce}"
 workdir="$(mktemp -d "/tmp/${target_session}.XXXXXX")"
 readonly workdir
+# The smoke runs its own tmux server on a socket in its scratch directory, so its cleanup can end
+# only the session it started: `tmux kill-session` on the shared default server could end anyone's.
+readonly tmux_socket="${workdir}/tmux.sock"
+tmux() { command tmux -S "$tmux_socket" "$@"; }
 readonly received_file="${workdir}/received.txt"
 readonly claude_output="${workdir}/claude-output.txt"
 readonly delivery_instruction="Envoy channel smoke: use Bash to write exactly ${message}, with no trailing newline, to ${received_file}; then reply CHANNEL_SMOKE_DONE."
@@ -132,7 +136,8 @@ tmux set-option -t "$tmux_session" remain-on-exit on
 tmux pipe-pane -t "$tmux_session" -o "cat >> '${claude_output}'"
 answer_startup_dialogs || fail "Claude did not reach its prompt within ${startup_timeout}s"
 
-printf 'starting interactive Claude channel smoke %s with %s %s\n' "$target_session" "$channel_flag" "$channel_entry"
+printf 'starting interactive Claude channel smoke %s with %s %s; watch it with: tmux -S %s attach -t %s\n' \
+  "$target_session" "$channel_flag" "$channel_entry" "$tmux_socket" "$tmux_session"
 wait_for_session || fail "channel session did not register with Envoy within ${session_timeout}s"
 printf 'registered Envoy channel session %s\n' "$session_row"
 

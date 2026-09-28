@@ -195,7 +195,9 @@ ENVOY_NATS_URL=nats://envoy-nats:4222 \
 allowlisted marketplace) and to `--dangerously-load-development-channels` for every other entry;
 set it explicitly to override. The `PASS` line prints the registered session row (id, dir,
 capabilities); a failure dumps the pane and the full `tmux pipe-pane` capture of everything Claude
-printed. Use `CLAUDE_BIN` or `ENVOY_URL` to select a different Claude binary or listener. For
+printed. The session runs on the smoke's own tmux server, on a socket in its temp directory, so its
+teardown can end only that session; the script prints the `tmux -S <socket> attach -t <session>` line
+that watches it. Use `CLAUDE_BIN` or `ENVOY_URL` to select a different Claude binary or listener. For
 source-tree diagnostics, pass a temporary bare-server config through `CLAUDE_MCP_CONFIG` and use
 `CLAUDE_CHANNEL_ENTRY=server:envoy`; the marketplace command above is the plugin packaging check.
 
