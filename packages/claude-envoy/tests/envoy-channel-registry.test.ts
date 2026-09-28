@@ -429,6 +429,7 @@ test("a shutdown landing inside the heartbeat's registry read leaves the registr
   const alreadyRegistered = "notifications.dispatch.issue.DSP-2"
   const entry = new Set<string>([directSubject, alreadyRegistered])
   const release = Promise.withResolvers<void>()
+  const removals: string[][] = []
   let holdRead = false
   let readHeld = false
   const client = recordingClient([], {
@@ -437,6 +438,7 @@ test("a shutdown landing inside the heartbeat's registry read leaves the registr
       return noInterest()
     },
     unsubscribe: async (input) => {
+      removals.push([...input.topics])
       for (const topic of input.topics) entry.delete(topic)
     },
     getInterest: async (sessionID) => {
@@ -463,14 +465,22 @@ test("a shutdown landing inside the heartbeat's registry read leaves the registr
     // The tick is past the entry check and suspended on the read when shutdown
     // empties the forwarder, so a check evaluated before the await passes going in
     // and finds an empty topic list coming out — every topic drift, the direct
-    // subject with them. The real listener does not merely empty the entry: an
-    // empty topic set makes `removeInterestTopics` delete it (internal/store/
-    // kv.go), and the deregistration behind it removes only the sessions row, so a
-    // `--resume` before `Registry.Reap` reads nothing back.
+    // subject with them.
     const shuttingDown = session.shutdown()
     await waitFor(async () => session.topics().length === 0, "the forwarder to close")
     release.resolve()
     await shuttingDown
+    // The assertion is that the resumed tick does not write to the registry at
+    // all, not that the entry happens to survive: keeping the direct subject out of
+    // the drift set on its own caps the damage at `[[DSP-2]]` — the entry survives
+    // and still holds the direct subject while a live subscription is silently
+    // deleted from durable state anyway. Only re-checking `shuttingDown` after the
+    // read gets to no write. (Without either, the drift set is both topics, and the
+    // real listener deletes the entry outright rather than emptying it:
+    // `removeInterestTopics` calls `deleteInterest`, internal/store/kv.go, and the
+    // deregistration behind it removes only the sessions row, so a `--resume`
+    // before `Registry.Reap` reads nothing back.)
+    expect(removals).toEqual([])
     expect([...entry].sort()).toEqual([directSubject, alreadyRegistered])
   } finally {
     release.resolve()
