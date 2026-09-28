@@ -63,11 +63,16 @@ side of the boundary against the guard that makes the claim. Measuring where a r
 sits is not the same as running the dangerous row on each side of it. Write the claim down only
 after that run.
 
+Re-running everything is not a defence. More than ten rounds of re-derivation are what made three
+reviewers confident enough to publish the same wrong row; the re-running was real, and the row was
+in its output. More coverage would not have changed the outcome. An adversarial reading of what an
+allowed row is evidence of would have.
+
 ## 2. A pattern count drops the name that looks like every other name and is not
 
-Two reviewers counted the guard's `State` interface with different patterns, `[A-Za-z]+` and
-`[A-Za-z_]+:`, and both got 17. The interface declares 18. Both patterns stop at the digit in
-`argv0` and drop it. That round was about three sites that copy a child's `State` back into the
+Two extraction patterns, `[A-Za-z]+` and `[A-Za-z_]+:`, counted the guard's `State` interface at
+17. One reviewer published that count; another caught its own 17 before publishing and diagnosed
+the cause. The interface declares 18: both patterns stop at the digit in `argv0` and drop it. That round was about three sites that copy a child's `State` back into the
 shell (`merge`, `runFunction`, and `runFile`'s sourced branch), each listing fields by hand, and
 those lists had also left out the five fields that say where the walk is, `argv0` among them.
 
