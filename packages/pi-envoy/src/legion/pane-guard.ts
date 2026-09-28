@@ -421,6 +421,57 @@ const FILE_COMMANDS = new Set([
   "chgrp",
 ]);
 const SIGNAL_COMMANDS = new Set(["kill", "pkill", "killall", "killall5"]);
+/** `find` predicates that take the word after them as their value, so that word is no predicate
+ * of its own and `-name "$pattern"` is not a `-delete` the guard failed to read. What the note
+ * above costs here: a `Record` would answer a bare `constructor` word, which would then swallow
+ * the word after it as its value and skip the refusal. `-fprintf` takes two words and is listed
+ * as taking one: reading its second word as a possible predicate refuses where it need not,
+ * which is the direction a miss here has to fall. */
+const FIND_VALUED_PREDICATES = new Set([
+  "-amin",
+  "-anewer",
+  "-atime",
+  "-cmin",
+  "-cnewer",
+  "-ctime",
+  "-fls",
+  "-fprint",
+  "-fprint0",
+  "-fprintf",
+  "-fstype",
+  "-gid",
+  "-group",
+  "-ilname",
+  "-iname",
+  "-inum",
+  "-ipath",
+  "-iregex",
+  "-iwholename",
+  "-links",
+  "-lname",
+  "-maxdepth",
+  "-mindepth",
+  "-mmin",
+  "-mtime",
+  "-name",
+  "-newer",
+  "-newerat",
+  "-newerct",
+  "-newermt",
+  "-path",
+  "-perm",
+  "-printf",
+  "-regex",
+  "-regextype",
+  "-samefile",
+  "-size",
+  "-type",
+  "-uid",
+  "-used",
+  "-user",
+  "-wholename",
+  "-xtype",
+]);
 
 /** Commands that do not add a path to a function's stdout. */
 const FUNCTION_OUTPUT_SILENT: Record<string, true> = {
@@ -1413,6 +1464,60 @@ function positionalOf(list: readonly Arg[]): Expansion[] | undefined {
 function literalText(exp: Expansion | undefined): string | undefined {
   if (exp === undefined || exp.some((piece) => piece.kind !== "literal")) return undefined;
   return exp.map((piece) => piece.text).join("");
+}
+
+/** What the guard can read of a word: its leading literal text, and whether that is all of it.
+ * `-C` reads whole, `root="$1"` reads as `root=` and not whole, `"$flag"` as nothing and not
+ * whole. The leading text is the whole leading RUN of literal pieces, not the first piece alone:
+ * a quote boundary splits `-"C$dir"` into a literal `-` and the quoted part, so reading only the
+ * first piece stopped at `-` and hid the `-C` that word carries. A word it cannot read whole
+ * still constrains what the word can be, and that prefix is the difference between refusing
+ * `fuser "$flag" f` and refusing every `local root="$1"`. */
+function readableWord(arg: Arg): { text: string; whole: boolean } {
+  const whole = literalText(arg.exp);
+  if (whole !== undefined) return { text: whole, whole: true };
+  let text = "";
+  for (const piece of arg.exp) {
+    if (piece.kind !== "literal") break;
+    text += piece.text;
+  }
+  return { text, whole: false };
+}
+
+/** Whether a word may be an option `matches` accepts. A word the guard reads whole answers the
+ * test; one it does not may be any option its readable prefix allows, so `"$flag"`, `-a"$rest"`
+ * and `--"$name"` may each be an option while `root="$1"` and `--socket="$s"` may not. Taking a
+ * word it cannot read as no option at all is the one reading it may never assume: that is what
+ * let `f=$(cat mode); fuser "$f" "$HOME"` through while `fuser -k "$HOME"` was refused. Both
+ * spellings count, since the options this guard tests for have long forms (`--recursive`,
+ * `--directory`, `--extract`, `--destination`, `--kill`): reading only the short one left those
+ * long spellings a way through. `declare -n` is the exception with no long form at all. */
+function mayBeOption(arg: Arg, matches: (text: string) => boolean): boolean {
+  const { text, whole } = readableWord(arg);
+  if (whole) return matches(text);
+  return text === "" || /^--?[a-zA-Z-]*$/.test(text);
+}
+
+/** The expansion of a word past its first `count` characters, which the guard has read: the value
+ * an option carries inside its own word (`-C/tmp`, `--directory=/tmp`). Undefined when the word is
+ * shorter than that, which means it carries no value and the next word is the option's. */
+function valueInWord(arg: Arg, count: number): Expansion | undefined {
+  const pieces: Piece[] = [];
+  let dropped = 0;
+  for (const piece of arg.exp) {
+    if (dropped >= count) {
+      pieces.push(piece);
+      continue;
+    }
+    if (piece.kind !== "literal") return undefined;
+    if (piece.text.length + dropped <= count) {
+      dropped += piece.text.length;
+      continue;
+    }
+    pieces.push({ ...piece, text: piece.text.slice(count - dropped) });
+    dropped = count;
+  }
+  return dropped < count || pieces.length === 0 ? undefined : pieces;
 }
 
 // --- Nested scripts in words -------------------------------------------------------------------
@@ -2680,13 +2785,22 @@ function operands(
   return { options, operands: found };
 }
 
-/** Strips the programs that run another program unchanged: `sudo rm` is `rm`. */
+/** Strips the programs that run another program unchanged: `sudo rm` is `rm`.
+ *
+ * `alts` are the other argvs the same command line may run, for the one wrapper where words the
+ * guard cannot read leave more than one program possible: `timeout` takes a duration after its
+ * options, so each unreadable word there may be an option, leaving the program after the
+ * duration, or the duration itself, leaving the program next. There is one reading per stop
+ * position the scan passed, not two — with two unreadable words neither the stopped scan nor the
+ * fully read one names the real program, which is how
+ * `timeout "$opt" "$duration" rm -rf ~` went unchecked. */
 function unwrap(
   argv: readonly Arg[],
   st: State,
   ctx: Ctx,
   site: Site
-): { argv: readonly Arg[]; st: State } {
+): { argv: readonly Arg[]; st: State; alts: readonly (readonly Arg[])[] } {
+  const alts: (readonly Arg[])[] = [];
   let list = argv;
   let state = st;
   for (let guard = 0; guard < 16; guard += 1) {
@@ -2694,12 +2808,30 @@ function unwrap(
     if (name === undefined) break;
     const base = path.basename(name);
     const rest = list.slice(1);
-    const skip = (valued: string, longValued: readonly string[] = []): readonly Arg[] => {
+    // `positional` marks a wrapper whose options are followed by an argument of its own before
+    // the program (`timeout <duration> <program>`). There a word the guard cannot read may be
+    // that argument, and reading past it would take the program to be the word after the one
+    // that is really the program, so the scan stops instead.
+    const skip = (
+      valued: string,
+      longValued: readonly string[] = [],
+      positional = false
+    ): readonly Arg[] => {
       let i = 0;
       for (; i < rest.length; i += 1) {
-        const text = literalText(rest[i]?.exp);
+        const arg = rest[i] as Arg;
+        const text = literalText(arg.exp);
         if (text === "--") return rest.slice(i + 1);
-        if (text === undefined || !text.startsWith("-") || text === "-") break;
+        // A word the guard cannot read may be one of this wrapper's options, and stopping here
+        // left the wrapper unstripped and the program it runs unchecked, even when that program
+        // is written plainly right after it (`sudo "$flag" rm -rf ~`). Reading past it takes the
+        // dangerous reading; the harmless one, where the unreadable word is itself the program,
+        // is the residual an unreadable command name already is.
+        if (text === undefined) {
+          if (positional || !mayBeOption(arg, (option) => option.startsWith("-"))) break;
+          continue;
+        }
+        if (!text.startsWith("-") || text === "-") break;
         if (text.startsWith("--")) {
           if (!text.includes("=") && longValued.includes(text)) i += 1;
         } else {
@@ -2710,20 +2842,46 @@ function unwrap(
       }
       return rest.slice(i);
     };
-    if ((base === "busybox" || base === "toybox") && rest[0] !== undefined) list = rest;
+    // A multi-call binary's applet word stands where a program name stands, so a readable one is
+    // promoted and checked as that program, and the loop starts again on it: `busybox busybox ls`
+    // promotes twice. An unreadable one is left in place for `dispatch`, which knows the applet
+    // may be any of the binary's own; promoting it would leave a command name the guard cannot
+    // read, which it allows.
+    if (
+      (base === "busybox" || base === "toybox") &&
+      rest[0] !== undefined &&
+      literalText(rest[0].exp) !== undefined
+    ) {
+      list = rest;
+      continue;
+    }
     if (base === "sudo" || base === "doas") list = skip("ughpCDrtUT", ["--user", "--group"]);
     else if (base === "nice") list = skip("n", ["--adjustment"]);
     else if (["nohup", "setsid", "builtin", "time"].includes(base)) list = skip("");
     else if (base === "exec") list = skip("a");
     else if (base === "command") {
       const flags = rest.map((arg) => literalText(arg.exp));
-      if (flags[0] === "-v" || flags[0] === "-V") return { argv: [], st: state };
+      if (flags[0] === "-v" || flags[0] === "-V") return { argv: [], st: state, alts };
       list = skip("");
     } else if (base === "stdbuf") list = skip("ioe", ["--input", "--output", "--error"]);
     else if (base === "ionice") list = skip("cnt", ["--class", "--classdata"]);
     else if (base === "timeout") {
-      const after = skip("sk", ["--signal", "--kill-after"]);
-      list = after.slice(1);
+      // The duration reading: the scan stops at a word it cannot read, taking that word to be
+      // the duration, so the program is the one after it.
+      const stopped = skip("sk", ["--signal", "--kill-after"], true);
+      list = stopped.slice(1);
+      // Every unreadable word between the two stop points is a reading of its own: it may be the
+      // duration, making the next word the program. With one such word the fully read scan
+      // covers it; with two, neither that scan nor the stopped one names the real program.
+      for (let at = rest.length - stopped.length; at < rest.length; at += 1) {
+        if (literalText(rest[at]?.exp) !== undefined) break;
+        alts.push(rest.slice(at + 1));
+      }
+      // The all-options reading: every word the scan passed was one of `timeout`'s options, so
+      // the duration is the next readable word and the program the one after that. When the scan
+      // did not stop early this agrees with `stopped` and there is nothing extra to dispatch.
+      const read = skip("sk", ["--signal", "--kill-after"]);
+      if (read.length !== stopped.length) alts.push(read.slice(1));
     } else if (base === "env") {
       let i = 0;
       const overlay = new Map<string, Expansion>();
@@ -2777,6 +2935,7 @@ function unwrap(
           overlay.set(arg.exp[0].text.slice(0, arg.exp[0].text.indexOf("=")), [
             unknown("an `env` assignment"),
           ]);
+        } else if (text === undefined && mayBeOption(arg, (option) => option.startsWith("-"))) {
         } else break;
       }
       if (i !== -1) list = rest.slice(i);
@@ -2791,7 +2950,7 @@ function unwrap(
       }
     } else break;
   }
-  return { argv: list, st: state };
+  return { argv: list, st: state, alts };
 }
 
 function runFunction(
@@ -2892,6 +3051,12 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
   const unwrapped = unwrap(invocation.args, outer, ctx, invocation.site);
   const argv = unwrapped.argv;
   const st = unwrapped.st;
+  // Every other program the line may run, when the words the guard cannot read leave more than
+  // one possible (`unwrap`'s `alts`). Each is walked for its refusal alone, in a state of its
+  // own, since only one reading is what bash will do and none may be recorded as what happened.
+  for (const other of unwrapped.alts) {
+    dispatch({ ...invocation, args: other }, clone(outer), ctx);
+  }
   const name = literalText(argv[0]?.exp);
   // A command whose name is itself a variable or a substitution runs a program the guard cannot
   // name (the documented residual risk).
@@ -3068,19 +3233,44 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         leading?.kind === "literal" &&
         leading.text.startsWith("-v") &&
         (leading.text.length > 2 || head.length > 1);
-      if (spaced || joined) {
-        const variable = spaced
-          ? literalText(rest[1]?.exp)
-          : literalText([
-              { ...(leading as Piece), text: leading?.text.slice(2) ?? "" },
-              ...head.slice(1),
-            ]);
+      // An option word the guard cannot read may be `-v`, and then the word after it names the
+      // variable printf writes. Taking it as a format string instead records no write at all, so
+      // a name the guard has already approved keeps its approved value while bash replaces it —
+      // the one direction it may not take. Which variable is unknown as well when that word is
+      // unreadable, and `assignByName` then forgets every name. With no word after it there is
+      // no such reading at all: `printf -v` alone is a usage error that assigns nothing, so
+      // forgetting every variable there was a refusal with nothing behind it.
+      const first = rest[0];
+      const mayBeV =
+        !spaced &&
+        !joined &&
+        first !== undefined &&
+        rest[1] !== undefined &&
+        mayBeOption(first, (text) => text.startsWith("-v"));
+      if (spaced || joined || mayBeV) {
+        const variable =
+          spaced || mayBeV
+            ? literalText(rest[1]?.exp)
+            : literalText([
+                { ...(leading as Piece), text: leading?.text.slice(2) ?? "" },
+                ...head.slice(1),
+              ]);
         // `printf -v NAME '%s' VALUE` assigns VALUE as it is, a pid of this shell's included;
         // another format assigns what printf renders, known only when every part of it is.
-        const printed = rest.slice(spaced ? 2 : 1);
+        const printed = rest.slice(spaced || mayBeV ? 2 : 1);
         const [format, value, ...others] = printed;
         let assigned: Expansion;
-        if (literalText(format?.exp) === "%s" && value !== undefined && others.length === 0) {
+        if (mayBeV) {
+          assigned = [
+            unknown(
+              `\`$${variable ?? "?"}\` (printf with an option word the guard cannot read, which may be \`-v\`)`
+            ),
+          ];
+        } else if (
+          literalText(format?.exp) === "%s" &&
+          value !== undefined &&
+          others.length === 0
+        ) {
           assigned = value.exp;
         } else {
           const text = printfText(printed, MAX_VALUE_LENGTH);
@@ -3249,25 +3439,46 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       const extracting =
         base === "unzip" ||
         rest.some((arg, index) => {
-          const text = literalText(arg.exp);
-          return (
-            text === "--extract" ||
-            text === "--get" ||
-            (text?.startsWith("-") === true && !text.startsWith("--") && text.includes("x")) ||
-            (index === 0 && /^[A-Za-z]*x[A-Za-z]*$/.test(text ?? ""))
+          // Bare mode letters, first on the line, are the one extract mode that is no option
+          // word, so a prefix of them the guard cannot read whole may still gain an `x`. Every
+          // other extract mode is an option word, and a prefix that can be none of them rules it
+          // out, so `tar cf "$archive" notes.txt` stays a create.
+          const { text, whole } = readableWord(arg);
+          if (!whole && index === 0 && /^[A-Za-z]*$/.test(text)) return true;
+          return mayBeOption(
+            arg,
+            (mode) =>
+              mode === "--extract" ||
+              mode === "--get" ||
+              (mode.startsWith("-") && !mode.startsWith("--") && mode.includes("x")) ||
+              (index === 0 && /^[A-Za-z]*x[A-Za-z]*$/.test(mode))
           );
         });
       if (!extracting) return;
       const targetDirectories: Arg[] = [];
       const short = base === "tar" ? "-C" : "-d";
       const long = base === "tar" ? "--directory" : "--destination";
+      // A short option may stand in a cluster (`tar -xC dir`), and wherever it stands its value
+      // is whatever follows it in the same word (`-C/tmp`, `-xC"$dir"`, `--directory=/tmp`), or
+      // the next word when nothing does. Judging the next word regardless passed a command whose
+      // real destination was never looked at, and reported on a path it never touched.
+      const letter = short.slice(1);
       for (const [index, arg] of rest.entries()) {
-        const text = literalText(arg.exp);
-        if (text === short || text === long) {
+        const { text, whole } = readableWord(arg);
+        const clusterAt =
+          text.startsWith("-") && !text.startsWith("--") ? text.indexOf(letter, 1) : -1;
+        const carried = text.startsWith(`${long}=`)
+          ? valueInWord(arg, long.length + 1)
+          : clusterAt !== -1 && (!whole || text.length > clusterAt + 1)
+            ? valueInWord(arg, clusterAt + 1)
+            : undefined;
+        if (carried !== undefined) {
+          targetDirectories.push({ text: arg.text, exp: carried });
+          continue;
+        }
+        if (clusterAt !== -1 || mayBeOption(arg, (option) => option === short || option === long)) {
           const target = rest[index + 1];
           if (target !== undefined) targetDirectories.push(target);
-        } else if (text?.startsWith(`${long}=`)) {
-          targetDirectories.push({ text: arg.text, exp: [literal(text.slice(long.length + 1))] });
         }
       }
       checkTargets(base, "extract and overwrite in", targetDirectories, true, st, ctx, site);
@@ -3360,8 +3571,21 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           "shared machine; a pane signals only processes it started. Stop a process you started " +
           'with the hub tool (`op: "stop"`), or `kill` the pid of a child you started from this pane'
       );
-    case "fuser":
-      if (rest.some((arg) => /^-[a-zA-Z]*k/.test(literalText(arg.exp) ?? ""))) {
+    case "fuser": {
+      // A word the guard cannot read may be `-k`, so a command holding one is a kill unless
+      // every reading left is harmless: `fuser -k` with no file to search kills nothing, so a
+      // lone unreadable word — either the option or the file, not both — is not a kill, and
+      // `fuser "$path"` still runs. That count is of the words bash will make, not of the words
+      // written: an unquoted word bash may split into several (`fields`) can be both the option
+      // and the file at once, which is how `a=$(cat f); fuser $a` reached a kill.
+      // `--kill` is the long spelling, which the short-cluster pattern cannot match: real PSmisc
+      // kills on either.
+      const kills = rest.some((arg) =>
+        mayBeOption(arg, (text) => /^-[a-zA-Z]*k/.test(text) || text === "--kill")
+      );
+      const readable = rest.every((arg) => literalText(arg.exp) !== undefined);
+      const mayBeSeveral = rest.some((arg) => arg.fields === "unknown");
+      if (kills && (readable || mayBeSeveral || rest.length > 1)) {
         throw new Refusal(
           site.snippet,
           site.line,
@@ -3370,41 +3594,108 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         );
       }
       return;
+    }
     case "tmux": {
       let socket: Arg | undefined;
       let socketIsPath = false;
-      for (let i = 0; i < rest.length; i += 1) {
-        const text = literalText(rest[i]?.exp);
-        if (text === "-L" || text === "-S" || text === "--socket") {
-          socket = rest[i + 1];
-          socketIsPath = text !== "-L";
-          i += 1;
-        } else if (text?.startsWith("--socket=")) {
-          socket = { text, exp: [literal(text.slice(9))] };
-          socketIsPath = true;
+      // tmux takes one subcommand per segment, and a literal `;` argument starts another
+      // segment: `tmux new-window \; kill-server` runs two commands on one line. The subcommand
+      // of a segment is its first word that is neither a server option nor an option's value,
+      // and every word after it belongs to that subcommand, which is what keeps
+      // `tmux set-option -t "$session" …` out of the kill test while `tmux "$command"` stays in.
+      // Scanning only the first segment let every command after a `;` past the rule.
+      //
+      // A word the guard cannot read may itself be that `;`, and a word bash may split into
+      // several may hold one, so either starts a segment as well as joining the one before it:
+      // `s=$(cat f); tmux -S "$sock" list-sessions "$s" kill-server` runs a kill when `$s` is
+      // `;`. A segment that exists only under that reading is `speculative`, and there the
+      // subcommand must be a word the guard can read something of: a speculative segment whose
+      // subcommand is also unreadable is two unknowns deep, the same shape as a command whose
+      // own name the guard cannot read, which it already allows. Refusing it instead refused
+      // four ordinary `tmux new-session`/`send-keys` lines in this repository's own scripts.
+      interface Segment {
+        readonly words: Arg[];
+        /** True when this segment exists only because a word may have been the `;`. */
+        readonly speculative: boolean;
+      }
+      let current: Segment = { words: [], speculative: false };
+      const segments: Segment[] = [current];
+      for (const arg of rest) {
+        const word = literalText(arg.exp);
+        // Real tmux takes a `;` at the END of a word as the separator too, so `list-sessions;`
+        // is the subcommand `list-sessions` and starts a new command after it. Testing only for
+        // a word that is exactly `;` made `list-sessions;` the subcommand itself and swallowed
+        // the kill standing after it. A trailing `;` is one the guard READ, so the segment it
+        // starts is not speculative.
+        const trailing = word !== ";" && word !== undefined && word.endsWith(";");
+        if (trailing) current.words.push({ text: arg.text, exp: [literal(word.slice(0, -1))] });
+        else if (word !== ";") current.words.push(arg);
+        if (word === ";" || trailing) {
+          current = { words: [], speculative: false };
+          segments.push(current);
+        } else if (word === undefined || arg.fields === "unknown") {
+          current = { words: [], speculative: true };
+          segments.push(current);
         }
       }
       const killCommands = ["kill-server", "kill-session", "kill-window", "kill-pane"];
       const respawnCommands = ["respawn-pane", "respawn-window"];
-      const respawning =
-        rest.some((arg) => {
-          const text = literalText(arg.exp);
-          if (text === undefined) return false;
-          const compact = text.replace("-", "");
-          return (
-            respawnCommands.filter((command) => command.replace("-", "").startsWith(compact))
-              .length === 1
-          );
-        }) && rest.some((arg) => literalText(arg.exp) === "-k");
-      const killing = rest.find((arg) => {
-        const text = literalText(arg.exp);
-        if (text === undefined) return false;
+      // A subcommand the guard cannot read whole may be completed into any tmux abbreviates from
+      // the prefix it did read, so `tmux "$command"` is taken as a kill and the resolved socket
+      // still decides; a prefix no kill command extends rules it out.
+      const names = (word: Arg | undefined, commands: readonly string[]): boolean => {
+        if (word === undefined) return false;
+        const { text, whole } = readableWord(word);
         const compact = text.replace("-", "");
-        return (
-          killCommands.filter((command) => command.replace("-", "").startsWith(compact)).length ===
-            1 || respawning
+        const reachable = commands.filter((command) =>
+          command.replace("-", "").startsWith(compact)
         );
-      });
+        return whole ? reachable.length === 1 : reachable.length > 0;
+      };
+      let killing: Arg | undefined;
+      for (const segment of segments) {
+        const words = segment.words;
+        let subcommand: Arg | undefined;
+        for (let i = 0; i < words.length; i += 1) {
+          const arg = words[i] as Arg;
+          const { text, whole } = readableWord(arg);
+          const attached = (option: string): Expansion | undefined =>
+            text.startsWith(option) && (!whole || text.length > option.length)
+              ? valueInWord(arg, option.length)
+              : undefined;
+          const carried = attached("-L") ?? attached("-S") ?? attached("--socket=");
+          if (carried !== undefined) {
+            // The socket is named inside the option's own word (`-S"$sock"`), which is the
+            // ordinary way to name a private server.
+            socket = { text: arg.text, exp: carried };
+            socketIsPath = !text.startsWith("-L");
+          } else if (text === "-L" || text === "-S" || text === "--socket") {
+            socket = words[i + 1];
+            socketIsPath = text !== "-L";
+            i += 1;
+          } else if (text === "-f" || text === "-T") {
+            i += 1;
+          } else if (subcommand === undefined && !text.startsWith("-")) {
+            // The test is on the prefix the guard read, not on the whole word: asking
+            // `literalText` made an option word it could not read whole (`-L"$sock"`) the
+            // segment's subcommand, and the kill standing after it was never tested. An empty
+            // prefix does not start with `-`, so `tmux "$command"` is still taken as a kill.
+            subcommand = arg;
+          }
+        }
+        // A segment that exists only because a word may have been the `;` needs a subcommand the
+        // guard can read something of; unreadable there, it is the two-unknowns case the guard
+        // already allows for a command whose own name it cannot read.
+        if (
+          segment.speculative &&
+          (subcommand === undefined || readableWord(subcommand).text === "")
+        )
+          continue;
+        const respawning =
+          names(subcommand, respawnCommands) &&
+          words.some((arg) => mayBeOption(arg, (text) => text === "-k"));
+        if (names(subcommand, killCommands) || respawning) killing ??= subcommand;
+      }
       if (killing === undefined) return;
       let resolvedSocket: Expansion | undefined;
       if (socketIsPath) {
@@ -3433,15 +3724,32 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       throw new Refusal(
         site.snippet,
         site.line,
-        `\`tmux ${literalText(killing.exp)}\` needs a socket path inside this pane's roots; the ` +
+        `\`tmux ${killing.text}\` needs a socket path inside this pane's roots; the ` +
           "resolved socket can end panes and processes this pane did not start"
+      );
+    }
+    case "busybox":
+    case "toybox": {
+      // `unwrap` promoted the applet word if it could read it, so reaching here with one left
+      // means it cannot. The applet may be any the binary carries, and no reading of an
+      // unreadable one is harmless: the list holds `killall`, whose refusal does not depend on
+      // its arguments, `rm` and `sh`, and `halt`, `poweroff` and `reboot`, which need no operand
+      // at all. An earlier form let an applet word with nothing after it run, on the claim that
+      // every applet is then inert; those three are why that claim was wrong.
+      if (rest.length === 0) return;
+      throw new Refusal(
+        site.snippet,
+        site.line,
+        `the guard cannot read the applet \`${(rest[0] as Arg).text}\` ${base} would run, and the ` +
+          "applets it carries include `rm`, `sh` and `killall`, which reach paths and processes " +
+          `this pane did not start; name the applet (\`${base} rm …\`) so it can be checked`
       );
     }
     default:
       break;
   }
-  if (SHELLS.has(base) || (base === "busybox" && SHELLS.has(literalText(rest[0]?.exp) ?? ""))) {
-    runShell(base === "busybox" ? rest.slice(1) : rest, invocation, st, ctx);
+  if (SHELLS.has(base)) {
+    runShell(rest, invocation, st, ctx);
     return;
   }
   const interpreter = interpreterLanguage(base);
@@ -3506,11 +3814,20 @@ function declaration(builtin: string, list: readonly Arg[], st: State, ctx: Ctx,
     .filter((text) => /^[-+][a-zA-Z]+$/.test(text));
   const option = (letter: string) =>
     options.some((text) => text.startsWith("-") && text.includes(letter));
-  if (builtin !== "export" && option("n")) {
+  // An option word the guard cannot read may be `-n`, and a nameref it did not see would send
+  // every later write to a variable it is not watching. A word whose readable prefix is no option
+  // (`root="$1"`) is not one however unreadable its value. `export` is exempt because bash's
+  // `export -n` only drops the export attribute.
+  const mayBeNameref = list.some((arg) => mayBeOption(arg, (text) => /^-[a-zA-Z]*n/.test(text)));
+  if (builtin !== "export" && mayBeNameref) {
     throw new Refusal(
       site.snippet,
       site.line,
-      "the guard does not follow a nameref (`declare -n`), whose writes land in the variable it names"
+      option("n")
+        ? "the guard does not follow a nameref (`declare -n`), whose writes land in the variable it names"
+        : `an option word \`${builtin}\` carries that the guard cannot read may be \`-n\`, a nameref ` +
+            "whose writes land in the variable it names and which the guard does not follow; write " +
+            "the option as a literal"
     );
   }
   if (option("f") || option("F")) return;
@@ -3732,11 +4049,27 @@ function checkRecursiveMode(
     }
     found.push(arg);
   }
-  if (!recursive) return;
-  const targets = reference ? found : found.slice(1);
   const verb =
     program === "chmod" ? "recursively change the mode of" : "recursively change the owner of";
-  checkTargets(`${program} -R`, verb, targets, true, st, ctx, site);
+  if (recursive) {
+    checkTargets(`${program} -R`, verb, reference ? found : found.slice(1), true, st, ctx, site);
+    return;
+  }
+  // No option the guard read is `-R`, but an operand it could not read whole may be one. Under
+  // that reading the word is the option rather than a path, so the paths this command would
+  // change recursively are the other operands: `chmod +x "$out"` has none and runs, while
+  // `chmod "$mode" 700 ~` would reach the home directory. A word bash may split into several
+  // (`fields`) is not one or the other: it can supply the option AND leave every other operand
+  // standing, which is how `a=$(cat f); chmod $a "$HOME"` reached the home directory.
+  for (const [index, arg] of found.entries()) {
+    if (!mayBeOption(arg, (text) => /^-[A-Za-z]*R/.test(text))) continue;
+    // A word bash may split into several supplies the option AND leaves every other operand
+    // standing, and may carry paths of its own inside it, so nothing is taken off the list.
+    const others = arg.fields === "unknown" ? found : found.filter((_, at) => at !== index);
+    const targets = reference || arg.fields === "unknown" ? others : others.slice(1);
+    if (targets.length === 0) continue;
+    checkTargets(`${program} -R`, verb, targets, true, st, ctx, site);
+  }
 }
 
 function checkFind(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void {
@@ -3752,20 +4085,40 @@ function checkFind(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void 
     break;
   }
   const starts: Arg[] = [];
+  // A root word the guard cannot read whole may be a predicate instead of a path. The two
+  // readings are judged together, not worst-of-each: under the predicate reading the roots are
+  // the ones before it, so `find "$dir" -type f` searches `.` and is allowed, while
+  // `find ~ "$word"` may delete under the home directory and is not.
+  let rootsBeforePredicate: Arg[] | undefined;
   for (; i < list.length; i += 1) {
-    const text = literalText(list[i]?.exp);
+    const arg = list[i] as Arg;
+    const text = literalText(arg.exp);
     if (
       text !== undefined &&
       (text.startsWith("-") || text === "(" || text === "!" || text === ")")
     )
       break;
-    starts.push(list[i] as Arg);
+    if (
+      rootsBeforePredicate === undefined &&
+      mayBeOption(arg, (option) => option.startsWith("-"))
+    ) {
+      rootsBeforePredicate = [...starts];
+    }
+    starts.push(arg);
   }
   const targets = starts.length > 0 ? starts : [{ text: ".", exp: [literal(".")] }];
   const expression = list.slice(i).map((arg) => literalText(arg.exp));
   let action: string | undefined;
   let shell: readonly Arg[] | undefined;
+  // A predicate that takes a value consumes the word after it, so that word is its value and no
+  // predicate of its own: `-name "$pattern"` is not a `-delete` the guard failed to read.
+  let consumedByPredicate = false;
   for (const [index, word] of expression.entries()) {
+    const isValue = consumedByPredicate;
+    consumedByPredicate = word !== undefined && FIND_VALUED_PREDICATES.has(word);
+    // Any other word the guard cannot read may be `-delete`, so what the search matched is taken
+    // as deleted and the roots still decide.
+    if (word === undefined && !isValue) action ??= "find with a predicate the guard cannot read";
     if (word === "-delete") action = "find -delete";
     if (word !== "-exec" && word !== "-execdir" && word !== "-ok" && word !== "-okdir") continue;
     const end = expression.findIndex(
@@ -3780,7 +4133,23 @@ function checkFind(list: readonly Arg[], st: State, ctx: Ctx, site: Site): void 
       shell = inner.argv;
     }
   }
-  if (action === undefined) return;
+  if (action === undefined) {
+    // No predicate the guard read deletes anything, but a root it could not read whole may be
+    // one, and then the roots are those before it.
+    if (rootsBeforePredicate === undefined) return;
+    const under =
+      rootsBeforePredicate.length > 0 ? rootsBeforePredicate : [{ text: ".", exp: [literal(".")] }];
+    checkTargets(
+      "find with a root the guard cannot read, which may be a predicate",
+      "delete or change what it finds under",
+      under,
+      false,
+      st,
+      ctx,
+      site
+    );
+    return;
+  }
   checkTargets(action, "delete or change what it finds under", targets, false, st, ctx, site);
   if (shell === undefined) return;
   const found = targets.length === 1 ? (targets[0]?.exp ?? []) : [unknown("a path `find` found")];
@@ -4120,7 +4489,10 @@ function runInterpreter(
   }
   for (; i < words.length; i += 1) {
     const word = words[i];
-    if (word === undefined) return;
+    // A word the guard cannot read stops it naming what the interpreter runs, but the words after
+    // it still may: `python3 "$flag" -c <code>` has its code checked. Reading the whole line is
+    // why the walk carries on rather than giving up here.
+    if (word === undefined) continue;
     if (codeFlags.includes(word)) {
       runCode(language, list[i + 1], invocation, st, ctx, site);
       return;

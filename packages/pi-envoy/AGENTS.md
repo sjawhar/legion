@@ -324,6 +324,57 @@ at all, so there is one walk for every target and no shortcut for a path that lo
 the walk does not cover is a link the command retargets during its own run, where the guard
 resolves a value it read correctly and a later stage changes it.
 
+A word the guard cannot read whole is never read as harmless. Where a word selects a dangerous
+option or subcommand — `tar`'s extract mode and `-C`, `unzip`'s `-d`, `fuser -k`, `tmux`'s kill
+and respawn subcommands, `chmod`/`chown`/`chgrp`'s `-R`, a `find` predicate, `declare -n`,
+`printf -v`, an interpreter's code option, a wrapper's own options (`sudo`, `env`, `nice`,
+`nohup`, …), and a `busybox` or `toybox` applet — it is taken as that option (`mayBeOption`) and
+the command's other arguments decide what that means, so `tar "$mode" -C .` runs while
+`tar "$mode" -C "$HOME"` does not. Both spellings count where a long form exists — `--recursive`,
+`--directory`, `--destination`, `--extract`, `--kill` — since reading only the short one left
+`tar --"$m"`, `chmod --"$r"` and `fuser --kill` a way through; `declare -n` has no long form.
+
+Three things hold the cost of that at zero of the 61 tracked shell scripts. The guard reads a
+word's leading literal prefix (`readableWord`), so `local root="$1"` is an assignment and never
+an option, and `--socket="$s"` is never `-k`; a word whose first character it cannot see may be
+any option at all. The readings are judged together, not worst-of-each: read as `-R` a word is no
+path, so `chmod +x "$out"` has no path left to change recursively, and read as a predicate a word
+is no search root, so `find "$dir" -type f` searches the working directory while `find ~ "$word"`
+does not. And those counts are of the fields bash will make, not the words written: an unquoted
+word it may split (`fields`) supplies the option *and* leaves every other operand standing, and
+may carry paths of its own, so `fuser $a` and `chmod $a` are judged where their quoted forms are
+not.
+
+Four site-specific rules follow from the same principle. An option may carry its value inside its
+own word wherever the option stands, in a cluster included (`-C"$dir"`, `-xC"$dir"`,
+`--directory="$d"`), and that carried value is the one judged: taking the next word instead both
+passed the command and named a path it never touched. `tmux` takes one subcommand per segment, and
+a `;` starts another whether it is a word of its own or sits at the END of one — real tmux takes
+`'kill-server;'` as a kill, verified on a private socket — so the trailing `;` is stripped and the
+word it leaves is that segment's subcommand; every segment is scanned, a word the guard cannot
+read may itself be that `;`, and its server options are matched on the prefix it can read, so
+`-S"$sock"` is an option rather than the segment's subcommand. `timeout` has one reading
+dispatched per word standing where its duration could (`unwrap`'s `alts`), since each such word
+may be one of its options instead, putting the program after the duration: with two of them
+neither the stopped scan nor the fully read one names the real program. A `busybox` or `toybox`
+applet
+word it cannot read is refused outright: no reading of it is harmless, because the binary carries
+`halt`, `poweroff` and `reboot` as well as `rm`, `sh` and `killall`, and those three need no
+operand. `unwrap` promotes only an applet word it can read, and promoting restarts its loop, so
+`busybox busybox ls` promotes twice and an unreadable applet never becomes a command name.
+
+Two members of the family stay open on purpose, because the program they name is an open set the
+documented residual already covers: a command whose own name the guard cannot read (`"$cmd" -rf ~`)
+and the program word of `xargs`. A wrapper's unreadable option word is *not* one of them — the
+program is written plainly right after it — so `sudo "$flag" rm -rf ~` and `env "$flag" rm -rf ~`
+are refused. Two narrower residuals are measured and recorded: a tmux segment that exists only
+because a word may have been the `;` and whose subcommand is also unreadable, two unknowns deep
+and so the same shape as an unreadable command name; and one over-refusal, an unquoted
+`chmod $mode <path>`, where that one word may be both the option and a path. A `python3 "$flag"
+<script>` over-refusal was recorded here and is withdrawn: it does not exist — a harmless script
+outside the roots is allowed, and the one shape that refuses is a script whose own contents are
+dangerous, which its readable ablation `python3 -E <script>` refuses too.
+
 A write to a variable that the guard sees reaches its model, and one it cannot model leaves the
 value unknown, never the one already approved: a builtin that assigns by name (`printf -v`,
 `read`, `mapfile`, `getopts`, `declare` and its kin, `unset`, `wait -p`), arithmetic, `${v:=x}`,
@@ -333,7 +384,8 @@ word may be several), assign as bash does; `"$@"` of none assigned is the empty 
 argument when quoted; a function's `local` is the caller's variable again when it returns, unknown
 when only some paths made it local; `readonly`, `-i`, `-l` and `-u` make a later write unknown; and
 a write under a name the guard cannot read, or `eval` of text it cannot read, makes every variable
-unknown and possibly unset (`ANY_NAME`), the pane's environment included. A nameref (`declare -n`) is
+unknown and possibly unset (`ANY_NAME`), the pane's environment included. A nameref (`declare -n`),
+and an option word of `declare` and its kin the guard cannot read, which may be one, are
 refused. Two writes it does not follow: a `source` of a path it cannot read at check time (a
 process substitution, `/dev/fd/N`, `/dev/stdin`, a file a command before it creates) is taken as
 sourcing nothing, though bash may read assignments from it (LEGION-332); and an assignment to
