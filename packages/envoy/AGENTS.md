@@ -689,6 +689,13 @@ title. A read gives each back as null. `pmdoc/gen/decode.ts` decodes Go-written 
 the browser holds, schema defaults applied, so a new attribute of this kind fails
 `TestUpdateFromEmptyEqualsAuthoredByBrowser` until it is added there.
 
+A document `pmdoc` refuses names the first refused block it writes. One walk of the tree goldmark
+reads decides every block refusal in document order before conversion (`refuseBlocks`), and it
+refuses every block kind conversion does not convert (`convertedBlocks`), a link reference
+definition among them, so conversion refuses no block; `TestParseNamesTheFirstRefusedBlock` holds
+that order for every pair of block refusals. Spacing refusals (`browserListSpacing`) come before
+the walk, and inline ones, such as a footnote reference, in conversion after it.
+
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive

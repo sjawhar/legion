@@ -11,9 +11,10 @@ import (
 
 // refuseBlocks refuses a document holding a block that cannot be stored as it reads (blockRefusal),
 // walking the tree goldmark read before it is converted, in document order, so that a document
-// refused for two reasons names the one it meets first. Conversion refuses nothing a reading can
-// reach. Spacing is refused apart from it, before it (browserListSpacing). The inline content of a
-// paragraph, a heading or a table cell holds no block, and the walk does not enter it.
+// refused for two reasons names the one it meets first. It refuses every block kind conversion does
+// not convert (convertedBlocks), so conversion refuses no block. Spacing is refused apart from it,
+// before it (browserListSpacing). The inline content of a paragraph, a heading or a table cell holds
+// no block, and the walk does not enter it.
 func refuseBlocks(root ast.Node, source []byte) error {
 	return ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
@@ -82,8 +83,34 @@ func blockRefusal(node ast.Node, source []byte) error {
 		if _, block := current.Attribute(blockRowAttr); block {
 			return refuse("a table a line opening another block would be a row of - a list item that cannot interrupt a paragraph, or indented code - which the browser editor's parser reads as that block after the table")
 		}
+	default:
+		if node.Type() == ast.TypeBlock && !convertedBlocks[node.Kind()] {
+			return refuse("unsupported markdown block " + node.Kind().String())
+		}
 	}
 	return nil
+}
+
+// convertedBlocks are the block kinds conversion converts: parseBlock's, and the rows and cells
+// parseTable converts. blockRefusal refuses every other block, a link reference definition among
+// them, so a block conversion meets outside this set is this package's bug (parseBlock).
+var convertedBlocks = map[ast.NodeKind]bool{
+	ast.KindDocument:             true,
+	ast.KindParagraph:            true,
+	ast.KindTextBlock:            true,
+	ast.KindHeading:              true,
+	ast.KindBlockquote:           true,
+	ast.KindList:                 true,
+	ast.KindListItem:             true,
+	ast.KindFencedCodeBlock:      true,
+	ast.KindCodeBlock:            true,
+	ast.KindThematicBreak:        true,
+	extensionast.KindFootnote:    true,
+	kindTypedDirective:           true,
+	extensionast.KindTable:       true,
+	extensionast.KindTableHeader: true,
+	extensionast.KindTableRow:    true,
+	extensionast.KindTableCell:   true,
 }
 
 // typedDirectiveRefusal refuses a typed block the browser editor's parser reads differently or

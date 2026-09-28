@@ -547,7 +547,8 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 	case *extensionast.Table:
 		return parseTable(current, source, footnotes)
 	default:
-		return nil, fmt.Errorf("%w: unsupported markdown block %s", ErrSchema, node.Kind())
+		// refuseBlocks refuses every block outside convertedBlocks before conversion starts.
+		panic(fmt.Sprintf("conversion reached a %s block, which refuseBlocks passed and parseBlock does not convert (convertedBlocks)", node.Kind()))
 	}
 }
 
