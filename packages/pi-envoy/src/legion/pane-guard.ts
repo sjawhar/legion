@@ -92,10 +92,13 @@ interface Piece {
 type Expansion = readonly Piece[];
 
 /** One argument of a command: the word as written (for the refusal) and one of its expansions
- * (brace expansion and `"$@"` give a word several). */
+ * (brace expansion and `"$@"` give a word several). `fields` says when bash may not make it one
+ * argument: `none` for an unquoted expansion that is empty, which bash drops, and `unknown` for a
+ * glob or an unquoted expansion the guard cannot read, which bash may split into several. */
 interface Arg {
   readonly text: string;
   readonly exp: Expansion;
+  readonly fields?: "none" | "unknown";
 }
 
 interface Roots {
@@ -917,10 +920,42 @@ function runtimeText(exp: Expansion): string {
   return exp.map((piece) => (piece.kind === "unknown" ? UNKNOWN_MARKER : piece.text)).join("");
 }
 
+/** Word parts bash splits into fields when they stand unquoted. */
+const SPLIT_PARTS = new Set([
+  "SimpleExpansion",
+  "ParameterExpansion",
+  "CommandExpansion",
+  "ArithmeticExpansion",
+]);
+
 function args(words: readonly Word[], st: State, ctx: Ctx): Arg[] {
-  return words.flatMap((word) =>
-    expandWord(word, st, ctx).map((exp) => ({ text: word.text, exp }))
-  );
+  return words.flatMap((word) => {
+    const parts = word.parts ?? [];
+    const unquoted = parts.some((part) => SPLIT_PARTS.has(part.type));
+    const onlyExpansions = parts.length > 0 && parts.every((part) => SPLIT_PARTS.has(part.type));
+    return expandWord(word, st, ctx).map((exp): Arg => {
+      if (exp.some((piece) => piece.kind === "glob")) {
+        return { text: word.text, exp, fields: "unknown" };
+      }
+      // Unquoted, an expansion bash splits on whitespace (`$*`, `$(…)`) or that the guard cannot read
+      // may be several arguments.
+      if (unquoted && exp.some((piece) => piece.kind === "unknown" || /[ \t\n]/.test(piece.text))) {
+        return { text: word.text, exp, fields: "unknown" };
+      }
+      if (onlyExpansions && exp.every((piece) => piece.text === "")) {
+        return { text: word.text, exp, fields: "none" };
+      }
+      return { text: word.text, exp };
+    });
+  });
+}
+
+/** The positional parameters a list of arguments gives a script, function or `set --`: undefined
+ * when bash may make a different number of them (`fields`), so no parameter past the ones the
+ * guard saw is read as empty while bash holds a value there. */
+function positionalOf(list: readonly Arg[]): Expansion[] | undefined {
+  if (list.some((arg) => arg.fields === "unknown")) return undefined;
+  return list.filter((arg) => arg.fields !== "none").map((arg) => arg.exp);
 }
 
 function literalText(exp: Expansion | undefined): string | undefined {
@@ -1978,7 +2013,7 @@ function runFunction(
   if (outer.runningFunctions.has(name)) return;
   const child: State = {
     ...clone(outer),
-    positional: args.map((arg) => arg.exp),
+    positional: positionalOf(args),
     source: definition.source,
     script: definition.file ?? outer.script,
   };
@@ -2013,7 +2048,7 @@ function functionOutput(
   if (outer.runningFunctions.has(name)) return undefined;
   const child: State = {
     ...clone(outer),
-    positional: args.map((arg) => arg.exp),
+    positional: positionalOf(args),
     source: definition.source,
     script: definition.file ?? outer.script,
     output: [],
@@ -2137,9 +2172,9 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     case "set": {
       const list = rest.map((arg) => literalText(arg.exp));
       const dashDash = list.indexOf("--");
-      if (dashDash !== -1) outer.positional = rest.slice(dashDash + 1).map((arg) => arg.exp);
+      if (dashDash !== -1) outer.positional = positionalOf(rest.slice(dashDash + 1));
       else if (list.length > 0 && !list[0]?.startsWith("-") && !list[0]?.startsWith("+")) {
-        outer.positional = rest.map((arg) => arg.exp);
+        outer.positional = positionalOf(rest);
       }
       return;
     }
@@ -2901,13 +2936,13 @@ function runShell(list: readonly Arg[], invocation: Invocation, st: State, ctx: 
   child.argv0 = operand[1]?.exp;
   if (command) {
     const text = operand[0] === undefined ? "" : runtimeText(operand[0].exp);
-    child.positional = operand.slice(2).map((arg) => arg.exp);
+    child.positional = positionalOf(operand.slice(2));
     runText(text, "its `-c` text", child, ctx, site);
     return;
   }
   const file = operand[0];
   if (file !== undefined) {
-    child.positional = operand.slice(1).map((arg) => arg.exp);
+    child.positional = positionalOf(operand.slice(1));
     runFile(file, operand.slice(1), child, ctx, site, "shell");
     return;
   }
@@ -3100,9 +3135,11 @@ function runFile(
         );
       }
       const child: State = { ...clone(st), source: content, script: abs, depth: st.depth + 1 };
-      const operands = positional.map((arg) => arg.exp);
-      // `. file` with no operands runs the file with this shell's own arguments.
-      child.positional = source && operands.length === 0 ? st.positional : operands;
+      const operands = positionalOf(positional);
+      // `. file` with no operands (none left once empty unquoted ones drop) runs the file with this
+      // shell's own arguments.
+      const noOperands = operands !== undefined && operands.length === 0;
+      child.positional = source && noOperands ? st.positional : operands;
       walkScript(parse(content), child, ctx, !source);
       if (source) {
         // A sourced file runs in this shell, so everything it leaves stays: the copy-back rule on
@@ -3113,12 +3150,11 @@ function runFile(
         // so a list the file touched is unknown. Touched, not changed: `shift` and `set --` each
         // leave a new list, so identity tells a file that never touched them from one that ran
         // `set -- "$@"`, which bash keeps.
-        st.positional =
-          operands.length === 0
-            ? child.positional
-            : child.positional === operands
-              ? st.positional
-              : undefined;
+        st.positional = noOperands
+          ? child.positional
+          : child.positional === operands
+            ? st.positional
+            : undefined;
         st.vars = child.vars;
         st.exported = child.exported;
         st.arrays.clear();

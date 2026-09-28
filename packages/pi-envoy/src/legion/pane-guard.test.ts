@@ -874,6 +874,33 @@ describe("scripts a command runs", () => {
     expect(bash('set -- "$HOME/.ssh" "$LEGION_WORKSPACE/b"; shift; rm -rf "$1"')).toBeUndefined();
   });
 
+  test("does not count the arguments a word may split into, glob into, or drop", () => {
+    const second = script("second.sh", 'rm -rf "$2"\n');
+    // Unquoted, `$v`, `$(…)`, `$*` and a glob give bash as many arguments as their fields, so a
+    // parameter past the ones the guard saw may still hold a path; it is unknown, never empty.
+    for (const command of [
+      'f() { rm -rf "$2"; }; v="a $HOME/.ssh"; f $v',
+      `v="a $HOME/.ssh"; bash ${second} $v`,
+      'v="a $HOME/.ssh"; set -- $v; rm -rf "$2"',
+      'f() { rm -rf "$2"; }; f $(cat list)',
+      'f() { rm -rf "$2"; }; g() { f $*; }; g "a $HOME/.ssh"',
+      'f() { rm -rf "$2"; }; f ~/*',
+      'f() { [ $# -gt 1 ] && rm -rf "$2"; }; v="a $HOME/.ssh"; f $v',
+    ]) {
+      expect(bash(command), command).toContain("rm would delete");
+    }
+    // An unquoted expansion that is empty is no argument at all, so the next one is `$1`.
+    for (const command of [
+      'f() { rm -rf "$1"; }; e=; f $e "$HOME/.ssh"',
+      'e=; set -- $e "$HOME/.ssh"; rm -rf "$1"',
+    ]) {
+      expect(bash(command), command).toContain(path.join(home, ".ssh"));
+    }
+    // Quoted, each word is one argument, empty or not.
+    expect(bash('f() { rm -rf "$1"; }; e=; f "$e" "$HOME/.ssh"')).toBeUndefined();
+    expect(bash('f() { rm -rf "$2"; }; f "$(cat x)"')).toBeUndefined();
+  });
+
   test("tests a positional parameter's operator expansion against the argument it holds", () => {
     const defaulted = script("positional-default.sh", `rm -rf "\${1:-$LEGION_WORKSPACE/build}"\n`);
     expect(bash(`bash ${defaulted} "$HOME"`)).toContain(home);
