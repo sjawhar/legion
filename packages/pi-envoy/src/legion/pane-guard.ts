@@ -2145,6 +2145,13 @@ function checkRedirects(
       } else if (command?.name === "printf") {
         content = printfText(command.args, MAX_SCRIPT_BYTES, true) ?? null;
       }
+      // `echoText` and `printfText` answer null for a write the guard cannot render AND for one
+      // that is merely longer than it reads, so both report `UNRENDERED_WRITE` when the honest
+      // cause is `OVERLONG_WRITE`: `printf '%0999999d%0999999d' 1 1 > f` and a 1.1 MB literal
+      // both say "output the guard cannot render". Measured, and left: telling them apart means
+      // changing what `printfText` returns, and every such write is refused either way, so the
+      // remedy the refusal names is right even where the cause it names is coarse. The
+      // here-document path below does reach `OVERLONG_WRITE`, so that reason is not dead.
       // An append adds to the model of that file, and to nothing else: with no model the file is
       // whatever is on disk, which the guard has not read, so it is unknown and never empty.
       // Taking it as empty left one no-op append (`echo '' >> f`) making the guard read the file
