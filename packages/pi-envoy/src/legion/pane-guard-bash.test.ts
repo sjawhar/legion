@@ -345,6 +345,8 @@ interface ModelRow {
   readonly payload: string;
   readonly guard: "refused" | "allowed";
   readonly live: Live;
+  /** Contents of `gen.sh` in the row's fixture, for a row whose handler a script sets. */
+  readonly script?: string;
 }
 
 const MODEL_ROWS: readonly ModelRow[] = [
@@ -576,6 +578,95 @@ const MODEL_ROWS: readonly ModelRow[] = [
     guard: "refused",
     live: "intact",
   },
+
+  // A handler is set, not run, by the body it sits in. A branch the shell never enters sets no
+  // handler at all, so even an `EXIT` one may never run — and a subshell's handlers and a
+  // script's run mid-command, in front of a later read.
+  {
+    name: "an EXIT handler a branch that did not run set",
+    payload: `( if ${FALSE_COND}; then trap ${QUOTED_WRITE} EXIT; fi; : ); ${RUN}`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "an EXIT handler an && right-hand side that did not run set",
+    payload: `( ${FALSE_COND} && trap ${QUOTED_WRITE} EXIT; : ); ${RUN}`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "an EXIT handler a script set in a branch that did not run",
+    payload: `bash gen.sh; ${RUN}`,
+    script: `if ${FALSE_COND}; then trap ${QUOTED_WRITE} EXIT; fi\n`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "an EXIT handler a script set on its straight line",
+    payload: `bash gen.sh; ${RUN}`,
+    script: `trap ${QUOTED_WRITE} EXIT\n`,
+    guard: "allowed",
+    live: "intact",
+  },
+  {
+    name: "an EXIT handler a branch that DID run set",
+    payload: `( if ${TRUE_COND}; then trap ${QUOTED_WRITE} EXIT; fi; : ); ${RUN}`,
+    guard: "refused",
+    live: "intact",
+  },
+
+  // Process substitution: bash waits for neither `>(…)` nor `<(…)`.
+  {
+    name: "an output process substitution",
+    payload: `echo z > >( ${WRITE} ); ${RUN}`,
+    guard: "refused",
+    live: "racy",
+  },
+  {
+    name: "an input process substitution",
+    payload: `cat <( ${WRITE} ) >/dev/null; ${RUN}`,
+    guard: "refused",
+    live: "intact",
+  },
+
+  // An `&&` right-hand side the shell never runs leaves more behind than a file. The control for
+  // each is the same command in an `if`, which the walk has always merged.
+  {
+    name: "a cd on an && right-hand side that did not run",
+    payload: `cd "$HOME" && ${FALSE_COND} && cd "$LEGION_WORKSPACE"; rm -rf victim`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "the same cd in an if",
+    payload: `cd "$HOME"; if ${FALSE_COND}; then cd "$LEGION_WORKSPACE"; fi; rm -rf victim`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "an assignment on an && right-hand side that did not run",
+    payload: `d="$HOME"; ${FALSE_COND} && d="$LEGION_WORKSPACE"; rm -rf "$d/victim"`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "the same assignment in an if",
+    payload: `d="$HOME"; if ${FALSE_COND}; then d="$LEGION_WORKSPACE"; fi; rm -rf "$d/victim"`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "a redefinition on an && right-hand side that did not run",
+    payload: `f() { rm -rf "$HOME/victim"; }; ${FALSE_COND} && f() { :; }; f`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "an && right-hand side whose value nothing reads",
+    payload: `${FALSE_COND} && d="$LEGION_WORKSPACE"; rm -rf "$LEGION_WORKSPACE/x"`,
+    guard: "allowed",
+    live: "intact",
+  },
 ];
 
 test("a file a branch or an unwaited command writes is never modelled as its text", () => {
@@ -595,6 +686,7 @@ test("a file a branch or an unwaited command writes is never modelled as its tex
     writeFileSync(path.join(rowHome, "victim"), "do-not-delete\n");
     writeFileSync(path.join(rowWorkspace, "unread.sh"), DESTRUCTIVE);
     writeFileSync(path.join(rowWorkspace, "safe.sh"), "PRESENT\n");
+    if (row.script !== undefined) writeFileSync(path.join(rowWorkspace, "gen.sh"), row.script);
 
     const rowEnv: NodeJS.ProcessEnv = {
       HOME: rowHome,
@@ -623,3 +715,70 @@ test("a file a branch or an unwaited command writes is never modelled as its tex
   }
   expect(observed).toEqual(expected);
 }, 120_000);
+
+// The other model a branch writes into: the pid a file holds, which `kill "$(<pid)"` reads. A
+// branch that may rewrite it must not leave the straight line's pid standing as fact — and must
+// not throw it away either, since when both what the branch writes and what was there before are
+// pids this shell started, signalling the file is safe whichever ran. Real bash decides here too:
+// each row reports what it actually put in the file and whether that pid is one of this shell's
+// own children, so "this pane's own descendant" is bash's answer rather than an assumption.
+test("a pid file a branch may rewrite is neither trusted nor forgotten", () => {
+  const start = "sleep 5 & echo $! > pid";
+  const kill = 'kill "$(<pid)"';
+  const rows = [
+    { name: "a straight-line pid", payload: `${start}; ${kill}`, guard: "allowed", ownChild: true },
+    {
+      name: "a branch may rewrite it with another pid of this shell",
+      payload: `${start}; ${FALSE_COND} && echo $! > pid; ${kill}`,
+      guard: "allowed",
+      ownChild: true,
+    },
+    {
+      name: "a branch may rewrite it with something that is not a pid",
+      payload: `${start}; ${FALSE_COND} && echo 1 > pid; ${kill}`,
+      guard: "refused",
+      ownChild: true,
+    },
+    {
+      name: "only a branch ever wrote it",
+      payload: `sleep 5 & ${FALSE_COND} && echo $! > pid; ${kill}`,
+      guard: "refused",
+      ownChild: false,
+    },
+  ];
+  const observed: string[] = [];
+  const expected: string[] = [];
+  for (const [index, row] of rows.entries()) {
+    const dir = path.join(base, `pid-${index}`);
+    const rowWorkspace = path.join(dir, "ws");
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(rowWorkspace, { recursive: true });
+    writeFileSync(path.join(rowWorkspace, "safe.sh"), "PRESENT\n");
+    const rowEnv: NodeJS.ProcessEnv = {
+      HOME: path.join(dir, "home"),
+      LEGION_WORKSPACE: rowWorkspace,
+      PATH: process.env.PATH,
+    };
+    const rowGuard = createPaneGuard({
+      workspace: rowWorkspace,
+      ompPid: process.pid,
+      scratch: path.join(dir, "scratch"),
+    });
+    const verdict = rowGuard.bash(row.payload, rowWorkspace, rowEnv);
+    // The same payload with the `kill` replaced by a report of what it would have signalled and
+    // of every child this shell holds, so the signal is never actually sent from a test.
+    const probe = row.payload.replace(kill, 'printf "%s|%s" "$(<pid)" "$(jobs -p | tr "\\n" ",")"');
+    const seen = spawnSync("bash", ["-c", probe], {
+      cwd: rowWorkspace,
+      env: rowEnv,
+      encoding: "utf8",
+    });
+    const [wrote = "", children = ""] = seen.stdout.split("|");
+    const ownChild = wrote !== "" && children.split(",").includes(wrote);
+    observed.push(
+      `${row.name}: ${verdict === undefined ? "allowed" : "refused"}, own child ${ownChild}`
+    );
+    expected.push(`${row.name}: ${row.guard}, own child ${row.ownChild}`);
+  }
+  expect(observed).toEqual(expected);
+}, 60_000);

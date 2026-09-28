@@ -196,15 +196,29 @@ interface Ctx {
   readonly uncertain: { depth: number };
 }
 
+/** What a command wrote to a file before it ran it: path to content, or null when the guard
+ * cannot know what was written. Shared by every subshell of one command, and exposing no `set`,
+ * so `modelWrite` is the only way a write is recorded and no later site can record one without
+ * the rule that governs it. */
+interface FileModel {
+  has(file: string): boolean;
+  get(file: string): string | null | undefined;
+}
+
+/** Files this shell wrote with a pid it started, indexed by resolved path. `delete` stays, since
+ * forgetting one only makes the file unknown; `modelPidFile` is the only writer. */
+interface PidFileModel {
+  get(file: string): Expansion | undefined;
+  delete(file: string): boolean;
+}
+
 interface State {
   vars: Map<string, Expansion>;
   exported: Set<string>;
   cwd: string | undefined;
   cwdWhy: string;
   positional: readonly Expansion[] | undefined;
-  /** Files this command writes before it runs them: path to content, or null when the guard
-   * cannot know what was written. Shared by every subshell of one command. */
-  readonly files: Map<string, string | null>;
+  readonly files: FileModel;
   backgroundStarted: boolean;
   /** Inside a shell this command starts (`bash -c`, a script): `$$` is a descendant. */
   readonly nested: boolean;
@@ -217,8 +231,7 @@ interface State {
   argv0: Expansion | undefined;
   /** Every output a function's substitution can emit. `undefined` means it emitted an unknown value. */
   output: readonly Expansion[] | undefined;
-  /** Files this shell wrote with a pid it started, indexed by resolved path. */
-  readonly pidFiles: Map<string, Expansion>;
+  readonly pidFiles: PidFileModel;
   /** Per-element values of shell arrays. */
   readonly arrays: Map<string, Map<string, Expansion>>;
   /** Functions available in this shell, with their definition source for diagnostic locations. */
@@ -255,6 +268,10 @@ interface Trap {
   /** The conditions it handles (`EXIT`, `INT`, …), as `trapSignal` names them. Every handler's
    * body is reachable, so each is walked; the set is what `trap - <signal>` removes. */
   readonly signals: readonly string[];
+  /** Set inside a body the shell may never enter, so the handler itself may never be set, and
+   * even an `EXIT` one may never run (`runSetTraps`). A `merge` that lifts a handler out of a
+   * branch stamps it too, since `AndOr` leaves one in this shell with no merge at all. */
+  readonly uncertainSet?: boolean;
   readonly file: string;
   /** For a handler `merge` lifted out of a branch or loop body: that body's variables, and the
    * values the merge left for them. A handler reads its variables when it runs, so a body's value
@@ -1234,8 +1251,12 @@ function visitParts(parts: readonly WordPart[] | undefined, st: State, ctx: Ctx)
         visitParts(part.parts, st, ctx);
         break;
       case "CommandExpansion":
-      case "ProcessSubstitution":
         walkSubstitution(part.script, part.inner, part.text, st, ctx);
+        break;
+      case "ProcessSubstitution":
+        // `<(…)` and `>(…)` run beside this shell, which does not wait for either, so what one
+        // writes may not be there when the next command reads it.
+        uncertainly(ctx, () => walkSubstitution(part.script, part.inner, part.text, st, ctx));
         break;
       case "ArithmeticExpansion":
         visitArithmetic(part.expression, st, ctx);
@@ -1392,8 +1413,15 @@ function clone(st: State): State {
  * function's own walk changes.
  *
  * A map every branch shares may only be moved towards unknown inside one. A write recording what
- * a file holds carries that text out of the branch it sits in, into the one the shell took, so
- * only a write on the straight-line path records text (`modelWrite`, `uncertainly`). */
+ * a file holds carries that text out of the branch it sits in, into the one the shell took, so a
+ * write the walk reaches inside a body the shell may never enter, or may not have finished,
+ * records only that the file is unknown (`modelWrite`, `uncertainly`).
+ *
+ * That covers a body the walk ENTERS. It does not cover a body the shell LEAVES early: the guard
+ * models no `return`, `exit`, `break` or `continue`, so a statement after one of them is still on
+ * what the walk calls the straight-line path, and a write there is still recorded as text. That
+ * is the documented residual of this rule, and closing it needs a mechanism of its own rather
+ * than this one. */
 function merge(target: State, branches: readonly State[]): void {
   const names = new Set<string>();
   for (const branch of branches) for (const name of branch.vars.keys()) names.add(name);
@@ -1496,14 +1524,16 @@ function merge(target: State, branches: readonly State[]): void {
   // A handler a branch or loop body sets stays set after it, as bash keeps it. It carries the
   // variables that body left, since the merged state may already have blurred the ones it reads
   // (`t=$(mktemp); trap 'rm -f "$t"' EXIT` in an `if`), beside the values this merge wrote for
-  // them. A removal inside a branch that may not run resets nothing here.
+  // them. A removal inside a branch that may not run resets nothing here. The branch may never
+  // have run, so the handler may never have been set: `uncertainSet` keeps `runSetTraps` from
+  // reading what even an `EXIT` one writes as fact.
   const lifted: Trap[] = [];
   let merged: ReadonlyMap<string, Expansion> | undefined;
   for (const branch of branches) {
     for (const trap of branch.traps) {
       if (target.traps.includes(trap)) continue;
       merged ??= new Map(target.vars);
-      lifted.push({ ...trap, vars: handlerVars(trap, branch.vars), merged });
+      lifted.push({ ...trap, vars: handlerVars(trap, branch.vars), merged, uncertainSet: true });
     }
   }
   target.traps = [...target.traps, ...lifted];
@@ -1532,7 +1562,26 @@ function uncertainly(ctx: Ctx, walk: () => void): void {
  * `runFile` prefers the model to what is on disk. A file that is unknown is refused, which is why
  * a conditional write followed by running the file is refused whether or not the branch runs. */
 function modelWrite(st: State, ctx: Ctx, file: string, content: string | null): void {
-  st.files.set(file, ctx.uncertain.depth > 0 ? null : content);
+  (st.files as Map<string, string | null>).set(file, ctx.uncertain.depth > 0 ? null : content);
+}
+
+/** What `file` holds as a pid after a command wrote it. The command's write always forgets what
+ * the file held, since it is no longer there.
+ *
+ * A write the shell certainly performed then records the pid, when what the command wrote is
+ * one. Inside a body the shell may not have performed, the file holds either what that body
+ * wrote or what it held before, so it records a pid whose number is unknown exactly when both
+ * are pids this shell started — `merge`'s own rule for a variable a branch sets to another of
+ * them — and nothing at all otherwise, where an unknown pid is refused rather than signalled. */
+function modelPidFile(st: State, ctx: Ctx, file: string, pid: Expansion | undefined): void {
+  const model = st.pidFiles as Map<string, Expansion>;
+  const before = model.get(file);
+  model.delete(file);
+  if (ctx.uncertain.depth === 0) {
+    if (pid !== undefined) model.set(file, pid);
+  } else if (pid !== undefined && before !== undefined) {
+    model.set(file, [unknown("a pid a branch or loop body wrote to this file", true)]);
+  }
 }
 
 /** The variables a handler runs with in a shell whose variables are `vars`. For a handler lifted
@@ -1596,9 +1645,12 @@ function subshell(st: State, patch?: Partial<State>): State {
 /** Runs the body of every handler this shell set, at its end: each against the state after the
  * shell's last statement, with the variables of the branch that set it where the shell still holds
  * what the merge wrote for them (`handlerVars`), and the pids it expanded (`Trap.pids`) over it.
- * An `EXIT` handler runs when the shell ends, so what it writes is written before anything after
- * the shell reads it; a handler for a signal runs only if that signal arrives, so what it writes
- * is uncertain (`uncertainly`). */
+ * An `EXIT` handler this shell certainly set runs when the shell ends, so what it writes is
+ * written before anything after the shell reads it. Everything else is uncertain: a handler for a
+ * signal runs only if that signal arrives, and a handler set inside a body the shell may never
+ * enter (`Trap.uncertainSet`) may never have been set at all, `EXIT` included. Both matter here
+ * rather than only at the outermost shell, because a subshell and a script this command runs each
+ * run their handlers mid-command, in front of a later read. */
 function runSetTraps(st: State, ctx: Ctx): void {
   for (const trap of st.traps) {
     const vars = new Map([...handlerVars(trap, st.vars), ...(trap.pids ?? [])]);
@@ -1615,7 +1667,7 @@ function runSetTraps(st: State, ctx: Ctx): void {
         locateRefusal(error, trap.file);
       }
     };
-    if (trap.signals.includes("EXIT")) run();
+    if (trap.signals.includes("EXIT") && trap.uncertainSet !== true) run();
     else uncertainly(ctx, run);
   }
 }
@@ -1811,13 +1863,24 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       return;
     }
     case "AndOr": {
-      // `a && b`, `a || b`: the first command runs, and whether any after it runs is that
-      // command's exit status, a fact of the run.
+      // `a && b`, `a || b`: the first command runs, and whether each one after it runs is the
+      // exit status of the one before, a fact of the run. So the shell may stop after any of
+      // them, and each prefix is a branch of its own: what `b` left stands in this shell only
+      // where every branch agrees, as an `if` body's does.
       const [first, ...rest] = node.commands;
       if (first !== undefined) walkNode(first, st, ctx, pipeIn);
+      if (rest.length === 0) return;
+      const before = st.output;
+      const branches: State[] = [clone(st)];
+      const running = clone(st);
       uncertainly(ctx, () => {
-        for (const command of rest) walkNode(command, st, ctx, pipeIn);
+        for (const command of rest) {
+          walkNode(command, running, ctx, pipeIn);
+          branches.push(clone(running));
+        }
       });
+      merge(st, branches);
+      if (branches.some((branch) => outputChanged(before, branch.output))) st.output = undefined;
       return;
     }
     case "CompoundList":
@@ -2014,7 +2077,6 @@ function checkRedirects(
       } else if (command?.name === "printf") {
         content = printfText(command.args, MAX_SCRIPT_BYTES, true) ?? null;
       }
-      st.pidFiles.delete(file);
       const before = appends ? st.files.get(file) : "";
       modelWrite(
         st,
@@ -2022,17 +2084,14 @@ function checkRedirects(
         file,
         content === null || before === null ? null : readable(`${before ?? ""}${content}`)
       );
-      if (
+      const pidWritten =
         writes &&
         !appends &&
-        ctx.uncertain.depth === 0 &&
         command?.name === "echo" &&
         command.args.length === 1 &&
         command.args[0]?.exp.length > 0 &&
-        command.args[0]?.exp.every((piece) => piece.descendantPid)
-      ) {
-        st.pidFiles.set(file, command.args[0].exp);
-      }
+        command.args[0].exp.every((piece) => piece.descendantPid);
+      modelPidFile(st, ctx, file, pidWritten ? command?.args[0]?.exp : undefined);
     }
   }
 }
@@ -2822,7 +2881,17 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
             return `\${${name}}`;
           })
           .join("");
-        outer.traps = [...outer.traps, { text: handlerText, site, signals: handled, file, pids }];
+        outer.traps = [
+          ...outer.traps,
+          {
+            text: handlerText,
+            site,
+            signals: handled,
+            file,
+            pids,
+            uncertainSet: ctx.uncertain.depth > 0,
+          },
+        ];
       } else if (text === undefined) {
         throw new Refusal(
           site.snippet,
@@ -2830,7 +2899,10 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           `the guard cannot read the handler this \`trap\` sets, \`${handler.text}\` (${handler.exp.find((piece) => piece.kind !== "literal")?.why ?? "a value the guard cannot know"}), so it cannot check what runs when this shell exits; write the handler out, or put it in a function`
         );
       } else if (!text.startsWith("-")) {
-        outer.traps = [...outer.traps, { text, site, signals: handled, file }];
+        outer.traps = [
+          ...outer.traps,
+          { text, site, signals: handled, file, uncertainSet: ctx.uncertain.depth > 0 },
+        ];
       }
       return;
     }
