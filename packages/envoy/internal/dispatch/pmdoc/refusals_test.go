@@ -22,6 +22,7 @@ func TestParseNamesTheFirstRefusedBlock(t *testing.T) {
 		{"a lone dash under a table after text", "text\n| a | b |\n| - | - |\n| 1 | 2 |\n-\n"},
 		{"indented code after a list", "100. a\n\n    x\n    y\n"},
 		{"indented code after a quote", ">\n    a\n    b\n"},
+		{"a code block whose language holds an escape", "```a\\*b\nx\n```\n"},
 		{"a Pandoc fenced div", "::: {.callout}\nBody.\n:::\n"},
 		{"a leaf directive", "::callout{#b4}\n"},
 	}
@@ -47,6 +48,39 @@ func TestParseNamesTheFirstRefusedBlock(t *testing.T) {
 			if _, err := Parse(markdown); err == nil || err.Error() != reasons[i] {
 				t.Errorf("%s, then %s: Parse(%q) = %v, want %q", first.name, second.name, markdown, err, reasons[i])
 			}
+		}
+	}
+}
+
+// A code block's language is refused where an escape or a character reference in it decodes: the
+// browser editor's parser decodes both in the info string's first word, and goldmark keeps them as
+// written. What that parser leaves as written, and the rest of the info string, which both drop,
+// is read as before.
+func TestParseRefusesACodeLanguageTheBrowserDecodes(t *testing.T) {
+	for _, markdown := range []string{
+		"```a\\*b\nx\n```\n",
+		"```a&amp;b\nx\n```\n",
+		"```a&#42;b\nx\n```\n",
+		"~~~a\\~b\nx\n~~~\n",
+		"- ```q=1\\_x\n  y\n  ```\n",
+	} {
+		if _, err := Parse(markdown); !errors.Is(err, ErrSchema) {
+			t.Errorf("Parse(%q) = %v, want a schema refusal", markdown, err)
+		}
+	}
+	for markdown, language := range map[string]string{
+		"```a\\qb\nx\n```\n":     `a\qb`,
+		"```a&bogus;b\nx\n```\n": "a&bogus;b",
+		"```a b\\*c\nx\n```\n":   "a",
+		"```c++\nx\n```\n":       "c++",
+	} {
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Errorf("Parse(%q) = %v, want it read", markdown, err)
+			continue
+		}
+		if got := doc.Children[0].Attrs["language"]; got != language {
+			t.Errorf("Parse(%q) language = %v, want %q", markdown, got, language)
 		}
 	}
 }

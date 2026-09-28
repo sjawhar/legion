@@ -7,6 +7,7 @@ import (
 
 	"github.com/yuin/goldmark/ast"
 	extensionast "github.com/yuin/goldmark/extension/ast"
+	"github.com/yuin/goldmark/util"
 )
 
 // refuseBlocks refuses a document holding a block that cannot be stored as it reads (blockRefusal),
@@ -44,6 +45,13 @@ func blockRefusal(node ast.Node, source []byte) error {
 	case *ast.Heading:
 		if _, underlined := current.Attribute(underlinedTextAttr); underlined {
 			return refuse("a lone - under a table that text stands before in its paragraph, which the browser editor's parser reads as an empty list item after the table, and goldmark as the underline of a heading holding that text")
+		}
+	case *ast.FencedCodeBlock:
+		// The browser editor's parser decodes backslash escapes and character references in the
+		// info string's first word, the language, where goldmark keeps them as written.
+		language := current.Language(source)
+		if !bytes.Equal(util.ResolveEntityNames(util.ResolveNumericReferences(util.UnescapePunctuations(language))), language) {
+			return refuse("a code block whose language holds a backslash escape or a character reference, which the browser editor's parser decodes and goldmark keeps as written")
 		}
 	case *ast.CodeBlock:
 		// An indented code block stands right after a list, outside it, only where the list's last
