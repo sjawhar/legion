@@ -146,12 +146,15 @@
   differently from bash (`${v///tmp//etc}`); text outside ASCII, which bash counts by the locale; a
   `case` whose word matches no item, which walks every branch. A pattern is matched in time its
   value and itself bound, never by a backtracking regular expression (`*a*a*a*b` over a run of
-  `a`s held a regex for hours), and the work is charged to the walk budget. The Stage 2, 3,
-  4b.13b, 4b and controller drivers are now refused only for killing the processes a query selects
-  (`$(run_processes)`, `first_child`), and the five manual smokes (`smoke-delivery.sh`,
-  `smoke-btw.sh`, `smoke-channel.sh`, `smoke-clear-rebind.sh`, `omp-roundtrip.sh`) run their
-  sessions on their own tmux server, where a `kill-session` can end only the session each started.
-  `src/legion/pane-guard-walk.ts` prints every refusal a script meets, not only the first.
+  `a`s held a regex for hours), and the work is charged to the walk budget. No value the guard
+  builds is longer than 65,536 characters: a replacement of a replacement reached 134 million in a
+  tenth of a second and held the pane for seconds on each read, so past the bound a value is
+  unknown. The Stage 2, 3, 4b.13b, 4b and controller drivers are now refused only for killing the
+  processes a query selects (`$(run_processes)`, `first_child`), and the five manual smokes
+  (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `smoke-clear-rebind.sh`,
+  `omp-roundtrip.sh`) run their sessions on their own tmux server, where a `kill-session` can end
+  only the session each started. `src/legion/pane-guard-walk.ts` prints every refusal a script
+  meets, not only the first.
 - A pane whose `HOME` sits under `/tmp` keeps it (LEGION-300). The guard counted every directory
   below `/tmp` except the socket families as the pane's scratch, so with `HOME` at
   `/tmp/<run>/omp-home` and no `TMUX_TMPDIR` in the same directory, `rm -rf ~`,

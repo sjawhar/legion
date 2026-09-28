@@ -336,7 +336,9 @@ describe("resolution", () => {
     expect(bash(`v="/a/b$HOME"; rm -rf "\${v##/a/b}"`)).toContain(home);
     // An unknown value or pattern leaves the result unknown, and so does a replacement holding `&`,
     // which bash 5.2 replaces with the matched text.
-    expect(bash(`v=$(cat f); rm -rf "\${v//x/y}"`)).toContain("{v//x/y}`)");
+    expect(bash(`v=$(cat f); rm -rf "\${v//x/y}"`)).toContain(
+      "{v//x/y}` (`$(cat f)` (a command's output))"
+    );
     expect(bash(`v="$HOME"; rm -rf "\${v//$(cat f)/y}"`)).toContain("{v//$(cat f)/y}`)");
     expect(bash(`v="$LEGION_WORKSPACE/a"; rm -rf "\${v//a/&}"`)).toContain("{v//a/&}`)");
     // After `/` or `//`, bash reads a leading `/` as the pattern's first character, where the parser
@@ -512,10 +514,34 @@ describe("resolution", () => {
   });
 
   test("counts a case pattern's matching against the walk budget", () => {
-    const v = `v=${"a".repeat(100_000)}`;
+    // Under the longest value the guard builds, so the match is attempted and charged.
+    const v = `v=${"a".repeat(60_000)}`;
     expect(
       bash(`${v}; case $v in ${"*a".repeat(2000)}b) :;; esac; rm -rf "$LEGION_WORKSPACE/x"`)
     ).toContain("walk limit");
+  });
+
+  test("builds no value longer than it judges: a replacement's output, a doubling", () => {
+    // A replacement of a replacement reaches 134 million characters in a tenth of a second, and
+    // judging each read of it took seconds; past the longest value the guard builds, a value is
+    // unknown, and a refusal names why.
+    const v = `v=${"a".repeat(512)}`;
+    const grown = `${v}; w="\${v//?/$v}"; x="\${v//?/$w}"`;
+    expect(bash(`${grown}; rm -rf "/$x"`)).toContain("longer than");
+    const reads = Array.from({ length: 10 }, () => 'rm -rf "$LEGION_WORKSPACE/$x"').join("; ");
+    expect(bash(`${grown}; ${reads}`)).toBeUndefined();
+    const doubled = `x=aaaa; ${Array.from({ length: 24 }, () => 'x="$x$x"').join("; ")}`;
+    expect(bash(`${doubled}; rm -rf "/$x"`)).toContain("longer than");
+    const printed = `x=aaaa; ${Array.from({ length: 24 }, () => `printf -v x '%s%s' "$x" "$x"`).join("; ")}`;
+    expect(bash(`${printed}; rm -rf "/$x"`)).toContain("longer than");
+    // A replacement whose output would pass the bound is not built: 80 of them, each 512 times a
+    // 60,000-character replacement, fit the walk budget and would build 2.5 billion characters,
+    // which unquoted the guard scans for splitting.
+    const expansions = Array.from({ length: 80 }, () => `: \${v//?/$r}`).join("; ");
+    const wide = `${v}; r=${"b".repeat(60_000)}; ${expansions}`;
+    expect(bash(`${wide}; rm -rf "$LEGION_WORKSPACE/x"`)).toBeUndefined();
+    // Under the bound, the value is bash's own.
+    expect(bash(`${v}; w="\${v//a/bb}"; rm -rf "/$w"`)).toContain(`(/${"b".repeat(1024)})`);
   });
 
   test("leaves ordinary work alone", () => {

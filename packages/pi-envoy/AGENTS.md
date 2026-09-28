@@ -294,7 +294,10 @@ command in the same line can rewrite; an operand `unbash` splits differently fro
 starting with `/` after `/` or `//`); text outside ASCII, which bash counts by the locale; and a
 replacement holding `&`. A pattern is matched by stepping the positions it can reach along the
 value, never by a backtracking regular expression, and its work (the value's length times the
-pattern's) is charged to the walk budget, a `case` item's included.
+pattern's) is charged to the walk budget, a `case` item's included. No value the guard builds is
+longer than 65,536 characters (`MAX_VALUE_LENGTH`): a replacement of a replacement or `x="$x$x"`
+repeated reached tens of millions of characters and held the pane on each read, so past the bound
+a value is unknown, and a refusal names the cause.
 
 A write to a variable that the guard sees reaches its model, and one it cannot model leaves the
 value unknown, never the one already approved: a builtin that assigns by name (`printf -v`,

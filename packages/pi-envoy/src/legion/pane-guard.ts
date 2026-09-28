@@ -20,7 +20,9 @@
  * piped into a shell, a script executed by path, and python/node/bun scripts through
  * `pane-guard-code.ts`). A command the parser reports as malformed is refused, and so is a target
  * the guard cannot resolve (a variable read from input, a command's output): it never guesses.
- * A command whose walk visits more than `MAX_WALK_STEPS` nodes is refused, never allowed unread.
+ * A command whose walk visits more than `MAX_WALK_STEPS` nodes is refused, never allowed unread, and
+ * no value the guard builds is longer than `MAX_VALUE_LENGTH`: past it (a replacement of a
+ * replacement, `x="$x$x"` repeated) a value is unknown, since building one held the pane.
  *
  * Every value the guard produces is known, unset, or unknown, and never one standing in for
  * another: a value it cannot know taken as some harmless concrete one (the empty string, the text
@@ -584,8 +586,8 @@ function unquotedLiteral(
 function lookup(name: string, st: State, ctx: Ctx): Expansion | undefined {
   const own = st.vars.get(name);
   if (own !== undefined) return isUnset(own) ? undefined : own;
-  const any = st.vars.get(ANY_NAME);
-  if (any !== undefined) return any;
+  const any = st.vars.get(ANY_NAME)?.[0];
+  if (any !== undefined) return [{ ...any, why: `\`$${name}\`, which ${any.why}` }];
   if (name === "PWD" && st.cwd !== undefined) return [literal(st.cwd)];
   const value = ctx.env[name];
   return value === undefined ? undefined : [literal(value)];
@@ -638,7 +640,7 @@ function keepAttributed(st: State, name: string, unsets = false): void {
  * assigns nothing. `writer` names the write for a refusal. */
 function assignByName(st: State, name: string | undefined, value: Expansion, writer: string): void {
   if (name === undefined) {
-    forgetVariables(st, `a variable ${writer} assigns under a name the guard cannot read`);
+    forgetVariables(st, `${writer} under a name the guard cannot read may have changed`);
     return;
   }
   if (IDENTIFIER.test(name)) {
@@ -661,14 +663,20 @@ function assignByName(st: State, name: string | undefined, value: Expansion, wri
 
 /** After a write the guard cannot read: any variable may have been assigned or unset, so every
  * value this shell holds, and every name it does not list (`ANY_NAME`), is unknown and may be
- * unset until the command assigns it again. */
+ * unset until the command assigns it again. `why` completes "`$NAME`, which …", naming the write,
+ * so a refusal says what made the name unknown. */
 function forgetVariables(st: State, why: string): void {
-  const forgotten: Expansion = [{ ...unknown(why), maybeUnset: true }];
-  const kept: Expansion = [{ ...unknown(why), maybeUnset: true, rewrites: true }];
-  for (const name of st.vars.keys()) st.vars.set(name, attributed(st, name) ? kept : forgotten);
-  st.vars.set(ANY_NAME, forgotten);
+  const forgotten = (name: string): Expansion => [
+    {
+      ...unknown(`\`$${name}\`, which ${why}`),
+      maybeUnset: true,
+      ...(attributed(st, name) ? { rewrites: true as const } : {}),
+    },
+  ];
+  for (const name of st.vars.keys()) if (name !== ANY_NAME) st.vars.set(name, forgotten(name));
+  st.vars.set(ANY_NAME, [{ ...unknown(why), maybeUnset: true }]);
   for (const name of st.arrays.keys()) {
-    st.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, forgotten]]));
+    st.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, forgotten(name)]]));
   }
 }
 
@@ -851,6 +859,11 @@ function patternExpansion(
   ctx: Ctx
 ): Piece[][] {
   const unknownResult = [[unknown(`\`${part.text}\``)]];
+  // An operand the guard cannot know makes the expansion unknown, for the operand's reason.
+  const because = (pieces: Expansion): Piece[][] => {
+    const cause = pieces.find((piece) => piece.kind === "unknown")?.why;
+    return cause === undefined ? unknownResult : [[unknown(`\`${part.text}\` (${cause})`)]];
+  };
   const operator = part.operator ?? "";
   const head = `\${${part.parameter}${operator}`;
   const accounted =
@@ -871,9 +884,8 @@ function patternExpansion(
     set === false &&
     (/^([1-9][0-9]*|[@*])$/.test(part.parameter) || isUnset(st.vars.get(part.parameter)));
   const value = set === true ? literalText(held) : knownUnset ? "" : undefined;
-  if (value === undefined || value.length > MAX_PATTERN_VALUE || !isAscii(value)) {
-    return unknownResult;
-  }
+  if (value === undefined) return because(held);
+  if (value.length > MAX_PATTERN_VALUE || !isAscii(value)) return unknownResult;
   const patternWord = part.replace?.pattern ?? part.operand;
   const patterns = patternWord === undefined ? [[literal("")]] : expandWord(patternWord, st, ctx);
   const glob = patterns.length === 1 ? patternGlob(patterns[0] as Expansion) : undefined;
@@ -887,11 +899,15 @@ function patternExpansion(
   } else {
     const replacements = expandWord(part.replace.replacement, st, ctx);
     const pieces = replacements.length === 1 ? (replacements[0] as Expansion) : undefined;
-    if (pieces === undefined || pieces.some((piece) => piece.kind === "unknown")) {
-      return unknownResult;
-    }
+    if (pieces === undefined) return unknownResult;
+    if (pieces.some((piece) => piece.kind === "unknown")) return because(pieces);
     const replacement = pieces.map((piece) => piece.text).join("");
     if (/[&\\]/.test(replacement)) return unknownResult;
+    // `//` replaces at most one match per character; the others at most one. The bound stops the
+    // output being built at all: unquoted, it is scanned for splitting before any word joins it.
+    const most =
+      value.length + (operator === "//" ? Math.max(value.length, 1) : 1) * replacement.length;
+    if (most > MAX_VALUE_LENGTH) return [[overLong(`\`${part.text}\``)]];
     result = replacePattern(value, operator, glob, replacement);
   }
   if (quoted) return [[literal(result)]];
@@ -1083,10 +1099,30 @@ function product(left: Piece[][], right: Piece[][]): Piece[][] {
       if (out.length >= MAX_ALTERNATIVES) {
         return [[unknown(`a brace expansion with more than ${MAX_ALTERNATIVES} alternatives`)]];
       }
-      out.push([...a, ...b]);
+      const long =
+        a.length + b.length > MAX_VALUE_PIECES || textLength(a) + textLength(b) > MAX_VALUE_LENGTH;
+      out.push(long ? [overLong("a word")] : [...a, ...b]);
     }
   }
   return out;
+}
+
+/** The longest value the guard builds, in characters and in pieces. A path is at most 4,096 bytes
+ * on Linux, so a longer value is never one target it resolves, and building values without a bound
+ * held the pane: a replacement of a replacement (`${v//?/$w}`) or `x="$x$x"` repeated in one line
+ * reached tens of millions of characters in a fraction of a second, and judging each read of one
+ * took seconds. Past the bound a value is unknown, and a refusal says why (`overLong`). */
+const MAX_VALUE_LENGTH = 65_536;
+const MAX_VALUE_PIECES = 4_096;
+
+function overLong(what: string): Piece {
+  return unknown(`${what}, longer than the ${MAX_VALUE_LENGTH} characters the guard builds`);
+}
+
+function textLength(pieces: readonly Piece[]): number {
+  let length = 0;
+  for (const piece of pieces) length += piece.text.length;
+  return length;
 }
 
 /** Every expansion of `word` bash could produce, as piece lists. Literal text holding the
@@ -1353,8 +1389,14 @@ function merge(target: State, branches: readonly State[]): void {
         return value === undefined || isUnset(value) || value.some((piece) => piece.maybeUnset);
       });
       const rewrites = branches.some((branch) => attributed(branch, name));
+      // Name what a branch did to it, so a refusal says why the value is unknown.
+      const cause = branches
+        .flatMap((branch) => branch.vars.get(name) ?? [])
+        .find((piece) => piece.kind === "unknown")?.why;
       const merged = unknown(
-        `\`$${name}\`, which a branch sets differently`,
+        name === ANY_NAME
+          ? `${cause ?? "a write the guard cannot read may have changed"}, in a branch or loop body`
+          : `\`$${name}\`, which a branch sets differently${cause === undefined ? "" : ` (${cause})`}`,
         signalSafe ? true : undefined
       );
       target.vars.set(name, [
@@ -2505,7 +2547,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         const command =
           text === undefined ? undefined : parse(`(( ${text} ))`).commands[0]?.command;
         if (command?.type === "ArithmeticCommand") visitArithmetic(command.expression, outer, ctx);
-        else forgetVariables(outer, "a variable `let` assigns in text the guard cannot read");
+        else forgetVariables(outer, "`let` in text the guard cannot read may have changed");
       }
       return;
     }
@@ -2555,10 +2597,18 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           assigned = value.exp;
         } else {
           const text = printfText(printed);
+          // An argument the guard cannot know names why the value is unknown.
+          const cause = printed.flatMap((arg) => arg.exp).find((p) => p.kind === "unknown")?.why;
           assigned =
             text === undefined || text.includes(UNKNOWN_MARKER)
-              ? [unknown(`\`$${variable ?? "?"}\` (printf -v)`)]
-              : [literal(text)];
+              ? [
+                  unknown(
+                    `\`$${variable ?? "?"}\` (printf -v${cause === undefined ? "" : `: ${cause}`})`
+                  ),
+                ]
+              : text.length > MAX_VALUE_LENGTH
+                ? [overLong(`\`$${variable ?? "?"}\` (printf -v)`)]
+                : [literal(text)];
         }
         assignByName(outer, variable, assigned, "`printf -v`");
         return;
@@ -2576,7 +2626,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       runText(text, "the `eval` text", outer, ctx, site);
       // What the guard could not read of the text may assign any variable.
       if (text.includes(UNKNOWN_MARKER)) {
-        forgetVariables(outer, "a variable `eval` of text the guard cannot read may assign");
+        forgetVariables(outer, "`eval` of text the guard cannot read may have changed");
       }
       return;
     }
@@ -2929,7 +2979,7 @@ function declaration(builtin: string, list: readonly Arg[], st: State, ctx: Ctx,
     if (text !== undefined && /^[-+][a-zA-Z]+$/.test(text)) continue;
     const { name, value: assigned } = nameAndValue(arg);
     if (name === undefined) {
-      forgetVariables(st, `a variable ${writer} assigns under a name the guard cannot read`);
+      forgetVariables(st, `${writer} under a name the guard cannot read may have changed`);
       continue;
     }
     const base = ARRAY_ELEMENT.exec(name)?.[1] ?? name;
