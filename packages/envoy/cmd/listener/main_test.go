@@ -2522,7 +2522,7 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 		logMessage string
 	}{
 		{"raw nats.ErrTimeout from the flush", natsgo.ErrTimeout, "delivery_failed", "listener role forward failed"},
-		{"flush timeout wrapped by the client", fmt.Errorf("bus: flush forward: %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
+		{"flush timeout wrapped by the client", fmt.Errorf("bus: flush publish to \"agent.x\": %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
 		{"bus.ErrReceiptTimeout", bus.ErrReceiptTimeout, "receipt_timeout", "listener role receipt timed out"},
 		{"bus.ErrReceiptTimeout wrapped", fmt.Errorf("forward: %w", bus.ErrReceiptTimeout), "receipt_timeout", "listener role receipt timed out"},
 	}

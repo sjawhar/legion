@@ -64,7 +64,7 @@ then a table with one row per error shape, deterministic and instant:
 
 ```go
 {"raw nats.ErrTimeout from the flush", natsgo.ErrTimeout, "delivery_failed", "listener role forward failed"},
-{"flush timeout wrapped by the client", fmt.Errorf("bus: flush forward: %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
+{"flush timeout wrapped by the client", fmt.Errorf("bus: flush publish to \"agent.x\": %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
 {"bus.ErrReceiptTimeout", bus.ErrReceiptTimeout, "receipt_timeout", "listener role receipt timed out"},
 {"bus.ErrReceiptTimeout wrapped", fmt.Errorf("forward: %w", bus.ErrReceiptTimeout), "receipt_timeout", "listener role receipt timed out"},
 ```
@@ -123,7 +123,7 @@ t.Cleanup(func() { _ = docker.ContainerUnpause(context.Background(), ctr.GetCont
 
 err = client.RequestCoreTo(subject, item, 500*time.Millisecond)
 // want: err != nil; !errors.Is(err, bus.ErrReceiptTimeout); errors.Is(err, natsgo.ErrTimeout);
-//       strings.HasPrefix(err.Error(), "bus: flush forward: "); elapsed within [window, 2s]
+//       elapsed within [window, 2s]
 ```
 
 Why this reproduces the reviewer's scenario faithfully: a paused server keeps the TCP connection open,

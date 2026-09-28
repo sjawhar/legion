@@ -3,6 +3,7 @@ package cistore
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1282,8 +1283,9 @@ func TestSummaryTickWaitsForQuietChangedTerminalObservation(t *testing.T) {
 }
 
 func TestSummaryTickPublishesLegacyResettledRecordWithoutTimestamps(t *testing.T) {
-	// A record written by a deployed listener carries no timestamps at all;
-	// its attempt set is the settlement identity, so it settles like any other.
+	// A record written by a deployed listener carries no check timestamps at all;
+	// its attempt set is the settlement identity, so it settles like any other
+	// record a head-gated listener left inside the handover grace.
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	store := openStore(t, conn)
@@ -1307,7 +1309,8 @@ func TestSummaryTickPublishesLegacyResettledRecordWithoutTimestamps(t *testing.T
 				"conclusion":"success"
 			}
 		},
-		"resettled":true
+		"resettled":true,
+		"last_event_at":` + strconv.FormatInt(time.Now().UnixMilli(), 10) + `
 	}`)
 	if _, err := store.watcher.KV().Put(Key(owner, repo, number, sha), legacy); err != nil {
 		t.Fatalf("store legacy state: %v", err)
