@@ -59,6 +59,18 @@ A block rewritten in place under its own id is one block, and neither the halves
 splice splits nor a repeat the live document already carries (a browser write can leave one until
 settlement repairs it) refuse anything. Only a typed block's markdown can name its id.
 
+Markdown a caller writes is stored as its rendering, so a write whose rendering reads back as
+another document is refused, naming what reads back (`pmdoc.RefuseMisreadWrite`, over the accept
+path's `pmdoc.NewMisread`): `ParseForWrite` reads back the whole document a spec, an upload or a
+version writes (`400 INVALID_MARKDOWN`), and an `insert` is read back on the document it leaves
+against the one it started from, as an accept is (`400 INVALID_OP` on `markdown`). The reading
+rules refuse every shape they know first, so this refusal names one none of them reads, and each is
+logged (`pmdoc: refused a write whose markdown reads back otherwise`). Wherever a check reads a
+write back - here, and in an accept's, a replace's and an ask edit's checks - only a refusal
+(`pmdoc.ErrSchema`) is a verdict; any other error, a panic (`pmdoc.ErrPanic`) among them, is
+`pmdoc`'s own and answers `500`. A tree a browser edit makes is not checked, so its rendering can
+still fail to read back when it is uploaded again.
+
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
 after; the one measure the room's update observer, `updateChangesMarkdown`, a transactional live
@@ -733,7 +745,10 @@ markdown whether it becomes blocks or table rows, a retype's attributes); in a s
 typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its
 ask block carries; and in a block ask's edited question and options. The browser editor's own
 updates cannot carry a carriage return. No stored document holds one, and `pmdoc` handles line
-feeds alone. A code span keeps the whitespace that
+feeds alone. Marks are read as that parser reads them, as a set, where goldmark nests them: a mark
+opened where the same mark is already open adds nothing, and its close ends the mark for the rest
+of the text around it, up to the node that opened it (`parseInlineMarks`), so `*x *y* z*` is
+`x y` in emphasis and ` z` without, and `****a****` is strong once. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
@@ -757,6 +772,9 @@ table is no paragraph and ends there, reading the line as that block. A setext u
 table is the table's row, as that parser reads it (`underlineAfterTable`), all but a lone `-`, an
 empty list item there: goldmark's setext heading took the table's paragraph, then wrote the
 underline as a paragraph after the table, or made the lines before the table a heading after it.
+Under a lone `-` goldmark's own handling still does that where text stands before the table in its
+paragraph, making the text a heading after the table where that parser reads the paragraph, the
+table and an empty item, so such a document is refused (`underlinedTextAttr`).
 A tab in a line's indentation spans the columns to the next multiple of four from where it stands,
 as CommonMark and the browser editor's parser read it, so after a quote's `> ` it spans two: `> \t- a`
 opens a list, `> \t| a |` over `> \t| - |` is a table, and `> a` over `> \t===` a setext heading
@@ -793,6 +811,18 @@ as the browser editor does (`otherListMarkers`); a list anywhere else keeps `-` 
 that leaves two lists side by side (deleting or emptying what stood between them, inserting or
 accepting a list beside one) therefore stores the two lists it made, and a `replace` refusal that
 names a list item's marker names the one it is written with (`BlockMarker.Other`).
+
+The renderer writes a run of inline text so that it reads back as written. A bare URL ends where
+linkify stops, so where a run does not read back because linkify would continue a URL into the
+character after it, that character is written behind a backslash (`endsBareURL`) - a backslash even
+for `&` and `~`, whose other escapes are character references, which linkify runs through. Marks are
+written in one order - link, strong, emphasis - so where a text still carries a mark the text
+before it opened, and the order puts that mark after the text's other marks, the mark is closed and
+opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
+`*`, `**` and `*`), the parser reads one run and cannot split it as written. Such a run is written again with the marks still open
+kept open and the others opened inside them (`keepingOpen`), and kept only where that reads back
+with nothing fused; a run that fuses nothing is written as before, so italic closed around a link
+keeps its bytes.
 
 A container that holds nothing is read as the browser editor's parser reads it, holding one empty
 paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
