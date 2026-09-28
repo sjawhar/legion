@@ -233,8 +233,26 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 // and returns its client URL once the server answers there (answering).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
+	return startNkeyUser(t, fmt.Sprintf("{ nkey: %q }", user))
+}
+
+// StartNkeyPublishAllowed runs a NATS test container as StartNkeyAuthorized does, whose one user
+// may publish only to the subjects allow names (and subscribe to anything): a publish to any other
+// subject is the server's permissions violation, as a per-client grant makes it.
+func StartNkeyPublishAllowed(t testing.TB, user string, allow ...string) string {
+	t.Helper()
+	quoted := make([]string, len(allow))
+	for index, subject := range allow {
+		quoted[index] = fmt.Sprintf("%q", subject)
+	}
+	return startNkeyUser(t, fmt.Sprintf("{ nkey: %q, permissions: { publish: { allow: [%s] } } }",
+		user, strings.Join(quoted, ", ")))
+}
+
+func startNkeyUser(t testing.TB, entry string) string {
+	t.Helper()
 	ctx := context.Background()
-	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ { nkey: %q } ]\n}\n", user)
+	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", entry)
 	ctr, err := tcnats.Run(ctx, Image, tcnats.WithConfigFile(strings.NewReader(config)))
 	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
