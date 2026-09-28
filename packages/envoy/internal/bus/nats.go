@@ -879,7 +879,7 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 		return err
 	}
 	deadline, _ := ctx.Deadline()
-	return c.publishConfirmed(c.Conn, subject, "", data, deadline)
+	return c.publishConfirmed(c.Conn, &nats.Msg{Subject: subject, Data: data}, deadline, (*nats.Conn).PublishMsg)
 }
 
 // ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
@@ -923,7 +923,7 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 		return err
 	}
 	defer receipt.Unsubscribe()
-	err = c.publishConfirmed(conn, subject, inbox, data, deadline)
+	err = c.publishConfirmed(conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, deadline, (*nats.Conn).PublishMsg)
 	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
 		return err
 	}

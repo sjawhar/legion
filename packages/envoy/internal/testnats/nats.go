@@ -233,7 +233,8 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 // and returns its client URL once the server answers there (answering).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
-	return startNkeyUser(t, fmt.Sprintf("{ nkey: %q }", user))
+	_, uri := startNkeyConfig(t, nkeyConfig(fmt.Sprintf("{ nkey: %q }", user)))
+	return uri
 }
 
 // StartNkeyPublishAllowed runs a NATS test container as StartNkeyAuthorized does, whose one user
@@ -241,18 +242,73 @@ func StartNkeyAuthorized(t testing.TB, user string) string {
 // subject is the server's permissions violation, as a per-client grant makes it.
 func StartNkeyPublishAllowed(t testing.TB, user string, allow ...string) string {
 	t.Helper()
+	return StartNkeyGranted(t, user, allow...).URL
+}
+
+// NkeyGrant is a NATS test server, started by StartNkeyGranted, whose one nkey user may publish
+// only to the subjects its grant names; Grant changes the grant.
+type NkeyGrant struct {
+	URL  string
+	user string
+	ctr  *tcnats.NATSContainer
+}
+
+// StartNkeyGranted runs a NATS test container as StartNkeyPublishAllowed does, and returns it so
+// the test can change the user's grant.
+func StartNkeyGranted(t testing.TB, user string, allow ...string) *NkeyGrant {
+	t.Helper()
+	ctr, uri := startNkeyConfig(t, publishGrantConfig(user, allow))
+	return &NkeyGrant{URL: uri, user: user, ctr: ctr}
+}
+
+// Grant replaces the user's publish grant with allow and has the server reload its configuration,
+// as an operator changing a grant does: the server keeps its connections and applies the new grant
+// to them. It returns once the server reports the reload.
+func (g *NkeyGrant) Grant(t testing.TB, allow ...string) {
+	t.Helper()
+	ctx := context.Background()
+	if err := g.ctr.CopyToContainer(ctx, []byte(publishGrantConfig(g.user, allow)), "/etc/nats.conf", 0o644); err != nil {
+		t.Fatalf("write the new grant: %v", err)
+	}
+	docker, err := testcontainers.NewDockerClientWithOpts(ctx)
+	if err != nil {
+		t.Fatalf("docker client: %v", err)
+	}
+	defer docker.Close()
+	if err := docker.ContainerKill(ctx, g.ctr.GetContainerID(), "HUP"); err != nil {
+		t.Fatalf("signal NATS to reload: %v", err)
+	}
+	deadline := time.Now().Add(connectTimeout)
+	for time.Now().Before(deadline) {
+		logs, err := g.ctr.Logs(ctx)
+		if err == nil {
+			text, _ := io.ReadAll(logs)
+			logs.Close()
+			if strings.Contains(string(text), "Reloaded server configuration") {
+				return
+			}
+		}
+		time.Sleep(retryInterval)
+	}
+	t.Fatalf("NATS did not report reloading its configuration within %s", connectTimeout)
+}
+
+func publishGrantConfig(user string, allow []string) string {
 	quoted := make([]string, len(allow))
 	for index, subject := range allow {
 		quoted[index] = fmt.Sprintf("%q", subject)
 	}
-	return startNkeyUser(t, fmt.Sprintf("{ nkey: %q, permissions: { publish: { allow: [%s] } } }",
+	return nkeyConfig(fmt.Sprintf("{ nkey: %q, permissions: { publish: { allow: [%s] } } }",
 		user, strings.Join(quoted, ", ")))
 }
 
-func startNkeyUser(t testing.TB, entry string) string {
+func nkeyConfig(entry string) string {
+	return fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", entry)
+}
+
+func startNkeyConfig(t testing.TB, config string) (*tcnats.NATSContainer, string) {
 	t.Helper()
 	ctx := context.Background()
-	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", entry)
 	ctr, err := tcnats.Run(ctx, Image, tcnats.WithConfigFile(strings.NewReader(config)))
 	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
@@ -263,7 +319,7 @@ func startNkeyUser(t testing.TB, entry string) string {
 		t.Fatalf("NATS connection string: %v", err)
 	}
 	answering(t, uri)
-	return uri
+	return ctr, uri
 }
 
 // answering waits, within connectTimeout, for the server at uri to refuse a connection with no
