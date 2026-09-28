@@ -224,6 +224,18 @@ describe("resolution", () => {
     expect(bash(`v=$(cat f); rm -rf "\${v//x/y}"`)).toContain("{v//x/y}`)");
     expect(bash(`v="$HOME"; rm -rf "\${v//$(cat f)/y}"`)).toContain("{v//$(cat f)/y}`)");
     expect(bash(`v="$LEGION_WORKSPACE/a"; rm -rf "\${v//a/&}"`)).toContain("{v//a/&}`)");
+    // After `/` or `//`, bash reads a leading `/` as the pattern's first character, where the parser
+    // reads an empty pattern: `${v////x}` replaces every `/` with `x`. That operand, and a pattern
+    // that expands to nothing, are unknown rather than a value left as it was.
+    expect(bash(`v="$LEGION_WORKSPACE/build"; rm -rf "\${v/////home/victim}"`)).toContain(
+      "{v/////home/victim}`)"
+    );
+    expect(bash(`v="$LEGION_WORKSPACE/build"; rm -rf "\${v////x}"`)).toContain("{v////x}`)");
+    expect(bash(`e=; v="$LEGION_WORKSPACE/build"; rm -rf "\${v//$e/x}"`)).toContain("{v//$e/x}`)");
+    // An escaped slash is the pattern's own character, as bash reads it.
+    expect(bash(`v="$LEGION_WORKSPACE/a/b"; rm -rf "/\${v//\\//_}"`)).toContain(
+      `(/${workspace.replaceAll("/", "_")}_a_b)`
+    );
   });
 
   test("refuses a target it cannot resolve, and never guesses one", () => {

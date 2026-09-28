@@ -633,7 +633,11 @@ function parameterExpansion(
 
 /** `${name#p}`, `##`, `%` and `%%`, and `${name/p/r}`, `//`, `/#` and `/%`, evaluated as bash does
  * when the value, the pattern and the replacement are all known; unknown otherwise, and for a
- * replacement holding `&` or `\`, which bash 5.2's `patsub_replacement` may rewrite. */
+ * replacement holding `&` or `\`, which bash 5.2's `patsub_replacement` may rewrite. The parser's
+ * split must account for the expansion's own text, and after `/` or `//` the pattern must be
+ * non-empty: bash reads a `/` there as the pattern's first character (`${v////x}` replaces every
+ * `/`), where the parser reads an empty pattern, and a value left as it was is the one the caller
+ * already trusts. */
 function patternExpansion(
   part: Extract<WordPart, { type: "ParameterExpansion" }>,
   quoted: boolean,
@@ -641,14 +645,23 @@ function patternExpansion(
   ctx: Ctx
 ): Piece[][] {
   const unknownResult = [[unknown(`\`${part.text}\``)]];
+  const operator = part.operator ?? "";
+  const head = `\${${part.parameter}${operator}`;
+  const accounted =
+    part.replace === undefined
+      ? part.text === `${head}${part.operand?.text ?? ""}}`
+      : part.text === `${head}${part.replace.pattern.text}/${part.replace.replacement.text}}` ||
+        (part.replace.replacement.text === "" &&
+          part.text === `${head}${part.replace.pattern.text}}`);
+  const slashPattern = operator === "/" || operator === "//";
+  if (!accounted || (slashPattern && part.replace?.pattern.text === "")) return unknownResult;
   const value = literalText(operatorValue(part.parameter, st, ctx));
   if (value === undefined || value.length > MAX_PATTERN_VALUE) return unknownResult;
   const patternWord = part.replace?.pattern ?? part.operand;
   const patterns = patternWord === undefined ? [[literal("")]] : expandWord(patternWord, st, ctx);
   const source = patterns.length === 1 ? patternSource(patterns[0] as Expansion) : undefined;
-  if (source === undefined) return unknownResult;
+  if (source === undefined || (slashPattern && source === "")) return unknownResult;
   const pattern = new RegExp(`^${source}$`);
-  const operator = part.operator ?? "";
   let result: string;
   if (part.replace === undefined) {
     result = removePattern(value, operator, pattern);
@@ -683,8 +696,8 @@ function removePattern(value: string, operator: string, pattern: RegExp): string
 }
 
 /** `value` with the longest match of `pattern` replaced: the first (`/`), every one left to right
- * (`//`), one at the start (`/#`) or one at the end (`/%`). A null pattern leaves `/` and `//`
- * alone, and those two replace an empty match only in an empty value. */
+ * (`//`), one at the start (`/#`) or one at the end (`/%`). `/` and `//` replace an empty match
+ * only in an empty value; their pattern is never null (`patternExpansion`). */
 function replacePattern(
   value: string,
   operator: string,
@@ -704,7 +717,6 @@ function replacePattern(
     }
     return value;
   }
-  if (pattern.source === "^$") return value;
   if (n === 0) return pattern.test("") ? replacement : value;
   let out = "";
   let at = 0;
