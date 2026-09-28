@@ -235,6 +235,9 @@ const MAX_WALK_STEPS = 100_000;
 const MAX_ALTERNATIVES = 64;
 /** The longest value a pattern expansion is evaluated over; `//` tests every slice of it. */
 const MAX_PATTERN_VALUE = 512;
+/** The pattern tests one walk step stands for: a test costs about as much as 1/128 of a node, so a
+ * `//` over the longest value spends about a thousand steps and the budget still bounds the time. */
+const PATTERN_TESTS_PER_STEP = 128;
 const MAX_SCRIPT_BYTES = 1024 * 1024;
 const FRESH_TEMP_NAME = "tmp.XXXXXXXXXX";
 /** First components under `/tmp` that hold other processes' sockets. */
@@ -655,6 +658,11 @@ function patternExpansion(
   const patterns = patternWord === undefined ? [[literal("")]] : expandWord(patternWord, st, ctx);
   const source = patterns.length === 1 ? patternSource(patterns[0] as Expansion) : undefined;
   if (source === undefined || (slashPattern && source === "")) return unknownResult;
+  const n = value.length;
+  const tests = slashPattern ? (n * (n + 1)) / 2 + 1 : n + 1;
+  ctx.steps.count += Math.ceil(tests / PATTERN_TESTS_PER_STEP);
+  // Past the budget the value is not computed; the walk's next node refuses the command.
+  if (ctx.steps.count > MAX_WALK_STEPS) return unknownResult;
   const pattern = new RegExp(`^${source}$`);
   let result: string;
   if (part.replace === undefined) {

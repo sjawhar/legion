@@ -380,6 +380,16 @@ describe("resolution", () => {
     expect(bash(`${command}; rm -rf "$HOME"`)).toContain("walk limit");
   });
 
+  test("counts a pattern expansion's work against the walk budget", () => {
+    // `//` tests every slice of its value: 500 of them over 512 characters is a few nodes of walk
+    // and seconds of matching, so the budget counts the matching and refuses the command.
+    const value = "a".repeat(512);
+    const expansions = Array.from({ length: 500 }, () => `: "\${v//?/x}"`).join("; ");
+    expect(bash(`v=${value}; ${expansions}; rm -rf "$LEGION_WORKSPACE/build"`)).toContain(
+      "walk limit"
+    );
+  });
+
   test("leaves ordinary work alone", () => {
     for (const command of [
       'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" new && rm -rf .legion && jj -R "$LEGION_WORKSPACE" describe -m "chore: remove .legion handoffs"',
