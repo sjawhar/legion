@@ -118,6 +118,9 @@ function longReplay(sessionID: string): object {
   return { frames, session_id: sessionID, v: 1 };
 }
 
+/** The phone layout runs on Chromium (the `iphone` project) and on WebKit (`webkit-iphone`). */
+const PHONE_PROJECTS = ["iphone", "webkit-iphone"];
+
 interface LiveViewLayout {
   /** The document's scrollable height and the layout viewport's height. */
   documentHeight: number;
@@ -186,6 +189,38 @@ async function expectViewportBound(page: Page): Promise<void> {
   expect((await liveViewLayout(page)).composerBottom).toBe(layout.composerBottom);
 }
 
+/** Scrolls the thread the way a reader does, and waits for the scroll event to be delivered
+ *  before going on. The thread follows its bottom only once that event has told it the reader is
+ *  there, and WebKit delivers scroll events a frame later than Chromium: a keyboard raised before
+ *  delivery raced the event and left the newest turn behind in about half of WebKit's runs. */
+async function scrollThreadTo(page: Page, top: number | "bottom"): Promise<void> {
+  await page.getByTestId("agent-thread").evaluate(
+    (thread, target) =>
+      new Promise<void>((resolve) => {
+        const to = target === "bottom" ? thread.scrollHeight - thread.clientHeight : target;
+        if (Math.abs(thread.scrollTop - to) < 1) {
+          resolve();
+          return;
+        }
+        thread.addEventListener("scroll", () => resolve(), { once: true });
+        thread.scrollTo(0, to);
+      }),
+    top
+  );
+}
+
+/** Whether <main> carries a keyboard cap, and whether that cap is exactly <main>'s own height. */
+function mainCap(page: Page): Promise<{ capped: boolean; fitsOwnHeight: boolean }> {
+  return page.getByTestId("main-content").evaluate((main) => {
+    const cap = Number.parseFloat(getComputedStyle(main).maxHeight);
+    const capped = !Number.isNaN(cap);
+    return {
+      capped,
+      fitsOwnHeight: capped && Math.abs(cap - main.getBoundingClientRect().height) < 0.5,
+    };
+  });
+}
+
 /** The newest turn is in view: its bottom edge is inside the thread and above the composer. */
 async function expectNewestTurnAboveComposer(page: Page): Promise<void> {
   await expect
@@ -197,22 +232,27 @@ async function expectNewestTurnAboveComposer(page: Page): Promise<void> {
 }
 
 /** iOS Safari's keyboard: the composer takes focus and only the visual viewport shrinks, to
- *  `height`. `<main>` is capped in the same task as the resize event (a deferred write would
- *  leave a frame with the composer behind the keyboard), and the composer then sits one page
- *  gutter above the visual viewport's bottom edge. */
-async function raiseKeyboard(page: Page, height: number): Promise<void> {
+ *  `height`, panned `offsetTop` px down the page (Safari pans it to bring a low input into view).
+ *  `<main>` is capped in the same task as the resize event (a deferred write would leave a frame
+ *  with the composer behind the keyboard), and the composer then sits one page gutter above the
+ *  visual viewport's bottom edge. */
+async function raiseKeyboard(page: Page, height: number, offsetTop = 0): Promise<void> {
   await page.getByTestId("agent-composer").locator("textarea").focus();
-  const sameTask = await page.evaluate((visualHeight) => {
-    const viewport = window.visualViewport;
-    const main = document.querySelector<HTMLElement>('[data-testid="main-content"]');
-    if (viewport === null || main === null) throw new Error("no visualViewport or main");
-    Object.defineProperty(viewport, "height", { configurable: true, get: () => visualHeight });
-    viewport.dispatchEvent(new Event("resize"));
-    return {
-      expected: viewport.offsetTop + visualHeight - main.getBoundingClientRect().top,
-      maxHeight: getComputedStyle(main).maxHeight,
-    };
-  }, height);
+  const sameTask = await page.evaluate(
+    ({ visualHeight, visualTop }) => {
+      const viewport = window.visualViewport;
+      const main = document.querySelector<HTMLElement>('[data-testid="main-content"]');
+      if (viewport === null || main === null) throw new Error("no visualViewport or main");
+      Object.defineProperty(viewport, "height", { configurable: true, get: () => visualHeight });
+      Object.defineProperty(viewport, "offsetTop", { configurable: true, get: () => visualTop });
+      viewport.dispatchEvent(new Event("resize"));
+      return {
+        expected: visualTop + visualHeight - main.getBoundingClientRect().top,
+        maxHeight: getComputedStyle(main).maxHeight,
+      };
+    },
+    { visualHeight: height, visualTop: offsetTop }
+  );
   expect(Number.parseFloat(sameTask.maxHeight)).toBeCloseTo(sameTask.expected, 1);
   await expect
     .poll(async () => {
@@ -220,7 +260,7 @@ async function raiseKeyboard(page: Page, height: number): Promise<void> {
       return layout.visualBottom - layout.mainPaddingBottom - layout.composerBottom;
     })
     .toBe(0);
-  expect((await liveViewLayout(page)).visualBottom).toBe(height);
+  expect((await liveViewLayout(page)).visualBottom).toBe(offsetTop + height);
 }
 
 /** The keyboard closes: the visual viewport is the whole window again and the composer blurs,
@@ -230,6 +270,7 @@ async function lowerKeyboard(page: Page): Promise<void> {
     const viewport = window.visualViewport;
     if (viewport === null) throw new Error("no visualViewport");
     Reflect.deleteProperty(viewport, "height");
+    Reflect.deleteProperty(viewport, "offsetTop");
     viewport.dispatchEvent(new Event("resize"));
   });
   await page.getByTestId("agent-composer").locator("textarea").blur();
@@ -373,7 +414,10 @@ test("a session nobody answers for is told so, and recovers when a responder app
 test("on a phone the live view never scrolls the page, keeps its header and composer on screen, and follows the keyboard", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name !== "iphone", "the phone layout runs on the iphone project");
+  test.skip(
+    !PHONE_PROJECTS.includes(testInfo.project.name),
+    "the phone layout runs on the phone projects"
+  );
   const phone: FakeSession = { ...planner, session_id: "01a0e0c1-0000-7000-8000-0000000390a4" };
   await setLiveSessions([planner, phone]);
   await publishAgentStreamFrame(phone.session_id, longReplay(phone.session_id), "replay");
@@ -386,16 +430,23 @@ test("on a phone the live view never scrolls the page, keeps its header and comp
     await expectViewportBound(page);
 
     // Chromium on Android, told `interactive-widget=resizes-content`, opens the keyboard by
-    // shrinking the layout viewport.
+    // shrinking the layout viewport, which already fits the shell above it. With the composer
+    // unfocused <main> carries no cap; focused, the cap equals <main>'s own height, so it moves
+    // nothing, and the composer sits one gutter above the keyboard either way.
+    const composerInput = page.getByTestId("agent-composer").locator("textarea");
     await page.setViewportSize({ height: 500, width: 390 });
+    expect(await mainCap(page)).toEqual({ capped: false, fitsOwnHeight: false });
     await expectViewportBound(page);
+    await composerInput.focus();
+    await expect.poll(() => mainCap(page)).toEqual({ capped: true, fitsOwnHeight: true });
+    await expectViewportBound(page);
+    await composerInput.blur();
     await page.setViewportSize({ height: 844, width: 390 });
 
     // iOS Safari opens it by shrinking only the visual viewport. A reader at the newest turn
     // raises the keyboard: the composer sits one page gutter above it, and the newest turn stays
     // in view above the composer.
-    const thread = page.getByTestId("agent-thread");
-    await thread.evaluate((element) => element.scrollTo(0, element.scrollHeight));
+    await scrollThreadTo(page, "bottom");
     await raiseKeyboard(page, 500);
     await expect(page.getByRole("link", { name: "← Agents" })).toBeInViewport({ ratio: 1 });
     await expectNewestTurnAboveComposer(page);
@@ -405,13 +456,18 @@ test("on a phone the live view never scrolls the page, keeps its header and comp
     await expectNewestTurnAboveComposer(page);
 
     // A reader scrolled back into the history keeps their place through a raise and a lower.
-    await thread.evaluate((element) => element.scrollTo(0, 1_200));
+    await scrollThreadTo(page, 1_200);
     const reading = (await liveViewLayout(page)).threadScrollTop;
     expect(reading).toBe(1_200);
     await raiseKeyboard(page, 500);
     expect((await liveViewLayout(page)).threadScrollTop).toBe(reading);
     await lowerKeyboard(page);
     expect((await liveViewLayout(page)).threadScrollTop).toBe(reading);
+
+    // Safari also pans the visual viewport down the page to bring a low input into view: the cap
+    // and the gutter follow the visual viewport's bottom in page coordinates, offsetTop included.
+    await raiseKeyboard(page, 500, 120);
+    await lowerKeyboard(page);
   } finally {
     await context.close();
   }
@@ -420,7 +476,7 @@ test("on a phone the live view never scrolls the page, keeps its header and comp
 test("at desktop width the live view fills the main column beside the navigation and the thread is its scroller", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "the desktop layout runs on the desktop project");
+  test.skip(testInfo.project.name !== "chromium", "the desktop layout runs on the desktop project");
   const desktop: FakeSession = { ...planner, session_id: "01a0e0c1-0000-7000-8000-000000001280" };
   await setLiveSessions([planner, desktop]);
   await publishAgentStreamFrame(desktop.session_id, longReplay(desktop.session_id), "replay");
@@ -443,7 +499,10 @@ test("at desktop width the live view fills the main column beside the navigation
 test("a document-scrolling route is never capped for the keyboard, at mount or after focus and resize", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name !== "iphone", "the phone layout runs on the iphone project");
+  test.skip(
+    !PHONE_PROJECTS.includes(testInfo.project.name),
+    "the phone layout runs on the phone projects"
+  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
