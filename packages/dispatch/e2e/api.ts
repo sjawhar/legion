@@ -458,13 +458,17 @@ export function getMessage(
   );
 }
 
+/** A session answers a targeted message's delivery. `followUp` is `dispatch_message`'s
+ *  `?follow_up=true`: once the attempt is answered, other text posts as a follow-up instead of
+ *  handing back the stored reply. */
 export function replyToMessageDelivery(
   messageID: string,
   input: { attempt: number; body?: string; error?: string },
-  actor: Actor
+  actor: Actor,
+  { followUp = false }: { followUp?: boolean } = {}
 ): Promise<Message | MessageDelivery> {
   return request<Message | MessageDelivery>(
-    `/api/v1/messages/${encodeURIComponent(messageID)}/reply`,
+    `/api/v1/messages/${encodeURIComponent(messageID)}/reply${followUp ? "?follow_up=true" : ""}`,
     "POST",
     input,
     {

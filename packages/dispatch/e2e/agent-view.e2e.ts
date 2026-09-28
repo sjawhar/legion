@@ -166,7 +166,10 @@ test("a session's replies to a direct message are unread until the live view sho
   });
   const session = { id: planner.session_id, kind: "session" as const };
   await replyToMessageDelivery(asked.id, { attempt: 1, body: "Switching to it now." }, session);
-  await replyToMessageDelivery(asked.id, { attempt: 1, body: "Done: it is at /dash." }, session);
+  // A follow-up, as dispatch_message sends it.
+  await replyToMessageDelivery(asked.id, { attempt: 1, body: "Done: it is at /dash." }, session, {
+    followUp: true,
+  });
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   try {
