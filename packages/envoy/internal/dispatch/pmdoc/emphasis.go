@@ -1,19 +1,22 @@
 package pmdoc
 
 import (
+	"reflect"
+
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
 	"github.com/yuin/goldmark/text"
 	"github.com/yuin/goldmark/util"
 )
 
-// inlineParsers is goldmark's default inline parsers with its emphasis parser, the one instance
-// parser.NewEmphasisParser returns, replaced by emphasisParser.
+// inlineParsers is goldmark's default inline parsers with its emphasis parser, found by its type
+// as blockParsers finds the block parsers it wraps, replaced by emphasisParser.
 func inlineParsers() []util.PrioritizedValue {
 	parsers := parser.DefaultInlineParsers()
+	emphasis := reflect.TypeOf(parser.NewEmphasisParser())
 	for index, prioritized := range parsers {
-		if prioritized.Value == parser.NewEmphasisParser() {
-			parsers[index] = util.Prioritized(emphasisParser{}, prioritized.Priority)
+		if reflect.TypeOf(prioritized.Value) == emphasis {
+			parsers[index].Value = emphasisParser{}
 		}
 	}
 	return parsers
