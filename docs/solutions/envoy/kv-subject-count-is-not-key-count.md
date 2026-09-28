@@ -64,7 +64,7 @@ production. It would have scaled to 35 s only on a deployment that really held 7
 - **Markers can be swept alone, and `MaxAge` is not how.** A KV `MaxAge` expires values as well as
   markers, so it is not a way to trim tombstones from a bucket whose claims must outlive it.
   `KeyValue.PurgeDeletes` is: it watches the bucket, then purges the subject of each delete or
-  purge marker and leaves live keys untouched (nats.go v1.50.0 `kv.go:802-870`), and
+  purge marker and leaves live keys untouched (nats.go v1.50.0 `kv.go:802-872`), and
   `nats kv compact <bucket>` calls it. It keeps markers newer than 30 minutes unless
   `DeleteMarkersOlderThan` says otherwise, and for a marker past that threshold it purges the
   whole subject, so a key re-created between the watch and the purge goes with it. Measured on a
@@ -84,5 +84,7 @@ production. It would have scaled to 35 s only on a deployment that really held 7
   when it has delivered every existing key, and its idle timer sends the *same* nil when nothing
   arrived within the JetStream `MaxWait`, reporting the timeout only on `Error()`
   (`kv.go:1145-1156`). A reader that treats the nil as "done" returns a silently short snapshot on
-  a stalled link. Check `Error()` at the marker, and treat a closed updates channel with no marker
-  (`kv.go:1168`) as the other early end.
+  a stalled link that then recovers. Check `Error()` at the marker, and treat a closed updates
+  channel with no marker (`kv.go:1170`) as the other early end. `nats.KeyValue.Keys()` has the
+  same timer, so listing keys and reading each one back has the bug too — it is not specific to
+  keeping the watch.

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -2240,52 +2241,52 @@ func putRoleClaim(t *testing.T, kv natsgo.KeyValue, role, holder string) uint64 
 	return revision
 }
 
-// cutWatchKV hands out a watcher over the real bucket that ends its scan early, the two ways
+// earlyEndKV hands out a watcher over the real bucket that ends its scan early, the two ways
 // nats.go ends one early (nats.go v1.50.0 kv.go). With no fault it closes the updates channel
 // after `after` entries and never sends the nil marker, which is what a subscription that ends
-// mid-scan looks like (:1168). With one it sends the marker after `after` entries and puts the
+// mid-scan looks like (:1170). With one it sends the marker after `after` entries and puts the
 // fault on Error() first, which is what the idle timer does when no entry arrives within the
 // JetStream MaxWait (:1145-1156).
-type cutWatchKV struct {
+type earlyEndKV struct {
 	natsgo.KeyValue
 
 	after int
 	fault error
 }
 
-func (k cutWatchKV) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
+func (k earlyEndKV) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
 	watcher, err := k.KeyValue.Watch(keys, opts...)
 	if err != nil {
 		return nil, err
 	}
-	cut := &cutWatcher{KeyWatcher: watcher, updates: make(chan natsgo.KeyValueEntry), faults: make(chan error, 1)}
+	ended := &earlyEndWatcher{KeyWatcher: watcher, updates: make(chan natsgo.KeyValueEntry), faults: make(chan error, 1)}
 	go func() {
-		defer close(cut.updates)
+		defer close(ended.updates)
 		for delivered := 0; delivered < k.after; delivered++ {
 			entry, ok := <-watcher.Updates()
 			if !ok || entry == nil {
 				return
 			}
-			cut.updates <- entry
+			ended.updates <- entry
 		}
 		if k.fault != nil {
-			cut.faults <- k.fault
-			cut.updates <- nil
+			ended.faults <- k.fault
+			ended.updates <- nil
 		}
 	}()
-	return cut, nil
+	return ended, nil
 }
 
-type cutWatcher struct {
+type earlyEndWatcher struct {
 	natsgo.KeyWatcher
 
 	updates chan natsgo.KeyValueEntry
 	faults  chan error
 }
 
-func (w *cutWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
+func (w *earlyEndWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
 
-func (w *cutWatcher) Error() <-chan error { return w.faults }
+func (w *earlyEndWatcher) Error() <-chan error { return w.faults }
 
 // A revision snapshot that ends before the bucket's keys are all delivered is not a snapshot: the
 // claims it missed are still in the bucket, and each one is a restored holder that would lose the
@@ -2318,7 +2319,7 @@ func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) 
 		{name: "the idle timer gives up mid-scan", fault: natsgo.ErrKeyWatcherTimeout, want: "stopped after 1 keys"},
 	} {
 		t.Run(ending.name, func(t *testing.T) {
-			handle := bus.KeyValue{KeyValue: cutWatchKV{KeyValue: rawRoles, after: 1, fault: ending.fault}}
+			handle := bus.KeyValue{KeyValue: earlyEndKV{KeyValue: rawRoles, after: 1, fault: ending.fault}}
 			revisions, err := roleRevisions(handle)
 			if err == nil {
 				t.Fatalf("a scan that ended after 1 of 4 claims returned %d revisions and no error", len(revisions))
@@ -2336,12 +2337,77 @@ func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) 
 	}
 }
 
+// armOn arms once trigger has passed through it, keeping the last trigger-length bytes so a
+// trigger split across two reads is still seen.
+type armOn struct {
+	trigger []byte
+	armed   *atomic.Bool
+	tail    []byte
+}
+
+func (a *armOn) Write(p []byte) (int, error) {
+	if !a.armed.Load() {
+		a.tail = append(a.tail, p...)
+		if bytes.Contains(a.tail, a.trigger) {
+			a.armed.Store(true)
+		} else if len(a.tail) > len(a.trigger) {
+			a.tail = append(a.tail[:0], a.tail[len(a.tail)-len(a.trigger):]...)
+		}
+	}
+	return len(p), nil
+}
+
+// holdAfter passes writes through to `to` until it is armed and budget bytes have gone by, then
+// buffers everything for `hold` and sends it on. It keeps taking the writes, so the server never
+// blocks and never sees a slow consumer; the client simply hears nothing for `hold` and then the
+// link recovers. A hold longer than the reader's JetStream MaxWait is what fires nats.go's
+// initial-values timer, and the recovery afterwards is what lets a reader that took the timer's
+// marker for a finished scan go on to succeed with less than the bucket.
+type holdAfter struct {
+	to     io.Writer
+	armed  *atomic.Bool
+	budget int
+	hold   time.Duration
+
+	mu        sync.Mutex
+	forwarded int
+	holding   bool
+	released  bool
+	held      []byte
+}
+
+func (h *holdAfter) Write(p []byte) (int, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.armed.Load() && h.forwarded >= h.budget && !h.released {
+		if !h.holding {
+			h.holding = true
+			time.AfterFunc(h.hold, h.release)
+		}
+		h.held = append(h.held, p...)
+		return len(p), nil
+	}
+	if h.armed.Load() {
+		h.forwarded += len(p)
+	}
+	return h.to.Write(p)
+}
+
+func (h *holdAfter) release() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.released = true
+	if len(h.held) > 0 {
+		_, _ = h.to.Write(h.held)
+		h.held = nil
+	}
+}
+
 // stallingProxy forwards a NATS connection to target until the client creates the watcher named by
-// trigger and budget bytes of that watcher's scan have reached it, then stops forwarding server
-// bytes while still reading them, so the server never blocks and the client simply stops hearing
-// anything. That is the shape of a relayed link that stops passing traffic mid-scan, and it is
-// what nats.go's idle timer exists for. It returns the URL to connect to.
-func stallingProxy(t *testing.T, target, trigger string, budget int) string {
+// trigger and budget bytes of that watcher's scan have reached it, then holds the server's bytes
+// for hold and sends them on: a relayed link that goes quiet mid-scan and comes back. It returns
+// the URL to connect to.
+func stallingProxy(t *testing.T, target, trigger string, budget int, hold time.Duration) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -2357,51 +2423,16 @@ func stallingProxy(t *testing.T, target, trigger string, budget int) string {
 			server, err := net.Dial("tcp", target)
 			if err != nil {
 				_ = client.Close()
-				return
+				continue
 			}
 			var armed atomic.Bool
 			go func() {
 				defer func() { _ = server.Close() }()
-				buf, tail := make([]byte, 32*1024), make([]byte, 0, 2*len(trigger))
-				for {
-					n, err := client.Read(buf)
-					if n > 0 {
-						if !armed.Load() {
-							tail = append(tail, buf[:n]...)
-							if bytes.Contains(tail, []byte(trigger)) {
-								armed.Store(true)
-							} else if len(tail) > len(trigger) {
-								tail = append(tail[:0], tail[len(tail)-len(trigger):]...)
-							}
-						}
-						if _, err := server.Write(buf[:n]); err != nil {
-							return
-						}
-					}
-					if err != nil {
-						return
-					}
-				}
+				_, _ = io.Copy(server, io.TeeReader(client, &armOn{trigger: []byte(trigger), armed: &armed}))
 			}()
 			go func() {
 				defer func() { _ = client.Close() }()
-				buf, forwarded := make([]byte, 32*1024), 0
-				for {
-					n, err := server.Read(buf)
-					if n > 0 {
-						if !armed.Load() || forwarded < budget {
-							if armed.Load() {
-								forwarded += n
-							}
-							if _, err := client.Write(buf[:n]); err != nil {
-								return
-							}
-						}
-					}
-					if err != nil {
-						return
-					}
-				}
+				_, _ = io.Copy(&holdAfter{to: client, armed: &armed, budget: budget, hold: hold}, server)
 			}()
 		}
 	}()
@@ -2413,10 +2444,13 @@ func stallingProxy(t *testing.T, target, trigger string, budget int) string {
 // arrive. nats.go's idle timer reports that stall as ErrKeyWatcherTimeout on Error() and then
 // sends the same nil entry a finished scan sends, so a reader that takes the nil for a finished
 // scan restores a snapshot missing most of the bucket, and every claim it misses is a restored
-// holder released a session TTL early. Which error Open reports depends on how it reads the
+// holder released a session TTL early. The link comes back after the hold, so a reader that took
+// the timer's marker for a finished scan is free to succeed with part of the bucket rather than
+// failing on a later request: that is the shape both a per-key read through Keys() and a bare
+// watch get wrong, and the shape this pins. Which error Open reports depends on how it reads the
 // bucket; that it reports one is the contract. The deterministic halves of both endings, including
 // that the timeout is carried, are in TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot.
-// Open's JetStream MaxWait is the timer's window, so this costs that wait once.
+// The hold is longer than Open's JetStream MaxWait, so this costs that wait once.
 func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 	names := testBuckets(t)
 	direct, cleanup := connectNATS(t)
@@ -2435,7 +2469,7 @@ func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 	}
 
 	target := strings.TrimPrefix(sharedTestNATSURI(t), "nats://")
-	stalled := testnats.Connect(t, stallingProxy(t, target, "$JS.API.CONSUMER.CREATE.KV_"+names.roles, 16*1024))
+	stalled := testnats.Connect(t, stallingProxy(t, target, "$JS.API.CONSUMER.CREATE.KV_"+names.roles, 16*1024, 13*time.Second))
 	defer stalled.Close()
 
 	registry, err := Open(stalled, WithReplicas(1), withTestBuckets(t))

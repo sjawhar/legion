@@ -157,15 +157,15 @@ func (r *Registry) roles() bus.KeyValue {
 }
 
 // roleRevisions reads the revision of every role claim kv holds, for the grace a restored claim's
-// holder gets to register again. It is one watch over the bucket's existing keys, the way the
-// interest, session and CI caches read theirs (internal/kvwatch), so readiness costs one pass over
-// the bucket rather than a round trip per stored claim. It is the same watch nats.go's kv.Keys()
-// runs — IgnoreDeletes and MetaOnly over every key — which discards each entry's revision, so this
-// keeps the revision instead of reading it back with a Get per key. The watch names no key, so a
-// claim whose key this build cannot read (bus.ErrRefused: an earlier build stored it past what a
-// read of it may send) gets a revision here; it still gets no grace, because
-// ReleaseExpiredRoleClaim, the only reader of these revisions, reads the claim itself first and
-// cannot. A delete marker is not a claim and is skipped.
+// holder gets to register again. It takes them from one watch over the bucket's existing keys, the
+// way the interest, session and CI caches read theirs (internal/kvwatch), so readiness costs one
+// pass over the bucket rather than a round trip per stored claim. That is the watch nats.go's
+// kv.Keys() runs — IgnoreDeletes and MetaOnly over every key — which discards each entry's
+// revision; this keeps it. The watch names no key, so a claim whose key this build cannot read
+// (bus.ErrRefused: an earlier build stored it past what a read of it may send) gets a revision
+// here; it still gets no grace, because ReleaseExpiredRoleClaim, the only reader of these
+// revisions, reads the claim itself first and cannot. A delete marker is not a claim and is
+// skipped.
 //
 // A snapshot short of the bucket is missing claims that are in it, and each one it misses is a
 // restored holder that loses its grace and is released a session TTL early, so a scan that did not
@@ -174,7 +174,8 @@ func (r *Registry) roles() bus.KeyValue {
 // :1140-1142); its idle timer sends the same nil when no entry arrived within the JetStream
 // MaxWait, after putting ErrKeyWatcherTimeout on Error() under the watcher's lock (:1145-1156), so
 // the error is there to read by the time the nil arrives; and it closes the updates channel with no
-// nil at all when the subscription ends first (:1168), an ordered consumer it could not recreate or
+// nil at all when the subscription ends first (:1170, which closes Error() at :1171 too), an ordered
+// consumer it could not recreate or
 // a closed connection. Only the first is a complete scan.
 func roleRevisions(kv bus.KeyValue) (map[string]uint64, error) {
 	watcher, err := kv.Watch(nats.AllKeys, nats.IgnoreDeletes(), nats.MetaOnly())
