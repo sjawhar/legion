@@ -11,16 +11,21 @@ Each commit uses the KV key `<owner>.<repo>.pr<number>.<sha>` in
 earlier listener wrote is skipped, never cached as state, until its TTL expires. A dot in a segment is written `=` (`sjawhar/.github` keys as
 `sjawhar.=github...`): a KV key's tokens must not be empty, and no GitHub name holds
 `=`, so `foo.bar` and `foo_bar` keep distinct keys. State contains checks, suites, a state-version `Generation`, `EmittedCount`,
-`SettledEmitted`, and an optional claim `{hash, generation, claimed_at}`.
+`SettledEmitted`, an optional claim `{hash, generation, claimed_at}`, and `schema: 1`, which
+every write of the record stamps.
 
 1. `Record` and `RecordSuite` CAS-update the aggregate. A new record starts at
    generation 0; every later aggregate-hash change and every re-arm advances the
    state version, then clears `SettledEmitted`.
 2. The reconcile loop reads its rebuildable cache and selects every quiet, terminal
    state without an emitted or live claim, whichever commit of the pull request it is for. A claim older
-   than twice the debounce interval is reclaimed.
+   than twice the debounce interval is reclaimed. A record without `schema` was last written by a
+   listener that settled only its pull request's head, and is selected only while its
+   `last_event_at` is within the debounce plus one minute (see below); the check comes before the
+   reclaim.
 3. `ClaimSettlement` re-reads durable state, verifies the expected hash, generation,
-   terminality and debounce window, then CAS-writes the hash-bound claim. A mismatch publishes nothing.
+   terminality, debounce window and that same grace, then CAS-writes the hash-bound claim. A
+   mismatch publishes nothing.
 4. The claimant renders that durable snapshot and publishes with
    `github.checks.<owner>/<repo>.pr.<number>.<sha>.g<generation>`.
 5. `MarkSettled` records the emission in `EmittedCount` and clears its claim. A
@@ -30,6 +35,27 @@ earlier listener wrote is skipped, never cached as state, until its TTL expires.
 All local cache write-through and watcher updates carry a KV revision and only
 apply at or above the cached revision. This prevents an older claim/mark write
 from replacing a newer watcher state.
+
+## Records a head-gated listener left
+
+A listener that settled only a pull request's head left every other terminal commit's record
+unsettled until the bucket's seven-day TTL; on 2026-09-28 production held 1,442 of them across
+595 `pr.<n>.checks` subjects, the youngest six minutes old and the median 65 hours. Settling them
+would publish verdicts days late, which an agent waiting on its head can read as its head's. So a
+record without `schema` settles only within the handover grace, the debounce plus one minute: a
+head that finished just before the old listener was replaced is still owed its settlement, and a
+rolling deploy overlaps the two listeners, so the gap it must cover is at most the tens of seconds
+a replacement without overlap takes. Past the grace such a record never settles. It stays
+`settled_emitted: false` with no `schema` until the TTL expires it; that is expected, and it is
+history, not pending work. An observation that changes the record (a new check run, a re-run, a
+suite) stamps it, and the commit then settles as any other; a redelivery of what the record already
+holds writes nothing. A stamped record is never held back, so a settlement pending across a restart
+of the listener still publishes; a process-start cutoff would drop those.
+
+A head-gated listener (legion 9de053a2, or 1ad2466c) run after a rollback decodes a stamped record,
+ignoring the field it does not know, and does not mistake it for a head record, which it recognizes
+by `kind`; its own writes drop the stamp. Seven days after the last head-gated listener stops, no
+unstamped record remains.
 
 ## Envelope
 

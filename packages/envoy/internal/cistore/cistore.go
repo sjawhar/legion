@@ -3,8 +3,8 @@
 // Each check_run and check_suite webhook folds into a per-commit State record
 // in a JetStream KV bucket via compare-and-swap rather than being published
 // raw; concurrent observations of one commit share one write (see update). A
-// reconcile ticker (see loop.go) emits one checks envelope when the current head
-// is quiet and its recorded CI work is complete. All coordination state lives in
+// reconcile ticker (see loop.go) emits one checks envelope when a commit is quiet
+// and its recorded CI work is complete. All coordination state lives in
 // KV, so aggregation is durable, restart-safe, and correct across listener
 // replicas; the in-memory state is a rebuildable WatchAll read-cache and the
 // queue of observations waiting for their commit's write.
@@ -149,6 +149,52 @@ type State struct {
 	// (markOverflowed, from the summary loop). A head that settled before it overflowed keeps its
 	// last settlement; nothing supersedes it.
 	Overflowed bool `json:"overflowed,omitempty"`
+	// Schema is recordSchema on every record this listener writes (encodeRecord), and absent from a
+	// record last written by a listener that settled only a pull request's head (legacyBacklog). An
+	// older listener decodes a record through a struct without it and ignores it, and a write of
+	// that listener drops it.
+	Schema int `json:"schema,omitempty"`
+}
+
+// recordSchema marks a record written by a listener that settles every commit of a pull request,
+// its head or not.
+const recordSchema = 1
+
+// encodeRecord stamps st with recordSchema and encodes it. Every write of a record goes through
+// it, so a record without the stamp was last written by a head-gated listener.
+func encodeRecord(st *State) ([]byte, error) {
+	st.Schema = recordSchema
+	return json.Marshal(st)
+}
+
+// handoverAllowance is how long past its debounce a record without recordSchema can still settle.
+// A head-gated listener settled a head as soon as its debounce passed and left every other
+// terminal commit unsettled; this listener settles those too. So an unstamped, terminal, unsettled
+// record whose debounce passed while a head-gated listener ran is a commit that listener declined
+// to settle, and settling it now would publish a verdict hours or days after the commit's last
+// event. Only a head whose debounce ran out between the head-gated listener's last tick and this
+// listener's first is still owed its settlement. A rolling deploy overlaps the two tasks, so that
+// window is near zero; a replacement without overlap (the old task stopped, the new one started,
+// connected and warmed its caches) takes tens of seconds. A minute covers that with room, and sits
+// far below the backlog measured on production NATS on 2026-09-28, whose youngest record was six
+// minutes old and whose median was 65 hours.
+const handoverAllowance = time.Minute
+
+// legacyBacklog reports whether st is a head-gated listener's leftover rather than a settlement
+// owed at the handover: it carries no recordSchema and its last event is more than debounce plus
+// handoverAllowance before now. Such a record never settles: it stays settled_emitted false, with
+// no schema, until the bucket's TTL expires it, and that is expected. An observation that changes
+// the record writes the stamp and a fresh last_event_at, and the commit then settles as any other. A
+// stamped record is never held back, so a settlement pending across a restart of this listener
+// still publishes.
+//
+// The bucket's TTL (seven days, cmd/listener/main.go) expires a record seven days after its last
+// write, and no head-gated listener writes once the deploy carrying recordSchema replaces it. That
+// deploy is no earlier than 2026-09-28, so from seven days after it (2026-10-05 at the earliest) no
+// unstamped record remains and this check holds nothing back. A rollback to a head-gated listener
+// writes unstamped records again and restarts that clock.
+func legacyBacklog(st State, now int64, debounce time.Duration) bool {
+	return st.Schema != recordSchema && now-st.LastEventAt > (debounce+handoverAllowance).Milliseconds()
 }
 
 // UnmarshalJSON maps the retired resettled marker to the durable fact that
@@ -553,7 +599,7 @@ func (s *Store) casState(key string, apply func(st *State) (ok bool, err error))
 		if !ok {
 			return state, false, nil
 		}
-		buf, err := json.Marshal(state)
+		buf, err := encodeRecord(&state)
 		if err != nil {
 			return State{}, false, err
 		}
@@ -600,7 +646,8 @@ func (s *Store) ClaimSettlement(key, expectedHash string, expectedGeneration uin
 			state.Generation != expectedGeneration ||
 			state.Hash() != expectedHash ||
 			!settlementReady(*state) ||
-			state.LastEventAt+debounce.Milliseconds() > now {
+			state.LastEventAt+debounce.Milliseconds() > now ||
+			legacyBacklog(*state, now, debounce) {
 			return false, nil
 		}
 		state.Claim = &SettlementClaim{

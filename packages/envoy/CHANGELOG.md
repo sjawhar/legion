@@ -18,6 +18,15 @@
   TypeScript daemon still takes only its head's, and the Go daemon takes a code head's for the
   handoff-only heads after it. The listener no longer records each pull request's head (the
   `head.*` records in the CI bucket); a record an earlier listener wrote is skipped until its TTL.
+- Every write of a CI record stamps it `schema: 1`. A record without it was last written by a
+  listener that settled only heads, and it settles only while its last event is within the
+  debounce plus one minute, so a head that finished during the handover still settles and the
+  backlog of commits that listener never settled does not: on 2026-09-28 production held 1,442
+  such records (595 `pr.<n>.checks` subjects, up to 168 hours old), which the first start would
+  otherwise have published at once. Those records stay unsettled, without `schema`, until the
+  bucket's seven-day TTL expires them. An observation that changes the record stamps it and the
+  commit settles as usual; a stamped record settles however long it waited, across a restart too. A
+  rolled-back listener ignores the field.
 
 ### Fixed
 
