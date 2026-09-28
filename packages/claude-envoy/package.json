@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/claude-envoy",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Claude Code channel plugin for Legion's Envoy bus",
   "type": "module",
   "files": [
