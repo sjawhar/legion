@@ -61,15 +61,22 @@ settlement repairs it) refuse anything. Only a typed block's markdown can name i
 
 Markdown a caller writes is stored as its rendering, so a write whose rendering reads back as
 another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocument` for a whole
-document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` for an insert): `ParseForWrite` reads back the whole document a spec, an upload or a
-version writes (`400 INVALID_MARKDOWN`), and an `insert` is read back on the document it leaves
-against the one it started from, as an accept is (`400 INVALID_OP` on `markdown`). The reading
-rules refuse every shape they know first, so this refusal names one none of them reads, and each is
-logged (`pmdoc: refused a write whose markdown reads back otherwise`). Wherever a check reads a
-write back - here, and in an accept's, a replace's and an ask edit's checks - only a refusal
-(`pmdoc.ErrSchema`) is a verdict; any other error, a panic (`pmdoc.ErrPanic`) among them, is
-`pmdoc`'s own and answers `500`. A tree a browser edit makes is not checked, so its rendering can
-still fail to read back when it is uploaded again.
+document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` for an insert):
+`ParseForWrite` reads back the whole document a spec, an upload or a version writes
+(`400 INVALID_MARKDOWN`). An `insert` takes one of two paths. A fragment of only table rows
+anchored in a table's row goes to `pmdoc.InsertTableRows` (`docs/edits.go:865`), which returns
+before any read-back, so a table-row insert is not read back, and it can leave a live document
+its own markdown reads back otherwise: a row inserted under an aligned column is stored without
+alignment and reads back with the column's, and a row whose cells the upload path refuses for
+reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
+Every other insert is spliced and read back on the document it leaves against the one it started
+from, as an accept is (`400 INVALID_OP` on `markdown`). The reading rules refuse every shape they
+know first, so this refusal names one none of them reads, and each is logged (`pmdoc: refused a
+write whose markdown reads back otherwise`). Wherever a check reads a write back - here, and in an
+accept's, a replace's and an ask edit's checks - only a refusal (`pmdoc.ErrSchema`) is a verdict;
+any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and answers `500`. A tree
+a browser edit makes is not checked, so its rendering can still fail to read back when it is
+uploaded again.
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
