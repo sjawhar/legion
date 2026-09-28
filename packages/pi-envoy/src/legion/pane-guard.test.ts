@@ -1297,13 +1297,13 @@ describe("scripts a command runs", () => {
     expect(bash("echo hi >> ~/.bashrc")).toBeUndefined();
     expect(bash(`echo 'echo hi' > ${fresh}; bash ${fresh}`)).toBeUndefined();
     // The rows above hold for a path no redirect in the command named, which is what a model is.
-    // A `>` the walk read but the shell never runs seeds one — `files` is shared across branches —
-    // so this composition is still allowed, unchanged from before this rule and identical at main.
-    // It is the residual LEGION-354 closes; when a branch write leaves the file unknown, this line
-    // becomes a refusal and must flip rather than be deleted.
+    // A `>` the walk read but the shell never runs no longer seeds one: `files` is shared across
+    // branches, so a write the shell may never perform records only that the file is unknown
+    // (LEGION-354), and this append onto an unknown file keeps it unknown. Before that rule this
+    // composition was allowed, which is the residual that rule closes.
     expect(
       bash(`false && echo ok > ${existing}; echo '' >> ${existing}; bash ${existing}`)
-    ).toBeUndefined();
+    ).toContain("cannot read before running it");
     // A path whose `..` crosses a symlink: the guard's key is lexical, the kernel's is not, so the
     // file the append and the run open is not the one the key names. The model rule closes the
     // append-carrying form structurally, by never consulting a path's contents at all — which is

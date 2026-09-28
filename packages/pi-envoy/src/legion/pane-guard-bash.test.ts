@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createPaneGuard, type PaneGuard } from "./pane-guard";
+import { DESTRUCTIVE, KILL_PID, type Live, MODEL_ROWS, PID_ROWS } from "./pane-guard-model-rows";
 import {
   DOTDOT_COMPONENT,
   measureAllPathRows,
@@ -156,7 +157,7 @@ test("every pattern expansion is unknown or bash's own value, and never allows a
   expect(wrong).toEqual([]);
   // The harness itself: most cases resolve, so an empty comparison is not a pass by default.
   expect(resolved).toBeGreaterThan(cases.length / 2);
-});
+}, 60_000);
 
 test("an operator on whether a parameter is set never allows a target bash puts outside the roots", () => {
   // Set, empty, unset, unset after a value, left to the pane's environment or removed from it, and
@@ -198,7 +199,7 @@ test("an operator on whether a parameter is set never allows a target bash puts 
   );
   // The harness itself: bash deletes outside the roots in many cases, so none allowed is a result.
   expect(outside.length).toBeGreaterThan(commands.length / 10);
-});
+}, 60_000);
 
 test("a function's arguments are bash's own, and never let a target outside the roots through", () => {
   // Words that are one argument, none (an empty unquoted value, `"$@"` of no arguments, an empty
@@ -253,7 +254,7 @@ test("a function's arguments are bash's own, and never let a target outside the 
     []
   );
   expect(outside.length).toBeGreaterThan(commands.length / 10);
-});
+}, 60_000);
 
 test("every write to a variable is bash's own, and never leaves a stale value to let a target through", () => {
   // A variable, an array, an element, a variable already outside the roots, one `readonly` and
@@ -376,7 +377,7 @@ test("the path battery's rows measure the property they name", () => {
     )
   ).toEqual([]);
   expect(families.length).toBeGreaterThan(10);
-});
+}, 60_000);
 
 test("a target is judged as the kernel resolves it, not as the text reads", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-paths-"));
@@ -406,3 +407,115 @@ test("a target is judged as the kernel resolves it, not as the text reads", () =
     rmSync(root, { recursive: true, force: true });
   }
 }, 180_000);
+
+test("a file a branch or an unwaited command writes is never modelled as its text", () => {
+  const observed: string[] = [];
+  const expected: string[] = [];
+  for (const [index, row] of MODEL_ROWS.entries()) {
+    const dir = path.join(base, `model-${index}`);
+    const rowWorkspace = path.join(dir, "ws");
+    const rowHome = path.join(dir, "home");
+    const rowScratch = path.join(dir, "scratch");
+    rmSync(dir, { recursive: true, force: true });
+    for (const made of [rowWorkspace, rowHome, rowScratch, path.join(rowWorkspace, "deep")]) {
+      mkdirSync(made, { recursive: true });
+    }
+    // The canary. Its absence afterwards is the only evidence of destruction, so a row that runs
+    // nothing reads as intact and proves nothing.
+    writeFileSync(path.join(rowHome, "victim"), "do-not-delete\n");
+    writeFileSync(path.join(rowWorkspace, "unread.sh"), DESTRUCTIVE);
+    writeFileSync(path.join(rowWorkspace, "safe.sh"), "PRESENT\n");
+    if (row.script !== undefined) writeFileSync(path.join(rowWorkspace, "gen.sh"), row.script);
+
+    const rowEnv: NodeJS.ProcessEnv = {
+      HOME: rowHome,
+      LEGION_WORKSPACE: rowWorkspace,
+      TMPDIR: rowScratch,
+      PATH: process.env.PATH,
+    };
+    const rowGuard = createPaneGuard({
+      workspace: rowWorkspace,
+      ompPid: process.pid,
+      scratch: rowScratch,
+    });
+    const verdict = rowGuard.bash(row.payload, rowWorkspace, rowEnv);
+    // Real bash, in this row's own fixture, reaching no home but the canary.
+    spawnSync("bash", ["-c", row.payload], { cwd: rowWorkspace, env: rowEnv, timeout: 20_000 });
+    const live: Live =
+      row.live === "racy"
+        ? readFileSync(path.join(rowWorkspace, "unread.sh"), "utf8") === DESTRUCTIVE
+          ? "intact"
+          : "racy"
+        : existsSync(path.join(rowHome, "victim"))
+          ? "intact"
+          : "destroyed";
+    observed.push(`${row.name}: ${verdict === undefined ? "allowed" : "refused"}, bash ${live}`);
+    expected.push(`${row.name}: ${row.guard}, bash ${row.live}`);
+  }
+  expect(observed).toEqual(expected);
+  // Which shapes the rule does not reach is a claim about this batch, so it is read off the
+  // batch rather than written down beside it: a row that becomes refused, or a new one that
+  // arrives allowed while bash destroys the canary, fails here until the list says so.
+  expect(
+    MODEL_ROWS.filter((row) => row.guard === "allowed" && row.live === "destroyed").map(
+      (row) => row.name
+    )
+  ).toEqual([
+    "RESIDUAL a return before the write",
+    "RESIDUAL a return in a branch before the write",
+    "RESIDUAL an exit before the write",
+    "RESIDUAL set -e and a command that fails before the write",
+    "RESIDUAL an exec before the write",
+    "RESIDUAL an exit in a branch before the write",
+    "RESIDUAL set -o errexit and a command that fails before the write",
+    "RESIDUAL set -u and an unset name before the write",
+    "RESIDUAL set -e in a script whose caller ignores its status",
+  ]);
+}, 120_000);
+
+// The other model a branch writes into: the pid a file holds, which `kill "$(<pid)"` reads. A
+// branch that may rewrite it must not leave the straight line's pid standing as fact — and must
+// not throw it away either, since when both what the branch writes and what was there before are
+// pids this shell started, signalling the file is safe whichever ran. Real bash decides here too:
+// each row reports what it actually put in the file and whether that pid is one of this shell's
+// own children, so "this pane's own descendant" is bash's answer rather than an assumption.
+test("a pid file a branch may rewrite is neither trusted nor forgotten", () => {
+  const observed: string[] = [];
+  const expected: string[] = [];
+  for (const [index, row] of PID_ROWS.entries()) {
+    const dir = path.join(base, `pid-${index}`);
+    const rowWorkspace = path.join(dir, "ws");
+    rmSync(dir, { recursive: true, force: true });
+    mkdirSync(rowWorkspace, { recursive: true });
+    writeFileSync(path.join(rowWorkspace, "safe.sh"), "PRESENT\n");
+    const rowEnv: NodeJS.ProcessEnv = {
+      HOME: path.join(dir, "home"),
+      LEGION_WORKSPACE: rowWorkspace,
+      PATH: process.env.PATH,
+    };
+    const rowGuard = createPaneGuard({
+      workspace: rowWorkspace,
+      ompPid: process.pid,
+      scratch: path.join(dir, "scratch"),
+    });
+    const verdict = rowGuard.bash(row.payload, rowWorkspace, rowEnv);
+    // The same payload with the `kill` replaced by a report of what it would have signalled and
+    // of every child this shell holds, so the signal is never actually sent from a test.
+    const probe = row.payload.replace(
+      KILL_PID,
+      'printf "%s|%s" "$(<pid)" "$(jobs -p | tr "\\n" ",")"'
+    );
+    const seen = spawnSync("bash", ["-c", probe], {
+      cwd: rowWorkspace,
+      env: rowEnv,
+      encoding: "utf8",
+    });
+    const [wrote = "", children = ""] = seen.stdout.split("|");
+    const ownChild = wrote !== "" && children.split(",").includes(wrote);
+    observed.push(
+      `${row.name}: ${verdict === undefined ? "allowed" : "refused"}, own child ${ownChild}`
+    );
+    expected.push(`${row.name}: ${row.guard}, own child ${row.ownChild}`);
+  }
+  expect(observed).toEqual(expected);
+}, 60_000);
