@@ -1,4 +1,4 @@
-import { DELIVERY_CAPABILITIES } from "@legion/contracts";
+import { DELIVERY_CAPABILITIES, MAX_BROADCAST_RECIPIENTS } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
@@ -985,20 +985,28 @@ function SelectionHeader({
  */
 function BroadcastComposer({
   agents,
+  body,
+  delivery,
+  onBody,
+  onDelivery,
   onSent,
   selected,
   onDeselect,
 }: {
   agents: readonly Agent[];
+  body: string;
+  delivery: MessageDeliveryMode;
+  onBody: (body: string) => void;
+  onDelivery: (delivery: MessageDeliveryMode) => void;
   onDeselect: (sessionID: string) => void;
   onSent: () => void;
   selected: ReadonlySet<string>;
 }): ReactNode {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [body, setBody] = useState("");
-  const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
   const { excluded, recipients } = broadcastPlan(selected, agents, delivery);
+  // The server refuses a send over the shared limit; saying so before Send saves the round trip.
+  const overLimit = recipients.length > MAX_BROADCAST_RECIPIENTS;
   const send = useMutation({
     mutationFn: () =>
       api.createBroadcast({
@@ -1007,7 +1015,6 @@ function BroadcastComposer({
         session_ids: recipients.map((agent) => agent.session_id),
       }),
     onSuccess: (created) => {
-      setBody("");
       onSent();
       for (const recipient of created.recipients) {
         void queryClient.invalidateQueries({
@@ -1066,7 +1073,7 @@ function BroadcastComposer({
         <select
           aria-label="Delivery mode"
           className={`min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`}
-          onChange={(event) => setDelivery(event.target.value as MessageDeliveryMode)}
+          onChange={(event) => onDelivery(event.target.value as MessageDeliveryMode)}
           value={delivery}
         >
           {DELIVERY_CAPABILITIES.map((mode) => (
@@ -1079,7 +1086,7 @@ function BroadcastComposer({
       <textarea
         aria-label="Broadcast message"
         className={`mt-2 block w-full rounded-lg border px-3 py-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-full narrow-or-short:mt-0 narrow-or-short:max-h-32 short:col-span-2 narrow-or-short:min-h-16! narrow-or-short:field-sizing-content short:max-h-16 ${inputClasses(true)}`}
-        onChange={(event) => setBody(event.target.value)}
+        onChange={(event) => onBody(event.target.value)}
         placeholder="One message, sent to each selected agent"
         rows={3}
         value={body}
@@ -1098,6 +1105,14 @@ function BroadcastComposer({
           . Nothing is sent to them, and no other mode is substituted.
         </p>
       )}
+      {overLimit ? (
+        <p
+          className={`mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-full narrow-or-short:mt-0 short:order-3 ${dangerText}`}
+        >
+          At most {MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach{" "}
+          {recipients.length}.
+        </p>
+      ) : null}
       {send.isError ? (
         <p
           className={`mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-full narrow-or-short:mt-0 short:order-3 ${dangerText}`}
@@ -1107,7 +1122,7 @@ function BroadcastComposer({
       ) : null}
       <button
         className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4 ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-        disabled={recipients.length === 0 || body.trim() === "" || send.isPending}
+        disabled={recipients.length === 0 || overLimit || body.trim() === "" || send.isPending}
         onClick={() => send.mutate()}
         type="button"
       >
@@ -1147,6 +1162,11 @@ export function AgentsPage(): ReactNode {
   // list after ticking a row must not quietly drop that row from the send. Every selected
   // session is named in the composer, so nothing is hidden either way.
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
+  // The draft is page state too: the composer unmounts whenever the selection empties, and
+  // clearing a selection to pick again must not throw away a typed message or its mode. A
+  // successful send clears it.
+  const [draft, setDraft] = useState("");
+  const [delivery, setDelivery] = useState<MessageDeliveryMode>("btw");
   const matching = filterAgents(agents, filters);
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
   // and is recomputed on every render of this page.
@@ -1241,8 +1261,15 @@ export function AgentsPage(): ReactNode {
           {selected.size === 0 ? null : (
             <BroadcastComposer
               agents={agents}
+              body={draft}
+              delivery={delivery}
+              onBody={setDraft}
+              onDelivery={setDelivery}
               onDeselect={(sessionID) => select(sessionID, false)}
-              onSent={() => setSelected(new Set())}
+              onSent={() => {
+                setSelected(new Set());
+                setDraft("");
+              }}
               selected={selected}
             />
           )}

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -307,7 +308,7 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 	listener, _ := newBroadcastListener(t, broadcastSessions)
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 
-	tooMany := make([]string, maxBroadcastRecipients+1)
+	tooMany := make([]string, contracts.MaxBroadcastRecipients+1)
 	for index := range tooMany {
 		tooMany[index] = "session-" + string(rune('a'+index%26)) + string(rune('a'+index/26))
 	}

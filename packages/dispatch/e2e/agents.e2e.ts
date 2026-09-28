@@ -816,6 +816,10 @@ test("with half the recipients unable to take the mode, the compact composer kee
       const at = `${size.width}x${size.height}`;
       await page.setViewportSize(size);
       await fillUntilStable(message);
+      // Tight at 667x375: 166 of 168.75. The short grid is rows 44 + 64 + 16, two 8 px gaps, 24 px
+      // of padding and a 2 px border. A fourth row costs 24 px whatever its height, so the next
+      // element added to the compact composer has no room: this goes red while the composer is
+      // still inside its 50vh cap and nothing on screen looks wrong.
       expect
         .soft((await composer.boundingBox())?.height ?? Infinity, at)
         .toBeLessThanOrEqual(size.height * 0.45);
@@ -844,6 +848,97 @@ test("with half the recipients unable to take the mode, the compact composer kee
       });
       expect.soft(last, at).toEqual({ scrolls: true, visible: true });
     }
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a typed broadcast survives clearing the selection and picking again, and a send clears it", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the draft rule");
+  await setLiveSessions(fortyPlanners().slice(0, 2));
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const message = composer.getByRole("textbox", { name: "Broadcast message" });
+    const mode = composer.getByRole("combobox", { name: "Delivery mode" });
+
+    await header.click();
+    await message.fill("Keep this draft.");
+    await mode.selectOption("aside");
+    // Clearing the selection takes the composer away; picking again brings the draft back.
+    await header.click();
+    await expect(composer).toHaveCount(0);
+    await header.click();
+    await expect(message).toHaveValue("Keep this draft.");
+    await expect(mode).toHaveValue("aside");
+
+    await composer.getByRole("button", { name: "Send to 2" }).click();
+    await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
+    await page.goBack();
+    await header.click();
+    await expect(message).toHaveValue("");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a selection over the broadcast limit says so and never asks the server", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the limit");
+  await setLiveSessions(
+    Array.from({ length: 101 }, (_, index) => {
+      const number = String(index + 1).padStart(3, "0");
+      return {
+        capabilities: ["aside", "btw"],
+        dir: `/workspaces/planner-${number}`,
+        machine_id: "build-host",
+        roles: ["planner"],
+        session_id: `planner-${number}-session`,
+        title: `Planner ${number}`,
+      };
+    })
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const posts: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().endsWith("/api/v1/broadcasts")) {
+        posts.push(request.url());
+      }
+    });
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
+    await expect(
+      composer.getByRole("heading", { name: "Broadcast to 101 of 101 selected" })
+    ).toBeVisible();
+    await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Too many.");
+    const send = composer.getByRole("button", { name: "Send to 101" });
+    await expect(send).toBeDisabled();
+    await send.click({ force: true });
+    await page.waitForTimeout(500);
+    expect(posts).toEqual([]);
+    expect(await getSentMessages()).toEqual([]);
+    await expect(
+      composer.getByText("At most 100 recipients per broadcast; this one would reach 101.")
+    ).toBeVisible();
+
+    // One fewer is within the limit: the reason goes and Send comes back.
+    await agents.getByRole("button", { name: /^No Dispatch activity/ }).click();
+    await agents.getByRole("checkbox", { name: "Select Planner 101 for broadcast" }).uncheck();
+    await expect(composer.getByText(/^At most 100 recipients/)).toHaveCount(0);
+    await expect(composer.getByRole("button", { name: "Send to 100" })).toBeEnabled();
   } finally {
     await alice.close();
   }

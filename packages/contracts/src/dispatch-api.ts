@@ -770,6 +770,15 @@ export interface CommentEventPayload
  */
 export const DELIVERY_CAPABILITIES = ["aside", "btw", "steer"] as const;
 
+/**
+ * The most sessions one broadcast sends to (`POST /api/v1/broadcasts`'s `session_ids`, after the
+ * duplicates are dropped). A runaway guard, not a product limit: selection is a human ticking
+ * boxes, but select-all makes a large send one click. Generated into Go as
+ * `contracts.MaxBroadcastRecipients`, which the server enforces, so the dashboard's refusal and
+ * the server's are one number.
+ */
+export const MAX_BROADCAST_RECIPIENTS = 100;
+
 export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
 /**

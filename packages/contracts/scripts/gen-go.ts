@@ -2,7 +2,11 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
-import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "../src/dispatch-api";
+import {
+  DELIVERY_DUPLICATE_WINDOW_MS,
+  MAX_BROADCAST_RECIPIENTS,
+  RECEIPT_TIMEOUT_CAUSE,
+} from "../src/dispatch-api";
 import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
@@ -80,6 +84,11 @@ const DeliveryDuplicateWindow = ${DELIVERY_DUPLICATE_WINDOW_MS} * time.Milliseco
 // send. Generated from RECEIPT_TIMEOUT_CAUSE in packages/contracts so the string Dispatch writes
 // and the string the dashboard keys its retry wording on cannot drift apart.
 const ReceiptTimeoutCause = ${JSON.stringify(RECEIPT_TIMEOUT_CAUSE)}
+
+// MaxBroadcastRecipients is the most sessions one broadcast sends to. Generated from
+// MAX_BROADCAST_RECIPIENTS in packages/contracts so the server's limit and the dashboard's
+// cannot drift apart.
+const MaxBroadcastRecipients = ${MAX_BROADCAST_RECIPIENTS}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
