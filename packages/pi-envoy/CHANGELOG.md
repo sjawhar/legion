@@ -160,15 +160,18 @@
   protection of its directory covered them by that coincidence, which nothing enforced. The
   directory holding `HOME` is now protected as the one holding `TMUX_TMPDIR` is, by exact name; the
   workspace inside it stays writable.
-- The pane guard follows every write to a variable (LEGION-300). It kept values bash had changed,
-  so a target built from one afterwards was judged on the stale value: `unset d;
+- The pane guard follows the writes to a variable it sees (LEGION-300). It kept values bash had
+  changed, so a target built from one afterwards was judged on the stale value: `unset d;
   : "${d:=$HOME/.ssh}"; rm -rf "$d"`, a function's `local d=…` still in force after it returned,
   `printf -v 'd[0]'`, `read -ra d`, `declare "d=$HOME/.ssh"`, a plain `d=x` over an array's other
   elements, arithmetic, `wait -p`, `unset -f` of a function that shadowed a command, and a write
   bash refuses or rewrites for a `readonly`, `-i`, `-l` or `-u` name were all allowed where bash
   deletes outside the roots. Each now assigns as bash does, and a write the guard cannot model (a
   variable named at run time, `eval "$(tool)"`) leaves every variable unknown, so a target built
-  from one afterwards is refused. A nameref (`declare -n`) is refused.
+  from one afterwards is refused. A nameref (`declare -n`) is refused. Still not followed: a
+  `source` of a path the guard cannot read at check time, such as a process substitution, which it
+  takes as sourcing nothing (LEGION-332), and an assignment to `IFS`, since it splits an unquoted
+  value on whitespace alone.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot

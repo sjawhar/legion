@@ -296,15 +296,19 @@ replacement holding `&`. A pattern is matched by stepping the positions it can r
 value, never by a backtracking regular expression, and its work (the value's length times the
 pattern's) is charged to the walk budget, a `case` item's included.
 
-Every write to a variable reaches the guard's model, and one it cannot model leaves the value
-unknown, never the one already approved: a builtin that assigns by name (`printf -v`, `read`,
-`mapfile`, `getopts`, `declare` and its kin, `unset`, `wait -p`), arithmetic, `${v:=x}`, a loop
-variable, and a plain assignment to an array's name (its element 0) assign as bash does; a
+A write to a variable that the guard sees reaches its model, and one it cannot model leaves the
+value unknown, never the one already approved: a builtin that assigns by name (`printf -v`,
+`read`, `mapfile`, `getopts`, `declare` and its kin, `unset`, `wait -p`), arithmetic, `${v:=x}`,
+a loop variable, and a plain assignment to an array's name (its element 0) assign as bash does; a
 function's `local` is the caller's variable again when it returns, unknown when only some paths
 made it local; `readonly`, `-i`, `-l` and `-u` make a later write unknown; and a write under a
 name the guard cannot read, or `eval` of text it cannot read, makes every variable unknown and
 possibly unset (`ANY_NAME`), the pane's environment included. A nameref (`declare -n`) is
-refused.
+refused. Two writes it does not follow: a `source` of a path it cannot read at check time (a
+process substitution, `/dev/fd/N`, `/dev/stdin`, a file a command before it creates) is taken as
+sourcing nothing, though bash may read assignments from it (LEGION-332); and an assignment to
+`IFS` leaves its splitting model as it was, which splits an unquoted value on whitespace alone,
+so a value bash splits on another character is taken as one word.
 
 `src/legion/pane-guard-bash.ts` holds bash's pattern matching, removal and replacement, `test`'s
 string and integer forms, and `printf %q` quoting as pure functions;

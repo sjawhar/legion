@@ -26,13 +26,16 @@ pattern replacement and removal of a known ASCII value (`${v//a/b}`, `${v#*:}`),
 output, command substitutions, and the scripts the command runs (`bash <file>`, `sh -c`, `source`,
 a heredoc fed to a shell, a script run by path, python/node/bun scripts, one it writes first), with
 the arguments it gives them: an argument loop (`while [ $# -gt 0 ]; do case "$1" in ...`) over
-arguments it knows is walked as bash runs it. It follows every write to a variable (a builtin's,
-arithmetic, `${v:=x}`, a function's `local`), and a write it cannot model, such as one under a name
-computed at run time or `eval "$(tool)"`, leaves every variable unknown, so a target built from one
-afterwards is refused; a nameref (`declare -n`) is refused outright. A target with no proven path
-prefix is refused, as is a command the parser reports as malformed. An unknown trailing component
-under a prefix already proven inside a permitted root remains allowed. `pkill`, `killall`, and
-`fuser -k` are refused outright. For `tmux kill-*`, the guard resolves the socket as tmux does
+arguments it knows is walked as bash runs it. It follows the writes to a variable it sees (a
+builtin's, arithmetic, `${v:=x}`, a function's `local`), and a write it cannot model, such as one
+under a name computed at run time or `eval "$(tool)"`, leaves every variable unknown, so a target
+built from one afterwards is refused; a nameref (`declare -n`) is refused outright. It does not
+follow a `source` of a path it cannot read at check time (a process substitution, `/dev/fd/N`),
+which it takes as sourcing nothing, nor an assignment to `IFS`: it splits an unquoted value on
+whitespace alone. A target with no proven path prefix is refused, as is a command the parser
+reports as malformed. An unknown trailing component under a prefix already proven inside a
+permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused outright. For
+`tmux kill-*`, the guard resolves the socket as tmux does
 (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`, then `$TMUX`, then the default socket) and refuses
 a resolved path outside the pane roots. `kill` only reaches a pid that `/proc` shows descending
 from the pane's own Oh My Pi process. Every refusal names the target, where it resolved, and the

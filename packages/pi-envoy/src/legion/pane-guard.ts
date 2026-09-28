@@ -29,7 +29,7 @@
  * rather than empty; a pattern it cannot split as bash does leaves the whole expansion unknown; and
  * a word that may be several arguments or none leaves the arguments it is among unknown.
  *
- * The same holds for writes: every write a command makes to a variable reaches the guard's model,
+ * The same holds for writes: a write the guard sees a command make to a variable reaches its model,
  * and one it cannot model leaves the value unknown rather than the one already approved. A builtin
  * that assigns by name (`printf -v`, `read`, `mapfile`, `getopts`, `declare` and its kin, `unset`,
  * `wait -p`), arithmetic, `${v:=x}`, a loop variable and a plain assignment to an array's name all
@@ -40,7 +40,10 @@
  * (`declare -n`) is refused, since its writes land elsewhere. Text `eval` runs that the guard
  * cannot read is outside what it sees in any case (`docs/deployment.md`, "The pane guard"):
  * besides running commands the guard never judges, it can make a name read-only, so that a later
- * write the guard trusts is refused.
+ * write the guard trusts is refused. Two writes it does not follow: a `source` of a path it cannot
+ * read at check time (a process substitution, `/dev/fd/N`, a file a command before it creates),
+ * which `runFile` takes as sourcing nothing (LEGION-332), and an assignment to `IFS`, since it
+ * splits an unquoted value on whitespace alone.
  *
  * A `trap` handler's body is judged once, against the state of the shell that set it after that
  * shell's last statement, where bash runs an EXIT handler; a subshell's handlers (a substitution,
