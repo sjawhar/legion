@@ -1235,26 +1235,22 @@ function walkLoopAnyPasses(node: While, st: State, ctx: Ctx): void {
   if (outputChanged(before, body.output)) st.output = undefined;
 }
 
-/** Walks a loop pass by pass as bash runs it while the guard can decide its condition, the way an
- * argument loop over known arguments (`while [ $# -gt 0 ]; do case "$1" in ...`) is decided. Returns
- * false, having walked nothing, when it cannot decide the first condition; a condition it cannot
- * decide later hands the rest of the loop to `walkLoopAnyPasses`. A body holding `break` or
- * `continue` is never decided, since the passes would not end where the condition says. */
-function walkDecidedLoop(node: While, st: State, ctx: Ctx): boolean {
-  if (/\b(break|continue)\b/.test(st.source.slice(node.body.pos, node.body.end))) return false;
-  for (let pass = 0; pass < MAX_DECIDED_PASSES; pass += 1) {
-    const holds = decideCondition(node.clause, st, ctx);
-    if (holds === undefined) {
-      if (pass === 0) return false;
-      walkLoopAnyPasses(node, st, ctx);
-      return true;
+/** A `while` or `until` loop: walked pass by pass as bash runs it while the guard can decide its
+ * condition (an argument loop over known arguments, `while [ $# -gt 0 ]; do case "$1" in ...`),
+ * and from the first condition it cannot decide on as a loop that may run any number of times. A
+ * body holding `break` or `continue` is never decided, since the passes would not end where the
+ * condition says. */
+function walkLoop(node: While, st: State, ctx: Ctx): void {
+  if (!/\b(break|continue)\b/.test(st.source.slice(node.body.pos, node.body.end))) {
+    for (let pass = 0; pass < MAX_DECIDED_PASSES; pass += 1) {
+      const holds = decideCondition(node.clause, st, ctx);
+      if (holds === undefined) break;
+      walkList(node.clause.commands, st, ctx);
+      if (holds === (node.kind === "until")) return;
+      walkList(node.body.commands, st, ctx);
     }
-    walkList(node.clause.commands, st, ctx);
-    if (holds === (node.kind === "until")) return true;
-    walkList(node.body.commands, st, ctx);
   }
   walkLoopAnyPasses(node, st, ctx);
-  return true;
 }
 
 /** A condition's truth when it is one `[` or `test` command over words the guard knows, else
@@ -1364,11 +1360,12 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         st.backgroundStarted = true;
         return;
       }
-      const written =
-        node.command.type === "BraceGroup" ? groupOutputFile(node, st, ctx) : undefined;
-      if (written !== undefined && node.command.type === "BraceGroup") {
-        st.files.set(written, walkRenderingGroup(node.command, st, ctx));
-        return;
+      if (node.command.type === "BraceGroup") {
+        const written = groupOutputFile(node, st, ctx);
+        if (written !== undefined) {
+          st.files.set(written, walkRenderingGroup(node.command, st, ctx));
+          return;
+        }
       }
       walkNode(node.command, st, ctx, pipeIn);
       return;
@@ -1477,8 +1474,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       return;
     }
     case "While": {
-      if (walkDecidedLoop(node, st, ctx)) return;
-      walkLoopAnyPasses(node, st, ctx);
+      walkLoop(node, st, ctx);
       return;
     }
     case "Case": {
