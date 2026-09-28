@@ -587,13 +587,14 @@ test("the header checkbox stays under the pointer on a phone when its click open
   }
 });
 
-// Forty silent planners, each with a role and a directory, so every card at 390 px is 166 px tall;
-// a fixture with shorter cards gives different row counts below.
-function fortyPlanners(): FakeSession[] {
-  return Array.from({ length: 40 }, (_, index) => {
-    const number = String(index + 1).padStart(2, "0");
+/** `count` silent planners, `capable` of them advertising BTW and the rest `aside` only,
+ *  numbered to `count`'s width so the list sorts in order. Each has a role and a directory, so
+ *  every card at 390 px is 166 px tall; a fixture with shorter cards gives different row counts. */
+function planners(count: number, capable: number): FakeSession[] {
+  return Array.from({ length: count }, (_, index) => {
+    const number = String(index + 1).padStart(String(count).length, "0");
     return {
-      capabilities: ["aside", "btw"],
+      capabilities: index < capable ? ["aside", "btw"] : ["aside"],
       dir: `/workspaces/planner-${number}`,
       machine_id: "build-host",
       roles: ["planner"],
@@ -635,7 +636,7 @@ test("on a phone the open composer keeps its height budget at forty recipients, 
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
-  await setLiveSessions(fortyPlanners());
+  await setLiveSessions(planners(40, 40));
 
   const alice = await asUser(browser, "alice");
   try {
@@ -741,7 +742,7 @@ test("a narrow or short screen gets the compact composer, filled within 45% of i
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
-  await setLiveSessions(fortyPlanners());
+  await setLiveSessions(planners(40, 40));
 
   const alice = await asUser(browser, "alice");
   try {
@@ -781,94 +782,6 @@ test("a narrow or short screen gets the compact composer, filled within 45% of i
   }
 });
 
-test("with half the recipients unable to take the mode, the compact composer keeps its budget and every exclusion stays reachable on one line", async ({
-  browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
-  // Planners 21 to 40 advertise `aside` only, so the default BTW mode excludes them. Every
-  // earlier budget fixture excluded nobody, so the Excluded line never rendered there.
-  await setLiveSessions(
-    fortyPlanners().map((session, index) =>
-      index < 20 ? session : { ...session, capabilities: ["aside"] }
-    )
-  );
-
-  const alice = await asUser(browser, "alice");
-  try {
-    const page = await alice.newPage();
-    await page.setViewportSize({ height: 664, width: 390 });
-    await page.goto("/agents");
-    const agents = page.getByRole("region", { name: "Agents" });
-    const composer = page.getByRole("region", { name: "Broadcast" });
-    const message = composer.getByRole("textbox", { name: "Broadcast message" });
-    await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
-    await expect(
-      composer.getByRole("heading", { name: "Broadcast to 20 of 40 selected" })
-    ).toBeVisible();
-    const excluded = composer.getByText(/^Excluded:/);
-
-    // Soft, so each viewport reports on its own.
-    for (const size of [
-      { height: 664, width: 390 },
-      { height: 390, width: 844 },
-      { height: 375, width: 667 },
-    ]) {
-      const at = `${size.width}x${size.height}`;
-      await page.setViewportSize(size);
-      await fillUntilStable(message);
-      // Tight at 667x375: 166 of 168.75. The short grid is rows 44 + 64 + 16, two 8 px gaps, 24 px
-      // of padding and a 2 px border. A fourth row costs 24 px whatever its height, so the next
-      // element added to the compact composer has no room: this goes red while the composer is
-      // still inside its 50vh cap and nothing on screen looks wrong.
-      expect
-        .soft((await composer.boundingBox())?.height ?? Infinity, at)
-        .toBeLessThanOrEqual(size.height * 0.45);
-
-      // All twenty stay named on the line, and its last name scrolls into view.
-      for (let index = 21; index <= 40; index += 1) {
-        await expect.soft(excluded, at).toContainText(`Planner ${index} (does not advertise btw)`);
-      }
-      const last = await excluded.evaluate((element) => {
-        const lastName = "Planner 40";
-        const scrolls = element.scrollWidth > element.clientWidth;
-        const text = [...element.childNodes].find((node) => node.textContent?.includes(lastName));
-        if (text === undefined) return { scrolls, visible: false };
-        const range = document.createRange();
-        const start = text.textContent?.indexOf(lastName) ?? 0;
-        range.setStart(text, start);
-        range.setEnd(text, start + lastName.length);
-        // Scroll the line so the name's left edge meets the line's, then read both again.
-        element.scrollLeft +=
-          range.getBoundingClientRect().left - element.getBoundingClientRect().left;
-        const [name, line] = [range.getBoundingClientRect(), element.getBoundingClientRect()];
-        return {
-          scrolls,
-          visible: name.left >= line.left - 0.5 && name.right <= line.right + 0.5,
-        };
-      });
-      expect.soft(last, at).toEqual({ scrolls: true, visible: true });
-    }
-  } finally {
-    await alice.close();
-  }
-});
-
-/** `count` planners, `capable` of them advertising BTW and the rest `aside` only, numbered in
- *  three digits so the list sorts in order. */
-function planners(count: number, capable: number): FakeSession[] {
-  return Array.from({ length: count }, (_, index) => {
-    const number = String(index + 1).padStart(3, "0");
-    return {
-      capabilities: index < capable ? ["aside", "btw"] : ["aside"],
-      dir: `/workspaces/planner-${number}`,
-      machine_id: "build-host",
-      roles: ["planner"],
-      session_id: `planner-${number}-session`,
-      title: `Planner ${number}`,
-    };
-  });
-}
-
 const NOTICE = /^(At most \d+ recipients|Could not send:|Excluded:)/;
 const NOTICE_SIZES = [
   { height: 664, width: 390 },
@@ -894,12 +807,15 @@ async function expectNoticeWithinBudget(
     expect
       .soft((await composer.boundingBox())?.height ?? Infinity, at)
       .toBeLessThanOrEqual(size.height * 0.45);
-    const shape = await composer.evaluate((section) => ({
-      notices: [...section.querySelectorAll("p")].filter((line) =>
-        /^(At most \d+ recipients|Could not send:|Excluded:)/.test(line.textContent ?? "")
-      ).length,
-      rows: getComputedStyle(section).gridTemplateRows.split(" ").filter(Boolean).length,
-    }));
+    const shape = await composer.evaluate(
+      (section, notice) => ({
+        notices: [...section.querySelectorAll("p")].filter((line) =>
+          new RegExp(notice).test(line.textContent ?? "")
+        ).length,
+        rows: getComputedStyle(section).gridTemplateRows.split(" ").filter(Boolean).length,
+      }),
+      NOTICE.source
+    );
     expect.soft(shape.notices, at).toBeLessThanOrEqual(1);
     expect.soft(shape.rows, at).toBeLessThanOrEqual(size.height <= 500 ? 3 : 4);
     await check(at);
@@ -915,6 +831,7 @@ async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
   await page.goto("/agents");
   await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
   await expect(composer).toBeVisible();
+  const refused = composer.getByText(/^Could not send:/);
   return {
     agents,
     composer,
@@ -923,16 +840,65 @@ async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
     excludedLine: composer.getByText(/^Excluded:/),
     limit: composer.getByText(/^At most 100 recipients per broadcast/),
     notice: composer.getByText(NOTICE),
-    refused: composer.getByText(/^Could not send:/),
+    refused,
     // Every listed recipient leaves the registry before Send, so the server refuses the send.
     refuse: async (leaving: FakeSession[]) => {
       await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Report status.");
       for (const session of leaving) await setSessionLive(session.session_id, false);
       await composer.getByRole("button", { name: /^Send to / }).click();
-      await expect(composer.getByText(/^Could not send:/)).toBeVisible();
+      await expect(refused).toBeVisible();
     },
   };
 }
+
+test("with half the recipients unable to take the mode, the compact composer keeps its budget and every exclusion stays reachable on one line", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    // Planners 21 to 40 advertise `aside` only, so the default BTW mode excludes them. Every
+    // earlier budget fixture excluded nobody, so the Excluded line never rendered there.
+    const fixture = await openNoticeFixture(page, planners(40, 20));
+    await expect(
+      fixture.composer.getByRole("heading", { name: "Broadcast to 20 of 40 selected" })
+    ).toBeVisible();
+    // Tight at 667x375: 166 of 168.75. The short grid is rows 44 + 64 + 16, two 8 px gaps, 24 px
+    // of padding and a 2 px border. A fourth row costs 24 px whatever its height, so the next
+    // element added to the compact composer has no room: the budget goes red while the composer
+    // is still inside its 50vh cap and nothing on screen looks wrong.
+    await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
+      // All twenty stay named on the line, and its last name scrolls into view.
+      for (let index = 21; index <= 40; index += 1) {
+        await expect
+          .soft(fixture.excludedLine, at)
+          .toContainText(`Planner ${index} (does not advertise btw)`);
+      }
+      const last = await fixture.excludedLine.evaluate((element) => {
+        const lastName = "Planner 40";
+        const scrolls = element.scrollWidth > element.clientWidth;
+        const text = [...element.childNodes].find((node) => node.textContent?.includes(lastName));
+        if (text === undefined) return { scrolls, visible: false };
+        const range = document.createRange();
+        const start = text.textContent?.indexOf(lastName) ?? 0;
+        range.setStart(text, start);
+        range.setEnd(text, start + lastName.length);
+        // Scroll the line so the name's left edge meets the line's, then read both again.
+        element.scrollLeft +=
+          range.getBoundingClientRect().left - element.getBoundingClientRect().left;
+        const [name, line] = [range.getBoundingClientRect(), element.getBoundingClientRect()];
+        return {
+          scrolls,
+          visible: name.left >= line.left - 0.5 && name.right <= line.right + 0.5,
+        };
+      });
+      expect.soft(last, at).toEqual({ scrolls: true, visible: true });
+    });
+  } finally {
+    await alice.close();
+  }
+});
 
 test.describe("the composer's notices share one slot, highest first, within budget on compact screens", () => {
   test("the limit alone: 120 recipients", async ({ browser }, testInfo) => {
@@ -975,8 +941,9 @@ test.describe("the composer's notices share one slot, highest first, within budg
     const alice = await asUser(browser, "alice");
     try {
       const page = await alice.newPage();
-      const fixture = await openNoticeFixture(page, planners(40, 40));
-      await fixture.refuse(planners(40, 40));
+      const sessions = planners(40, 40);
+      const fixture = await openNoticeFixture(page, sessions);
+      await fixture.refuse(sessions);
       await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
         await expect.soft(fixture.refused, at).toHaveCount(1);
         await expect.soft(fixture.notice, at).toHaveCount(1);
@@ -993,12 +960,13 @@ test.describe("the composer's notices share one slot, highest first, within budg
     const alice = await asUser(browser, "alice");
     try {
       const page = await alice.newPage();
-      const fixture = await openNoticeFixture(page, planners(40, 20));
-      await fixture.refuse(planners(20, 20));
+      const sessions = planners(40, 20);
+      const fixture = await openNoticeFixture(page, sessions);
+      await fixture.refuse(sessions.slice(0, 20));
       await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
         await expect.soft(fixture.refused, at).toHaveCount(1);
         await expect.soft(fixture.excludedLine, at).toHaveCount(0);
-        await expect.soft(fixture.excludedChip("Planner 021"), at).toHaveCount(1);
+        await expect.soft(fixture.excludedChip("Planner 21"), at).toHaveCount(1);
       });
     } finally {
       await alice.close();
@@ -1039,7 +1007,8 @@ test("a typed broadcast survives clearing the selection, picking again and a ref
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the draft rule");
-  await setLiveSessions(fortyPlanners().slice(0, 2));
+  const pair = planners(40, 40).slice(0, 2);
+  await setLiveSessions(pair);
 
   const alice = await asUser(browser, "alice");
   try {
@@ -1063,7 +1032,7 @@ test("a typed broadcast survives clearing the selection, picking again and a ref
 
     // A send the server refuses keeps the page, and the draft with it: both sessions leave the
     // registry after the page last read it, so the server finds no one to reach.
-    for (const session of fortyPlanners().slice(0, 2)) {
+    for (const session of pair) {
       await setSessionLive(session.session_id, false);
     }
     await composer.getByRole("button", { name: "Send to 2" }).click();
@@ -1072,7 +1041,7 @@ test("a typed broadcast survives clearing the selection, picking again and a ref
     await expect(mode).toHaveValue("aside");
 
     // A send that succeeds leaves the page; coming back finds an empty draft.
-    for (const session of fortyPlanners().slice(0, 2)) {
+    for (const session of pair) {
       await setSessionLive(session.session_id, true);
     }
     await composer.getByRole("button", { name: "Send to 2" }).click();

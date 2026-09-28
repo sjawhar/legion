@@ -391,10 +391,9 @@ Two rules keep an assertion honest. First, name the state the fixture puts the s
 assertion would still pass with the change reverted; if it would, the fixture satisfies it for another reason
 (an empty message box, every session advertising `btw`, a sibling route unmounting the page before a
 clear-on-send check). Second, when something other than the assertion decides what it covers - fixture seeding,
-a login's casing, a project's title grep - make that selector an assertion too, then lapse the property once and
-confirm the assertion fires, since a selector check that cannot fire only looks like a guard. The one exception is
-a Playwright project's title `grep`, which has no hook to assert what it selected; its fallback is a one-time
-manual check, noted beside the `webkit-iphone` project below.
+a login's casing - make that selector an assertion too, then lapse the property once and confirm the assertion
+fires, since a selector check that cannot fire only looks like a guard. The one exception is a Playwright
+project's title `grep`; its fallback is the one-time manual check beside the `webkit-iphone` project below.
 
 `run-server.sh` resolves the concrete Go binary in the caller's toolchain
 environment, then starts Dispatch with every server setting pinned. It
