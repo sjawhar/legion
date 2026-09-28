@@ -209,7 +209,10 @@ async function scrollThreadTo(page: Page, top: number | "bottom"): Promise<void>
   );
 }
 
-/** Whether <main> carries a keyboard cap, and whether that cap is exactly <main>'s own height. */
+/** Whether <main> carries a keyboard cap, and whether that cap is at or below <main>'s own
+ *  height. A cap that binds shrinks the element to itself, so this cannot tell "exactly its own
+ *  height" from "smaller"; the gutter check beside each call site is what proves it moves
+ *  nothing. */
 function mainCap(page: Page): Promise<{ capped: boolean; fitsOwnHeight: boolean }> {
   return page.getByTestId("main-content").evaluate((main) => {
     const cap = Number.parseFloat(getComputedStyle(main).maxHeight);
@@ -438,6 +441,9 @@ test("on a phone the live view never scrolls the page, keeps its header and comp
     expect(await mainCap(page)).toEqual({ capped: false, fitsOwnHeight: false });
     await expectViewportBound(page);
     await composerInput.focus();
+    // The pair discriminates jointly: mainCap says a cap is present and not larger than <main>,
+    // and expectViewportBound's gutter check is the one that proves the cap moves nothing, so it
+    // is not redundant beside it.
     await expect.poll(() => mainCap(page)).toEqual({ capped: true, fitsOwnHeight: true });
     await expectViewportBound(page);
     await composerInput.blur();

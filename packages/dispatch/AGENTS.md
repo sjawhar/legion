@@ -452,7 +452,7 @@ a collaborator's cursor differs by engine: Chromium drops typing there and WebKi
 while Firefox is unaffected, so that spec is the one that needs a second engine. CI installs
 WebKit beside Chromium for it (`bun run e2e:install` does the same locally).
 
-The `webkit-iphone` project runs the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` (its project `grep` selects them) in WebKit with the iPhone 13 profile, since iOS Safari is the engine the keyboard cap exists for and the `iphone` project is Chromium. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so those rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
+The `webkit-iphone` project runs the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` (its project `grep` selects them by title, so renaming either test silently drops its WebKit run with no failure; rename the `grep` with it) in WebKit with the iPhone 13 profile, since iOS Safari is the engine the keyboard cap exists for and the `iphone` project is Chromium. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so those rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts` alone: Firefox's native
 editing puts text typed over a code block's last line before that line's newline, and deletes a
