@@ -946,16 +946,6 @@ func appendText(target *[]*Node, value string, marks []Mark) {
 	*target = append(*target, &Node{Type: "text", Text: value, Marks: marks})
 }
 
-func withoutSameMark(marks []Mark, mark Mark) []Mark {
-	out := make([]Mark, 0, len(marks))
-	for _, other := range marks {
-		if !sameMark(other, mark) {
-			out = append(out, other)
-		}
-	}
-	return out
-}
-
 func titleOrNil(title []byte) any {
 	if len(title) == 0 {
 		return nil
