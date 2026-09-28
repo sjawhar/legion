@@ -1532,14 +1532,17 @@ function merge(target: State, branches: readonly State[]): void {
   // for the path where the branch did not run — and may not run on the path where it did, so it
   // is uncertain from here on for the same reason. One branch holding it is not enough; the
   // handler stands as fact only where every branch still holds it.
+  //
+  // One lift per branch that holds the handler, not one per handler: each carries the variables
+  // THAT branch left (`handlerVars`), and with a branch per `&&` prefix those differ as soon as a
+  // later prefix reassigns a name the handler reads when it runs. Skipping the second lift as a
+  // duplicate drops the capture that names what the handler would delete. The cost is one walk of
+  // the body per branch holding it, linear in the prefixes.
   const lifted: Trap[] = [];
-  const seen = new Set(target.traps);
   let merged: ReadonlyMap<string, Expansion> | undefined;
   for (const branch of branches) {
     for (const trap of branch.traps) {
-      // One lift per handler: with a branch per `&&` prefix the same one appears in several.
-      if (seen.has(trap)) continue;
-      seen.add(trap);
+      if (target.traps.includes(trap)) continue;
       merged ??= new Map(target.vars);
       lifted.push({ ...trap, vars: handlerVars(trap, branch.vars), merged, uncertainSet: true });
     }
