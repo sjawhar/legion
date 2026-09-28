@@ -201,3 +201,69 @@ test("the project List view roves with j/k and opens the focused row with Enter 
     await context.close();
   }
 });
+
+test("j and k cross a collapsed band instead of dead-ending in it, and reach its rows once it opens", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const seed = async (title: string, status: "backlog" | "todo" | "in_progress" | "done") => {
+    const issue = await createIssue({ project: "CORE", title });
+    await patchIssue(issue.key, { status });
+    return issue;
+  };
+  await seed("Alpha", "backlog");
+  await seed("Bravo", "todo");
+  await seed("Mike", "in_progress");
+  await seed("Zulu", "done");
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto("/projects/CORE/issues");
+    // A closed `details` keeps its content out of the accessibility tree, so these are DOM
+    // locators: that a collapsed band's rows ARE in the DOM is the whole point here - rows the
+    // page never rendered would satisfy the assertions below for another reason entirely.
+    const rowsIn = (band: string) =>
+      page.locator(`ul[aria-label="${band} issues"] [data-issue-row]`);
+    const alpha = rowsIn("Backlog");
+    const bravo = rowsIn("Todo");
+    const mike = rowsIn("In progress");
+    const zulu = rowsIn("Done");
+    for (const row of [alpha, bravo, mike, zulu]) {
+      await expect(row).toHaveCount(1);
+    }
+    // Done is the one band the page renders closed; Todo is closed here by the reader, which
+    // puts a collapsed band between two open ones.
+    await expect(zulu).toBeHidden();
+    await page.getByRole("group", { name: "Todo (1)" }).locator("summary").click();
+    await expect(bravo).toBeHidden();
+    await page.locator("body").focus();
+
+    await page.keyboard.press("j");
+    await expect(alpha).toBeFocused();
+    await page.keyboard.press("j");
+    await expect(mike).toBeFocused();
+    await expect(bravo).not.toBeFocused();
+    // Nothing visible past Mike: the collapsed Done band is not a destination, so j holds, as
+    // it does at the end of the list.
+    await page.keyboard.press("j");
+    await expect(mike).toBeFocused();
+    await page.keyboard.press("k");
+    await expect(alpha).toBeFocused();
+
+    // Opening a band puts its rows back in the order, between the two they sit between.
+    await page.getByRole("group", { name: "Todo (1)" }).locator("summary").click();
+    await expect(bravo).toBeVisible();
+    await alpha.focus();
+    await page.keyboard.press("j");
+    await expect(bravo).toBeFocused();
+    await page.getByRole("group", { name: "Done (1)" }).locator("summary").click();
+    await expect(zulu).toBeVisible();
+    await mike.focus();
+    await page.keyboard.press("j");
+    await expect(zulu).toBeFocused();
+  } finally {
+    await context.close();
+  }
+});
