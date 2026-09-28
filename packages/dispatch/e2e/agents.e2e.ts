@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, test } from "@playwright/test";
 
 import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
 import {
@@ -587,21 +587,52 @@ test("the header checkbox stays under the pointer on a phone when its click open
   }
 });
 
-test("on a phone the open composer keeps to 40% of the screen at two or forty recipients, leaves two whole rows and a third checkbox above it, and keeps every chip reachable", async ({
+// Forty silent planners, each with a role and a directory, so every card at 390 px is 166 px tall;
+// a fixture with shorter cards gives different row counts below.
+function fortyPlanners(): FakeSession[] {
+  return Array.from({ length: 40 }, (_, index) => {
+    const number = String(index + 1).padStart(2, "0");
+    return {
+      capabilities: ["aside", "btw"],
+      dir: `/workspaces/planner-${number}`,
+      machine_id: "build-host",
+      roles: ["planner"],
+      session_id: `planner-${number}-session`,
+      title: `Planner ${number}`,
+    };
+  });
+}
+
+/** Types lines into the message box until two consecutive heights agree: the composer at its
+ *  tallest, the way it is while someone writes a long message. */
+async function fillUntilStable(textarea: Locator): Promise<void> {
+  let previous = -1;
+  // From three lines, past the two rows the empty box already holds.
+  for (let lines = 3; lines <= 40; lines += 1) {
+    await textarea.fill(Array.from({ length: lines }, (_, line) => `Line ${line + 1}`).join("\n"));
+    const height = (await textarea.boundingBox())?.height ?? 0;
+    if (height === previous) return;
+    previous = height;
+  }
+  throw new Error("the message box never stopped growing");
+}
+
+/** Whole `article` cards above the composer: top >= 0 and bottom <= the composer's top edge. */
+async function wholeCardsAbove(agents: Locator, composer: Locator): Promise<number> {
+  const composerTop = (await composer.boundingBox())?.y ?? 0;
+  let count = 0;
+  for (const card of await agents.locator("article").all()) {
+    const box = await card.boundingBox();
+    if (box !== null && box.y >= 0 && box.y + box.height <= composerTop) count += 1;
+  }
+  return count;
+}
+
+test("on a phone the open composer keeps its height budget at forty recipients, empty or filled, keeps its message box steady, and keeps every chip reachable", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
-  const number = (index: number) => String(index + 1).padStart(2, "0");
-  await setLiveSessions(
-    Array.from({ length: 40 }, (_, index) => ({
-      capabilities: ["aside", "btw"],
-      dir: `/workspaces/planner-${number(index)}`,
-      machine_id: "build-host",
-      roles: ["planner"],
-      session_id: `planner-${number(index)}-session`,
-      title: `Planner ${number(index)}`,
-    }))
-  );
+  await setLiveSessions(fortyPlanners());
 
   const alice = await asUser(browser, "alice");
   try {
@@ -611,56 +642,85 @@ test("on a phone the open composer keeps to 40% of the screen at two or forty re
     await page.goto("/agents");
     const agents = page.getByRole("region", { name: "Agents" });
     const composer = page.getByRole("region", { name: "Broadcast" });
+    const message = composer.getByRole("textbox", { name: "Broadcast message" });
     const row = (index: number) =>
-      agents.getByRole("checkbox", { name: `Select Planner ${number(index)} for broadcast` });
-    const budget = viewport.height * 0.4;
+      agents.getByRole("checkbox", {
+        name: `Select Planner ${String(index + 1).padStart(2, "0")} for broadcast`,
+      });
     const composerHeight = async () => (await composer.boundingBox())?.height ?? Infinity;
+    const composerTop = async () => (await composer.boundingBox())?.y ?? 0;
+    const checkboxAbove = async (index: number) => {
+      const box = await row(index).boundingBox();
+      return box !== null && box.y >= 0 && box.y + box.height <= (await composerTop());
+    };
+    const scrollFirstCardToTop = () =>
+      row(0).evaluate((element) => element.closest("article")?.scrollIntoView({ block: "start" }));
 
-    await agents.getByRole("button", { name: "No Dispatch activity (40)" }).click();
+    const fold = agents.getByRole("button", { name: /^No Dispatch activity \(40/ });
+    await fold.click();
+    await expect(fold).toHaveAttribute("aria-expanded", "true");
     await row(0).check();
     await row(1).check();
     await expect(
       composer.getByRole("heading", { name: "Broadcast to 2 of 2 selected" })
     ).toBeVisible();
     const heightAtTwo = await composerHeight();
-    expect(heightAtTwo).toBeLessThanOrEqual(budget);
+    expect(heightAtTwo).toBeLessThanOrEqual(viewport.height * 0.4);
 
-    // Forty recipients: the count stays exact, the composer stays inside its budget, and the
-    // recipients are one line that scrolls sideways to its last chip.
+    // Forty recipients: the count stays exact, and one line of chips keeps the composer at the
+    // height two gave it (221.7 px, 33.4%).
     await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
     await expect(
       composer.getByRole("heading", { name: "Broadcast to 40 of 40 selected" })
     ).toBeVisible();
-    // One line of chips: forty recipients take exactly the height two did, inside the budget.
-    const heightAtForty = await composerHeight();
-    expect(heightAtForty).toBeLessThanOrEqual(budget);
-    expect(heightAtForty).toBe(heightAtTwo);
+    expect(await composerHeight()).toBe(heightAtTwo);
+
+    // The message box keeps its height when the first character goes in.
+    const emptyMessage = (await message.boundingBox())?.height;
+    await message.fill("S");
+    expect((await message.boundingBox())?.height).toBe(emptyMessage);
+    await message.fill("");
+
     // At the top of the page the composer covers none of the selection header.
     await page.evaluate(() => window.scrollTo(0, 0));
-    const topOfComposer = (await composer.boundingBox())?.y ?? 0;
     for (const control of [
       agents.getByRole("checkbox", { name: "Select all matching agents" }),
       agents.getByRole("button", { name: "Clear selection" }),
     ]) {
       const box = await control.boundingBox();
-      expect((box?.y ?? Infinity) + (box?.height ?? 0)).toBeLessThanOrEqual(topOfComposer);
+      expect((box?.y ?? Infinity) + (box?.height ?? 0)).toBeLessThanOrEqual(await composerTop());
     }
-    // At the worst case, forty selected, with the first card scrolled to the top of the viewport:
-    // two whole rows sit above the composer's top edge, and the third row's checkbox does too,
-    // so it can be ticked without scrolling. A third whole row is bounded by the card, about
-    // 165 px tall at 390.
-    await row(0).evaluate((element) =>
-      element.closest("article")?.scrollIntoView({ block: "start" })
-    );
-    const composerTop = (await composer.boundingBox())?.y ?? 0;
-    const above = async (box: { y: number; height: number } | null) =>
-      box !== null && box.y >= 0 && box.y + box.height <= composerTop;
-    let wholeRowsAbove = 0;
-    for (const card of await agents.locator("article").all()) {
-      if (await above(await card.boundingBox())) wholeRowsAbove += 1;
-    }
-    expect(wholeRowsAbove).toBeGreaterThanOrEqual(2);
-    expect(await above(await row(2).boundingBox())).toBe(true);
+
+    // Row counts below are whole `article` cards with top >= 0 and bottom <= the composer's top
+    // edge, with the fold expanded and forty selected; the height clause is the discriminating
+    // one, the row clauses record intent. A third whole card is bounded by the 166 px card, not
+    // by the composer.
+    await expect(agents.locator("article")).toHaveCount(40);
+
+    // The defined offset: the first card scrolled to the top of the viewport (scrollY 431),
+    // message empty. Two whole cards and the third card's checkbox are above the composer.
+    await scrollFirstCardToTop();
+    expect(await wholeCardsAbove(agents, composer)).toBeGreaterThanOrEqual(2);
+    expect(await checkboxAbove(2)).toBe(true);
+
+    // The operator's moment: from that offset, a message filled until the box stops growing,
+    // with no re-scroll (focusing and filling the box scrolls the page, to scrollY 461 here).
+    // The composer is then at its tallest, 286 px or 43.1% of 664, under a 45% budget; filling
+    // lifts its top by exactly the 64 px the box grew (442 to 378). One whole card is above it,
+    // and the next card's checkbox.
+    await fillUntilStable(message);
+    expect(await composerHeight()).toBeLessThanOrEqual(viewport.height * 0.45);
+    expect(await wholeCardsAbove(agents, composer)).toBeGreaterThanOrEqual(1);
+    expect(await checkboxAbove(2)).toBe(true);
+
+    // The defined offset again, filled (scrollY 431, cards at 0-166 and 178-344, composer top
+    // 378). This clause has 34 px of slack and no more: anything that later adds composer height
+    // (another chrome line, taller chips, an inline error) turns it red, and that is the budget
+    // working, not a flaky test. Empty, the height clause does the discriminating.
+    await scrollFirstCardToTop();
+    expect(await wholeCardsAbove(agents, composer)).toBeGreaterThanOrEqual(2);
+
+    // The recipients are one line that scrolls sideways to its last chip.
     const chips = composer.getByRole("list", { name: "Selected agents" });
     expect(await chips.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
     const last = chips.getByRole("button", { name: /^Planner 40/ });
@@ -671,6 +731,50 @@ test("on a phone the open composer keeps to 40% of the screen at two or forty re
     expect((lastBox?.x ?? Infinity) + (lastBox?.width ?? 0)).toBeLessThanOrEqual(
       (lineBox?.x ?? 0) + (lineBox?.width ?? 0) + 0.5
     );
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a narrow or short screen gets the compact composer, filled within 45% of its height", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+  await setLiveSessions(fortyPlanners());
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 664, width: 390 });
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const message = composer.getByRole("textbox", { name: "Broadcast message" });
+    await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
+    await expect(
+      composer.getByRole("heading", { name: "Broadcast to 40 of 40 selected" })
+    ).toBeVisible();
+    const phoneMessage = (await message.boundingBox())?.height;
+
+    // 640 and 700 are the band below `md` that a width-only `sm` key left wide; 844x390 and
+    // 667x375 are phones in landscape, where height is the constraint.
+    // Soft, so each viewport reports on its own.
+    for (const size of [
+      { height: 664, width: 640 },
+      { height: 664, width: 700 },
+      { height: 390, width: 844 },
+      { height: 375, width: 667 },
+    ]) {
+      await page.setViewportSize(size);
+      await message.fill("");
+      expect
+        .soft((await message.boundingBox())?.height, `${size.width}x${size.height}`)
+        .toBe(phoneMessage);
+      await fillUntilStable(message);
+      expect
+        .soft((await composer.boundingBox())?.height ?? Infinity, `${size.width}x${size.height}`)
+        .toBeLessThanOrEqual(size.height * 0.45);
+    }
   } finally {
     await alice.close();
   }

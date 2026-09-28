@@ -1021,32 +1021,36 @@ function BroadcastComposer({
     },
   });
 
-  // Below `sm` the composer is a compact grid, so it takes about a third of a phone screen: the
-  // heading on one line, the recipients in one sideways-scrolling line, the message at two rows
-  // (growing with its text where the browser supports `field-sizing`), and the mode beside
-  // Send. From `sm` every `max-sm:` class drops away and the block layout above it is unchanged.
+  // On a narrow or short screen (`narrow-or-short`, styles.css) the composer is a compact grid,
+  // so it takes about a third of a phone screen: the heading on one line, the recipients in one
+  // sideways-scrolling line, the message sized to its text (`field-sizing`) from two rows up to
+  // `max-h-32`, and the mode beside Send. A short screen (a phone in landscape) folds that into
+  // two lines - heading beside the recipients, then the message beside the mode and Send - with
+  // the message held at two rows. `min-h-16` is important because styles.css's unlayered
+  // below-1280 touch floor (`min-height: 44px`) would otherwise override it and shrink the
+  // message box on its first character. Elsewhere none of these classes apply.
   return (
     <section
       aria-label="Broadcast"
-      className={`sticky bottom-0 z-10 mt-3 max-h-[50vh] overflow-y-auto rounded-xl border p-3 max-sm:grid max-sm:grid-cols-[auto_1fr] max-sm:items-center max-sm:gap-2 ${card} ${borderDefault}`}
+      className={`sticky bottom-0 z-10 mt-3 max-h-[50vh] overflow-y-auto rounded-xl border p-3 narrow-or-short:grid narrow-or-short:grid-cols-[auto_1fr] narrow-or-short:items-center narrow-or-short:gap-2 short:grid-cols-[auto_minmax(0,1fr)_auto_auto] ${card} ${borderDefault}`}
     >
       <h2
-        className={`text-sm font-semibold max-sm:col-span-2 max-sm:truncate ${textPrimaryOnCanvas}`}
+        className={`text-sm font-semibold narrow-or-short:col-span-2 narrow-or-short:truncate short:col-span-1 ${textPrimaryOnCanvas}`}
       >
         Broadcast to {recipients.length} of {selected.size} selected
       </h2>
       <ul
         aria-label="Selected agents"
-        className="mt-2 flex flex-wrap gap-2 max-sm:col-span-2 max-sm:mt-0 max-sm:flex-nowrap max-sm:overflow-x-auto"
+        className="mt-2 flex flex-wrap gap-2 narrow-or-short:col-span-2 narrow-or-short:mt-0 narrow-or-short:flex-nowrap narrow-or-short:overflow-x-auto short:col-span-3"
       >
         {[...selected].map((sessionID) => {
           const agent = agents.find((candidate) => candidate.session_id === sessionID);
           const label = sessionLabel(sessionID, agent?.title ?? "");
           const left = excluded.find((item) => item.sessionID === sessionID);
           return (
-            <li className="max-sm:shrink-0" key={sessionID}>
+            <li className="narrow-or-short:shrink-0" key={sessionID}>
               <button
-                className={`min-h-8 rounded-full border px-2 py-1 text-xs max-sm:min-h-11 max-sm:whitespace-nowrap ${secondaryButtonBorder} ${left === undefined ? secondaryButtonText : dangerText} ${secondaryButtonHoverBorder}`}
+                className={`min-h-8 rounded-full border px-2 py-1 text-xs narrow-or-short:min-h-11 narrow-or-short:whitespace-nowrap ${secondaryButtonBorder} ${left === undefined ? secondaryButtonText : dangerText} ${secondaryButtonHoverBorder}`}
                 onClick={() => onDeselect(sessionID)}
                 title={`Remove ${label} from this broadcast`}
                 type="button"
@@ -1058,7 +1062,7 @@ function BroadcastComposer({
           );
         })}
       </ul>
-      <div className="mt-2 flex flex-wrap items-center gap-2 max-sm:order-2 max-sm:mt-0">
+      <div className="mt-2 flex flex-wrap items-center gap-2 narrow-or-short:order-2 narrow-or-short:mt-0">
         <select
           aria-label="Delivery mode"
           className={`min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`}
@@ -1074,14 +1078,16 @@ function BroadcastComposer({
       </div>
       <textarea
         aria-label="Broadcast message"
-        className={`mt-2 block w-full rounded-lg border px-3 py-2 text-sm sm:min-h-[4.875rem] max-sm:order-1 max-sm:col-span-2 max-sm:mt-0 max-sm:max-h-32 max-sm:min-h-16 max-sm:field-sizing-content ${inputClasses(true)}`}
+        className={`mt-2 block w-full rounded-lg border px-3 py-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-2 narrow-or-short:mt-0 narrow-or-short:max-h-32 narrow-or-short:min-h-16! narrow-or-short:field-sizing-content short:max-h-16 ${inputClasses(true)}`}
         onChange={(event) => setBody(event.target.value)}
         placeholder="One message, sent to each selected agent"
-        rows={2}
+        rows={3}
         value={body}
       />
       {excluded.length === 0 ? null : (
-        <p className={`mt-2 text-sm max-sm:order-1 max-sm:col-span-2 max-sm:mt-0 ${dangerText}`}>
+        <p
+          className={`mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-2 narrow-or-short:mt-0 short:order-3 short:col-span-4 ${dangerText}`}
+        >
           Excluded:{" "}
           {excluded
             .map((item) => `${sessionLabel(item.sessionID, item.title)} (${item.reason})`)
@@ -1090,12 +1096,14 @@ function BroadcastComposer({
         </p>
       )}
       {send.isError ? (
-        <p className={`mt-2 text-sm max-sm:order-1 max-sm:col-span-2 max-sm:mt-0 ${dangerText}`}>
+        <p
+          className={`mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-2 narrow-or-short:mt-0 short:order-3 short:col-span-4 ${dangerText}`}
+        >
           Could not send: {send.error instanceof Error ? send.error.message : "network error"}
         </p>
       ) : null}
       <button
-        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold max-sm:order-2 max-sm:mt-0 max-sm:justify-self-end ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+        className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold narrow-or-short:order-2 narrow-or-short:mt-0 narrow-or-short:justify-self-end ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
         disabled={recipients.length === 0 || body.trim() === "" || send.isPending}
         onClick={() => send.mutate()}
         type="button"
