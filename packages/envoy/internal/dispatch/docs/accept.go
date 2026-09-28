@@ -95,8 +95,8 @@ func refuseAcceptBy(before, after *pmdoc.Node, match pmdoc.Range, at pmdoc.Textb
 // emptied to `- [ ]`, which reads back as a plain item. A block that already read back otherwise
 // the same way before the accept, the one it changed included, is not the accept's. The checks
 // before it read one block at a time; this one reads the blocks beside each other. The refusal
-// names what reads back and advises rejecting. A panic reading the document back (pmdoc.ErrPanic)
-// is pmdoc's bug, and is its error.
+// names what reads back and advises rejecting. An error reading the document back that is no
+// refusal, a panic (pmdoc.ErrPanic) among them, is pmdoc's bug, and is its error.
 func refuseMisreadAccept(before, after *pmdoc.Node, with string) error {
 	misread, err := pmdoc.NewMisread(before, after)
 	if err != nil {
@@ -280,8 +280,9 @@ func changedBlocks(before, after *pmdoc.Node, match pmdoc.Range) (first, last, l
 // replacementBroke is the index in after of the first document-level block the write changed
 // (changedBlocks) that check fails, and what check says of it, when it said nothing of the blocks
 // the match lay in before: a block that already failed the check, or another block that does, is
-// no reason to refuse this write. A panic in the check (pmdoc.ErrPanic) is no verdict on either
-// side, but pmdoc's bug, and is its error.
+// no reason to refuse this write. Only a refusal (pmdoc.ErrSchema) is check's verdict; any other
+// error from it, a panic (pmdoc.ErrPanic) among them, is no verdict on either side, but pmdoc's
+// bug, and is its error.
 func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*pmdoc.Node) error) (block int, broke, err error) {
 	first, last, lastAfter, err := changedBlocks(before, after, match)
 	if err != nil {
@@ -289,7 +290,7 @@ func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*
 	}
 	for index := first; index <= last; index++ {
 		if err := check(before.Children[index]); err != nil {
-			if errors.Is(err, pmdoc.ErrPanic) {
+			if !errors.Is(err, pmdoc.ErrSchema) {
 				return -1, nil, err
 			}
 			return -1, nil, nil
@@ -297,7 +298,7 @@ func replacementBroke(before, after *pmdoc.Node, match pmdoc.Range, check func(*
 	}
 	for index := first; index <= lastAfter; index++ {
 		if broke = check(after.Children[index]); broke != nil {
-			if errors.Is(broke, pmdoc.ErrPanic) {
+			if !errors.Is(broke, pmdoc.ErrSchema) {
 				return -1, nil, broke
 			}
 			return index, broke, nil

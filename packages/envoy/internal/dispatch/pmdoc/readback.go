@@ -48,11 +48,11 @@ func ReadBack(doc *Node) (*Node, error) {
 // or not after parses: the checks that read each changed block alone still refuse one the write
 // leaves unreadable. A nil before is a whole document the write makes, so every block that reads
 // back otherwise is the write's, and an after whose markdown the parser refuses is named by that
-// refusal. A panic reading either back (ErrPanic) is this package's bug, not a misread, and is the
-// error.
+// refusal. Only a refusal (ErrSchema) reading either back is a verdict; any other error, a panic
+// (ErrPanic) among them, is this package's bug, not a misread, and is the error.
 func NewMisread(before, after *Node) (string, error) {
 	backAfter, err := ReadBack(after)
-	if errors.Is(err, ErrPanic) {
+	if err != nil && !errors.Is(err, ErrSchema) {
 		return "", err
 	}
 	if err != nil {
@@ -60,7 +60,7 @@ func NewMisread(before, after *Node) (string, error) {
 			return err.Error(), nil
 		}
 		if _, beforeErr := ReadBack(before); beforeErr != nil {
-			if errors.Is(beforeErr, ErrPanic) {
+			if !errors.Is(beforeErr, ErrSchema) {
 				return "", beforeErr
 			}
 			return "", nil
@@ -79,7 +79,7 @@ func NewMisread(before, after *Node) (string, error) {
 		return difference, nil
 	}
 	backBefore, err := ReadBack(before)
-	if errors.Is(err, ErrPanic) {
+	if err != nil && !errors.Is(err, ErrSchema) {
 		return "", err
 	}
 	if err != nil {
@@ -103,8 +103,8 @@ func NewMisread(before, after *Node) (string, error) {
 // RefuseMisreadWrite refuses (ErrSchema) a write whose document reads back otherwise where before
 // did not (NewMisread; a nil before for a whole document): what is stored is its rendering, which
 // the next read would give back as another document or refuse. The rules that read a shape refuse
-// what they know first, so a refusal here names a shape none of them reads, and is logged. A panic
-// reading it back (ErrPanic) is the error.
+// what they know first, so a refusal here names a shape none of them reads, and is logged. Any
+// other error reading it back, a panic (ErrPanic) among them, is the error.
 func RefuseMisreadWrite(before, after *Node) error {
 	misread, err := NewMisread(before, after)
 	if err != nil {

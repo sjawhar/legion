@@ -1,7 +1,6 @@
 package pmdoc
 
 import (
-	"errors"
 	"fmt"
 	"html"
 	"reflect"
@@ -309,7 +308,7 @@ func BlockReadError(block *Node) error {
 // BlockShapeError says what a document-level block's markdown reads back as when that is not
 // blocks of the same kinds nested the same way - the first block that reads back as another - or
 // is nil when it reads back so, or the parser's refusal of the markdown. What a textblock holds is
-// not compared.
+// not compared. Every verdict it gives is ErrSchema, as the parser's own refusals are.
 func BlockShapeError(block *Node) error {
 	doc := readAlone(block)
 	markdown, err := Render(doc)
@@ -321,10 +320,18 @@ func BlockShapeError(block *Node) error {
 		return err
 	}
 	if reason := readDifference(doc, back, shapeOnly); reason != "" {
-		return errors.New(reason)
+		return readsBackAs(reason)
 	}
 	return nil
 }
+
+// readsBackAs is a block's markdown reading back as blocks of another shape (BlockShapeError):
+// a refusal, so it is ErrSchema, worded as what reads back.
+type readsBackAs string
+
+func (reason readsBackAs) Error() string { return string(reason) }
+
+func (readsBackAs) Unwrap() error { return ErrSchema }
 
 // endOf names where a block's children end, as a reader names it.
 func endOf(nodeType string) string {
