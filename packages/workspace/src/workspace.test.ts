@@ -1066,13 +1066,21 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
   test("core.askPass never answers the credentialed fetch's fill, and the pin is what stops it", async () => {
     // A dedicated bare repository with NO persisted configuration at all — not even
     // credential.interactive — so GIT_ASKPASS is the only variable in play. That absence is
-    // load-bearing, not an oversight: a repository provisioning has actually touched carries
-    // credential.interactive=false, persisted by credentialConfigCommands above, and on git >=
-    // 2.44 that setting alone blocks the askpass fallback — indistinguishable, by any text or
-    // behavior a fill can observe, from GIT_ASKPASS doing the same job (confirmed against real
-    // git: 2.43 ignores credential.interactive for this and answers regardless; 2.47, the worker
-    // image's, does not). Giving this fixture a persisted clone's configuration to look more
-    // "realistic" is exactly the change that would make the witness blind again.
+    // load-bearing, not an oversight, and for two reasons stronger than "avoids a git-version
+    // confound": first, credential.interactive=false is removable by exactly the adversary the
+    // pin exists for — the shared clone's configuration is tree-writable (this PR's own threat
+    // model), so an agent that can plant core.askPass can also run `git config --unset
+    // credential.interactive`; an attacker does not leave the mitigation standing while
+    // exploiting the hole beside it. Second, the credentialed *clone* always runs in exactly
+    // this fixture's state: `ensureRepoClone` clones into a fresh `mkdtemp` sibling with no
+    // persisted configuration at all, so the isolated fixture is production on first
+    // provisioning, not a laboratory. (It is also true that credential.interactive=false, on git
+    // >= 2.44, blocks the askpass fallback by itself, indistinguishable from GIT_ASKPASS doing
+    // the same job on a fetch of an already-provisioned clone — confirmed against real git: 2.43
+    // ignores it and answers regardless, 2.47, the worker image's, does not — but that is a
+    // secondary confound this fixture happens to sidestep, not the reason for it.) Giving this
+    // fixture a persisted clone's configuration to look more "realistic" is exactly the change
+    // that would make the witness blind again.
     const fetchEnv = await capturedFetchEnv();
     const askpassGitDir = path.join(await temporaryDirectory(), "askpass-repo.git");
     expect((await runCommand([SYSTEM_GIT, "init", "--bare", askpassGitDir])).exitCode).toBe(0);

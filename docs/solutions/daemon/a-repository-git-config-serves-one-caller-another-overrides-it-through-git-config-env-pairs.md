@@ -63,7 +63,10 @@ GIT_CONFIG_KEY_2=core.hooksPath                        GIT_CONFIG_VALUE_2=/dev/n
 ```
 
 beside an empty `GIT_ASKPASS` (git reads it as no askpass program at all, not `core.askPass`
-either), `GIT_TERMINAL_PROMPT=0` and `GIT_ALLOW_PROTOCOL=https`. The clone and the fetch also pass
+either), `GIT_TERMINAL_PROMPT=0`, `GIT_ALLOW_PROTOCOL=https`, `GIT_CONFIG_GLOBAL=/dev/null` and
+`GIT_CONFIG_NOSYSTEM=1` (no reachable global or system config), and `GIT_CONFIG_PARAMETERS=""`
+(git reads it after the numbered pairs, so it would otherwise survive their reset). The clone and
+the fetch also pass
 `--config=git.executable-path=git`, and the fetch `--ignore-working-copy`. What each of these pins,
 and what remains, is described once, in `createProvisioningCredential`'s doc comment
 (`packages/workspace/src/workspace.ts`). The one-shot helper answers `get` with the installation

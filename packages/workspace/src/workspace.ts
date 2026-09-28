@@ -151,7 +151,13 @@ function runCredentialedJj(
  *   could reach: the global and system config files (`GIT_CONFIG_GLOBAL=/dev/null`,
  *   `GIT_CONFIG_NOSYSTEM=1`, the Go twin's `isolatedGitConfig`) and `GIT_CONFIG_PARAMETERS`, which
  *   git reads *after* the numbered `GIT_CONFIG_COUNT` pairs and so survives their reset on its own
- *   (`GIT_CONFIG_PARAMETERS: ""`, which git parses as zero pairs, whatever the ambient value was);
+ *   (`GIT_CONFIG_PARAMETERS: ""`, which git parses as zero pairs, whatever the ambient value was).
+ *   Hiding the global and system config hides an operator's legitimate settings there too — this
+ *   daemon host's `safe.directory=*` and `filter.lfs.*` registrations included — which the clone
+ *   and fetch need only because nothing here needs them yet: every *uncredentialed* command still
+ *   reads them, so a clone whose ownership stops matching the process uid would fail `dubious
+ *   ownership` on the credentialed fetch alone, and an LFS repository would clone pointers with
+ *   `filter.lfs.required` silently gone;
  * - git's hooks: none run (`core.hooksPath=/dev/null`);
  * - git's transport: https alone (`GIT_ALLOW_PROTOCOL=https`), all https://github.com needs;
  * - jj's git: the one on PATH (`PINNED_GIT_EXECUTABLE`);
