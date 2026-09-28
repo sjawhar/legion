@@ -46,44 +46,26 @@ func ReadBack(doc *Node) (*Node, error) {
 // another value anywhere (a table cell's alignment) is not compared. A before whose markdown the
 // parser refuses (a browser edit can leave one) gives nothing to judge against, and is "" whether
 // or not after parses: the checks that read each changed block alone still refuse one the write
-// leaves unreadable. A nil before is a whole document the write makes, so every block that reads
-// back otherwise is the write's, and an after whose markdown the parser refuses is named by that
-// refusal. Only a refusal (ErrSchema) reading either back is a verdict; any other error, a panic
-// (ErrPanic) among them, is this package's bug, not a misread, and is the error.
+// leaves unreadable. Only a refusal (ErrSchema) reading either back is a verdict; any other error,
+// a panic (ErrPanic) among them, is this package's bug, not a misread, and is the error.
 func NewMisread(before, after *Node) (string, error) {
 	backAfter, err := ReadBack(after)
 	if err != nil && !errors.Is(err, ErrSchema) {
 		return "", err
 	}
-	if err != nil {
-		if before == nil {
-			return err.Error(), nil
-		}
-		if _, beforeErr := ReadBack(before); beforeErr != nil {
-			if !errors.Is(beforeErr, ErrSchema) {
-				return "", beforeErr
-			}
-			return "", nil
-		}
-		return err.Error(), nil
-	}
 	written := StripAnchorMarks(after)
-	difference := readDifference(written, backAfter, skip{})
-	if difference == "" {
+	if err == nil && readDifference(written, backAfter, skip{}) == "" {
 		return "", nil
 	}
-	if before == nil {
-		if found := misreads(written, backAfter, skip{}); len(found) > 0 {
-			return found[0].reason, nil
-		}
-		return difference, nil
+	backBefore, beforeErr := ReadBack(before)
+	if beforeErr != nil && !errors.Is(beforeErr, ErrSchema) {
+		return "", beforeErr
 	}
-	backBefore, err := ReadBack(before)
-	if err != nil && !errors.Is(err, ErrSchema) {
-		return "", err
+	if beforeErr != nil {
+		return "", nil
 	}
 	if err != nil {
-		return "", nil
+		return err.Error(), nil
 	}
 	previous := StripAnchorMarks(before)
 	drift := skip{names: attributeDrift(previous, backBefore)}
@@ -100,13 +82,43 @@ func NewMisread(before, after *Node) (string, error) {
 	return "", nil
 }
 
+// documentMisread names how doc, a whole document a write makes, reads back otherwise, or is ""
+// when it does not: every block that reads back otherwise is the write's, the first named as far
+// down as its markdown still pairs (misreads), and a doc whose markdown the parser refuses is named
+// by that refusal. Only a refusal (ErrSchema) is a verdict; any other error is the error.
+func documentMisread(doc *Node) (string, error) {
+	back, err := ReadBack(doc)
+	if err != nil {
+		if errors.Is(err, ErrSchema) {
+			return err.Error(), nil
+		}
+		return "", err
+	}
+	written := StripAnchorMarks(doc)
+	difference := readDifference(written, back, skip{})
+	if difference == "" {
+		return "", nil
+	}
+	if found := misreads(written, back, skip{}); len(found) > 0 {
+		return found[0].reason, nil
+	}
+	return difference, nil
+}
+
 // RefuseMisreadWrite refuses (ErrSchema) a write whose document reads back otherwise where before
-// did not (NewMisread; a nil before for a whole document): what is stored is its rendering, which
-// the next read would give back as another document or refuse. The rules that read a shape refuse
-// what they know first, so a refusal here names a shape none of them reads, and is logged. Any
-// other error reading it back, a panic (ErrPanic) among them, is the error.
+// did not (NewMisread), or, with a nil before, a whole document the write makes that reads back
+// otherwise (documentMisread): what is stored is its rendering, which the next read would give back
+// as another document or refuse. The rules that read a shape refuse what they know first, so a
+// refusal here names a shape none of them reads, and is logged. Any other error reading it back, a
+// panic (ErrPanic) among them, is the error.
 func RefuseMisreadWrite(before, after *Node) error {
-	misread, err := NewMisread(before, after)
+	var misread string
+	var err error
+	if before == nil {
+		misread, err = documentMisread(after)
+	} else {
+		misread, err = NewMisread(before, after)
+	}
 	if err != nil {
 		return err
 	}
