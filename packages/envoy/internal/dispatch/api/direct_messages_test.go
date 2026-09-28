@@ -883,8 +883,11 @@ func assertRootCarriesDelivery(t *testing.T, database *store.Store, rootID, sess
 // This and TestTheUnreadFlagFollowsTheReadMark below fail together under every mutation of the
 // unread rule but one, which is why both stay: making the flag session-level rather than per
 // root (messages.go's `on unread.root_id = c.id` written `on exists (select 1 from
-// unread_direct_replies)`) reds only this one, whose fixture holds a second, all-read
-// conversation and asserts the flag on each root separately.
+// unread_direct_replies)`) reds this one and leaves its pair green. This one's fixture holds a
+// second, all-read conversation and asserts the flag on each root separately. (That mutation
+// reds two other tests as well, TestTheUnreadCountEqualsWhatTheWindowShowsForEverySession and
+// TestTheWindowReturnsEveryUnreadConversationBesideTheFiftyMostActive; what separates the pair
+// is that its other member stays green.)
 //
 // The flag a conversation comes back with is the read mark's verdict, not "this session has
 // replied here". Written by the Legion PO's reviewer (#1533, issuecomment-5865095561), green at
