@@ -321,4 +321,64 @@ callers "$root" "$(printf '%s\n' "$all_inputs" | sed "s|'package.json'|'package.
 run_check "$root"
 check "package.jso? covers package.json in a dorny filter" "$(is "$status" 0)"
 
+# buildx_step <root> <run body>: replaces the build-push-action step with a run step.
+buildx_step() {
+  local root=$1 body=$2
+  python3 - "$root/.github/workflows/image.yaml" "$body" <<'PY'
+import sys
+path, body = sys.argv[1], sys.argv[2]
+indented = "\n".join("          " + line for line in body.splitlines())
+text = open(path).read()
+head, _, _ = text.partition("      - uses: docker/build-push-action@v6")
+open(path, "w").write(f"{head}      - name: Build\n        run: |\n{indented}\n")
+PY
+}
+
+echo "case: a run step invoking docker buildx build is an image build"
+root=$(fixture buildx-run)
+buildx_step "$root" 'docker buildx build --load --tag app:ci --file docker/Dockerfile .'
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "counts the run step as a build" "$(contains "$out" 'docker/Dockerfile: checked 5 inputs (7 files) against .github/workflows/image.yaml on.push.paths')"
+check "reports one build, not zero" "$(contains "$out" '(1 image build(s))')"
+
+echo "case: a buildx run step's inputs are covered like any other build's"
+root=$(fixture buildx-run-uncovered)
+buildx_step "$root" 'docker buildx build --load --tag app:ci --file docker/Dockerfile .'
+drop_path "$root" "packages/app/**"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the source" "$(contains "$out" 'does not cover packages/app (docker/Dockerfile:3)')"
+
+echo "case: a buildx run step across continuations, with an expression and a second command"
+root=$(fixture buildx-run-multiline)
+buildx_step "$root" 'docker pull debian:trixie-slim
+docker buildx build --load --tag "$IMAGE" \
+  --build-arg REVISION=${{ github.sha }} \
+  --file docker/Dockerfile .'
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "finds exactly the one build" "$(contains "$out" '(1 image build(s))')"
+
+echo "case: a run step this check cannot read fails rather than passing vacuously"
+root=$(fixture buildx-run-unknown-flag)
+buildx_step "$root" 'docker buildx build --load --squash --file docker/Dockerfile .'
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the flag" "$(contains "$out" 'Build names --squash, a flag this check cannot read')"
+
+root=$(fixture buildx-run-no-context)
+buildx_step "$root" 'docker buildx build --load --file docker/Dockerfile'
+run_check "$root"
+check "a build with no context fails" "$(is "$status" 1)"
+check "says how many it found" "$(contains "$out" 'names 0 build contexts, and this check needs exactly one')"
+
+echo "case: a run step that mentions docker without building is not a build"
+root=$(fixture buildx-run-not-a-build)
+buildx_step "$root" 'docker pull debian:trixie-slim'
+run_check "$root"
+check "fails on zero builds rather than passing" "$(is "$status" 1)"
+check "says it proves nothing" "$(contains "$out" 'this check covered 0 image builds')"
+
+
 summary "check-image-trigger-paths.sh"

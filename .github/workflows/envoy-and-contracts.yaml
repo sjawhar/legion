@@ -25,6 +25,14 @@ on:
       - "deploy/kubernetes/operator-route/**"
       - "packages/daemon/src/daemon/omp-pin.ts"
       - ".github/actions/install-omp/**"
+      # The envoy-go job builds packages/envoy/docker/Dockerfile for the smoke test, so this
+      # list owes every file that build reads: the four below are the ones the entries above do
+      # not already cover. .github/scripts/check-image-trigger-paths.sh fails the build when one
+      # is missing.
+      - ".github/workflows/envoy-and-contracts.yaml"
+      - ".dockerignore"
+      - "packages/daemon/package.json"
+      - "packages/workspace/package.json"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -48,6 +56,11 @@ on:
       - "deploy/kubernetes/operator-route/**"
       - "packages/daemon/src/daemon/omp-pin.ts"
       - ".github/actions/install-omp/**"
+      # Same four the push list owes, for the same build.
+      - ".github/workflows/envoy-and-contracts.yaml"
+      - ".dockerignore"
+      - "packages/daemon/package.json"
+      - "packages/workspace/package.json"
   merge_group:
     types: [checks_requested]
 

@@ -226,6 +226,90 @@ def mount_sources(instruction: str) -> list[str]:
     return sources
 
 
+# `docker buildx build` flags this check knows. A flag outside both sets is Unreadable rather
+# than guessed at, since mistaking a value-taking flag for a boolean silently eats the context
+# argument and would check the wrong tree.
+BUILDX_VALUE_FLAGS = {
+    "--add-host", "--allow", "--annotation", "--attest", "--build-arg", "--build-context",
+    "--builder", "--cache-from", "--cache-to", "--call", "--cgroup-parent", "--file", "-f",
+    "--iidfile", "--label", "--metadata-file", "--network", "--no-cache-filter", "--output",
+    "-o", "--platform", "--progress", "--provenance", "--sbom", "--secret", "--shm-size",
+    "--ssh", "--tag", "-t", "--target", "--ulimit",
+}
+BUILDX_BOOLEAN_FLAGS = {
+    "--check", "--debug", "-D", "--force-rm", "--load", "--no-cache", "--pull", "--push",
+    "--quiet", "-q", "--rm",
+}
+SEPARATOR = re.compile(r"[;|&]+")
+EXPRESSION = re.compile(r"\$\{\{[^}]*\}\}")
+
+
+def buildx_builds(script: str) -> list[tuple[str, str]]:
+    """(context, Dockerfile) of every `docker buildx build` / `docker build` in a run step.
+
+    Two normalisations before shlex, which knows nothing about shell grammar: a `${{ … }}`
+    expression collapses to one word, or it would split into three and the tail would read as
+    context arguments; and `;`, `|`, `&` and the newline become standalone words, or a second
+    command on the same line would read as arguments to the first and a build on the next line
+    would be missed entirely."""
+    joined = re.sub(r"\\\s*\n", " ", EXPRESSION.sub("EXPRESSION", script))
+    padded = SEPARATOR.sub(r" \g<0> ", joined).replace("\n", " ; ")
+    try:
+        words = shlex.split(padded, comments=True)
+    except ValueError as error:
+        raise Unreadable(f"unparseable run step: {error}") from error
+    found, command = [], []
+    for word in words + [";"]:
+        if not SEPARATOR.fullmatch(word):
+            command.append(word)
+            continue
+        arguments = build_arguments(command)
+        if arguments is not None:
+            found.append(buildx_target(arguments))
+        command = []
+    return found
+
+
+def build_arguments(command: list[str]) -> list[str] | None:
+    """The arguments after `docker build` / `docker buildx build`, or None for anything else."""
+    if not command or posixpath.basename(command[0]) != "docker":
+        return None
+    if command[1:3] == ["buildx", "build"]:
+        return command[3:]
+    if command[1:2] == ["build"]:
+        return command[2:]
+    return None
+
+
+def buildx_target(arguments: list[str]) -> tuple[str, str]:
+    """The context and Dockerfile one `docker build` argument list names."""
+    dockerfile, positionals, index = None, [], 0
+    while index < len(arguments):
+        word = arguments[index]
+        index += 1
+        if not word.startswith("-"):
+            positionals.append(word)
+            continue
+        name, _, inline = word.partition("=")
+        if name in BUILDX_BOOLEAN_FLAGS:
+            continue
+        if name not in BUILDX_VALUE_FLAGS:
+            raise Unreadable(f"names {name}, a flag this check cannot read")
+        if "=" not in word:
+            if index >= len(arguments):
+                raise Unreadable(f"names {name} with no value")
+            inline = arguments[index]
+            index += 1
+        if name in {"--file", "-f"}:
+            dockerfile = inline
+    if len(positionals) != 1:
+        raise Unreadable(
+            f"names {len(positionals)} build contexts, and this check needs exactly one"
+        )
+    context = posixpath.normpath(positionals[0])
+    return context, posixpath.normpath(dockerfile or posixpath.join(context, "Dockerfile"))
+
+
 def context_files(context: str, source: str, ignored) -> list[str]:
     """Repository paths of the files a context source brings in, after the .dockerignore."""
     if "$" in source:
@@ -464,16 +548,28 @@ for workflow, document in documents.items():
         if not isinstance(job, dict):
             continue
         for step in job.get("steps") or []:
-            if isinstance(step, dict) and "docker/build-push-action" in str(step.get("uses", "")):
+            if not isinstance(step, dict):
+                continue
+            if "docker/build-push-action" in str(step.get("uses", "")):
                 options = step.get("with") or {}
                 context = posixpath.normpath(str(options.get("context", ".")))
                 dockerfile = str(options.get("file", posixpath.join(context, "Dockerfile")))
                 builds.append((workflow, context, posixpath.normpath(dockerfile)))
+                continue
+            script = step.get("run")
+            if not isinstance(script, str) or "docker" not in script:
+                continue
+            where = step.get("name") or "an unnamed run step"
+            try:
+                for context, dockerfile in buildx_builds(script):
+                    builds.append((workflow, context, dockerfile))
+            except Unreadable as error:
+                problems.append(f"::error file={workflow}::{workflow}: {where} {error}")
 
 if not builds:
     problems.append(
-        "::error::no workflow runs docker/build-push-action: this check covered 0 image builds, "
-        "so it proves nothing"
+        "::error::no workflow builds an image with docker/build-push-action or `docker buildx "
+        "build`: this check covered 0 image builds, so it proves nothing"
     )
 
 for workflow, context, dockerfile in builds:
