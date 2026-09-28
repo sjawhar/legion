@@ -103,8 +103,11 @@ interface Roots {
   readonly workspace: string | undefined;
   /** The scratch root's real path (`/tmp`). */
   readonly scratch: string;
-  /** First path components under the scratch root that other processes own (sockets). */
+  /** Prefixes of first path components under the scratch root that other processes own (sockets). */
   readonly protectedScratch: readonly string[];
+  /** First path components under the scratch root this pane lives in, not scratch: the directory
+   * holding its `HOME` or `TMUX_TMPDIR`, by exact name. */
+  readonly protectedDirectories: readonly string[];
 }
 
 interface Ctx {
@@ -348,12 +351,17 @@ function realish(abs: string, followFinal: boolean): string {
   return path.join(realExisting(path.dirname(resolved)), path.basename(resolved));
 }
 
-/** Whether a first component under the scratch root is one other processes own. A component
- * that is only the literal start of a glob or an unknown value (`/tmp/t*`) is protected when it
- * could still grow into such a name. */
+/** Whether a first component under the scratch root is one other processes own, or one holding
+ * the pane's home or tmux directory. A component that is only the literal start of a glob or an
+ * unknown value (`/tmp/t*`) is protected when it could still grow into such a name. */
 function isProtectedScratchComponent(component: string, roots: Roots, partial = false): boolean {
-  return roots.protectedScratch.some(
-    (name) => component.startsWith(name) || (partial && name.startsWith(component))
+  return (
+    roots.protectedScratch.some(
+      (name) => component.startsWith(name) || (partial && name.startsWith(component))
+    ) ||
+    roots.protectedDirectories.some(
+      (name) => component === name || (partial && name.startsWith(component))
+    )
   );
 }
 
@@ -3301,14 +3309,15 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     }
     // A home or tmux directory under the scratch root is not the pane's scratch: the /tmp
     // directory holding it is protected whole, as a rig's run directory holds its OMP home.
-    const protectedScratch = [...PROTECTED_SCRATCH];
     const tmuxDir = env.TMUX_TMPDIR === undefined ? undefined : realish(env.TMUX_TMPDIR, true);
+    const protectedDirectories: string[] = [];
     for (const owned of [tmuxDir, home]) {
-      if (owned?.startsWith(`${scratch}/`)) {
-        protectedScratch.push(owned.slice(scratch.length + 1).split("/")[0] ?? "");
-      }
+      const component = owned?.startsWith(`${scratch}/`)
+        ? owned.slice(scratch.length + 1).split("/")[0]
+        : undefined;
+      if (component !== undefined && component !== "") protectedDirectories.push(component);
     }
-    return { workspace, scratch, protectedScratch };
+    return { workspace, scratch, protectedScratch: PROTECTED_SCRATCH, protectedDirectories };
   };
   const context = (env: NodeJS.ProcessEnv): Ctx => ({
     roots: roots(env),

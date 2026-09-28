@@ -147,10 +147,13 @@ describe("the pane guard's command families", () => {
       const rigHome = path.join(run, "omp-home");
       const rigWorkspace = path.join(run, "state", "workspaces", "LEGION-2");
       mkdirSync(path.join(rigHome, ".ssh"), { recursive: true });
+      const sibling = `${run}2`;
       mkdirSync(rigWorkspace, { recursive: true });
+      mkdirSync(sibling, { recursive: true });
       writeFileSync(path.join(rigHome, ".ssh", "id_ed25519"), "key");
       writeFileSync(path.join(rigHome, ".bashrc"), "profile");
       writeFileSync(path.join(rigWorkspace, "notes.txt"), "notes");
+      writeFileSync(path.join(sibling, "notes.txt"), "notes");
       const rigGuard = createPaneGuard({ workspace: rigWorkspace, ompPid: process.pid, scratch });
       const rigEnv = { ...env, HOME: rigHome, LEGION_WORKSPACE: rigWorkspace };
       const rig = (command: string): string | undefined =>
@@ -159,12 +162,20 @@ describe("the pane guard's command families", () => {
         for (const target of ['"$HOME/.bashrc"', "~/.ssh/id_ed25519", run]) {
           expect(rig(build(target)), target).toContain("outside the issue workspace");
         }
-        // The rig's workspace and the pane's own /tmp directories stay writable.
-        for (const target of ['"$LEGION_WORKSPACE/notes.txt"', `${scratch}/mine/notes.txt`]) {
+        // The rig's workspace and the pane's own /tmp directories stay writable, a sibling whose
+        // name only starts with the run directory's included; a glob that could reach the run
+        // directory is refused.
+        for (const target of [
+          '"$LEGION_WORKSPACE/notes.txt"',
+          `${scratch}/mine/notes.txt`,
+          `${sibling}/notes.txt`,
+        ]) {
           expect(rig(build(target)), target).toBeUndefined();
         }
+        expect(rig(`rm -rf ${scratch}/legion-e2e-r*`)).toContain("a glob over");
       } finally {
         rmSync(run, { recursive: true, force: true });
+        rmSync(sibling, { recursive: true, force: true });
       }
     });
   }
