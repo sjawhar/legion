@@ -130,9 +130,10 @@
   (`${v///tmp//etc}`); text outside ASCII, which bash counts by the locale; a `case` whose word
   matches no item, which walks every branch. A pattern expansion spends the walk budget by the
   slices it tests. The Stage 2, 3, 4b.13b, 4b and controller drivers are now refused only for
-  killing the processes a query selects (`$(run_processes)`, `first_child`), and the four manual
-  smokes (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `omp-roundtrip.sh`) run their
-  sessions on their own tmux server, so the guard allows their cleanup.
+  killing the processes a query selects (`$(run_processes)`, `first_child`), and the five manual
+  smokes (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `smoke-clear-rebind.sh`,
+  `omp-roundtrip.sh`) run their sessions on their own tmux server, where a `kill-session` can end
+  only the session each started.
   `src/legion/pane-guard-walk.ts` prints every refusal a script meets, not only the first.
 - A pane whose `HOME` sits under `/tmp` keeps it (LEGION-300). The guard counted every directory
   below `/tmp` except the socket families as the pane's scratch, so with `HOME` at

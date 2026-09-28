@@ -36,9 +36,12 @@ const repository = path.resolve(import.meta.dir, "../../../..");
 // is what makes a refusal that moves fail here. The test is not flaky: it is right about a
 // population that changed.
 const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
-  // Writes or deletes under the operator's home: the dispatch backups, a profile's plugin tree.
+  // Writes or deletes under the operator's home: the dispatch backups, a profile's plugin tree, a
+  // Claude project directory.
   "packages/envoy/deploy/scripts/autodeploy.sh": "packages/envoy/deploy/scripts/autodeploy.sh:145",
   "packages/pi-envoy/scripts/grant-rig/setup.sh": "packages/pi-envoy/scripts/grant-rig/setup.sh:56",
+  "packages/claude-envoy/scripts/smoke-clear-rebind.sh":
+    "packages/claude-envoy/scripts/smoke-clear-rebind.sh:62",
   // Deletes the backups `find` lists: a path read from a command's output.
   "packages/envoy/deploy/scripts/autodeploy_test.sh":
     "packages/envoy/deploy/scripts/autodeploy.sh:80",
@@ -48,10 +51,6 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/stage3-4b13b-acceptance.sh:1254",
   "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/stage3-devbox-workflow.sh:1136",
   "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:999",
-  // Ends its session on the shared default tmux server, where `kill-session` can end anyone's, and
-  // then deletes its Claude project directory under the operator's home.
-  "packages/claude-envoy/scripts/smoke-clear-rebind.sh":
-    "packages/claude-envoy/scripts/smoke-clear-rebind.sh:42",
   // A library run bare, without the arguments every caller passes: bash stops at its argument
   // check, and the guard, which walks a command whatever a test before it decides, reaches the
   // paths an empty argument makes (`--control`, `--dest`).

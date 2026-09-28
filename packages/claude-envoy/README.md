@@ -219,7 +219,9 @@ session id, lists the new direct subject, and still lacks the old one two heartb
 fails when the entry moves later than the handoff poll allows; with `ENVOY_HEARTBEAT_MS=60000` that
 checks the poll rather than a heartbeat that happened to fall soon after `/clear`. It needs
 `tmux`, `curl`, `jq`, an authenticated `claude`, and the listener and NATS; it sends no prompt to the
-model and removes both ids' registry entries when it exits. Pointed at an older build (an installed
+model and removes both ids' registry entries when it exits. Like `smoke-channel.sh`, it runs its
+session on its own tmux server, on a socket in its temp directory, and prints the
+`tmux -S <socket> attach -t <session>` line that watches it. Pointed at an older build (an installed
 plugin cache directory), it reproduces the stale subject that build leaves behind:
 
 ```bash
