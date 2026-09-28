@@ -412,10 +412,13 @@ since the same accept is refused every time.
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,
 including its cells' alignment. An index is required. A missing, non-integer, negative, or out-of-range
 index is `INVALID_OP` on `index`, naming the supplied value and the table's actual row and column dimensions; no operation
-partially mutates a table. Parsing canonicalizes a short ragged Markdown row by padding its missing
-cells, each with its column's alignment, as its rendering reads back, so column deletion operates on
-that complete canonical representation and leaves every non-selected cell intact. The browser
-editor's parser does not pad a short row. Deleting the last remaining body row or any row's last remaining column
+partially mutates a table. Parsing pads a short row to the header's width, as the browser editor's
+table plugin does on load: Milkdown's gfm preset installs prosemirror-tables' `tableEditing`, whose
+`fixTables` pads a table a transaction brings in (verified on an `EditorState`; that the browser
+loads by a transaction is y-prosemirror's sync, not checked in a browser). The headless engine runs
+no plugins and keeps the short row. Each padded cell takes its column's alignment, as its rendering
+reads back, so column deletion operates on that complete representation and leaves every
+non-selected cell intact. Deleting the last remaining body row or any row's last remaining column
 is refused, retaining the table block. Table `references` from `GET /api/v1/artifacts/{id}/blocks`
 aggregate anchors pinned to descendant cells. A row or column deletion that would remove an open
 ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
@@ -748,7 +751,10 @@ updates cannot carry a carriage return. No stored document holds one, and `pmdoc
 feeds alone. Marks are read as that parser reads them, as a set, where goldmark nests them: a mark
 opened where the same mark is already open adds nothing, and its close ends the mark for the rest
 of the text around it, up to the node that opened it (`parseInlineMarks`), so `*x *y* z*` is
-`x y` in emphasis and ` z` without, and `****a****` is strong once. A code span keeps the whitespace that
+`x y` in emphasis and ` z` without, and `****a****` is strong once. Delimiter runs pair as that
+parser pairs them: CommonMark's rule of three is judged on the lengths two runs have left after
+the pairs already made from them (`emphasisDelimiters`), where goldmark judged the lengths they were
+written with, so in `***a.****&#32;b*` the closer's last `**` is text. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
@@ -786,6 +792,10 @@ on the line after the quote's last, is refused when it holds more than one line:
 editor's parser keeps the list or quote open across the code's first line, which it does not
 continue, and reads the code's later lines as a second code block. A blank line before the code
 ends a quote, so there the code is read whole.
+A fenced code block whose language - the info string's first word - holds a backslash escape or a
+character reference is refused: that parser decodes both, and goldmark keeps them as written. What
+it leaves as written (`\q`, `&bogus;`) is read as before, as is the rest of the info string, which
+both drop.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
@@ -819,10 +829,12 @@ for `&` and `~`, whose other escapes are character references, which linkify run
 written in one order - link, strong, emphasis - so where a text still carries a mark the text
 before it opened, and the order puts that mark after the text's other marks, the mark is closed and
 opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
-`*`, `**` and `*`), the parser reads one run and cannot split it as written. Such a run is written again with the marks still open
-kept open and the others opened inside them (`keepingOpen`), and kept only where that reads back
-with nothing fused; a run that fuses nothing is written as before, so italic closed around a link
-keeps its bytes.
+`*`, `**` and `*`), the parser reads one run. Such a run is kept where it reads back, as the parser
+then splits it as written; one that does not is written again with the marks still open kept open,
+then the marks the next text still carries, and the text's others opened inside them
+(`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written
+`***a** b*`; a run that fuses nothing is written as before, so italic closed around a link keeps
+its bytes.
 
 A container that holds nothing is read as the browser editor's parser reads it, holding one empty
 paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
