@@ -181,12 +181,14 @@ else (Sami, 2026-09-27, dispatch://AGENTC-34/ask/01ed2956-73cc-48d2-8ed4-7a86c6d
 means ready: specced, unblocked, and waiting on neither a deploy nor a decision. An issue that
 waits on one belongs in `backlog`, with what it waits on said on the issue.
 
-Hold at most three issues in flight (`in_progress`, `testing`, `needs_review` or `retro`), all on
-the current priorities that the roadmap, dispatch://AGENTC-34, names (Sami, 2026-09-27, answering
-dispatch://AGENTC-34/ask/1aeb8f2e-0950-4eaa-aaac-24286c9dd3ca; the question proposed two, and his
-answer set three). Past three, or holding one off the priorities: push any unfinished work, say
-where in one comment on the issue, move it to `backlog` and clear its route. Each issue counts on
-its own; a child does not ride under its parent's slot. In-flight issues with no owner at all go
+Hold at most three issues in flight (`in_progress`, `testing`, `needs_review` or `retro`), of any
+kind (Sami, 2026-09-27, answering dispatch://AGENTC-34/ask/1aeb8f2e-0950-4eaa-aaac-24286c9dd3ca;
+the question proposed two, and his answer set three). The limit is per agent and has nothing to do
+with the week's priorities (Sami, 2026-09-28, reply a7647eb0 on
+dispatch://AGENTC-393/ask/b773d9f6): the priorities decide only what you pull next. Past three:
+push any unfinished work, say where in one comment on the issue, move it to `backlog` and clear
+its route. Each issue counts on its own; a child does not ride under its parent's slot.
+In-flight issues with no owner at all go
 back to `backlog` as well: no claim or route held by a live session, no Dispatch activity in the
 last day, and no pull request moving on GitHub (an owner working there leaves no Dispatch trace).
 The order keeper sweeps those. Never write the status of an issue that carries the `legion`
