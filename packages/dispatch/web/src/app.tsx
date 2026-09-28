@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
-import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, matchPath, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isForbidden, isUnauthorized } from "./api/client";
 import { useConnectionState } from "./api/live";
@@ -75,6 +75,10 @@ const DocumentPage = lazy(() =>
 const AgentsPage = lazy(() =>
   import("./features/agents/AgentsPage").then((module) => ({ default: module.AgentsPage }))
 );
+
+/** The live agent view is the one route whose page owns its scroller: the thread scrolls and
+ *  the page's header and composer stay put, so the shell gives it exactly the viewport. */
+const AGENT_LIVE_PATH = "/agents/:sessionId/live";
 
 const AgentConversationPage = lazy(() =>
   import("./features/agent-view/AgentConversationPage").then((module) => ({
@@ -359,6 +363,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           : marginRailShown
             ? "xl:pr-20"
             : "";
+  // Every other page scrolls the document: `ViewportAnchor` keeps the reader's place with
+  // `window.scrollBy`, and sticky composers stick to the window. So only a page that scrolls
+  // inside itself gets a viewport-tall shell (dynamic viewport units where the browser has them,
+  // so a phone's collapsing toolbar is accounted for), with `<main>` a flex column that hands it
+  // the height left below the compact header.
+  const fillsViewport = matchPath(AGENT_LIVE_PATH, location.pathname) !== null;
   const connection = useConnectionState();
   const inbox = useQuery(inboxQuery());
   const needsYouCount = inbox.data === undefined ? 0 : waitingOnYou(inbox.data).length;
@@ -437,7 +447,14 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 
   return (
     <MarginProvider>
-      <div className={`xl:flex ${canvasText}`} data-testid="app-shell">
+      <div
+        className={
+          fillsViewport
+            ? `flex h-screen flex-col supports-[height:100dvh]:h-dvh xl:flex-row ${canvasText}`
+            : `xl:flex ${canvasText}`
+        }
+        data-testid="app-shell"
+      >
         <a
           className={`sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:px-4 focus:py-2 ${railFocusOverlayBg} ${railFocusOverlayText}`}
           href="#main-content"
@@ -542,7 +559,11 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </aside>
         )}
         <main
-          className={`min-w-0 flex-1 p-6 pb-32 outline-none xl:order-2 xl:pb-6 ${mainLayoutClass}`}
+          className={
+            fillsViewport
+              ? `flex min-h-0 min-w-0 flex-1 flex-col p-6 outline-none xl:order-2 ${mainLayoutClass}`
+              : `min-w-0 flex-1 p-6 pb-32 outline-none xl:order-2 xl:pb-6 ${mainLayoutClass}`
+          }
           data-shell-layout={fullWidth ? "full-width" : "standard"}
           data-testid="main-content"
           id="main-content"
@@ -556,7 +577,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
-                <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
+                <Route element={<AgentConversationPage />} path={AGENT_LIVE_PATH} />
                 <Route element={<IssuePage />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
                 <Route element={<ProjectPage />} path="/projects/:key/architecture" />

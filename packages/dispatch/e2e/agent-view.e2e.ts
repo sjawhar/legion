@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
 import { publishAgentStreamFrame, setAgentStreamResponder } from "./api";
@@ -89,6 +89,81 @@ function assistantFrame(seq: number, text: string, streaming: boolean): object {
     seq,
     v: 1,
   };
+}
+
+/** A replay long enough that the thread must scroll at any viewport: forty turns of prose. */
+function longReplay(sessionID: string): object {
+  const frames = Array.from({ length: 40 }, (_, index) => ({
+    kind: "message",
+    message: {
+      at: 1_000 + index * 1_000,
+      id: `m${index}`,
+      parts: [
+        {
+          text: `Turn ${index}: ${"the relay carries this turn to the viewer. ".repeat(4)}`,
+          type: "text",
+        },
+      ],
+      role: index % 2 === 0 ? "user" : "assistant",
+      streaming: false,
+    },
+    seq: index + 1,
+    v: 1,
+  }));
+  return { frames, session_id: sessionID, v: 1 };
+}
+
+interface LiveViewLayout {
+  /** The document's scrollable height and the layout viewport's height. */
+  documentHeight: number;
+  viewportHeight: number;
+  /** The visual viewport's bottom edge, in the layout viewport's coordinates. */
+  visualBottom: number;
+  composerBottom: number;
+  mainBottom: number;
+  mainPaddingBottom: number;
+  threadScrollHeight: number;
+  threadClientHeight: number;
+}
+
+function liveViewLayout(page: Page): Promise<LiveViewLayout> {
+  return page.evaluate(() => {
+    const box = (testId: string) => {
+      const element = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
+      if (element === null) throw new Error(`no ${testId}`);
+      return element;
+    };
+    const main = box("main-content");
+    const thread = box("agent-thread");
+    const viewport = window.visualViewport;
+    if (viewport === null) throw new Error("no visualViewport");
+    return {
+      composerBottom: box("agent-composer").getBoundingClientRect().bottom,
+      documentHeight: document.documentElement.scrollHeight,
+      mainBottom: main.getBoundingClientRect().bottom,
+      mainPaddingBottom: Number.parseFloat(getComputedStyle(main).paddingBottom),
+      threadClientHeight: thread.clientHeight,
+      threadScrollHeight: thread.scrollHeight,
+      viewportHeight: window.innerHeight,
+      visualBottom: viewport.offsetTop + viewport.height,
+    };
+  });
+}
+
+/** The page never scrolls, its header and composer are on screen, and the thread is the one
+ *  scroller: scrolled to its start, the first turn shows and the composer has not moved. */
+async function expectViewportBound(page: Page): Promise<void> {
+  await page.evaluate(() => window.scrollTo(0, 100_000));
+  const layout = await liveViewLayout(page);
+  expect(layout.documentHeight).toBeLessThanOrEqual(layout.viewportHeight + 1);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  expect(layout.composerBottom).toBeLessThanOrEqual(layout.viewportHeight);
+  await expect(page.getByRole("link", { name: "← Agents" })).toBeInViewport({ ratio: 1 });
+  await expect(page.getByTestId("agent-composer")).toBeInViewport({ ratio: 1 });
+  expect(layout.threadScrollHeight).toBeGreaterThan(layout.threadClientHeight);
+  await page.getByTestId("agent-thread").evaluate((thread) => thread.scrollTo(0, 0));
+  await expect(page.getByText("Turn 0:")).toBeInViewport();
+  expect((await liveViewLayout(page)).composerBottom).toBe(layout.composerBottom);
 }
 
 test.beforeEach(async () => {
@@ -215,6 +290,82 @@ test("a session nobody answers for is told so, and recovers when a responder app
     );
     await expect(page.getByText("Back on a newer plugin")).toBeVisible({ timeout: 20_000 });
     await expect(empty).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test("on a phone the live view never scrolls the page, keeps its header and composer on screen, and follows the keyboard", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the phone layout runs on the iphone project");
+  const phone: FakeSession = { ...planner, session_id: "01a0e0c1-0000-7000-8000-0000000390a4" };
+  await setLiveSessions([planner, phone]);
+  await publishAgentStreamFrame(phone.session_id, longReplay(phone.session_id), "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto(`/agents/${phone.session_id}/live`);
+    await expect(page.getByText("Turn 39:")).toBeVisible();
+    await expectViewportBound(page);
+
+    // Chromium on Android, told `interactive-widget=resizes-content`, opens the keyboard by
+    // shrinking the layout viewport.
+    await page.setViewportSize({ height: 500, width: 390 });
+    await expectViewportBound(page);
+    await page.setViewportSize({ height: 844, width: 390 });
+
+    // iOS Safari opens it by shrinking only the visual viewport, and the composer follows.
+    const textarea = page.getByTestId("agent-composer").locator("textarea");
+    await textarea.focus();
+    await page.evaluate(() => {
+      const viewport = window.visualViewport;
+      if (viewport === null) throw new Error("no visualViewport");
+      Object.defineProperty(viewport, "height", { configurable: true, get: () => 500 });
+      viewport.dispatchEvent(new Event("resize"));
+    });
+    await expect
+      .poll(async () => {
+        const layout = await liveViewLayout(page);
+        return layout.composerBottom <= layout.visualBottom;
+      })
+      .toBe(true);
+    expect((await liveViewLayout(page)).visualBottom).toBe(500);
+    await expect(page.getByRole("link", { name: "← Agents" })).toBeInViewport({ ratio: 1 });
+
+    // The keyboard closing takes the composer back to the bottom of the screen.
+    await page.evaluate(() => {
+      const viewport = window.visualViewport;
+      if (viewport === null) throw new Error("no visualViewport");
+      Reflect.deleteProperty(viewport, "height");
+      viewport.dispatchEvent(new Event("resize"));
+    });
+    await textarea.blur();
+    await expect.poll(async () => (await liveViewLayout(page)).composerBottom).toBeGreaterThan(800);
+  } finally {
+    await context.close();
+  }
+});
+
+test("at desktop width the live view fills the main column beside the navigation and the thread is its scroller", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "the desktop layout runs on the desktop project");
+  const desktop: FakeSession = { ...planner, session_id: "01a0e0c1-0000-7000-8000-000000001280" };
+  await setLiveSessions([planner, desktop]);
+  await publishAgentStreamFrame(desktop.session_id, longReplay(desktop.session_id), "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ height: 800, width: 1280 });
+    await page.goto(`/agents/${desktop.session_id}/live`);
+    await expect(page.getByText("Turn 39:")).toBeVisible();
+    await expect(page.getByRole("complementary", { name: "Navigation" })).toBeVisible();
+    await expectViewportBound(page);
+    const layout = await liveViewLayout(page);
+    expect(layout.composerBottom).toBe(layout.mainBottom - layout.mainPaddingBottom);
+    expect(layout.mainBottom).toBe(layout.viewportHeight);
   } finally {
     await context.close();
   }
