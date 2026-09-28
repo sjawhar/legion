@@ -463,6 +463,8 @@ WebKit beside Chromium for it (`bun run e2e:install` does the same locally).
 
 The `webkit-iphone` project runs the live view's two phone-layout rows in `e2e/agent-view.e2e.ts` (its project `grep` selects them by title, so renaming either test silently drops its WebKit run with no failure; rename the `grep` with it) in WebKit with the iPhone 13 profile, since iOS Safari is the engine the keyboard cap exists for and the `iphone` project is Chromium. WebKit delivers a scroll container's `scroll` event a frame later than Chromium, and the thread follows its bottom only once that event has arrived, so those rows scroll the thread through `scrollThreadTo`, which waits for the event, before they raise a keyboard.
 
+No Playwright hook asserts what a project's title `grep` selected, so that guard is a one-time manual check: rename one selected test in a scratch copy and confirm `bunx playwright test --config e2e/playwright.config.ts --project=webkit-iphone --list` drops it (2 tests become 1, with no error), then restore it. Repeat the check whenever the `grep` or the titles change.
+
 The `firefox` Playwright project runs `e2e/code-line-replace.e2e.ts` alone: Firefox's native
 editing puts text typed over a code block's last line before that line's newline, and deletes a
 paragraph's hard break along with the text after it, which Chromium and WebKit never do, so that
