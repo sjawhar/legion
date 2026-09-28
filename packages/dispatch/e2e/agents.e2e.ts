@@ -1089,19 +1089,7 @@ test("a selection over the broadcast limit says so and never asks the server", a
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the limit");
-  await setLiveSessions(
-    Array.from({ length: 101 }, (_, index) => {
-      const number = String(index + 1).padStart(3, "0");
-      return {
-        capabilities: ["aside", "btw"],
-        dir: `/workspaces/planner-${number}`,
-        machine_id: "build-host",
-        roles: ["planner"],
-        session_id: `planner-${number}-session`,
-        title: `Planner ${number}`,
-      };
-    })
-  );
+  await setLiveSessions(planners(101, 101));
 
   const alice = await asUser(browser, "alice");
   try {
