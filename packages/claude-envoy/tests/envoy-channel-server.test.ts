@@ -653,9 +653,9 @@ test("two channel servers under different Claude processes rebind independently"
     expect(identityB.id).toBe("ses_b")
     expect(callsA).toContain("unregister ses_a")
     expect(heartbeatsB).toBeGreaterThan(0)
-    expect(
-      callsB.filter((call) => call !== "subscribe ses_b" && call !== "getInterest"),
-    ).toEqual([])
+    expect(callsB.filter((call) => call !== "subscribe ses_b" && call !== "getInterest")).toEqual(
+      [],
+    )
   } finally {
     await serverA.shutdown()
     await serverB.shutdown()
@@ -1015,7 +1015,10 @@ test("a delivery still in flight on the old subject does not hold back registrat
   )
 
   try {
-    nats.emit("notifications.agent.ses_old", deliveryRaw.replace(directSubject, "notifications.agent.ses_old"))
+    nats.emit(
+      "notifications.agent.ses_old",
+      deliveryRaw.replace(directSubject, "notifications.agent.ses_old"),
+    )
     await waitFor(async () => notified, "the delivery on the old subject to reach the notifier")
     await writeSessionHandoff(handoff, "ses_new")
     await waitFor(
@@ -1222,7 +1225,10 @@ test("a registry removal that fails is reconciled by the next heartbeat, without
     // reconciles. A stale retry replaying the failure-time topic list would strip
     // it right back out; reconciliation, driven by live forwarder.topics(), must not.
     await session.follow([reFollowed])
-    await waitFor(async () => !entry.has(staysRemoved), "the heartbeat to reconcile the stale entry")
+    await waitFor(
+      async () => !entry.has(staysRemoved),
+      "the heartbeat to reconcile the stale entry",
+    )
     expect([...entry].sort()).toEqual([directSubject, reFollowed])
   } finally {
     await session.shutdown()
@@ -1254,12 +1260,14 @@ test("a persistent reconciliation failure retries once immediately, then waits f
     }),
   )
 
-
   try {
-    // One at startup (`recoverRegisteredInterests`, swallowed there), one from the
+    // One at startup (`syncRegisteredInterests`, swallowed there), one from the
     // heartbeat the handoff poke triggers, one bounded immediate retry (N2) — then
     // the outage guard must hold with no interval tick due for 10 s.
-    await waitFor(async () => getInterestAttempts >= 3, "the startup read, the first reconciliation attempt, and its one bounded retry")
+    await waitFor(
+      async () => getInterestAttempts >= 3,
+      "the startup read, the first reconciliation attempt, and its one bounded retry",
+    )
     // A real wait, not a guessed one: proving the guard holds needs to observe a
     // window in which nothing further happens, and nothing else here produces an
     // event to wait for instead — a hot loop would have run thousands of times
@@ -1267,6 +1275,104 @@ test("a persistent reconciliation failure retries once immediately, then waits f
     await Bun.sleep(150)
     expect(getInterestAttempts).toBe(3)
   } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a registry read that fails at startup does not let the heartbeat delete the registered interests", async () => {
+  const stateDirectory = await scratchState()
+  const nats = new FakeNats()
+  const alreadyRegistered = "notifications.dispatch.issue.DSP-5"
+  const entry = new Set<string>([directSubject, alreadyRegistered])
+  let reads = 0
+  const client = recordingClient([], {
+    subscribe: async (input) => {
+      for (const topic of input.topics) entry.add(topic)
+      return noInterest()
+    },
+    unsubscribe: async (input) => {
+      for (const topic of input.topics) entry.delete(topic)
+    },
+    getInterest: async (sessionID) => {
+      reads++
+      // The listener is down for exactly the startup read — a redeploy landing on
+      // a plugin reload — and healthy from then on.
+      if (reads === 1) throw new Error("listener unavailable")
+      return { ...noInterest(), session_id: sessionID, topics: [...entry] }
+    },
+  })
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      client,
+      heartbeatMs: 20,
+    }),
+  )
+
+  try {
+    await waitFor(async () => reads >= 4, "several heartbeats after the failed startup read")
+    // A read the session never completed is not evidence that the entry drifted.
+    // Nothing restores a topic deleted from it: `unregisterSession` leaves the
+    // interests entry behind, so the stripped one is what the next resume reads.
+    expect([...entry].sort()).toEqual([directSubject, alreadyRegistered])
+    // Adopting it is also what stops the session being deaf to it until a restart.
+    expect(session.topics()).toContain(alreadyRegistered)
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a shutdown landing inside an in-flight heartbeat leaves the registry entry alone", async () => {
+  const stateDirectory = await scratchState()
+  const nats = new FakeNats()
+  const alreadyRegistered = "notifications.dispatch.issue.DSP-1"
+  const entry = new Set<string>([directSubject, alreadyRegistered])
+  const release = Promise.withResolvers<void>()
+  let holdRegistration = false
+  let registrationHeld = false
+  const client = recordingClient([], {
+    subscribe: async (input) => {
+      const topics = [...input.topics]
+      if (holdRegistration) {
+        registrationHeld = true
+        await release.promise
+      }
+      for (const topic of topics) entry.add(topic)
+      return noInterest()
+    },
+    unsubscribe: async (input) => {
+      for (const topic of input.topics) entry.delete(topic)
+    },
+    getInterest: async (sessionID) => ({
+      ...noInterest(),
+      session_id: sessionID,
+      topics: [...entry],
+    }),
+  })
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      client,
+      heartbeatMs: 20,
+    }),
+  )
+
+  try {
+    expect(session.topics()).toContain(alreadyRegistered)
+    holdRegistration = true
+    await waitFor(async () => registrationHeld, "a heartbeat to reach the listener")
+    holdRegistration = false
+    // `shutdown` empties the forwarder before its deregistration queues behind the
+    // tick already running; an emptied topic list is teardown, never drift.
+    const shuttingDown = session.shutdown()
+    await waitFor(async () => session.topics().length === 0, "the forwarder to close")
+    release.resolve()
+    await shuttingDown
+    expect([...entry].sort()).toEqual([directSubject, alreadyRegistered])
+  } finally {
+    release.resolve()
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
   }

@@ -44245,6 +44245,13 @@ async function startChannelSession(options) {
       await rm2(roleStateFile(options.stateDirectory, identity.id), { force: true });
     }
   };
+  let roleTransferFrom;
+  const transferRole = async () => {
+    if (roleTransferFrom === undefined)
+      return;
+    await restoreRole(roleTransferFrom);
+    roleTransferFrom = undefined;
+  };
   const adoptHandoff = async () => {
     if (handoffFile === undefined)
       return;
@@ -44271,17 +44278,29 @@ async function startChannelSession(options) {
     process.stderr.write(`envoy: session id changed ${previous} -> ${next}; re-registered
 `);
   };
-  let roleTransferFrom;
-  const transferRole = async () => {
-    if (roleTransferFrom === undefined)
+  let interestsRead = false;
+  const syncRegisteredInterests = async () => {
+    if (shuttingDown)
       return;
-    await restoreRole(roleTransferFrom);
-    roleTransferFrom = undefined;
-  };
-  const reconcileRegisteredInterests = async () => {
-    const registry2 = await options.client.getInterest(identity.id);
+    const registry2 = await options.client.getInterest(identity.id).catch((error48) => {
+      if (error48 instanceof EnvoyApiError && error48.details.status === 404)
+        return;
+      throw error48;
+    });
+    if (!interestsRead) {
+      interestsRead = true;
+      for (const topic of registry2?.topics ?? []) {
+        if (topic === directSubject || topic.startsWith(ROLE_TOPIC_PREFIX))
+          continue;
+        userTopics.add(topic);
+        forwarder.follow(topic);
+      }
+      return;
+    }
+    if (registry2 === undefined)
+      return;
     const followed = new Set(forwarder.topics());
-    const drifted = registry2.topics.filter((topic) => topic !== directSubject && !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic));
+    const drifted = registry2.topics.filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic));
     if (drifted.length === 0)
       return;
     await options.client.unsubscribe({ sessionID: identity.id, topics: drifted });
@@ -44299,7 +44318,7 @@ async function startChannelSession(options) {
         await register();
         await reassertRole();
         await transferRole();
-        await reconcileRegisteredInterests();
+        await syncRegisteredInterests();
       });
       outageReported = false;
     } catch (error48) {
@@ -44323,21 +44342,11 @@ async function startChannelSession(options) {
     else
       heartbeat();
   };
-  const recoverRegisteredInterests = async () => {
-    const registry2 = await options.client.getInterest(identity.id).catch(() => {
-      return;
-    });
-    if (registry2 === undefined)
-      return;
-    for (const topic of registry2.topics) {
-      if (topic === directSubject || topic.startsWith(ROLE_TOPIC_PREFIX))
-        continue;
-      userTopics.add(topic);
-      forwarder.follow(topic);
-    }
-  };
   forwarder.follow(directSubject);
-  await recoverRegisteredInterests();
+  await syncRegisteredInterests().catch((error48) => {
+    process.stderr.write(`envoy-channel: could not read the registered interests (${messageFor(error48)}); the next heartbeat retries
+`);
+  });
   await options.connection.flush();
   await serialized(async () => {
     await register();
