@@ -183,3 +183,24 @@ func TestARestartKeepsItsURLWhenThePortIsContendedWhileStopped(t *testing.T) {
 	}
 	Connect(t, uri).Close()
 }
+
+// A second Grant on one server judges the outcome of its own reload, not the first Grant's, which
+// the server's log still holds: a second grant the server refuses fails the test with the server's
+// reason instead of passing on the first reload's line.
+func TestASecondGrantWaitsForItsOwnReload(t *testing.T) {
+	_, public := User(t)
+	grant := StartNkeyGranted(t, public, "first.>")
+	grant.Grant(t, "second.>")
+
+	refused := &fatalRecorder{TB: t}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		grant.Grant(refused, "not..a.subject")
+	}()
+	<-done
+	if !strings.Contains(refused.message, "NATS refused the new grant") ||
+		!strings.Contains(refused.message, `subject "not..a.subject" is not a valid subject`) {
+		t.Fatalf("a second Grant the server refused ended with %q, want the server's refusal", refused.message)
+	}
+}

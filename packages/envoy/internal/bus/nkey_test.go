@@ -12,24 +12,6 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// testUser is a freshly minted nkey user: its seed and its public key.
-func testUser(t *testing.T) (seed, public string) {
-	t.Helper()
-	user, err := nkeys.CreateUser()
-	if err != nil {
-		t.Fatalf("create nkey user: %v", err)
-	}
-	rawSeed, err := user.Seed()
-	if err != nil {
-		t.Fatalf("user seed: %v", err)
-	}
-	public, err = user.PublicKey()
-	if err != nil {
-		t.Fatalf("user public key: %v", err)
-	}
-	return string(rawSeed), public
-}
-
 // seedFile writes contents to a 0600 file and returns its path.
 func seedFile(t *testing.T, contents string) string {
 	t.Helper()
@@ -82,7 +64,7 @@ func TestAClientWithNoSeedConnectsToAServerWithoutAuthorization(t *testing.T) {
 // the file or the variable, and every connection the client dials later to recover is that user's
 // too.
 func TestAClientWithItsSeedConnectsToAServerThatRequiresIt(t *testing.T) {
-	seed, public := testUser(t)
+	seed, public := testnats.User(t)
 	uri := testnats.StartNkeyAuthorized(t, public)
 
 	t.Run("NATS_NKEY_SEED_FILE, which wins over NATS_NKEY_SEED", func(t *testing.T) {
@@ -117,7 +99,7 @@ func TestAClientWithItsSeedConnectsToAServerThatRequiresIt(t *testing.T) {
 // With no seed configured, the server that requires one refuses the client, and the error says so.
 func TestAClientWithNoSeedIsRefusedByAServerThatRequiresOne(t *testing.T) {
 	unsetNkeyEnvironment(t)
-	_, public := testUser(t)
+	_, public := testnats.User(t)
 	uri := testnats.StartNkeyAuthorized(t, public)
 	client, err := bus.Connect([]string{uri})
 	if err == nil {
@@ -147,7 +129,7 @@ func TestAnUnusableSeedIsAnErrorNamingItsVariable(t *testing.T) {
 		}
 		return seedFile(t, string(raw))
 	}()
-	userSeed, _ := testUser(t)
+	userSeed, _ := testnats.User(t)
 	for _, tc := range []struct {
 		name string
 		env  map[string]string
@@ -189,7 +171,7 @@ func TestAnUnusableSeedIsAnErrorNamingItsVariable(t *testing.T) {
 // its server has nkey users) and catches a change that falls back to connecting without it.
 func TestASeedAgainstAServerWithoutUsersIsRefused(t *testing.T) {
 	uri := testnats.URL(t)
-	seed, _ := testUser(t)
+	seed, _ := testnats.User(t)
 	unsetNkeyEnvironment(t)
 	t.Setenv("NATS_NKEY_SEED", seed)
 	client, err := bus.Connect([]string{uri})

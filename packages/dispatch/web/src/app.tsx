@@ -13,7 +13,13 @@ import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
 import { RefPreviewHost } from "./features/refs/RefPreview";
-import { parseIssuePath, parseProjectPath, routeHasMargin } from "./features/refs/routes";
+import {
+  AGENT_LIVE_PATH,
+  parseIssuePath,
+  parseProjectPath,
+  routeFillsViewport,
+  routeHasMargin,
+} from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
 import { SearchPalette } from "./features/search/SearchPalette";
 import { SettingsPage } from "./features/settings/SettingsPage";
@@ -24,6 +30,7 @@ import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { ShortcutHelp } from "./features/shell/ShortcutHelp";
 import { COMPACT_VIEWPORT_QUERY, useDialog, useMediaQuery } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
+import { useKeyboardFit } from "./features/shell/useKeyboardFit";
 import { useUserPreference } from "./features/shell/userPreference";
 import { Sidebar } from "./features/sidebar/Sidebar";
 import {
@@ -359,11 +366,17 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           : marginRailShown
             ? "xl:pr-20"
             : "";
+  // A page that scrolls inside itself gets a viewport-tall shell (dynamic viewport units where
+  // the browser has them, so a phone's collapsing toolbar is accounted for), with `<main>` a
+  // flex column that hands it the height left below the compact header, capped above an iOS
+  // on-screen keyboard while its composer has focus.
+  const fillsViewport = routeFillsViewport(location.pathname);
   const connection = useConnectionState();
   const inbox = useQuery(inboxQuery());
   const needsYouCount = inbox.data === undefined ? 0 : waitingOnYou(inbox.data).length;
 
   const mainRef = useRef<HTMLElement | null>(null);
+  useKeyboardFit(mainRef, fillsViewport);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const isFirstRender = useRef(true);
   const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
@@ -437,7 +450,10 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 
   return (
     <MarginProvider>
-      <div className={`xl:flex ${canvasText}`} data-testid="app-shell">
+      <div
+        className={`${fillsViewport ? "flex h-screen flex-col supports-[height:100dvh]:h-dvh xl:flex-row" : "xl:flex"} ${canvasText}`}
+        data-testid="app-shell"
+      >
         <a
           className={`sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:px-4 focus:py-2 ${railFocusOverlayBg} ${railFocusOverlayText}`}
           href="#main-content"
@@ -542,7 +558,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           </aside>
         )}
         <main
-          className={`min-w-0 flex-1 p-6 pb-32 outline-none xl:order-2 xl:pb-6 ${mainLayoutClass}`}
+          className={`min-w-0 flex-1 p-6 outline-none xl:order-2 ${fillsViewport ? "flex min-h-0 flex-col" : "pb-32 xl:pb-6"} ${mainLayoutClass}`}
           data-shell-layout={fullWidth ? "full-width" : "standard"}
           data-testid="main-content"
           id="main-content"
@@ -556,7 +572,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
-                <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
+                <Route element={<AgentConversationPage />} path={AGENT_LIVE_PATH} />
                 <Route element={<IssuePage />} path="/issues/:key/*" />
                 <Route element={<ProjectPage />} path="/projects/:key" />
                 <Route element={<ProjectPage />} path="/projects/:key/architecture" />
