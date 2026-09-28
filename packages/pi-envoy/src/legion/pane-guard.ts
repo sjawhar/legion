@@ -190,6 +190,10 @@ interface Ctx {
   readonly ompPid: number;
   readonly parentOf: (pid: number) => number | undefined;
   readonly steps: { count: number };
+  /** How many bodies the walk has entered that the shell may never enter, or may not have
+   * finished, by the time a later command reads what they wrote (`uncertainly`, `modelWrite`).
+   * Where the walk is, not what the shell holds, so it lives here and not in `State`. */
+  readonly uncertain: { depth: number };
 }
 
 interface State {
@@ -1385,7 +1389,11 @@ function clone(st: State): State {
  * empty or a pid this shell started (`$!` in a retry loop, empty had it not run) stays a pid
  * that is safe to signal. Not merged: `files` and `pidFiles`, which every branch shares; `output`,
  * which each caller compares itself (`outputChanged`); and `runningFunctions`, which only a
- * function's own walk changes. */
+ * function's own walk changes.
+ *
+ * A map every branch shares may only be moved towards unknown inside one. A write recording what
+ * a file holds carries that text out of the branch it sits in, into the one the shell took, so
+ * only a write on the straight-line path records text (`modelWrite`, `uncertainly`). */
 function merge(target: State, branches: readonly State[]): void {
   const names = new Set<string>();
   for (const branch of branches) for (const name of branch.vars.keys()) names.add(name);
@@ -1501,6 +1509,32 @@ function merge(target: State, branches: readonly State[]): void {
   target.traps = [...target.traps, ...lifted];
 }
 
+/** Walks a body the shell may never enter — a branch, a loop body, a handler for a signal that
+ * may never arrive, one of several definitions a name may hold — or may not have finished when a
+ * later command reads what it wrote: a background command, a coprocess, a part of a pipeline.
+ * Every file modelled inside is unknown afterwards (`modelWrite`).
+ *
+ * Whether the shell takes such a branch is a fact of the run — whether a file exists, what a
+ * `grep` finds, what `uname` prints — so no rule here can decide it, and the model may not assume
+ * either answer. */
+function uncertainly(ctx: Ctx, walk: () => void): void {
+  ctx.uncertain.depth += 1;
+  try {
+    walk();
+  } finally {
+    ctx.uncertain.depth -= 1;
+  }
+}
+
+/** Records the text a command writes to `file`, which a later command of the same command may run
+ * (`runFile`). Inside a body the shell may not have performed (`uncertainly`) the file is unknown
+ * instead: `files` is one map the whole walk shares, and a stale model is worse than none, since
+ * `runFile` prefers the model to what is on disk. A file that is unknown is refused, which is why
+ * a conditional write followed by running the file is refused whether or not the branch runs. */
+function modelWrite(st: State, ctx: Ctx, file: string, content: string | null): void {
+  st.files.set(file, ctx.uncertain.depth > 0 ? null : content);
+}
+
 /** The variables a handler runs with in a shell whose variables are `vars`. For a handler lifted
  * out of a branch, a name the shell still holds as the merge that lifted it wrote it takes the
  * value that branch left, since the handler runs only on a path where that branch ran; a name
@@ -1561,21 +1595,28 @@ function subshell(st: State, patch?: Partial<State>): State {
 
 /** Runs the body of every handler this shell set, at its end: each against the state after the
  * shell's last statement, with the variables of the branch that set it where the shell still holds
- * what the merge wrote for them (`handlerVars`), and the pids it expanded (`Trap.pids`) over it. */
+ * what the merge wrote for them (`handlerVars`), and the pids it expanded (`Trap.pids`) over it.
+ * An `EXIT` handler runs when the shell ends, so what it writes is written before anything after
+ * the shell reads it; a handler for a signal runs only if that signal arrives, so what it writes
+ * is uncertain (`uncertainly`). */
 function runSetTraps(st: State, ctx: Ctx): void {
   for (const trap of st.traps) {
     const vars = new Map([...handlerVars(trap, st.vars), ...(trap.pids ?? [])]);
-    try {
-      runText(
-        trap.text,
-        "the EXIT trap",
-        subshell(st, { source: trap.file, vars }),
-        ctx,
-        trap.site
-      );
-    } catch (error) {
-      locateRefusal(error, trap.file);
-    }
+    const run = () => {
+      try {
+        runText(
+          trap.text,
+          "the EXIT trap",
+          subshell(st, { source: trap.file, vars }),
+          ctx,
+          trap.site
+        );
+      } catch (error) {
+        locateRefusal(error, trap.file);
+      }
+    };
+    if (trap.signals.includes("EXIT")) run();
+    else uncertainly(ctx, run);
   }
 }
 
@@ -1592,8 +1633,10 @@ const MAX_DECIDED_PASSES = 64;
 function walkLoopAnyPasses(node: While, st: State, ctx: Ctx): void {
   const before = st.output;
   const body = clone(st);
-  walkList(node.clause.commands, body, ctx);
-  walkList(node.body.commands, body, ctx);
+  uncertainly(ctx, () => {
+    walkList(node.clause.commands, body, ctx);
+    walkList(node.body.commands, body, ctx);
+  });
   merge(st, [clone(st), body]);
   if (outputChanged(before, body.output)) st.output = undefined;
 }
@@ -1720,10 +1763,14 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       if (node.background) {
         // `command &` runs in a subshell: nothing it changes (a handler, a variable, the working
         // directory, the arguments) reaches this shell, and the handlers it sets run at its end.
+        // This shell does not wait for it, so what it writes may not be there when the next
+        // command reads it.
         const before = st.output;
         const child = subshell(st);
-        walkNode(node.command, child, ctx, pipeIn);
-        runSetTraps(child, ctx);
+        uncertainly(ctx, () => {
+          walkNode(node.command, child, ctx, pipeIn);
+          runSetTraps(child, ctx);
+        });
         if (outputChanged(before, child.output)) st.output = undefined;
         st.backgroundStarted = true;
         return;
@@ -1731,7 +1778,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       if (node.command.type === "BraceGroup") {
         const written = groupOutputFile(node, st, ctx);
         if (written !== undefined) {
-          st.files.set(written, walkRenderingGroup(node.command, st, ctx));
+          modelWrite(st, ctx, written, walkRenderingGroup(node.command, st, ctx));
           return;
         }
       }
@@ -1748,20 +1795,31 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         for (const command of node.commands) walkNode(command, st, ctx, pipeIn);
         return;
       }
+      // Bash starts every part at once, so a part's write may not be there when a later part
+      // reads it, and the guard walks the parts in order over one shared model.
       const before = st.output;
       const parts: State[] = [];
-      for (const [index, command] of node.commands.entries()) {
-        const part = subshell(st);
-        walkNode(command, part, ctx, index > 0);
-        runSetTraps(part, ctx);
-        parts.push(part);
-      }
+      uncertainly(ctx, () => {
+        for (const [index, command] of node.commands.entries()) {
+          const part = subshell(st);
+          walkNode(command, part, ctx, index > 0);
+          runSetTraps(part, ctx);
+          parts.push(part);
+        }
+      });
       if (parts.some((part) => outputChanged(before, part.output))) st.output = undefined;
       return;
     }
-    case "AndOr":
-      for (const command of node.commands) walkNode(command, st, ctx, pipeIn);
+    case "AndOr": {
+      // `a && b`, `a || b`: the first command runs, and whether any after it runs is that
+      // command's exit status, a fact of the run.
+      const [first, ...rest] = node.commands;
+      if (first !== undefined) walkNode(first, st, ctx, pipeIn);
+      uncertainly(ctx, () => {
+        for (const command of rest) walkNode(command, st, ctx, pipeIn);
+      });
       return;
+    }
     case "CompoundList":
       walkList(node.commands, st, ctx);
       return;
@@ -1781,9 +1839,11 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       walkList(node.clause.commands, st, ctx);
       const clauseOutput = st.output;
       const then = clone(st);
-      walkList(node.then.commands, then, ctx);
       const otherwise = clone(st);
-      if (node.else !== undefined) walkNode(node.else, otherwise, ctx, pipeIn);
+      uncertainly(ctx, () => {
+        walkList(node.then.commands, then, ctx);
+        if (node.else !== undefined) walkNode(node.else, otherwise, ctx, pipeIn);
+      });
       merge(st, [then, otherwise]);
       if (
         outputChanged(before, clauseOutput) ||
@@ -1802,14 +1862,16 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       const name = node.name.value;
       const known = words.map((word) => literalText(word.exp));
       const branches: State[] = [clone(st)];
-      if (node.type === "For" && known.every((w) => w !== undefined) && known.length <= 16) {
-        for (const value of known) {
-          const body = clone(st);
-          assignScalar(body, name, [literal(value as string)]);
-          walkList(node.body.commands, body, ctx);
-          branches.push(body);
+      uncertainly(ctx, () => {
+        if (node.type === "For" && known.every((w) => w !== undefined) && known.length <= 16) {
+          for (const value of known) {
+            const body = clone(st);
+            assignScalar(body, name, [literal(value as string)]);
+            walkList(node.body.commands, body, ctx);
+            branches.push(body);
+          }
+          return;
         }
-      } else {
         const body = clone(st);
         const signalSafe = words.every((word) => {
           const text = literalText(word.exp);
@@ -1828,7 +1890,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
           assignScalar(body, "REPLY", [unknown("`$REPLY`, read from input")]);
         walkList(node.body.commands, body, ctx);
         branches.push(body);
-      }
+      });
       merge(st, branches);
       if (branches.some((branch) => outputChanged(before, branch.output))) st.output = undefined;
       return;
@@ -1839,7 +1901,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       visitArithmetic(node.test, st, ctx);
       visitArithmetic(node.update, st, ctx);
       const body = clone(st);
-      walkList(node.body.commands, body, ctx);
+      uncertainly(ctx, () => walkList(node.body.commands, body, ctx));
       merge(st, [clone(st), body]);
       if (outputChanged(before, body.output)) st.output = undefined;
       return;
@@ -1862,7 +1924,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       for (const item of node.items) {
         for (const word of item.pattern) visitWord(word, st, ctx);
         const body = clone(st);
-        walkList(item.body.commands, body, ctx);
+        uncertainly(ctx, () => walkList(item.body.commands, body, ctx));
         branches.push(body);
       }
       merge(st, branches);
@@ -1881,9 +1943,12 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
     }
     case "Coproc": {
       const before = st.output;
+      // A coprocess runs beside this shell, which does not wait for it.
       const child = subshell(st);
-      walkNode(node.body, child, ctx, false);
-      runSetTraps(child, ctx);
+      uncertainly(ctx, () => {
+        walkNode(node.body, child, ctx, false);
+        runSetTraps(child, ctx);
+      });
       if (outputChanged(before, child.output)) st.output = undefined;
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
       return;
@@ -1953,13 +2018,16 @@ function checkRedirects(
       }
       st.pidFiles.delete(file);
       const before = appends ? st.files.get(file) : "";
-      st.files.set(
+      modelWrite(
+        st,
+        ctx,
         file,
         content === null || before === null ? null : readable(`${before ?? ""}${content}`)
       );
       if (
         writes &&
         !appends &&
+        ctx.uncertain.depth === 0 &&
         command?.name === "echo" &&
         command.args.length === 1 &&
         command.args[0]?.exp.length > 0 &&
@@ -2509,15 +2577,18 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     // Each definition a branch may have left, and the command where a path left none, runs as a
-    // branch of its own.
-    const runs = callee.map((definition) => {
-      const run = clone(outer);
-      if (definition !== undefined) runFunction(base, definition, rest, run, ctx);
-      else {
-        run.functions.delete(base);
-        dispatch(invocation, run, ctx);
+    // branch of its own: which one the name runs is the branch the shell took.
+    const runs: State[] = [];
+    uncertainly(ctx, () => {
+      for (const definition of callee) {
+        const run = clone(outer);
+        if (definition !== undefined) runFunction(base, definition, rest, run, ctx);
+        else {
+          run.functions.delete(base);
+          dispatch(invocation, run, ctx);
+        }
+        runs.push(run);
       }
-      return run;
     });
     merge(outer, runs);
     return;
@@ -2900,7 +2971,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           const file = path.resolve(st.cwd, target);
           st.pidFiles.delete(file);
           const text = heredoc === undefined ? null : heredocText(heredoc);
-          st.files.set(file, append || text === null ? null : readable(text));
+          modelWrite(st, ctx, file, append || text === null ? null : readable(text));
         }
       }
       return;
@@ -4013,6 +4084,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     ompPid: options.ompPid,
     parentOf: options.parentOf ?? procParent,
     steps: { count: 0 },
+    uncertain: { depth: 0 },
   });
   const initial = (cwd: string, source: string): State => ({
     vars: new Map(),
