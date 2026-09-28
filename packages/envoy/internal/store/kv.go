@@ -157,31 +157,35 @@ func (r *Registry) roles() bus.KeyValue {
 }
 
 // roleRevisions reads the revision of every role claim kv holds, for the grace a restored claim's
-// holder gets to register again. A claim whose key this build cannot read (bus.ErrRefused: an
-// earlier build stored it past what a read of it may send) gets none, since nothing can resolve
-// it; the role reaper deletes it.
+// holder gets to register again. It is one watch over the bucket's existing keys, the way the
+// interest, session and CI caches read theirs (internal/kvwatch): readiness must not cost a round
+// trip per stored claim. It is the same watch nats.go's kv.Keys() runs — IgnoreDeletes and
+// MetaOnly over every key — which discards each entry's revision, so this keeps the revision
+// instead of reading it back with a Get per key. Production's role bucket carried 767 subjects on
+// 2026-09-28 — 9 claims and 758 delete markers, which a limits-retention KV keeps for every key
+// ever deleted — and a listener reached over a relayed link paid about one round trip for each
+// claim before it was ready (LEGION-360). The watch names no key, so a claim whose key this build
+// cannot read (bus.ErrRefused: an earlier build stored it past what a read of it may send) gets a
+// revision here; it still gets no grace, because ReleaseExpiredRoleClaim, the only reader of these
+// revisions, reads the claim itself first and cannot. A delete marker is not a claim and is
+// skipped.
 func roleRevisions(kv bus.KeyValue) (map[string]uint64, error) {
-	revisions := map[string]uint64{}
-	keys, err := kv.Keys()
-	if errors.Is(err, nats.ErrNoKeysFound) {
-		return revisions, nil
-	}
+	watcher, err := kv.Watch(nats.AllKeys, nats.IgnoreDeletes(), nats.MetaOnly())
 	if err != nil {
 		return nil, err
 	}
-	for _, role := range keys {
-		entry, err := kv.Get(role)
-		if errors.Is(err, nats.ErrKeyNotFound) {
-			continue
+	defer func() {
+		if err := watcher.Stop(); err != nil {
+			slog.Warn("role registry could not stop its revision watch", slog.String("error", err.Error()))
 		}
-		if errors.Is(err, bus.ErrRefused) {
-			slog.Warn("role registry skipped a stored claim it cannot read", slog.Int("key_bytes", len(role)), slog.String("error", err.Error()))
-			continue
+	}()
+	revisions := map[string]uint64{}
+	// A nil entry marks the end of the keys the bucket already held.
+	for entry := range watcher.Updates() {
+		if entry == nil {
+			break
 		}
-		if err != nil {
-			return nil, err
-		}
-		revisions[role] = entry.Revision()
+		revisions[entry.Key()] = entry.Revision()
 	}
 	return revisions, nil
 }

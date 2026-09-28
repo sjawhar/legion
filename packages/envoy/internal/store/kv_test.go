@@ -2135,3 +2135,97 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 		t.Fatalf("WatchErr after the failed Rewatch: %v; the interest watcher moved to the closed connection", err)
 	}
 }
+
+// Opening the registry snapshots the revision of every stored role claim, for the grace a restored
+// holder gets to register again. It must read them in one pass over the bucket, not one round trip
+// per key: production's role bucket held 767 subjects on 2026-09-28, and a listener reached over a
+// relayed link paid about one round trip for each before it was ready (LEGION-360). The claims'
+// revisions are still exactly the ones the bucket holds, and a deleted key — which a
+// limits-retention KV keeps a marker for forever — is not a claim and gets no grace.
+func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+	names := testBuckets(t)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.roles, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create the role bucket: %v", err)
+	}
+	const claims = 64
+	want := map[string]uint64{}
+	for i := range claims + 1 {
+		role := fmt.Sprintf("role-%03d", i)
+		value, err := json.Marshal(RoleClaim{HolderSessionID: fmt.Sprintf("ses_%03d", i), ClaimedAt: time.Now().UnixMilli()})
+		if err != nil {
+			t.Fatalf("encode claim: %v", err)
+		}
+		revision, err := rawRoles.Put(role, value)
+		if err != nil {
+			t.Fatalf("store %s: %v", role, err)
+		}
+		want[role] = revision
+	}
+	deleted := fmt.Sprintf("role-%03d", claims)
+	if err := rawRoles.Delete(deleted); err != nil {
+		t.Fatalf("delete %s: %v", deleted, err)
+	}
+	delete(want, deleted)
+
+	// Every read of one key is a request the store sends on this connection: a direct get when the
+	// bucket allows one, a stream message get otherwise.
+	gets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.DIRECT.GET.KV_%s.>", names.roles))
+	if err != nil {
+		t.Fatalf("watch direct gets: %v", err)
+	}
+	defer func() { _ = gets.Unsubscribe() }()
+	legacyGets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.STREAM.MSG.GET.KV_%s", names.roles))
+	if err != nil {
+		t.Fatalf("watch stream message gets: %v", err)
+	}
+	defer func() { _ = legacyGets.Unsubscribe() }()
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush the watches: %v", err)
+	}
+
+	registry, err := Open(conn, WithReplicas(1), withTestBuckets(t))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(registry.StopWatch)
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush after Open: %v", err)
+	}
+	if sent := drain(t, gets) + drain(t, legacyGets); sent != 0 {
+		t.Fatalf("Open sent %d per-key reads of the role bucket holding %d claims; want none, one pass over the bucket", sent, claims)
+	}
+
+	if len(registry.restoredRoleRevisions) != len(want) {
+		t.Fatalf("Open restored %d role revisions, want %d", len(registry.restoredRoleRevisions), len(want))
+	}
+	for role, revision := range want {
+		if got := registry.restoredRoleRevisions[role]; got != revision {
+			t.Fatalf("restored revision of %s = %d, want the stored %d", role, got, revision)
+		}
+	}
+	if revision, ok := registry.restoredRoleRevisions[deleted]; ok {
+		t.Fatalf("a deleted key was restored as a claim at revision %d", revision)
+	}
+}
+
+// drain counts the requests sub has received, up to the first idle window.
+func drain(t *testing.T, sub *natsgo.Subscription) int {
+	t.Helper()
+	count := 0
+	for {
+		if _, err := sub.NextMsg(200 * time.Millisecond); err != nil {
+			if errors.Is(err, natsgo.ErrTimeout) {
+				return count
+			}
+			t.Fatalf("drain %s: %v", sub.Subject, err)
+		}
+		count++
+	}
+}
