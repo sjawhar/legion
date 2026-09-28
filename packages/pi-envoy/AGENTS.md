@@ -279,8 +279,11 @@ fresh `/tmp` path, and `printf -v` assigns), `cd`, brace expansion, the paths `r
 value (`${v//a/b}`, `${v#*:}`), command substitutions, subshells and branches, functions,
 wrappers (`sudo`, `env`, `timeout`, ...), and the scripts a command runs or writes first, whose
 refusal names the script and line. A script or function run with arguments the guard knows has
-them as its positional parameters (`$#` their count, one past the last empty, a `shift` past the
-last a no-op as in bash), so an argument loop
+them as its positional parameters (`$#` their count, one past the last unset, a `shift` past the
+last a no-op as in bash, `"$@"` of none no argument); a word that may be several arguments or none
+(an unquoted expansion it cannot read or that holds whitespace, a glob) leaves them unknown, as
+does a shell that did not say what its arguments are, to `${1-…}` and `${1+…}` too. `unset` leaves
+a name unset, apart from empty and from the pane's environment. So an argument loop
 (`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`) is walked pass by pass, each
 `case` taking the one item its known word selects. A loop or `case` it cannot decide, a `case`
 whose word matches no item included, is walked as one that may take any branch, and a `shift`
@@ -293,7 +296,9 @@ replacement holding `&`. A pattern expansion spends the walk budget by the slice
 
 `src/legion/pane-guard-bash.ts` holds bash's pattern removal and replacement, `test`'s string and
 integer forms, and `printf %q` quoting as pure functions; `src/legion/pane-guard-bash.test.ts` holds
-every pattern operator over operands and values to one real bash, through the guard.
+every pattern operator over operands and values, every set-ness operator over set, empty, unset
+and environment names, and a function's arguments over words that give one, none, several or an
+unknown number, to one real bash, through the guard.
 `src/legion/pane-guard-code.ts` tokenizes Python and JavaScript for known deletion, move,
 overwrite, signal, and shell-out calls whose arguments it can evaluate; an argument it cannot
 evaluate is let through, where a shell target it cannot resolve, and a command `unbash` reports as

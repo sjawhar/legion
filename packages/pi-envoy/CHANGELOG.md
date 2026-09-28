@@ -121,20 +121,23 @@
   (LEGION-300). A script or function run with arguments the guard knows has them as `$1`, `$#` and
   `${1:-…}`, so an argument loop (`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`)
   is walked pass by pass, a `case` on a known word takes its one matching item, and a `shift` past
-  the last argument shifts nothing, as in bash. It also evaluates pattern replacement and removal
-  of a known ASCII value (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`, a function whose output
-  passes through `(umask 077 && …)`, and a script a brace group writes from here-documents and
-  `printf` before running it. A target it cannot resolve is still refused, and some stay unknown on
-  purpose: `$(git rev-parse --show-toplevel)`, whose answer the repository's config decides and an
-  earlier command in the same line can rewrite; an operand the parser splits differently from bash
-  (`${v///tmp//etc}`); text outside ASCII, which bash counts by the locale; a `case` whose word
-  matches no item, which walks every branch. A pattern expansion spends the walk budget by the
-  slices it tests. The Stage 2, 3, 4b.13b, 4b and controller drivers are now refused only for
-  killing the processes a query selects (`$(run_processes)`, `first_child`), and the five manual
-  smokes (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `smoke-clear-rebind.sh`,
+  the last argument shifts nothing, as in bash. A word that may be several arguments or none (an
+  unquoted `$v` holding a space, `$*`, a glob) leaves the arguments unknown, `"$@"` of no arguments
+  is none, `unset` leaves a name unset rather than empty, and in a shell whose arguments the guard
+  does not know `${1-…}` and `${1+…}` stay unknown. It also evaluates pattern replacement and
+  removal of a known ASCII value (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`, a function whose
+  output passes through `(umask 077 && …)`, and a script a brace group writes from here-documents
+  and `printf` before running it. A target it cannot resolve is still refused, and some stay
+  unknown on purpose: `$(git rev-parse --show-toplevel)`, whose answer the repository's config
+  decides and an earlier command in the same line can rewrite; an operand the parser splits
+  differently from bash (`${v///tmp//etc}`); text outside ASCII, which bash counts by the locale; a
+  `case` whose word matches no item, which walks every branch. A pattern expansion spends the walk
+  budget by the slices it tests. The Stage 2, 3, 4b.13b, 4b and controller drivers are now refused
+  only for killing the processes a query selects (`$(run_processes)`, `first_child`), and the five
+  manual smokes (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `smoke-clear-rebind.sh`,
   `omp-roundtrip.sh`) run their sessions on their own tmux server, where a `kill-session` can end
-  only the session each started.
-  `src/legion/pane-guard-walk.ts` prints every refusal a script meets, not only the first.
+  only the session each started. `src/legion/pane-guard-walk.ts` prints every refusal a script
+  meets, not only the first.
 - A pane whose `HOME` sits under `/tmp` keeps it (LEGION-300). The guard counted every directory
   below `/tmp` except the socket families as the pane's scratch, so with `HOME` at
   `/tmp/<run>/omp-home` and no `TMUX_TMPDIR` in the same directory, `rm -rf ~`,
