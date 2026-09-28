@@ -109,6 +109,93 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 	}
 }
 
+// A handoff push can carry GitHub's skip-checks trailer, so the pull request's new head runs no CI,
+// and the code head it replaced settles afterwards. That settlement is published, carrying the
+// code head's SHA, though the code head is no longer the pull request's head.
+func TestEndToEndACodeHeadSettlesAfterASkippedHandoffHead(t *testing.T) {
+	ctx := context.Background()
+	_, uri := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("bus connect: %v", err)
+	}
+	defer client.Close()
+	store, err := cistore.Open(client.Conn, logging.New("test"), cistore.WithReplicas(1), cistore.WithTTL(time.Hour))
+	if err != nil {
+		t.Fatalf("open cistore: %v", err)
+	}
+	readyCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := store.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("cache ready: %v", err)
+	}
+	const (
+		secret  = "s"
+		code    = "c0de000000000000000000000000000000000000"
+		handoff = "4a4d0ff000000000000000000000000000000000"
+	)
+	handler := webhook.GitHubHandler(secret, "@legion", "", client, store)
+	loopCtx, loopCancel := context.WithCancel(ctx)
+	defer loopCancel()
+	cistore.StartSummaryLoop(loopCtx, store, client, 100*time.Millisecond, 20*time.Millisecond, logging.New("e2e"))
+	sub, err := client.Conn.SubscribeSync("notifications.github.example-org.example-repo.pr.42.checks")
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer sub.Unsubscribe()
+	postEvent := func(event, body, delivery string) {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(body))
+		req.Header.Set("X-GitHub-Delivery", delivery)
+		req.Header.Set("X-GitHub-Event", event)
+		req.Header.Set("X-Hub-Signature-256", sign(secret, []byte(body)))
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+		if rr.Code != 200 {
+			t.Fatalf("handler status = %d, body=%s", rr.Code, rr.Body.String())
+		}
+	}
+	pullRequest := func(action, head, updatedAt, delivery string) {
+		t.Helper()
+		postEvent("pull_request", fmt.Sprintf(`{
+			"action": %q, "number": 42,
+			"pull_request": {"head": {"sha": %q}, "updated_at": %q},
+			"repository": {"name": "example-repo", "owner": {"login": "example-org"}}
+		}`, action, head, updatedAt), delivery)
+	}
+	pullRequest("opened", code, "2026-09-07T03:00:00Z", "d0")
+	postEvent("check_run", fmt.Sprintf(`{
+		"action": "created",
+		"check_run": {"id": 1, "name": "build", "status": "in_progress", "head_sha": %q, "pull_requests": [{"number": 42}]},
+		"sender": {"login": "ci", "type": "Bot"},
+		"repository": {"name": "example-repo", "owner": {"login": "example-org"}}
+	}`, code), "d1")
+	// The handoff head replaces the code head while its run is still going, and starts none.
+	pullRequest("synchronize", handoff, "2026-09-07T03:00:30Z", "d2")
+	postEvent("check_run", fmt.Sprintf(`{
+		"action": "completed",
+		"check_run": {"id": 1, "name": "build", "status": "completed", "conclusion": "success", "completed_at": "2026-09-07T03:01:00Z",
+			"head_sha": %q, "pull_requests": [{"number": 42}]},
+		"sender": {"login": "ci", "type": "Bot"},
+		"repository": {"name": "example-repo", "owner": {"login": "example-org"}}
+	}`, code), "d3")
+	msg, err := sub.NextMsg(3 * time.Second)
+	if err != nil {
+		t.Fatalf("the code head's settlement was not published: %v", err)
+	}
+	var env contracts.Envelope
+	if err := json.Unmarshal(msg.Data, &env); err != nil {
+		t.Fatalf("checks envelope not JSON: %v", err)
+	}
+	var sum cistore.Summary
+	if err := json.Unmarshal([]byte(env.Payload), &sum); err != nil {
+		t.Fatalf("checks payload not JSON: %v\n%s", err, env.Payload)
+	}
+	if sum.SHA != code || sum.Passed.Count != 1 || sum.Failed.Count != 0 {
+		t.Fatalf("settlement = %+v, want the code head %s passing", sum, code)
+	}
+}
+
 func sign(secret string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)

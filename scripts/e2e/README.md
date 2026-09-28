@@ -281,7 +281,9 @@ tester, reviewer, retro, merger READY, the ordinary human squash merge, producti
 architect sign-off. It also proves three changes-requested rounds, each posted by the reviewer
 pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
 the round returns to implementing only once the reviewer's handoff is recorded, authored and
-committed by the review App — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
+committed by the review App, and each review, like the final approval, names the commit carrying
+that round's reviewer handoff, the head the reviewer's own handoff push made (the order the Go
+reviewer prompt gives; the proof names only the decision) — and each naming one concrete correction the spec permits (a distinct line appended to the smoke file, the one product file the
 implementer's pull request changed, which the run records and requires to be exactly one; the
 correction counts only in that file's patch on the pull request) and reaching testing only on
 that round's own implementer handoff (the daemon's phase record must hold the implementer's
@@ -289,7 +291,12 @@ handoff for that round when the issue reaches testing, and the commit carrying e
 implementer, tester, and reviewer handoff is authored and committed by that role's own App, read
 from the issue's workspace),
 and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
-worker after its launch budget and the architect's retry relaunching it, restart during
+worker after its launch budget and the architect's retry relaunching it, a root whose human
+decides at the design gate that no change is needed (`architect-closes-a-no-change-root`: the
+architect ends its admitted tree with `close_root`, the daemon posts its reason on the issue before
+it writes `done`, every status write on the issue is the daemon's, the freed slot goes to the next
+waiting root, and the journal has the gate's changes request, the close, the linger, the slot
+release and the architect's suspension), restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's
 credentials: in one bash tool call of a real implementer pane, plain `gh` resolves
 `<state_dir>/worker-bin/gh`, two chained `legion gh` calls authenticate as `legion-implementer[bot]`
@@ -307,8 +314,15 @@ architect's session where they are written.
 After the sign-off the proof human removes
 every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
 fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
-loop before Stage 7, so the proof's reviewer approves a head that still carries `.legion/`, and
+loop before Stage 7, so the reviewer, as its Go prompt says and with no approval sent by the proof, approves a head that still carries `.legion/`, and
 without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
+From the proof's merge until that cleanup passes, the run holds the smoke `main`: an exclusive
+`flock` on `/tmp/legion-e2e-smoke-main.<owner>-<repo>.lock`, shared by every Stage 3 and Stage 4b
+run on the box (`hold_smoke_main` in `lib/workflow.sh`). Another run's merge inside that window
+adds the same `.legion/` paths and GitHub refuses it as unmergeable. A run that finds the lock
+held names the holder, says every minute how long it has waited, and fails after 45 minutes
+naming it. The lock is on an open descriptor, so a holder that dies or is killed frees it with no
+stale lock left behind.
 Each check is named in the transcript;
 seven negative controls demonstrate that the status-actor, held-worker, re-closed-gate, idle-read
 and worker-notice assertions reject deliberately corrupted observations before the captured
@@ -1095,6 +1109,21 @@ finds what it did under the operator's `HOME`: `mise` the same pinned Oh My Pi, 
 secretsd config (the daemon resolves `provider_keys` with it), gh and jj their config. Panes are
 unaffected, since the daemon moves their four XDG base directories under `<state_dir>/home`
 (LEGION-206 P1).
+
+jj reads a leading `~/` in a config value against `HOME`, which is `DIR` once the daemon runs. An
+operator's `signing.key = "~/.ssh/<key>.pub"` would then name a key inside `DIR`, where there is
+none. With `signing.behavior = "own"`, the first commit of every workspace clone the daemon makes is
+authored by the operator, so it fails to sign, and no pane ever starts: the daemon log shows each
+provision failing with `Couldn't load public key <dir>/.ssh/...`, and the run fails
+`panes-pinned-to-the-rig-before-any-agent-turn` waiting for the architect to register. So
+`make_omp_home` pins every `~/` value of the operator's jj config, in
+`DIR/.jjconfig-operator-paths.toml`, to the path it names under the operator's `HOME`. It exports
+`JJ_CONFIG` as the operator's own config files (`jj config path --user`, which names jj's default
+files when `JJ_CONFIG` is unset), with that overlay last, so the daemon's jj signs as the
+operator's does. A second call leaves its own overlay out when it reads the operator's config. A
+`~/` value it cannot pin, inside an array or a table or under a quoted key, fails the call, naming
+the key. Panes commit as their App's identity (`JJ_USER` and `JJ_EMAIL`), which `"own"` never
+signs.
 
 A proof's panes and controller therefore see none of the operator's `~/.gitconfig`, `~/.claude`,
 `~/.codex` or `~/.aws`, which is what a Sandbox pod sees. The gateway key command alone runs under

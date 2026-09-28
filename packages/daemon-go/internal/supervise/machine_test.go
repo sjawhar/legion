@@ -446,8 +446,11 @@ func TestSuspendKeepsTheSessionAndDropsTheLocator(t *testing.T) {
 			h.reach(state)
 			loc := h.locator()
 
-			h.must(RequestSuspend{Claim: testToken})
+			h.must(RequestSuspend{Claim: testToken, Reason: "LEGION-208 left implementing"})
 
+			if lines := h.logs.lines(`msg="supervise: suspended"`, "claim="+string(testToken), `reason="LEGION-208 left implementing"`); len(lines) != 1 {
+				t.Errorf("suspend lines %q, want one naming the claim and the reason", lines)
+			}
 			if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != loc {
 				t.Errorf("suspended %+v, want %+v", suspend.Locator, loc)
 			}
@@ -476,6 +479,9 @@ func TestASuspendThatFailsChangesNothing(t *testing.T) {
 		t.Fatalf("suspend returned %v, want the runtime's error", err)
 	}
 	h.wantState(StateIdle)
+	if lines := h.logs.lines(`msg="supervise: suspended"`); len(lines) != 0 {
+		t.Errorf("a failed suspend logged %q", lines)
+	}
 	if h.locator() != loc {
 		t.Errorf("locator %+v, want %+v", h.locator(), loc)
 	}

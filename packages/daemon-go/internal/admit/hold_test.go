@@ -293,7 +293,7 @@ func TestReconcileHoldsAnUnrecordedKeyBehindTheStreamWhateverItsListedStatus(t *
 // stale unlabeled listing snapshot applied at release was the last word forever. Only a replay at
 // or behind the held summary's own sequence is stale; a newer event is recorded normally — promote
 // still holds the candidate back until release, and applySummary leaves a record already past its
-// summary alone (see the daemon package's own test of the exact commit/AfterCommit race this
+// summary alone (see the daemon package's own test of the exact commit/commit-hook race this
 // depends on).
 func TestALabelAddedWhileAKeyIsHeldReachesTheRecordAndIsAdmittedAfterRelease(t *testing.T) {
 	pool := migratedPool(t)

@@ -124,9 +124,12 @@ shape; a spec that does not is the place to fix.
   subscribed to it. Envoy's GitHub webhook must acknowledge it with 200 and publish nothing — see
   [an-unknown-github-event-publishes-an-empty-envelope](../envoy/an-unknown-github-event-publishes-an-empty-envelope-skip-it-by-name-after-signature-verification.md)
   for why the pre-LEGION-99 handler published a junk envelope instead.
-- Check runs GitHub reports on the merge-group commit belong to no pull request head; Envoy's checks
-  tracker records only check runs that list a pull request and, even then, drops any whose SHA is
-  not the recorded head, so no `pr.<n>.checks` settlement is ever produced from a queue commit.
+- Check runs GitHub reports on the merge-group commit list no pull request: GitHub's `pull_requests`
+  on a check suite matches a pull request by `head_sha` and `head_branch`, and the queue commit runs
+  on a `gh-readonly-queue/...` branch that no pull request has as its head. Envoy's checks tracker
+  records only check runs that list a pull request, so no `pr.<n>.checks` settlement is ever
+  produced from a queue commit. (The tracker settles any commit of a pull request, not only its
+  head, so this rests on that list alone.)
 
 Related: [template-names-a-ci-check-the-repository-never-produces](../legion/template-names-a-ci-check-the-repository-never-produces.md)
 (the ruleset's required names must be names the repository's workflows actually emit).

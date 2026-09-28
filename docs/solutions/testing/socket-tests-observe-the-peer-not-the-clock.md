@@ -68,8 +68,9 @@ assertion (`[helloDeadline, waiterTimer]`) — it pins *which* code path cleared
 Where a real wait is unavoidable — a negative check like "no log line after the peer closes" over a
 real socket — keep it tiny, comment why deterministic control will not work, and never use it as the
 bound for a positive condition. For positive conditions poll the observable itself: the shared
-`waitFor(predicate, timeoutMs)` in `daemon/__tests__/ci-fixtures.ts` (10 ms tick; pass 10 s for a
-fresh `bun` CLI child's boot).
+`waitFor(predicate, timeoutMs, what)` in `daemon/__tests__/ci-fixtures.ts`, a 2 ms poll with a
+named real-time deadline (4 s by default). Pass 10 s for a fresh `bun` CLI child's boot, and give
+the test itself a longer bound than that, or the test's timeout fires before the named one.
 
 ## 4. Force the split at the handler boundary
 

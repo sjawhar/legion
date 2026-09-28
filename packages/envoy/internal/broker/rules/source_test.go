@@ -79,7 +79,8 @@ func TestNewCurrentOnReloadHook(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := cur.Get()
-	os.WriteFile(path, valid, 0o600) // re-triggers the ticker's reload against the same content
+	// The ticker reloads the file on every tick, so the next tick is the reload the hook refuses.
+	// Rewriting the file here would let that reload read it empty, between truncate and write.
 	select {
 	case e := <-alarmed:
 		if !errors.Is(e, refusal) {

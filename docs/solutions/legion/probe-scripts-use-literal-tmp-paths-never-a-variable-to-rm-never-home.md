@@ -39,8 +39,13 @@ so every probe of it, every handoff JSON naming it, and every commit subject abo
 through a file written with the `write` tool. That is the guard working as designed: it protects
 the shared jj operation log
 (`docs/solutions/legion/shell-command-gates-derive-from-bash-word-splitting-not-example-forms.md`).
-It also means a probe's destructive lines live in a file the guard never sees, edited by line
-number, run by name. A file is exactly where a stale line survives an edit.
+It also meant a probe's destructive lines lived in a file the guard never saw, edited by line
+number, run by name. A file is exactly where a stale line survives an edit. Since LEGION-121 the
+extension reads the scripts a command runs (`bash <file>`, `sh -c`, `source`, a script run by
+path, python/node/bun scripts) and refuses a destructive command whose target resolves outside
+`$LEGION_WORKSPACE` and a `/tmp` directory of the pane's own (`docs/deployment.md`, "The pane
+guard"); the incident's script is refused whole. The rules below still stand: the guard cannot
+read a path decided only at run time.
 
 ## The rules (the architect's standing orders since the incident)
 

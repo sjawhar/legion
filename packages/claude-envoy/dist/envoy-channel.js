@@ -22695,6 +22695,7 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // src/envoy-channel-server.ts
+import { unwatchFile, watchFile } from "fs";
 import { readFile as readFile2, rm as rm2 } from "fs/promises";
 
 // ../../node_modules/.bun/zod@4.3.6/node_modules/zod/v4/classic/external.js
@@ -41114,7 +41115,7 @@ function natsAuthOptions(env) {
 
 // ../envoy-client/src/tool-contract.ts
 var DELIVERY_CONTRACT = "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
-var TOPIC_GUIDE = "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " + "(publish-to; holders claim via envoy_role_set). > matches one or more trailing tokens and does not " + "match the base subject. Envoy registers the concrete base when you subscribe to <subject>.>, so " + "the recommended default remains github.<owner>.<repo>.pr.<n>.>. <owner> and <repo> are one token " + "each, with every dot in the name written _ (sjawhar/.github is github.sjawhar._github; " + "acme/site.io is github.acme.site_io), and a topic spelled with the dot receives nothing. " + "Default PR subscription: " + "github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: " + "opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), " + "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one head-checks settlement event: " + 'passed/failed/cancelled/skipped with failing names and URLs; re-fires with superseded_settlement: "true" ' + "when new runs appear for the same head). Other GitHub: issue.<n>, issue.<n>.comment, " + "issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action> (only " + "runs without an associated PR); slack.<team>.<channel>.message|mention and " + "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " + "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
+var TOPIC_GUIDE = "Topic guide (all are under notifications.): agent.<session_id> (subscribe: own inbox); role.<role> " + "(publish-to; holders claim via envoy_role_set). > matches one or more trailing tokens and does not " + "match the base subject. Envoy registers the concrete base when you subscribe to <subject>.>, so " + "the recommended default remains github.<owner>.<repo>.pr.<n>.>. <owner> and <repo> are one token " + "each, with every dot in the name written _ (sjawhar/.github is github.sjawhar._github; " + "acme/site.io is github.acme.site_io), and a topic spelled with the dot receives nothing. " + "Default PR subscription: " + "github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: " + "opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), " + "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one settlement event per commit whose checks settle, the head or not, naming its sha: " + 'passed/failed/cancelled/skipped with failing names and URLs; re-fires with superseded_settlement: "true" ' + "when new runs appear for the same commit). Other GitHub: issue.<n>, issue.<n>.comment, " + "issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action> (only " + "runs without an associated PR); slack.<team>.<channel>.message|mention and " + "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " + "whatsapp.<phone>.<jid>.<kind>; envoy.exceptions.<original-topic>.";
 var URGENCY_VALUES = EnvelopeSchema.shape.urgency.unwrap().options;
 var EXPECTS_REPLY_VALUES = EnvelopeSchema.shape.expects_reply.unwrap().options;
 function messageMetadataShape(schema) {
@@ -43834,7 +43835,7 @@ class StdioServerTransport {
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
-var version2 = "0.3.0";
+var version2 = "0.4.0";
 
 // src/channel-forwarder.ts
 var DeliveryIdentity = exports_external.object({
@@ -44033,6 +44034,24 @@ var CHANNEL_INBOX_LIMIT = 50;
 var EMPTY_RECEIPT = new Uint8Array;
 var ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
 var PersistedRole = exports_external.object({ session_id: exports_external.string().min(1), role: exports_external.string().min(1) });
+var HANDOFF_POLL_MS = 250;
+var HANDOFF_FLUSH_TIMEOUT_MS = 1e4;
+async function withTimeout(promise3, ms, what) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise3, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function undefinedOnNotFound(error48) {
+  if (error48 instanceof EnvoyApiError && error48.details.status === 404)
+    return;
+  throw error48;
+}
 var MCP_SERVER_INFO = { name: "envoy", version: version2 };
 var argumentSchemas = new WeakMap;
 function argumentsSchema(spec) {
@@ -44198,20 +44217,39 @@ async function startChannelSession(options) {
   let heldRole;
   let shuttingDown = false;
   const handoffFile = options.handoffPid === undefined ? undefined : sessionHandoffFile(options.stateDirectory, options.handoffPid);
+  let registryWrites = Promise.resolve();
+  const serialized = (write) => {
+    const result = registryWrites.then(() => write());
+    registryWrites = result.catch(() => {
+      return;
+    });
+    return result;
+  };
   const forwarder = createChannelForwarder(options.connection, {
     deliver: async (message) => {
       const removedTopics = subscriptionRemovedTopics(message.raw, identity.id);
-      if (removedTopics !== undefined) {
+      if (removedTopics !== undefined && removedTopics.length > 0) {
         for (const topic of removedTopics)
           userTopics.delete(topic);
-        forwarder.unfollow(removedTopics).catch((error48) => {
+        const { dropping, unsubscribing } = dropFromForwarderAndRegistry(removedTopics);
+        dropping.catch((error48) => {
           process.stderr.write(`envoy-channel: could not drop a removed subscription \u2014 ${messageFor(error48)}
+`);
+        });
+        unsubscribing.catch((error48) => {
+          process.stderr.write(`envoy-channel: could not drop a removed subscription from the registry \u2014 ${messageFor(error48)}; the next heartbeat reconciles it
 `);
         });
       }
       await enqueueChannelMessage(delivery, options.connection, directSubject, message);
     }
   });
+  function dropFromForwarderAndRegistry(topics) {
+    return {
+      dropping: forwarder.unfollow(topics),
+      unsubscribing: serialized(() => options.client.unsubscribe({ sessionID: identity.id, topics }))
+    };
+  }
   const register = async () => {
     await options.client.subscribe({
       sessionID: identity.id,
@@ -44248,11 +44286,7 @@ async function startChannelSession(options) {
   const reassertRole = async () => {
     if (heldRole === undefined)
       return;
-    const holder = await options.client.getRole(heldRole).then((role) => role.holder, (error48) => {
-      if (error48 instanceof EnvoyApiError && error48.details.status === 404)
-        return;
-      throw error48;
-    });
+    const holder = await options.client.getRole(heldRole).then((role) => role.holder, undefinedOnNotFound);
     if (holder === identity.id)
       return;
     const result = await options.client.setRole({
@@ -44265,6 +44299,13 @@ async function startChannelSession(options) {
       await rm2(roleStateFile(options.stateDirectory, identity.id), { force: true });
     }
   };
+  let roleTransferFrom;
+  const transferRole = async () => {
+    if (roleTransferFrom === undefined)
+      return;
+    await restoreRole(roleTransferFrom);
+    roleTransferFrom = undefined;
+  };
   const adoptHandoff = async () => {
     if (handoffFile === undefined)
       return;
@@ -44275,63 +44316,108 @@ async function startChannelSession(options) {
     const previousSubject = directSubject;
     const nextSubject = agentSubject(next);
     forwarder.follow(nextSubject);
-    await options.connection.flush();
-    await options.client.unregisterSession(previous);
+    try {
+      await withTimeout(options.connection.flush(), options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS, "flushing NATS");
+      await options.client.unregisterSession(previous);
+    } catch (error48) {
+      forwarder.unfollow([nextSubject]);
+      throw error48;
+    }
     identity.set(next);
     directSubject = nextSubject;
+    forwarder.unfollow([previousSubject]);
+    roleTransferFrom ??= previous;
     await register();
-    await forwarder.unfollow([previousSubject]);
-    await restoreRole(previous);
+    await transferRole();
     process.stderr.write(`envoy: session id changed ${previous} -> ${next}; re-registered
 `);
   };
+  let interestsRead = false;
+  const syncRegisteredInterests = async () => {
+    if (shuttingDown)
+      return;
+    const registry2 = await options.client.getInterest(identity.id).catch(undefinedOnNotFound);
+    if (shuttingDown)
+      return;
+    if (!interestsRead) {
+      for (const topic of registry2?.topics ?? []) {
+        if (topic === directSubject || topic.startsWith(ROLE_TOPIC_PREFIX))
+          continue;
+        userTopics.add(topic);
+        forwarder.follow(topic);
+      }
+      interestsRead = true;
+      return;
+    }
+    if (registry2 === undefined)
+      return;
+    const followed = new Set(forwarder.topics());
+    const drifted = registry2.topics.filter((topic) => topic !== directSubject && !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic));
+    if (drifted.length === 0)
+      return;
+    await options.client.unsubscribe({ sessionID: identity.id, topics: drifted });
+  };
   let heartbeatInFlight = false;
+  let heartbeatRequested = false;
   let outageReported = false;
   const heartbeat = async () => {
     if (shuttingDown || heartbeatInFlight)
       return;
     heartbeatInFlight = true;
     try {
-      await adoptHandoff();
-      await register();
+      await serialized(async () => {
+        await adoptHandoff();
+        await register();
+        await reassertRole();
+        await transferRole();
+        await syncRegisteredInterests();
+      });
       outageReported = false;
-      await reassertRole();
     } catch (error48) {
       if (outageReported)
         return;
       outageReported = true;
       process.stderr.write(`envoy-channel: registry heartbeat failed (${messageFor(error48)}); retrying every heartbeat
 `);
+      requestHeartbeat();
     } finally {
       heartbeatInFlight = false;
+      if (heartbeatRequested) {
+        heartbeatRequested = false;
+        heartbeat();
+      }
     }
   };
-  const recoverRegisteredInterests = async () => {
-    const registry2 = await options.client.getInterest(identity.id).catch(() => {
-      return;
-    });
-    if (registry2 === undefined)
-      return;
-    for (const topic of registry2.topics) {
-      if (topic === directSubject || topic.startsWith(ROLE_TOPIC_PREFIX))
-        continue;
-      userTopics.add(topic);
-      forwarder.follow(topic);
-    }
+  const requestHeartbeat = () => {
+    if (heartbeatInFlight)
+      heartbeatRequested = true;
+    else
+      heartbeat();
   };
   forwarder.follow(directSubject);
-  await recoverRegisteredInterests();
+  await syncRegisteredInterests().catch((error48) => {
+    process.stderr.write(`envoy-channel: could not read the registered interests (${messageFor(error48)}); the next heartbeat retries
+`);
+  });
   await options.connection.flush();
-  await register();
-  await restoreRole();
+  await serialized(async () => {
+    await register();
+    await restoreRole();
+  });
   await pruneStaleSessionHandoffs(options.stateDirectory);
   const heartbeatTimer = setInterval(() => {
     heartbeat();
   }, options.heartbeatMs);
+  if (handoffFile !== undefined) {
+    watchFile(handoffFile, { interval: HANDOFF_POLL_MS }, requestHeartbeat);
+    requestHeartbeat();
+  }
   return {
     delivery,
     topics: () => forwarder.topics(),
     async follow(topics) {
+      if (shuttingDown)
+        return [];
       const fresh = [];
       for (const topic of expandSubscriptionTopics(topics)) {
         if (topic === directSubject || userTopics.has(topic))
@@ -44341,7 +44427,7 @@ async function startChannelSession(options) {
         fresh.push(topic);
       }
       await options.connection.flush();
-      await register();
+      await serialized(register);
       return fresh;
     },
     async unfollow(topics) {
@@ -44349,8 +44435,9 @@ async function startChannelSession(options) {
       const removed = requested.filter((topic) => userTopics.delete(topic));
       if (removed.length === 0)
         return [];
-      await options.client.unsubscribe({ sessionID: identity.id, topics: removed });
-      await forwarder.unfollow(removed);
+      const { dropping, unsubscribing } = dropFromForwarderAndRegistry(removed);
+      await unsubscribing;
+      await dropping;
       return removed;
     },
     async rememberRole(role) {
@@ -44365,8 +44452,10 @@ async function startChannelSession(options) {
         return;
       shuttingDown = true;
       clearInterval(heartbeatTimer);
+      if (handoffFile !== undefined)
+        unwatchFile(handoffFile, requestHeartbeat);
       await forwarder.close();
-      await options.client.unregisterSession(identity.id).catch((error48) => {
+      await serialized(() => options.client.unregisterSession(identity.id)).catch((error48) => {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error48)}
 `);
       });

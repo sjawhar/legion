@@ -250,6 +250,13 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	if issue.Status == payload.Status {
 		return nil
 	}
+	// A done write's reason goes on the issue first: Dispatch refuses a message on a closed issue.
+	// It is posted as this row's message, so a retry after a failed write finds it and posts none.
+	if payload.Reason != "" {
+		if err := r.message(ctx, row, record.MessagePost{Body: payload.Reason}); err != nil {
+			return err
+		}
+	}
 	if err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
 		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
 	}
@@ -288,11 +295,16 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // once nobody will hold that role for this notice — the claim has failed or retired, or its tree
 // lingers or has closed — the row finishes undelivered with one log line. So does a row whose
 // architect cannot be resolved from the record (errNoticeUnroutable), which holds back no later
-// notice either. A publish the listener accepts but then cannot forward, to a session that is
+// notice either, and, before any publish, a row whose architect stopped with its finished tree
+// (stoppedWithTree). A publish the listener accepts but then cannot forward, to a session that is
 // registered but no longer running, comes back as a role-lane exception and is queued again
-// (rehold, notice_exceptions.go). The runner executes a row it leased from memory, so a row deleted
-// under its lease since (a catch-up a newer ready dropped) is found gone in the tree's snapshot and
-// finishes without a publish.
+// (rehold, notice_exceptions.go) unless its architect stopped with its finished tree. The runner
+// executes a row it leased from memory, so a row deleted under its lease since (a catch-up a newer
+// ready dropped) is found gone in the tree's snapshot and finishes without a publish, and so does a
+// catch-up a newer one superseded (catchUpSuperseded, read against the snapshot's root and the
+// claim as it runs now): the re-hold reads the claim from memory and writes its copy outside
+// ApplyFact's lock, so it can lose the race to a ready and commit an older copy after the fresh
+// catch-up.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
@@ -312,10 +324,26 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if err != nil {
 		return err
 	}
+	if payload.CatchUp != nil {
+		root, err := claim.NewToken(tree.project, tree.root.Key, claim.RoleArchitect)
+		if err != nil {
+			return fmt.Errorf("the architect of %s: %w", tree.root.Key, err)
+		}
+		if catchUpSuperseded(*payload.CatchUp, r.supervisedClaim(root), &tree.root) {
+			r.log.Info("outbox catch-up finished without publishing: a newer catch-up supersedes it", "row", row.ID, "issue", row.Issue,
+				"generation", payload.CatchUp.Generation, "launch", payload.CatchUp.Launch)
+			return nil
+		}
+	}
 	runs := func(token claim.Token) bool { return claimRuns(r.claimState(token)) }
 	architect, err := owningArchitect(tree.project, tree.issues, issue, payload.Kind, runs)
 	if err != nil {
 		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
+	}
+	if state := r.claimState(architect); stoppedWithTree(tree.root.Lingers(), state) {
+		r.log.Info("outbox notice finished undelivered: its architect stopped with its finished tree",
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", state)
+		return nil
 	}
 	if earlier := earlierNoticeFor(tree, architect, runs); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
@@ -508,7 +536,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"row", row.ID, "issue", issue.Key, "role", payload.Role, "leaves", payload.Leaves, "phase", issue.Phase, "start-row", last)
 			return nil
 		}
-		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token}); err != nil {
+		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason}); err != nil {
 			return fmt.Errorf("suspend claim %s: %w", token, err)
 		}
 		return nil

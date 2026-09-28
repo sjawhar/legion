@@ -39,7 +39,7 @@
     "lint": "bunx biome check src/ schemas/"
   },
   "dependencies": {
-    "zod": "^4.1.8"
+    "zod": "4.3.6"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
