@@ -44287,20 +44287,22 @@ async function startChannelSession(options) {
         return;
       throw error48;
     });
+    if (shuttingDown)
+      return;
     if (!interestsRead) {
-      interestsRead = true;
       for (const topic of registry2?.topics ?? []) {
         if (topic === directSubject || topic.startsWith(ROLE_TOPIC_PREFIX))
           continue;
         userTopics.add(topic);
         forwarder.follow(topic);
       }
+      interestsRead = true;
       return;
     }
     if (registry2 === undefined)
       return;
     const followed = new Set(forwarder.topics());
-    const drifted = registry2.topics.filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic));
+    const drifted = registry2.topics.filter((topic) => topic !== directSubject && !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic));
     if (drifted.length === 0)
       return;
     await options.client.unsubscribe({ sessionID: identity.id, topics: drifted });

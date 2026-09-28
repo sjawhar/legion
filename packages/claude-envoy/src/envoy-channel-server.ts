@@ -576,42 +576,49 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   let interestsRead = false
 
   /**
-   * Brings the registry entry and this process's own NATS subscriptions into
-   * line with each other, from the entry the listener holds.
+   * Brings the registry entry and this process's own NATS subscriptions into line
+   * with each other. The first successful read adopts every topic the entry lists;
+   * every later read subtracts every topic the entry lists that
+   * `forwarder.topics()` no longer names.
    *
-   * The first successful read adopts: registered interests deliver only through
-   * this process's subscriptions, so a resumed or restarted server must rebuild
-   * the topics its session id already registered or stay deaf to them. Every
-   * later read subtracts: a topic the entry still lists but `forwarder.topics()`
-   * no longer names — because a `deliver`-time removal's registry write failed,
-   * or for any other reason — is unsubscribed. Comparing live state each
-   * heartbeat, rather than replaying a topic list a failure was recorded
-   * against, means a topic re-followed since a failed removal is never stripped,
-   * and one topic's registry outage cannot block any other: there is no
-   * per-topic queue to starve, only ever this session's own current entry.
+   * Subtracting is safe only while `forwarder.topics()` is authoritative for this
+   * session, so both windows where it is not are checked after the read, together,
+   * because both open while the read is in flight. `interestsRead` is false until
+   * a read has succeeded, when the forwarder holds only the direct subject while
+   * the entry legitimately holds more. `shuttingDown` is set as teardown begins,
+   * and `forwarder.close()` empties the topic list in that same synchronous step,
+   * so a shutdown landing mid-read would leave an emptied list looking like total
+   * drift. Neither is read before the await: the early return at the top only
+   * saves a round trip, and guards nothing.
    *
-   * Subtracting is destructive and nothing undoes it — `unregisterSession`
-   * deletes only the sessions row, so a stripped entry is what the next
-   * `--resume` reads back — so it runs only where `forwarder.topics()` really is
-   * authoritative. Two ordinary situations where it is not are excluded here
-   * rather than assumed away: before a read has succeeded, when the forwarder
-   * holds only the direct subject while the entry legitimately holds more (a 404
-   * is the genuinely-new-session case, and does leave the forwarder complete);
-   * and from the start of shutdown, where `forwarder.close()` empties the topic
-   * list before the deregistration it races. The listener refuses the same
-   * inference from the other side of the wire: `mergeForUpsert`
-   * (packages/envoy/internal/store/kv.go) merges and never removes because a
-   * transient read once truncated a live subscription out of durable state.
+   * The drift filter names the direct subject even though `followed` covers it in
+   * every state this can subtract in — it is followed before the first
+   * registration, and `adoptHandoff` follows the new subject before assigning it.
+   * That redundancy is deliberate, because it is not what the reasoning costs if
+   * it is ever wrong again: an empty topic set makes the listener delete the whole
+   * entry (`removeInterestTopics` calls `deleteInterest`), where a followed topic
+   * slipping through loses one topic.
    *
-   * That shutdown guard is also why the direct subject goes unnamed below: it is
-   * in `forwarder.topics()` at every other point this can run — followed before
-   * the first registration, and `adoptHandoff` follows the new subject before
-   * assigning it — so `followed` already covers it.
+   * A 404 completes the read: it is the genuinely-new-session case, and the
+   * forwarder is already complete. Any other failure leaves `interestsRead` false
+   * and the next heartbeat adopts again, so a permanent outage means the entry is
+   * never reconciled. That is the correct direction, because nothing undoes a
+   * wrong subtraction: `unregisterSession` deletes only the sessions row, so a
+   * stripped entry stands until `Registry.Reap` and is what a `--resume` inside
+   * that window reads back. The listener refuses the same inference from the other
+   * side of the wire — `mergeForUpsert` (packages/envoy/internal/store/kv.go)
+   * merges and never removes because a transient read once truncated a live
+   * subscription out of durable state.
    *
-   * Runs only inside `serialized`, so it never races a concurrent registration.
-   * Quiet only at startup, where the caller swallows a failed read: from the
-   * heartbeat an outage here is exactly what the heartbeat's own report exists
-   * to surface, and the next heartbeat syncs fully again regardless.
+   * Reading live state each heartbeat, rather than replaying a topic list a
+   * failure was recorded against, is what keeps a topic re-followed since a failed
+   * removal from being stripped again, and keeps one topic's registry outage from
+   * blocking any other: there is no per-topic queue, only this session's own entry.
+   *
+   * Runs inside `serialized` from the heartbeat, so it never races a concurrent
+   * registration; the startup call runs before the first one is queued.
+   * Quiet only at startup, where the caller swallows a failed read; from the
+   * heartbeat an outage is what the heartbeat's own report exists to surface.
    */
   const syncRegisteredInterests = async (): Promise<void> => {
     if (shuttingDown) return
@@ -619,19 +626,21 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       if (error instanceof EnvoyApiError && error.details.status === 404) return undefined
       throw error
     })
+    if (shuttingDown) return
     if (!interestsRead) {
-      interestsRead = true
       for (const topic of registry?.topics ?? []) {
         if (topic === directSubject || topic.startsWith(ROLE_TOPIC_PREFIX)) continue
         userTopics.add(topic)
         forwarder.follow(topic)
       }
+      interestsRead = true
       return
     }
     if (registry === undefined) return
     const followed = new Set(forwarder.topics())
     const drifted = registry.topics.filter(
-      (topic) => !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic),
+      (topic) =>
+        topic !== directSubject && !topic.startsWith(ROLE_TOPIC_PREFIX) && !followed.has(topic),
     )
     if (drifted.length === 0) return
     await options.client.unsubscribe({ sessionID: identity.id, topics: drifted })

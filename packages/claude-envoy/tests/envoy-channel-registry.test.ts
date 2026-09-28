@@ -368,7 +368,7 @@ test("a registry read that fails at startup does not let the heartbeat delete th
   }
 })
 
-test("a shutdown landing inside an in-flight heartbeat leaves the registry entry alone", async () => {
+test("a shutdown landing before the heartbeat's registry read leaves the registry entry alone", async () => {
   const stateDirectory = await scratchState()
   const nats = new FakeNats()
   const alreadyRegistered = "notifications.dispatch.issue.DSP-1"
@@ -408,8 +408,65 @@ test("a shutdown landing inside an in-flight heartbeat leaves the registry entry
     holdRegistration = true
     await waitFor(async () => registrationHeld, "a heartbeat to reach the listener")
     holdRegistration = false
-    // `shutdown` empties the forwarder before its deregistration queues behind the
-    // tick already running; an emptied topic list is teardown, never drift.
+    // The tick is held in `register()`, so shutdown lands before the sync is
+    // entered at all: this pins the window the entry check covers. The window
+    // after the read is the test below.
+    const shuttingDown = session.shutdown()
+    await waitFor(async () => session.topics().length === 0, "the forwarder to close")
+    release.resolve()
+    await shuttingDown
+    expect([...entry].sort()).toEqual([directSubject, alreadyRegistered])
+  } finally {
+    release.resolve()
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a shutdown landing inside the heartbeat's registry read leaves the registry entry alone", async () => {
+  const stateDirectory = await scratchState()
+  const nats = new FakeNats()
+  const alreadyRegistered = "notifications.dispatch.issue.DSP-2"
+  const entry = new Set<string>([directSubject, alreadyRegistered])
+  const release = Promise.withResolvers<void>()
+  let holdRead = false
+  let readHeld = false
+  const client = recordingClient([], {
+    subscribe: async (input) => {
+      for (const topic of input.topics) entry.add(topic)
+      return noInterest()
+    },
+    unsubscribe: async (input) => {
+      for (const topic of input.topics) entry.delete(topic)
+    },
+    getInterest: async (sessionID) => {
+      if (holdRead) {
+        readHeld = true
+        await release.promise
+      }
+      return { ...noInterest(), session_id: sessionID, topics: [...entry] }
+    },
+  })
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      client,
+      heartbeatMs: 20,
+    }),
+  )
+
+  try {
+    expect(session.topics()).toContain(alreadyRegistered)
+    holdRead = true
+    await waitFor(async () => readHeld, "a heartbeat to reach the registry read")
+    holdRead = false
+    // The tick is past the entry check and suspended on the read when shutdown
+    // empties the forwarder, so a check evaluated before the await passes going in
+    // and finds an empty topic list coming out — every topic drift, the direct
+    // subject with them. The real listener does not merely empty the entry: an
+    // empty topic set makes `removeInterestTopics` delete it (internal/store/
+    // kv.go), and the deregistration behind it removes only the sessions row, so a
+    // `--resume` before `Registry.Reap` reads nothing back.
     const shuttingDown = session.shutdown()
     await waitFor(async () => session.topics().length === 0, "the forwarder to close")
     release.resolve()
