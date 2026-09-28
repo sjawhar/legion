@@ -23,6 +23,7 @@ import {
   type IssueTab,
   parseIssuePath,
 } from "../refs/routes";
+import { useKeymapScope } from "../shell/keymap";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ChildrenTab } from "./ChildrenTab";
@@ -99,6 +100,9 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   } = useIssueDetail(route);
   const landing = useItemLanding(route, issue.data);
   const navigate = useNavigate();
+  // The issue page's own scope, so the palette offers this issue's actions (`IssueHeader`
+  // registers them) while it is the page on screen.
+  useKeymapScope("issue");
   const panelScroll = useRef<Partial<Record<IssueTab, number>>>({});
   const [specShowDiff, setSpecShowDiff] = useState(false);
   const [specToolbar, setSpecToolbar] = useState<DocumentToolbar | undefined>(undefined);

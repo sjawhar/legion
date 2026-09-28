@@ -10,12 +10,22 @@ import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
  * letter, `"?"` the character an unshifted or shifted key produces.
  */
 
-export type KeymapScope = "global" | "dialog" | "inbox" | "project" | "architecture" | "board";
+export type KeymapScope =
+  | "global"
+  | "dialog"
+  | "inbox"
+  | "issue"
+  | "project"
+  | "architecture"
+  | "board";
 
 export interface KeyBinding {
   /** Stable identifier, unique within the registering component. */
   id: string;
-  /** One or more alternatives in tinykeys syntax, e.g. `["j", "ArrowDown"]`. */
+  /**
+   * One or more alternatives in tinykeys syntax, e.g. `["j", "ArrowDown"]`. `[]` is a
+   * palette-only action: no key press ever matches it, and it is offered by `actions()` alone.
+   */
   keys: string | readonly string[];
   label: string;
   run: (event: KeyboardEvent) => void;
@@ -23,6 +33,8 @@ export interface KeyBinding {
   when?: () => boolean;
   /** Fires while an `INPUT`, `TEXTAREA`, `SELECT`, or contentEditable element has focus. */
   inEditable?: boolean;
+  /** Whether `⌘K` offers this binding as an action; default `true`. Movement keys set `false`. */
+  palette?: boolean;
 }
 
 /** A binding as `?` describes it: keys as typed, its scope, and whether it applies right now. */
@@ -31,6 +43,15 @@ export interface KeyBindingDescription {
   id: string;
   keys: readonly string[];
   label: string;
+  scope: KeymapScope;
+}
+
+/** A binding the palette offers as a row: its label, the keys that also run it, and the run. */
+export interface KeymapAction {
+  id: string;
+  keys: readonly string[];
+  label: string;
+  run: () => void;
   scope: KeymapScope;
 }
 
@@ -168,6 +189,12 @@ export interface KeymapOptions {
 }
 
 export interface Keymap {
+  /**
+   * The palette's rows: every enabled, palette-eligible binding of the scopes beneath the
+   * innermost dialog, innermost scope first. A binding with `palette: false`, with more than one
+   * key alternative (one row cannot express several), or that fires in an editable is left out.
+   */
+  actions(): KeymapAction[];
   /** Every registered binding with its `when()` evaluated now — the source for `?`. */
   describe(): KeyBindingDescription[];
   handleKeyDown(event: KeyboardEvent): void;
@@ -276,6 +303,43 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
   };
 
   return {
+    actions() {
+      // Everything beneath the innermost dialog: the palette is itself a dialog, so this is the
+      // page the reader is looking at. A scope pushed twice contributes one set of rows.
+      const stack: KeymapScope[] = ["global", ...scopes];
+      const dialog = stack.lastIndexOf(DIALOG_SCOPE);
+      const beneath = dialog === -1 ? stack : stack.slice(0, dialog);
+      const offered: KeymapAction[] = [];
+      const seen = new Set<KeymapScope>();
+      for (let depth = beneath.length - 1; depth >= 0; depth -= 1) {
+        const scope = beneath[depth] as KeymapScope;
+        if (seen.has(scope)) {
+          continue;
+        }
+        seen.add(scope);
+        for (const registration of registrations) {
+          const { binding } = registration;
+          const keys = keysOf(binding);
+          if (
+            registration.scope !== scope ||
+            binding.palette === false ||
+            binding.inEditable === true ||
+            keys.length > 1 ||
+            binding.when?.() === false
+          ) {
+            continue;
+          }
+          offered.push({
+            id: binding.id,
+            keys,
+            label: binding.label,
+            run: () => binding.run(new KeyboardEvent("keydown", { key: keys[0] ?? "" })),
+            scope,
+          });
+        }
+      }
+      return offered;
+    },
     describe() {
       return registrations.map(({ binding, scope }) => ({
         enabled: binding.when?.() !== false,

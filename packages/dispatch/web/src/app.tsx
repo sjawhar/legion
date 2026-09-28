@@ -22,7 +22,7 @@ import {
   routeHasMargin,
 } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
-import { SearchPalette } from "./features/search/SearchPalette";
+import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
 import { SettingsPage } from "./features/settings/SettingsPage";
 import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
@@ -326,7 +326,9 @@ function NavigationContents({
 function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
+  // Which palette is open, and `null` for none: `$mod+k` and the rail's Search control list this
+  // page's actions above the hits, `/` searches only, and `g p` lists projects.
+  const [paletteMode, setPaletteMode] = useState<PaletteMode | null>(null);
   const [sidebarHidden, setSidebarHidden] = useUserPreference(
     "shell.sidebar",
     (stored) => stored === "hidden",
@@ -391,24 +393,63 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // The registry as described when `?` fired (focus still on the caller); `null` while closed.
   const [helpSnapshot, setHelpSnapshot] = useState<readonly KeyBindingDescription[] | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const routeProject = parseProjectPath(location.pathname)?.project;
   useKeymap("global", [
     {
+      // The palette is its own row in the palette; `?` lists the key instead.
       id: "search",
       inEditable: true,
       keys: "$mod+k",
       label: "Search",
-      run: () => setSearchOpen((open) => !open),
+      palette: false,
+      run: () => setPaletteMode((open) => (open === null ? "all" : null)),
+    },
+    {
+      id: "search-only",
+      keys: "/",
+      label: "Search",
+      palette: false,
+      run: () => setPaletteMode("search"),
     },
     {
       id: "help",
       keys: "?",
       label: "Keyboard shortcuts",
+      palette: false,
       run: () => setHelpSnapshot(appKeymap.describe()),
     },
     { id: "create", keys: "c", label: "Create issue", run: () => setCreateOpen(true) },
     { id: "go-inbox", keys: "g i", label: "Go to Inbox", run: () => navigate("/") },
     { id: "go-agents", keys: "g a", label: "Go to Agents", run: () => navigate("/agents") },
     { id: "go-settings", keys: "g s", label: "Go to Settings", run: () => navigate("/settings") },
+    {
+      id: "go-documents",
+      keys: "g d",
+      label: "Go to Documents",
+      run: () => navigate(`/projects/${routeProject}/documents`),
+      when: () => routeProject !== undefined,
+    },
+    {
+      id: "go-project",
+      keys: "g p",
+      label: "Go to project…",
+      run: () => setPaletteMode("projects"),
+    },
+    {
+      id: "toggle-sidebar",
+      keys: "Shift+S",
+      label: "Toggle sidebar",
+      run: () => setSidebarHidden(!sidebarHidden),
+      // Below `xl` the sidebar is a sheet with its own Menu control, and the preference is inert.
+      when: () => !isCompactViewport,
+    },
+    {
+      id: "toggle-margin",
+      keys: "Shift+M",
+      label: "Toggle margin",
+      run: () => setMarginHidden(!marginHidden),
+      when: () => hasMargin,
+    },
   ]);
   const signOut = useMutation({
     mutationFn: () => api.logout(),
@@ -442,7 +483,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       compact={isCompactViewport}
       onClose={() => setNavigationOpen(false)}
       onHideSidebar={() => setSidebarHidden(true)}
-      onSearch={() => setSearchOpen(true)}
+      onSearch={() => setPaletteMode("all")}
       onSignOut={() => signOut.mutate()}
       signOutError={signOut.isError}
       signOutPending={signOut.isPending}
@@ -606,7 +647,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             width={marginWidth}
           />
         </ErrorBoundary>
-        <SearchPalette onClose={() => setSearchOpen(false)} open={searchOpen} />
+        <SearchPalette mode={paletteMode} onClose={() => setPaletteMode(null)} />
         <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
         {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
         <RefPreviewHost />

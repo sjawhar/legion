@@ -59,7 +59,7 @@ function renderPalette(onClose = () => {}): { queryClient: QueryClient; unmount:
       <QueryClientProvider client={queryClient}>
         <KeymapProvider>
           <CurrentRoute />
-          <SearchPalette onClose={onClose} open />
+          <SearchPalette mode="all" onClose={onClose} />
         </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
@@ -216,10 +216,10 @@ test("closes the palette when navigation changes", async () => {
       <QueryClientProvider client={queryClient}>
         <RouteChanger />
         <SearchPalette
+          mode="all"
           onClose={() => {
             closed += 1;
           }}
-          open
         />
       </QueryClientProvider>
     </MemoryRouter>

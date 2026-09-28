@@ -57,6 +57,7 @@ import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, buildIssuePath } from "../refs/routes";
+import { useKeymap } from "../shell/keymap";
 import { AssigneeControl } from "./AssigneeControl";
 import { ClaimChip } from "./ClaimChip";
 import { GitHubLink } from "./GitHubLink";
@@ -67,6 +68,7 @@ import { stateForIssue } from "./pins";
 import { UnreachableRouteMarker } from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
+import { useIssuePriority } from "./useIssuePriority";
 
 const routeHint =
   "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";
@@ -179,6 +181,33 @@ export function IssueHeader({
     },
   });
   const drafts = useIssueDrafts(issue, updateIssue);
+  const priority = useIssuePriority(issue.key);
+  // Palette-only: closing and reopening an issue are too consequential for a single key, so they
+  // are reachable from `$mod+k` alone, through the same handlers and the same guards as the
+  // Close and Reopen buttons below. `IssuePage` pushes the `issue` scope these are offered under.
+  useKeymap("issue", [
+    {
+      id: "close",
+      keys: [],
+      label: "Close issue",
+      run: () => drafts.requestStatusSubmit("done"),
+      when: () => !isClosed,
+    },
+    {
+      id: "reopen",
+      keys: [],
+      label: "Reopen issue",
+      run: () => drafts.requestStatusSubmit("backlog"),
+      when: () => isClosed,
+    },
+    ...([0, 1, 2, 3] as const).map((level) => ({
+      id: `set-p${level}`,
+      keys: [],
+      label: `Set priority P${level}`,
+      run: () => priority.submit(level),
+      when: () => !isClosed,
+    })),
+  ]);
   const statusSaving = updateIssue.isPending && updateIssue.variables?.status !== undefined;
   const pendingStatus = statusSaving ? updateIssue.variables?.status : undefined;
   const selectableStatuses = isClosed ? issueStatuses : openIssueStatuses;

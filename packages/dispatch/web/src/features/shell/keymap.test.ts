@@ -249,3 +249,76 @@ test("project and board are page scopes: their bindings are described under thei
   expect(press("j")).toBe(true);
   expect(nextCard.fired()).toBe(1);
 });
+
+test("actions() lists each scope below the innermost dialog once, innermost scope first", () => {
+  const { keymap } = harness();
+  const create = binding("create", "c");
+  const toggleView = binding("toggle-view", "v");
+  const closePalette = binding("close-palette", "Escape", { inEditable: true });
+  keymap.register("global", [create.definition]);
+  keymap.register("project", [toggleView.definition]);
+  keymap.register(DIALOG_SCOPE, [closePalette.definition]);
+  // A page can push its scope twice (a panel kept mounted while hidden); one row all the same.
+  keymap.pushScope("project");
+  keymap.pushScope("project");
+  keymap.pushScope(DIALOG_SCOPE);
+
+  expect(keymap.actions().map((action) => [action.scope, action.id])).toEqual([
+    ["project", "toggle-view"],
+    ["global", "create"],
+  ]);
+});
+
+test("actions() omits palette:false, multi-key, inEditable and unavailable bindings", () => {
+  const { keymap } = harness();
+  const next = binding("next", "j", { palette: false });
+  const arrows = binding("arrows", ["ArrowDown", "ArrowUp"]);
+  const search = binding("search", "$mod+k", { inEditable: true });
+  const move = binding("move", "Shift+J", { when: () => false });
+  const open = binding("open", "o");
+  keymap.register("board", [
+    next.definition,
+    arrows.definition,
+    search.definition,
+    move.definition,
+    open.definition,
+  ]);
+  keymap.pushScope("board");
+
+  expect(keymap.actions().map((action) => action.id)).toEqual(["open"]);
+});
+
+test("a keyless binding never fires on a key press yet is offered as an action", () => {
+  const { keymap, press } = harness();
+  const close = binding("close", [], { label: "Close issue" });
+  keymap.register("issue", [close.definition]);
+  keymap.pushScope("issue");
+
+  expect(press("c")).toBe(false);
+  expect(press("Enter")).toBe(false);
+  expect(close.fired()).toBe(0);
+  expect(keymap.describe().map((entry) => [entry.id, entry.keys])).toEqual([["close", []]]);
+  expect(keymap.actions()).toMatchObject([
+    { id: "close", keys: [], label: "Close issue", scope: "issue" },
+  ]);
+});
+
+test("running an action fires its binding once with a keydown carrying its first key", () => {
+  const { keymap } = harness();
+  const fired: string[] = [];
+  keymap.register("global", [
+    { id: "snooze", keys: "s", label: "Snooze", run: (event) => fired.push(event.key) },
+    {
+      id: "close",
+      keys: [],
+      label: "Close issue",
+      run: (event) => fired.push(`close:${event.key}`),
+    },
+  ]);
+
+  for (const action of keymap.actions()) {
+    action.run();
+  }
+
+  expect(fired).toEqual(["s", "close:"]);
+});

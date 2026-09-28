@@ -232,8 +232,21 @@ function ArchitectureTreeView({
   };
   useKeymapScope("architecture");
   useKeymap("architecture", [
-    { id: "next", keys: "j", label: "Next component", run: () => rove(1) },
-    { id: "previous", keys: "k", label: "Previous component", run: () => rove(-1) },
+    // Movement is what the arrow keys are for; a palette row that moves the cursor helps nobody.
+    {
+      id: "next",
+      keys: "j",
+      label: "Next component",
+      palette: false,
+      run: () => rove(1),
+    },
+    {
+      id: "previous",
+      keys: "k",
+      label: "Previous component",
+      palette: false,
+      run: () => rove(-1),
+    },
     {
       id: "arrows",
       keys: ["ArrowDown", "ArrowUp"],

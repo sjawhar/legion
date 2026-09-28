@@ -40,6 +40,7 @@ const SCOPE_LABELS: Record<KeymapScope, string> = {
   dialog: "Dialog",
   global: "Global",
   inbox: "Inbox",
+  issue: "Issue",
   project: "Project",
 };
 
@@ -54,6 +55,7 @@ const SCOPE_ORDER: readonly KeymapScope[] = [
   "architecture",
   "board",
   "inbox",
+  "issue",
   "dialog",
 ];
 
@@ -81,10 +83,12 @@ export function ShortcutHelp({
   }
 
   const needle = filter.trim().toLowerCase();
+  // A palette-only action has no keys; `?` is the list of keys, so it has nothing to show here.
+  const keyed = snapshot.filter((entry) => entry.keys.length > 0);
   const shown =
     needle === ""
-      ? snapshot
-      : snapshot.filter((entry) =>
+      ? keyed
+      : keyed.filter((entry) =>
           `${entry.label} ${entry.keys.join(" ")} ${entry.scope}`.toLowerCase().includes(needle)
         );
   const scopes = SCOPE_ORDER.filter((scope) => shown.some((entry) => entry.scope === scope));
@@ -162,8 +166,11 @@ export function ShortcutHelp({
 
 const kbdClass = `rounded px-1.5 py-0.5 font-mono text-xs font-medium ${kbdHint}`;
 
-/** `["1", …, "9"]` collapses to `1 – 9`; other alternatives are listed with "or". */
-function KeyHints({ keys }: { keys: readonly string[] }): ReactNode {
+/**
+ * The keys that run a binding, as `?` and the palette both show them: `["1", …, "9"]` collapses
+ * to `1 – 9`, other alternatives are listed with "or", and no keys renders nothing.
+ */
+export function KeyHints({ keys }: { keys: readonly string[] }): ReactNode {
   const first = keys[0];
   const last = keys[keys.length - 1];
   const consecutive =
