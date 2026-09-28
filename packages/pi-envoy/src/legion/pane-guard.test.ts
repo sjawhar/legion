@@ -493,6 +493,27 @@ describe("scripts a command runs", () => {
     expect(bash(`f() { if true; then echo x; fi; rm -rf "$1"; }; f ${safe}`)).toBeUndefined();
   });
 
+  test("keeps the arguments a sourced file changes", () => {
+    const safe = '"$LEGION_WORKSPACE/a"';
+    const sets = script("source-sets-args.sh", 'set -- "$HOME/y"\n');
+    const shifts = script("source-shifts-args.sh", "shift\n");
+    const reads = script("source-reads-args.sh", 'echo "$1"\n');
+    expect(bash(`set -- ${safe}; . ${sets}; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- ${safe} "$HOME/y"; . ${shifts}; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- ${safe}; if true; then . ${sets}; fi; rm -rf "$1"`)).toContain(
+      "(a positional parameter)"
+    );
+    // With operands bash keeps a list the file set and restores one it shifted; the guard cannot
+    // tell which, so a changed list is unknown.
+    expect(bash(`set -- ${safe}; . ${sets} q; rm -rf "$1"`)).toContain("(a positional parameter)");
+    expect(bash(`set -- ${safe}; . ${reads} ${safe}; rm -rf "$1"`)).toBeUndefined();
+    // With none, the file reads this shell's own arguments.
+    expect(bash(`set -- ${safe}; . ${reads}; rm -rf "$1"`)).toBeUndefined();
+    expect(bash(`set -- "$HOME/y"; . ${reads}; rm -rf "$LEGION_WORKSPACE/b"`)).toBeUndefined();
+    // A function's arguments are its own, and the caller's come back when it returns.
+    expect(bash(`set -- ${safe} "$HOME/y"; f() { shift; }; f; rm -rf "$1"`)).toBeUndefined();
+  });
+
   test("walks a backgrounded command in a subshell", () => {
     const cleanup = 'cleanup() { rm -rf "$HOME"; }; trap cleanup EXIT; f() { trap - EXIT; }';
     // `f &` clears only its own subshell's handler, so the parent's still runs at exit.

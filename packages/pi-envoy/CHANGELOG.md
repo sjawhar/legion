@@ -97,9 +97,12 @@
   replaced an earlier definition was judged by the earlier one. The positional parameters merge as a
   variable does: a `shift` or `set --` inside a branch makes them unknown after it, where before the
   guard kept the arguments from before the branch, so `set -- "$LEGION_WORKSPACE/a" "$HOME/y"; if
-  true; then shift; fi; rm -rf "$1"` was allowed. A backgrounded command (`f &`) is walked in a
-  subshell, so its `trap - EXIT` no longer clears the parent's handler, and nothing else it changes
-  reaches the parent.
+  true; then shift; fi; rm -rf "$1"` was allowed. A sourced file's `set --` or `shift` changes the
+  caller's arguments, as bash does; before, the guard kept the caller's, so `set --
+  "$LEGION_WORKSPACE/a"; . lib.sh; rm -rf "$1"` with `lib.sh` running `set -- "$HOME/y"` was
+  allowed. `. file` with no operands runs the file with the caller's arguments, not none. A
+  backgrounded command (`f &`) is walked in a subshell, so its `trap - EXIT` no longer clears the
+  parent's handler, and nothing else it changes reaches the parent.
 - The guard walks up to 100,000 nodes of one command before refusing it as too large to judge,
   from 10,000. The repository's largest tracked script, Stage 4b's driver, needs about 20,700 to
   reach its first refusal, and 10,000 refused it for size alone. The limit still refuses and never

@@ -30,6 +30,9 @@
  * the construct may no longer know, except a name the shell assigns after the construct, whose new
  * value is the one it reads. A later branch that blurs the name expires the capture too, so
  * `…; fi; if [ -n "$x" ]; then t="$LEGION_WORKSPACE/b"; fi` is refused though both values are safe.
+ * A handler lifted from a branch has that body's variables but not its arguments, which merge
+ * as the branches leave them: `set -- a a; if true; then shift; trap 'rm -rf "$1"' EXIT; fi` is
+ * refused though `$1` is safe either way, and a walk that decides the branch would not lift that.
  * A function a branch or loop body defines is every definition a path may have left: a call runs
  * each, and the command of that name where a path defined none. A handler that would be dangerous
  * only at an earlier exit (an `exit` before a later assignment makes its target safe) is not
@@ -942,7 +945,10 @@ function clone(st: State): State {
  * working directory the branches leave differently is unknown, a function name holds every
  * definition they leave (`Callee`), and a handler any of them sets stays. Not merged: `files` and
  * `pidFiles`, which every branch shares; `output`, which each caller compares itself
- * (`outputChanged`); and `runningFunctions`, which only a function's own walk changes. */
+ * (`outputChanged`); and `runningFunctions`, which only a function's own walk changes. Two other
+ * sites carry a child's state back into this shell, `runFunction` and `runFile`'s sourced branch,
+ * and each lists its fields by hand: a field added to `State` belongs in all three, or in the list
+ * of what each leaves out. */
 function merge(target: State, branches: readonly State[]): void {
   const names = new Set<string>();
   for (const branch of branches) for (const name of branch.vars.keys()) names.add(name);
@@ -1632,6 +1638,10 @@ function runFunction(
   } catch (error) {
     locateRefusal(error, definition.file);
   }
+  // A call runs in this shell, so everything the body leaves stays, as `merge` and `runFile`'s
+  // sourced branch carry it (a field added to `State` belongs in all three). Not carried: the
+  // positional parameters, which bash restores to the caller's when a function returns; `files`
+  // and `pidFiles` (shared); and `runningFunctions`.
   outer.vars = child.vars;
   outer.exported = child.exported;
   outer.arrays.clear();
@@ -2730,9 +2740,24 @@ function runFile(
         );
       }
       const child: State = { ...clone(st), source: content, script: abs, depth: st.depth + 1 };
-      child.positional = positional.map((arg) => arg.exp);
+      const operands = positional.map((arg) => arg.exp);
+      // `. file` with no operands runs the file with this shell's own arguments.
+      child.positional = source && operands.length === 0 ? st.positional : operands;
       walkScript(parse(content), child, ctx, !source);
       if (source) {
+        // A sourced file runs in this shell, so everything it leaves stays: the same fields
+        // `merge` carries out of a branch and `runFunction` out of a call, and a field added to
+        // `State` belongs in all three or in their lists of what each leaves out. Not carried
+        // here: `files` and `pidFiles` (shared), and `runningFunctions`. The arguments: with no
+        // operands the file changed this shell's own, which stay changed; with operands bash
+        // restores this shell's afterwards unless the file set new ones with `set`, which the guard
+        // does not tell apart from a `shift` bash undoes, so a list the file changed is unknown.
+        st.positional =
+          operands.length === 0
+            ? child.positional
+            : JSON.stringify(child.positional) === JSON.stringify(operands)
+              ? st.positional
+              : undefined;
         st.vars = child.vars;
         st.exported = child.exported;
         st.arrays.clear();
