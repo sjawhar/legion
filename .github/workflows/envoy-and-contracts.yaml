@@ -387,6 +387,8 @@ jobs:
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image would be one more registry pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
+      # The listener image the smoke test runs against, built by its own step below.
+      ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/setup-bun
@@ -444,6 +446,18 @@ jobs:
       - name: Build envoy services
         run: go build ./cmd/dispatch ./cmd/listener
         working-directory: packages/envoy
+      # The image build is a step of its own, because TestSmoke's subject is the container's
+      # behaviour and a slow build must fail nothing. It used to build inside the test, where
+      # `go test -timeout 5m` bounded it: across the ten Release Envoy Listener runs before this
+      # change TestSmoke itself took 256.60–289.47 s, of which the five assertions measured
+      # 0.00 s each, and release run 36443745717 hit `panic: test timed out after 5m0s` at build
+      # step 46/46 (LEGION-361). The pull step above put this Dockerfile's base images in the
+      # daemon's store, which this build reads.
+      - name: Build the listener image the smoke test runs against
+        run: docker buildx build --load --tag "$ENVOY_SMOKE_IMAGE" --file packages/envoy/docker/Dockerfile .
+      # 5m now bounds only what the test does: pull NATS, start both containers behind the test's
+      # own 60 s health wait, and assert. Measured at 5.3–6.2 s against a prebuilt image on a
+      # devbox at load average 80, so the bound is deliberate headroom, not a build budget.
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy

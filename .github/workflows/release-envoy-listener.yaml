@@ -65,6 +65,9 @@ jobs:
   docker:
     needs: build
     runs-on: ubuntu-24.04
+    env:
+      # The listener image the smoke test runs against, built by the step below.
+      ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -79,6 +82,17 @@ jobs:
       - name: Generate Go contracts
         run: bun run gen:go
         working-directory: packages/contracts
+      # The image build is a step of its own, because TestSmoke's subject is the container's
+      # behaviour and a slow build must fail nothing. It used to build inside the test, where
+      # `go test -timeout 5m` bounded it: across the ten runs before this change TestSmoke itself
+      # took 256.60–289.47 s, of which the five assertions measured 0.00 s each, and run
+      # 36443745717 (83fe7bd7, attempt 1) hit `panic: test timed out after 5m0s` at build step
+      # 46/46, publishing no image until the job was re-run.
+      - name: Build the listener image the smoke test runs against
+        run: docker buildx build --load --tag "$ENVOY_SMOKE_IMAGE" --file packages/envoy/docker/Dockerfile .
+      # 5m now bounds only what the test does: pull NATS, start both containers behind the test's
+      # own 60 s health wait, and assert. Measured at 5.3–6.2 s against a prebuilt image on a
+      # devbox at load average 80, so the bound is deliberate headroom, not a build budget.
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy

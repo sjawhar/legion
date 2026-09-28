@@ -1,10 +1,17 @@
 //go:build smoke
 
 // Package smoke contains container-level smoke tests for the Envoy listener.
-// Builds the Docker image from the local Dockerfile and verifies critical
-// endpoints work end-to-end with a real NATS server via testcontainers.
+// Verifies critical endpoints work end-to-end with a real NATS server via testcontainers.
 //
-// Run: go test -tags smoke -v -timeout 5m ./internal/smoke/
+// ENVOY_SMOKE_IMAGE names an already-built listener image to run against. Both CI workflows
+// build it in a step of their own and set it, so the build is not work `go test` has to finish
+// inside its own deadline — what this test asserts is the container's behaviour, not a build-time
+// budget. Unset, the test builds the Dockerfile itself, which is what a local run does.
+//
+// Run, from the repository root:
+// `docker buildx build --load -t legion-envoy-smoke -f packages/envoy/docker/Dockerfile .`
+// then, in packages/envoy:
+// `ENVOY_SMOKE_IMAGE=legion-envoy-smoke go test -tags smoke -v ./internal/smoke/`
 package smoke
 
 import (
@@ -13,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -43,15 +51,7 @@ func TestSmoke(t *testing.T) {
 		t.Fatalf("start NATS: %v", err)
 	}
 
-	listenerC, err := testcontainers.Run(ctx, "",
-		testcontainers.WithDockerfile(testcontainers.FromDockerfile{
-			// The shared Dockerfile builds from the repo root: its bun stage needs
-			// the whole workspace to bake the dispatch SPA and regenerate contracts.
-			Context:       "../../../../",
-			Dockerfile:    "packages/envoy/docker/Dockerfile",
-			PrintBuildLog: true,
-			KeepImage:     true,
-		}),
+	listenerOpts := []testcontainers.ContainerCustomizer{
 		network.WithNetwork([]string{"listener"}, net),
 		testcontainers.WithEnv(map[string]string{
 			"NATS_URLS": "nats://nats:4222",
@@ -83,9 +83,22 @@ func TestSmoke(t *testing.T) {
 					}
 					return json.NewDecoder(body).Decode(&health) == nil && health.Status == "healthy"
 				}).
-				WithStartupTimeout(60*time.Second),
+				WithStartupTimeout(60 * time.Second),
 		),
-	)
+	}
+	image := os.Getenv("ENVOY_SMOKE_IMAGE")
+	if image == "" {
+		listenerOpts = append(listenerOpts, testcontainers.WithDockerfile(testcontainers.FromDockerfile{
+			// The shared Dockerfile builds from the repo root: its bun stage needs
+			// the whole workspace to bake the dispatch SPA and regenerate contracts.
+			Context:       "../../../../",
+			Dockerfile:    "packages/envoy/docker/Dockerfile",
+			PrintBuildLog: true,
+			KeepImage:     true,
+		}))
+	}
+
+	listenerC, err := testcontainers.Run(ctx, image, listenerOpts...)
 	testcontainers.CleanupContainer(t, listenerC)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)

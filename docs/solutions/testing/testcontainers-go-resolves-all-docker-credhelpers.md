@@ -25,9 +25,10 @@ severity: low
 
 ## Problem
 
-`packages/envoy/internal/smoke/listener_test.go` pulls `nats:2.10` from Docker Hub and builds
-the local Dockerfile with `testcontainers.WithDockerfile` — nothing in the test targets any
-private registry (`listener_test.go:20-53`). It still fails locally on a machine whose
+`packages/envoy/internal/smoke/listener_test.go` pulls `nats:2.10` from Docker Hub, and —
+unless `ENVOY_SMOKE_IMAGE` names an image built beforehand — builds the local Dockerfile with
+`testcontainers.WithDockerfile`; nothing in the test targets any private registry
+(`listener_test.go:46-101`). It still fails locally on a machine whose
 `~/.docker/config.json` has a `credHelpers` entry mapping an unrelated registry (here,
 `us-east1-docker.pkg.dev` → `gcloud`) to a helper that is currently unable to authenticate
 non-interactively:
@@ -44,9 +45,10 @@ invokes the configured helper binary when building auth config. A helper that is
 isn't authenticated, or times out fails that resolution outright — it doesn't fall back to
 anonymous/no-auth for the registries the build actually needs. The CI runner has no such
 `config.json` entry at all, so the failure is invisible in CI (`.github/workflows/`, "Container
-smoke test (testcontainers)": `go test -tags smoke -v -timeout 5m ./internal/smoke/`) and only
-reproduces on a developer machine with a stale cloud credential helper configured for something
-unrelated to the test.
+smoke test (testcontainers)": `go test -tags smoke -v -timeout 5m ./internal/smoke/`, which runs
+against the image the "Build the listener image the smoke test runs against" step built) and
+only reproduces on a developer machine with a stale cloud credential helper configured for
+something unrelated to the test.
 
 ## Solution
 
