@@ -120,7 +120,6 @@ func (r refusingRecorder) refuse(kind string) error {
 
 func (r refusingRecorder) Record(contracts.CIObservation) error      { return r.refuse("check") }
 func (r refusingRecorder) RecordSuite(contracts.CIObservation) error { return r.refuse("suite") }
-func (r refusingRecorder) RecordHead(_, _, _, _, _ string) error     { return r.refuse("head") }
 
 func postGitHub(t *testing.T, handler http.Handler, event, delivery, body string) {
 	t.Helper()

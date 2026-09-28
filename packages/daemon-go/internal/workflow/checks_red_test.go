@@ -23,7 +23,9 @@ import (
 // handoff head, whose settled verdict the reviewer waits for before it decides, so the round is
 // left open, its reviewer running, and the red is the round's to decide. And a round that has
 // already decided is ended by its decision before the red rule is asked: a request for changes
-// sends the implementer the reviewer's body and counts the round, and no checks-red is told.
+// sends the implementer the reviewer's body and counts the round, and no checks-red is told. The
+// same holds for the code head's own red carried to the handoff head that replaced it
+// (classify.SettlementFor): the round decides it, and nothing is sent back.
 func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -34,14 +36,19 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 		// decided seeds the reviewer's row with a request for changes: both halves of the round in.
 		decided bool
 		want    phase.Phase
+		// settles is the commit the red settlement names: the head, or the code head a handoff-only
+		// push replaced.
+		settles string
 	}{
-		{"in testing", phase.Testing, "testing", false, false, false, phase.Implementing},
-		{"in reviewing", phase.Reviewing, "needs_review", false, false, false, phase.Implementing},
-		{"a planned red in testing", phase.Testing, "testing", true, false, false, phase.Testing},
-		{"in implementing", phase.Implementing, "in_progress", false, false, false, phase.Implementing},
-		{"on the tester's handoff-only head", phase.Testing, "testing", false, true, false, phase.Testing},
-		{"on the reviewer's handoff-only head, its round half in", phase.Reviewing, "needs_review", false, true, false, phase.Reviewing},
-		{"on a code head whose round has decided", phase.Reviewing, "needs_review", false, false, true, phase.Implementing},
+		{"in testing", phase.Testing, "testing", false, false, false, phase.Implementing, ""},
+		{"in reviewing", phase.Reviewing, "needs_review", false, false, false, phase.Implementing, ""},
+		{"a planned red in testing", phase.Testing, "testing", true, false, false, phase.Testing, ""},
+		{"in implementing", phase.Implementing, "in_progress", false, false, false, phase.Implementing, ""},
+		{"on the tester's handoff-only head", phase.Testing, "testing", false, true, false, phase.Testing, ""},
+		{"on the reviewer's handoff-only head, its round half in", phase.Reviewing, "needs_review", false, true, false, phase.Reviewing, ""},
+		{"on a code head whose round has decided", phase.Reviewing, "needs_review", false, false, true, phase.Implementing, ""},
+		{"on the code head, carried to the tester's handoff-only head", phase.Testing, "testing", false, true, false, phase.Testing, "code"},
+		{"on the code head, carried to the reviewer's handoff-only head", phase.Reviewing, "needs_review", false, true, false, phase.Reviewing, "code"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -62,8 +69,12 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 				seedPhase(t, pool, reviewer)
 			}
 			engine := testEngine(config.DesignGateRootIssues, nil)
+			settles := tc.settles
+			if settles == "" {
+				settles = "head"
+			}
 			if result, err := intake.ApplyFact(context.Background(), pool, "github", "red", intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
-				HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "pytest", ID: 7}}, Generation: 1, Snapshot: "red-head", Verdict: "red",
+				HeadSHA: settles, CheckRuns: []record.AttemptRun{{Name: "pytest", ID: 7}}, Generation: 1, Snapshot: "red-head", Verdict: "red",
 				Failing: []string{"python-cli-tests / test (pytest)"}}, engine); err != nil || result.Refusal != nil {
 				t.Fatalf("apply the red verdict = %+v, %v", result.Refusal, err)
 			}
@@ -75,6 +86,15 @@ func TestARedVerdictInTestingOrReviewingSendsTheTreeBackToImplementing(t *testin
 					t.Fatalf("notices %v, want no checks-red", got)
 				}
 				assertOutboxCount(t, pool, "supervise", 0)
+				if tc.settles != "" {
+					var verdict, checked string
+					if err := pool.QueryRow(context.Background(), "select verdict, checked_head from pull_requests where number = 42").Scan(&verdict, &checked); err != nil {
+						t.Fatalf("read the pull request's verdict: %v", err)
+					}
+					if verdict != "red" || checked != tc.settles {
+						t.Fatalf("verdict %q of %q, want the carried red of %q", verdict, checked, tc.settles)
+					}
+				}
 				return
 			}
 			var task string

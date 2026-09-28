@@ -22,9 +22,9 @@ const TOPIC_GUIDE =
   "Default PR subscription: " +
   "github.<owner>.<repo>.pr.<n>.> (it receives the quiet PR family): pr.<n> (lifecycle: " +
   "opened/synchronize/closed; closed carries merged, merge_commit_sha, merged_by, head_sha), " +
-  "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one head-checks settlement event: " +
+  "pr.<n>.comment, pr.<n>.review, pr.<n>.mention, pr.<n>.checks (one settlement event per commit whose checks settle, the head or not, naming its sha: " +
   'passed/failed/cancelled/skipped with failing names and URLs; re-fires with superseded_settlement: "true" ' +
-  "when new runs appear for the same head). Other GitHub: issue.<n>, issue.<n>.comment, " +
+  "when new runs appear for the same commit). Other GitHub: issue.<n>, issue.<n>.comment, " +
   "issue.<n>.mention, mention, push.branch.<name>, push.tag.<name>, workflow.<file>.<action> (only " +
   "runs without an associated PR); slack.<team>.<channel>.message|mention and " +
   "slack.<team>.<channel>.thread.<ts>.message|mention; ghostwispr.<session>.<kind>; " +
