@@ -9,6 +9,7 @@ import type { MessageRead } from "../../api/types";
 import { actorName } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
 import { type AgentConversation, isRunning, toThreadMessages } from "./conversation";
+import { dispatchMetadata } from "./dispatch-marks";
 
 /**
  * Everything that reads the conversation, in one component so a boundary can be put around it.
@@ -57,7 +58,7 @@ export function AgentRuntimeThread({
             createdAt,
             id,
             // AgentThread renders a message carrying this marker as Dispatch's, not the stream's.
-            metadata: { custom: { dispatch: true } },
+            metadata: dispatchMetadata({ dispatch: true }),
             role: "assistant" as const,
             status: { reason: "stop", type: "complete" } as const,
           };
@@ -73,8 +74,7 @@ export function AgentRuntimeThread({
           content,
           createdAt,
           id,
-          // AgentThread names a user-role message carrying an author as someone else's.
-          metadata: { custom: { author } },
+          metadata: dispatchMetadata({ author }),
           role: "user" as const,
         };
       });

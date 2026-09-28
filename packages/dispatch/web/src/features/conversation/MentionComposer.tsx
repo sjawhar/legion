@@ -13,6 +13,7 @@ import {
 } from "react";
 
 import { ApiError, api, apiErrorMessage } from "../../api/client";
+import { agentMessagesQuery } from "../../api/queries";
 import type {
   Agent,
   AskOption,
@@ -655,7 +656,9 @@ export function MentionComposer({
       if (commentQueryKey !== undefined)
         void queryClient.invalidateQueries({ queryKey: commentQueryKey });
       if (owner.kind === "session") {
-        void queryClient.invalidateQueries({ queryKey: ["agents", owner.sessionId, "messages"] });
+        void queryClient.invalidateQueries({
+          queryKey: agentMessagesQuery(owner.sessionId).queryKey,
+        });
       } else {
         void queryClient.invalidateQueries({ queryKey: ["inbox"] });
         if (anchor !== undefined) {

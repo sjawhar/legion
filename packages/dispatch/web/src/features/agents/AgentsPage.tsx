@@ -1,6 +1,6 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useEffect, useId, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -61,7 +61,14 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 
 import { deliveryAttempts } from "./attempts";
-import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead } from "./unread";
+import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
+import {
+  holdsUnreadReply,
+  storeAgentState,
+  unreadRepliesLabel,
+  useMarkRepliesRead,
+  useWatermarkAtOpen,
+} from "./unread";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
@@ -221,7 +228,9 @@ function AgentExchangeReply({
   const retry = useMutation({
     mutationFn: (delivery: MessageDeliveryMode) => api.createMessageDelivery(reply.id, delivery),
     onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
+      void queryClient.invalidateQueries({
+        queryKey: agentMessagesQuery(agent.session_id).queryKey,
+      }),
   });
   const label = sessionLabel(agent.session_id, agent.title);
   const author = resolveAuthor(reply.author, titles);
@@ -297,7 +306,9 @@ function AgentTargetedMessage({
     mutationFn: (delivery: MessageDeliveryMode) =>
       api.createMessageDelivery(read.message.id, delivery),
     onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
+      void queryClient.invalidateQueries({
+        queryKey: agentMessagesQuery(agent.session_id).queryKey,
+      }),
   });
   const label = sessionLabel(agent.session_id, agent.title);
   const titles = useMemo(
@@ -385,49 +396,25 @@ function AgentMessageList({
   const agentState = useQuery(userAgentStateQuery());
   const [showOlder, setShowOlder] = useState(false);
   const [showCleared, setShowCleared] = useState(false);
-  // Exchanges shown because they held an unread reply when the row opened. They stay shown once
-  // read, so marking a reply read never folds it away from the viewer who is reading it.
-  const [revealed, setRevealed] = useState<ReadonlySet<string>>(() => new Set());
-  const sessionState = agentState.data?.[agent.session_id];
-  const clearedBefore = sessionState?.cleared_before;
-  const readThrough = sessionState?.read_through;
+  const clearedBefore = agentState.data?.[agent.session_id]?.cleared_before;
   const all = messages.data ?? [];
   const unread = exchangesAfter(all, clearedBefore);
   const visible = showCleared ? all : unread;
   const [newest, ...older] = visible;
-  // A read mark covers every reply up to it, so each of the viewer's own exchanges with a reply
-  // newer than the mark is shown when the row opens, not left behind "Show N older" while it is
-  // marked read. Only the viewer's own direct messages count toward their unread replies.
+  // Each of the viewer's own exchanges with a reply newer than how far they had read when the row
+  // opened is shown, not left behind "Show N older". The watermark stays where it was while the
+  // row is open, so marking those replies read does not fold them away from the viewer reading
+  // them.
   const viewer = useQuery(whoAmIQuery()).data;
-  const viewerLogin = viewer?.kind === "user" ? viewer.login.toLowerCase() : undefined;
-  const watermark = Math.max(
-    clearedBefore === undefined ? Number.NEGATIVE_INFINITY : Date.parse(clearedBefore),
-    readThrough === undefined ? Number.NEGATIVE_INFINITY : Date.parse(readThrough)
+  const viewerLogin = viewer?.kind === "user" ? viewer.login : undefined;
+  const watermark = useWatermarkAtOpen(agent.session_id);
+  const olderShown = older.filter(
+    (read) =>
+      watermark !== undefined && holdsUnreadReply(read, agent.session_id, viewerLogin, watermark)
   );
-  const serverUnread = sessionState?.unread_replies ?? 0;
-  const holdsUnread = (read: MessageRead) =>
-    serverUnread > 0 &&
-    read.message.issue_key === null &&
-    read.message.author.kind === "user" &&
-    read.message.author.id.toLowerCase() === viewerLogin &&
-    read.replies.some(
-      (reply) =>
-        reply.author.kind === "session" &&
-        reply.author.id === agent.session_id &&
-        Date.parse(reply.created_at) > watermark
-    );
-  const olderShown = older.filter((read) => revealed.has(read.message.id) || holdsUnread(read));
   const olderFolded = older.filter((read) => !olderShown.includes(read));
   const rendered =
     newest === undefined ? [] : [newest, ...olderShown, ...(showOlder ? olderFolded : [])];
-  const toReveal = olderShown
-    .filter((read) => !revealed.has(read.message.id))
-    .map((read) => read.message.id)
-    .join(" ");
-  useEffect(() => {
-    if (toReveal === "") return;
-    setRevealed((current) => new Set([...current, ...toReveal.split(" ")]));
-  }, [toReveal]);
   useMarkRepliesRead(
     agent.session_id,
     messages.isPending || agentState.isPending ? undefined : rendered
@@ -595,7 +582,7 @@ function AgentMessageComposer({
         onSent={() => {
           onCancelReply();
           void queryClient.invalidateQueries({
-            queryKey: ["agents", agent.session_id, "messages"],
+            queryKey: agentMessagesQuery(agent.session_id).queryKey,
           });
         }}
         owner={composerOwner}
@@ -835,52 +822,6 @@ function AgentFold({
 }
 
 /**
- * Sessions that answered the viewer and are no longer in the live list. The unread count sums
- * every session that replied, and a session often answers and then exits, so each of them keeps
- * a row here whose Open reads its replies in the live view: the badge is always one the viewer
- * can clear, and a reply is never lost because its session ended.
- */
-function EndedAgentsWithReplies({ live }: { live: readonly Agent[] }): ReactNode {
-  const states = useQuery(userAgentStateQuery()).data ?? {};
-  const ended = Object.entries(states).filter(
-    ([sessionID, state]) =>
-      state.unread_replies > 0 && !live.some((agent) => agent.session_id === sessionID)
-  );
-  if (ended.length === 0) return null;
-  const title = "Replied, no longer connected";
-  return (
-    <section aria-label={title} className="mt-5 space-y-3">
-      <h2 className={`text-xs font-semibold uppercase ${textMutedOnCanvas}`}>{title}</h2>
-      {ended.map(([sessionID, state]) => {
-        const label = sessionLabel(sessionID, "");
-        const to = `/agents/${encodeURIComponent(sessionID)}/live`;
-        return (
-          <article
-            className={`flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border px-3 py-1.5 ${card} ${borderDefault}`}
-            key={sessionID}
-          >
-            <span className={`min-w-0 truncate text-sm font-semibold ${textPrimaryOnCanvas}`}>
-              {label}
-            </span>
-            <Link
-              aria-label={`Open ${label}`}
-              className={`min-h-11 rounded-lg border px-2 text-xs font-medium whitespace-nowrap md:min-h-7 md:leading-7 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-              title={`Read ${label}'s replies`}
-              to={to}
-            >
-              Open
-            </Link>
-            <span className="ml-auto">
-              <LabelPill selected>{unreadRepliesLabel(state.unread_replies)}</LabelPill>
-            </span>
-          </article>
-        );
-      })}
-    </section>
-  );
-}
-
-/**
  * What narrows the agent list, mirroring the `envoy broadcast` script's own selectors: one
  * machine, one role, and a directory substring. An empty field matches everything.
  */
@@ -1062,7 +1003,7 @@ function BroadcastComposer({
       onSent();
       for (const recipient of created.recipients) {
         void queryClient.invalidateQueries({
-          queryKey: ["agents", recipient.session_id, "messages"],
+          queryKey: agentMessagesQuery(recipient.session_id).queryKey,
         });
       }
       void queryClient.invalidateQueries({ queryKey: ["broadcast"] });

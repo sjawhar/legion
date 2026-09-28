@@ -11,6 +11,7 @@ import {
   setConnectionState,
 } from "./live";
 import {
+  agentMessagesQuery,
   architectureSourcesQuery,
   inboxQuery,
   projectsQuery,
@@ -179,7 +180,7 @@ function isCommentLikeEvent(event: Event): boolean {
 // resolved) belongs to no conversation on that page.
 function agentConversationKey(target: string | undefined): readonly unknown[] | undefined {
   if (target?.startsWith("session:") && target.length > "session:".length) {
-    return ["agents", target.slice("session:".length), "messages"];
+    return agentMessagesQuery(target.slice("session:".length)).queryKey;
   }
   return undefined;
 }

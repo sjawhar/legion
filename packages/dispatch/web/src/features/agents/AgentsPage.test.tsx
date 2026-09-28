@@ -1139,7 +1139,13 @@ test("Agents Clear hides every exchange up to now for this viewer and persists t
 test("Agents keeps exchanges with activity after the persisted cutoff and hides the rest", async () => {
   const page = renderAgents({
     agentState: {
-      "planner-session": { cleared_before: "2026-09-14T12:00:00Z", unread_replies: 0 },
+      // The viewer has read through the late answer, so nothing is unread and the fold is the
+      // Clear's alone.
+      "planner-session": {
+        cleared_before: "2026-09-14T12:00:00Z",
+        read_through: "2026-09-14T13:00:00Z",
+        unread_replies: 0,
+      },
     },
     messages: [
       exchange("m3", "New question", "2026-09-15T00:00:00Z"),
