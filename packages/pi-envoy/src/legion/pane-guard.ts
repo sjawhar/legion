@@ -186,8 +186,9 @@ interface Site {
 const MAX_DEPTH = 8;
 /** The syntax nodes one command's walk may visit before the guard refuses it as too large to judge.
  * The repository's largest tracked script, `scripts/e2e/stage4b-sandbox-tree.sh`, reaches its
- * first refusal after about 20,700; a walk of 200,000 nodes took 260 ms on a loaded devbox, so the
- * budget bounds a pane's wait near 130 ms. */
+ * first refusal after about 20,700, in about half a second through the guard on a loaded devbox.
+ * What a node costs depends on what it does (a script it reads and parses costs far more than a
+ * `:`), so the budget bounds a walk's size, not its time. */
 const MAX_WALK_STEPS = 100_000;
 const MAX_ALTERNATIVES = 64;
 const MAX_SCRIPT_BYTES = 1024 * 1024;
