@@ -1207,6 +1207,32 @@ describe("scripts a command runs", () => {
     expect(bash(`bash ${opaque}`)).toContain("cannot read before running it");
   });
 
+  test("reads no script a command writes that is longer than it reads from disk", () => {
+    // Rendering is cheap (the text is concatenated lazily); reading the result is not: a group of
+    // 2,000 `printf` of a 65,536-character value renders 131 MB and held the pane for seconds.
+    const b = `b=${"b".repeat(65_536)}`;
+    const printfs = (n: number) => Array.from({ length: n }, () => `printf '%s' "$b"`).join("; ");
+    const f = '"$LEGION_WORKSPACE/f"';
+    for (const command of [
+      `${b}; { ${printfs(2000)}; } > ${f}; bash ${f}`,
+      `${b}; ${Array.from({ length: 20 }, () => `printf '%s' "$b" >> ${f}`).join("; ")}; bash ${f}`,
+      `${b}; ${Array.from({ length: 20 }, () => `echo "$b" >> ${f}`).join("; ")}; bash ${f}`,
+      // Main already held the pane on these two (14 to 17 s for 8,000 arguments).
+      `${b}; printf '%s' ${Array.from({ length: 100 }, () => '"$b"').join(" ")} > ${f}; bash ${f}`,
+      `${b}; echo ${Array.from({ length: 100 }, () => '"$b"').join(" ")} > ${f}; bash ${f}`,
+    ]) {
+      expect(bash(command), command.slice(0, 120)).toContain("cannot read before running it");
+    }
+    // Up to the size, what it writes is read whole: a dangerous last line of a script just under
+    // the size is refused by its line, not cut off.
+    expect(bash(`${b}; { ${printfs(2)}; } > ${f}; bash ${f}`)).toBeUndefined();
+    const x = `x=${"x".repeat(1000)}`;
+    const lines = Array.from({ length: 1040 }, () => `printf '%s\\n' "$x"`).join("; ");
+    expect(bash(`${x}; { ${lines}; echo 'rm -rf $HOME/.ssh'; } > ${f}; bash ${f}`)).toContain(
+      "line 1041 of"
+    );
+  });
+
   test("reads Python and JavaScript scripts for what they evaluate to", () => {
     const py = script(
       "clean.py",

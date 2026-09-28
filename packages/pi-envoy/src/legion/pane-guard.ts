@@ -22,7 +22,9 @@
  * the guard cannot resolve (a variable read from input, a command's output): it never guesses.
  * A command whose walk visits more than `MAX_WALK_STEPS` nodes is refused, never allowed unread, and
  * no value the guard builds is longer than `MAX_VALUE_LENGTH`: past it (a replacement of a
- * replacement, `x="$x$x"` repeated) a value is unknown, since building one held the pane.
+ * replacement, `x="$x$x"` repeated) a value is unknown, since building one held the pane. A script
+ * a command writes is read whole up to `MAX_SCRIPT_BYTES`, as one on disk is, and past it is one
+ * the guard cannot read (`readable`).
  *
  * Every value the guard produces is known, unset, or unknown, and never one standing in for
  * another: a value it cannot know taken as some harmless concrete one (the empty string, the text
@@ -1928,13 +1930,16 @@ function checkRedirects(
         content = heredoc?.content ?? (herestring ? herestringText(herestring, st, ctx) : null);
       } else if (command?.name === "echo") {
         const words = command.args.map((arg) => literalText(arg.exp));
-        content = words.every((word) => word !== undefined) ? `${words.join(" ")}\n` : null;
+        content = words.every((word) => word !== undefined) ? echoLine(words as string[]) : null;
       } else if (command?.name === "printf") {
         content = printfText(command.args) ?? null;
       }
       st.pidFiles.delete(file);
       const before = appends ? st.files.get(file) : "";
-      st.files.set(file, content === null || before === null ? null : `${before ?? ""}${content}`);
+      st.files.set(
+        file,
+        content === null || before === null ? null : readable(`${before ?? ""}${content}`)
+      );
       if (
         writes &&
         !appends &&
@@ -1972,18 +1977,34 @@ function groupOutputFile(statement: Statement, st: State, ctx: Ctx): string | un
 
 /** Walks a brace group whose output goes to a file, and returns what it writes there: the
  * concatenated output of each statement, with each part the guard cannot know as the unknown
- * marker, or null once a statement prints something it cannot render. Each statement's output is
- * read before the statement is walked, so it sees the variables the statements before it set. */
+ * marker, or null once a statement prints something it cannot render or the text passes what the
+ * guard reads (`readable`). Each statement's output is read before the statement is walked, so it
+ * sees the variables the statements before it set. */
 function walkRenderingGroup(group: BraceGroup, st: State, ctx: Ctx): string | null {
   let content: string | null = "";
   for (const statement of group.body.commands) {
     if (content !== null) {
       const text = statementOutput(statement, st, ctx);
-      content = text === undefined ? null : content + text;
+      content = text === undefined ? null : readable(content + text);
     }
     walkNode(statement, st, ctx, false);
   }
   return content;
+}
+
+/** The line `echo WORD...` prints, or null when it is longer than a script the guard reads: joining
+ * the words builds the whole string, so the length is checked first. */
+function echoLine(words: readonly string[]): string | null {
+  let length = 0;
+  for (const word of words) length += word.length + 1;
+  return length > MAX_SCRIPT_BYTES ? null : `${words.join(" ")}\n`;
+}
+
+/** The text of a file a command writes, as the guard models it, or null (a file it cannot read)
+ * when it is longer than a script the guard reads from disk. Building it is cheap, since the text
+ * is joined lazily; reading it is not: a 176 KB command rendering 655 MB held the pane for 30 s. */
+function readable(content: string): string | null {
+  return content.length > MAX_SCRIPT_BYTES ? null : content;
 }
 
 /** What one statement of a rendered group prints: nothing for an assignment, a quoted here-document
@@ -2010,7 +2031,7 @@ function statementOutput(statement: Statement, st: State, ctx: Ctx): string | un
   if (name === "printf") return printfText(rest);
   if (name === "echo") {
     if (literalText(rest[0]?.exp)?.startsWith("-")) return undefined;
-    return `${rest.map((arg) => runtimeText(arg.exp)).join(" ")}\n`;
+    return echoLine(rest.map((arg) => runtimeText(arg.exp))) ?? undefined;
   }
   return undefined;
 }
@@ -2814,7 +2835,10 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         if (target !== undefined && st.cwd !== undefined) {
           const file = path.resolve(st.cwd, target);
           st.pidFiles.delete(file);
-          st.files.set(file, append ? null : (heredoc?.content ?? null));
+          st.files.set(
+            file,
+            append || heredoc?.content === undefined ? null : readable(heredoc.content)
+          );
         }
       }
       return;
@@ -3639,7 +3663,7 @@ function runFile(
       throw new Refusal(
         site.snippet,
         site.line,
-        `this command writes ${abs} in a way the guard cannot read before running it; write the script with the write tool first`
+        `this command writes ${abs} in a way the guard cannot read before running it (output it cannot render, or more than the ${MAX_SCRIPT_BYTES} bytes it reads of a script); write the script with the write tool first`
       );
     }
     content = written;

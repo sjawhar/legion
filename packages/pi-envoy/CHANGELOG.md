@@ -149,7 +149,9 @@
   `a`s held a regex for hours), and the work is charged to the walk budget. No value the guard
   builds is longer than 65,536 characters: a replacement of a replacement reached 134 million in a
   tenth of a second and held the pane for seconds on each read, so past the bound a value is
-  unknown. The Stage 2, 3, 4b.13b, 4b and controller drivers are now refused only for killing the
+  unknown. A script a command writes is read whole up to the 1 MiB the guard reads of one on disk,
+  and past it is refused as one it cannot read: a 176 KB brace group rendering 655 MB held the pane
+  for 30 s. The Stage 2, 3, 4b.13b, 4b and controller drivers are now refused only for killing the
   processes a query selects (`$(run_processes)`, `first_child`), and the five manual smokes
   (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `smoke-clear-rebind.sh`,
   `omp-roundtrip.sh`) run their sessions on their own tmux server, where a `kill-session` can end
