@@ -23,7 +23,7 @@ func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {
 	if err := serve(cfg); err == nil || !strings.Contains(err.Error(), "AGENT_SECRETS_URL") {
 		t.Fatalf("serve must refuse without AGENT_SECRETS_URL, got %v", err)
 	}
-	cfg, err = loadConfig(env(map[string]string{"HOME": "/home/u", "XDG_RUNTIME_DIR": "/run/user/7", "AGENT_SECRETS_URL": "https://secrets.internal.trajectorylabs.com"}))
+	cfg, err = loadConfig(env(map[string]string{"HOME": "/home/u", "XDG_RUNTIME_DIR": "/run/user/7", "AGENT_SECRETS_URL": "https://secrets.internal.example"}))
 	if err != nil {
 		t.Fatal(err)
 	}

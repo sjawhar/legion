@@ -1,10 +1,10 @@
 # The Go live harnesses' operator: what an operator puts in runtime.kubernetes.pod to route every
 # Legion pod's model turns through the Hawk model gateway (middleman). Legion knows none of it; it
 # delivers these pieces to every worker pod and the image probe's pod (docs/kubernetes.md,
-# "Operator configuration"). The shape is the one agent-c's admission policies admit for a Legion
-# pod (legion-sandbox-pods, legion-middleman-audience): ServiceAccount legion-worker, exactly one
-# projected serviceAccountToken source, alone in its volume, for audience middleman-legion, lasting
-# at most 3600 s. The ConfigMap named here, legion-operator-route, holds this directory's models.yml
+# "Operator configuration"). The shape is the one the cluster's admission policies admit for a
+# Legion pod: ServiceAccount legion-worker, exactly one projected serviceAccountToken source, alone
+# in its volume, for the model gateway's audience, lasting at most 3600 s. The ConfigMap named here,
+# legion-operator-route, holds this directory's models.yml
 # (its baseUrl the operator's LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml. A harness run creates
 # its own copy, legion-operator-route-<project>, before any pod runs, points the pods at it in place
 # of this name, and deletes it after, so runs sharing the namespace never share the route.

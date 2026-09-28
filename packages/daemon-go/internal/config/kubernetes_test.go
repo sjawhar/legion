@@ -54,7 +54,7 @@ func kubernetesWith(line, replacement string) string {
 func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
 	path := writeConfigFile(t, kubernetesFile+`    tree_volume: 30Gi
     kubeconfig: kube/legion-daemon
-    context: legion-daemon@production
+    context: legion-daemon@example
     session_store: pvc
     scheduling:
       node_selector: {karpenter.k8s.aws/instance-family: m7i, zone: 4}
@@ -77,7 +77,7 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
         - name: operator-token
           projected:
             sources:
-              - service_account_token: {audience: middleman-legion, expiration_seconds: 3600, path: token}
+              - service_account_token: {audience: operator-audience, expiration_seconds: 3600, path: token}
               - secret: {name: legion-operator-ca, items: [{key: ca.crt, path: ca.crt}]}
               - config_map: {name: legion-operator-routes}
         - name: operator-creds
@@ -101,7 +101,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 		StorageClass: "gp2",
 		TreeVolume:   "30Gi",
 		Kubeconfig:   filepath.Join(filepath.Dir(path), "kube/legion-daemon"),
-		Context:      "legion-daemon@production",
+		Context:      "legion-daemon@example",
 		Scheduling: Scheduling{
 			NodeSelector: map[string]string{"karpenter.k8s.aws/instance-family": "m7i", "zone": "4"},
 			Tolerations: []Toleration{
@@ -129,7 +129,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 					Items:                []corev1.KeyToPath{{Key: "models.yml", Path: "models.yml"}, {Key: "overlay.yml", Path: "overlay.yml"}},
 				}}},
 				{Name: "operator-token", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
-					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "middleman-legion", ExpirationSeconds: new(int64(3600)), Path: "token"}},
+					{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "operator-audience", ExpirationSeconds: new(int64(3600)), Path: "token"}},
 					{Secret: &corev1.SecretProjection{
 						LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-ca"}, Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
 					}},
@@ -211,7 +211,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		},
 		{
 			name: "the removed gateway block",
-			body: kubernetesFile + "    gateway:\n      url: https://middleman.internal.example\n      audience: middleman-legion\n      service_account: legion-worker\n      token_expiry_seconds: 600\n",
+			body: kubernetesFile + "    gateway:\n      url: https://middleman.internal.example\n      audience: operator-audience\n      service_account: legion-worker\n      token_expiry_seconds: 600\n",
 			want: "runtime.kubernetes.gateway was removed (LEGION-270): configure pods with runtime.kubernetes.pod (docs/kubernetes.md, Operator configuration)",
 		},
 		{
@@ -272,7 +272,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		},
 		{
 			name: "context without a kubeconfig",
-			body: kubernetesFile + "    context: legion-daemon@production\n",
+			body: kubernetesFile + "    context: legion-daemon@example\n",
 			want: "runtime.kubernetes.context names a kubeconfig context, so it requires runtime.kubernetes.kubeconfig",
 		},
 		{
@@ -293,7 +293,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "node_selector setting the Legion pool",
 			body: kubernetesFile + "    scheduling: {node_selector: {legion.dev/pool: other}}\n",
-			want: "runtime.kubernetes.scheduling.node_selector must not set legion.dev/pool: the runtime selects the Legion pool itself, and legion-sandbox-pods requires its value",
+			want: "runtime.kubernetes.scheduling.node_selector must not set legion.dev/pool: the runtime selects the Legion pool itself, and the cluster's admission policy requires its value",
 		},
 		{
 			name: "tolerations not an array",
@@ -717,7 +717,7 @@ runtime:
     image: `+workerImage+`
     storage_class: gp2
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production
-    context: legion-daemon@production
+    context: legion-daemon@example
     pod:
 `+operatorRoutePod(t))
 
@@ -731,7 +731,7 @@ runtime:
 	if cfg.Linger != 18*time.Minute || cfg.Gates.Design != DesignGateOff || cfg.AdmissionCap != 2 {
 		t.Errorf("Linger=%s Gates=%+v AdmissionCap=%d, want 18m, off, 2", cfg.Linger, cfg.Gates, cfg.AdmissionCap)
 	}
-	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@production" || block.Resources != nil || block.Scheduling.NodeSelector != nil {
+	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@example" || block.Resources != nil || block.Scheduling.NodeSelector != nil {
 		t.Errorf("kubernetes block = %+v, want the restricted context, no requests, and no node selector", *block)
 	}
 	if pod := cfg.Runtime.Kubernetes.Pod; pod.ServiceAccount != "legion-worker" || len(pod.Volumes) != 2 || len(pod.VolumeMounts) != 3 ||
@@ -742,7 +742,7 @@ runtime:
 
 func TestAgentSecretsBlockSettlesWithDefaults(t *testing.T) {
 	path := writeConfigFile(t, kubernetesFile+`    agent_secrets:
-      url: https://secrets.dev1.internal.trajectorylabs.com
+      url: https://secrets.internal.example
       operator: sjawhar
 `)
 	cfg, err := LoadForValidation(path, noEnv)
@@ -751,7 +751,7 @@ func TestAgentSecretsBlockSettlesWithDefaults(t *testing.T) {
 	}
 	got := cfg.Runtime.Kubernetes.AgentSecrets
 	want := &AgentSecretsConfig{
-		URL: "https://secrets.dev1.internal.trajectorylabs.com", Operator: "sjawhar",
+		URL: "https://secrets.internal.example", Operator: "sjawhar",
 		Audience: "agent-secrets", TokenExpirySeconds: 3600,
 	}
 	if !reflect.DeepEqual(got, want) {

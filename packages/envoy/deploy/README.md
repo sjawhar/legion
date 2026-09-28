@@ -162,13 +162,11 @@ The Dispatch signing material is a named volume; the database is external.
 
 ## Backups and restore
 
-The database's nightly logical backup is not this compose's job: agent-c's
-`dispatch-backup` Fargate task (`meta/infra/pulumi/components/dispatch/backup.py`)
-`pg_dump`s the Aurora `dispatch` database into `production-dispatch-pg-backups`
-under the `dispatch/` prefix and pages `#eng-alerts` when a day has no dump; restores
-go through agent-c's `scripts/dispatch_restore.py`. `scripts/autodeploy.sh` still
-takes its own pre-deploy dump of `DATABASE_URL` before every image roll, kept locally
-for rollback.
+The database's nightly logical backup is not this compose's job: the production
+deployment's own scheduled backup task `pg_dump`s the `dispatch` database to object
+storage and alerts when a day has no dump; restores go through that deployment's own
+restore tooling. `scripts/autodeploy.sh` still takes its own pre-deploy dump of
+`DATABASE_URL` before every image roll, kept locally for rollback.
 
 ## Sync to a remote host
 

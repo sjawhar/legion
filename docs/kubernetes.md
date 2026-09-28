@@ -318,7 +318,7 @@ runtime:
     storage_class: gp2          # required: the tree volume's class (the cluster has no default)
     tree_volume: 20Gi           # default 20Gi
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production   # relative to legion.yaml's directory
-    context: legion-daemon@production   # required when the kubeconfig sets no current context
+    context: legion-daemon@example   # required when the kubeconfig sets no current context
     scheduling:                 # optional, beyond the Legion pool the runtime always selects
       node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
       tolerations: []
@@ -625,8 +625,8 @@ on its way to github.com.
 
 ### RBAC the Go daemon needs
 
-The daemon runs as a restricted identity (production: the `legion-daemon` group, as the
-`production-legion-daemon` role). It needs:
+The daemon runs as a restricted identity (in production, an IAM role mapped to the `legion-daemon`
+group). It needs:
 - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
 - `secrets`: create, delete, update, get, but never list;
 - `pods`: get, list, watch, which the incarnation fence's pod informer reads; `pods/log`: get;

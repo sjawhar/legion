@@ -401,7 +401,7 @@ merged into, and both bases are deleted at the end. The evidence is kept in `ACC
 ## stage4a-sandbox-runtime.sh
 
 ```sh
-LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production \
+LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
@@ -421,7 +421,7 @@ other process; only the installation token enters each claim's Secret.
 Every pod carries the operator fixture's pod,
 [`fixtures/operator-route/pod.yml`](fixtures/operator-route/pod.yml), read through the daemon's
 own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
-audience `middleman-legion`, and a ConfigMap holding the fixture's `models.yml` (anthropic through
+the model gateway's audience, and a ConfigMap holding the fixture's `models.yml` (anthropic through
 the operator's model gateway, `LEGION_E2E_MODEL_GATEWAY_URL`, keyed by that token) and
 `overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to the
 gateway's aliases, and each provider a pod could reach without the gateway disabled). Legion holds
@@ -436,16 +436,16 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_RUNTIME_CONTEXT` | required | the kubeconfig context of the Legion daemon's restricted identity (`legion-daemon@production`: the IAM role `production-legion-daemon`, group `legion-daemon`) |
+| `LEGION_E2E_RUNTIME_CONTEXT` | required | the kubeconfig context of the Legion daemon's restricted identity (an IAM role mapped to group `legion-daemon`) |
 | `LEGION_E2E_RUNTIME_KUBECONFIG` | `~/.kube/legion-daemon-production` | the kubeconfig file holding that context, kept apart from the devbox's own |
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
-| `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker, `https://secrets.internal.trajectorylabs.com` (Plan D), never a development slot (below) |
+| `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker (Plan D), never a development slot (below) |
 | `LEGION_E2E_AGENT_SECRETS_OPERATOR` | unset | the login this run's machine login is approved by — the harness starts a `legion-daemon` machine login and prints `STAGE4A: approve machine login code XXXX-XXXX on the Dispatch credential page as <operator>`, the stage is devbox-attended so the operator approves it with his own YubiKey during the run (polled up to 10 minutes; a timeout, denial, or expiry blocks the `secrets-*` checks with that reason, never fails the stage); distinct from the daemon's own production credential |
-| `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into `production/agent-secrets/legion-e2e-auto` (rule `LEGION_E2E_AUTO`: pod, automatic, inject) — the harness never sees the value itself, only its hash |
+| `LEGION_E2E_AGENT_SECRETS_AUTO_SHA256` | unset | the `sha256sum` of the dummy value Sami seeded into the production broker's secret store for rule `LEGION_E2E_AUTO` (pod, automatic, inject) — the harness never sees the value itself, only its hash |
 | `LEGION_E2E_AGENT_SECRETS_BIN` | `$work/agent-secrets` (built by the script; not read from the environment) | the checkout's `agent-secrets` CLI (`packages/envoy/cmd/agent-secrets`), run directly from the devbox for the `secrets-old-uid-and-revocation` check's before/after-revocation reads |
 
 **Why the production broker, with dummy rules, and not a development slot.** A dispatch-project
@@ -549,7 +549,7 @@ smoke repository `sjawhar/legion-smoke`. The daemon runs on the devbox as the Le
 restricted identity, and its pods dial its worker stream on the devbox's private address.
 
 ```sh
-LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
   LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_DISPATCH_URL=https://<dispatch> \
   LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
@@ -649,7 +649,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | checkpoint | what it holds |
 | :--- | :--- |
 | `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
-| `preflight` | the runtime identity is `production-legion-daemon` and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
+| `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`fixtures/operator-route`](fixtures/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |

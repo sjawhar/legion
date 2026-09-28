@@ -93,9 +93,8 @@ var imageDigestRef = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 // login at boot, on a background context, and logs the confirmation code once; no file ever
 // carries a launcher credential, since Login wins and holds it only in process memory), the
 // audience of the projected token every pod carries for it, and that token's lifetime. The audience
-// defaults to the broker's own (`agent-secrets`) and the lifetime to 3600 s, the most agent-c's
-// admission admits for a Legion worker token (components/identity/model_access.py,
-// LEGION_WORKER_TOKEN_MAX_EXPIRATION_SECONDS); the API server issues none under 600.
+// defaults to the broker's own (`agent-secrets`) and the lifetime to 3600 s, the most the cluster's
+// admission policy admits for a Legion worker token; the API server issues none under 600.
 type AgentSecretsConfig struct {
 	URL                string
 	Operator           string
@@ -660,7 +659,7 @@ func readNodeSelector(value *yaml.Node, key string) (map[string]string, error) {
 			return nil, refusal
 		}
 		if label == poolLabel {
-			return nil, fmt.Errorf("%s must not set %s: the runtime selects the Legion pool itself, and legion-sandbox-pods requires its value", key, poolLabel)
+			return nil, fmt.Errorf("%s must not set %s: the runtime selects the Legion pool itself, and the cluster's admission policy requires its value", key, poolLabel)
 		}
 		if _, exists := selector[label]; exists {
 			return nil, fmt.Errorf("%s names %s twice", key, label)
