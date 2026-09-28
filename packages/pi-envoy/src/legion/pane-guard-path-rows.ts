@@ -784,6 +784,21 @@ export const PATH_ROWS: readonly PathRow[] = [
     command: 'cd in && chmod -R 700 "$(realpath -s ..)/sub"',
     dotdot: true,
   },
+  {
+    name: "realpath.P.L.lexical",
+    family: "substitution",
+    role: "probe",
+    // Bash takes the LAST of `-L` and `-P`, so this is logical: a `P` anywhere is not physical.
+    command: 'chmod -R 000 "$(realpath -P -L "$HOME/mine/../keep")"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.L.P.physical",
+    family: "substitution",
+    role: "must-allow",
+    command: 'chmod -R 700 "$(realpath -L -P "$HOME/mine/../keep")"',
+    dotdot: true,
+  },
 
   // --- a resolution that fails: each must be unknown, never harmless ---
   {
