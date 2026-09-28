@@ -20,7 +20,20 @@ let env: NodeJS.ProcessEnv;
 const repository = path.resolve(import.meta.dir, "../../../..");
 
 // Where the guard refuses each tracked shell script: the innermost `file:line` its refusal names.
-// When a refusal moves on purpose, regenerate it as pane-guard-scripts.ts says.
+// It is regenerated with pane-guard-scripts.ts, never edited by hand. A failure has one of two
+// shapes, and they want opposite responses:
+//
+// - Entries changed (`Expected - N`, `Received + N`) for files the branch contains: a refusal moved
+//   to another line or file. If the guard or the script changed it on purpose, regenerate;
+//   otherwise the change is the finding.
+// - An entry added or removed for a file the branch does not contain: the table is derived from the
+//   checkout, and CI tests a pull request merged with main, so a script that lands on main changes
+//   this expectation without the branch changing. Merge main forward and regenerate. An entry added
+//   by hand for a file the branch lacks fails the other way on the branch itself.
+//
+// This is the accepted cost of recording `file:line` rather than a substring of each refusal, which
+// is what makes a refusal that moves fail here. The test is not flaky: it is right about a
+// population that changed.
 const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   ".github/scripts/release-push.sh": ".github/scripts/release-push.sh:103",
   "packages/claude-envoy/scripts/smoke-channel.sh":
