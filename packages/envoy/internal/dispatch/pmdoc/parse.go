@@ -599,7 +599,8 @@ func parseList(list *ast.List, source []byte, footnotes map[int]string) (*Node, 
 	for child := list.FirstChild(); child != nil; child = child.NextSibling() {
 		item, ok := child.(*ast.ListItem)
 		if !ok {
-			return nil, fmt.Errorf("%w: list contains %s", ErrSchema, child.Kind())
+			// refuseBlocks refuses every block outside convertedBlocks, and goldmark builds a list of items.
+			panic(fmt.Sprintf("conversion reached a list holding a %s block, which parseList does not convert", child.Kind()))
 		}
 		parsed, err := parseListItem(item, source, footnotes)
 		if err != nil {
@@ -659,7 +660,8 @@ func parseTable(table *extensionast.Table, source []byte, footnotes map[int]stri
 			}
 			children = append(children, parsed)
 		default:
-			return nil, fmt.Errorf("%w: unsupported table child %s", ErrSchema, child.Kind())
+			// refuseBlocks refuses every block outside convertedBlocks, and goldmark builds a table of rows.
+			panic(fmt.Sprintf("conversion reached a table holding a %s block, which parseTable does not convert", child.Kind()))
 		}
 	}
 	// A table with no body row holds one empty row, as the browser editor's parser reads it.
@@ -680,7 +682,8 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 	for child := row.FirstChild(); child != nil; child = child.NextSibling() {
 		cell, ok := child.(*extensionast.TableCell)
 		if !ok {
-			return nil, fmt.Errorf("%w: unsupported table cell %s", ErrSchema, child.Kind())
+			// refuseBlocks refuses every block outside convertedBlocks, and goldmark builds a row of cells.
+			panic(fmt.Sprintf("conversion reached a table row holding a %s block, which parseTableRow does not convert", child.Kind()))
 		}
 		content, err := parseTableCellInline(cell, source, nil, footnotes)
 		if err != nil {
