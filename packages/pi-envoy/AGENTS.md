@@ -292,13 +292,15 @@ shell started (a retry loop's `pid=$!`) stays a pid it may signal. Unknown on pu
 `$(git rev-parse --show-toplevel)`, whose answer the repository's config decides and an earlier
 command in the same line can rewrite; an operand `unbash` splits differently from bash (a pattern
 starting with `/` after `/` or `//`); text outside ASCII, which bash counts by the locale; and a
-replacement holding `&`. A pattern expansion spends the walk budget by the slices it tests.
+replacement holding `&`. A pattern is matched by stepping the positions it can reach along the
+value, never by a backtracking regular expression, and its work (the value's length times the
+pattern's) is charged to the walk budget, a `case` item's included.
 
-`src/legion/pane-guard-bash.ts` holds bash's pattern removal and replacement, `test`'s string and
-integer forms, and `printf %q` quoting as pure functions; `src/legion/pane-guard-bash.test.ts` holds
-every pattern operator over operands and values, every set-ness operator over set, empty, unset
-and environment names, and a function's arguments over words that give one, none, several or an
-unknown number, to one real bash, through the guard.
+`src/legion/pane-guard-bash.ts` holds bash's pattern matching, removal and replacement, `test`'s
+string and integer forms, and `printf %q` quoting as pure functions;
+`src/legion/pane-guard-bash.test.ts` holds every pattern operator over operands and values, every
+set-ness operator over set, empty, unset and environment names, and a function's arguments over
+words that give one, none, several or an unknown number, to one real bash, through the guard.
 `src/legion/pane-guard-code.ts` tokenizes Python and JavaScript for known deletion, move,
 overwrite, signal, and shell-out calls whose arguments it can evaluate; an argument it cannot
 evaluate is let through, where a shell target it cannot resolve, and a command `unbash` reports as

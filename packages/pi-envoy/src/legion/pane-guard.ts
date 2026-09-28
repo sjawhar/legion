@@ -77,7 +77,12 @@ import type {
 } from "unbash";
 import { parse } from "unbash";
 import {
+  ANY_ONE,
+  ANY_RUN,
   evaluateTest,
+  type Glob,
+  globMatches,
+  globWork,
   isAscii,
   removePattern,
   replacePattern,
@@ -269,12 +274,17 @@ const MAX_DEPTH = 8;
  * budget's worth of `rm -rf a;`, each target resolved against the pane's roots, takes about
  * 490 ms. So the budget bounds a walk's size, not its time. */
 const MAX_WALK_STEPS = 100_000;
+const WALK_LIMIT = `the guard reached its walk limit of ${MAX_WALK_STEPS} nodes; run a smaller script`;
 const MAX_ALTERNATIVES = 64;
-/** The longest value a pattern expansion is evaluated over; `//` tests every slice of it. */
+/** The longest value a pattern expansion is evaluated over; `//` matches from every start of it. */
 const MAX_PATTERN_VALUE = 512;
-/** The pattern tests one walk step stands for: a test costs about as much as 1/128 of a node, so a
- * `//` over the longest value spends about a thousand steps and the budget still bounds the time. */
-const PATTERN_TESTS_PER_STEP = 128;
+/** The pattern matching work (`globWork`) one walk step stands for, so the budget bounds the time
+ * a walk spends matching as it bounds its nodes. Measured on a loaded devbox: a budget's worth of
+ * it takes 0.2 s in one `//` over 512 characters with a 762-position pattern, and 0.4 to 0.8 s
+ * spread over thousands of expansions or `case` items, against 0.86 s for 100,000 `rm -rf a;`.
+ * `globWork` charges every pass its full length, where a pass stops once no pattern position is
+ * left, so the charge errs high: too high refuses a command, too low would bring the time back. */
+const PATTERN_WORK_PER_STEP = 1024;
 const MAX_SCRIPT_BYTES = 1024 * 1024;
 const FRESH_TEMP_NAME = "tmp.XXXXXXXXXX";
 /** First components under `/tmp` that hold other processes' sockets. */
@@ -722,6 +732,9 @@ function patternExpansion(
         (part.replace.replacement.text === "" &&
           part.text === `${head}${part.replace.pattern.text}}`);
   const slashPattern = operator === "/" || operator === "//";
+  // A parsed empty pattern after `/` or `//` is `unbash` splitting a `/` bash reads as the
+  // pattern's (`${v////x}`). The empty-glob check below refuses it too, so removing either leaves
+  // the other the one defence of that split, and `pane-guard-bash.test.ts` fails only with both gone.
   if (!accounted || (slashPattern && part.replace?.pattern.text === "")) return unknownResult;
   // Unset expands empty: an argument past the last one this shell knows it was given, or a name it
   // unset. A name merely absent from the command may still be in the environment bash runs with.
@@ -735,17 +748,14 @@ function patternExpansion(
   }
   const patternWord = part.replace?.pattern ?? part.operand;
   const patterns = patternWord === undefined ? [[literal("")]] : expandWord(patternWord, st, ctx);
-  const source = patterns.length === 1 ? patternSource(patterns[0] as Expansion) : undefined;
-  if (source === undefined || (slashPattern && source === "")) return unknownResult;
-  const n = value.length;
-  const tests = slashPattern ? (n * (n + 1)) / 2 + 1 : n + 1;
-  ctx.steps.count += Math.ceil(tests / PATTERN_TESTS_PER_STEP);
-  // Past the budget the value is not computed; the walk's next node refuses the command.
-  if (ctx.steps.count > MAX_WALK_STEPS) return unknownResult;
-  const pattern = new RegExp(`^${source}$`);
+  const glob = patterns.length === 1 ? patternGlob(patterns[0] as Expansion) : undefined;
+  // Also the second defence of the split above: an empty pattern text gives an empty glob.
+  if (glob === undefined || (slashPattern && glob.length === 0)) return unknownResult;
+  // Past the budget the value is not computed, and the walk refuses the command.
+  if (!spendPatternWork(globWork(glob, value.length, operator), ctx)) return unknownResult;
   let result: string;
   if (part.replace === undefined) {
-    result = removePattern(value, operator, pattern);
+    result = removePattern(value, operator, glob);
   } else {
     const replacements = expandWord(part.replace.replacement, st, ctx);
     const pieces = replacements.length === 1 ? (replacements[0] as Expansion) : undefined;
@@ -754,7 +764,7 @@ function patternExpansion(
     }
     const replacement = pieces.map((piece) => piece.text).join("");
     if (/[&\\]/.test(replacement)) return unknownResult;
-    result = replacePattern(value, operator, pattern, replacement);
+    result = replacePattern(value, operator, glob, replacement);
   }
   if (quoted) return [[literal(result)]];
   if (/\s/.test(result)) {
@@ -1401,7 +1411,7 @@ function decideCase(node: Case, st: State, ctx: Ctx): CaseItem | undefined {
     for (const word of item.pattern) {
       const patterns = expandWord(word, st, ctx);
       const matched =
-        patterns.length === 1 ? matchesPattern(patterns[0] as Expansion, value) : undefined;
+        patterns.length === 1 ? matchesPattern(patterns[0] as Expansion, value, ctx) : undefined;
       if (matched === undefined) return undefined;
       if (matched)
         return item.terminator === undefined || item.terminator === ";;" ? item : undefined;
@@ -1410,29 +1420,38 @@ function decideCase(node: Case, st: State, ctx: Ctx): CaseItem | undefined {
   return undefined;
 }
 
-/** Whether a `case` pattern matches `value` (`patternSource`); undefined when the guard cannot
- * match it exactly, a value outside ASCII included. */
-function matchesPattern(pattern: Expansion, value: string): boolean | undefined {
-  const source = patternSource(pattern);
-  if (source === undefined || !isAscii(value)) return undefined;
-  return new RegExp(`^${source}$`).test(value);
+/** Whether a `case` pattern matches `value` (`patternGlob`); undefined when the guard cannot
+ * match it exactly, a value outside ASCII included, or when the match would spend the walk's
+ * budget. */
+function matchesPattern(pattern: Expansion, value: string, ctx: Ctx): boolean | undefined {
+  const glob = patternGlob(pattern);
+  if (glob === undefined || !isAscii(value)) return undefined;
+  if (!spendPatternWork(globWork(glob, value.length, ""), ctx)) return undefined;
+  return globMatches(glob, value);
 }
 
-/** A bash pattern as a regular expression's source: literal ASCII text exactly, unquoted `*` and
- * `?` as wildcards. Undefined for what the guard cannot match exactly: an unknown part, a bracket
- * expression, text that may be an extended pattern (`@(a|b)`), and text outside ASCII. */
-function patternSource(pattern: Expansion): string | undefined {
-  let source = "";
+/** A bash pattern as a `Glob`: literal ASCII text exactly, unquoted `*` and `?` as wildcards.
+ * Undefined for what the guard cannot match exactly: an unknown part, a bracket expression, text
+ * that may be an extended pattern (`@(a|b)`), and text outside ASCII. */
+function patternGlob(pattern: Expansion): Glob | undefined {
+  const glob: number[] = [];
   for (const piece of pattern) {
     if (piece.kind === "unknown" || !isAscii(piece.text)) return undefined;
     if (piece.kind === "glob") {
-      if (piece.text === "*") source += "[\\s\\S]*";
-      else if (piece.text === "?") source += "[\\s\\S]";
+      if (piece.text === "*") glob.push(ANY_RUN);
+      else if (piece.text === "?") glob.push(ANY_ONE);
       else return undefined;
     } else if (/[()|]/.test(piece.text)) return undefined;
-    else source += piece.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    else for (let i = 0; i < piece.text.length; i += 1) glob.push(piece.text.charCodeAt(i));
   }
-  return source;
+  return glob;
+}
+
+/** Charges `work` (`globWork`) to the walk's budget; false when that spends it, and then the walk
+ * refuses the command. */
+function spendPatternWork(work: number, ctx: Ctx): boolean {
+  ctx.steps.count += Math.ceil(work / PATTERN_WORK_PER_STEP);
+  return ctx.steps.count <= MAX_WALK_STEPS;
 }
 
 function outputChanged(
@@ -1448,11 +1467,7 @@ function outputChanged(
 function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
   if (++ctx.steps.count > MAX_WALK_STEPS) {
     const site = siteOf(node, st);
-    throw new Refusal(
-      site.snippet,
-      site.line,
-      `the guard reached its walk limit of ${MAX_WALK_STEPS} nodes; run a smaller script`
-    );
+    throw new Refusal(site.snippet, site.line, WALK_LIMIT);
   }
   switch (node.type) {
     case "Statement": {
@@ -3451,10 +3466,14 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     functions: new Map(),
     traps: [],
   });
-  const run = (attempt: () => void, fallback: string): string | undefined => {
+  const run = (ctx: Ctx, attempt: () => void, fallback: string): string | undefined => {
     try {
       attempt();
-      return undefined;
+      // A value past the budget is left uncomputed, and the walk's next node refuses; a command
+      // whose last expansion spent the budget has no next node, so it is refused here.
+      return ctx.steps.count > MAX_WALK_STEPS
+        ? `refused \`${fallback}\`: ${WALK_LIMIT}`
+        : undefined;
     } catch (error) {
       if (!(error instanceof Refusal)) throw error;
       return `refused \`${error.snippet || fallback}\`: ${error.detail}`;
@@ -3463,13 +3482,14 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
   return {
     bash: (command, cwd, env) => {
       const ctx = context(env);
-      return run(() => walkScript(parse(command), initial(cwd, command), ctx), command.trim());
+      return run(ctx, () => walkScript(parse(command), initial(cwd, command), ctx), command.trim());
     },
     argv: (argv, cwd, env) => {
       const ctx = context(env);
       const list: Arg[] = argv.map((item) => ({ text: item, exp: [literal(item)] }));
       const snippet = argv.join(" ");
       return run(
+        ctx,
         () =>
           dispatch(
             {
@@ -3488,6 +3508,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     code: (language, code, cwd, env) => {
       const ctx = context(env);
       return run(
+        ctx,
         () => checkCode(language, code, initial(cwd, code), ctx, true),
         `${language} code`
       );

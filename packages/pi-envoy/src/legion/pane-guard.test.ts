@@ -418,14 +418,39 @@ describe("resolution", () => {
     expect(bash(`${command}; rm -rf "$HOME"`)).toContain("walk limit");
   });
 
-  test("counts a pattern expansion's work against the walk budget", () => {
-    // `//` tests every slice of its value: 500 of them over 512 characters is a few nodes of walk
-    // and seconds of matching, so the budget counts the matching and refuses the command.
-    const value = "a".repeat(512);
-    const expansions = Array.from({ length: 500 }, () => `: "\${v//?/x}"`).join("; ");
-    expect(bash(`v=${value}; ${expansions}; rm -rf "$LEGION_WORKSPACE/build"`)).toContain(
-      "walk limit"
-    );
+  test("charges one pattern expansion its worst-case matching, and refuses one past the budget", () => {
+    // `//` over the longest value it is evaluated over (512 characters) with a pattern of 772
+    // positions: its worst case is a budget of matching (`globWork`, 131,841 characters stepped
+    // times 780), so it is refused before it runs, though the target would be inside the
+    // workspace. A charge that under-counts the pattern or the value lets it through.
+    const v = `v=${"a".repeat(512)}`;
+    const over = `${"*a".repeat(385)}*b`;
+    expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v//${over}/x}"`)).toContain("walk limit");
+    // A quarter of it is matched, and bash's value is the target.
+    const under = `${"*a".repeat(100)}*b`;
+    expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v//${under}/x}"`)).toBeUndefined();
+    expect(bash(`${v}; rm -rf "/\${v//${under}/x}"`)).toContain(`rm would delete`);
+  });
+
+  test("matches a pattern with any number of stars in time the value and the pattern bound", () => {
+    // A regular expression for `*a*a*a*b` backtracks over a run of `a`s for time polynomial in the
+    // run, the stars its exponent: one of these held the pane for hours.
+    const v = `v=${"a".repeat(512)}`;
+    const stars = "*a*a*a*a*a*a";
+    expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v//${stars}*b/x}"`)).toBeUndefined();
+    expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v%%${stars}*b}"`)).toBeUndefined();
+    expect(bash(`${v}; rm -rf "/\${v##${stars}}"`)).toContain("rm would delete");
+    // The `case` takes its second item alone: the first does not match, the second does.
+    expect(
+      bash(`${v}; case $v in ${stars}*b) rm -rf ~;; ${stars}) rm -rf "$LEGION_WORKSPACE/x";; esac`)
+    ).toBeUndefined();
+  });
+
+  test("counts a case pattern's matching against the walk budget", () => {
+    const v = `v=${"a".repeat(100_000)}`;
+    expect(
+      bash(`${v}; case $v in ${"*a".repeat(2000)}b) :;; esac; rm -rf "$LEGION_WORKSPACE/x"`)
+    ).toContain("walk limit");
   });
 
   test("leaves ordinary work alone", () => {
