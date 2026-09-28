@@ -7,7 +7,7 @@
       "dependencies": {
         "@toon-format/toon": "^4.1.1",
         "nats": "^2.29.2",
-        "zod": "^4.1.8",
+        "zod": "4.3.6",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
@@ -22,7 +22,7 @@
         "@modelcontextprotocol/sdk": "^1.30.0",
         "ky": "^2.0.2",
         "nats": "^2.29.2",
-        "zod": "^4.0.0",
+        "zod": "4.3.6",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
@@ -34,7 +34,7 @@
       "name": "@legion/contracts",
       "version": "0.10.0",
       "dependencies": {
-        "zod": "^4.1.8",
+        "zod": "4.3.6",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
@@ -44,7 +44,7 @@
     },
     "packages/daemon": {
       "name": "legion",
-      "version": "7.3.0",
+      "version": "7.5.3",
       "bin": {
         "legion": "src/cli/index.ts",
       },
@@ -121,7 +121,7 @@
         "@legion/contracts": "workspace:*",
         "@toon-format/toon": "^4.1.1",
         "nats": "^2.29.2",
-        "zod": "^4.1.8",
+        "zod": "4.3.6",
       },
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
@@ -131,7 +131,7 @@
     },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
-      "version": "3.8.2",
+      "version": "3.11.2",
       "dependencies": {
         "@opencode-ai/plugin": "~1.14.46",
       },
@@ -142,7 +142,7 @@
         "@types/bun": "latest",
         "solid-js": "^1.9.0",
         "typescript": "^5.3.0",
-        "zod": "^4.1.8",
+        "zod": "4.3.6",
       },
       "peerDependencies": {
         "@opentui/core": ">=0.1.92",
@@ -161,7 +161,7 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-legion-envoy",
-      "version": "5.13.1",
+      "version": "5.16.5",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -173,7 +173,7 @@
         "nats": "^2.29.2",
         "typescript": "^5.3.0",
         "unbash": "^4.0.11",
-        "zod": "^4.1.8",
+        "zod": "4.3.6",
       },
     },
     "packages/proof-editor": {
@@ -228,8 +228,8 @@
   },
   "patchedDependencies": {
     "@milkdown/plugin-clipboard@7.22.1": "patches/@milkdown%2Fplugin-clipboard@7.22.1.patch",
-    "prosemirror-tables@1.8.5": "patches/prosemirror-tables@1.8.5.patch",
     "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
+    "prosemirror-tables@1.8.5": "patches/prosemirror-tables@1.8.5.patch",
   },
   "packages": {
     "@ampproject/remapping": ["@ampproject/remapping@2.3.0", "", { "dependencies": { "@jridgewell/gen-mapping": "^0.3.5", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw=="],
@@ -1748,13 +1748,7 @@
 
     "@babel/preset-typescript/@babel/helper-plugin-utils": ["@babel/helper-plugin-utils@7.28.6", "", {}, "sha512-S9gzZ/bz83GRysI7gAD4wPT/AI3uCnY+9xn+Mx/KPs2JwHJIz1W8PZkg2cqyt3RNOBM8ejcXhV6y8Og7ly/Dug=="],
 
-    "@legion/contracts/zod": ["zod@4.6.5", "", {}, "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q=="],
-
-    "@legion/envoy-client/zod": ["zod@4.6.5", "", {}, "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q=="],
-
     "@opencode-ai/plugin/zod": ["zod@4.1.8", "", {}, "sha512-5R1P+WwQqmmMIEACyzSvo4JXHY5WiAFHRMg+zBZKgKS+Q1viRa0C1hmUKtHltoIFKtIdki3pRxkmpP74jnNYHQ=="],
-
-    "@sjawhar/pi-legion-envoy/zod": ["zod@4.6.5", "", {}, "sha512-v5l/aFXZQeai4awLbOpSoHecE9UiMrnfx75tEXLjNonXVARxQ5mOeipTjROUchszUNCqnE+hqAMujRsRHsut2Q=="],
 
     "@tailwindcss/oxide-wasm32-wasi/@emnapi/core": ["@emnapi/core@1.11.3", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.3", "tslib": "^2.4.0" }, "bundled": true }, "sha512-zLpS5asjEb7lq8jYLq37N6XKaE41DIexlY1rF/z4/tIl3wo13Sqm28fRyfIsKZD+NZ8mM5RoKkpW/rBcuoSZSg=="],
 
