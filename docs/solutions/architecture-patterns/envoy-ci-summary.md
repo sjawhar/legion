@@ -47,8 +47,9 @@ record without `schema` settles only in `[debounce, debounce + 5 min)` after its
 
 A head that finished just before the old listener was replaced is still owed its settlement, and
 the window must cover the time between the old listener's last tick (it stops ticking at SIGTERM,
-`summaryCancel` in `cmd/listener`'s main) and the new one's first. The longest such gap is the
-on-prem compose deploy, which is stop-then-start, on a slow path whose named terms are a floor:
+`summaryCancel` in `cmd/listener`'s main) and the new one's first. Only a listener that mounts the
+GitHub webhook route runs the summary loop, and the longest such gap is a compose deploy of one,
+which is stop-then-start, on a slow path whose named terms are a floor:
 
 | Term | Bound |
 | --- | --- |
