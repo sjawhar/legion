@@ -333,7 +333,7 @@ const RUN = "bash unread.sh";
 const FALSE_COND = "grep -q zzzNOPE safe.sh";
 /** True under real bash. */
 const TRUE_COND = "grep -q PRESENT safe.sh";
-const DESTRUCTIVE = 'rm -rf "$HOME"\n';
+export const DESTRUCTIVE = 'rm -rf "$HOME"\n';
 
 /** What the row does when real bash runs it: `destroyed` and `intact` are checked, and `racy` is
  * a write bash performs beside the read, whose outcome one run cannot settle — those rows are
@@ -349,7 +349,7 @@ interface ModelRow {
   readonly script?: string;
 }
 
-const MODEL_ROWS: readonly ModelRow[] = [
+export const MODEL_ROWS: readonly ModelRow[] = [
   // Straight-line writes, both directions: the model is the only thing that can allow a row, and
   // the guard still reads what a command really writes.
   {
@@ -667,6 +667,110 @@ const MODEL_ROWS: readonly ModelRow[] = [
     guard: "allowed",
     live: "intact",
   },
+  {
+    name: "an && right-hand side that redirects a later rm",
+    payload: `d="$HOME"; ${FALSE_COND} && d="$LEGION_WORKSPACE/junk"; rm -rf "$d"`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "an && right-hand side that cds, and does run",
+    payload: `[ -d deep ] && cd deep; rm -rf junk`,
+    guard: "refused",
+    live: "intact",
+  },
+
+  // The mirror of a handler a branch registered: one this shell certainly registered, whose
+  // removal sits in a body. The removal really happening is what makes the modelled write not
+  // happen, so these conditions hold rather than fail.
+  {
+    name: "a removal of an EXIT handler on the straight line",
+    payload: `( trap ${QUOTED_WRITE} EXIT; trap - EXIT; : ); ${RUN}`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "a removal of an EXIT handler in an if body that did run",
+    payload: `( trap ${QUOTED_WRITE} EXIT; if ${TRUE_COND}; then trap - EXIT; fi; : ); ${RUN}`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "a removal of an EXIT handler on an && right-hand side that did run",
+    payload: `( trap ${QUOTED_WRITE} EXIT; ${TRUE_COND} && trap - EXIT; : ); ${RUN}`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "a removal of an EXIT handler in a case arm",
+    payload: `( trap ${QUOTED_WRITE} EXIT; case "$(uname)" in *) trap - EXIT ;; esac; : ); ${RUN}`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "a removal of an EXIT handler in a called function",
+    payload: `( trap ${QUOTED_WRITE} EXIT; f() { trap - EXIT; }; f; : ); ${RUN}`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "a removal of an EXIT handler in an if body that did not run",
+    payload: `( trap ${QUOTED_WRITE} EXIT; if ${FALSE_COND}; then trap - EXIT; fi; : ); ${RUN}`,
+    guard: "refused",
+    live: "intact",
+  },
+
+  // Leaving a body early. `break` and `continue` are closed, because the walk reaches their
+  // bodies through a body wrap; the rest are the residual this rule does not reach, and are
+  // pinned as they behave so that closing one is a visible change rather than a silent one.
+  {
+    name: "a break before the write",
+    payload: `for n in a; do break; ${WRITE}; done; ${RUN}`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "a break before the write in a while body",
+    payload: `while true; do break; ${WRITE}; done; ${RUN}`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "a continue before the write",
+    payload: `for n in a b; do continue; ${WRITE}; done; ${RUN}`,
+    guard: "refused",
+    live: "destroyed",
+  },
+  {
+    name: "RESIDUAL a return before the write",
+    payload: `f() { return 0; ${WRITE}; }; f; ${RUN}`,
+    guard: "allowed",
+    live: "destroyed",
+  },
+  {
+    name: "RESIDUAL a return in a branch before the write",
+    payload: `f() { [ -f nosuch.conf ] || return 0; ${WRITE}; }; f; ${RUN}`,
+    guard: "allowed",
+    live: "destroyed",
+  },
+  {
+    name: "RESIDUAL an exit before the write",
+    payload: `( exit 0; ${WRITE} ); ${RUN}`,
+    guard: "allowed",
+    live: "destroyed",
+  },
+  {
+    name: "RESIDUAL set -e and a command that fails before the write",
+    payload: `( set -e; ${FALSE_COND}; ${WRITE} ); ${RUN}`,
+    guard: "allowed",
+    live: "destroyed",
+  },
+  {
+    name: "RESIDUAL an exec before the write",
+    payload: `( exec true; ${WRITE} ); ${RUN}`,
+    guard: "allowed",
+    live: "destroyed",
+  },
 ];
 
 test("a file a branch or an unwaited command writes is never modelled as its text", () => {
@@ -714,6 +818,20 @@ test("a file a branch or an unwaited command writes is never modelled as its tex
     expected.push(`${row.name}: ${row.guard}, bash ${row.live}`);
   }
   expect(observed).toEqual(expected);
+  // Which shapes the rule does not reach is a claim about this batch, so it is read off the
+  // batch rather than written down beside it: a row that becomes refused, or a new one that
+  // arrives allowed while bash destroys the canary, fails here until the list says so.
+  expect(
+    MODEL_ROWS.filter((row) => row.guard === "allowed" && row.live === "destroyed").map(
+      (row) => row.name
+    )
+  ).toEqual([
+    "RESIDUAL a return before the write",
+    "RESIDUAL a return in a branch before the write",
+    "RESIDUAL an exit before the write",
+    "RESIDUAL set -e and a command that fails before the write",
+    "RESIDUAL an exec before the write",
+  ]);
 }, 120_000);
 
 // The other model a branch writes into: the pid a file holds, which `kill "$(<pid)"` reads. A
@@ -722,33 +840,39 @@ test("a file a branch or an unwaited command writes is never modelled as its tex
 // pids this shell started, signalling the file is safe whichever ran. Real bash decides here too:
 // each row reports what it actually put in the file and whether that pid is one of this shell's
 // own children, so "this pane's own descendant" is bash's answer rather than an assumption.
+export const START_PID = "sleep 5 & echo $! > pid";
+export const KILL_PID = 'kill "$(<pid)"';
+export const PID_ROWS = [
+  {
+    name: "a straight-line pid",
+    payload: `${START_PID}; ${KILL_PID}`,
+    guard: "allowed",
+    ownChild: true,
+  },
+  {
+    name: "a branch may rewrite it with another pid of this shell",
+    payload: `${START_PID}; ${FALSE_COND} && echo $! > pid; ${KILL_PID}`,
+    guard: "allowed",
+    ownChild: true,
+  },
+  {
+    name: "a branch may rewrite it with something that is not a pid",
+    payload: `${START_PID}; ${FALSE_COND} && echo 1 > pid; ${KILL_PID}`,
+    guard: "refused",
+    ownChild: true,
+  },
+  {
+    name: "only a branch ever wrote it",
+    payload: `sleep 5 & ${FALSE_COND} && echo $! > pid; ${KILL_PID}`,
+    guard: "refused",
+    ownChild: false,
+  },
+];
+
 test("a pid file a branch may rewrite is neither trusted nor forgotten", () => {
-  const start = "sleep 5 & echo $! > pid";
-  const kill = 'kill "$(<pid)"';
-  const rows = [
-    { name: "a straight-line pid", payload: `${start}; ${kill}`, guard: "allowed", ownChild: true },
-    {
-      name: "a branch may rewrite it with another pid of this shell",
-      payload: `${start}; ${FALSE_COND} && echo $! > pid; ${kill}`,
-      guard: "allowed",
-      ownChild: true,
-    },
-    {
-      name: "a branch may rewrite it with something that is not a pid",
-      payload: `${start}; ${FALSE_COND} && echo 1 > pid; ${kill}`,
-      guard: "refused",
-      ownChild: true,
-    },
-    {
-      name: "only a branch ever wrote it",
-      payload: `sleep 5 & ${FALSE_COND} && echo $! > pid; ${kill}`,
-      guard: "refused",
-      ownChild: false,
-    },
-  ];
   const observed: string[] = [];
   const expected: string[] = [];
-  for (const [index, row] of rows.entries()) {
+  for (const [index, row] of PID_ROWS.entries()) {
     const dir = path.join(base, `pid-${index}`);
     const rowWorkspace = path.join(dir, "ws");
     rmSync(dir, { recursive: true, force: true });
@@ -767,7 +891,10 @@ test("a pid file a branch may rewrite is neither trusted nor forgotten", () => {
     const verdict = rowGuard.bash(row.payload, rowWorkspace, rowEnv);
     // The same payload with the `kill` replaced by a report of what it would have signalled and
     // of every child this shell holds, so the signal is never actually sent from a test.
-    const probe = row.payload.replace(kill, 'printf "%s|%s" "$(<pid)" "$(jobs -p | tr "\\n" ",")"');
+    const probe = row.payload.replace(
+      KILL_PID,
+      'printf "%s|%s" "$(<pid)" "$(jobs -p | tr "\\n" ",")"'
+    );
     const seen = spawnSync("bash", ["-c", probe], {
       cwd: rowWorkspace,
       env: rowEnv,

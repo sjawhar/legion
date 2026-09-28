@@ -1527,16 +1527,31 @@ function merge(target: State, branches: readonly State[]): void {
   // them. A removal inside a branch that may not run resets nothing here. The branch may never
   // have run, so the handler may never have been set: `uncertainSet` keeps `runSetTraps` from
   // reading what even an `EXIT` one writes as fact.
+  //
+  // The mirror of that: a handler this shell did set, which a branch may have removed, is kept
+  // for the path where the branch did not run — and may not run on the path where it did, so it
+  // is uncertain from here on for the same reason. One branch holding it is not enough; the
+  // handler stands as fact only where every branch still holds it.
   const lifted: Trap[] = [];
+  const seen = new Set(target.traps);
   let merged: ReadonlyMap<string, Expansion> | undefined;
   for (const branch of branches) {
     for (const trap of branch.traps) {
-      if (target.traps.includes(trap)) continue;
+      // One lift per handler: with a branch per `&&` prefix the same one appears in several.
+      if (seen.has(trap)) continue;
+      seen.add(trap);
       merged ??= new Map(target.vars);
       lifted.push({ ...trap, vars: handlerVars(trap, branch.vars), merged, uncertainSet: true });
     }
   }
-  target.traps = [...target.traps, ...lifted];
+  target.traps = [
+    ...target.traps.map((trap) =>
+      branches.every((branch) => branch.traps.includes(trap))
+        ? trap
+        : { ...trap, uncertainSet: true }
+    ),
+    ...lifted,
+  ];
 }
 
 /** Walks a body the shell may never enter — a branch, a loop body, a handler for a signal that
