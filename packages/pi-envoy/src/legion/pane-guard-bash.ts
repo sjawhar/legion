@@ -102,7 +102,8 @@ export function removePattern(value: string, operator: string, glob: Glob): stri
 
 /** `value` with the longest match of `glob` replaced: the first (`/`), every one left to right
  * (`//`), one at the start (`/#`) or one at the end (`/%`). `/` and `//` replace an empty match
- * only in an empty value; their pattern is never null (`patternExpansion` in `pane-guard.ts`). */
+ * only in an empty value, and a null pattern leaves the value as it is; `/#` and `/%` insert at
+ * their end for one. */
 export function replacePattern(
   value: string,
   operator: string,
@@ -118,6 +119,7 @@ export function replacePattern(
       ? replacement + value.slice(length)
       : value.slice(0, n - length) + replacement;
   }
+  if (glob.length === 0) return value;
   if (n === 0) return globMatches(glob, "") ? replacement : value;
   let out = "";
   let at = 0;

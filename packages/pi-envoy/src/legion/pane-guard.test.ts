@@ -242,6 +242,10 @@ describe("resolution", () => {
       `read -r "$(cat n)" <<< "$HOME"; rm -rf "$LEGION_WORKSPACE/x"`,
       `${safe}; unset "$(cat n)"; rm -rf "/\${d+$LEGION_WORKSPACE/w}"`,
       `${safe}; eval "$(cat f)"; rm -rf "$d"`,
+      // So may a file sourced that the guard cannot read before bash does.
+      `source <(echo LEGION_WORKSPACE=/etc); rm -rf "$LEGION_WORKSPACE/x"`,
+      `source /dev/fd/3 3<<< "LEGION_WORKSPACE=/etc"; rm -rf "$LEGION_WORKSPACE/x"`,
+      `cp a rc; . ./rc; rm -rf "$LEGION_WORKSPACE/x"`,
       // `${d:=x}` and `${d=x}` assign the operand.
       `unset d; : "\${d:=$HOME/.ssh}"; rm -rf "$d"`,
       `unset d; : "\${d=$HOME/.ssh}"; rm -rf "$d"`,

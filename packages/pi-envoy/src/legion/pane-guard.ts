@@ -3560,7 +3560,8 @@ function runCode(
 
 /** Reads and checks the script at `file`: a shell script, or Python/JavaScript by extension or
  * shebang (`auto`). A file written earlier in this same command is read from what the command
- * writes; a file that does not exist runs nothing. */
+ * writes; a file the guard cannot read as one runs nothing it can judge, and sourced, leaves every
+ * variable unknown (`forgetVariables`). */
 function runFile(
   file: Arg,
   positional: readonly Arg[],
@@ -3592,11 +3593,20 @@ function runFile(
     content = written;
   } else {
     let size: number;
+    // A file the guard cannot read now may still hold text when bash sources it (a process
+    // substitution, `/dev/fd/3`, one a command before it creates), so what it assigns is unknown.
+    const unread = () => {
+      if (source) forgetVariables(st, `a variable the sourced ${abs} may assign`);
+    };
     try {
       const info = statSync(abs);
-      if (!info.isFile()) return;
+      if (!info.isFile()) {
+        unread();
+        return;
+      }
       size = info.size;
     } catch {
+      unread();
       return;
     }
     try {
