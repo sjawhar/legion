@@ -69,6 +69,11 @@ import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
+/** The composer's one notice slot: the recipient limit, a refused send or the exclusions, one at
+ *  a time. In the compact grid it is one line that scrolls sideways like the chips: between the
+ *  mode and Send on a narrow screen, adding no height, and the third and last row on a short one. */
+const composerLine = `mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1 ${dangerText}`;
+
 /** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
 function isInactive(agent: Agent, now: number): boolean {
   return now - agent.last_seen >= INACTIVE_AFTER_MS;
@@ -1005,7 +1010,9 @@ function BroadcastComposer({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { excluded, recipients } = broadcastPlan(selected, agents, delivery);
-  // The server refuses a send over the shared limit; saying so before Send saves the round trip.
+  // The server counts the `session_ids` it is sent - these recipients - against the shared limit
+  // and refuses a send over it; saying so before Send saves the round trip. The same predicate
+  // gives the limit the notice slot.
   const overLimit = recipients.length > MAX_BROADCAST_RECIPIENTS;
   const send = useMutation({
     mutationFn: () =>
@@ -1091,13 +1098,20 @@ function BroadcastComposer({
         rows={3}
         value={body}
       />
-      {excluded.length === 0 ? null : (
-        // In the compact grid the exclusions are one line that scrolls sideways, like the chips:
-        // between the mode and Send on a narrow screen, and as a third line under them on a
-        // short one. Every excluded session stays in it, and on its chip, by name.
-        <p
-          className={`mt-2 text-sm narrow-or-short:order-2 narrow-or-short:col-start-2 narrow-or-short:mt-0 narrow-or-short:min-w-0 narrow-or-short:overflow-x-auto narrow-or-short:text-xs narrow-or-short:whitespace-nowrap short:order-3 short:col-span-4 short:col-start-1 ${dangerText}`}
-        >
+      {/* One notice at a time, in priority order: the limit, then a refused send, then the
+          exclusions. A higher notice hiding the Excluded line hides no name: every excluded
+          session's chip still carries its reason. */}
+      {overLimit ? (
+        <p className={composerLine}>
+          At most {MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach{" "}
+          {recipients.length}.
+        </p>
+      ) : send.isError ? (
+        <p className={composerLine}>
+          Could not send: {send.error instanceof Error ? send.error.message : "network error"}
+        </p>
+      ) : excluded.length === 0 ? null : (
+        <p className={composerLine}>
           Excluded:{" "}
           {excluded
             .map((item) => `${sessionLabel(item.sessionID, item.title)} (${item.reason})`)
@@ -1105,21 +1119,6 @@ function BroadcastComposer({
           . Nothing is sent to them, and no other mode is substituted.
         </p>
       )}
-      {overLimit ? (
-        <p
-          className={`mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-full narrow-or-short:mt-0 short:order-3 ${dangerText}`}
-        >
-          At most {MAX_BROADCAST_RECIPIENTS} recipients per broadcast; this one would reach{" "}
-          {recipients.length}.
-        </p>
-      ) : null}
-      {send.isError ? (
-        <p
-          className={`mt-2 text-sm narrow-or-short:order-1 narrow-or-short:col-span-full narrow-or-short:mt-0 short:order-3 ${dangerText}`}
-        >
-          Could not send: {send.error instanceof Error ? send.error.message : "network error"}
-        </p>
-      ) : null}
       <button
         className={`mt-2 rounded-lg px-3 py-2 text-sm font-semibold narrow-or-short:order-2 narrow-or-short:col-start-3 narrow-or-short:mt-0 narrow-or-short:justify-self-end short:col-start-4 ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
         disabled={recipients.length === 0 || overLimit || body.trim() === "" || send.isPending}

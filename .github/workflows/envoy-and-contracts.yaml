@@ -384,8 +384,8 @@ jobs:
             exit 1
           fi
         working-directory: packages/envoy
-      - name: Generate Go contracts from shared schema
-        run: bun run gen:go
+      - name: Check Go contracts are generated from the shared schema
+        run: bun run check:go
         working-directory: packages/contracts
       - name: Check pmdoc fixtures are up to date
         run: bun run check

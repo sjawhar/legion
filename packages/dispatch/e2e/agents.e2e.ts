@@ -1,6 +1,6 @@
-import { expect, type Locator, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
+import { type FakeSession, getSentMessages, setLiveSessions, setSessionLive } from "./agents";
 import {
   createAgentMessage,
   createAsk,
@@ -853,7 +853,189 @@ test("with half the recipients unable to take the mode, the compact composer kee
   }
 });
 
-test("a typed broadcast survives clearing the selection and picking again, and a send clears it", async ({
+/** `count` planners, `capable` of them advertising BTW and the rest `aside` only, numbered in
+ *  three digits so the list sorts in order. */
+function planners(count: number, capable: number): FakeSession[] {
+  return Array.from({ length: count }, (_, index) => {
+    const number = String(index + 1).padStart(3, "0");
+    return {
+      capabilities: index < capable ? ["aside", "btw"] : ["aside"],
+      dir: `/workspaces/planner-${number}`,
+      machine_id: "build-host",
+      roles: ["planner"],
+      session_id: `planner-${number}-session`,
+      title: `Planner ${number}`,
+    };
+  });
+}
+
+const NOTICE = /^(At most \d+ recipients|Could not send:|Excluded:)/;
+const NOTICE_SIZES = [
+  { height: 664, width: 390 },
+  { height: 390, width: 844 },
+  { height: 375, width: 667 },
+];
+
+/**
+ * At each compact size, with the message filled until it stops growing: the composer is within
+ * 45% of the viewport, one notice at most renders, and the notice adds no grid row on a narrow
+ * screen (heading, chips, message, controls: four) and at most one on a short one (three).
+ */
+async function expectNoticeWithinBudget(
+  page: Page,
+  composer: Locator,
+  check: (at: string) => Promise<void>
+): Promise<void> {
+  const message = composer.getByRole("textbox", { name: "Broadcast message" });
+  for (const size of NOTICE_SIZES) {
+    const at = `${size.width}x${size.height}`;
+    await page.setViewportSize(size);
+    await fillUntilStable(message);
+    expect
+      .soft((await composer.boundingBox())?.height ?? Infinity, at)
+      .toBeLessThanOrEqual(size.height * 0.45);
+    const shape = await composer.evaluate((section) => ({
+      notices: [...section.querySelectorAll("p")].filter((line) =>
+        /^(At most \d+ recipients|Could not send:|Excluded:)/.test(line.textContent ?? "")
+      ).length,
+      rows: getComputedStyle(section).gridTemplateRows.split(" ").filter(Boolean).length,
+    }));
+    expect.soft(shape.notices, at).toBeLessThanOrEqual(1);
+    expect.soft(shape.rows, at).toBeLessThanOrEqual(size.height <= 500 ? 3 : 4);
+    await check(at);
+  }
+}
+
+/** The Agents page at 390x664 with every session selected, and the notice slot's parts. */
+async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
+  const agents = page.getByRole("region", { name: "Agents" });
+  const composer = page.getByRole("region", { name: "Broadcast" });
+  await setLiveSessions(sessions);
+  await page.setViewportSize({ height: 664, width: 390 });
+  await page.goto("/agents");
+  await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
+  await expect(composer).toBeVisible();
+  return {
+    agents,
+    composer,
+    excludedChip: (title: string) =>
+      composer.getByRole("button", { name: new RegExp(`^${title} · does not advertise btw`) }),
+    excludedLine: composer.getByText(/^Excluded:/),
+    limit: composer.getByText(/^At most 100 recipients per broadcast/),
+    notice: composer.getByText(NOTICE),
+    refused: composer.getByText(/^Could not send:/),
+    // Every listed recipient leaves the registry before Send, so the server refuses the send.
+    refuse: async (leaving: FakeSession[]) => {
+      await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Report status.");
+      for (const session of leaving) await setSessionLive(session.session_id, false);
+      await composer.getByRole("button", { name: /^Send to / }).click();
+      await expect(composer.getByText(/^Could not send:/)).toBeVisible();
+    },
+  };
+}
+
+test.describe("the composer's notices share one slot, highest first, within budget on compact screens", () => {
+  test("the limit alone: 120 recipients", async ({ browser }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const fixture = await openNoticeFixture(page, planners(120, 120));
+      await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
+        await expect.soft(fixture.limit, at).toHaveCount(1);
+        await expect.soft(fixture.notice, at).toHaveCount(1);
+      });
+    } finally {
+      await alice.close();
+    }
+  });
+
+  test("the limit over exclusions: 120 selected, 110 recipients, each excluded chip still names its reason", async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const fixture = await openNoticeFixture(page, planners(120, 110));
+      await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
+        await expect.soft(fixture.limit, at).toHaveCount(1);
+        await expect.soft(fixture.excludedLine, at).toHaveCount(0);
+        await expect.soft(fixture.excludedChip("Planner 111"), at).toHaveCount(1);
+      });
+    } finally {
+      await alice.close();
+    }
+  });
+
+  test("a refused send alone: 40 recipients leave the registry before Send", async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const fixture = await openNoticeFixture(page, planners(40, 40));
+      await fixture.refuse(planners(40, 40));
+      await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
+        await expect.soft(fixture.refused, at).toHaveCount(1);
+        await expect.soft(fixture.notice, at).toHaveCount(1);
+      });
+    } finally {
+      await alice.close();
+    }
+  });
+
+  test("a refused send over exclusions: 40 selected, 20 without BTW, each excluded chip still names its reason", async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const fixture = await openNoticeFixture(page, planners(40, 20));
+      await fixture.refuse(planners(20, 20));
+      await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
+        await expect.soft(fixture.refused, at).toHaveCount(1);
+        await expect.soft(fixture.excludedLine, at).toHaveCount(0);
+        await expect.soft(fixture.excludedChip("Planner 021"), at).toHaveCount(1);
+      });
+    } finally {
+      await alice.close();
+    }
+  });
+
+  test("the boundary with exclusions: 101 recipients show the limit, exactly 100 the Excluded line", async ({
+    browser,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+    const alice = await asUser(browser, "alice");
+    try {
+      const page = await alice.newPage();
+      const fixture = await openNoticeFixture(page, planners(111, 101));
+      await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
+        await expect.soft(fixture.limit, at).toHaveCount(1);
+        await expect.soft(fixture.excludedLine, at).toHaveCount(0);
+      });
+      await page.setViewportSize({ height: 664, width: 390 });
+      await fixture.agents.getByRole("button", { name: /^No Dispatch activity/ }).click();
+      await fixture.agents
+        .getByRole("checkbox", { name: "Select Planner 101 for broadcast" })
+        .uncheck();
+      await expect(
+        fixture.composer.getByRole("heading", { name: "Broadcast to 100 of 110 selected" })
+      ).toBeVisible();
+      await expectNoticeWithinBudget(page, fixture.composer, async (at) => {
+        await expect.soft(fixture.limit, at).toHaveCount(0);
+        await expect.soft(fixture.excludedLine, at).toHaveCount(1);
+      });
+    } finally {
+      await alice.close();
+    }
+  });
+});
+
+test("a typed broadcast survives clearing the selection, picking again and a refused send", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the draft rule");
@@ -879,6 +1061,20 @@ test("a typed broadcast survives clearing the selection and picking again, and a
     await expect(message).toHaveValue("Keep this draft.");
     await expect(mode).toHaveValue("aside");
 
+    // A send the server refuses keeps the page, and the draft with it: both sessions leave the
+    // registry after the page last read it, so the server finds no one to reach.
+    for (const session of fortyPlanners().slice(0, 2)) {
+      await setSessionLive(session.session_id, false);
+    }
+    await composer.getByRole("button", { name: "Send to 2" }).click();
+    await expect(composer.getByText(/^Could not send:/)).toBeVisible();
+    await expect(message).toHaveValue("Keep this draft.");
+    await expect(mode).toHaveValue("aside");
+
+    // A send that succeeds leaves the page; coming back finds an empty draft.
+    for (const session of fortyPlanners().slice(0, 2)) {
+      await setSessionLive(session.session_id, true);
+    }
     await composer.getByRole("button", { name: "Send to 2" }).click();
     await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
     await page.goBack();

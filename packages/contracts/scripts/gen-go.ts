@@ -1,5 +1,6 @@
-import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
@@ -328,15 +329,24 @@ ${keep}
 `;
 }
 
+// `--check` renders to a scratch file and compares it with the committed one instead of writing
+// it, so CI fails on a generated.go that no longer matches the TypeScript it comes from.
+const checkOnly = process.argv.includes("--check");
+const scratch = checkOnly ? mkdtempSync(join(tmpdir(), "gen-go-")) : undefined;
+const target = scratch === undefined ? out : join(scratch, "generated.go");
+
 const envelope = (await Bun.file(envelopeFile).json()) as Schema;
-mkdirSync(dirname(out), { recursive: true });
-await Bun.write(out, renderContracts(envelope));
+mkdirSync(dirname(target), { recursive: true });
+await Bun.write(target, renderContracts(envelope));
 
 const fmt = Bun.which("gofmt");
+if (fmt === null && checkOnly) {
+  throw new Error("gen-go --check needs gofmt: the committed file is gofmt-formatted");
+}
 
 if (fmt) {
   const gofmt = Bun.spawnSync({
-    cmd: [fmt, "-w", out],
+    cmd: [fmt, "-w", target],
     stderr: "inherit",
     stdout: "inherit",
   });
@@ -344,4 +354,18 @@ if (fmt) {
   if (gofmt.exitCode !== 0) {
     throw new Error("gofmt failed");
   }
+}
+
+if (scratch !== undefined) {
+  const fresh = await Bun.file(target).text();
+  const committed = await Bun.file(out).text();
+  if (fresh !== committed) {
+    Bun.spawnSync({ cmd: ["diff", "-u", out, target], stderr: "inherit", stdout: "inherit" });
+    rmSync(scratch, { force: true, recursive: true });
+    console.error(
+      `${out} is stale: run \`bun run gen:go\` in packages/contracts and commit the result.`
+    );
+    process.exit(1);
+  }
+  rmSync(scratch, { force: true, recursive: true });
 }
