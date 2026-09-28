@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { rm } from "node:fs/promises"
+import { EnvoyApiError } from "@legion/envoy-client/transport"
 import { startChannelSession } from "../src/envoy-channel-server"
 import { SessionIdentity, sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
 import {
@@ -362,6 +363,64 @@ test("a registry read that fails at startup does not let the heartbeat delete th
     expect([...entry].sort()).toEqual([directSubject, alreadyRegistered])
     // Adopting it is also what stops the session being deaf to it until a restart.
     expect(session.topics()).toContain(alreadyRegistered)
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a listener error that is not a 404 is not an absence, so the heartbeat still adopts", async () => {
+  const stateDirectory = await scratchState()
+  const nats = new FakeNats()
+  const alreadyRegistered = "notifications.dispatch.issue.DSP-7"
+  const entry = new Set<string>([directSubject, alreadyRegistered])
+  let reads = 0
+  const client = recordingClient([], {
+    subscribe: async (input) => {
+      for (const topic of input.topics) entry.add(topic)
+      return noInterest()
+    },
+    unsubscribe: async (input) => {
+      for (const topic of input.topics) entry.delete(topic)
+    },
+    getInterest: async (sessionID) => {
+      reads++
+      // The pair of the test above, with the error kind that separates the two
+      // conjuncts of the not-found predicate. A plain `Error` is rethrown by any
+      // form of it; an `EnvoyApiError` carrying a status that is not 404 is
+      // rethrown only while the status is still checked. Dropping that conjunct
+      // leaves something that still reads as a not-found handler, and no other
+      // test in this suite objects: the read is swallowed as an absence, the adopt
+      // branch completes over an empty list and sets the gate, and because
+      // adoption runs once the session never hears this topic again.
+      if (reads === 1) {
+        throw new EnvoyApiError({
+          method: "GET",
+          url: "http://127.0.0.1:9020/v1/interests/ses_claude",
+          status: 500,
+          responseBody: "upstream unavailable",
+        })
+      }
+      return { ...noInterest(), session_id: sessionID, topics: [...entry] }
+    },
+  })
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      connection: nats,
+      client,
+      heartbeatMs: 20,
+    }),
+  )
+
+  try {
+    await waitFor(
+      async () => session.topics().includes(alreadyRegistered),
+      "the heartbeat to adopt the topic the failed startup read could not",
+    )
+    // And the gate staying shut is what keeps the entry whole: a session that
+    // adopted nothing would read every topic in it as drift on the next tick.
+    await waitFor(async () => reads >= 4, "several heartbeats after the failed startup read")
+    expect([...entry].sort()).toEqual([directSubject, alreadyRegistered])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
