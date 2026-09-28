@@ -418,16 +418,16 @@ the harness reads into memory. The harness decodes it there and mints the implem
 installation token in process. The key is written to no file, appears in no argv, and reaches no
 other process; only the installation token enters each claim's Secret.
 
-Every pod carries the operator fixture's pod,
-[`fixtures/operator-route/pod.yml`](fixtures/operator-route/pod.yml), read through the daemon's
+Every pod carries the operator route's pod,
+[`deploy/kubernetes/operator-route/pod.yml`](../../deploy/kubernetes/operator-route/pod.yml), read through the daemon's
 own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
-audience `middleman-legion`, and a ConfigMap holding the fixture's `models.yml` (anthropic through
+audience `middleman-legion`, and a ConfigMap holding the route's `models.yml` (anthropic through
 the operator's model gateway, `LEGION_E2E_MODEL_GATEWAY_URL`, keyed by that token) and
 `overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to the
 gateway's aliases, and each provider a pod could reach without the gateway disabled). Legion holds
 none of it. Before the harness runs, the script creates the run's own copy of that ConfigMap as the
 operator, `legion-operator-route-<project>`, labelled with the run's project, its `models.yml` with
-`LEGION_E2E_MODEL_GATEWAY_URL` put in place of the fixture's `${LEGION_E2E_MODEL_GATEWAY_URL}`
+`LEGION_E2E_MODEL_GATEWAY_URL` put in place of the route's `${MODEL_BASE_URL}`
 placeholder; the harness points the pods at it, so another run in the namespace can neither see nor
 delete this one's route. It also creates the run's providers Secret,
 `legion-<project>-providers`, with one key (`stage4a`, a random value no model route reads) that the
@@ -651,7 +651,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
 | `preflight` | the runtime identity is `production-legion-daemon` and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
-| `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`fixtures/operator-route`](fixtures/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
+| `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`deploy/kubernetes/operator-route`](../../deploy/kubernetes/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
 | `spec-posted` | each admitted architect, prompted by nothing but the daemon's `catch-up` notice, posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
 | `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node |

@@ -143,7 +143,7 @@ type liveEnv struct {
 	streamHost, streamPort                             string
 	appID, appKeyName                                  string
 	record, work, from                                 string
-	// operatorPodFile is scripts/e2e/fixtures/operator-route/pod.yml, the operator's pod every
+	// operatorPodFile is deploy/kubernetes/operator-route/pod.yml, the operator's pod every
 	// launch carries; operatorConfigMap is the run's copy of the ConfigMap it names.
 	operatorPodFile, operatorConfigMap string
 	// The agent-secrets checks' inputs (AGENTC-393): the production broker, the login this run's
