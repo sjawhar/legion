@@ -762,7 +762,13 @@ func adjacentDelimiter(marks []Mark) byte {
 	if len(marks) == 0 {
 		return 0
 	}
-	switch marks[len(marks)-1].Type {
+	return markDelimiter(marks[len(marks)-1])
+}
+
+// markDelimiter is the character a mark's delimiter run is written with, or 0 when the mark is not
+// written with one.
+func markDelimiter(mark Mark) byte {
+	switch mark.Type {
 	case "strong", "emphasis":
 		return '*'
 	case "strike_through":
@@ -795,11 +801,24 @@ func sharedMarks(left, right []Mark) int {
 		limit = len(right)
 	}
 	for i := range limit {
-		if left[i].Type != right[i].Type || !attrsEqual(left[i].Attrs, right[i].Attrs) {
+		if !sameMark(left[i], right[i]) {
 			return i
 		}
 	}
 	return limit
+}
+
+func sameMark(left, right Mark) bool {
+	return left.Type == right.Type && attrsEqual(left.Attrs, right.Attrs)
+}
+
+func containsSameMark(marks []Mark, mark Mark) bool {
+	for _, other := range marks {
+		if sameMark(other, mark) {
+			return true
+		}
+	}
+	return false
 }
 
 func renderMarkRank(markType string) int {

@@ -73,3 +73,33 @@ func TestRenderKeepsTheEscapeThatEndsABareURL(t *testing.T) {
 		}
 	}
 }
+
+// A mark the next text still carries stays open around the marks that text adds: bold inside
+// italic is written `*a **b** c*`. Closing the italic and opening both again writes `*`, `**` and
+// `*` side by side, one run of four asterisks that reads back with bold twice, and every write-back
+// of that reading added two more.
+func TestRenderKeepsAMarkOpenAroundTheMarksInsideIt(t *testing.T) {
+	for _, c := range []struct{ markdown, want string }{
+		{"*a **b** c*\n", "*a **b** c*\n"},
+		{"_a **b** c_\n", "*a **b** c*\n"},
+		{"*a **b** c **d** e*\n", "*a **b** c **d** e*\n"},
+		{"*a **b [l](https://e.com/u) c** d*\n", "*a **b [l](https://e.com/u) c** d*\n"},
+		{"> *a **b** c*\n", "> *a **b** c*\n"},
+		{"| *a **b** c* |\n| --- |\n", "| *a **b** c* |\n| --- |\n"},
+	} {
+		doc, err := Parse(c.markdown)
+		if err != nil {
+			t.Fatalf("Parse(%q) = %v", c.markdown, err)
+		}
+		rendered, err := Render(doc)
+		if err != nil {
+			t.Fatalf("Render(Parse(%q)) = %v", c.markdown, err)
+		}
+		if rendered != c.want {
+			t.Errorf("Render(Parse(%q)) = %q, want %q", c.markdown, rendered, c.want)
+		}
+		if _, err := ParseForWrite(c.markdown, nil); err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want it stored", c.markdown, err)
+		}
+	}
+}

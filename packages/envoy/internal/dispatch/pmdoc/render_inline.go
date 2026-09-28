@@ -77,47 +77,110 @@ type lineCandidate struct {
 // inlineWithEscapes writes one textblock's inline nodes. Delimiters in text the escape rules leave
 // alone can still pair into a mark the text never had, or break one it has: GFM reads a single
 // tilde as a strikethrough delimiter and refuses a run of three, and asterisks and underscores pair
-// across a hard break, around a reference or inside a link label. And linkify continues a bare URL
-// into the text written right after it, which a backslash escape had stopped as written. A run whose
-// text holds either is read back after it is written, and when it does not come back as written it
-// is written again with its text's tildes escaped, then with its asterisks and underscores escaped
-// as well, and then, after a bare URL, with the character that follows it escaped too - each kept
-// only if it reads back, so a run that fails for another reason keeps the bytes it had.
+// across a hard break, around a reference or inside a link label. Linkify continues a bare URL
+// into the text written right after it, which a backslash escape had stopped as written. A run
+// whose text holds either is read back after it is written, and when it does not come back as
+// written it is written again in each spelling respellings lists, keeping the first that reads
+// back, so a run that fails for another reason keeps the bytes it had.
+//
+// And the marks are written in one order, so a mark the next text still carries is closed and
+// opened again inside that text's other marks wherever the order puts it after them: bold inside
+// italic comes out as `*`, `**` and `*` side by side, one run of four asterisks, which the parser
+// cannot split as written. A run written with such a fused delimiter run is written first with
+// open marks kept open (keepingOpen), kept only where that reads back with no delimiter run fused,
+// and otherwise written as a run whose marks fuse nowhere is.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
-	r.writeInlineRun(nodes, prefix, context, delimitersAsRuled, false)
+	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
 	held := delimitersInText(nodes)
 	bareURL := textAfterBareURL(nodes, context.tableCell)
-	if r.err != nil || held == delimitersAsRuled && !bareURL || r.runReadsBack(from, prefix, nodes) {
+	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused || !fused && r.runReadsBack(from, prefix, nodes) {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
-	if held != delimitersAsRuled && r.rewriteReadsBack(from, nodes, prefix, context, held, delimitersAll, false) {
-		return
+	if fused {
+		if r.rewriteReadsBack(from, nodes, prefix, context, respellings(held, bareURL, true), true) {
+			return
+		}
+		r.b.Truncate(from)
+		r.b.WriteString(written)
+		if r.runReadsBack(from, prefix, nodes) {
+			return
+		}
 	}
-	last := delimitersAll
-	if held == delimitersAsRuled {
-		last = delimitersAsRuled
-	}
-	if bareURL && r.rewriteReadsBack(from, nodes, prefix, context, held, last, true) {
+	if r.rewriteReadsBack(from, nodes, prefix, context, respellings(held, bareURL, false), false) {
 		return
 	}
 	r.b.Truncate(from)
 	r.b.WriteString(written)
 }
 
-// rewriteReadsBack writes the run since from again with each delimiter escape from first to last,
-// the character after each bare URL escaped as well when afterBareURL says so, and keeps the first
-// that reads back, reporting whether one did.
-func (r *renderer) rewriteReadsBack(from int, nodes []*Node, prefix string, context inlineContext, first, last delimiterEscapes, afterBareURL bool) bool {
-	for escapes := first; escapes <= last; escapes++ {
+// rewriteReadsBack writes the run since from in each of spellings in turn and keeps the first that
+// reads back, and, when unfused says so, writes no fused delimiter run, reporting whether one did.
+func (r *renderer) rewriteReadsBack(from int, nodes []*Node, prefix string, context inlineContext, spellings []runSpelling, unfused bool) bool {
+	for _, spelling := range spellings {
 		r.b.Truncate(from)
-		r.writeInlineRun(nodes, prefix, context, escapes, afterBareURL)
-		if r.err == nil && r.runReadsBack(from, prefix, nodes) {
+		fused := r.writeInlineRun(nodes, prefix, context, spelling)
+		if r.err == nil && !(unfused && fused) && r.runReadsBack(from, prefix, nodes) {
 			return true
 		}
 	}
 	return false
+}
+
+// runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
+// text it escapes, whether it escapes the character after each bare URL (endsBareURL), and whether
+// a mark the next text still carries stays open around that text's other marks (keepingOpen).
+type runSpelling struct {
+	escapes      delimiterEscapes
+	afterBareURL bool
+	keepOpen     bool
+}
+
+// respellings is every spelling, open marks kept open or not, that inlineWithEscapes writes a run
+// in after its first writing, in the order it tries them: the delimiter escapes from the fewest,
+// then each again with the character after a bare URL escaped.
+func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
+	escapes := []delimiterEscapes{delimitersAsRuled}
+	if held != delimitersAsRuled {
+		for next := held; next <= delimitersAll; next++ {
+			escapes = append(escapes, next)
+		}
+	}
+	var spellings []runSpelling
+	for _, afterBareURL := range []bool{false, true} {
+		if afterBareURL && !bareURL {
+			continue
+		}
+		for _, delimiters := range escapes {
+			spelling := runSpelling{escapes: delimiters, afterBareURL: afterBareURL, keepOpen: keepOpen}
+			if spelling != (runSpelling{}) {
+				spellings = append(spellings, spelling)
+			}
+		}
+	}
+	return spellings
+}
+
+// keepingOpen orders marks, the marks a text is written under, so that the marks written open
+// before it that it still carries stay open: the longest run of active, from the outermost, whose
+// every mark it carries comes first, as active holds them, and its other marks follow in their
+// written order, opened inside them.
+func keepingOpen(active, marks []Mark) []Mark {
+	kept := 0
+	for kept < len(active) && containsSameMark(marks, active[kept]) {
+		kept++
+	}
+	if kept <= sharedMarks(active, marks) {
+		return marks
+	}
+	ordered := append(make([]Mark, 0, len(marks)), active[:kept]...)
+	for _, mark := range marks {
+		if !containsSameMark(active[:kept], mark) {
+			ordered = append(ordered, mark)
+		}
+	}
+	return ordered
 }
 
 // textAfterBareURL reports whether nodes write text right after a bare URL, which linkify can
@@ -153,25 +216,37 @@ func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node) bool {
 	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
 }
 
-func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineContext, escapes delimiterEscapes, afterBareURL bool) {
+// writeInlineRun writes nodes in spelling, reporting whether it fused two delimiter runs: closed a
+// mark and at once opened one written with the same delimiter character, which the parser reads as
+// one run.
+func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineContext, spelling runSpelling) (fused bool) {
 	escapePipes := context.tableCell
 	var active []Mark
 	position := inlinePosition{atLineStart: context.startsLine, atTextStart: true}
 	for index, n := range nodes {
 		if r.err != nil {
-			return
+			return fused
 		}
 		switch n.Type {
 		case "text":
 			next := writtenMarks(n, escapePipes)
+			if spelling.keepOpen {
+				next = keepingOpen(active, next)
+			}
 			hasLink := containsMark(visibleMarks(n.Marks), "link")
 			var following []Mark
 			if index+1 < len(nodes) {
 				following = writtenMarks(nodes[index+1], escapePipes)
+				if spelling.keepOpen {
+					following = keepingOpen(next, following)
+				}
 			}
 			common := sharedMarks(active, next)
 			for i := len(active) - 1; i >= common; i-- {
 				r.closeInlineMark(active[i], escapePipes)
+			}
+			if common < len(active) && common < len(next) && markDelimiter(active[common]) != 0 && markDelimiter(active[common]) == markDelimiter(next[common]) {
+				fused = true
 			}
 			for _, mark := range next[common:] {
 				r.openInlineMark(mark, nodes, index)
@@ -193,8 +268,8 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				urlSchemes:     !hasLink,
 				label:          label,
 				followed:       index+1 < len(nodes) || len(next) > 0,
-				delimiters:     escapes,
-				afterBareURL:   afterBareURL && followsBareURL(nodes, index, escapePipes),
+				delimiters:     spelling.escapes,
+				afterBareURL:   spelling.afterBareURL && followsBareURL(nodes, index, escapePipes),
 				heading:        context.heading,
 				marked:         len(next) > 0,
 				opener:         adjacentDelimiter(next[common:]),
@@ -240,6 +315,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 	}
 	r.closeMarks(active, escapePipes)
 	r.endLine(false)
+	return fused
 }
 
 // endLine judges the line just written when its text began with a lineCandidate: the character is
