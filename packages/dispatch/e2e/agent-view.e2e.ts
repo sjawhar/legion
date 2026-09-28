@@ -1,7 +1,12 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
-import { publishAgentStreamFrame, setAgentStreamResponder } from "./api";
+import {
+  createIssue,
+  createProject,
+  publishAgentStreamFrame,
+  setAgentStreamResponder,
+} from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -170,7 +175,9 @@ async function expectViewportBound(page: Page): Promise<void> {
   const layout = await liveViewLayout(page);
   expect(layout.documentHeight).toBeLessThanOrEqual(layout.viewportHeight + 1);
   expect(await page.evaluate(() => window.scrollY)).toBe(0);
-  expect(layout.composerBottom).toBeLessThanOrEqual(layout.viewportHeight);
+  // The composer ends one page gutter above the visual viewport's bottom, not merely on screen:
+  // a composer overflowing a collapsed thread would still be inside the window.
+  expect(layout.composerBottom).toBe(layout.visualBottom - layout.mainPaddingBottom);
   await expect(page.getByRole("link", { name: "← Agents" })).toBeInViewport({ ratio: 1 });
   await expect(page.getByTestId("agent-composer")).toBeInViewport({ ratio: 1 });
   expect(layout.threadScrollHeight).toBeGreaterThan(layout.threadClientHeight);
@@ -190,15 +197,23 @@ async function expectNewestTurnAboveComposer(page: Page): Promise<void> {
 }
 
 /** iOS Safari's keyboard: the composer takes focus and only the visual viewport shrinks, to
- *  `height`. The composer then sits one page gutter above the visual viewport's bottom edge. */
+ *  `height`. `<main>` is capped in the same task as the resize event (a deferred write would
+ *  leave a frame with the composer behind the keyboard), and the composer then sits one page
+ *  gutter above the visual viewport's bottom edge. */
 async function raiseKeyboard(page: Page, height: number): Promise<void> {
   await page.getByTestId("agent-composer").locator("textarea").focus();
-  await page.evaluate((visualHeight) => {
+  const sameTask = await page.evaluate((visualHeight) => {
     const viewport = window.visualViewport;
-    if (viewport === null) throw new Error("no visualViewport");
+    const main = document.querySelector<HTMLElement>('[data-testid="main-content"]');
+    if (viewport === null || main === null) throw new Error("no visualViewport or main");
     Object.defineProperty(viewport, "height", { configurable: true, get: () => visualHeight });
     viewport.dispatchEvent(new Event("resize"));
+    return {
+      expected: viewport.offsetTop + visualHeight - main.getBoundingClientRect().top,
+      maxHeight: getComputedStyle(main).maxHeight,
+    };
   }, height);
+  expect(Number.parseFloat(sameTask.maxHeight)).toBeCloseTo(sameTask.expected, 1);
   await expect
     .poll(async () => {
       const layout = await liveViewLayout(page);
@@ -420,6 +435,49 @@ test("at desktop width the live view fills the main column beside the navigation
     const layout = await liveViewLayout(page);
     expect(layout.composerBottom).toBe(layout.mainBottom - layout.mainPaddingBottom);
     expect(layout.mainBottom).toBe(layout.viewportHeight);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a document-scrolling route is never capped for the keyboard, at mount or after focus and resize", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the phone layout runs on the iphone project");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Scrolls the document.",
+    title: "Doc route",
+  });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  // Inspect the properties, not the layout: a stray cap or custom property on <main> here has no
+  // layout signature on a document-scrolling page, only a style recalc on every keyboard frame.
+  const mainKeyboardStyle = () =>
+    page.getByTestId("main-content").evaluate((main) => ({
+      computedMaxHeight: getComputedStyle(main).maxHeight,
+      customProperties: Array.from(main.style).filter((name) => name.startsWith("--")),
+      inlineMaxHeight: main.style.maxHeight,
+    }));
+  const uncapped = { computedMaxHeight: "none", customProperties: [], inlineMaxHeight: "" };
+  try {
+    await page.setViewportSize({ height: 844, width: 390 });
+    // The keyboard is already up when the route mounts.
+    await page.addInitScript(() => {
+      const viewport = window.visualViewport;
+      if (viewport !== null) {
+        Object.defineProperty(viewport, "height", { configurable: true, get: () => 500 });
+      }
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const composer = page.getByTestId("main-content").locator("textarea").first();
+    await expect(composer).toBeVisible();
+    expect(await mainKeyboardStyle()).toEqual(uncapped);
+
+    await composer.focus();
+    await page.evaluate(() => window.visualViewport?.dispatchEvent(new Event("resize")));
+    expect(await mainKeyboardStyle()).toEqual(uncapped);
   } finally {
     await context.close();
   }

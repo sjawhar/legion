@@ -4,8 +4,12 @@ import { type RefObject, useLayoutEffect } from "react";
  * While `enabled` and a textarea inside `ref`'s element has focus, caps the element's inline
  * `max-height` so its bottom edge meets the visual viewport's bottom edge. The shell passes
  * `<main>` on a route that fills the viewport, so the page's composer, the textarea at its
- * bottom, keeps `<main>`'s bottom gutter above the on-screen keyboard. A layout effect, so a
- * route change with the keyboard up drops the cap before the next paint.
+ * bottom, keeps `<main>`'s bottom gutter above the on-screen keyboard. The cap is written
+ * synchronously in the event handler, so the frame after a resize is already capped; keep it
+ * there (no `requestAnimationFrame`, no state-keyed effect). The effect also fits once as it
+ * runs, before the first paint: a textarea already focused when the route mounts (focus restored
+ * with the keyboard up) fires no event the listeners could hear. A disabled element is never
+ * capped.
  *
  * Chromium on Android does not need this - the page's `interactive-widget=resizes-content`
  * viewport shrinks the layout viewport, and the dynamic-viewport shell with it. iOS Safari
@@ -33,6 +37,7 @@ export function useKeyboardFit(ref: RefObject<HTMLElement | null>, enabled: bool
     viewport.addEventListener("scroll", fit);
     element.addEventListener("focusin", fit);
     element.addEventListener("focusout", fit);
+    fit();
     return () => {
       viewport.removeEventListener("resize", fit);
       viewport.removeEventListener("scroll", fit);
