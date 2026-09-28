@@ -89,12 +89,16 @@ func TestRenderKeepsAFusedRunThatReadsBack(t *testing.T) {
 	})
 }
 
-// A fused run that does not read back is written with open marks kept open, so that no mark the
-// next text still carries is closed and opened again inside that text's other marks.
+// A fused run that does not read back is written with no mark the next text still carries closed
+// and opened again between them: open marks stay open, and a text opens first the marks the text
+// after it carries.
 func TestRenderKeepsAMarkOpenWhereAFusedRunDoesNotReadBack(t *testing.T) {
 	assertRenders(t, []struct{ markdown, want string }{
 		{"*a **b [l](https://e.com/u) c** d*\n", "*a **b [l](https://e.com/u) c** d*\n"},
 		{"*a **b***\n", "*a **b***\n"},
+		{"***a** b*\n", "***a** b*\n"},
+		{"x ***a** b* y\n", "x ***a** b* y\n"},
+		{"[***a** b*](https://e.com/u)\n", "[***a** b*](https://e.com/u)\n"},
 	})
 }
 

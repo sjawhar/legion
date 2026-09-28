@@ -148,22 +148,22 @@ func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
 	return spellings
 }
 
-// keepingOpen orders marks, the marks a text is written under, so that the marks written open
-// before it that it still carries stay open: the longest run of active, from the outermost, whose
-// every mark it carries comes first, as active holds them, and its other marks follow in their
-// written order, opened inside them.
-func keepingOpen(active, marks []Mark) []Mark {
+// keepingOpen orders marks, the marks a text is written under, so that no mark it or the text
+// after it still carries is closed and opened again between them: the longest run of active, the
+// marks written open before it, from the outermost, whose every mark it carries comes first, as
+// active holds them; then its other marks that following, the next text's marks, carries; then
+// the rest, each group in its written order, opened inside the one before.
+func keepingOpen(active, marks, following []Mark) []Mark {
 	kept := 0
 	for kept < len(active) && containsSameMark(marks, active[kept]) {
 		kept++
 	}
-	if kept <= sharedMarks(active, marks) {
-		return marks
-	}
 	ordered := append(make([]Mark, 0, len(marks)), active[:kept]...)
-	for _, mark := range marks {
-		if !containsSameMark(active[:kept], mark) {
-			ordered = append(ordered, mark)
+	for _, carried := range []bool{true, false} {
+		for _, mark := range marks {
+			if !containsSameMark(active[:kept], mark) && containsSameMark(following, mark) == carried {
+				ordered = append(ordered, mark)
+			}
 		}
 	}
 	return ordered
@@ -216,15 +216,19 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 		switch n.Type {
 		case "text":
 			next := writtenMarks(n, escapePipes)
-			if spelling.keepOpen {
-				next = keepingOpen(active, next)
-			}
 			hasLink := containsMark(visibleMarks(n.Marks), "link")
 			var following []Mark
 			if index+1 < len(nodes) {
 				following = writtenMarks(nodes[index+1], escapePipes)
-				if spelling.keepOpen {
-					following = keepingOpen(next, following)
+			}
+			if spelling.keepOpen {
+				next = keepingOpen(active, next, following)
+				if index+1 < len(nodes) {
+					var after []Mark
+					if index+2 < len(nodes) {
+						after = writtenMarks(nodes[index+2], escapePipes)
+					}
+					following = keepingOpen(next, following, after)
 				}
 			}
 			common := sharedMarks(active, next)
