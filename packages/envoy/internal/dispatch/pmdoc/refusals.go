@@ -41,6 +41,10 @@ func blockRefusal(node ast.Node, source []byte) error {
 		if reason, ok := paragraphDirectiveReason(current.Lines(), source); ok {
 			return refuse(reason)
 		}
+	case *ast.Heading:
+		if _, underlined := current.Attribute(underlinedTextAttr); underlined {
+			return refuse("a lone - under a table that text stands before in its paragraph, which the browser editor's parser reads as an empty list item after the table, and goldmark as the underline of a heading holding that text")
+		}
 	case *ast.CodeBlock:
 		// An indented code block stands right after a list, outside it, only where the list's last
 		// item holds its content five or more columns in (a wide ordered marker, or tabs), and

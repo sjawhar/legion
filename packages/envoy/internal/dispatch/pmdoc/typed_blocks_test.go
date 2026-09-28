@@ -427,6 +427,19 @@ func TestTypedBlockDirectiveErrorsNameTheProblem(t *testing.T) {
 			want:     "a table a line opening another block would be a row of",
 		},
 		{
+			// Where text stands before the table in its paragraph, goldmark makes that text a
+			// heading after the table, underlined by the dash; the browser editor's parser reads
+			// the paragraph, the table and an empty list item.
+			name:     "a lone dash under a table after text",
+			markdown: "text\n| a | b |\n| - | :-: |\n| 1 | 2 |\n-\n",
+			want:     "a lone - under a table that text stands before in its paragraph",
+		},
+		{
+			name:     "the same in a footnote definition in a quote",
+			markdown: "x[^a1]\n\n> [^a1]:     text\n>     | a | b |\n>     | - | :-: |\n>     | 1 | 2 |\n>     -\n",
+			want:     "a lone - under a table that text stands before in its paragraph",
+		},
+		{
 			// The browser editor's parser keeps a list whose item holds its content five or more
 			// columns in open across the code's first line, and so reads the code's later lines as
 			// a second code block.

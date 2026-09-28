@@ -19,6 +19,7 @@ func TestParseNamesTheFirstRefusedBlock(t *testing.T) {
 		{"a footnote definition whose label holds whitespace", "[^x y]: note\n"},
 		{"a lazy line after a table in a quote", "> | a |\n> | - |\n> | b |\ntail\n"},
 		{"an ordered item numbered 2 after a table", "| a | b |\n| - | - |\n| 1 | 2 |\n2. a\n"},
+		{"a lone dash under a table after text", "text\n| a | b |\n| - | - |\n| 1 | 2 |\n-\n"},
 		{"indented code after a list", "100. a\n\n    x\n    y\n"},
 		{"indented code after a quote", ">\n    a\n    b\n"},
 		{"a Pandoc fenced div", "::: {.callout}\nBody.\n:::\n"},

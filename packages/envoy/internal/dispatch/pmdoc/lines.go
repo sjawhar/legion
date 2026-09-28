@@ -425,7 +425,10 @@ func interruptsOpenBlock(parent ast.Node, source []byte, start int) bool {
 	case *ast.Paragraph:
 		// A table goldmark makes of the paragraph is no paragraph to that parser, and holds
 		// nothing open a line could interrupt.
-		if !opensContainers || previous.Lines().Len() == 0 || formsTable(previous, source) {
+		if !opensContainers || previous.Lines().Len() == 0 {
+			return false
+		}
+		if table, _ := formsTable(previous, source); table {
 			return false
 		}
 		last := previous.Lines().At(previous.Lines().Len() - 1)

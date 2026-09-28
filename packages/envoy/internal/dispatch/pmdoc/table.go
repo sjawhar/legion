@@ -148,14 +148,20 @@ func markLazyRows(table *extensionast.Table, rows, lazy []int) {
 // writes the underline as a paragraph of its own, or moves the lines before the table after it as
 // the heading. The browser editor's parser, whose table is no paragraph, reads the line as the
 // table's row, as it reads any line that opens no other block, so the line stays the paragraph's -
-// all but a lone `-`, which opens an empty list item there, as goldmark's own handling leaves it.
+// all but a lone `-`, which opens an empty list item there, as goldmark's own handling leaves it
+// when the table takes every line. Where text stands before the table, that handling makes the
+// text a heading after the table, which is marked (underlinedTextAttr) for the refusal walk.
 // That handling closes the paragraph, trimming the whitespace every line opens with, before the
 // table transformer reads it, so the lines are kept as read (readLinesAttr) for markBlockRows.
 type underlineAfterTable struct{ parser.BlockParser }
 
 func (p underlineAfterTable) Open(parent ast.Node, reader gmtext.Reader, pc parser.Context) (ast.Node, parser.State) {
 	paragraph, ok := pc.LastOpenedBlock().Node.(*ast.Paragraph)
-	if !ok || paragraph.Parent() != parent || !formsTable(paragraph, reader.Source()) {
+	if !ok || paragraph.Parent() != parent {
+		return p.BlockParser.Open(parent, reader, pc)
+	}
+	table, textBefore := formsTable(paragraph, reader.Source())
+	if !table {
 		return p.BlockParser.Open(parent, reader, pc)
 	}
 	if line, _ := reader.PeekLine(); !bareMarkerLine.Match(bytes.TrimRight(line, "\n")) {
@@ -166,6 +172,9 @@ func (p underlineAfterTable) Open(parent ast.Node, reader gmtext.Reader, pc pars
 	node, state := p.BlockParser.Open(parent, reader, pc)
 	if node != nil {
 		paragraph.SetAttribute(readLinesAttr, lines)
+		if textBefore {
+			node.SetAttribute(underlinedTextAttr, true)
+		}
 	}
 	return node, state
 }
@@ -174,9 +183,15 @@ func (p underlineAfterTable) Open(parent ast.Node, reader gmtext.Reader, pc pars
 // before that close trims them (underlineAfterTable).
 var readLinesAttr = []byte("pmdoc-read-lines")
 
+// underlinedTextAttr marks the heading goldmark makes, after a table, of the text standing before
+// the table in its paragraph, under a lone `-` the browser editor's parser reads as an empty list
+// item (underlineAfterTable).
+var underlinedTextAttr = []byte("pmdoc-underlined-text")
+
 // formsTable reports whether goldmark's table transformer reads a table in paragraph's lines,
-// trying it on a copy apart from the document.
-func formsTable(paragraph *ast.Paragraph, source []byte) bool {
+// trying it on a copy apart from the document, and whether text stands before that table, which
+// the transformer leaves a paragraph of its own.
+func formsTable(paragraph *ast.Paragraph, source []byte) (table, textBefore bool) {
 	trial := ast.NewParagraph()
 	trial.SetLines(tabExpandedLines(paragraph.Lines(), source))
 	holder := ast.NewDocument()
@@ -184,10 +199,11 @@ func formsTable(paragraph *ast.Paragraph, source []byte) bool {
 	tableTransformer.Transform(trial, gmtext.NewReader(source), parser.NewContext())
 	for child := holder.FirstChild(); child != nil; child = child.NextSibling() {
 		if _, ok := child.(*extensionast.Table); ok {
-			return true
+			_, textBefore = child.PreviousSibling().(*ast.Paragraph)
+			return true, textBefore
 		}
 	}
-	return false
+	return false, false
 }
 
 // blockRowAttr marks a table goldmark took a body row of from a line the browser editor's parser
