@@ -942,9 +942,9 @@ function clone(st: State): State {
 
 /** Anything a copy-back site does not carry out of a child is a candidate hole. Three sites carry
  * a child's state back into this shell, `merge`, `runFunction` and `runFile`'s sourced branch, and
- * each lists `State`'s fields by hand: a field added to `State` belongs in all three, or in the
- * list of what each leaves out and why. None of the three carries the fields that say where the
- * walk is rather than what the shell holds: `nested`, `depth`, `source`, `script` and `argv0`.
+ * each lists `State`'s fields by hand. A field added to `State` belongs in all three; or in the
+ * list of what each leaves out and why; or, like `nested`, `depth`, `source`, `script` and
+ * `argv0`, it says where the walk is rather than what the shell holds, and crosses no site at all.
  *
  * After branches that may or may not run: everything a branch leaves in this shell, since any of
  * them may be the one that ran. A variable, the positional parameters (`shift`, `set --`) or the
