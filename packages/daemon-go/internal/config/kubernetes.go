@@ -230,8 +230,8 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	return block, nil
 }
 
-// ReadPodFile reads a `runtime.kubernetes.pod` block kept in a file of its own, such as a live
-// harness's operator fixture (scripts/e2e/fixtures/operator-route/pod.yml), with every check the
+// ReadPodFile reads a `runtime.kubernetes.pod` block kept in a file of its own, such as an
+// operator's own route (deploy/kubernetes/operator-route/pod.yml), with every check the
 // loader makes of the block inside a legion.yaml.
 func ReadPodFile(path string) (PodConfig, error) {
 	raw, err := os.ReadFile(path)

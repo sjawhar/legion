@@ -1,19 +1,19 @@
-# The live harnesses' operator route (pod.yml mounts this file into the image's Oh My Pi profile):
+# One operator's model route (pod.yml mounts this file into the image's Oh My Pi profile):
 # anthropic through the Hawk model gateway (middleman), keyed by the pod's projected
 # ServiceAccount token. The gateway reads the key from x-api-key; Oh My Pi caches the command's
 # value for the process and runs it again on a 401, so the token the kubelet rotated is read on
 # the first refusal. `auth: apiKey` makes these custom models plain API-key callers: without it Oh
 # My Pi sends an anthropic-messages custom model in its Claude Code OAuth shape.
 #
-# The models are the operator gateway's aliases for Legion workers, the names the harness expects
-# the gateway to serve a legion-worker token. Oh My Pi finds no catalog entry for an aliased id,
-# so each carries its model's catalog metadata.
+# The model ids are the ones the operator's endpoint serves. Oh My Pi finds no catalog entry for
+# them, so each carries its model's catalog metadata.
 #
-# baseUrl is the operator's gateway: a harness substitutes LEGION_E2E_MODEL_GATEWAY_URL, the
-# gateway's Anthropic endpoint, for the placeholder before it creates the ConfigMap from this file.
+# baseUrl is the operator's own gateway, so this file carries a placeholder instead: apply.sh
+# substitutes the base URL it is given, and the live harnesses substitute
+# LEGION_E2E_MODEL_GATEWAY_URL, before either creates the ConfigMap.
 providers:
   anthropic:
-    baseUrl: ${LEGION_E2E_MODEL_GATEWAY_URL}
+    baseUrl: ${MODEL_BASE_URL}
     auth: apiKey
     api: anthropic-messages
     apiKey: "!cat /var/run/operator/token"

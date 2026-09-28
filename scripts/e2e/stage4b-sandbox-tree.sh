@@ -28,7 +28,7 @@
 #   operator fixture's models.yml and the controller's profile name (lib/model-gateway-url.sh).
 # - LEGION_E2E_MODEL_GATEWAY_AUDIENCE (required) is the audience the operator's model gateway accepts
 #   on a worker's projected ServiceAccount token, substituted into the run's copy of the operator
-#   fixture's pod.yml and asserted on every pod.
+#   route's pod.yml and asserted on every pod.
 # - LEGION_E2E_DISPATCH_URL, LEGION_E2E_ENVOY_URL and LEGION_E2E_NATS_URL (required) are production
 #   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
 #   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
@@ -84,11 +84,11 @@ dispatch_base=${LEGION_E2E_DISPATCH_URL:-}
 dispatch_actor=legion-e2e4b-proof-human-$$
 envoy_url=${LEGION_E2E_ENVOY_URL:-}
 nats_url=${LEGION_E2E_NATS_URL:-}
-# The operator's pod configuration (scripts/e2e/fixtures/operator-route): the model route, overlay,
+# The operator's pod configuration (deploy/kubernetes/operator-route): the model route, overlay,
 # ServiceAccount and projected token every pod carries. Legion holds none of it. The run creates its
-# own copy of the ConfigMap the fixture mounts, labelled with the run's label, which the teardown
+# own copy of the ConfigMap it mounts, labelled with the run's label, which the teardown
 # deletes with the rest.
-fixture=$root/scripts/e2e/fixtures/operator-route
+operator_route=$root/deploy/kubernetes/operator-route
 route_configmap=legion-operator-route-$run_label
 # The providers Secret the runtime names for the project (ProvidersSecretName), which the run creates
 # only when the operator's environment names a NATS nkey seed and lib/namespace-rig.sh deletes.
@@ -428,33 +428,33 @@ runtime:
     context: $runtime_context
     pod:
 EOF
-  # The operator fixture's pod, its token audience the operator's and its ConfigMap reference pointed
+  # The operator route's pod, its token audience the operator's and its ConfigMap reference pointed
   # at the run's own copy.
   render_operator_pod
   sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$work/pod.yml" >>"$work/legion.yaml"
-  grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the fixture's pod.yml mounts no ConfigMap legion-operator-route"
+  grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the operator route's pod.yml mounts no ConfigMap legion-operator-route"
 }
-# render_operator_pod writes the run's copy of the fixture's pod.yml, the gateway's audience in place
-# of its placeholder.
+# render_operator_pod writes the run's copy of the operator route's pod.yml, the gateway's audience
+# in place of its placeholder.
 render_operator_pod() {
-  # shellcheck disable=SC2016  # the fixture's literal placeholder, not an expansion
-  local placeholder='${LEGION_E2E_MODEL_GATEWAY_AUDIENCE}' pod
-  pod=$(<"$fixture/pod.yml")
+  # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
+  local placeholder='${MODEL_TOKEN_AUDIENCE}' pod
+  pod=$(<"$operator_route/pod.yml")
   printf '%s\n' "${pod//"$placeholder"/"$gateway_audience"}" >"$work/pod.yml"
-  grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" || fail "the fixture's pod.yml has no token audience $placeholder to fill with the gateway's"
+  grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" || fail "the operator route's pod.yml has no token audience $placeholder to fill with the gateway's"
 }
-# create_route_configmap is the operator's step before any pod runs: the fixture's models.yml and
+# create_route_configmap is the operator's step before any pod runs: the operator route's models.yml and
 # overlay.yml in the ConfigMap the run's pods mount.
 create_route_configmap() {
-  # shellcheck disable=SC2016  # the fixture's literal placeholder, not an expansion
-  local placeholder='${LEGION_E2E_MODEL_GATEWAY_URL}' models
-  models=$(<"$fixture/models.yml")
+  # shellcheck disable=SC2016  # the operator route's literal placeholder, not an expansion
+  local placeholder='${MODEL_BASE_URL}' models
+  models=$(<"$operator_route/models.yml")
   printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
-  grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the fixture's models.yml has no baseUrl $placeholder to point at the gateway"
-  op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
+  grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the operator route's models.yml has no baseUrl $placeholder to point at the gateway"
+  op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$operator_route/overlay.yml" \
     --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
     fail "the operator could not create ConfigMap $route_configmap"
-  note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$run_label"
+  note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $operator_route, label legion.dev/project=$run_label"
 }
 # create_providers_secret is the operator's step for the NATS nkey seed: a daemon with a seed (the
 # operator's NATS_NKEY_SEED_FILE, else NATS_NKEY_SEED, which the daemon inherits) points every pod
@@ -1553,7 +1553,7 @@ stem=$(cat "$evidence/review-pair/session-stem")
 # Both agents declare @review, which the operator's overlay maps. The task executor runs a subagent
 # on its parent's model when the subagent's own does not resolve, silently, so each pair session's
 # turns must all be on the fixture's review target.
-review_target=$(sed -n 's/^  review: \([^:]*\).*/\1/p' "$fixture/overlay.yml")
+review_target=$(sed -n 's/^  review: \([^:]*\).*/\1/p' "$operator_route/overlay.yml")
 [ -n "$review_target" ] || fail "the operator fixture's overlay.yml maps no review role"
 for agent in $pair_agents; do
   d=$evidence/review-pair/$agent.json

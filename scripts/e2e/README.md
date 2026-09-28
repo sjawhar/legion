@@ -419,20 +419,20 @@ the harness reads into memory. The harness decodes it there and mints the implem
 installation token in process. The key is written to no file, appears in no argv, and reaches no
 other process; only the installation token enters each claim's Secret.
 
-Every pod carries the operator fixture's pod,
-[`fixtures/operator-route/pod.yml`](fixtures/operator-route/pod.yml), read through the daemon's
+Every pod carries the operator route's pod,
+[`deploy/kubernetes/operator-route/pod.yml`](../../deploy/kubernetes/operator-route/pod.yml), read through the daemon's
 own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
-the model gateway's audience, and a ConfigMap holding the fixture's `models.yml` (anthropic through
+the model gateway's audience, and a ConfigMap holding the route's `models.yml` (anthropic through
 the operator's model gateway, `LEGION_E2E_MODEL_GATEWAY_URL`, keyed by that token) and
 `overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to the
 gateway's aliases, and each provider a pod could reach without the gateway disabled). Legion holds
 none of it. Before the harness runs, the script creates the run's own copy of that ConfigMap as the
 operator, `legion-operator-route-<project>`, labelled with the run's project, its `models.yml` with
-`LEGION_E2E_MODEL_GATEWAY_URL` put in place of the fixture's `${LEGION_E2E_MODEL_GATEWAY_URL}`
+`LEGION_E2E_MODEL_GATEWAY_URL` put in place of the route's `${MODEL_BASE_URL}`
 placeholder; the harness points the pods at it, so another run in the namespace can neither see nor
-delete this one's route. The harness loads the run's own copy of the fixture's `pod.yml`, with
-`LEGION_E2E_MODEL_GATEWAY_AUDIENCE` put in place of its `${LEGION_E2E_MODEL_GATEWAY_AUDIENCE}`
-placeholder, so the audience is the operator's and `operator-token` checks the token against it. It
+delete this one's route. The harness loads the run's own copy of the route's `pod.yml`, with
+`LEGION_E2E_MODEL_GATEWAY_AUDIENCE` put in place of its `${MODEL_TOKEN_AUDIENCE}` placeholder, so
+the audience is the operator's and `operator-token` checks the token against it. It
 also creates the run's providers Secret,
 `legion-<project>-providers`, with one key (`stage4a`, a random value no model route reads) that the
 harness's `provider_keys` hands every agent as `STAGE4A_PROVIDER_KEY`, so every pod and the probe run
@@ -445,7 +445,7 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
-| `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the placeholder in the run's copy of the fixture's `pod.yml`; refused when unset or when it holds a character outside letters, digits and `. _ : / -` |
+| `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; refused when unset or when it holds a character outside letters, digits and `. _ : / -` |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker (Plan D), never a development slot (below) |
@@ -571,7 +571,7 @@ for them. `prerequisites` refuses a value that is unset, names a bare alias, or 
 naming the variable and never its value.
 
 `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` is the audience the model gateway accepts on a worker's projected
-ServiceAccount token. The run puts it in place of the placeholder in its copy of the fixture's
+ServiceAccount token. The run puts it in place of the placeholder in its copy of the operator route's
 `pod.yml`, which the daemon loads, and `pod-shape` holds every pod to exactly that one token.
 `LEGION_E2E_DISPATCH_TOKEN_SECRET_ID` and `LEGION_E2E_ENVOY_TOKEN_SECRET_ID` are the Secrets Manager
 ids of the production Dispatch agents' bearer and the production Envoy listener's API token, which
@@ -665,7 +665,7 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `prerequisites` | the tools, the restricted context and the image by digest; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
 | `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
-| `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`fixtures/operator-route`](fixtures/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
+| `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`deploy/kubernetes/operator-route`](../../deploy/kubernetes/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
 | `spec-posted` | each admitted architect, prompted by nothing but the daemon's `catch-up` notice, posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
 | `tree-separation` | tree 1's implementer and tree 2's planner run at once on different nodes, each tree on one node |

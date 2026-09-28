@@ -22,6 +22,7 @@ on:
       - "go.work"
       - "go.work.sum"
       - "scripts/e2e/**"
+      - "deploy/kubernetes/operator-route/**"
       - "packages/daemon/src/daemon/omp-pin.ts"
       - ".github/actions/install-omp/**"
   pull_request:
@@ -44,6 +45,7 @@ on:
       - "go.work"
       - "go.work.sum"
       - "scripts/e2e/**"
+      - "deploy/kubernetes/operator-route/**"
       - "packages/daemon/src/daemon/omp-pin.ts"
       - ".github/actions/install-omp/**"
   merge_group:
@@ -144,6 +146,8 @@ jobs:
               - 'go.work'
               - 'go.work.sum'
               - 'scripts/e2e/**'
+              # The operator route's pod.yml, which two daemon-go tests load (config, sandbox).
+              - 'deploy/kubernetes/operator-route/**'
               # The jj its tests drive is the worker image's.
               - 'packages/daemon/docker/worker.Dockerfile'
               - '.github/actions/install-jj/**'

@@ -1,0 +1,34 @@
+# The operator's `runtime.kubernetes.pod`: the pieces an operator supplies so every Legion pod's
+# Oh My Pi reaches its model. Legion knows none of it; it delivers these pieces to every worker pod
+# and the image probe's pod (docs/kubernetes.md, "Operator configuration"; README.md beside this
+# file lists what each piece is). The Go live harnesses run on these values, with the token audience
+# they are given in place of its placeholder.
+#
+# The ConfigMap named here, legion-operator-route, holds a models.yml and an overlay.yml; apply.sh
+# creates it. A live harness run creates its own copy instead, legion-operator-route-<run>, points
+# its pods at that name, and deletes it after, so a run sharing the namespace never touches it.
+env:
+  # The operator's settings overlay (overlay.yml), named after Legion's pod baseline, so it
+  # outranks the baseline and every repository's .omp/config.yml.
+  PI_CONFIG_FILES: /etc/legion-operator/overlay.yml
+  # Anthropic Foundry puts FOUNDRY_BASE_URL ahead of a model's own baseUrl; a repository's .env
+  # could turn it on, and the pod's own value outranks .env.
+  CLAUDE_CODE_USE_FOUNDRY: "0"
+service_account: legion-worker
+volumes:
+  - name: operator-route
+    config_map:
+      name: legion-operator-route
+      items: [{key: models.yml, path: models.yml}, {key: overlay.yml, path: overlay.yml}]
+  - name: operator-token
+    projected:
+      sources:
+        # The audience the operator's model gateway accepts: the operator, and each live harness run,
+        # puts it in place of the placeholder, so the repository holds no audience.
+        - service_account_token: {audience: "${MODEL_TOKEN_AUDIENCE}", expiration_seconds: 3600, path: token}
+volume_mounts:
+  # models.yml where the image's Oh My Pi profile (OMP_PROFILE=legion, HOME=/home/legion) reads it.
+  - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}
+  - {volume: operator-route, mount_path: /etc/legion-operator/overlay.yml, sub_path: overlay.yml}
+  # The token models.yml's key command reads: /var/run/operator/token.
+  - {volume: operator-token, mount_path: /var/run/operator}
