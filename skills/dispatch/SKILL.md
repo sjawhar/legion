@@ -182,8 +182,9 @@ means ready: specced, unblocked, and waiting on neither a deploy nor a decision.
 waits on one belongs in `backlog`, with what it waits on said on the issue.
 
 Hold at most three issues in flight (`in_progress`, `testing`, `needs_review` or `retro`), all on
-the current priorities that the roadmap, dispatch://AGENTC-34, names (Sami, 2026-09-27,
-dispatch://AGENTC-34/ask/1aeb8f2e-0950-4eaa-aaac-24286c9dd3ca). Past three, or holding one off the
+the current priorities that the roadmap, dispatch://AGENTC-34, names (Sami, 2026-09-27, answering
+dispatch://AGENTC-34/ask/1aeb8f2e-0950-4eaa-aaac-24286c9dd3ca; the question proposed two, and his
+answer set three). Past three, or holding one off the
 priorities: push any unfinished work, say where in one comment on the issue, move it to `backlog`
 and clear its route. Each issue counts on its own; a child does not ride under its parent's slot.
 
