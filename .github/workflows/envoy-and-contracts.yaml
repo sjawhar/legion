@@ -446,18 +446,18 @@ jobs:
       - name: Build envoy services
         run: go build ./cmd/dispatch ./cmd/listener
         working-directory: packages/envoy
-      # The image build is a step of its own, because TestSmoke's subject is the container's
-      # behaviour and a slow build must fail nothing. It used to build inside the test, where
-      # `go test -timeout 5m` bounded it: across the ten Release Envoy Listener runs before this
-      # change TestSmoke itself took 256.60–289.47 s, of which the five assertions measured
-      # 0.00 s each, and release run 36443745717 hit `panic: test timed out after 5m0s` at build
-      # step 46/46 (LEGION-361). The pull step above put this Dockerfile's base images in the
-      # daemon's store, which this build reads.
+      # The image build is a step of its own: what TestSmoke asserts is the container's
+      # behaviour, so a slow build must fail nothing. Inside the test it spent 256.60–289.47 s
+      # of `go test -timeout 5m` across ten Release Envoy Listener runs while the five
+      # assertions measured 0.00 s each (LEGION-361;
+      # docs/solutions/testing/a-container-build-inside-go-test-spends-the-tests-deadline.md).
+      # The pull step above put this Dockerfile's base images in the daemon's store, which the
+      # `docker` driver reads; no LEGION_COMMIT, since this job publishes no image to match.
       - name: Build the listener image the smoke test runs against
         run: docker buildx build --load --tag "$ENVOY_SMOKE_IMAGE" --file packages/envoy/docker/Dockerfile .
-      # 5m now bounds only what the test does: pull NATS, start both containers behind the test's
-      # own 60 s health wait, and assert. Measured at 5.3–6.2 s against a prebuilt image on a
-      # devbox at load average 80, so the bound is deliberate headroom, not a build budget.
+      # 5m bounds only what the test does: pull NATS, start both containers behind the test's
+      # own 60 s health wait, and assert. Measured at 1.0 s in CI and 2.2–6.2 s on a devbox at
+      # load average 80, so the bound is deliberate headroom, not a build budget.
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy
