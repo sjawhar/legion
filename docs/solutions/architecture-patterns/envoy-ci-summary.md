@@ -40,30 +40,58 @@ A listener that settled only a pull request's head left every other terminal com
 unsettled until the bucket's seven-day TTL; on 2026-09-28 production held 1,442 of them across
 595 `pr.<n>.checks` subjects, the youngest six minutes old and the median 65 hours. Settling them
 would publish verdicts days late, which an agent waiting on its head can read as its head's. So a
-record without `schema` settles only in `[debounce, debounce + 5 min)` after its last event. A
-head that finished just before the old listener was replaced is still owed its settlement, and
-the window must cover the longest time between the old listener's last tick (it stops ticking at
-SIGTERM) and the new one's first. That is the on-prem compose deploy, which is stop-then-start, on
-a slow path whose named terms are a floor: a 30 s stop grace, a first 5 s dial and the stream's
-reconcile (up to 25 s), a 10 s durable check, two 30 s fail-open cache gates and the subscribe retry
-loop's 135 s of backoff, at least 260 s before the container's own start and image pull. The
-degraded path adds terms that are bounded but not counted (the dial's retries, the four bucket
-opens, the durable check each subscribe attempt repeats), and the grace does not grow to absorb
-them: a sixth minute would put the band's far edge at 365 s, past the youngest measured backlog
-record (360 s). Production's ECS rollouts take 0.6 to 20.5 s from SIGTERM to ready (once 58.9 s).
-Past the band such a record never settles. It stays
-`settled_emitted: false` with no `schema` until the TTL expires it; that is expected, and it is
-history, not pending work. The listener's `/metrics` gauge `envoy_ci_legacy_records_held` carries
-how many the last tick held back, and it logs `checks held back a head-gated listener's unsettled
-records, at least` with the count the first time a process holds any; that count is a floor, since
-the loop does not wait for the CI cache to load. An observation that changes the record (a new
-check run, a re-run, a
+record without `schema` settles only in `[debounce, debounce + 5 min)` after its last event
+(`handoverGrace`); past the band it never settles.
+
+### The grace
+
+A head that finished just before the old listener was replaced is still owed its settlement, and
+the window must cover the time between the old listener's last tick (it stops ticking at SIGTERM,
+`summaryCancel` in `cmd/listener`'s main) and the new one's first. The longest such gap is the
+on-prem compose deploy, which is stop-then-start, on a slow path whose named terms are a floor:
+
+| Term | Bound |
+| --- | --- |
+| old listener's stop grace (`stop_grace_period`, `deploy/compose/listener.compose.yml`) | 30 s |
+| `bus.ConnectOwningStream`: a first 5 s dial, then the stream's info and update, each bounded by the 10 s JetStream MaxWait | 25 s |
+| durable check (`listenerDurable`), one JetStream call | 10 s |
+| interest and session cache gates (`registry.WaitForCacheReady`, `sessions.WaitForCacheReady`) | 60 s |
+| subscribe retry loop around `startListenerSubscription`, sleeping attempt×3 s after each of its first nine attempts | 135 s |
+| **floor, before container start and image pull** | **260 s** |
+
+The degraded path adds terms that are bounded but not counted: `bus.connectWithContext` retries the
+dial up to ten times (about 59 s); `cistore.Open`, `store.Open`'s two buckets and
+`session.OpenSessionRegistry` each wait up to the 10 s MaxWait (40 s); and
+`startListenerSubscription` reruns `listenerDurable`'s ConsumerInfo on every attempt (up to about
+100 s), which is slow exactly when the backoff runs. Production's ECS rollouts take 0.6 to 20.5 s
+from SIGTERM to ready, once 58.9 s (2026-09-28).
+
+Any width admits something, because the head-gated listener keeps leaving non-head records until
+its SIGTERM: the band admits the ones it left in its last debounce plus grace, and a listener with
+#1526 settles those commits anyway. The width bounds how late such a settlement can arrive, at most
+debounce plus grace after the commit's last event, not whether one arrives; it is not bounded by
+the backlog's age, which was one snapshot. Measured on production NATS on 2026-09-28: at 07:17Z the
+band `[5 s, 305 s)` held no record; over the past week a 305 s band held 0.73 records on average and
+14 at worst, and was empty 54% of the time (a 65 s band: 0.16 and 9); such records replenish at
+about 8.6 an hour. Five minutes covers the 260 s floor with 40 s for container start and image
+pull, at the cost of settlements up to 5 min 5 s late and those few admitted records per cutover.
+
+### What an operator sees
+
+A record past the band stays `settled_emitted: false` with no `schema` until the TTL expires it;
+that is expected, and it is history, not pending work. The listener's `/metrics` gauge
+`envoy_ci_legacy_records_held` carries how many the last tick held back, and it logs `checks held
+back a head-gated listener's unsettled records, at least` with the count the first time a process
+holds any; that count is a floor, since the loop does not wait for the CI cache to load. An
+observation that changes the record (a new check run, a re-run, a
 suite) stamps it, and the commit then settles as any other; a redelivery of what the record already
 holds writes nothing. A stamped record, of any schema, is never held back, so a settlement pending
 across a restart of the listener still publishes; a process-start cutoff would drop those. A record
 without a schema whose `last_event_at` is ahead of the listener's clock publishes once wall time
 reaches its band, and raising `ENVOY_CI_DEBOUNCE` moves the band's far edge, admitting the records
 in the added slice.
+
+### Rollback and upgrade order
 
 A head-gated listener (legion 9de053a2, or 1ad2466c) run after a rollback decodes a stamped record,
 ignoring the field it does not know, and does not mistake it for a head record, which it recognizes

@@ -165,30 +165,14 @@ func encodeRecord(st *State) ([]byte, error) {
 	return json.Marshal(st)
 }
 
-// handoverGrace bounds how long after its debounce a record without a schema can still settle. A
-// head-gated listener settled its head as soon as the debounce passed, so the only settlement it
-// can still owe is a head whose debounce ran out while no listener was ticking. A listener stops
-// ticking when it gets SIGTERM, so the longest such gap is the on-prem compose deploy, which stops
-// the old listener before starting the new one, on the new one's slow path to its first tick
-// (cmd/listener's main, in order). These terms are a floor on that path:
-//   - the old listener's stop grace, 30 s (stop_grace_period, deploy/compose/listener.compose.yml);
-//   - bus.ConnectOwningStream: a first 5 s dial, then the stream's info and update, each bounded
-//     by the 10 s JetStream MaxWait, 25 s;
-//   - the durable check (listenerDurable), one JetStream call, 10 s;
-//   - the interest and session cache gates (registry.WaitForCacheReady and
-//     sessions.WaitForCacheReady), 30 s each, 60 s;
-//   - the subscribe retry loop around startListenerSubscription, which sleeps attempt*3 s after
-//     each of its first nine attempts, 135 s.
-//
-// That is 260 s before the container's own start and image pull. The degraded path has terms that
-// are bounded but not counted here: bus.connectWithContext retries the dial up to ten times (about
-// 59 s in all, not 5 s); cistore.Open, store.Open's two buckets and session.OpenSessionRegistry
-// each wait up to the 10 s MaxWait per bucket (40 s); and startListenerSubscription runs
-// listenerDurable's ConsumerInfo again on every attempt (up to about 100 s), which is slow exactly
-// when the backoff runs, since both are slow when NATS is. The constant does not try to absorb
-// them: a sixth minute would put the band's far edge, at production's 5 s debounce, at 365 s, past
-// the youngest backlog record measured on 2026-09-28 (360 s), and start admitting the backlog.
-// Production's ECS rollouts take 0.6 to 20.5 s from SIGTERM to ready, once 58.9 s.
+// handoverGrace is how long past its debounce a record without a schema can still settle. It is
+// meant for a head whose debounce ran out while no listener was ticking: an on-prem
+// stop-then-start deploy takes at least about 260 s from the old listener's SIGTERM to the new
+// one's first tick. Any width also admits the non-head records the head-gated listener left in its
+// last debounce+handoverGrace, which this listener settles as it settles every commit; the width
+// bounds how late such a settlement can arrive, not whether one does. The derivation, its
+// constants and the dated measurements behind five minutes are in
+// docs/solutions/architecture-patterns/envoy-ci-summary.md.
 const handoverGrace = 5 * time.Minute
 
 // legacyBacklog reports whether st is a head-gated listener's leftover: it has no schema and its
