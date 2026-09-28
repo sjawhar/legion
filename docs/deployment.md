@@ -32,8 +32,13 @@ under a name computed at run time or `eval "$(tool)"`, leaves every variable unk
 built from one afterwards is refused; a nameref (`declare -n`) is refused outright. It does not
 follow a `source` of a path it cannot read at check time (a process substitution, `/dev/fd/N`),
 which it takes as sourcing nothing, nor an assignment to `IFS`: it splits an unquoted value on
-whitespace alone. A target with no proven path prefix is refused, as is a command the parser
-reports as malformed. An unknown trailing component under a prefix already proven inside a
+whitespace alone. A script the command writes and then runs is refused as one the guard cannot
+read when a value it cannot know is written into it by `printf %s`, `printf %q` or `echo` (bash
+parses the value as code, so a `;`, a quote or a newline in it escapes any position), when `echo`
+takes an option first, or when an unquoted here-document holds text bash expands; `printf %d`
+writes only digits and a sign, so it is read. A shell or interpreter reading such a here-document
+as its program is refused too. A target with no proven path prefix is refused, as is a command the
+parser reports as malformed. An unknown trailing component under a prefix already proven inside a
 permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused outright. For
 `tmux kill-*`, the guard resolves the socket as tmux does
 (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`, then `$TMUX`, then the default socket) and refuses

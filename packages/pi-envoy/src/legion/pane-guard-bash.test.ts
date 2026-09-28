@@ -196,8 +196,9 @@ test("an operator on whether a parameter is set never allows a target bash puts 
 
 test("a function's arguments are bash's own, and never let a target outside the roots through", () => {
   // Words that are one argument, none (an empty unquoted value, `"$@"` of no arguments, an empty
-  // array), several (a value with a space), or unknown; bodies that index, shift, count and test.
-  const prelude = 'A="$HOME/.ssh"; W="$LEGION_WORKSPACE/w"; S="a $HOME/.ssh"; arr=(); one=("")';
+  // array), several (a value with a space), or unknown, and variables and array literals that hold
+  // those; bodies that index, shift, count and test.
+  const prelude = `A="$HOME/.ssh"; W="$LEGION_WORKSPACE/w"; S="a $HOME/.ssh"; arr=(); one=(""); X="\${arr[@]}"; Y=("\${arr[@]}" "$A"); Z=($S "$W")`;
   const words = [
     '"$A"',
     "$A",
@@ -213,6 +214,11 @@ test("a function's arguments are bash's own, and never let a target outside the 
     `"\${arr[@]}"`,
     `"\${one[@]}"`,
     "$NOPE",
+    '"$X"',
+    '"$P"',
+    `"\${Y[0]}"`,
+    `"\${Y[@]}"`,
+    `"\${Z[1]}"`,
   ];
   const bodies = [
     'rm -rf "$1"',
@@ -231,7 +237,7 @@ test("a function's arguments are bash's own, and never let a target outside the 
     bodies.flatMap((body) =>
       words.flatMap((first) =>
         ['"$A"', "$E", '"$@"', "$S"].map(
-          (second) => `${prelude}; set -- ${outer}; f() { ${body}; }; f ${first} ${second}`
+          (second) => `${prelude}; set -- ${outer}; P="$@"; f() { ${body}; }; f ${first} ${second}`
         )
       )
     )

@@ -47,15 +47,17 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
     "packages/envoy/deploy/scripts/autodeploy.sh:80",
   // Kills the processes a query selects (`$(run_processes)`, `first_child`), not pids it started.
   "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/controller-start-tmux.sh:67",
-  "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/stage2-tmux-supervision.sh:461",
-  "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/stage3-4b13b-acceptance.sh:1254",
-  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/stage3-devbox-workflow.sh:1160",
-  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:999",
   // A library run bare, without the arguments every caller passes: bash stops at its argument
   // check, and the guard, which walks a command whatever a test before it decides, reaches the
   // paths an empty argument makes (`--control`, `--dest`).
   "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:99",
-  "scripts/e2e/lib/install-model-gateway.sh": "/hawk-token:33",
+  // Runs the gateway key command it writes, whose `command=(%s)` line takes a value built from
+  // `$(command -v hawk-token)`: a script the guard cannot read. The drivers run it before any pane.
+  "scripts/e2e/lib/install-model-gateway.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
 };
 
 beforeAll(() => {
@@ -1055,6 +1057,27 @@ describe("scripts a command runs", () => {
       expect(bash(command), command).toContain(path.join(home, ".ssh"));
     }
     expect(bash('set --; f() { rm -rf "$1"; }; f "$*" "$HOME/.ssh"')).toBeUndefined();
+    // Stored, `"$@"` of none is the empty string bash assigns, one argument when quoted.
+    for (const command of [
+      'set --; x="$@"; f() { rm -rf "$2"; }; f "$x" "$HOME/.ssh"',
+      `arr=(); x="\${arr[@]}"; f() { rm -rf "$2"; }; f "$x" "$HOME/.ssh"`,
+      'set --; x="$@"; set -- "$x" "$HOME/.ssh"; rm -rf "$2"',
+      'set --; f() { local x="$@"; g "$x" "$HOME/.ssh"; }; g() { rm -rf "$2"; }; f',
+      'set --; export x="$@"; f() { rm -rf "$2"; }; f "$x" "$HOME/.ssh"',
+      `set --; Y[0]="$@"; f() { rm -rf "$2"; }; f "\${Y[@]}" "$HOME/.ssh"`,
+    ]) {
+      expect(bash(command), command).toContain(path.join(home, ".ssh"));
+    }
+    // An array's literal holds the words bash gives it, and a word that may be several leaves the
+    // elements unknown.
+    for (const command of [
+      `set -- "$LEGION_WORKSPACE/w" "$HOME/.ssh"; Y=("$@"); rm -rf "\${Y[1]}"`,
+      `arr=(); Y=("\${arr[@]}" "$HOME/.ssh"); rm -rf "\${Y[0]}"`,
+      `set --; Y=("$@"); f() { rm -rf "$2"; }; f "\${Y[0]}" "$HOME/.ssh"`,
+    ]) {
+      expect(bash(command), command).toContain(path.join(home, ".ssh"));
+    }
+    expect(bash(`S="a b"; Y=($S "$HOME/.ssh"); rm -rf "\${Y[2]}"`)).toContain("rm would delete");
   });
 
   test("tests a positional parameter's operator expansion against the argument it holds", () => {
@@ -1198,6 +1221,28 @@ describe("scripts a command runs", () => {
     expect(bash(`cp /etc/hostname ${file}; bash ${file}`)).toBeUndefined();
     expect(bash(`curl -o ${file} https://example.test; bash ${file}`)).toBeUndefined();
     expect(bash(`echo 'rm -rf ~' > ${file}; bash ${file}`)).toContain(home);
+    // An option changes what `echo` prints, so its output is not the words it was given.
+    for (const option of ["-e", "-n", "-ne", "-E"]) {
+      expect(bash(`echo ${option} 'rm -rf ~' > ${file}; bash ${file}`), option).toContain(
+        "cannot read before running it"
+      );
+    }
+    // An unquoted here-document expands `$`, a backquote and a backslash before one of them or a
+    // newline as bash writes it, so one holding them is text the guard cannot read; with nothing to
+    // expand, it is read as written.
+    expect(bash(`x='rm -rf ~'; cat > ${file} <<EOF\n$x\nEOF\nbash ${file}`)).toContain(
+      "cannot read before running it"
+    );
+    expect(bash(`tee ${file} >/dev/null <<EOF\n$(cat src)\nEOF\nbash ${file}`)).toContain(
+      "cannot read before running it"
+    );
+    expect(bash(`x='rm -rf ~'\nbash <<EOF\n$x\nEOF`)).toContain("cannot read the script");
+    expect(
+      bash(`d="$HOME/.ssh"\npython3 - <<PY\nimport shutil; shutil.rmtree("$d")\nPY`)
+    ).toContain("cannot read the program");
+    expect(bash(`cat > ${file} <<EOF\nrm -rf ~\nEOF\nbash ${file}`)).toContain(home);
+    expect(bash(`bash <<EOF\nrm -rf ~\nEOF`)).toContain(home);
+    expect(bash(`python3 - <<PY\nprint("a\\n")\nPY`)).toBeUndefined();
   });
 
   test("reads a script a brace group writes from here-documents and printf before running it", () => {
@@ -1208,14 +1253,57 @@ describe("scripts a command runs", () => {
       );
     expect(bash(`bash ${writer('"$work/out"')}`)).toBeUndefined();
     expect(bash(`bash ${writer('"$HOME/out"')}`)).toContain(path.join(home, "out"));
-    // A value the guard cannot know is unknown in the script it writes too.
-    expect(bash(`bash ${writer('"$(cat target.txt)"')}`)).toContain("builds at run time");
+    // A value the guard cannot know is code the script holds even under `%q`, whose output form
+    // bash selects by value; the guard does not follow which quoting position the format gives it.
+    expect(bash(`bash ${writer('"$(cat target.txt)"')}`)).toContain(
+      "cannot read before running it"
+    );
     // A statement whose output it cannot render leaves the script unreadable.
     const opaque = script(
       "group-opaque.sh",
       'work=$(mktemp -d)\n{ cat <<\'EOF\'\n#!/bin/bash\nEOF\n  jq -r .body input.json; } >"$work/run.sh"\nbash "$work/run.sh"\n'
     );
     expect(bash(`bash ${opaque}`)).toContain("cannot read before running it");
+  });
+
+  test("reads no script that holds a value it cannot know as code", () => {
+    const f = '"$LEGION_WORKSPACE/f"';
+    const p = "p=$(cat src.txt)";
+    // `%s` and `echo` write a value into the script as it is, so it can carry `;`, a quote or a
+    // newline out of any position: an operand of a command that takes anything, a quote, an
+    // assignment, a comment. `%q` writes a form bash selects by value, and a value holding a newline
+    // selects `$'…'`, which closes a single- or double-quoted position. Read as one unknown word,
+    // each of these was allowed.
+    for (const command of [
+      `p='x'${"#".repeat(70_000)}; { printf '%s' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf '%s' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { echo "$p"; } > ${f}; bash ${f}`,
+      `${p}; printf -v q '%s' "$p"; printf '%s' "$q" > ${f}; bash ${f}`,
+      `${p}; printf '%s' "$p" > ${f}; bash ${f}`,
+      `${p}; { printf 'echo %s\\n' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf 'echo "%s"\\n' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf 'echo "%q"\\n' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf "echo '%q'\\n" "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf 'v=%s\\n' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf '# %s\\n' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { echo "echo $p"; } > ${f}; source ${f}`,
+      // A word that may be several arguments moves every value after it to another conversion.
+      `u=$(cat list); printf 'n=%d\\nrm -rf %s\\n' $u "$LEGION_WORKSPACE/x" > ${f}; bash ${f}`,
+    ]) {
+      expect(bash(command), command.slice(0, 80)).toContain("cannot read before running it");
+    }
+    // What it can render is judged line by line.
+    expect(bash(`p='rm -rf ~/.ssh'; { printf '%s' "$p"; } > ${f}; bash ${f}`)).toContain(
+      "line 1 of"
+    );
+    // `%d` writes digits and a sign whatever it is given, so a value it cannot know is one unknown
+    // word there.
+    expect(bash(`${p}; { printf 'echo "%d"\\n' "$p"; } > ${f}; bash ${f}`)).toBeUndefined();
+    expect(bash(`${p}; { printf 'rm -rf /tmp/%d\\n' "$p"; } > ${f}; bash ${f}`)).toContain(
+      "line 1 of"
+    );
+    // A file never run is never read.
+    expect(bash(`printf 'Authorization: Bearer %s\\n' "$(cat token)" > ${f}`)).toBeUndefined();
   });
 
   test("reads no script a command writes that is longer than it reads from disk", () => {

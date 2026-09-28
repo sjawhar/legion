@@ -299,17 +299,27 @@ longer than 65,536 characters or 4,096 pieces (`MAX_VALUE_LENGTH`, `MAX_VALUE_PI
 by a test): a replacement of a replacement or `x="$x$x"`
 repeated reached tens of millions of characters and held the pane on each read, so past the bound
 a value is unknown, and a refusal names the cause. A script a command writes (a rendered brace
-group, `printf` or `echo` into a file, appends) is read whole up to the 1 MiB the guard reads of a
-script on disk, and past it is one the guard cannot read.
+group, `printf` or `echo` into a file, appends, a here-document through `cat` or `tee`) is read
+whole up to the 1 MiB the guard reads of a script on disk, and past it is one the guard cannot
+read. So is one holding a value the guard cannot know through `printf %s`, `printf %q` or `echo`:
+bash parses the value as code, where a `;`, a quote or a newline it holds reaches out of any
+position, a comment included, and `%q`'s output form is not fixed (a value containing a newline
+selects `$'…'`, which carries the value's own quote characters raw and closes a single- or
+double-quoted position). `printf %d` writes digits and a sign, so there a value it cannot know
+stays one unknown word. `echo` with an option first, and a here-document whose unquoted text
+bash expands, are scripts it cannot read too; a shell or interpreter reading such a
+here-document as its program is refused.
 
 A write to a variable that the guard sees reaches its model, and one it cannot model leaves the
 value unknown, never the one already approved: a builtin that assigns by name (`printf -v`,
 `read`, `mapfile`, `getopts`, `declare` and its kin, `unset`, `wait -p`), arithmetic, `${v:=x}`,
-a loop variable, and a plain assignment to an array's name (its element 0) assign as bash does; a
-function's `local` is the caller's variable again when it returns, unknown when only some paths
-made it local; `readonly`, `-i`, `-l` and `-u` make a later write unknown; and a write under a
-name the guard cannot read, or `eval` of text it cannot read, makes every variable unknown and
-possibly unset (`ANY_NAME`), the pane's environment included. A nameref (`declare -n`) is
+a loop variable, a plain assignment to an array's name (its element 0), and an array's literal,
+which holds the words bash gives it (none for `"$@"` of none, and every element unknown when a
+word may be several), assign as bash does; `"$@"` of none assigned is the empty string, one
+argument when quoted; a function's `local` is the caller's variable again when it returns, unknown
+when only some paths made it local; `readonly`, `-i`, `-l` and `-u` make a later write unknown; and
+a write under a name the guard cannot read, or `eval` of text it cannot read, makes every variable
+unknown and possibly unset (`ANY_NAME`), the pane's environment included. A nameref (`declare -n`) is
 refused. Two writes it does not follow: a `source` of a path it cannot read at check time (a
 process substitution, `/dev/fd/N`, `/dev/stdin`, a file a command before it creates) is taken as
 sourcing nothing, though bash may read assignments from it (LEGION-332); and an assignment to

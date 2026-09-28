@@ -147,6 +147,14 @@ function isUnset(value: Expansion | undefined): boolean {
  * (`f "$@" x` gives f one argument). An element that is empty is an ordinary empty piece. */
 const NO_ELEMENTS: Piece = { kind: "literal", text: "", noElements: true };
 
+/** A value as a variable or element holds it. `NO_ELEMENTS` marks a word, not a value: what
+ * `x="$@"` assigns from no elements is the empty string, which `"$x"` passes as one argument, so
+ * the mark never outlives the word it came from. */
+function stored(value: Expansion): Expansion {
+  if (!value.some((piece) => piece.noElements === true)) return value;
+  return value.map((piece) => (piece.noElements === true ? literal("") : piece));
+}
+
 /** The key under which `vars` holds the value of every name it does not list, once the shell ran
  * a write the guard could not read (`forgetVariables`): any name, one from the pane's environment
  * included, may since have been assigned or unset. */
@@ -602,9 +610,10 @@ function assignScalar(st: State, name: string, value: Expansion): void {
     keepAttributed(st, name);
     return;
   }
-  st.vars.set(name, value);
+  const kept = stored(value);
+  st.vars.set(name, kept);
   const elements = st.arrays.get(name);
-  if (elements !== undefined) st.arrays.set(name, new Map(elements).set("0", value));
+  if (elements !== undefined) st.arrays.set(name, new Map(elements).set("0", kept));
 }
 
 /** Whether `name` has an attribute bash refuses or rewrites a write with (`Piece.rewrites`). */
@@ -1935,12 +1944,12 @@ function checkRedirects(
       const file = path.resolve(st.cwd ?? "/", target);
       let content: string | null = null;
       if (command?.name === "cat" && command.args.length === 0) {
-        content = heredoc?.content ?? (herestring ? herestringText(herestring, st, ctx) : null);
+        if (heredoc !== undefined) content = heredocText(heredoc);
+        else if (herestring !== undefined) content = herestringText(herestring, st, ctx);
       } else if (command?.name === "echo") {
-        const words = command.args.map((arg) => literalText(arg.exp));
-        content = words.every((word) => word !== undefined) ? echoLine(words as string[]) : null;
+        content = echoText(command.args);
       } else if (command?.name === "printf") {
-        content = printfText(command.args, MAX_SCRIPT_BYTES) ?? null;
+        content = printfText(command.args, MAX_SCRIPT_BYTES, true) ?? null;
       }
       st.pidFiles.delete(file);
       const before = appends ? st.files.get(file) : "";
@@ -2000,11 +2009,21 @@ function walkRenderingGroup(group: BraceGroup, st: State, ctx: Ctx): string | nu
   return content;
 }
 
-/** The line `echo WORD...` prints, or null when it is longer than a script the guard reads: joining
- * the words builds the whole string, so the length is checked first. */
-function echoLine(words: readonly string[]): string | null {
+/** What `echo WORD...` prints to a file: its line, or null for one the guard cannot render. An
+ * option first (`-n`, `-e` and their kin, which change what it prints) and a word the guard cannot
+ * know (written as it is, into a script bash will parse) both leave it unrendered, and so does a
+ * line longer than a script the guard reads: joining the words builds the whole string, so the
+ * length is checked first. */
+function echoText(list: readonly Arg[]): string | null {
+  if (literalText(list[0]?.exp)?.startsWith("-")) return null;
+  const words: string[] = [];
   let length = 0;
-  for (const word of words) length += word.length + 1;
+  for (const arg of list) {
+    const word = literalText(arg.exp);
+    if (word === undefined) return null;
+    words.push(word);
+    length += word.length + 1;
+  }
   return length > MAX_SCRIPT_BYTES ? null : `${words.join(" ")}\n`;
 }
 
@@ -2015,8 +2034,18 @@ function readable(content: string): string | null {
   return content.length > MAX_SCRIPT_BYTES ? null : content;
 }
 
-/** What one statement of a rendered group prints: nothing for an assignment, a quoted here-document
- * fed to `cat`, `printf`, or `echo`. Undefined for anything else. */
+/** A here-document's text as the command reads it, or null when bash expands it into something
+ * else: unquoted, `$` and a backquote expand, and a backslash before `$`, a backquote, a backslash
+ * or a newline is removed, while the guard holds the text as written. */
+function heredocText(heredoc: Redirect): string | null {
+  const text = heredoc.content;
+  if (text === undefined) return null;
+  return !heredoc.heredocQuoted && /[$`]|\\[$`\\\n]/.test(text) ? null : text;
+}
+
+/** What one statement of a rendered group prints: nothing for an assignment, a here-document fed
+ * to `cat` (`heredocText`), `printf`, or `echo` of values the guard knows. Undefined for anything
+ * else. */
 function statementOutput(statement: Statement, st: State, ctx: Ctx): string | undefined {
   const command = statement.command;
   if (statement.background || statement.redirects.length > 0 || command.type !== "Command") {
@@ -2029,18 +2058,11 @@ function statementOutput(statement: Statement, st: State, ctx: Ctx): string | un
     const [heredoc, ...others] = command.redirects;
     if (heredoc === undefined || others.length > 0) return undefined;
     if (heredoc.operator !== "<<" && heredoc.operator !== "<<-") return undefined;
-    // An unquoted here-document expands its text as bash writes it; only one with nothing to
-    // expand reads the same.
-    const text = heredoc.content;
-    if (text === undefined || (!heredoc.heredocQuoted && /[$`\\]/.test(text))) return undefined;
-    return text;
+    return heredocText(heredoc) ?? undefined;
   }
   if (command.redirects.length > 0) return undefined;
-  if (name === "printf") return printfText(rest, MAX_SCRIPT_BYTES);
-  if (name === "echo") {
-    if (literalText(rest[0]?.exp)?.startsWith("-")) return undefined;
-    return echoLine(rest.map((arg) => runtimeText(arg.exp))) ?? undefined;
-  }
+  if (name === "printf") return printfText(rest, MAX_SCRIPT_BYTES, true);
+  if (name === "echo") return echoText(rest) ?? undefined;
   return undefined;
 }
 
@@ -2049,11 +2071,21 @@ function statementOutput(statement: Statement, st: State, ctx: Ctx): string | un
  * the format reused while arguments remain. Undefined for a format it does not render: an unknown
  * one, `-v`, a width or precision, or another conversion. It stops once the text passes `limit`,
  * the most its caller keeps, so the text it returns is past the limit rather than built whole: a
- * format reused over 100,000 arguments would build and scan gigabytes. */
-function printfText(list: readonly Arg[], limit: number): string | undefined {
+ * format reused over 100,000 arguments would build and scan gigabytes.
+ *
+ * Rendering a `script` bash will parse, it is also undefined for a value it cannot know under `%s`
+ * or `%q`, and for an argument that may be several (every value after it may belong to another
+ * conversion), since the marker standing in would read as one harmless word. `%s` writes the value
+ * as it is, and no position confines it, a comment included (a newline ends one). `%q`'s output
+ * form is not fixed. A value containing a newline selects the `$'…'` form, whose output carries the
+ * value's own quote characters raw, and that closes the format's quote in both the single- and
+ * double-quoted positions; the guard does not follow which position a conversion sits in. `%d`
+ * stays: its output is digits and a sign (`UNKNOWN_MARKER`). */
+function printfText(list: readonly Arg[], limit: number, script = false): string | undefined {
   const [formatArg, ...values] = list;
   const format = literalText(formatArg?.exp);
   if (format === undefined || format.startsWith("-")) return undefined;
+  if (script && values.some((value) => value.fields === "unknown")) return undefined;
   const parts: ({ readonly text: string } | { readonly conversion: "s" | "q" | "d" })[] = [];
   for (let i = 0; i < format.length; i += 1) {
     const char = format.charAt(i);
@@ -2081,6 +2113,9 @@ function printfText(list: readonly Arg[], limit: number): string | undefined {
       }
       const value = values[index];
       index += 1;
+      if (script && part.conversion !== "d" && value !== undefined) {
+        if (literalText(value.exp) === undefined) return undefined;
+      }
       const text = value === undefined ? "" : runtimeText(value.exp);
       if (part.conversion === "s") out += text;
       else if (part.conversion === "d")
@@ -2120,10 +2155,11 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
     visitParts(assignment.indexParts, st, ctx);
     for (const word of assignment.array ?? []) visitWord(word, st, ctx);
     if (assignment.name === undefined) continue;
-    const expanded =
+    const expanded = stored(
       assignment.value === undefined
         ? [literal("")]
-        : (expandWord(assignment.value, st, ctx)[0] ?? []);
+        : (expandWord(assignment.value, st, ctx)[0] ?? [])
+    );
     const arrayAssignment =
       assignment.array !== undefined || assignment.append || assignment.index !== undefined;
     const descendantPid = expanded.length > 0 && expanded.every((piece) => piece.descendantPid);
@@ -2157,9 +2193,20 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
                   .map((key) => Number(key) + 1)
               )
             : 0;
-          for (const word of assignment.array) {
-            elements.set(String(index), expandWord(word, st, ctx)[0] ?? []);
-            index += 1;
+          // The words bash gives the literal: none for `"$@"` of none, and one per element; a word
+          // that may be several or none leaves every element unknown.
+          const words = args(assignment.array, st, ctx);
+          if (words.some((word) => word.fields === "unknown")) {
+            elements.clear();
+            elements.set(UNKNOWN_ARRAY_INDEX, [
+              unknown(`\`$${assignment.name}\`, an array a word of which may be several elements`),
+            ]);
+          } else {
+            for (const word of words) {
+              if (word.fields === "none") continue;
+              elements.set(String(index), stored(word.exp));
+              index += 1;
+            }
           }
         } else if (assignment.append) {
           const index = Math.max(
@@ -2852,10 +2899,8 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         if (target !== undefined && st.cwd !== undefined) {
           const file = path.resolve(st.cwd, target);
           st.pidFiles.delete(file);
-          st.files.set(
-            file,
-            append || heredoc?.content === undefined ? null : readable(heredoc.content)
-          );
+          const text = heredoc === undefined ? null : heredocText(heredoc);
+          st.files.set(file, append || text === null ? null : readable(text));
         }
       }
       return;
@@ -3540,8 +3585,16 @@ function runShell(list: readonly Arg[], invocation: Invocation, st: State, ctx: 
   }
   // No -c and no file: the shell reads its script from standard input.
   const heredoc = invocation.redirects.find((r) => r.operator === "<<" || r.operator === "<<-");
-  if (heredoc?.content !== undefined) {
-    runText(heredoc.content, "the script it reads from the heredoc", child, ctx, site);
+  if (heredoc !== undefined) {
+    const text = heredocText(heredoc);
+    if (text === null) {
+      throw new Refusal(
+        site.snippet,
+        site.line,
+        "the guard cannot read the script this shell reads from its here-document, which bash expands first; quote its delimiter (`<<'EOF'`) or write the script with the write tool"
+      );
+    }
+    runText(text, "the script it reads from the heredoc", child, ctx, site);
     return;
   }
   const herestring = invocation.redirects.find((r) => r.operator === "<<<");
@@ -3611,15 +3664,16 @@ function runInterpreter(
     // `python3 - <<'PY'`: the program is standard input.
     if (word === "-") {
       const heredoc = invocation.redirects.find((r) => r.operator === "<<" || r.operator === "<<-");
-      if (heredoc?.content !== undefined) {
-        runCode(
-          language,
-          { text: "<heredoc>", exp: [literal(heredoc.content)] },
-          invocation,
-          st,
-          ctx,
-          site
-        );
+      if (heredoc !== undefined) {
+        const text = heredocText(heredoc);
+        if (text === null) {
+          throw new Refusal(
+            site.snippet,
+            site.line,
+            "the guard cannot read the program this interpreter reads from its here-document, which bash expands first; quote its delimiter (`<<'PY'`) or write the program with the write tool"
+          );
+        }
+        runCode(language, { text: "<heredoc>", exp: [literal(text)] }, invocation, st, ctx, site);
       }
       return;
     }

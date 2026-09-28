@@ -15,7 +15,16 @@ export type CodeLanguage = "py" | "js";
 
 /** Stands in, in code or shell text a command builds at run time, for a part the guard cannot
  * know (a shell variable read from input, a command's output); a value holding it evaluates to
- * unknown. */
+ * unknown.
+ *
+ * It is spelled from `[A-Za-z0-9_]` alone, so in shell text it is one bare word, and a part may be
+ * written as the marker into a script bash will parse only when the text bash writes there cannot
+ * hold a shell metacharacter either. `printf %d` is that part: its output is digits and a sign by
+ * the conversion's own definition, not by a formatting choice bash may revise. `%s` and `echo`
+ * write the value as it is. `%q`'s output form is not fixed. A value containing a newline selects
+ * the `$'…'` form, whose output carries the value's own quote characters raw, and that closes the
+ * format's quote in both the single- and double-quoted positions. So each of those three leaves a
+ * script unreadable instead (`printfText` in `pane-guard.ts`). */
 export const UNKNOWN_MARKER = "__LEGION_GUARD_UNKNOWN__";
 
 /** A value the evaluator knows, or `undefined` for one it cannot know before the code runs. */

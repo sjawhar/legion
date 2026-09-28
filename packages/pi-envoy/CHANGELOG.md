@@ -136,11 +136,12 @@
   is walked pass by pass, a `case` on a known word takes its one matching item, and a `shift` past
   the last argument shifts nothing, as in bash. A word that may be several arguments or none (an
   unquoted `$v` holding a space, `$*`, a glob) leaves the arguments unknown, `"$@"` of no arguments
-  is none, `unset` leaves a name unset rather than empty, and in a shell whose arguments the guard
-  does not know `${1-…}` and `${1+…}` stay unknown. It also evaluates pattern replacement and
-  removal of a known ASCII value (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`, a function whose
-  output passes through `(umask 077 && …)`, and a script a brace group writes from here-documents
-  and `printf` before running it. A target it cannot resolve is still refused, and some stay
+  is none (and assigned, `x="$@"`, the empty string, one argument when quoted), `unset` leaves a
+  name unset rather than empty, and in a shell whose arguments the guard does not know `${1-…}` and
+  `${1+…}` stay unknown. It also evaluates pattern replacement and removal of a known ASCII value
+  (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`, a function whose output passes through
+  `(umask 077 && …)`, and a script a brace group writes from here-documents and `printf` before
+  running it. A target it cannot resolve is still refused, and some stay
   unknown on purpose: `$(git rev-parse --show-toplevel)`, whose answer the repository's config
   decides and an earlier command in the same line can rewrite; an operand the parser splits
   differently from bash (`${v///tmp//etc}`); text outside ASCII, which bash counts by the locale; a
@@ -151,12 +152,20 @@
   tenth of a second and held the pane for seconds on each read, so past the bound a value is
   unknown. A script a command writes is read whole up to the 1 MiB the guard reads of one on disk,
   and past it is refused as one it cannot read: a 176 KB brace group rendering 655 MB held the pane
-  for 30 s. The Stage 2, 3, 4b.13b, 4b and controller drivers are now refused only for killing the
-  processes a query selects (`$(run_processes)`, `first_child`), and the five manual smokes
-  (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `smoke-clear-rebind.sh`,
-  `omp-roundtrip.sh`) run their sessions on their own tmux server, where a `kill-session` can end
-  only the session each started. `src/legion/pane-guard-walk.ts` prints every refusal a script
-  meets, not only the first.
+  for 30 s. So is a script whose code holds a value the guard cannot know: `printf %s`, `printf %q`
+  and `echo` write the value into it, and bash parses what the value holds, where a `;`, a quote or
+  a newline reaches out of any position (an operand of `echo`, a quoted string, a comment), and a
+  value containing a newline makes `%q` select `$'…'`, which closes a single- or double-quoted
+  position. So is one `echo` writes with an option first, since the option changes what it prints:
+  a harmless `echo -e 'ls' > f; bash f` is refused as well, and writing the file stays allowed.
+  `printf %d` writes only digits and a sign, so there its value stays one unknown word. The Stage
+  2, 3, 4b.13b, 4b and controller drivers are refused for killing the processes a query selects
+  (`$(run_processes)`, `first_child`), all but the controller's first for running the gateway key
+  command `install-model-gateway.sh` writes, whose `command=(…)` line takes a value built from
+  `$(command -v hawk-token)`, and the five manual smokes (`smoke-delivery.sh`, `smoke-btw.sh`,
+  `smoke-channel.sh`, `smoke-clear-rebind.sh`, `omp-roundtrip.sh`) run their sessions on their own
+  tmux server, where a `kill-session` can end only the session each started.
+  `src/legion/pane-guard-walk.ts` prints every refusal a script meets, not only the first.
 - A pane whose `HOME` sits under `/tmp` keeps it (LEGION-300). The guard counted every directory
   below `/tmp` except the socket families as the pane's scratch, so with `HOME` at
   `/tmp/<run>/omp-home` and no `TMUX_TMPDIR` in the same directory, `rm -rf ~`,
@@ -177,6 +186,18 @@
   `source` of a path the guard cannot read at check time, such as a process substitution, which it
   takes as sourcing nothing (LEGION-332), and an assignment to `IFS`, since it splits an unquoted
   value on whitespace alone.
+- The pane guard reads no unquoted here-document that bash expands (LEGION-300). `cat > f <<EOF`
+  and `tee f <<EOF` stored the text as written, so `x='rm -rf ~'; cat > f <<EOF` with `$x` in the
+  body, then `bash f`, was allowed while bash wrote and ran the expanded line; a shell or
+  interpreter reading one as its program (`bash <<EOF`, `python3 - <<PY`) was judged on the same
+  unexpanded text. A here-document whose unquoted text holds `$`, a backquote, or a backslash
+  before one of them or a newline is now a script the guard cannot read, and a shell or
+  interpreter reading it is refused, as a rendered brace group already treated one.
+- The pane guard gives an array's literal the elements bash gives it (LEGION-300). It took one
+  element per word, where bash makes `("$@")` one per argument, `("${arr[@]}")` none for an empty
+  array, and a word that may split several, so `Y=("$@"); rm -rf "${Y[1]}"` with a second argument
+  outside the roots was allowed. A word that may be several elements now leaves every element
+  unknown.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot
