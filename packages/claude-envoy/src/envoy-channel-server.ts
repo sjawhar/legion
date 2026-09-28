@@ -85,6 +85,17 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Pr
   }
 }
 
+/**
+ * A rejection handler for a listener read whose subject legitimately may not
+ * exist yet: `undefined` on the listener's 404 — no such role, no such entry —
+ * and a rethrow for everything else, so a transport failure is never read as an
+ * absence.
+ */
+function undefinedOnNotFound(error: unknown): undefined {
+  if (error instanceof EnvoyApiError && error.details.status === 404) return undefined
+  throw error
+}
+
 /** The MCP `serverInfo`; the version is the package's, so it is spelled once. */
 export const MCP_SERVER_INFO = { name: "envoy", version: packageVersion } as const
 
@@ -493,13 +504,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   const reassertRole = async (): Promise<void> => {
     if (heldRole === undefined) return
-    const holder = await options.client.getRole(heldRole).then(
-      (role) => role.holder,
-      (error: unknown) => {
-        if (error instanceof EnvoyApiError && error.details.status === 404) return undefined
-        throw error
-      },
-    )
+    const holder = await options.client
+      .getRole(heldRole)
+      .then((role) => role.holder, undefinedOnNotFound)
     if (holder === identity.id) return
     const result = await options.client.setRole({
       sessionID: identity.id,
@@ -568,11 +575,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     process.stderr.write(`envoy: session id changed ${previous} -> ${next}; re-registered\n`)
   }
 
-  /**
-   * False until the entry this id already registered has been read once, which
-   * is what makes `forwarder.topics()` an authoritative picture of what the
-   * session follows.
-   */
+  /** Set by the first read `syncRegisteredInterests` completes, never cleared. */
   let interestsRead = false
 
   /**
@@ -622,10 +625,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    */
   const syncRegisteredInterests = async (): Promise<void> => {
     if (shuttingDown) return
-    const registry = await options.client.getInterest(identity.id).catch((error: unknown) => {
-      if (error instanceof EnvoyApiError && error.details.status === 404) return undefined
-      throw error
-    })
+    const registry = await options.client.getInterest(identity.id).catch(undefinedOnNotFound)
     if (shuttingDown) return
     if (!interestsRead) {
       for (const topic of registry?.topics ?? []) {

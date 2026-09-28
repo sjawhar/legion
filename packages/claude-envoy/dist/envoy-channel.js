@@ -43994,6 +43994,11 @@ async function withTimeout(promise3, ms, what) {
     clearTimeout(timer);
   }
 }
+function undefinedOnNotFound(error48) {
+  if (error48 instanceof EnvoyApiError && error48.details.status === 404)
+    return;
+  throw error48;
+}
 var MCP_SERVER_INFO = { name: "envoy", version: version2 };
 var argumentSchemas = new WeakMap;
 function argumentsSchema(spec) {
@@ -44228,11 +44233,7 @@ async function startChannelSession(options) {
   const reassertRole = async () => {
     if (heldRole === undefined)
       return;
-    const holder = await options.client.getRole(heldRole).then((role) => role.holder, (error48) => {
-      if (error48 instanceof EnvoyApiError && error48.details.status === 404)
-        return;
-      throw error48;
-    });
+    const holder = await options.client.getRole(heldRole).then((role) => role.holder, undefinedOnNotFound);
     if (holder === identity.id)
       return;
     const result = await options.client.setRole({
@@ -44282,11 +44283,7 @@ async function startChannelSession(options) {
   const syncRegisteredInterests = async () => {
     if (shuttingDown)
       return;
-    const registry2 = await options.client.getInterest(identity.id).catch((error48) => {
-      if (error48 instanceof EnvoyApiError && error48.details.status === 404)
-        return;
-      throw error48;
-    });
+    const registry2 = await options.client.getInterest(identity.id).catch(undefinedOnNotFound);
     if (shuttingDown)
       return;
     if (!interestsRead) {
