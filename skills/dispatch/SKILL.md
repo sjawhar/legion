@@ -184,9 +184,11 @@ waits on one belongs in `backlog`, with what it waits on said on the issue.
 Hold at most three issues in flight (`in_progress`, `testing`, `needs_review` or `retro`), all on
 the current priorities that the roadmap, dispatch://AGENTC-34, names (Sami, 2026-09-27, answering
 dispatch://AGENTC-34/ask/1aeb8f2e-0950-4eaa-aaac-24286c9dd3ca; the question proposed two, and his
-answer set three). Past three, or holding one off the
-priorities: push any unfinished work, say where in one comment on the issue, move it to `backlog`
-and clear its route. Each issue counts on its own; a child does not ride under its parent's slot.
+answer set three). Past three, or holding one off the priorities: push any unfinished work, say
+where in one comment on the issue, move it to `backlog` and clear its route. Each issue counts on
+its own; a child does not ride under its parent's slot. Never write the status of an issue that
+carries the `legion` label, or of any issue under one: the Legion daemon writes those statuses,
+and moving one of its admitted roots out of its flow parks the tree and stops its workers.
 
 One agent keeps the backlog's order against those priorities, with Sami
 (dispatch://AGENTC-34/ask/f6780f9e-8b96-49eb-9be7-7c7f2036d5cc). Setting an issue's priority
