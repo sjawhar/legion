@@ -940,16 +940,17 @@ function clone(st: State): State {
   };
 }
 
-/** After branches that may or may not run: everything a branch leaves in this shell, since any of
+/** Anything a copy-back site does not carry out of a child is a candidate hole. Three sites carry
+ * a child's state back into this shell, `merge`, `runFunction` and `runFile`'s sourced branch, and
+ * each lists `State`'s fields by hand: a field added to `State` belongs in all three, or in the
+ * list of what each leaves out and why.
+ *
+ * After branches that may or may not run: everything a branch leaves in this shell, since any of
  * them may be the one that ran. A variable, the positional parameters (`shift`, `set --`) or the
  * working directory the branches leave differently is unknown, a function name holds every
  * definition they leave (`Callee`), and a handler any of them sets stays. Not merged: `files` and
  * `pidFiles`, which every branch shares; `output`, which each caller compares itself
- * (`outputChanged`); and `runningFunctions`, which only a function's own walk changes. Two other
- * sites carry a child's state back into this shell, `runFunction` and `runFile`'s sourced branch,
- * and each lists its fields by hand: a field added to `State` belongs in all three, or in the list
- * of what each leaves out. Anything a copy-back site does not carry out of a child is a candidate
- * hole. */
+ * (`outputChanged`); and `runningFunctions`, which only a function's own walk changes. */
 function merge(target: State, branches: readonly State[]): void {
   const names = new Set<string>();
   for (const branch of branches) for (const name of branch.vars.keys()) names.add(name);
@@ -1639,10 +1640,9 @@ function runFunction(
   } catch (error) {
     locateRefusal(error, definition.file);
   }
-  // A call runs in this shell, so everything the body leaves stays, as `merge` and `runFile`'s
-  // sourced branch carry it (a field added to `State` belongs in all three). Not carried: the
-  // positional parameters, which bash restores to the caller's when a function returns; `files`
-  // and `pidFiles` (shared); and `runningFunctions`.
+  // A call runs in this shell, so everything the body leaves stays: the copy-back rule on `merge`
+  // holds here too. Not carried: the positional parameters, which bash restores to the caller's
+  // when a function returns; `files` and `pidFiles` (shared); and `runningFunctions`.
   outer.vars = child.vars;
   outer.exported = child.exported;
   outer.arrays.clear();
@@ -2746,14 +2746,12 @@ function runFile(
       child.positional = source && operands.length === 0 ? st.positional : operands;
       walkScript(parse(content), child, ctx, !source);
       if (source) {
-        // A sourced file runs in this shell, so everything it leaves stays: the same fields
-        // `merge` carries out of a branch and `runFunction` out of a call, and a field added to
-        // `State` belongs in all three or in their lists of what each leaves out. Anything a
-        // copy-back site does not carry out of a child is a candidate hole. Not carried
-        // here: `files` and `pidFiles` (shared), and `runningFunctions`. The arguments: with no
-        // operands the file changed this shell's own, which stay changed; with operands bash
-        // restores this shell's afterwards unless the file set new ones with `set`, which the guard
-        // does not tell apart from a `shift` bash undoes, so a list the file changed is unknown.
+        // A sourced file runs in this shell, so everything it leaves stays: the copy-back rule on
+        // `merge` holds here too. Not carried here: `files` and `pidFiles` (shared), and
+        // `runningFunctions`. The arguments: with no operands the file changed this shell's own,
+        // which stay changed; with operands bash restores this shell's afterwards unless the file
+        // set new ones with `set`, which the guard does not tell apart from a `shift` bash undoes,
+        // so a list the file changed is unknown.
         st.positional =
           operands.length === 0
             ? child.positional
