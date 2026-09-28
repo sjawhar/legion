@@ -901,11 +901,17 @@ var ErrPublishDenied = errors.New("NATS denied the publish")
 // connState is what confirmPublished compares across a core publish and its flush.
 type connState struct {
 	lastError  error
+	connected  bool
 	reconnects uint64
 }
 
+// observe reads the last error, then whether the connection is connected, then its reconnect
+// count, in that order, so that a reconnect's clearing of the last error is always seen with one of
+// the other two (confirmPublished).
 func observe(conn *nats.Conn) connState {
-	return connState{lastError: conn.LastError(), reconnects: conn.Stats().Reconnects}
+	lastError := conn.LastError()
+	connected := conn.IsConnected()
+	return connState{lastError: lastError, connected: connected, reconnects: conn.Stats().Reconnects}
 }
 
 // confirmPublished reports whether a core publish to subject, made after before was observed and
@@ -924,13 +930,27 @@ func observe(conn *nats.Conn) connState {
 // ours would overwrite it. So any change of the last error across the publish and its flush fails
 // the publish, named as ErrPublishDenied when the error is the violation of this very subject, and
 // as unconfirmed otherwise; the cost is that a concurrent failure elsewhere on the connection fails
-// this publish too, and its caller retries it. A reconnect in between fails it the same way,
-// because a reconnect clears the last error and the old connection may have taken the publish, or
-// its violation, with it.
+// this publish too, and its caller retries it.
+//
+// A reconnect clears the last error (doReconnect), so a connection that drops right behind the
+// flush's PONG would read as unchanged. The clear happens only after the drop has marked the
+// connection reconnecting (processOpErr), and a reconnect counts itself before it marks the
+// connection connected again, both under the connection's lock; so reading the error, then the
+// status, then the count, a cleared error comes with a status that is not connected or a count
+// that moved, and either fails the publish as unconfirmed. Not connected is IsConnected, which
+// counts a draining connection as connected, so a publish during Drain still confirms, and a
+// closed one as not.
+//
+// One change goes unseen: the last error set to a shared nats.go value (ErrSlowConsumer,
+// ErrMaxSubscriptionsExceeded), then this publish's violation, then that same value again, all
+// between the two observations. nats.go exposes no error counter to tell that from no change, and
+// the only subscriptions on Dispatch's outbox connection are the reply inboxes of its own
+// JetStream requests (its agent stream dials a separate connection), which are not busy enough to
+// be a slow consumer; so it is accepted.
 func confirmPublished(conn *nats.Conn, subject string, before connState) error {
 	after := observe(conn)
-	if after.reconnects != before.reconnects {
-		return fmt.Errorf("bus: NATS reconnected during the publish to %q, so it is not known to have been accepted", subject)
+	if !after.connected || after.reconnects != before.reconnects {
+		return fmt.Errorf("bus: NATS disconnected during the publish to %q, so it is not known to have been accepted", subject)
 	}
 	if sameError(after.lastError, before.lastError) {
 		return nil
@@ -943,9 +963,10 @@ func confirmPublished(conn *nats.Conn, subject string, before connState) error {
 		subject, after.lastError)
 }
 
-// sameError reports whether a and b are the same error value. nats.go allocates every error it
-// records afresh, so a new one never equals the one it replaced; a value of a type that cannot be
-// compared counts as different rather than panicking.
+// sameError reports whether a and b are the same error value. nats.go records each permissions
+// violation as a new error (processErr), so a denial never equals the error it replaced; a shared
+// nats.go value recorded again (confirmPublished names the ones that matter) does. A value of a
+// type that cannot be compared counts as different rather than panicking.
 func sameError(a, b error) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -955,14 +976,15 @@ func sameError(a, b error) bool {
 }
 
 // ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
-// flush both succeeded, the server reported nothing during them, and no empty
-// receipt arrived before the deadline: the forward is known to have reached
-// the server, and whoever holds the subject did not acknowledge it in time. A
-// flush that fails or times out — a reconnecting or stalled connection still
-// buffering the forward — is returned as the client's own error, never this
-// one, because that forward is not known to have left this process; so is a
-// forward the server denied (ErrPublishDenied), or one during which the server
-// reported another error, since that one may have been its denial.
+// flush both succeeded, the server reported nothing and the connection stayed
+// up through them, and no empty receipt arrived before the deadline: the
+// forward is known to have reached the server, and whoever holds the subject
+// did not acknowledge it in time. A flush that fails or times out — a
+// reconnecting or stalled connection still buffering the forward — is returned
+// as the client's own error, never this one, because that forward is not known
+// to have left this process; so is a forward the server denied
+// (ErrPublishDenied), or one during which the server reported another error or
+// the connection dropped, since either may have hidden its denial.
 var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 
 // RequestCoreTo delivers item directly to subject and waits for an empty
@@ -1009,21 +1031,19 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 	if errors.Is(unconfirmed, ErrPublishDenied) {
 		return unconfirmed
 	}
-	timedOut := func() error {
-		if unconfirmed != nil {
-			return unconfirmed
-		}
-		return ErrReceiptTimeout
+	timedOut := ErrReceiptTimeout
+	if unconfirmed != nil {
+		timedOut = unconfirmed
 	}
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return timedOut()
+			return timedOut
 		}
 		response, err := receipt.NextMsg(remaining)
 		if err != nil {
 			if errors.Is(err, nats.ErrTimeout) {
-				return timedOut()
+				return timedOut
 			}
 			return err
 		}

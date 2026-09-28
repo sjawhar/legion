@@ -10,7 +10,6 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
-	"github.com/nats-io/nkeys"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -21,42 +20,29 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-const deniedRoleTopic = "notifications.role.reviewer"
+const roleTopic = "notifications.role.reviewer"
 
 // grantedNATS starts a NATS server whose one nkey user may publish only to allow, and returns the
 // deployed Dispatch server's bus client connected as that user, and a plain connection of the same
 // user that subscribes to the role topic, as the listener's role lane would.
 func grantedNATS(t *testing.T, allow ...string) (*bus.Client, <-chan *natsgo.Msg) {
 	t.Helper()
-	user, err := nkeys.CreateUser()
-	if err != nil {
-		t.Fatalf("create nkey user: %v", err)
-	}
-	public, err := user.PublicKey()
-	if err != nil {
-		t.Fatalf("nkey public key: %v", err)
-	}
-	seed, err := user.Seed()
-	if err != nil {
-		t.Fatalf("nkey seed: %v", err)
-	}
+	seed, public := testnats.User(t)
 	uri := testnats.StartNkeyPublishAllowed(t, public, allow...)
-	t.Setenv("NATS_NKEY_SEED", string(seed))
+	t.Setenv("NATS_NKEY_SEED", seed)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect as the granted user: %v", err)
 	}
 	t.Cleanup(client.Close)
 
-	subscriber, err := natsgo.Connect(uri, natsgo.Nkey(public, func(nonce []byte) ([]byte, error) {
-		return user.Sign(nonce)
-	}))
+	subscriber, err := bus.Dial("role-subscriber", []string{uri})
 	if err != nil {
 		t.Fatalf("connect the role subscriber: %v", err)
 	}
 	t.Cleanup(subscriber.Close)
 	received := make(chan *natsgo.Msg, 8)
-	if _, err := subscriber.ChanSubscribe(deniedRoleTopic, received); err != nil {
+	if _, err := subscriber.ChanSubscribe(roleTopic, received); err != nil {
 		t.Fatalf("subscribe to the role topic: %v", err)
 	}
 	if err := subscriber.Flush(); err != nil {
@@ -105,7 +91,7 @@ func TestRunRetriesARoleRouteNATSDenies(t *testing.T) {
 	if at := publishedAt(t, database, event.ID); at != nil {
 		t.Fatalf("event marked published at %s with destinations %v, though NATS denied its role route", at, destinations)
 	}
-	if slices.Contains(destinations, deniedRoleTopic) {
+	if slices.Contains(destinations, roleTopic) {
 		t.Fatalf("published_destinations = %v records the denied role topic", destinations)
 	}
 	issueTopic := "notifications.dispatch.issue.T-1.message.created"
@@ -124,7 +110,7 @@ func TestRunRetriesARoleRouteNATSDenies(t *testing.T) {
 	for _, line := range strings.Split(logged.String(), "\n") {
 		if strings.Contains(line, "dispatch outbox: publish event") {
 			lines++
-			if !strings.Contains(line, deniedRoleTopic) || !strings.Contains(line, "Permissions Violation for Publish") {
+			if !strings.Contains(line, roleTopic) || !strings.Contains(line, "Permissions Violation for Publish") {
 				t.Fatalf("retry line %q does not name the subject and the violation", line)
 			}
 		}
@@ -135,7 +121,7 @@ func TestRunRetriesARoleRouteNATSDenies(t *testing.T) {
 }
 
 // With notifications.role.> granted, the same role route is published once, recorded, and the
-// event marked published, exactly as before the denial check.
+// event marked published.
 func TestRunPublishesAGrantedRoleRoute(t *testing.T) {
 	client, received := grantedNATS(t, "notifications.dispatch.>", "notifications.role.>", "_INBOX.>", "$JS.API.>")
 	database := storetest.Open(t)
@@ -153,7 +139,7 @@ func TestRunPublishesAGrantedRoleRoute(t *testing.T) {
 		return publishedAt(t, database, event.ID) != nil
 	})
 	destinations, attempts := publishedDestinations(t, database, event.ID)
-	if !slices.Contains(destinations, deniedRoleTopic) || attempts != 0 {
+	if !slices.Contains(destinations, roleTopic) || attempts != 0 {
 		t.Fatalf("published_destinations = %v after %d retries, want the role topic on the first attempt", destinations, attempts)
 	}
 	select {
@@ -162,8 +148,8 @@ func TestRunPublishesAGrantedRoleRoute(t *testing.T) {
 		if err := json.Unmarshal(message.Data, &item); err != nil {
 			t.Fatalf("decode the role envelope: %v", err)
 		}
-		if item.Topic != deniedRoleTopic || item.SourceEventID == "" {
-			t.Fatalf("role subscriber received %+v, want the event's envelope on %s", item, deniedRoleTopic)
+		if item.Topic != roleTopic || item.SourceEventID == "" {
+			t.Fatalf("role subscriber received %+v, want the event's envelope on %s", item, roleTopic)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the role subscriber received nothing through a granted publish")

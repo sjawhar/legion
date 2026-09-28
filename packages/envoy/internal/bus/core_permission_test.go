@@ -7,7 +7,6 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
-	"github.com/nats-io/nkeys"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -24,7 +23,7 @@ const (
 // through.
 func grantedClient(t *testing.T) (*bus.Client, *natsgo.Conn) {
 	t.Helper()
-	seed, public := testUser(t)
+	seed, public := testnats.User(t)
 	uri := testnats.StartNkeyPublishAllowed(t, public, grantedRole, "_INBOX.>")
 	t.Setenv("NATS_NKEY_SEED", seed)
 	client, err := bus.Connect([]string{uri})
@@ -32,11 +31,7 @@ func grantedClient(t *testing.T) (*bus.Client, *natsgo.Conn) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(client.Close)
-	user, err := nkeys.FromSeed([]byte(seed))
-	if err != nil {
-		t.Fatalf("parse seed: %v", err)
-	}
-	subscriber, err := natsgo.Connect(uri, natsgo.Nkey(public, user.Sign))
+	subscriber, err := bus.Dial("role-subscriber", []string{uri})
 	if err != nil {
 		t.Fatalf("connect subscriber: %v", err)
 	}
