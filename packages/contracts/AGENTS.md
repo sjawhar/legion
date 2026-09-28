@@ -43,9 +43,7 @@ the native Dispatch tool suite:
   session's follow-up in the same conversation, and a call repeating text the conversation already
   holds posts nothing (`MessageReplyResult.duplicate`). `dispatch_read.message` must be
   used alone (`readValidation`) and reads the conversation a message id belongs to, issue-less or not,
-  as the host's session (`GET /api/v1/messages/{id}?session=`; on a direct, issue-less conversation
-  the server answers 403 to a session not in it, a guard against reading another session's direct
-  conversation by mistake). `dispatch-api.ts` carries `UserAgentState {cleared_before?, read_through?,
+  as the host's session (`GET /api/v1/messages/{id}?session=`, whose read rule `packages/envoy/AGENTS.md` owns). `dispatch-api.ts` carries `UserAgentState {cleared_before?, read_through?,
   unread_replies}`, `UserAgentStateInput`, and the `user_agent_state.updated` member of `DispatchEvent`
   (`UserAgentStateUpdatedEventPayload {login, session_id}`). Host adapters consume `dispatchToolSpecs` directly.
 - Every Dispatch tool specification includes `example`, a schema-valid call rendered with its allowed keys after the tool rejects invalid arguments; update it with any argument-shape change.

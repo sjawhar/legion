@@ -400,11 +400,8 @@ export class DispatchClient {
 
   /** `GET /api/v1/messages/{id}`: the conversation a message belongs to, by any message id in
    *  it - the root and every reply. It takes no issue, so it reads a human's direct message to
-   *  a session and the replies to it, which belong to none. It reads as `session`: on a direct
-   *  (issue-less) conversation another session is 403 THREAD_FORBIDDEN, a guard against reading
-   *  the wrong conversation by mistake; an issue thread follows the issue's rule. Direct-
-   *  conversation text also reaches every authenticated caller through GET /api/v1/events;
-   *  nothing in Dispatch restricts it by session. */
+   *  a session and the replies to it, which belong to none. It reads as `session`; which
+   *  threads a session may read is the route's rule (`GET /api/v1` describes it). */
   async getMessageThread(id: string, session: string): Promise<MessageRead> {
     return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
   }
