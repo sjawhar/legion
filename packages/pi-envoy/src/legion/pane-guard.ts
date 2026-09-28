@@ -90,6 +90,8 @@ interface Piece {
   readonly lenient?: true;
   /** Only on `UNSET`'s piece. */
   readonly unset?: true;
+  /** Only on `NO_ELEMENTS`'s piece. */
+  readonly noElements?: true;
 }
 type Expansion = readonly Piece[];
 
@@ -100,6 +102,10 @@ const UNSET: Expansion = [{ kind: "literal", text: "", unset: true }];
 function isUnset(value: Expansion | undefined): boolean {
   return value?.length === 1 && value[0]?.unset === true;
 }
+
+/** `$@`, `$*` or `${arr[@]}` over no elements: empty text, and no argument when it is all of a word
+ * (`f "$@" x` gives f one argument). An element that is empty is an ordinary empty piece. */
+const NO_ELEMENTS: Piece = { kind: "literal", text: "", noElements: true };
 
 /** One argument of a command: the word as written (for the refusal) and one of its expansions
  * (brace expansion and `"$@"` give a word several). `fields` says when bash may not make it one
@@ -542,7 +548,7 @@ function resolveArrayIndex(index: string | undefined, st: State, ctx: Ctx): stri
 function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][] {
   if (name === "@" || name === "*") {
     if (st.positional === undefined) return [[unknown(`\`$${name}\` (the positional parameters)`)]];
-    return st.positional.length === 0 ? [[literal("")]] : st.positional.map((p) => [...p]);
+    return elements(st.positional, name === "*" && quoted);
   }
   if (/^[0-9]+$/.test(name)) {
     if (name === "0") return [[...(st.argv0 ?? [literal(st.script ?? "bash")])]];
@@ -578,6 +584,14 @@ function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][
   return [pieces];
 }
 
+/** A list's elements as `$@` or `${arr[@]}` expands them, one word each (`NO_ELEMENTS` for none),
+ * or `joined`, as a quoted `$*` or `${arr[*]}` does, one word of them all separated by spaces. */
+function elements(values: readonly Expansion[], joined: boolean): Piece[][] {
+  if (joined)
+    return [values.flatMap((value, index) => (index === 0 ? value : [literal(" "), ...value]))];
+  return values.length === 0 ? [[NO_ELEMENTS]] : values.map((value) => [...value]);
+}
+
 /** A parameter's value as an operator (`${1:-x}`) tests it: a special parameter from what the
  * shell holds (`$1` from its arguments, unset past the last), any other name from `lookup`. */
 function operatorValue(name: string, st: State, ctx: Ctx): Expansion | undefined {
@@ -604,8 +618,7 @@ function parameterExpansion(
     if (array !== undefined) {
       const unknownElement = array.get(UNKNOWN_ARRAY_INDEX);
       if (unknownElement !== undefined) return [[...unknownElement]];
-      const values = [...array.values()];
-      return values.length === 0 ? [[literal("")]] : values.map((value) => [...value]);
+      return elements([...array.values()], part.index === "*" && quoted);
     }
     return parameter(name, quoted, st, ctx);
   }
@@ -956,6 +969,10 @@ function args(words: readonly Word[], st: State, ctx: Ctx): Arg[] {
         return { text: word.text, exp, fields: "unknown" };
       }
       if (onlyExpansions && exp.every((piece) => piece.text === "")) {
+        return { text: word.text, exp, fields: "none" };
+      }
+      // `"$@"` or `"${arr[@]}"` over no elements, and nothing else in the word, is no argument.
+      if (exp.length > 0 && exp.every((piece) => piece.noElements === true)) {
         return { text: word.text, exp, fields: "none" };
       }
       return { text: word.text, exp };

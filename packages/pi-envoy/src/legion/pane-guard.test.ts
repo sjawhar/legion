@@ -915,9 +915,19 @@ describe("scripts a command runs", () => {
     ]) {
       expect(bash(command), command).toContain(path.join(home, ".ssh"));
     }
-    // Quoted, each word is one argument, empty or not.
+    // Quoted, each word is one argument, empty or not, except `"$@"` and `"${arr[@]}"`, which are
+    // one per element: none for no element, one empty one for an element that is empty.
     expect(bash('f() { rm -rf "$1"; }; e=; f "$e" "$HOME/.ssh"')).toBeUndefined();
     expect(bash('f() { rm -rf "$2"; }; f "$(cat x)"')).toBeUndefined();
+    for (const command of [
+      'set --; f() { rm -rf "$1"; }; f "$@" "$HOME/.ssh"',
+      'set --; set -- "$@" "$HOME/.ssh"; rm -rf "$1"',
+      'arr=(); f() { rm -rf "$1"; }; f "${arr[@]}" "$HOME/.ssh"',
+      'arr=(""); f() { rm -rf "$2"; }; f "${arr[@]}" "$HOME/.ssh"',
+    ]) {
+      expect(bash(command), command).toContain(path.join(home, ".ssh"));
+    }
+    expect(bash('set --; f() { rm -rf "$1"; }; f "$*" "$HOME/.ssh"')).toBeUndefined();
   });
 
   test("tests a positional parameter's operator expansion against the argument it holds", () => {
