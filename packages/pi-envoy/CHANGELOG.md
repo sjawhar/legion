@@ -69,6 +69,54 @@
 
 ### Fixed
 
+- The pane guard (LEGION-121) models a subshell as bash runs one, everywhere it sees one: a command
+  or process substitution, `( … )`, `( … ) &`, each part of a pipeline, and a coprocess. A subshell
+  starts with none of the parent's traps and runs the handlers it sets itself at its own end; the
+  parent's run once, at the parent's end. Before, a substitution ran every handler set before it
+  against the state at that line, and the other four walked a handler they set into a state that
+  was then discarded. So `( trap 'rm -rf "$HOME/y"' EXIT; echo hi )`, its background and piped
+  forms, and the coprocess form were allowed, and bash deletes the target in each. `! command`, a
+  pipeline of one, is walked in this shell, as bash runs it, so `! cd "$HOME"; rm -rf x` is refused.
+- `trap - <condition>` removes only the conditions it names: `trap - INT` leaves the EXIT handler,
+  which bash still runs, and `trap -` naming none resets nothing. Before, any `trap -` dropped every
+  handler, so `trap 'rm -rf "$HOME/y"' EXIT; trap - INT` was allowed. A condition the guard cannot
+  read (`"$(…)"`, a variable read from input, a positional parameter) could be any: a removal naming
+  one resets nothing, and a handler set for one stays and is walked. A handler whose text the guard
+  cannot read (`trap "$c" EXIT` with `c` from input) is refused, since it cannot check what runs at
+  exit; a double-quoted handler that expanded only pids from `$!` (`trap "kill $pid" EXIT`) reads
+  them back and is judged. A handler the guard can read that runs a command it cannot
+  (`trap 'eval "$c"' EXIT`) is judged as any such command is.
+- A handler set inside an `if`, `case` or loop body stays set after it, as bash keeps it, judged
+  with the variables that body gave it: `if true; then trap 'rm -rf "$HOME/y"' EXIT; fi` was
+  allowed, and `if true; then t=$(mktemp); trap 'rm -f "$t"' EXIT; fi` still is. A name assigned
+  after the construct takes its new value, which is what a single-quoted handler reads at exit, so
+  `…; fi; t="$HOME/y"` is refused; a double-quoted handler keeps the values it expanded when it was
+  set. A function an `if`, `case` or loop body defines is every definition a path may have left: a
+  call runs each, and the command itself where a path defined none. Before, a definition inside a
+  branch was dropped, so `if true; then f() { rm -rf "$HOME/y"; }; fi; f` was allowed, and one that
+  replaced an earlier definition was judged by the earlier one. The positional parameters merge as a
+  variable does: a `shift` or `set --` inside a branch makes them unknown after it, where before the
+  guard kept the arguments from before the branch, so `set -- "$LEGION_WORKSPACE/a" "$HOME/y"; if
+  true; then shift; fi; rm -rf "$1"` was allowed. A sourced file's `set --` or `shift` changes the
+  caller's arguments, as bash does; before, the guard kept the caller's, so `set --
+  "$LEGION_WORKSPACE/a"; . lib.sh; rm -rf "$1"` with `lib.sh` running `set -- "$HOME/y"` was
+  allowed. With operands, bash restores the caller's arguments afterwards, undoing a `shift` and
+  keeping a `set --`; the guard does not tell those apart, so a list the file touched is unknown,
+  even one set to the same values (`set -- "$@"`), which bash keeps. `. file` with no operands runs
+  the file with the caller's arguments, not none, so `set -- "$HOME/y"; . lib.sh` with `lib.sh`
+  running `rm -rf "$@"` is refused. A backgrounded command (`f &`) is walked in a subshell, so its
+  `trap - EXIT` no longer clears the parent's handler, and nothing else it changes reaches the
+  parent.
+- The guard walks up to 100,000 nodes of one command before refusing it as too large to judge,
+  from 10,000. The repository's largest tracked script, Stage 4b's driver, needs about 20,700 to
+  reach its first refusal, and 10,000 refused it for size alone. The limit still refuses and never
+  allows unread.
+- Tracked scripts the guard now judges on their real first refusal:
+  `packages/envoy/scripts/e2e-api.sh`, whose cleanup kills only the child whose pid it wrote, runs.
+  Stage 2, Stage 3 and the 4b.13b
+  acceptance are refused at their gateway key command's write, and Stage 4b and the controller
+  proof at the plugin unpack. The allow-list test records each refused script's `file:line`, derived
+  by `src/legion/pane-guard-scripts.ts`, where it had recorded a phrase several refusals share.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot
