@@ -92,7 +92,7 @@ func (s *Store) write(identity State, observations int, mutate func(*State) bool
 		if rev != 0 && st.Hash() != beforeHash && st.Generation == generation {
 			bumpGeneration(&st)
 		}
-		buf, err := json.Marshal(st)
+		buf, err := encodeRecord(&st)
 		if err != nil {
 			return err
 		}
@@ -115,7 +115,7 @@ func (s *Store) write(identity State, observations int, mutate func(*State) bool
 			}
 			st = stored
 			st.Overflowed = true
-			if buf, err = json.Marshal(st); err != nil {
+			if buf, err = encodeRecord(&st); err != nil {
 				return err
 			}
 		}
