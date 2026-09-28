@@ -5,8 +5,8 @@
 # the first refusal. `auth: apiKey` makes these custom models plain API-key callers: without it Oh
 # My Pi sends an anthropic-messages custom model in its Claude Code OAuth shape.
 #
-# The models are the gateway's `-legion` aliases (agent-c's LEGION_MODEL_ALIAS_NAMES), the only
-# names the gateway serves a legion-worker token. Oh My Pi finds no catalog entry for an aliased id,
+# The models are the operator gateway's aliases for Legion workers, the names the harness expects
+# the gateway to serve a legion-worker token. Oh My Pi finds no catalog entry for an aliased id,
 # so each carries its model's catalog metadata.
 #
 # baseUrl is the operator's gateway: a harness substitutes LEGION_E2E_MODEL_GATEWAY_URL, the

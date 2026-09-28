@@ -404,6 +404,7 @@ merged into, and both bases are deleted at the end. The evidence is kept in `ACC
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
+LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 ```
 
@@ -429,7 +430,10 @@ none of it. Before the harness runs, the script creates the run's own copy of th
 operator, `legion-operator-route-<project>`, labelled with the run's project, its `models.yml` with
 `LEGION_E2E_MODEL_GATEWAY_URL` put in place of the fixture's `${LEGION_E2E_MODEL_GATEWAY_URL}`
 placeholder; the harness points the pods at it, so another run in the namespace can neither see nor
-delete this one's route. It also creates the run's providers Secret,
+delete this one's route. The harness loads the run's own copy of the fixture's `pod.yml`, with
+`LEGION_E2E_MODEL_GATEWAY_AUDIENCE` put in place of its `${LEGION_E2E_MODEL_GATEWAY_AUDIENCE}`
+placeholder, so the audience is the operator's and `operator-token` checks the token against it. It
+also creates the run's providers Secret,
 `legion-<project>-providers`, with one key (`stage4a`, a random value no model route reads) that the
 harness's `provider_keys` hands every agent as `STAGE4A_PROVIDER_KEY`, so every pod and the probe run
 with the providers Secret mounted, as a deployment with `provider_keys` does.
@@ -441,6 +445,7 @@ with the providers Secret mounted, as a deployment with `provider_keys` does.
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the placeholder in the run's copy of the fixture's `pod.yml`; refused when unset or when it holds a character outside letters, digits and `. _ : / -` |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker (AGENTC-393) the run enrolls pods with — the **production** broker (Plan D), never a development slot (below) |
@@ -550,8 +555,9 @@ restricted identity, and its pods dial its worker stream on the devbox's private
 
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
-  LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_DISPATCH_URL=https://<dispatch> \
-  LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
+  LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
+  LEGION_E2E_DISPATCH_URL=https://<dispatch> LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
+  LEGION_E2E_DISPATCH_TOKEN_SECRET_ID=<secret id> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
 ```
@@ -563,6 +569,14 @@ run writes into its copy of the operator fixture's `models.yml` and the controll
 Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified names
 for them. `prerequisites` refuses a value that is unset, names a bare alias, or carries a path,
 naming the variable and never its value.
+
+`LEGION_E2E_MODEL_GATEWAY_AUDIENCE` is the audience the model gateway accepts on a worker's projected
+ServiceAccount token. The run puts it in place of the placeholder in its copy of the fixture's
+`pod.yml`, which the daemon loads, and `pod-shape` holds every pod to exactly that one token.
+`LEGION_E2E_DISPATCH_TOKEN_SECRET_ID` and `LEGION_E2E_ENVOY_TOKEN_SECRET_ID` are the Secrets Manager
+ids of the production Dispatch agents' bearer and the production Envoy listener's API token, which
+`prerequisites` reads with the devbox admin role into 0600 files. `prerequisites` refuses each of the
+three when it is unset or malformed, again naming the variable and never its value.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
 refused without `STAGE4B_UNTIL`, runs none of `controller`'s checks and only takes tree 3 out, printing `CHECK controller: SKIPPED (…)`,

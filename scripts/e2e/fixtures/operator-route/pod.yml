@@ -24,7 +24,9 @@ volumes:
   - name: operator-token
     projected:
       sources:
-        - service_account_token: {audience: middleman-legion, expiration_seconds: 3600, path: token}
+        # The operator gateway's audience: a harness substitutes LEGION_E2E_MODEL_GATEWAY_AUDIENCE
+        # for the placeholder in the run's copy of this file.
+        - service_account_token: {audience: "${LEGION_E2E_MODEL_GATEWAY_AUDIENCE}", expiration_seconds: 3600, path: token}
 volume_mounts:
   # models.yml where the image's Oh My Pi profile (OMP_PROFILE=legion, HOME=/home/legion) reads it.
   - {volume: operator-route, mount_path: /home/legion/.omp/profiles/legion/agent/models.yml, sub_path: models.yml}

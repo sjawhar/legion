@@ -61,10 +61,10 @@ Do not use workspace slugs like `acme` in the topic path.
 
 ```bash
 # From the repo root:
-./packages/envoy-plugin/scripts/sync-host.sh sami@sami
+./packages/envoy-plugin/scripts/sync-host.sh sami@example-host-laptop
 
 # Or via the combined envoy sync:
-./scripts/sync-envoy-host.sh sami@sami
+./scripts/sync-envoy-host.sh sami@example-host-laptop
 ```
 
 The sync script downloads the latest envoy-plugin release tarball from GitHub,

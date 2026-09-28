@@ -90,7 +90,7 @@ func newTestServer(t *testing.T) *testServer {
 	rulesYAML := `version: 1
 secrets:
   DEEL_API_KEY:
-    source: dev1/agent-secrets/DEEL_API_KEY
+    source: example/agent-secrets/DEEL_API_KEY
     owner: sjawhar
     delivery: inject
     max_lifetime_seconds: 43200
@@ -125,7 +125,7 @@ approvers:
 	enr.Chain = enroll.NewChainVerifier(st, approversSvc, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
-		Store: st, Rules: cur, Secrets: secrets.Fake{"dev1/agent-secrets/DEEL_API_KEY": "deel-v1"},
+		Store: st, Rules: cur, Secrets: secrets.Fake{"example/agent-secrets/DEEL_API_KEY": "deel-v1"},
 		Approvers: approversSvc, MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
@@ -475,7 +475,7 @@ func TestSessionProofRejectedOnLauncherAuthRoute(t *testing.T) {
 // 401 PROOF_INVALID — it must never be treated as a session proof merely because it verifies.
 func TestLauncherProofRejectedOnSessionAuthRoute(t *testing.T) {
 	ts := newTestServer(t)
-	credentialID, machineKey := ts.mintLauncherCredential(t, "sjawhar", "sami-agents")
+	credentialID, machineKey := ts.mintLauncherCredential(t, "sjawhar", "example-host-devbox")
 
 	status, body := ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/requests", map[string]any{
 		"request": "irrelevant", "session_id": nil,
@@ -497,7 +497,7 @@ func TestLauncherProofRejectedOnSessionAuthRoute(t *testing.T) {
 func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, "sjawhar", "sami-agents")
+	compact := signMachineLoginRequest(t, machineKey, ts.URL, "sjawhar", "example-host-devbox")
 
 	status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	if status != http.StatusAccepted {
@@ -618,7 +618,7 @@ func TestMachineLoginLookupUnknownCodeIsNoSuchCode(t *testing.T) {
 func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, "sjawhar", "sami-agents")
+	compact := signMachineLoginRequest(t, machineKey, ts.URL, "sjawhar", "example-host-devbox")
 	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	login := decode[struct {
 		PendingID string `json:"pending_id"`

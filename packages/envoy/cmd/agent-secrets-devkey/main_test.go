@@ -42,7 +42,7 @@ import (
 const (
 	testOrigin  = "https://devkey.test"
 	testUIToken = "test-ui-token-0123456789abcdef"
-	testSource  = "dev1/agent-secrets/AGENT_SECRETS_PROOF_APPROVAL"
+	testSource  = "example/agent-secrets/AGENT_SECRETS_PROOF_APPROVAL"
 	testValue   = "dev-secret-value"
 )
 

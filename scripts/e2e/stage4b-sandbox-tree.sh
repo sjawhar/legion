@@ -26,10 +26,16 @@
 # - LEGION_E2E_IMAGE (required) is the worker image, by digest.
 # - LEGION_E2E_MODEL_GATEWAY_URL (required) is the model gateway's Anthropic endpoint, the route the
 #   operator fixture's models.yml and the controller's profile name (lib/model-gateway-url.sh).
+# - LEGION_E2E_MODEL_GATEWAY_AUDIENCE (required) is the audience the operator's model gateway accepts
+#   on a worker's projected ServiceAccount token, substituted into the run's copy of the operator
+#   fixture's pod.yml and asserted on every pod.
 # - LEGION_E2E_DISPATCH_URL, LEGION_E2E_ENVOY_URL and LEGION_E2E_NATS_URL (required) are production
 #   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
 #   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
 #   repository carries none of them, and the run never prints them.
+# - LEGION_E2E_DISPATCH_TOKEN_SECRET_ID and LEGION_E2E_ENVOY_TOKEN_SECRET_ID (required) are the
+#   Secrets Manager ids of the production Dispatch agents' bearer and the production Envoy listener's
+#   API token. The repository carries neither.
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
@@ -37,12 +43,12 @@
 # - STAGE4B_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) holds the transcript, the
 #   daemon log, the pod watch, every agent transcript, and the negative controls.
 #
-# The production bearers (Secrets Manager's production/dispatch/agent-token and
-# production/envoy/api-token) are read with the devbox admin role into 0600 files under the run's
-# scratch directory. They are never printed, never in an argv (curl reads them from header files),
-# and never in the evidence. One run at a time: the project, the NATS durable consumer names, ports
-# 13370/13371 and the namespace label are shared, so the run takes a lock and refuses to start while
-# another holds it, or while LEGSMOKE has pods, Sandboxes or claims it did not create.
+# The production bearers (the two Secrets Manager ids above) are read with the devbox admin role
+# into 0600 files under the run's scratch directory. They are never printed, never in an argv (curl
+# reads them from header files), and never in the evidence. One run at a time: the project, the NATS
+# durable consumer names, ports 13370/13371 and the namespace label are shared, so the run takes a
+# lock and refuses to start while another holds it, or while LEGSMOKE has pods, Sandboxes or claims
+# it did not create.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -62,6 +68,9 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
+gateway_audience=${LEGION_E2E_MODEL_GATEWAY_AUDIENCE:-}
+dispatch_token_secret_id=${LEGION_E2E_DISPATCH_TOKEN_SECRET_ID:-}
+envoy_token_secret_id=${LEGION_E2E_ENVOY_TOKEN_SECRET_ID:-}
 until=${STAGE4B_UNTIL:-}
 skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
 # The Dispatch project key (the workflow's) and its token (the pods' label, the claims' prefix).
@@ -357,8 +366,8 @@ pod_endpoint_mismatch() {
 
 read_bearers() {
   (umask 077 &&
-    aws secretsmanager get-secret-value --secret-id production/dispatch/agent-token --query SecretString --output text >"$work/dispatch-token" &&
-    aws secretsmanager get-secret-value --secret-id production/envoy/api-token --query SecretString --output text >"$work/envoy-token" &&
+    aws secretsmanager get-secret-value --secret-id "$dispatch_token_secret_id" --query SecretString --output text >"$work/dispatch-token" &&
+    aws secretsmanager get-secret-value --secret-id "$envoy_token_secret_id" --query SecretString --output text >"$work/envoy-token" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
     cp "$work/dispatch-auth-header" "$work/dispatch-human-header" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
@@ -419,9 +428,20 @@ runtime:
     context: $runtime_context
     pod:
 EOF
-  # The operator fixture's pod, its ConfigMap reference pointed at the run's own copy.
-  sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$fixture/pod.yml" >>"$work/legion.yaml"
+  # The operator fixture's pod, its token audience the operator's and its ConfigMap reference pointed
+  # at the run's own copy.
+  render_operator_pod
+  sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$work/pod.yml" >>"$work/legion.yaml"
   grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the fixture's pod.yml mounts no ConfigMap legion-operator-route"
+}
+# render_operator_pod writes the run's copy of the fixture's pod.yml, the gateway's audience in place
+# of its placeholder.
+render_operator_pod() {
+  # shellcheck disable=SC2016  # the fixture's literal placeholder, not an expansion
+  local placeholder='${LEGION_E2E_MODEL_GATEWAY_AUDIENCE}' pod
+  pod=$(<"$fixture/pod.yml")
+  printf '%s\n' "${pod//"$placeholder"/"$gateway_audience"}" >"$work/pod.yml"
+  grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" || fail "the fixture's pod.yml has no token audience $placeholder to fill with the gateway's"
 }
 # create_route_configmap is the operator's step before any pod runs: the fixture's models.yml and
 # overlay.yml in the ConfigMap the run's pods mount.
@@ -726,14 +746,14 @@ hog_oomkilled() {
 # shape_problems prints each way the pod object on stdin departs from that shape, or nothing. It
 # judges the object alone, so a pod the watch recorded is judged after it is gone.
 shape_problems() {
-  jq -r --arg route "$route_configmap" '
+  jq -r --arg route "$route_configmap" --arg audience "$gateway_audience" '
     .spec as $s
     | (if $s.runtimeClassName != "gvisor" then "runtimeClassName \($s.runtimeClassName)" else empty end),
       (if $s.serviceAccountName != "legion-worker" then "serviceAccountName \($s.serviceAccountName)" else empty end),
       (if $s.automountServiceAccountToken != false then "automountServiceAccountToken \($s.automountServiceAccountToken)" else empty end),
       (if ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken)] | length) != 1
-        or ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken) | .serviceAccountToken.audience] != ["middleman-legion"])
-        then "the projected token source of the operator pod is not the one middleman-legion token" else empty end),
+        or ([$s.volumes[] | select(.projected) | .projected.sources[] | select(.serviceAccountToken) | .serviceAccountToken.audience] != [$audience])
+        then "the projected token source of the operator pod is not the one token for LEGION_E2E_MODEL_GATEWAY_AUDIENCE" else empty end),
       ([$s.volumes[] | select(.configMap.name == $route) | .name] as $route_volumes
         | if ($route_volumes | length) != 1 then "no one volume of the route ConfigMap \($route)"
           elif ([$s.containers[] | select(.name == "worker") | .volumeMounts[]? | select(.name == $route_volumes[0] and .mountPath == "/home/legion/.omp/profiles/legion/agent/models.yml")] | length) != 1
@@ -1212,6 +1232,13 @@ fqdn='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
 nats_host=${nats_url#nats://} && nats_port=${nats_host##*:} && nats_host=${nats_host%:*}
 gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
+# The gateway's audience lands inside a quoted YAML string in the pod the daemon loads.
+[[ $gateway_audience =~ ^[A-Za-z0-9._:/-]+$ ]] ||
+  fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is unset or not a token audience: letters, digits and . _ : / - only"
+[[ $dispatch_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
+  fail "LEGION_E2E_DISPATCH_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
+[[ $envoy_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
+  fail "LEGION_E2E_ENVOY_TOKEN_SECRET_ID is unset or not a Secrets Manager secret id or ARN"
 # The gateway's health endpoint is at its origin.
 gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
@@ -1256,8 +1283,8 @@ pass
 begin preflight
 # The runtime identity is the restricted role, and nothing more.
 who=$(rk auth whoami -o json) || blocked "kubectl auth whoami under $runtime_context failed"
-jq -e '.status.userInfo.username | test("assumed-role/production-legion-daemon/")' <<<"$who" >/dev/null ||
-  fail "the runtime identity is $(jq -r .status.userInfo.username <<<"$who"), not the production-legion-daemon role"
+jq -e '.status.userInfo.username | test(":assumed-role/[A-Za-z0-9+=,.@_-]*legion-daemon/")' <<<"$who" >/dev/null ||
+  fail "the runtime identity $(jq -r .status.userInfo.username <<<"$who") is not the assumed Legion daemon role"
 jq -e '.status.userInfo.groups | index("legion-daemon")' <<<"$who" >/dev/null || fail "the runtime identity is not in group legion-daemon"
 [ "$(rk auth can-i list secrets -n "$namespace" 2>/dev/null)" = no ] || fail "the runtime identity can list Secrets in $namespace"
 note "[runtime] $(jq -r .status.userInfo.username <<<"$who"); list secrets -n $namespace: no"

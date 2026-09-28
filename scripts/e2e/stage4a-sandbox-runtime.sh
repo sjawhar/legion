@@ -24,7 +24,8 @@
 # ~/.kube/legion-daemon-production) name the restricted identity; LEGION_E2E_OPERATOR_CONTEXT
 # (default production) the admin one; LEGION_E2E_IMAGE (required) the worker image by digest;
 # LEGION_E2E_MODEL_GATEWAY_URL (required) the model gateway's Anthropic endpoint, the route the
-# fixture's models.yml names;
+# fixture's models.yml names; LEGION_E2E_MODEL_GATEWAY_AUDIENCE (required) the audience that gateway
+# accepts on a worker's projected token, filled into the run's copy of the fixture's pod.yml;
 # STAGE4A_FROM a development entry point, which is never the proof; STAGE4A_EVIDENCE_DIR where the
 # transcript and the runtime's log go (default a fresh /tmp directory, kept and printed).
 #
@@ -47,6 +48,7 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 image=${LEGION_E2E_IMAGE:-}
+gateway_audience=${LEGION_E2E_MODEL_GATEWAY_AUDIENCE:-}
 agent_secrets_url=${LEGION_E2E_AGENT_SECRETS_URL:-}
 agent_secrets_operator=${LEGION_E2E_AGENT_SECRETS_OPERATOR:-}
 agent_secrets_auto_sha=${LEGION_E2E_AGENT_SECRETS_AUTO_SHA256:-}
@@ -113,6 +115,9 @@ for tool in go kubectl aws curl ss secrets diff; do command -v "$tool" >/dev/nul
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
 gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
+# The gateway's audience lands inside a quoted YAML string in the pod the runtime loads.
+[[ $gateway_audience =~ ^[A-Za-z0-9._:/-]+$ ]] ||
+  fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is unset or not a token audience: letters, digits and . _ : / - only"
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the harness binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) ||
@@ -146,10 +151,16 @@ placeholder='${LEGION_E2E_MODEL_GATEWAY_URL}'
 models=$(<"$fixture/models.yml")
 printf '%s\n' "${models//"$placeholder"/"$gateway"}" >"$work/models.yml"
 grep -qFx "    baseUrl: $gateway" "$work/models.yml" || fail "the fixture's models.yml has no baseUrl $placeholder to point at the gateway"
+# shellcheck disable=SC2016  # the fixture's literal placeholder, not an expansion
+placeholder='${LEGION_E2E_MODEL_GATEWAY_AUDIENCE}'
+pod=$(<"$fixture/pod.yml")
+printf '%s\n' "${pod//"$placeholder"/"$gateway_audience"}" >"$work/pod.yml"
+grep -qF "audience: \"$gateway_audience\"" "$work/pod.yml" || fail "the fixture's pod.yml has no token audience $placeholder to fill with the gateway's"
 op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$fixture/overlay.yml" \
   --dry-run=client -o yaml | kubectl label --local -f - "legion.dev/project=$run_label" -o yaml | op create -f - >/dev/null ||
   fail "the operator could not create ConfigMap $route_configmap"
 note "[operator] ConfigMap $route_configmap: models.yml (baseUrl from LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml from $fixture, label legion.dev/project=$run_label"
+note "operator pod: $work/pod.yml, the fixture's with its token audience from LEGION_E2E_MODEL_GATEWAY_AUDIENCE"
 # The run's providers Secret, named as the runtime names it (ProvidersSecretName), holding one key no
 # model route reads: provider_keys hands it to every agent's Oh My Pi, and provider-key checks where
 # it arrives.
@@ -180,7 +191,7 @@ if env \
   LEGION_E2E_RECORD="$record" \
   LEGION_E2E_WORK="$evidence" \
   LEGION_E2E_FROM="$from" \
-  LEGION_E2E_OPERATOR_POD="$fixture/pod.yml" \
+  LEGION_E2E_OPERATOR_POD="$work/pod.yml" \
   LEGION_E2E_OPERATOR_CONFIGMAP="$route_configmap" \
   LEGION_E2E_AGENT_SECRETS_URL="$agent_secrets_url" \
   LEGION_E2E_AGENT_SECRETS_OPERATOR="$agent_secrets_operator" \

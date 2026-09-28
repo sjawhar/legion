@@ -30,7 +30,7 @@
 # packages/daemon/src/daemon/omp-pin.ts (the single source config.ts's DEFAULT_OMP_INVOCATION uses).
 ARG BUN_VERSION=1.3.14
 ARG MISE_VERSION=v2026.8.12
-# Sami's jj fork: what the dogfood daemon runs on sami-agents; same 0.45 line as the jj-lib inside OMP.
+# Sami's jj fork: what the dogfood daemon runs on the devbox; same 0.45 line as the jj-lib inside OMP.
 ARG JJ_TOOL=github:sjawhar/jj@0.45.1-sami.20260910-043938
 ARG GH_TOOL=gh@2.98.0
 # go.work's `go` line: the Go stage builds in workspace mode, and the golang image's GOTOOLCHAIN=local

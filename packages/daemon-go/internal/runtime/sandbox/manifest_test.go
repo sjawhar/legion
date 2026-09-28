@@ -691,7 +691,7 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 }
 
 // New refuses an agent-secrets configuration no pod could run: no broker URL, no token audience,
-// an expiry outside the API server's floor (10m) and agent-c's admission cap (1h), or the image's
+// an expiry outside the API server's floor (10m) and the cluster's admission cap (1h), or the image's
 // agent-secrets binary missing.
 func TestNewRefusesAnAgentSecretsOptionNoPodCouldRun(t *testing.T) {
 	for name, tc := range map[string]struct {
