@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
+import { QueryClient } from "@tanstack/react-query";
 
 import {
   createApiClient,
   type FetchImplementation,
+  isCredentialFeatureOff,
   isRetryableQueryError,
   isUnauthorized,
 } from "../api/client";
@@ -306,25 +308,78 @@ test("isUnauthorized distinguishes a 401 from a transient 5xx failure", async ()
   expect(isUnauthorized(new TypeError("network error"))).toBe(false);
 });
 
-test("isRetryableQueryError exempts auth outcomes (401, 403) but retries a transient 5xx", async () => {
-  const unauthorized = createApiClient(stubFetch(() => new Response(null, { status: 401 })).fetch);
-  const forbidden = createApiClient(
-    stubFetch(() =>
-      Response.json({ error: "login not allowed", code: "LOGIN_NOT_ALLOWED" }, { status: 403 })
-    ).fetch
-  );
-  const serverError = createApiClient(stubFetch(() => new Response(null, { status: 503 })).fetch);
+test(
+  "isRetryableQueryError exempts auth outcomes (401, 403) and a credential-feature-off 404, " +
+    "but retries a transient 5xx",
+  async () => {
+    const unauthorized = createApiClient(
+      stubFetch(() => new Response(null, { status: 401 })).fetch
+    );
+    const forbidden = createApiClient(
+      stubFetch(() =>
+        Response.json({ error: "login not allowed", code: "LOGIN_NOT_ALLOWED" }, { status: 403 })
+      ).fetch
+    );
+    const featureOff = createApiClient(
+      stubFetch(() =>
+        Response.json({ error: "not configured", code: "FEATURE_OFF" }, { status: 404 })
+      ).fetch
+    );
+    const serverError = createApiClient(stubFetch(() => new Response(null, { status: 503 })).fetch);
 
-  const [unauthorizedError, forbiddenError, serverErrorResult] = await Promise.all([
-    unauthorized.whoAmI().catch((error: unknown) => error),
-    forbidden.whoAmI().catch((error: unknown) => error),
-    serverError.whoAmI().catch((error: unknown) => error),
-  ]);
+    const [unauthorizedError, forbiddenError, featureOffError, serverErrorResult] =
+      await Promise.all([
+        unauthorized.whoAmI().catch((error: unknown) => error),
+        forbidden.whoAmI().catch((error: unknown) => error),
+        featureOff.getCredentialPending().catch((error: unknown) => error),
+        serverError.whoAmI().catch((error: unknown) => error),
+      ]);
 
-  expect(isRetryableQueryError(unauthorizedError)).toBe(false);
-  expect(isRetryableQueryError(forbiddenError)).toBe(false);
-  expect(isRetryableQueryError(serverErrorResult)).toBe(true);
-});
+    expect(isRetryableQueryError(unauthorizedError)).toBe(false);
+    expect(isRetryableQueryError(forbiddenError)).toBe(false);
+    expect(isCredentialFeatureOff(featureOffError)).toBe(true);
+    expect(isRetryableQueryError(featureOffError)).toBe(false);
+    expect(isRetryableQueryError(serverErrorResult)).toBe(true);
+  }
+);
+
+test(
+  "the production retry policy issues one credential-requests request when the broker is " +
+    "unconfigured, not three (the Inbox and Settings queries share this policy from main.tsx)",
+  async () => {
+    const stub = stubFetch(() =>
+      Response.json({ error: "not configured", code: "FEATURE_OFF" }, { status: 404 })
+    );
+    const client = createApiClient(stub.fetch);
+    // Mirrors main.tsx's shared QueryClient retry option exactly, with retryDelay shortened
+    // so the test does not wait on the production 500ms backoff.
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: {
+          retry: (failureCount, error) => failureCount < 2 && isRetryableQueryError(error),
+          retryDelay: 0,
+        },
+      },
+    });
+
+    try {
+      await expect(
+        queryClient.fetchQuery({
+          queryFn: () => client.getCredentialPending(),
+          queryKey: ["credential-pending"],
+        })
+      ).rejects.toMatchObject({ code: "FEATURE_OFF" });
+
+      // Before the fix, isRetryableQueryError treats FEATURE_OFF as retryable like a
+      // transient 5xx, so this issues three requests (and the browser logs three failed
+      // fetches) on every Inbox and Settings load where DISPATCH_AGENT_SECRETS_URL is unset
+      // — the same shape #1506 fixed for the architecture-source 404.
+      expect(stub.requests).toHaveLength(1);
+    } finally {
+      queryClient.clear();
+    }
+  }
+);
 test("API client reaches every remaining documented endpoint", async () => {
   const stub = stubFetch((request) => {
     if (
