@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -34,10 +35,6 @@ import (
 // or liveness changed in between. What persists is who was actually sent to.
 //
 // Broadcasting is human-only, like the one-session route it is built from.
-
-// maxBroadcastRecipients bounds one send. Selection is a human ticking boxes over the live
-// session list, so this is a runaway guard rather than a product limit.
-const maxBroadcastRecipients = 100
 
 // broadcastDeliveryWorkers is how many recipients are delivered to at once, once the create
 // request has already answered. Each worker takes a tracking context of its own: the pool's
@@ -203,9 +200,11 @@ func validateBroadcastInput(body, delivery string, sessionIDs []string) ([]strin
 	if len(requested) == 0 {
 		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT", "session_ids must name at least one session")
 	}
-	if len(requested) > maxBroadcastRecipients {
+	// contracts.MaxBroadcastRecipients bounds one send, and the dashboard refuses the same number
+	// before it asks. A runaway guard rather than a product limit.
+	if len(requested) > contracts.MaxBroadcastRecipients {
 		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT",
-			"a broadcast reaches at most %d sessions (%d selected)", maxBroadcastRecipients, len(requested))
+			"a broadcast reaches at most %d sessions (%d selected)", contracts.MaxBroadcastRecipients, len(requested))
 	}
 	return requested, nil
 }

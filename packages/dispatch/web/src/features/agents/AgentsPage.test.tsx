@@ -1478,28 +1478,96 @@ test("a mode both recipients advertise takes the excluded one back in", async ()
   }
 });
 
-test("a directory filter narrows the listed agents and what Select all ticks", async () => {
+test("the header checkbox follows the filters and its count never hides a selected row the filter hides", async () => {
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    fireEvent.change(within(region).getByRole("searchbox", { name: "Directory contains" }), {
-      target: { value: "PLANNER" },
-    });
+    expect(within(region).queryByRole("button", { name: /^Select all/ })).toBeNull();
+    const header = within(region).getByRole("checkbox", {
+      name: "Select all matching agents",
+    }) as HTMLInputElement;
+    const directory = within(region).getByRole("searchbox", { name: "Directory contains" });
+    expect(within(region).getByText("2 matching")).toBeTruthy();
+
+    // Everything, then narrow: the header counts the matching row and names the other one.
+    fireEvent.click(header);
+    expect(within(region).getByText("2 of 2 matching selected")).toBeTruthy();
+    fireEvent.change(directory, { target: { value: "PLANNER" } });
     await waitFor(() =>
       expect(within(region).queryByRole("heading", { level: 2, name: "Reviewer" })).toBeNull()
     );
-    fireEvent.click(within(region).getByRole("button", { name: "Select all (1)" }));
+    expect(
+      within(region).getByText("1 of 1 matching selected · 1 more selected outside the filter")
+    ).toBeTruthy();
+    expect(header.checked).toBe(true);
     const broadcast = within(region).getByRole("region", { name: "Broadcast" });
     expect(
-      within(broadcast).getByRole("heading", { name: "Broadcast to 1 of 1 selected" })
+      within(broadcast).getByRole("heading", { name: "Broadcast to 1 of 2 selected" })
     ).toBeTruthy();
+
+    // Clearing the matching row leaves a selection wholly outside the filter, which must not
+    // read like an empty one.
+    fireEvent.click(header);
+    expect(within(region).getByText("1 matching · 1 selected outside the filter")).toBeTruthy();
+    expect(header.checked).toBe(false);
+    expect(header.indeterminate).toBe(false);
     const chips = within(broadcast).getByRole("list", { name: "Selected agents" });
     expect(
       within(chips)
         .getAllByRole("button")
         .map((chip) => chip.textContent)
-    ).toEqual(["Planner ✕"]);
+    ).toEqual(["Reviewer · does not advertise btw ✕"]);
+
+    // Widening the filter shows the unticked row beside the ticked one: the header turns mixed.
+    fireEvent.change(directory, { target: { value: "" } });
+    await waitFor(() => expect(within(region).getByText("1 of 2 matching selected")).toBeTruthy());
+    expect(header.checked).toBe(false);
+    expect(header.indeterminate).toBe(true);
+
+    // Clear selection empties the whole selection, the header with it.
+    fireEvent.click(within(region).getByRole("button", { name: "Clear selection" }));
+    expect(within(region).getByText("2 matching")).toBeTruthy();
+    expect(header.indeterminate).toBe(false);
+    expect(header.checked).toBe(false);
+    expect(within(region).queryByRole("region", { name: "Broadcast" })).toBeNull();
+    expect(within(region).queryByRole("button", { name: "Clear selection" })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("the header checkbox selects a folded row and the fold says how many of its rows are selected", async () => {
+  // Seen a minute ago with no Dispatch signal: it sits under the collapsed `No Dispatch
+  // activity` fold.
+  const silent: Agent = {
+    ...agents[0],
+    last_activity: null,
+    open_asks: 0,
+    session_id: "silent-session",
+    title: "Silent",
+  };
+  const page = renderAgents({ inboxRows: [], listedAgents: [agents[0], silent] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    expect(within(region).getByRole("button", { name: "No Dispatch activity (1)" })).toBeTruthy();
+    expect(within(region).queryByRole("heading", { level: 2, name: "Silent" })).toBeNull();
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select all matching agents" }));
+    expect(within(region).getByText("2 of 2 matching selected")).toBeTruthy();
+    expect(
+      within(region).getByRole("button", { name: "No Dispatch activity (1, 1 selected)" })
+    ).toBeTruthy();
+    const chips = within(within(region).getByRole("region", { name: "Broadcast" })).getByRole(
+      "list",
+      { name: "Selected agents" }
+    );
+    expect(
+      within(chips)
+        .getAllByRole("button")
+        .map((chip) => chip.textContent)
+    ).toEqual(["Planner ✕", "Silent ✕"]);
   } finally {
     page.view.unmount();
     page.restore();
