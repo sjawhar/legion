@@ -53,12 +53,17 @@ import * as path from "node:path";
 import { messageFor } from "@legion/envoy-client/errors";
 import type {
   ArithmeticExpression,
+  BraceGroup,
+  Case,
+  CaseItem,
   Command,
+  CompoundList,
   Node,
   ParsedScript,
   Redirect,
   Statement,
   TestExpression,
+  While,
   Word,
   WordPart,
 } from "unbash";
@@ -228,6 +233,8 @@ const MAX_DEPTH = 8;
  * 490 ms. So the budget bounds a walk's size, not its time. */
 const MAX_WALK_STEPS = 100_000;
 const MAX_ALTERNATIVES = 64;
+/** The longest value a pattern expansion is evaluated over; `//` tests every slice of it. */
+const MAX_PATTERN_VALUE = 512;
 const MAX_SCRIPT_BYTES = 1024 * 1024;
 const FRESH_TEMP_NAME = "tmp.XXXXXXXXXX";
 /** First components under `/tmp` that hold other processes' sockets. */
@@ -259,6 +266,14 @@ const FILE_COMMANDS = new Set([
   "chgrp",
 ]);
 const SIGNAL_COMMANDS = new Set(["kill", "pkill", "killall", "killall5"]);
+/** Variables that change which directory `git rev-parse --show-toplevel` finds, or whether it finds
+ * one. */
+const GIT_DISCOVERY_VARIABLES = [
+  "GIT_DIR",
+  "GIT_WORK_TREE",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+];
 
 /** Commands that do not add a path to a function's stdout. */
 const FUNCTION_OUTPUT_SILENT: Record<string, true> = {
@@ -509,6 +524,8 @@ function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][
     if (name === "0") return [[...(st.argv0 ?? [literal(st.script ?? "bash")])]];
     const value = st.positional?.[Number(name) - 1];
     if (value !== undefined) return [[...value]];
+    // A shell whose arguments the guard knows has none past the last: that parameter is empty.
+    if (st.positional !== undefined) return [[literal("")]];
     return [[unknown(`\`$${name}\` (a positional parameter)`)]];
   }
   if (name === "$") {
@@ -517,6 +534,7 @@ function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][
   if (name === "!") {
     return [[unknown("`$!` (the last background job)", st.backgroundStarted ? true : undefined)]];
   }
+  if (name === "#" && st.positional !== undefined) return [[literal(String(st.positional.length))]];
   if (["?", "#", "-"].includes(name)) return [[unknown(`\`$${name}\``)]];
   const value = lookup(name, st, ctx);
   if (value === undefined) {
@@ -532,6 +550,17 @@ function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][
     } else pieces.push(...unquotedLiteral(piece.text.replaceAll("\\", "\\\\"), undefined, st, ctx));
   }
   return [pieces];
+}
+
+/** A parameter's value as an operator (`${1:-x}`) tests it: a special parameter from what the
+ * shell holds (`$1` from its arguments, unset past the last), any other name from `lookup`. */
+function operatorValue(name: string, st: State, ctx: Ctx): Expansion | undefined {
+  if (!/^([0-9]+|[@*#?$!-])$/.test(name)) return lookup(name, st, ctx);
+  if (/^[1-9][0-9]*$/.test(name) && st.positional !== undefined) {
+    return st.positional[Number(name) - 1];
+  }
+  const alternatives = parameter(name, true, st, ctx);
+  return alternatives.length === 1 ? alternatives[0] : [unknown(`\`$${name}\``)];
 }
 
 function parameterExpansion(
@@ -561,27 +590,35 @@ function parameterExpansion(
     }
     return [[unknown(`\`${part.text}\``)]];
   }
-  if (part.length || part.indirect || part.slice || part.replace) {
+  if (part.length || part.indirect || part.slice) {
     return [[unknown(`\`${part.text}\``)]];
+  }
+  if (part.replace !== undefined || ["#", "##", "%", "%%"].includes(part.operator ?? "")) {
+    return patternExpansion(part, quoted, st, ctx);
   }
   const operator = part.operator;
   if (operator === undefined) return parameter(name, quoted, st, ctx);
-  const value = lookup(name, st, ctx);
+  const value = operatorValue(name, st, ctx);
   const set = value !== undefined;
   const nonEmpty = set && value.map((p) => p.text).join("") !== "";
   const known = !set || value.every((p) => p.kind === "literal");
+  // A value holding known text or a pid this shell started is non-empty whatever else it holds.
+  const surelyNonEmpty =
+    set && value.some((p) => p.descendantPid === true || (p.kind === "literal" && p.text !== ""));
   const operand = (): Piece[][] =>
     part.operand === undefined ? [[literal("")]] : expandWord(part.operand, st, ctx);
   switch (operator) {
     case ":-":
     case ":=":
+      if (surelyNonEmpty) return parameter(name, quoted, st, ctx);
       if (!known) return [[unknown(`\`${part.text}\``)]];
       return nonEmpty ? parameter(name, quoted, st, ctx) : operand();
     case "-":
     case "=":
-      if (!known) return [[unknown(`\`${part.text}\``)]];
+      // Only whether the parameter is set decides, and that the guard knows.
       return set ? parameter(name, quoted, st, ctx) : operand();
     case ":+":
+      if (surelyNonEmpty) return operand();
       if (!known) return [[unknown(`\`${part.text}\``)]];
       return nonEmpty ? operand() : [[literal("")]];
     case "+":
@@ -592,6 +629,98 @@ function parameterExpansion(
     default:
       return [[unknown(`\`${part.text}\``)]];
   }
+}
+
+/** `${name#p}`, `##`, `%` and `%%`, and `${name/p/r}`, `//`, `/#` and `/%`, evaluated as bash does
+ * when the value, the pattern and the replacement are all known; unknown otherwise, and for a
+ * replacement holding `&` or `\`, which bash 5.2's `patsub_replacement` may rewrite. */
+function patternExpansion(
+  part: Extract<WordPart, { type: "ParameterExpansion" }>,
+  quoted: boolean,
+  st: State,
+  ctx: Ctx
+): Piece[][] {
+  const unknownResult = [[unknown(`\`${part.text}\``)]];
+  const value = literalText(operatorValue(part.parameter, st, ctx));
+  if (value === undefined || value.length > MAX_PATTERN_VALUE) return unknownResult;
+  const patternWord = part.replace?.pattern ?? part.operand;
+  const patterns = patternWord === undefined ? [[literal("")]] : expandWord(patternWord, st, ctx);
+  const source = patterns.length === 1 ? patternSource(patterns[0] as Expansion) : undefined;
+  if (source === undefined) return unknownResult;
+  const pattern = new RegExp(`^${source}$`);
+  const operator = part.operator ?? "";
+  let result: string;
+  if (part.replace === undefined) {
+    result = removePattern(value, operator, pattern);
+  } else {
+    const replacements = expandWord(part.replace.replacement, st, ctx);
+    const pieces = replacements.length === 1 ? (replacements[0] as Expansion) : undefined;
+    if (pieces === undefined || pieces.some((piece) => piece.kind === "unknown")) {
+      return unknownResult;
+    }
+    const replacement = pieces.map((piece) => piece.text).join("");
+    if (/[&\\]/.test(replacement)) return unknownResult;
+    result = replacePattern(value, operator, pattern, replacement);
+  }
+  if (quoted) return [[literal(result)]];
+  if (/\s/.test(result)) {
+    return [[unknown(`unquoted \`${part.text}\`, which splits into several words`)]];
+  }
+  return [unquotedLiteral(result.replaceAll("\\", "\\\\"), undefined, st, ctx)];
+}
+
+/** `value` with the shortest (`#`, `%`) or longest (`##`, `%%`) prefix (`#`) or suffix (`%`)
+ * `pattern` matches removed; `value` itself when none matches. */
+function removePattern(value: string, operator: string, pattern: RegExp): string {
+  const n = value.length;
+  const prefix = operator.startsWith("#");
+  for (let k = 0; k <= n; k += 1) {
+    const length = operator.length === 2 ? n - k : k;
+    if (prefix && pattern.test(value.slice(0, length))) return value.slice(length);
+    if (!prefix && pattern.test(value.slice(n - length))) return value.slice(0, n - length);
+  }
+  return value;
+}
+
+/** `value` with the longest match of `pattern` replaced: the first (`/`), every one left to right
+ * (`//`), one at the start (`/#`) or one at the end (`/%`). A null pattern leaves `/` and `//`
+ * alone, and those two replace an empty match only in an empty value. */
+function replacePattern(
+  value: string,
+  operator: string,
+  pattern: RegExp,
+  replacement: string
+): string {
+  const n = value.length;
+  if (operator === "/#") {
+    for (let end = n; end >= 0; end -= 1) {
+      if (pattern.test(value.slice(0, end))) return replacement + value.slice(end);
+    }
+    return value;
+  }
+  if (operator === "/%") {
+    for (let start = 0; start <= n; start += 1) {
+      if (pattern.test(value.slice(start))) return value.slice(0, start) + replacement;
+    }
+    return value;
+  }
+  if (pattern.source === "^$") return value;
+  if (n === 0) return pattern.test("") ? replacement : value;
+  let out = "";
+  let at = 0;
+  while (at < n) {
+    let end = n;
+    while (end > at && !pattern.test(value.slice(at, end))) end -= 1;
+    if (end === at) {
+      out += value[at];
+      at += 1;
+      continue;
+    }
+    out += replacement;
+    at = end;
+    if (operator === "/") return out + value.slice(at);
+  }
+  return out;
 }
 
 /** A command substitution's value: `$(mktemp ...)` is a fresh path in its directory and
@@ -647,7 +776,10 @@ function commandOutput(
       return [[literal(st.cwd)]];
     }
     if (invocation.base === "mktemp") return [mktempPath(invocation.command, st, ctx)];
-    const resolved = substitutionPath(invocation.base, invocation.rest, st);
+    const resolved =
+      invocation.base === "git"
+        ? gitTopLevel(invocation.rest, st, ctx)
+        : substitutionPath(invocation.base, invocation.rest, st);
     if (resolved !== undefined) return [[literal(resolved)]];
   }
   if (only?.type === "AndOr" && only.operators.length === 1 && only.operators[0] === "&&") {
@@ -677,10 +809,73 @@ function substitutionInvocation(
   return { base: path.basename(name), command: node, rest: argv.slice(1) };
 }
 
+/** What `git [-C DIR] rev-parse --show-toplevel` prints: the nearest directory at or above the
+ * working directory (or DIR) holding a repository git accepts, symlinks resolved. Unknown wherever
+ * git could print something else or fail and print nothing, which would leave the command's path
+ * empty: a variable that moves git's discovery, no `git` on the pane's PATH, a repository another
+ * user owns (git refuses it as dubious), or no repository above. */
+function gitTopLevel(list: readonly Arg[], st: State, ctx: Ctx): string | undefined {
+  let words = list.map((arg) => literalText(arg.exp));
+  let start = st.cwd;
+  if (words[0] === "-C") {
+    const directory = words[1];
+    if (directory === undefined || start === undefined) return undefined;
+    start = path.resolve(start, directory);
+    words = words.slice(2);
+  }
+  if (start === undefined || words.length !== 2) return undefined;
+  if (words[0] !== "rev-parse" || words[1] !== "--show-toplevel") return undefined;
+  if (GIT_DISCOVERY_VARIABLES.some((name) => lookup(name, st, ctx) !== undefined)) return undefined;
+  const searchPath = literalText(lookup("PATH", st, ctx));
+  if (!searchPath?.split(":").some((dir) => dir !== "" && existsSync(path.join(dir, "git")))) {
+    return undefined;
+  }
+  try {
+    if (!statSync(start).isDirectory()) return undefined;
+  } catch {
+    return undefined;
+  }
+  for (let directory = realExisting(start); ; directory = path.dirname(directory)) {
+    if (isGitRepository(directory)) {
+      return statSync(directory).uid === process.getuid?.() ? directory : undefined;
+    }
+    if (directory === "/") return undefined;
+  }
+}
+
+/** Whether `directory/.git` is a repository git's discovery stops at: a directory, or a `gitdir:`
+ * file naming one, holding `HEAD`, with `objects` and `refs` in it or in the `commondir` it names
+ * (a worktree's). Git walks past a `.git` that is neither. */
+function isGitRepository(directory: string): boolean {
+  const dotGit = path.join(directory, ".git");
+  try {
+    let gitDir = dotGit;
+    if (statSync(dotGit).isFile()) {
+      const pointer = /^gitdir: (.+)$/m.exec(readFileSync(dotGit, "utf8"))?.[1]?.trim();
+      if (pointer === undefined) return false;
+      gitDir = path.resolve(directory, pointer);
+    }
+    const commonFile = path.join(gitDir, "commondir");
+    const common = existsSync(commonFile)
+      ? path.resolve(gitDir, readFileSync(commonFile, "utf8").trim())
+      : gitDir;
+    return (
+      statSync(path.join(gitDir, "HEAD")).isFile() &&
+      statSync(path.join(common, "objects")).isDirectory() &&
+      statSync(path.join(common, "refs")).isDirectory()
+    );
+  } catch {
+    return false;
+  }
+}
+
 function substitutionPath(base: string, list: readonly Arg[], st: State): string | undefined {
   if (!["dirname", "basename", "realpath", "readlink"].includes(base)) return undefined;
   const target = literalText(operands(list, "").operands.at(-1)?.exp);
   if (target === undefined || st.cwd === undefined) return undefined;
+  // An empty operand names no path: dirname prints `.`, basename nothing, and realpath and
+  // readlink fail and print nothing.
+  if (target === "") return base === "dirname" ? "." : "";
   const abs = path.resolve(st.cwd, target);
   if (base === "dirname") return path.dirname(abs);
   if (base === "basename") return path.basename(abs);
@@ -949,9 +1144,11 @@ function clone(st: State): State {
  * After branches that may or may not run: everything a branch leaves in this shell, since any of
  * them may be the one that ran. A variable, the positional parameters (`shift`, `set --`) or the
  * working directory the branches leave differently is unknown, a function name holds every
- * definition they leave (`Callee`), and a handler any of them sets stays. Not merged: `files` and
- * `pidFiles`, which every branch shares; `output`, which each caller compares itself
- * (`outputChanged`); and `runningFunctions`, which only a function's own walk changes. */
+ * definition they leave (`Callee`), and a handler any of them sets stays. A variable every branch
+ * leaves empty or a pid this shell started (`$!` in a retry loop, empty had it not run) stays a pid
+ * that is safe to signal. Not merged: `files` and `pidFiles`, which every branch shares; `output`,
+ * which each caller compares itself (`outputChanged`); and `runningFunctions`, which only a
+ * function's own walk changes. */
 function merge(target: State, branches: readonly State[]): void {
   const names = new Set<string>();
   for (const branch of branches) for (const name of branch.vars.keys()) names.add(name);
@@ -961,7 +1158,17 @@ function merge(target: State, branches: readonly State[]): void {
     if (first !== undefined && values.every((value) => value === values[0])) {
       target.vars.set(name, first);
     } else {
-      target.vars.set(name, [unknown(`\`$${name}\`, which a branch sets differently`)]);
+      const signalSafe = branches.every((branch) => {
+        const value = branch.vars.get(name);
+        return (
+          value !== undefined &&
+          (literalText(value) === "" ||
+            (value.length > 0 && value.every((piece) => piece.descendantPid === true)))
+        );
+      });
+      target.vars.set(name, [
+        unknown(`\`$${name}\`, which a branch sets differently`, signalSafe ? true : undefined),
+      ]);
     }
   }
   const arrayNames = new Set<string>();
@@ -1108,6 +1315,150 @@ function walkList(statements: readonly Statement[], st: State, ctx: Ctx): void {
   for (const statement of statements) walkNode(statement, st, ctx, false);
 }
 
+/** The passes of a loop the guard can decide (an argument loop runs one per option) that it walks
+ * one at a time before it walks the rest as a loop that may run any number of times. */
+const MAX_DECIDED_PASSES = 64;
+
+/** A `while` or `until` loop that may run any number of times: its condition and body walked once
+ * on a copy, merged with not running at all. */
+function walkLoopAnyPasses(node: While, st: State, ctx: Ctx): void {
+  const before = st.output;
+  const body = clone(st);
+  walkList(node.clause.commands, body, ctx);
+  walkList(node.body.commands, body, ctx);
+  merge(st, [clone(st), body]);
+  if (outputChanged(before, body.output)) st.output = undefined;
+}
+
+/** Walks a loop pass by pass as bash runs it while the guard can decide its condition, the way an
+ * argument loop over known arguments (`while [ $# -gt 0 ]; do case "$1" in ...`) is decided. Returns
+ * false, having walked nothing, when it cannot decide the first condition; a condition it cannot
+ * decide later hands the rest of the loop to `walkLoopAnyPasses`. A body holding `break` or
+ * `continue` is never decided, since the passes would not end where the condition says. */
+function walkDecidedLoop(node: While, st: State, ctx: Ctx): boolean {
+  if (/\b(break|continue)\b/.test(st.source.slice(node.body.pos, node.body.end))) return false;
+  for (let pass = 0; pass < MAX_DECIDED_PASSES; pass += 1) {
+    const holds = decideCondition(node.clause, st, ctx);
+    if (holds === undefined) {
+      if (pass === 0) return false;
+      walkLoopAnyPasses(node, st, ctx);
+      return true;
+    }
+    walkList(node.clause.commands, st, ctx);
+    if (holds === (node.kind === "until")) return true;
+    walkList(node.body.commands, st, ctx);
+  }
+  walkLoopAnyPasses(node, st, ctx);
+  return true;
+}
+
+/** A condition's truth when it is one `[` or `test` command over words the guard knows, else
+ * undefined. A word that expands to nothing is undecided, since bash would drop it. */
+function decideCondition(clause: CompoundList, st: State, ctx: Ctx): boolean | undefined {
+  const [statement, ...others] = clause.commands;
+  if (statement === undefined || others.length > 0 || statement.background) return undefined;
+  const command = statement.command;
+  if (
+    statement.redirects.length > 0 ||
+    command.type !== "Command" ||
+    command.name === undefined ||
+    command.prefix.length > 0 ||
+    command.redirects.length > 0
+  ) {
+    return undefined;
+  }
+  // The name as written: `[` would expand as the start of a bracket glob.
+  const name = command.name.text;
+  if (name !== "[" && name !== "test") return undefined;
+  const argv = args(command.suffix, st, ctx);
+  if (argv.length !== command.suffix.length) return undefined;
+  const words = argv.map((arg) => literalText(arg.exp));
+  if (words.some((word) => word === undefined || word === "")) return undefined;
+  const operands = words as string[];
+  if (name === "[")
+    return operands.at(-1) === "]" ? evaluateTest(operands.slice(0, -1)) : undefined;
+  return evaluateTest(operands);
+}
+
+/** `test`'s answer for the forms an argument loop uses: a string's emptiness, string equality,
+ * and integer comparison. Anything else (file tests, `-a`, `-o`, parentheses) is undecided. */
+function evaluateTest(operands: readonly string[]): boolean | undefined {
+  const [left = "", operator = "", right = ""] = operands;
+  if (operands.length === 1) return left !== "";
+  if (operands.length === 2) {
+    if (left === "!") return operator === "";
+    if (left === "-n") return operator !== "";
+    if (left === "-z") return operator === "";
+    return undefined;
+  }
+  if (operands.length !== 3) return undefined;
+  if (operator === "=" || operator === "==") return left === right;
+  if (operator === "!=") return left !== right;
+  if (!/^-?[0-9]+$/.test(left) || !/^-?[0-9]+$/.test(right)) return undefined;
+  const a = Number(left);
+  const b = Number(right);
+  switch (operator) {
+    case "-eq":
+      return a === b;
+    case "-ne":
+      return a !== b;
+    case "-gt":
+      return a > b;
+    case "-ge":
+      return a >= b;
+    case "-lt":
+      return a < b;
+    case "-le":
+      return a <= b;
+    default:
+      return undefined;
+  }
+}
+
+/** The one item a `case` runs when the guard knows its word: the first whose pattern matches, or
+ * null when none does. Undefined when it cannot tell: a word or a pattern before the match it
+ * cannot know, a bracket expression or an extended pattern, or an item that falls through. */
+function decideCase(node: Case, st: State, ctx: Ctx): CaseItem | null | undefined {
+  const words = expandWord(node.word, st, ctx);
+  const value = words.length === 1 ? literalText(words[0]) : undefined;
+  if (value === undefined) return undefined;
+  for (const item of node.items) {
+    for (const word of item.pattern) {
+      const patterns = expandWord(word, st, ctx);
+      const matched =
+        patterns.length === 1 ? matchesPattern(patterns[0] as Expansion, value) : undefined;
+      if (matched === undefined) return undefined;
+      if (matched)
+        return item.terminator === undefined || item.terminator === ";;" ? item : undefined;
+    }
+  }
+  return null;
+}
+
+/** Whether a `case` pattern matches `value` (`patternSource`); undefined when the guard cannot
+ * match it exactly. */
+function matchesPattern(pattern: Expansion, value: string): boolean | undefined {
+  const source = patternSource(pattern);
+  return source === undefined ? undefined : new RegExp(`^${source}$`).test(value);
+}
+
+/** A bash pattern as a regular expression's source: literal text exactly, unquoted `*` and `?` as
+ * wildcards. Undefined for what the guard cannot match exactly: an unknown part, a bracket
+ * expression, or text that may be an extended pattern (`@(a|b)`). */
+function patternSource(pattern: Expansion): string | undefined {
+  let source = "";
+  for (const piece of pattern) {
+    if (piece.kind === "unknown") return undefined;
+    if (piece.kind === "glob") {
+      if (piece.text === "*") source += "[\\s\\S]*";
+      else if (piece.text === "?") source += "[\\s\\S]";
+      else return undefined;
+    } else if (/[()|]/.test(piece.text)) return undefined;
+    else source += piece.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+  return source;
+}
+
 function outputChanged(
   before: readonly Expansion[] | undefined,
   after: readonly Expansion[] | undefined
@@ -1139,6 +1490,12 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         runSetTraps(child, ctx);
         if (outputChanged(before, child.output)) st.output = undefined;
         st.backgroundStarted = true;
+        return;
+      }
+      const written =
+        node.command.type === "BraceGroup" ? groupOutputFile(node, st, ctx) : undefined;
+      if (written !== undefined && node.command.type === "BraceGroup") {
+        st.files.set(written, walkRenderingGroup(node.command, st, ctx));
         return;
       }
       walkNode(node.command, st, ctx, pipeIn);
@@ -1248,15 +1605,18 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       return;
     }
     case "While": {
-      const before = st.output;
-      const body = clone(st);
-      walkList(node.clause.commands, body, ctx);
-      walkList(node.body.commands, body, ctx);
-      merge(st, [clone(st), body]);
-      if (outputChanged(before, body.output)) st.output = undefined;
+      if (walkDecidedLoop(node, st, ctx)) return;
+      walkLoopAnyPasses(node, st, ctx);
       return;
     }
     case "Case": {
+      const chosen = decideCase(node, st, ctx);
+      if (chosen !== undefined) {
+        visitWord(node.word, st, ctx);
+        for (const item of node.items) for (const word of item.pattern) visitWord(word, st, ctx);
+        if (chosen !== null) walkList(chosen.body.commands, st, ctx);
+        return;
+      }
       const before = st.output;
       visitWord(node.word, st, ctx);
       const branches: State[] = [clone(st)];
@@ -1346,9 +1706,11 @@ function checkRedirects(
       let content: string | null = null;
       if (command?.name === "cat" && command.args.length === 0) {
         content = heredoc?.content ?? (herestring ? herestringText(herestring, st, ctx) : null);
-      } else if (command?.name === "echo" || command?.name === "printf") {
+      } else if (command?.name === "echo") {
         const words = command.args.map((arg) => literalText(arg.exp));
         content = words.every((word) => word !== undefined) ? `${words.join(" ")}\n` : null;
+      } else if (command?.name === "printf") {
+        content = printfText(command.args) ?? null;
       }
       st.pidFiles.delete(file);
       const before = appends ? st.files.get(file) : "";
@@ -1370,6 +1732,119 @@ function checkRedirects(
 function herestringText(redirect: Redirect, st: State, ctx: Ctx): string | null {
   if (redirect.target === undefined) return null;
   return literalText(expandWord(redirect.target, st, ctx)[0]) ?? null;
+}
+
+/** The file a `{ ...; } > file` statement writes its output to, when that is its one redirection
+ * and the guard knows the path. */
+function groupOutputFile(statement: Statement, st: State, ctx: Ctx): string | undefined {
+  const [redirect, ...others] = statement.redirects;
+  if (redirect === undefined || others.length > 0 || redirect.fileDescriptor !== undefined) {
+    return undefined;
+  }
+  if ((redirect.operator !== ">" && redirect.operator !== ">|") || redirect.target === undefined) {
+    return undefined;
+  }
+  const targets = expandWord(redirect.target, st, ctx);
+  const target = targets.length === 1 ? literalText(targets[0]) : undefined;
+  if (target === undefined || (st.cwd === undefined && !target.startsWith("/"))) return undefined;
+  return path.resolve(st.cwd ?? "/", target);
+}
+
+/** Walks a brace group whose output goes to a file, and returns what it writes there: the
+ * concatenated output of each statement, with each part the guard cannot know as the unknown
+ * marker, or null once a statement prints something it cannot render. Each statement's output is
+ * read before the statement is walked, so it sees the variables the statements before it set. */
+function walkRenderingGroup(group: BraceGroup, st: State, ctx: Ctx): string | null {
+  let content: string | null = "";
+  for (const statement of group.body.commands) {
+    if (content !== null) {
+      const text = statementOutput(statement, st, ctx);
+      content = text === undefined ? null : content + text;
+    }
+    walkNode(statement, st, ctx, false);
+  }
+  return content;
+}
+
+/** What one statement of a rendered group prints: nothing for an assignment, a quoted here-document
+ * fed to `cat`, `printf`, or `echo`. Undefined for anything else. */
+function statementOutput(statement: Statement, st: State, ctx: Ctx): string | undefined {
+  const command = statement.command;
+  if (statement.background || statement.redirects.length > 0 || command.type !== "Command") {
+    return undefined;
+  }
+  if (command.name === undefined) return command.redirects.length === 0 ? "" : undefined;
+  const name = literalText(expandWord(command.name, st, ctx)[0]);
+  const rest = args(command.suffix, st, ctx);
+  if (name === "cat" && rest.length === 0) {
+    const [heredoc, ...others] = command.redirects;
+    if (heredoc === undefined || others.length > 0) return undefined;
+    if (heredoc.operator !== "<<" && heredoc.operator !== "<<-") return undefined;
+    // An unquoted here-document expands its text as bash writes it; only one with nothing to
+    // expand reads the same.
+    const text = heredoc.content;
+    if (text === undefined || (!heredoc.heredocQuoted && /[$`\\]/.test(text))) return undefined;
+    return text;
+  }
+  if (command.redirects.length > 0) return undefined;
+  if (name === "printf") return printfText(rest);
+  if (name === "echo") {
+    if (literalText(rest[0]?.exp)?.startsWith("-")) return undefined;
+    return `${rest.map((arg) => runtimeText(arg.exp)).join(" ")}\n`;
+  }
+  return undefined;
+}
+
+/** What `printf FORMAT ARG...` prints, with each part the guard cannot know as the unknown marker:
+ * `%s`, `%q` (quoted for a shell to read back), `%d`, `%%`, and the escapes `\n`, `\t` and `\\`,
+ * the format reused while arguments remain. Undefined for a format it does not render: an unknown
+ * one, `-v`, a width or precision, or another conversion. */
+function printfText(list: readonly Arg[]): string | undefined {
+  const [formatArg, ...values] = list;
+  const format = literalText(formatArg?.exp);
+  if (format === undefined || format.startsWith("-")) return undefined;
+  const parts: ({ readonly text: string } | { readonly conversion: "s" | "q" | "d" })[] = [];
+  for (let i = 0; i < format.length; i += 1) {
+    const char = format.charAt(i);
+    const next = format.charAt(i + 1);
+    if (char === "%") {
+      if (next === "%") parts.push({ text: "%" });
+      else if (next === "s" || next === "q" || next === "d") parts.push({ conversion: next });
+      else return undefined;
+      i += 1;
+    } else if (char === "\\") {
+      const text = next === "n" ? "\n" : next === "t" ? "\t" : next === "\\" ? "\\" : undefined;
+      if (text === undefined) return undefined;
+      parts.push({ text });
+      i += 1;
+    } else parts.push({ text: char });
+  }
+  const conversions = parts.filter((part) => "conversion" in part).length;
+  let out = "";
+  let index = 0;
+  do {
+    for (const part of parts) {
+      if ("text" in part) {
+        out += part.text;
+        continue;
+      }
+      const value = values[index];
+      index += 1;
+      const text = value === undefined ? "" : runtimeText(value.exp);
+      if (part.conversion === "s") out += text;
+      else if (part.conversion === "d")
+        out += /^-?[0-9]+$/.test(text) ? text : value === undefined ? "0" : UNKNOWN_MARKER;
+      else out += shellQuoted(text);
+    }
+  } while (conversions > 0 && index < values.length);
+  return out;
+}
+
+/** `text` as a word a shell reads back as `text`, which is what `printf %q` guarantees. */
+function shellQuoted(text: string): string {
+  if (text === "") return "''";
+  if (/^[A-Za-z0-9_/.:@%+=,-]+$/.test(text)) return text;
+  return `'${text.replaceAll("'", "'\\''")}'`;
 }
 
 /** A path refusal: the rule, the pane's roots, and what to do instead. */
@@ -1717,11 +2192,17 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       (redirect.fileDescriptor === undefined || redirect.fileDescriptor === 1) &&
       [">", ">>", ">|", "&>", "&>>", ">&"].includes(redirect.operator)
   );
+  // `umask` prints the mask (`-S`, `-p`) only when it is given no mode to set.
+  const umaskWords = base === "umask" ? rest.map((arg) => literalText(arg.exp)) : [];
+  const silentUmask =
+    umaskWords.every((word) => word !== undefined) &&
+    umaskWords.some((word) => !word?.startsWith("-"));
   if (
     outer.output !== undefined &&
     !stdoutRedirected &&
     base !== "echo" &&
     base !== "printf" &&
+    !silentUmask &&
     FUNCTION_OUTPUT_SILENT[base] !== true
   ) {
     outer.output = undefined;
@@ -1796,10 +2277,24 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     case "printf": {
-      const at = rest.findIndex((arg) => literalText(arg.exp) === "-v");
+      const at = literalText(rest[0]?.exp) === "-v" ? 0 : -1;
       const variable = at === -1 ? undefined : literalText(rest[at + 1]?.exp);
       if (variable !== undefined) {
-        outer.vars.set(variable, [unknown(`\`$${variable}\` (printf -v)`)]);
+        // `printf -v NAME '%s' VALUE` assigns VALUE as it is, a pid of this shell's included;
+        // another format assigns what printf renders, known only when every part of it is.
+        const printed = rest.slice(at + 2);
+        const [format, value, ...others] = printed;
+        if (literalText(format?.exp) === "%s" && value !== undefined && others.length === 0) {
+          outer.vars.set(variable, value.exp);
+        } else {
+          const text = printfText(printed);
+          outer.vars.set(
+            variable,
+            text === undefined || text.includes(UNKNOWN_MARKER)
+              ? [unknown(`\`$${variable}\` (printf -v)`)]
+              : [literal(text)]
+          );
+        }
         return;
       }
       if (outer.output !== undefined && !stdoutRedirected) {

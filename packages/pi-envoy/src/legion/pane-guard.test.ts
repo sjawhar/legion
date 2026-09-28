@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,28 +23,23 @@ const repository = path.resolve(import.meta.dir, "../../../..");
 // Where the guard refuses each tracked shell script: the innermost `file:line` its refusal names.
 // When a refusal moves on purpose, regenerate it as pane-guard-scripts.ts says.
 const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
-  ".github/scripts/release-push.sh": ".github/scripts/release-push.sh:103",
-  "packages/claude-envoy/scripts/smoke-channel.sh":
-    "packages/claude-envoy/scripts/smoke-channel.sh:149",
-  "packages/dispatch/e2e/acceptance/omp-roundtrip.sh":
-    "packages/dispatch/e2e/acceptance/omp-roundtrip.sh:76",
+  // Writes or deletes under the operator's home: the dispatch backups, a profile's plugin tree.
   "packages/envoy/deploy/scripts/autodeploy.sh": "packages/envoy/deploy/scripts/autodeploy.sh:145",
+  "packages/pi-envoy/scripts/grant-rig/setup.sh": "packages/pi-envoy/scripts/grant-rig/setup.sh:56",
+  // Deletes the backups `find` lists: a path read from a command's output.
   "packages/envoy/deploy/scripts/autodeploy_test.sh":
     "packages/envoy/deploy/scripts/autodeploy.sh:80",
-  "packages/envoy/deploy/scripts/sync-host.sh": "packages/envoy/deploy/scripts/sync-host.sh:11",
-  "packages/envoy/scripts/verify-cluster.sh": "packages/envoy/scripts/verify-cluster.sh:94",
-  "packages/pi-envoy/scripts/grant-rig/setup.sh": "packages/pi-envoy/scripts/grant-rig/setup.sh:56",
-  "packages/pi-envoy/scripts/smoke-btw.sh": "packages/pi-envoy/scripts/smoke-btw.sh:219",
-  "packages/pi-envoy/scripts/smoke-delivery.sh": "packages/pi-envoy/scripts/smoke-delivery.sh:230",
-  "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
+  // Kills the processes a query selects (`$(run_processes)`, `first_child`), not pids it started.
+  "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/controller-start-tmux.sh:67",
+  "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/stage2-tmux-supervision.sh:461",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/stage3-4b13b-acceptance.sh:1254",
+  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/stage3-devbox-workflow.sh:1136",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:999",
+  // A library run bare, without the arguments every caller passes: bash stops at its argument
+  // check, and the guard, which walks a command whatever a test before it decides, reaches the
+  // paths an empty argument makes (`--control`, `--dest`).
   "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:99",
-  "scripts/e2e/lib/install-model-gateway.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
-  "scripts/e2e/lib/install-plugin-profile.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
-  "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
-  "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
-  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
-  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
-  "scripts/sync-envoy-host.sh": "packages/envoy/deploy/scripts/sync-host.sh:11",
+  "scripts/e2e/lib/install-model-gateway.sh": "/hawk-token:33",
 };
 
 beforeAll(() => {
@@ -150,10 +146,61 @@ describe("resolution", () => {
     expect(bash(`rm -rf "\${HOME:-/nowhere}"`)).toContain(home);
   });
 
+  test("resolves the paths realpath, dirname, basename and readlink -f print", () => {
+    expect(bash('d=$(realpath -m -- "$LEGION_WORKSPACE/a/../b"); rm -rf "$d"')).toBeUndefined();
+    expect(bash('d=$(realpath -m -- "$HOME/a/../.ssh"); rm -rf "$d"')).toContain(
+      path.join(home, ".ssh")
+    );
+    expect(bash('d=$(dirname "$HOME/.ssh/id"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
+    expect(bash('d="$LEGION_WORKSPACE/$(basename "$HOME/x")"; rm -rf "$d"')).toBeUndefined();
+    expect(bash('d=$(readlink -f "$HOME/.ssh"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
+  });
+
+  test("resolves the repository git rev-parse --show-toplevel names", () => {
+    const repo = path.join(workspace, "repo");
+    const checkout = path.join(home, "checkout");
+    for (const dir of [repo, checkout]) {
+      expect(spawnSync("git", ["init", "-q", dir]).status).toBe(0);
+    }
+    // An empty `.git` below the repository is not one; git walks past it, as the guard must.
+    mkdirSync(path.join(repo, "sub", ".git"), { recursive: true });
+    try {
+      expect(
+        bash('r=$(git rev-parse --show-toplevel); rm -rf "$r/build"', path.join(repo, "sub"))
+      ).toBeUndefined();
+      expect(bash(`rm -rf "$(git -C ${checkout} rev-parse --show-toplevel)"`)).toContain(checkout);
+      // Git's answer moves with GIT_DIR and GIT_WORK_TREE, and no repository above is a failure.
+      expect(
+        bash('export GIT_WORK_TREE=/; rm -rf "$(git rev-parse --show-toplevel)/b"', repo)
+      ).toContain("a command's output");
+      expect(bash('rm -rf "$(git rev-parse --show-toplevel)/b"')).toContain("a command's output");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(checkout, { recursive: true, force: true });
+    }
+  });
+
+  test("evaluates a known value's pattern replacement and removal", () => {
+    expect(bash(`v="$HOME/a"; rm -rf "\${v//$HOME/$LEGION_WORKSPACE}"`)).toBeUndefined();
+    expect(bash(`v="$LEGION_WORKSPACE/a"; rm -rf "\${v/$LEGION_WORKSPACE/$HOME}"`)).toContain(
+      path.join(home, "a")
+    );
+    expect(bash(`v="x:$LEGION_WORKSPACE/a:b"; rm -rf "\${v#*:}"`)).toBeUndefined();
+    expect(bash(`v="x:$HOME/.ssh"; rm -rf "\${v#*:}"`)).toContain(path.join(home, ".ssh"));
+    expect(bash(`v="$HOME/.ssh/x.y.z"; rm -rf "\${v%/*}"`)).toContain(path.join(home, ".ssh"));
+    expect(bash(`v="$HOME/.ssh.tar.gz"; rm -rf "\${v%%.tar*}"`)).toContain(path.join(home, ".ssh"));
+    expect(bash(`v="/a/b$HOME"; rm -rf "\${v##/a/b}"`)).toContain(home);
+    // An unknown value or pattern leaves the result unknown, and so does a replacement holding `&`,
+    // which bash 5.2 replaces with the matched text.
+    expect(bash(`v=$(cat f); rm -rf "\${v//x/y}"`)).toContain("{v//x/y}`)");
+    expect(bash(`v="$HOME"; rm -rf "\${v//$(cat f)/y}"`)).toContain("{v//$(cat f)/y}`)");
+    expect(bash(`v="$LEGION_WORKSPACE/a"; rm -rf "\${v//a/&}"`)).toContain("{v//a/&}`)");
+  });
+
   test("refuses a target it cannot resolve, and never guesses one", () => {
     expect(bash('read d; rm -rf "$d"')).toContain("read from input");
     expect(bash('rm -rf "$NOT_SET_ANYWHERE"')).toContain("`$NOT_SET_ANYWHERE`");
-    expect(bash('rm -rf "$(git rev-parse --show-toplevel)"')).toContain("a command's output");
+    expect(bash('rm -rf "$(cat target.txt)"')).toContain("a command's output");
     expect(bash('for d in a "$X"; do rm -rf "$d"; done')).toContain("loop variable");
     // A known prefix inside the workspace bounds what follows it.
     expect(bash('rm -rf "$LEGION_WORKSPACE/build/$(date +%s)"')).toBeUndefined();
@@ -660,6 +707,69 @@ describe("scripts a command runs", () => {
     expect(bash(`bash ${generated}`)).toBeUndefined();
   });
 
+  test("uses a function's path through a subshell that only sets its umask", () => {
+    const inside = script(
+      "function-umask.sh",
+      'work="$(mktemp -d)"\nheader() { local file="$work/header"; (umask 077 && : > "$file"); printf \'%s\\n\' "$file"; }\npath=$(header)\nrm -f "$path"\n'
+    );
+    expect(bash(`bash ${inside}`)).toBeUndefined();
+    const outside = script(
+      "function-umask-home.sh",
+      'header() { local file="$HOME/header"; (umask 077 && : > "$file"); printf \'%s\\n\' "$file"; }\npath=$(header)\nrm -f "$path"\n'
+    );
+    expect(bash(`bash ${outside}`)).toContain(path.join(home, "header"));
+    // A bare `umask` prints the mask, so it is output the guard cannot know.
+    expect(bash('f() { umask; echo "$LEGION_WORKSPACE/x"; }; rm -rf "$(f)"')).toContain(
+      "a command's output"
+    );
+  });
+
+  test("walks an argument loop over the arguments a script is given", () => {
+    const parser = script(
+      "arguments.sh",
+      'dest=\nwhile [ $# -gt 0 ]; do\n  case "$1" in\n  --dest)\n    dest=$2\n    shift 2\n    ;;\n  -h | --help) exit 0 ;;\n  *)\n    echo "unknown argument: $1" >&2\n    exit 2\n    ;;\n  esac\ndone\nrm -rf "$dest"\n'
+    );
+    expect(bash(`bash ${parser} --dest ${scratch}/mine/out`)).toBeUndefined();
+    // The loop resolves the argument; it does not allow it.
+    expect(bash(`bash ${parser} --dest "$HOME/out"`)).toContain(path.join(home, "out"));
+    // An argument the guard cannot know stays unknown through the loop.
+    expect(bash(`bash ${parser} --dest "$(cat dest.txt)"`)).toContain("a command's output");
+    // A condition over input the guard cannot know leaves the loop's assignments unknown.
+    expect(bash('d=; while read -r line; do d=$line; done < list.txt; rm -rf "$d"')).toContain(
+      "which a branch sets differently"
+    );
+  });
+
+  test("reads a positional parameter past the last argument as empty", () => {
+    const tail = script("positional.sh", 'rm -rf "$1/cache"\n');
+    // `bash <script>` with no arguments: `$1` is empty, so the target is `/cache`.
+    expect(bash(`bash ${tail}`)).toContain("(/cache)");
+    expect(bash(`bash ${tail} ${scratch}/mine`)).toBeUndefined();
+    // A shell that did not say what its arguments are keeps `$1` unknown.
+    expect(bash('rm -rf "$1/cache"')).toContain("a positional parameter");
+  });
+
+  test("tests a positional parameter's operator expansion against the argument it holds", () => {
+    const defaulted = script("positional-default.sh", `rm -rf "\${1:-$LEGION_WORKSPACE/build}"\n`);
+    expect(bash(`bash ${defaulted} "$HOME"`)).toContain(home);
+    expect(bash(`f() { rm -rf "\${1:-$LEGION_WORKSPACE/build}"; }; f "$HOME"`)).toContain(home);
+    // With no argument the default is what runs.
+    expect(bash(`bash ${defaulted}`)).toBeUndefined();
+    // A shell that did not say what its arguments are cannot say whether the default applies.
+    expect(bash(`rm -rf "\${1:-$LEGION_WORKSPACE/build}"`)).toBeDefined();
+  });
+
+  test("does not know the arguments after a shift in a branch it cannot decide", () => {
+    const shifted = script(
+      "shift-branch.sh",
+      'case "$(cat mode.txt)" in a) shift ;; esac\nrm -rf "$1"\n'
+    );
+    expect(bash(`bash ${shifted} ${scratch}/mine/x "$HOME"`)).toContain("a positional parameter");
+    const decided = script("shift-decided.sh", 'case "$1" in --) shift ;; esac\nrm -rf "$1"\n');
+    expect(bash(`bash ${decided} -- ${scratch}/mine/x`)).toBeUndefined();
+    expect(bash(`bash ${decided} -- "$HOME"`)).toContain(home);
+  });
+
   test("refuses every path a function can write to stdout", () => {
     const reason = bash('f() { echo "$HOME"; echo "$LEGION_WORKSPACE/x"; }; rm -rf $(f)');
     expect(reason).toBeDefined();
@@ -727,6 +837,8 @@ describe("scripts a command runs", () => {
     ).toBeUndefined();
   });
 
+  // `bun packages/pi-envoy/src/legion/pane-guard-walk.ts <script>` lists every refusal a script
+  // meets, where this test sees only the first.
   test("checks every tracked shell script against the documented allow-list", () => {
     expect(trackedScriptRefusals(repository)).toEqual(EXPECTED_SCRIPT_REFUSALS);
   });
@@ -773,6 +885,24 @@ describe("scripts a command runs", () => {
     expect(bash(`cp /etc/hostname ${file}; bash ${file}`)).toBeUndefined();
     expect(bash(`curl -o ${file} https://example.test; bash ${file}`)).toBeUndefined();
     expect(bash(`echo 'rm -rf ~' > ${file}; bash ${file}`)).toContain(home);
+  });
+
+  test("reads a script a brace group writes from here-documents and printf before running it", () => {
+    const writer = (value: string): string =>
+      script(
+        "group-writer.sh",
+        `work=$(mktemp -d)\n{\n  cat <<'EOF'\n#!/bin/bash\nEOF\n  printf 'target=%q\\n' ${value}\n  cat <<'EOF'\nrm -rf "$target"\nEOF\n} >"$work/run.sh"\nbash "$work/run.sh"\n`
+      );
+    expect(bash(`bash ${writer('"$work/out"')}`)).toBeUndefined();
+    expect(bash(`bash ${writer('"$HOME/out"')}`)).toContain(path.join(home, "out"));
+    // A value the guard cannot know is unknown in the script it writes too.
+    expect(bash(`bash ${writer('"$(cat target.txt)"')}`)).toContain("builds at run time");
+    // A statement whose output it cannot render leaves the script unreadable.
+    const opaque = script(
+      "group-opaque.sh",
+      'work=$(mktemp -d)\n{ cat <<\'EOF\'\n#!/bin/bash\nEOF\n  jq -r .body input.json; } >"$work/run.sh"\nbash "$work/run.sh"\n'
+    );
+    expect(bash(`bash ${opaque}`)).toContain("cannot read before running it");
   });
 
   test("reads Python and JavaScript scripts for what they evaluate to", () => {
@@ -933,6 +1063,24 @@ describe("signals", () => {
           `pid_file=${pidFile}; sleep 60 & echo "$!" > "$pid_file"; pid="$(<"$pid_file")"; kill "$pid"`
         )
       ).toBeUndefined();
+      // A retry loop that starts the child on every pass: after the loop the variable is `$!` or,
+      // had the loop not run, empty, and either is safe to signal.
+      expect(
+        bash('pid=; for attempt in 1 2 3; do sleep 60 & pid=$!; done; kill -TERM "$pid"')
+      ).toBeUndefined();
+      expect(bash('pid=; if [ -s f ]; then pid=$(cat f); fi; kill -TERM "$pid"')).toContain(
+        "cannot resolve the pid"
+      );
+      // A function reading its pid argument through `${1:-}` still reads the pid it was given.
+      const stop = `stop() { local pid=\${1:-}; [ -n "$pid" ] || return 0; kill -TERM "$pid"; }`;
+      expect(bash(`${stop}; sleep 60 & child=$!; stop "$child"`)).toBeUndefined();
+      expect(bash(`${stop}; stop "$(cat server.pid)"`)).toContain("cannot resolve the pid");
+      // rig.sh's start_process names the pid variable at run time: `printf -v "${name}_pid" '%s' "$!"`.
+      const start = `start() { local name=$1; shift; "$@" & printf -v "\${name}_pid" '%s' "$!"; }`;
+      expect(bash(`${start}; start server sleep 60; kill -TERM "$server_pid"`)).toBeUndefined();
+      expect(bash('printf -v pid \'%s\' "$(cat server.pid)"; kill -TERM "$pid"')).toContain(
+        "cannot resolve the pid"
+      );
       // Allowed without a pid lookup: a job, the shell's own last background job, a probe.
       expect(bash("sleep 60 & kill $!")).toBeUndefined();
       expect(bash('pid=""; kill "$pid"')).toBeUndefined();

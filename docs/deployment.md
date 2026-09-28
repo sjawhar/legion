@@ -19,9 +19,13 @@ under the pane's issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and an
 `/tmp` except `/tmp` itself, a glob over it, and its tmux and ssh socket directories. The guard
 cannot tell which permitted `/tmp` directory belongs to this pane. It parses the command with a bash
 parser and resolves each target as bash would: through `$HOME`, `~`, variables set earlier in the
-same command, `$(mktemp -d)`, `cd`, braces, command substitutions, and the scripts the command
-runs (`bash <file>`, `sh -c`, `source`, a heredoc fed to a shell, a script run by path,
-python/node/bun scripts). A target with no proven path prefix is refused, as is a command the
+same command, `$(mktemp -d)`, `cd`, braces, the paths `realpath`, `dirname`, `basename`,
+`readlink -f` and `git rev-parse --show-toplevel` print, pattern replacement and removal of a known
+value (`${v//a/b}`, `${v#*:}`), a function's output, command substitutions, and the scripts the
+command runs (`bash <file>`, `sh -c`, `source`, a heredoc fed to a shell, a script run by path,
+python/node/bun scripts, one it writes first), with the arguments it gives them: an argument loop
+(`while [ $# -gt 0 ]; do case "$1" in ...`) over arguments it knows is walked as bash runs it. A
+target with no proven path prefix is refused, as is a command the
 parser reports as malformed. An unknown trailing component under a prefix already proven inside a
 permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused outright. For `tmux
 kill-*`, the guard resolves the socket as tmux does (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`,

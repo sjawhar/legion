@@ -271,16 +271,29 @@ pane's Oh My Pi process (`/proc` read at check time). It reads the variables bot
 every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify, `LEGION_WORKSPACE`, `HOME`), so
 it adds nothing to either daemon contract. Commands are parsed with `unbash` (a bash parser,
 bundled into `dist/legion.js`) and walked as bash would run them: word expansion with quoting,
-tilde, variables assigned earlier (`$(mktemp -d)` is a fresh `/tmp` path), `cd`, brace expansion,
-command substitutions, subshells and branches, functions, wrappers (`sudo`, `env`, `timeout`, ...),
-and the scripts a command runs, whose refusal names the script and line. `src/legion/pane-guard-code.ts`
+tilde, variables assigned earlier (`$(mktemp -d)` is a fresh `/tmp` path, and `printf -v` assigns),
+`cd`, brace expansion, the paths `realpath`, `dirname`, `basename`, `readlink -f` and
+`git rev-parse --show-toplevel` print (the last only where git would find a repository it accepts),
+pattern replacement and removal of a known value (`${v//a/b}`, `${v#*:}`; a replacement holding `&`
+stays unknown), command substitutions, subshells and branches, functions, wrappers (`sudo`, `env`,
+`timeout`, ...), and the scripts a command runs or writes first, whose refusal names the script and
+line. A script or function run
+with arguments the guard knows has them as its positional parameters (`$#` their count, one past
+the last empty), so an argument loop (`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`)
+is walked pass by pass, each `case` taking the one item its known word selects; a loop or `case` it
+cannot decide is walked as one that may take any branch, and a `shift` inside one leaves the
+arguments unknown after it. A variable every branch leaves empty or a pid the shell started (a retry
+loop's `pid=$!`) stays a pid it may signal. `src/legion/pane-guard-code.ts`
 tokenizes Python and JavaScript for known deletion, move, overwrite, signal, and shell-out calls
 whose arguments it can evaluate; an argument it cannot evaluate is let through, where a shell
 target it cannot resolve, and a command `unbash` reports as malformed, are refused. Command tables
 are `Set`/`Map`, never object literals, since their keys come from the command (`constructor` would
 otherwise match). `src/legion/pane-guard.test.ts` holds the family matrix, the incident's script,
-the signal cases, and the eval tool; `extensions/legion.test.ts` proves the hook refuses the
-incident's script through a booted worker.
+the signal cases, the eval tool, and the sweep of every tracked shell script against
+`EXPECTED_SCRIPT_REFUSALS` (each refused script with its first refusal's reason);
+`src/legion/pane-guard-walk.ts` prints every refusal a script meets, not only the first, and never
+writes that set, so a change to it is a person's decision to fix the guard, the script, or the set.
+`extensions/legion.test.ts` proves the hook refuses the incident's script through a booted worker.
 
 ## Native Dispatch tools
 
@@ -439,4 +452,4 @@ state never nudges.
 - `spawnWorker` in `src/legion/daemon-client.ts` carries the caller's `requestId` (minted once per `legion` `spawn_worker` call in `src/legion/tools.ts`) and retries only a `fetch` that rejected — never a `LegionDaemonApiError`, whatever its status, and never a response-shape error — up to `SPAWN_WORKER_ATTEMPTS` (3) with `SPAWN_WORKER_RETRY_DELAYS_MS` between attempts, the same id every time so the daemon's ledger dedupes it; the last rejected fetch is a `LegionDaemonTransportError` naming the cause, attempts, and id. A response whose headers arrived but body cannot be read is not retried because `fetch` fulfilled; it is a `LegionDaemonResponseReadError` with the same request id and `legion state` guidance. The 403 recovery above composes with both paths unchanged (LEGION-102).
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
-- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider. A Legion pane cannot run their default tmux cleanup under the pane guard; do not edit the smoke to bypass that refusal. LEGION-300 owns a pane-safe smoke path.
+- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider. Each runs its session on its own tmux server, on a socket in its temp directory (`tmux() { command tmux -S "$tmux_socket" "$@"; }`), and prints the `tmux -S <socket> attach -t <session>` line that watches it, so its cleanup's `tmux kill-session` can end only the session it started: on the shared default server that kill could end anyone's session, and the pane guard refuses it there. Keep new tmux calls on that wrapper rather than the default server.

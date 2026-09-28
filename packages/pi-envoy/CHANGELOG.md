@@ -117,6 +117,20 @@
   acceptance are refused at their gateway key command's write, and Stage 4b and the controller
   proof at the plugin unpack. The allow-list test records each refused script's `file:line`, derived
   by `src/legion/pane-guard-scripts.ts`, where it had recorded a phrase several refusals share.
+- The pane guard resolves more of what a script computes before it refuses a target it cannot
+  (LEGION-300). A script or function run with arguments the guard knows has them as `$1`, `$#` and
+  `${1:-…}`, so an argument loop (`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`)
+  is walked pass by pass, and a `case` on a known word takes its one matching item. It also resolves
+  `$(git rev-parse --show-toplevel)` where git would print the repository, pattern replacement and
+  removal of a known value (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`, a function whose output
+  passes through `(umask 077 && …)`, and a script a brace group writes from here-documents and
+  `printf` before running it. A variable every branch leaves empty or holding a pid of this shell's
+  (a retry loop's `pid=$!`) is still a pid it may signal. A target it cannot resolve is still
+  refused. The Stage 2, 3, 4b.13b, 4b and controller drivers are now refused only for killing the
+  processes a query selects (`$(run_processes)`, `first_child`), and the four manual smokes
+  (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `omp-roundtrip.sh`) run their sessions
+  on their own tmux server, so the guard allows their cleanup. `src/legion/pane-guard-walk.ts`
+  prints every refusal a script meets, not only the first.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot
