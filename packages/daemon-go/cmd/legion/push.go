@@ -63,8 +63,10 @@ the branch: the planner's .legion/plan.json, the tester's .legion/test.json, and
 .legion/review.json whose verdict is "changes_requested". Its head commit then ends with GitHub's
 "skip-checks: true" trailer, so the push starts no workflow, and the Go daemon carries the code
 head's verdict to it. Every other push runs CI in full: one carrying code, a reviewer round with
-any other verdict or none, the .legion/ deletion, and a rewrite. A trailer an earlier push left on
-@- is removed. Never add or remove the trailer yourself.
+any other verdict or none, the .legion/ deletion, and a rewrite. No commit of the push may touch a
+path outside .legion/, even one a later commit undoes: the daemon classifies the push from the
+union of its commits' paths, so a head this rule skipped over such a commit would carry no verdict
+at all. A trailer an earlier push left on @- is removed. Never add or remove the trailer yourself.
 
 GitHub honours the trailer only as the message's last line, so the push describes @- with jj's
 templates.commit_trailers empty (the trailers @- already carries stay above it) and reads the
@@ -171,6 +173,14 @@ func push(workspaceFlag string, stdout, stderr io.Writer) error {
 // push may leave the head a human merges, which must carry its own checks. A rewrite never skips:
 // GitHub lists a forced push's commits since the merge base, so the daemon carries nothing across
 // it.
+//
+// The daemon asks the same question of the same push from the union of its commits'
+// added/removed/modified paths (the listener's changed_paths, githubPushChangedPaths in
+// packages/envoy/internal/contracts/normalize.go), not from the net tree diff, so this asks it that
+// way too: a push whose commits touch a path outside .legion/ and then undo it is handoff-only to a
+// net diff and code-changing to classify.ClassifyPush, and a head that skips CI while the daemon
+// refuses to carry a verdict to it ends with no verdict at all — a fix attempt counted against a
+// push that changed no code, and a red that does not send the tree back until the next full push.
 func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
 	if rewritten != "" {
 		return false, nil
@@ -178,6 +188,10 @@ func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
 	base := pushed
 	if base == "" {
 		base = "heads(::@- & ::trunk())"
+	}
+	touching, err := pushJJ(jj, dir, "log", "--no-graph", "-T", `commit_id ++ "\n"`, "-r", base+`..@- & files(~".legion/**")`)
+	if err != nil || touching != "" {
+		return false, err
 	}
 	changed, err := pushJJ(jj, dir, "diff", "--name-only", "--from", base, "--to", "@-")
 	if err != nil || changed == "" {

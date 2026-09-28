@@ -181,3 +181,31 @@ func TestPushRunsARewriteInFull(t *testing.T) {
 		t.Fatalf("the recorded tip is still there after the push: %v", err)
 	}
 }
+
+// The daemon classifies a push from the union of its commits' added/removed/modified paths (the
+// listener's changed_paths, packages/envoy/internal/contracts/normalize.go), not from the net tree
+// diff, so a push whose commits touch code and then undo it is code-changing to the daemon. Were
+// the skip decision the net diff, that head would skip CI and `classify.ClassifyPush` would refuse
+// to carry a verdict to it, leaving it with none: a fix attempt counted against a push that changed
+// no code, and a red that does not send the tree back. It runs in full instead.
+func TestPushRunsAPushWhoseCommitsTouchCodeInFull(t *testing.T) {
+	r := newPushRig(t)
+	r.commit("widget: add the line", map[string]string{"widget.txt": "one\n"})
+	if code, output := r.push(); code != 0 {
+		t.Fatalf("the code push = %d %q", code, output)
+	}
+	tip := r.run("log", "--no-graph", "-T", "commit_id", "-r", `remote_bookmarks(exact:"legion/LEGION-7", exact:"origin")`)
+	r.commit("scratch: add a file", map[string]string{"scratch.txt": "scratch\n"})
+	r.commit("scratch: drop it again", map[string]string{"scratch.txt": ""})
+	r.commit("test: record handoff", map[string]string{".legion/test.json": "{}\n"})
+	// The premise: the net tree diff of the whole push is the tester's handoff alone, so a skip
+	// decision taken from it skips.
+	if net := r.run("diff", "--name-only", "--from", tip, "--to", "@-"); net != ".legion/test.json" {
+		t.Fatalf("the push's net diff is %q; want the tester's handoff alone", net)
+	}
+	code, output := r.push()
+	pushed := r.pushed()
+	if code != 0 || strings.Contains(pushed, "skip-checks") || !strings.Contains(pushed, "Omp-Session: ses-pane") {
+		t.Fatalf("the push = %d %q, pushed %q; want it run in full", code, output, pushed)
+	}
+}
