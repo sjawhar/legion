@@ -115,6 +115,8 @@ jobs:
               - 'packages/pi-envoy/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
+              - 'package.json'
+              - 'bun.lock'
               # The Oh My Pi pin the phase-stall test runs (extensions/legion-phase-stall-omp.test.ts).
               - 'packages/daemon/src/daemon/omp-pin.ts'
               - '.github/actions/install-omp/**'
