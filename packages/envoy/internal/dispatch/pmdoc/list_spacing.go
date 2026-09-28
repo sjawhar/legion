@@ -427,13 +427,16 @@ func quotedListSpread(list *ast.List, quote, directive ast.Node, inDirective boo
 	}
 	threshold = max(threshold, least(last))
 	next := nextBlock(list)
-	if _, enclosingItem := next.(*ast.ListItem); enclosingItem {
-		// The next item of a list around this one.
-		return lines.blanksBefore(startOf(next), blank) >= threshold, ""
-	}
 	within := quote
 	if inDirective {
 		within = directive
+	}
+	// The next item of a list around this one, but not past the closing fence of the list's own
+	// typed block: the typed block's content is a document of its own to the browser editor's
+	// parser, which ends at that fence, so blank lines after it are not the list's, and the fence
+	// decides below.
+	if _, enclosingItem := next.(*ast.ListItem); enclosingItem && (!inDirective || !directive.(*typedDirective).Closed || isAncestor(within, next)) {
+		return lines.blanksBefore(startOf(next), blank) >= threshold, ""
 	}
 	if next == nil || !isAncestor(within, next) {
 		// At the end of the quote, or of a typed block inside it before its closing fence. A typed

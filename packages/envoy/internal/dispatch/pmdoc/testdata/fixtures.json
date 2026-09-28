@@ -25433,6 +25433,622 @@
     "rendered_by_milkdown": "Definitions ending in lists[^a][^b][^c], in quoted list items.\n\n> * a\n>   [^a]: *\n>         ```\n>         a\n>         ```\n>\n> Tail a.\n\nNext.\n\n> * b\n>   [^b]: *\n>         ```\n>         b\n>         ```\n>   Tail b.\n\nNext.\n\n> * c\n>   [^c]: > *\n>       >   ```\n>       >   c\n>       >   ```\n>\n> Tail c.\n"
   },
   {
+    "name": "quoted-items-holding-a-closed-callout",
+    "markdown": "An item of a quoted list holding a callout its own fence closes, with blank lines after the fence before the next item.\n\nNext.\n\n> * :::callout{#c1 kind=\"note\" title=\"\"}\n>   -\n>   :::\n>\n> *\n\nNext.\n\n> - :::callout{#c2 kind=\"note\" title=\"\"}\n>   - a\n>   :::\n>\n> - b\n\nNext.\n\n> 1. :::callout{#c3 kind=\"note\" title=\"\"}\n>    1. x\n>    :::\n>\n>\n> 2. y\n\nNext.\n\n>\t- :::callout{#c4 kind=\"note\" title=\"\"}\n>\t  - a\n>\t  - b\n>\t  :::\n>\n>\t- c\n\nNext.\n\n> > * ::::callout{#c5 kind=\"note\" title=\"\"}\n> >   1. a\n> >   ::::\n> >\n> >\n> >\n> > * x\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "An item of a quoted list holding a callout its own fence closes, with blank lines after the fence before the next item."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000006"
+                      }
+                    },
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "",
+                        "blockId": "c1"
+                      },
+                      "content": [
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000007"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000008"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000009"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000010"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000011"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000012"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000013"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000014"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000015"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000016"
+                      }
+                    },
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "",
+                        "blockId": "c2"
+                      },
+                      "content": [
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000017"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000018"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000019"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "a"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000020"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000021"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "b"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000022"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000023"
+          },
+          "content": [
+            {
+              "type": "ordered_list",
+              "attrs": {
+                "order": 1,
+                "spread": true,
+                "blockId": "b-000024"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000025"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000026"
+                      }
+                    },
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "",
+                        "blockId": "c3"
+                      },
+                      "content": [
+                        {
+                          "type": "ordered_list",
+                          "attrs": {
+                            "order": 1,
+                            "spread": false,
+                            "blockId": "b-000027"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000028"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000029"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "x"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000030"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000031"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000032"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000033"
+          },
+          "content": [
+            {
+              "type": "bullet_list",
+              "attrs": {
+                "spread": true,
+                "blockId": "b-000034"
+              },
+              "content": [
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000035"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000036"
+                      }
+                    },
+                    {
+                      "type": "callout",
+                      "attrs": {
+                        "kind": "note",
+                        "title": "",
+                        "blockId": "c4"
+                      },
+                      "content": [
+                        {
+                          "type": "bullet_list",
+                          "attrs": {
+                            "spread": false,
+                            "blockId": "b-000037"
+                          },
+                          "content": [
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000038"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000039"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "a"
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "type": "list_item",
+                              "attrs": {
+                                "label": "•",
+                                "listType": "bullet",
+                                "spread": false,
+                                "checked": null,
+                                "blockId": "b-000040"
+                              },
+                              "content": [
+                                {
+                                  "type": "paragraph",
+                                  "attrs": {
+                                    "blockId": "b-000041"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "text",
+                                      "text": "b"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "list_item",
+                  "attrs": {
+                    "label": "•",
+                    "listType": "bullet",
+                    "spread": false,
+                    "checked": null,
+                    "blockId": "b-000042"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000043"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "c"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000044"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "blockquote",
+          "attrs": {
+            "blockId": "b-000045"
+          },
+          "content": [
+            {
+              "type": "blockquote",
+              "attrs": {
+                "blockId": "b-000046"
+              },
+              "content": [
+                {
+                  "type": "bullet_list",
+                  "attrs": {
+                    "spread": true,
+                    "blockId": "b-000047"
+                  },
+                  "content": [
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000048"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000049"
+                          }
+                        },
+                        {
+                          "type": "callout",
+                          "attrs": {
+                            "kind": "note",
+                            "title": "",
+                            "blockId": "c5"
+                          },
+                          "content": [
+                            {
+                              "type": "ordered_list",
+                              "attrs": {
+                                "order": 1,
+                                "spread": false,
+                                "blockId": "b-000050"
+                              },
+                              "content": [
+                                {
+                                  "type": "list_item",
+                                  "attrs": {
+                                    "label": "•",
+                                    "listType": "bullet",
+                                    "spread": false,
+                                    "checked": null,
+                                    "blockId": "b-000051"
+                                  },
+                                  "content": [
+                                    {
+                                      "type": "paragraph",
+                                      "attrs": {
+                                        "blockId": "b-000052"
+                                      },
+                                      "content": [
+                                        {
+                                          "type": "text",
+                                          "text": "a"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "list_item",
+                      "attrs": {
+                        "label": "•",
+                        "listType": "bullet",
+                        "spread": false,
+                        "checked": null,
+                        "blockId": "b-000053"
+                      },
+                      "content": [
+                        {
+                          "type": "paragraph",
+                          "attrs": {
+                            "blockId": "b-000054"
+                          },
+                          "content": [
+                            {
+                              "type": "text",
+                              "text": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AdsBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBd0FuIGl0ZW0gb2YgYSBxdW90ZWQgbGlzdCBob2xkaW5nIGEgY2FsbG91dCBpdHMgb3duIGZlbmNlIGNsb3Nlcywgd2l0aCBibGFuayBsaW5lcyBhZnRlciB0aGUgZmVuY2UgYmVmb3JlIHRoZSBuZXh0IGl0ZW0uKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAAXoGBAABewVOZXh0LigAAXoHYmxvY2tJZAF3CGItMDAwMDAyhwF6AwpibG9ja3F1b3RlBwABggEDC2J1bGxldF9saXN0BwABgwEDCWxpc3RfaXRlbQcAAYQBAwlwYXJhZ3JhcGgoAAGFAQdibG9ja0lkAXcIYi0wMDAwMDaHAYUBAwdjYWxsb3V0BwABhwEDC2J1bGxldF9saXN0BwABiAEDCWxpc3RfaXRlbQcAAYkBAwlwYXJhZ3JhcGgoAAGKAQdibG9ja0lkAXcIYi0wMDAwMDkoAAGJAQVsYWJlbAF3A+KAoigAAYkBCGxpc3RUeXBlAXcGYnVsbGV0KAABiQEGc3ByZWFkAXkoAAGJAQdibG9ja0lkAXcIYi0wMDAwMDgoAAGIAQZzcHJlYWQBeSgAAYgBB2Jsb2NrSWQBdwhiLTAwMDAwNygAAYcBBGtpbmQBdwRub3RlKAABhwEFdGl0bGUBdwAoAAGHAQdibG9ja0lkAXcCYzEoAAGEAQVsYWJlbAF3A+KAoigAAYQBCGxpc3RUeXBlAXcGYnVsbGV0KAABhAEGc3ByZWFkAXkoAAGEAQdibG9ja0lkAXcIYi0wMDAwMDWHAYQBAwlsaXN0X2l0ZW0HAAGZAQMJcGFyYWdyYXBoKAABmgEHYmxvY2tJZAF3CGItMDAwMDExKAABmQEFbGFiZWwBdwPigKIoAAGZAQhsaXN0VHlwZQF3BmJ1bGxldCgAAZkBBnNwcmVhZAF5KAABmQEHYmxvY2tJZAF3CGItMDAwMDEwKAABgwEGc3ByZWFkAXgoAAGDAQdibG9ja0lkAXcIYi0wMDAwMDQoAAGCAQdibG9ja0lkAXcIYi0wMDAwMDOHAYIBAwlwYXJhZ3JhcGgHAAGjAQYEAAGkAQVOZXh0LigAAaMBB2Jsb2NrSWQBdwhiLTAwMDAxMocBowEDCmJsb2NrcXVvdGUHAAGrAQMLYnVsbGV0X2xpc3QHAAGsAQMJbGlzdF9pdGVtBwABrQEDCXBhcmFncmFwaCgAAa4BB2Jsb2NrSWQBdwhiLTAwMDAxNocBrgEDB2NhbGxvdXQHAAGwAQMLYnVsbGV0X2xpc3QHAAGxAQMJbGlzdF9pdGVtBwABsgEDCXBhcmFncmFwaAcAAbMBBgQAAbQBAWEoAAGzAQdibG9ja0lkAXcIYi0wMDAwMTkoAAGyAQVsYWJlbAF3A+KAoigAAbIBCGxpc3RUeXBlAXcGYnVsbGV0KAABsgEGc3ByZWFkAXkoAAGyAQdibG9ja0lkAXcIYi0wMDAwMTgoAAGxAQZzcHJlYWQBeSgAAbEBB2Jsb2NrSWQBdwhiLTAwMDAxNygAAbABBGtpbmQBdwRub3RlKAABsAEFdGl0bGUBdwAoAAGwAQdibG9ja0lkAXcCYzIoAAGtAQVsYWJlbAF3A+KAoigAAa0BCGxpc3RUeXBlAXcGYnVsbGV0KAABrQEGc3ByZWFkAXkoAAGtAQdibG9ja0lkAXcIYi0wMDAwMTWHAa0BAwlsaXN0X2l0ZW0HAAHEAQMJcGFyYWdyYXBoBwABxQEGBAABxgEBYigAAcUBB2Jsb2NrSWQBdwhiLTAwMDAyMSgAAcQBBWxhYmVsAXcD4oCiKAABxAEIbGlzdFR5cGUBdwZidWxsZXQoAAHEAQZzcHJlYWQBeSgAAcQBB2Jsb2NrSWQBdwhiLTAwMDAyMCgAAawBBnNwcmVhZAF4KAABrAEHYmxvY2tJZAF3CGItMDAwMDE0KAABqwEHYmxvY2tJZAF3CGItMDAwMDEzhwGrAQMJcGFyYWdyYXBoBwAB0AEGBAAB0QEFTmV4dC4oAAHQAQdibG9ja0lkAXcIYi0wMDAwMjKHAdABAwpibG9ja3F1b3RlBwAB2AEDDG9yZGVyZWRfbGlzdAcAAdkBAwlsaXN0X2l0ZW0HAAHaAQMJcGFyYWdyYXBoKAAB2wEHYmxvY2tJZAF3CGItMDAwMDI2hwHbAQMHY2FsbG91dAcAAd0BAwxvcmRlcmVkX2xpc3QHAAHeAQMJbGlzdF9pdGVtBwAB3wEDCXBhcmFncmFwaAcAAeABBgQAAeEBAXgoAAHgAQdibG9ja0lkAXcIYi0wMDAwMjkoAAHfAQVsYWJlbAF3A+KAoigAAd8BCGxpc3RUeXBlAXcGYnVsbGV0KAAB3wEGc3ByZWFkAXkoAAHfAQdibG9ja0lkAXcIYi0wMDAwMjgoAAHeAQVvcmRlcgF9ASgAAd4BBnNwcmVhZAF5KAAB3gEHYmxvY2tJZAF3CGItMDAwMDI3KAAB3QEEa2luZAF3BG5vdGUoAAHdAQV0aXRsZQF3ACgAAd0BB2Jsb2NrSWQBdwJjMygAAdoBBWxhYmVsAXcD4oCiKAAB2gEIbGlzdFR5cGUBdwZidWxsZXQoAAHaAQZzcHJlYWQBeSgAAdoBB2Jsb2NrSWQBdwhiLTAwMDAyNYcB2gEDCWxpc3RfaXRlbQcAAfIBAwlwYXJhZ3JhcGgHAAHzAQYEAAH0AQF5KAAB8wEHYmxvY2tJZAF3CGItMDAwMDMxKAAB8gEFbGFiZWwBdwPigKIoAAHyAQhsaXN0VHlwZQF3BmJ1bGxldCgAAfIBBnNwcmVhZAF5KAAB8gEHYmxvY2tJZAF3CGItMDAwMDMwKAAB2QEFb3JkZXIBfQEoAAHZAQZzcHJlYWQBeCgAAdkBB2Jsb2NrSWQBdwhiLTAwMDAyNCgAAdgBB2Jsb2NrSWQBdwhiLTAwMDAyM4cB2AEDCXBhcmFncmFwaAcAAf8BBgQAAYACBU5leHQuKAAB/wEHYmxvY2tJZAF3CGItMDAwMDMyhwH/AQMKYmxvY2txdW90ZQcAAYcCAwtidWxsZXRfbGlzdAcAAYgCAwlsaXN0X2l0ZW0HAAGJAgMJcGFyYWdyYXBoKAABigIHYmxvY2tJZAF3CGItMDAwMDM2hwGKAgMHY2FsbG91dAcAAYwCAwtidWxsZXRfbGlzdAcAAY0CAwlsaXN0X2l0ZW0HAAGOAgMJcGFyYWdyYXBoBwABjwIGBAABkAIBYSgAAY8CB2Jsb2NrSWQBdwhiLTAwMDAzOSgAAY4CBWxhYmVsAXcD4oCiKAABjgIIbGlzdFR5cGUBdwZidWxsZXQoAAGOAgZzcHJlYWQBeSgAAY4CB2Jsb2NrSWQBdwhiLTAwMDAzOIcBjgIDCWxpc3RfaXRlbQcAAZcCAwlwYXJhZ3JhcGgHAAGYAgYEAAGZAgFiKAABmAIHYmxvY2tJZAF3CGItMDAwMDQxKAABlwIFbGFiZWwBdwPigKIoAAGXAghsaXN0VHlwZQF3BmJ1bGxldCgAAZcCBnNwcmVhZAF5KAABlwIHYmxvY2tJZAF3CGItMDAwMDQwKAABjQIGc3ByZWFkAXkoAAGNAgdibG9ja0lkAXcIYi0wMDAwMzcoAAGMAgRraW5kAXcEbm90ZSgAAYwCBXRpdGxlAXcAKAABjAIHYmxvY2tJZAF3AmM0KAABiQIFbGFiZWwBdwPigKIoAAGJAghsaXN0VHlwZQF3BmJ1bGxldCgAAYkCBnNwcmVhZAF5KAABiQIHYmxvY2tJZAF3CGItMDAwMDM1hwGJAgMJbGlzdF9pdGVtBwABqQIDCXBhcmFncmFwaAcAAaoCBgQAAasCAWMoAAGqAgdibG9ja0lkAXcIYi0wMDAwNDMoAAGpAgVsYWJlbAF3A+KAoigAAakCCGxpc3RUeXBlAXcGYnVsbGV0KAABqQIGc3ByZWFkAXkoAAGpAgdibG9ja0lkAXcIYi0wMDAwNDIoAAGIAgZzcHJlYWQBeCgAAYgCB2Jsb2NrSWQBdwhiLTAwMDAzNCgAAYcCB2Jsb2NrSWQBdwhiLTAwMDAzM4cBhwIDCXBhcmFncmFwaAcAAbUCBgQAAbYCBU5leHQuKAABtQIHYmxvY2tJZAF3CGItMDAwMDQ0hwG1AgMKYmxvY2txdW90ZQcAAb0CAwpibG9ja3F1b3RlBwABvgIDC2J1bGxldF9saXN0BwABvwIDCWxpc3RfaXRlbQcAAcACAwlwYXJhZ3JhcGgoAAHBAgdibG9ja0lkAXcIYi0wMDAwNDmHAcECAwdjYWxsb3V0BwABwwIDDG9yZGVyZWRfbGlzdAcAAcQCAwlsaXN0X2l0ZW0HAAHFAgMJcGFyYWdyYXBoBwABxgIGBAABxwIBYSgAAcYCB2Jsb2NrSWQBdwhiLTAwMDA1MigAAcUCBWxhYmVsAXcD4oCiKAABxQIIbGlzdFR5cGUBdwZidWxsZXQoAAHFAgZzcHJlYWQBeSgAAcUCB2Jsb2NrSWQBdwhiLTAwMDA1MSgAAcQCBW9yZGVyAX0BKAABxAIGc3ByZWFkAXkoAAHEAgdibG9ja0lkAXcIYi0wMDAwNTAoAAHDAgRraW5kAXcEbm90ZSgAAcMCBXRpdGxlAXcAKAABwwIHYmxvY2tJZAF3AmM1KAABwAIFbGFiZWwBdwPigKIoAAHAAghsaXN0VHlwZQF3BmJ1bGxldCgAAcACBnNwcmVhZAF5KAABwAIHYmxvY2tJZAF3CGItMDAwMDQ4hwHAAgMJbGlzdF9pdGVtBwAB2AIDCXBhcmFncmFwaAcAAdkCBgQAAdoCAXgoAAHZAgdibG9ja0lkAXcIYi0wMDAwNTQoAAHYAgVsYWJlbAF3A+KAoigAAdgCCGxpc3RUeXBlAXcGYnVsbGV0KAAB2AIGc3ByZWFkAXkoAAHYAgdibG9ja0lkAXcIYi0wMDAwNTMoAAG/AgZzcHJlYWQBeCgAAb8CB2Jsb2NrSWQBdwhiLTAwMDA0NygAAb4CB2Jsb2NrSWQBdwhiLTAwMDA0NigAAb0CB2Jsb2NrSWQBdwhiLTAwMDA0NQA=",
+    "rendered_by_milkdown": "An item of a quoted list holding a callout its own fence closes, with blank lines after the fence before the next item.\n\nNext.\n\n> *\n>   :::callout{#c1 kind=\"note\" title}\n>   *\n>   :::\n>\n> *\n\nNext.\n\n> *\n>   :::callout{#c2 kind=\"note\" title}\n>   * a\n>   :::\n>\n> * b\n\nNext.\n\n> 1.\n>    :::callout{#c3 kind=\"note\" title}\n>    1. x\n>    :::\n>\n> 2. y\n\nNext.\n\n> *\n>   :::callout{#c4 kind=\"note\" title}\n>   * a\n>   * b\n>   :::\n>\n> * c\n\nNext.\n\n> > *\n> >   :::callout{#c5 kind=\"note\" title}\n> >   1. a\n> >   :::\n> >\n> > * x\n"
+  },
+  {
     "name": "quoted-typed-block-list-ends",
     "markdown": "Blank lines after a list at the end of a typed block in a quote.\n\nNext.\n\n> :::callout{#c1 kind=\"note\" title=\"\"}\n> - a\n>\n>\n\nNext.\n\n> :::callout{#c2 kind=\"note\" title=\"\"}\n> - a\n>\n>\n>\n\nNext.\n\n> :::callout{#c3 kind=\"note\" title=\"\"}\n> - a\n> - b\n>\n>\n\nNext.\n\n> > :::callout{#c4 kind=\"note\" title=\"\"}\n> > - a\n> >\n> >\n\nNext.\n\n> :::callout{#c5 kind=\"note\" title=\"\"}\n> - >\n>\n>\n\nNext.\n\n> :::callout{#c6 kind=\"note\" title=\"\"}\n> - > q\n>\n>\n> :::\n\nNext.\n\n> :::callout{#c7 kind=\"note\" title=\"\"}\n> - > q\n>\n>\n>\n> :::\n\nNext.\n\n> :::callout{#c8 kind=\"note\" title=\"\"}\n> - a\n>\n>\n> :::\n\nNext.\n\n> :::callout{#c9 kind=\"note\" title=\"\"}\n> - a\n>\n> - b\n>\n>\n\nNext.\n\n:::callout{#c31 kind=\"note\" title=\"\"}\n> > - a\n> >\n>\n> x\n:::\n\nNext.\n\n> > - a\n> >\n>\n> > b\n\nNext.\n\nAn empty code block in a list in a quote in a typed block in a quote, its blank line the code's:\n\n:::callout{#c40 kind=\"note\" title=\"\"}\n> :::callout{#c41 kind=\"note\" title=\"\"}\n> - ```\n>   \n>   ```\n> :::\n:::\n\nNext.\n\n> :::callout{#c42 kind=\"note\" title=\"\"}\n> > - ```\n> >   \n> >   ```\n> > tail\n> :::\n",
     "pm_json": {
