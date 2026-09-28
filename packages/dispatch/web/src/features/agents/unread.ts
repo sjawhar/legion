@@ -29,6 +29,9 @@ function newestSessionReply(
   let newest: string | undefined;
   for (const read of exchanges) {
     for (const reply of read.replies) {
+      // A session id and a GitHub login are disjoint namespaces, so the id test implies the kind.
+      // The server's rule tests the kind and this one tests the id; a reader restoring the
+      // symmetry by dropping the other side's clause would break it.
       if (reply.author.id !== sessionId) continue;
       if (newest === undefined || Date.parse(reply.created_at) > Date.parse(newest)) {
         newest = reply.created_at;

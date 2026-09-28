@@ -880,6 +880,12 @@ func assertRootCarriesDelivery(t *testing.T, database *store.Store, rootID, sess
 	}
 }
 
+// This and TestTheUnreadFlagFollowsTheReadMark below fail together under every mutation of the
+// unread rule but one, which is why both stay: making the flag session-level rather than per
+// root (messages.go's `on unread.root_id = c.id` written `on exists (select 1 from
+// unread_direct_replies)`) reds only this one, whose fixture holds a second, all-read
+// conversation and asserts the flag on each root separately.
+//
 // The flag a conversation comes back with is the read mark's verdict, not "this session has
 // replied here". Written by the Legion PO's reviewer (#1533, issuecomment-5865095561), green at
 // 13dbc553; it hangs off directConversationFrom, as TestARootInBothCandidateBranchesIsListedOnce
@@ -969,7 +975,8 @@ func windowEntry(t *testing.T, handler http.Handler, login, sessionID, rootID st
 
 // The flag a conversation comes back with is the read mark's verdict, not "this session has ever
 // replied here": a conversation whose every reply the viewer has read is not unread, and one that
-// has gained a reply since is, counting that reply alone.
+// has gained a reply since is, counting that reply alone. Its pair above is the one that
+// separates a per-root flag from a session-level one; this holds the count's side of the rule.
 func TestTheUnreadFlagFollowsTheReadMark(t *testing.T) {
 	handler, _, root, reply, _ := directConversationFrom(t, "alice")
 	first := decodeBody[model.Message](t, reply("The reply the viewer has read."))
