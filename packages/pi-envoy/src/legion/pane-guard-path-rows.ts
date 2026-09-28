@@ -768,6 +768,22 @@ export const PATH_ROWS: readonly PathRow[] = [
     command: 'chmod -R 000 "$(realpath "$HOME/keep")"',
     dotdot: false,
   },
+  {
+    name: "realpath.s.logical.cwd",
+    family: "substitution",
+    role: "probe",
+    // `e` is a symlink: bash's kernel cwd after `cd e` is physically the home, though the
+    // logical `$PWD` text still reads `e`. A lexical mode must resolve the cwd itself first.
+    command: 'cd e && chmod -R 000 "$(realpath -s ..)"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.s.logical.cwd.inside",
+    family: "substitution",
+    role: "must-allow",
+    command: 'cd in && chmod -R 700 "$(realpath -s ..)/sub"',
+    dotdot: true,
+  },
 
   // --- a resolution that fails: each must be unknown, never harmless ---
   {

@@ -1292,14 +1292,18 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
   if (base === "readlink" && !list.some((arg) => literalText(arg.exp)?.includes("f")))
     return undefined;
   if (base === "realpath") {
+    // `realpath` resolves a relative operand against `getcwd()`, the PHYSICAL directory —
+    // `st.cwd` is bash's LOGICAL PWD, which a `cd` into a symlink leaves pointed at the link's
+    // text, not its target. Both lexical modes below need the physical directory first.
+    const here = physical("/", st.cwd, true);
     // `-s`/`--strip`/`--no-symlinks` expand no symlink at all: the operand's own text, resolved
-    // lexically, is what bash prints.
+    // lexically against the physical cwd, is what bash prints.
     if (
       found.options.some(
         (option) => option === "--strip" || option === "--no-symlinks" || /^-[^-]*s/.test(option)
       )
     ) {
-      return path.resolve(st.cwd, target);
+      return "unknown" in here ? undefined : path.resolve(here.real, target);
     }
     // `--relative-to`/`--relative-base` print a path relative to another directory, which this
     // function does not compute.
@@ -1316,7 +1320,8 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
       })
       .at(-1);
     if (mode === "L") {
-      const resolved = physical("/", path.resolve(st.cwd, target), true);
+      if ("unknown" in here) return undefined;
+      const resolved = physical("/", path.resolve(here.real, target), true);
       return "unknown" in resolved ? undefined : resolved.real;
     }
   }
