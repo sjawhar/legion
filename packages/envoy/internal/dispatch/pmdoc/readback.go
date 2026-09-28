@@ -105,20 +105,23 @@ func documentMisread(doc *Node) (string, error) {
 	return difference, nil
 }
 
-// RefuseMisreadWrite refuses (ErrSchema) a write whose document reads back otherwise where before
-// did not (NewMisread), or, with a nil before, a whole document the write makes that reads back
-// otherwise (documentMisread): what is stored is its rendering, which the next read would give back
-// as another document or refuse. The rules that read a shape refuse what they know first, so a
-// refusal here names a shape none of them reads, and is logged. Any other error reading it back, a
-// panic (ErrPanic) among them, is the error.
+// RefuseMisreadDocument refuses (ErrSchema) a whole document a write makes, a spec, an upload or a
+// version, that reads back otherwise (documentMisread), and RefuseMisreadWrite a write into a
+// document, an insert, whose result reads back otherwise where before did not (NewMisread). What
+// is stored is the rendering, which the next read would give back as another document or refuse.
+// The rules that read a shape refuse what they know first, so a refusal here names a shape none of
+// them reads, and is logged. Any other error reading it back, a panic (ErrPanic) among them, is
+// the error.
+func RefuseMisreadDocument(doc *Node) error {
+	return refuseMisread(documentMisread(doc))
+}
+
+// RefuseMisreadWrite refuses a write into a document; see RefuseMisreadDocument.
 func RefuseMisreadWrite(before, after *Node) error {
-	var misread string
-	var err error
-	if before == nil {
-		misread, err = documentMisread(after)
-	} else {
-		misread, err = NewMisread(before, after)
-	}
+	return refuseMisread(NewMisread(before, after))
+}
+
+func refuseMisread(misread string, err error) error {
 	if err != nil {
 		return err
 	}

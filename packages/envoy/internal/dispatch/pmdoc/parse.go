@@ -97,13 +97,13 @@ func Parse(markdown string) (*Node, error) {
 // whole, or nil for a fragment or a new document: a repeat live already carries is not refused
 // (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. A document
 // whose rendering, the markdown it is stored as, reads back otherwise is refused
-// (RefuseMisreadWrite).
+// (RefuseMisreadDocument).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	doc, err := parseForWrite(markdown, live, true)
 	if err != nil {
 		return nil, err
 	}
-	if err := RefuseMisreadWrite(nil, doc); err != nil {
+	if err := RefuseMisreadDocument(doc); err != nil {
 		return nil, err
 	}
 	return doc, nil
