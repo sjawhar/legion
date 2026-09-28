@@ -586,3 +586,138 @@ test("the header checkbox stays under the pointer on a phone when its click open
     await alice.close();
   }
 });
+
+test("on a phone the open composer keeps to 40% of the screen at two or forty recipients, leaves two whole rows and a third checkbox above it, and keeps every chip reachable", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the viewport is set here, not by the project");
+  const number = (index: number) => String(index + 1).padStart(2, "0");
+  await setLiveSessions(
+    Array.from({ length: 40 }, (_, index) => ({
+      capabilities: ["aside", "btw"],
+      dir: `/workspaces/planner-${number(index)}`,
+      machine_id: "build-host",
+      roles: ["planner"],
+      session_id: `planner-${number(index)}-session`,
+      title: `Planner ${number(index)}`,
+    }))
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const viewport = { height: 664, width: 390 };
+    await page.setViewportSize(viewport);
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    const row = (index: number) =>
+      agents.getByRole("checkbox", { name: `Select Planner ${number(index)} for broadcast` });
+    const budget = viewport.height * 0.4;
+    const composerHeight = async () => (await composer.boundingBox())?.height ?? Infinity;
+
+    await agents.getByRole("button", { name: "No Dispatch activity (40)" }).click();
+    await row(0).check();
+    await row(1).check();
+    await expect(
+      composer.getByRole("heading", { name: "Broadcast to 2 of 2 selected" })
+    ).toBeVisible();
+    const heightAtTwo = await composerHeight();
+    expect(heightAtTwo).toBeLessThanOrEqual(budget);
+
+    // Forty recipients: the count stays exact, the composer stays inside its budget, and the
+    // recipients are one line that scrolls sideways to its last chip.
+    await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
+    await expect(
+      composer.getByRole("heading", { name: "Broadcast to 40 of 40 selected" })
+    ).toBeVisible();
+    // One line of chips: forty recipients take exactly the height two did, inside the budget.
+    const heightAtForty = await composerHeight();
+    expect(heightAtForty).toBeLessThanOrEqual(budget);
+    expect(heightAtForty).toBe(heightAtTwo);
+    // At the top of the page the composer covers none of the selection header.
+    await page.evaluate(() => window.scrollTo(0, 0));
+    const topOfComposer = (await composer.boundingBox())?.y ?? 0;
+    for (const control of [
+      agents.getByRole("checkbox", { name: "Select all matching agents" }),
+      agents.getByRole("button", { name: "Clear selection" }),
+    ]) {
+      const box = await control.boundingBox();
+      expect((box?.y ?? Infinity) + (box?.height ?? 0)).toBeLessThanOrEqual(topOfComposer);
+    }
+    // At the worst case, forty selected, with the first card scrolled to the top of the viewport:
+    // two whole rows sit above the composer's top edge, and the third row's checkbox does too,
+    // so it can be ticked without scrolling. A third whole row is bounded by the card, about
+    // 165 px tall at 390.
+    await row(0).evaluate((element) =>
+      element.closest("article")?.scrollIntoView({ block: "start" })
+    );
+    const composerTop = (await composer.boundingBox())?.y ?? 0;
+    const above = async (box: { y: number; height: number } | null) =>
+      box !== null && box.y >= 0 && box.y + box.height <= composerTop;
+    let wholeRowsAbove = 0;
+    for (const card of await agents.locator("article").all()) {
+      if (await above(await card.boundingBox())) wholeRowsAbove += 1;
+    }
+    expect(wholeRowsAbove).toBeGreaterThanOrEqual(2);
+    expect(await above(await row(2).boundingBox())).toBe(true);
+    const chips = composer.getByRole("list", { name: "Selected agents" });
+    expect(await chips.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+    const last = chips.getByRole("button", { name: /^Planner 40/ });
+    await last.scrollIntoViewIfNeeded();
+    await expect(last).toBeInViewport();
+    const [lastBox, lineBox] = [await last.boundingBox(), await chips.boundingBox()];
+    expect(lastBox?.y).toBe(lineBox?.y);
+    expect((lastBox?.x ?? Infinity) + (lastBox?.width ?? 0)).toBeLessThanOrEqual(
+      (lineBox?.x ?? 0) + (lineBox?.width ?? 0) + 0.5
+    );
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a session that registers under the filter after select-all is not swept into the send", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the selection rule");
+  const planner = (id: string): FakeSession => ({
+    capabilities: ["aside", "btw"],
+    dir: `/workspaces/${id}`,
+    machine_id: "build-host",
+    roles: ["planner"],
+    session_id: `${id}-session`,
+    title: `Planner ${id.toUpperCase()}`,
+  });
+  await setLiveSessions([planner("a"), planner("b")]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const header = agents.getByRole("checkbox", { name: "Select all matching agents" });
+    const composer = page.getByRole("region", { name: "Broadcast" });
+    await agents.getByRole("combobox", { name: "Role" }).selectOption("planner");
+    await header.click();
+    await expect(header).toHaveAccessibleDescription("2 of 2 matching selected");
+
+    // A third planner registers; the page learns of it on its next agent poll.
+    await setLiveSessions([planner("a"), planner("b"), planner("c")]);
+    await expect(header).toHaveAccessibleDescription("2 of 3 matching selected", {
+      timeout: 30_000,
+    });
+    await expect(header).toBeChecked({ indeterminate: true });
+    await expect(
+      composer.getByRole("heading", { name: "Broadcast to 2 of 2 selected" })
+    ).toBeVisible();
+
+    await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Only the two.");
+    await composer.getByRole("button", { name: "Send to 2" }).click();
+    await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
+    await expect
+      .poll(async () => (await getSentMessages()).map((entry) => entry.target_session).sort())
+      .toEqual(["a-session", "b-session"]);
+  } finally {
+    await alice.close();
+  }
+});
