@@ -249,3 +249,12 @@ func architectEnded(tree treeSnapshot, state supervise.ClaimState) string {
 	}
 	return ""
 }
+
+// stoppedWithTree says whether the owning architect of a notice, its claim in state, has stopped
+// with its finished tree: the tree lingers or has closed (lingers), and the claim does not run, as
+// the close suspended it or it failed or retired. Nothing more is sent to such an architect, not
+// even through the Envoy registration its stopped session left behind: re-admission starts it with
+// the tree's record rather than the notices of its close.
+func stoppedWithTree(lingers bool, state supervise.ClaimState) bool {
+	return lingers && !claimRuns(state)
+}

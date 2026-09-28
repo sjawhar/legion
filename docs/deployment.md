@@ -6,6 +6,46 @@ can ask the `secrets` broker (secretsd) for any agent-tier key. A credential tha
 may hold therefore cannot live in the agent tier without every pane being able to read it.
 Kubernetes deployments (`docs/kubernetes.md`) get a pod boundary instead and do not need this page.
 
+## The pane guard
+
+Because every pane runs as the daemon's own user, the Legion extension (`packages/pi-envoy`) holds
+each phase worker's and root architect's tool calls, and those of any `task` subagent they spawn,
+to a boundary before they run; it refuses the shared jj operation-log rewrites (LEGION-45) and,
+since LEGION-121, destructive commands and signals outside the pane's own work.
+A `bash` command, `eval` code, or `hub` process start may delete (`rm`, `unlink`, `find -delete`,
+`find -exec rm`, `shred`), move (`mv`), truncate (`truncate`), overwrite by redirection or `tee`
+(an existing file only), or recursively change the mode or owner (`chmod -R`, `chown -R`) of paths
+under the pane's issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and any directory below
+`/tmp` except `/tmp` itself, a glob over it, and its tmux and ssh socket directories. The guard
+cannot tell which permitted `/tmp` directory belongs to this pane. It parses the command with a bash
+parser and resolves each target as bash would: through `$HOME`, `~`, variables set earlier in the
+same command, `$(mktemp -d)`, `cd`, braces, command substitutions, and the scripts the command
+runs (`bash <file>`, `sh -c`, `source`, a heredoc fed to a shell, a script run by path,
+python/node/bun scripts). A target with no proven path prefix is refused, as is a command the
+parser reports as malformed. An unknown trailing component under a prefix already proven inside a
+permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused outright. For `tmux
+kill-*`, the guard resolves the socket as tmux does (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`,
+then `$TMUX`, then the default socket) and refuses a resolved path outside the pane roots. `kill`
+only reaches a pid that `/proc` shows descending from the pane's own Oh My Pi process. Every refusal
+names the target, where it resolved, and the rule, so the agent can rewrite the command.
+
+The guard reads text before it runs, so it cannot see what is only decided at run time: a compiled
+program or anything a command runs without naming it on the command line (a `make` target, a test
+runner, `npm run`), a program whose name is itself a variable or a command's output
+(`$cmd`, `eval "$(tool)"`), Python or JavaScript whose paths or pids come from values it cannot
+evaluate (the `eval` tool's kernels included; known prefixes are still judged), and interpreters
+the guard does not read (`perl`, `ruby`, `awk`), commands outside the families above that overwrite
+a destination (`cp`, `dd`, `ln -f`, `install`), append writes (`>>`, `tee -a`, `sed -i`), a
+directory reached through a `cd` that failed, and the `write` and `edit` tools. The guard checks a
+destination for `rsync`, extract-mode `tar`, and `unzip` when it can identify one. It also cannot
+distinguish one pane's allowed `/tmp` directory from another. A running shell started through `hub`
+can receive later unguarded input, and `xd://debug` can launch an unguarded program. The documented
+residuals are `git -C <path> clean`, Python loop values, an aliased CommonJS `require`, an `eval`
+trap whose outer exit timing is not modeled, an `rsync` destination followed by an unrecognised
+valued option, and a `TMUX` value that begins with a comma and therefore names no socket path.
+This is a mistake-guard, not a sandbox: it exists because an agent probe deleted the operator's home
+directory. LEGION-122 and the Kubernetes pod boundary are the hard isolation controls.
+
 ## Current decision for the LEGION deployment
 
 On 2026-09-13 Sami decided that the two GitHub App private keys stay in the secrets store's agent

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -64,13 +65,9 @@ func TestPollHoldReleaseClosesAHeldRootOnAQuietStreamWithinABound(t *testing.T) 
 	}
 	// target is far past anything an ack floor on this empty stream will ever reach: only idle —
 	// a fresh consumer with nothing ever published to it — can close this hold.
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return admission.Reconcile(context.Background(), tx, []dispatch.IssueSummary{
-			{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
-		}, 1000, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
-	}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+	}, 1000, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind record, want it held")
 	}
@@ -107,13 +104,9 @@ func TestPollHoldReleaseRetriesAFailedPositionRead(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed root: %v", err)
 	}
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return admission.Reconcile(context.Background(), tx, []dispatch.IssueSummary{
-			{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
-		}, 5, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
-	}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+	}, 5, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind record, want it held")
 	}
@@ -159,13 +152,9 @@ func TestPollHoldReleaseRetriesAFailedApplyOfAnUnchangedPosition(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed root: %v", err)
 	}
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return admission.Reconcile(context.Background(), tx, []dispatch.IssueSummary{
-			{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
-		}, 5, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
-	}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+	}, 5, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind record, want it held")
 	}
@@ -434,13 +423,9 @@ func TestPollHoldReleaseWarnsWhenAHoldPersistsPastItsBound(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed root: %v", err)
 	}
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return admission.Reconcile(context.Background(), tx, []dispatch.IssueSummary{
-			{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
-		}, 5, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
-	}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+	}, 5, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind record, want it held")
 	}
@@ -472,28 +457,24 @@ func TestPollHoldReleaseWarnsWhenAHoldPersistsPastItsBound(t *testing.T) {
 
 // A collapsed held-key rule an earlier round shipped returned for every
 // event on a held unrecorded key, a newer labeled todo included — but ApplyFact's advisory lock is
-// transaction-scoped and frees at commit, before AfterCommit runs (which clears pending), so an
+// transaction-scoped and frees at commit, before its commit hook runs (which clears pending), so an
 // event applying in that exact window still saw the key held and, under the collapsed rule,
 // dropped it: refreshed a summary about to be deleted and was acknowledged without recording
 // anything, unrecorded until its next event. admit.go's stale-only check now instead lets a
 // genuinely newer event still record in that window regardless of the doomed pending entry. Even
 // so, that record is skipped by the same transaction's own promote, which still sees the key held
-// (pending has not cleared yet); nothing else promotes it once AfterCommit finally does clear it.
+// (pending has not cleared yet); nothing else promotes it once the hook finally does clear it.
 // pollHoldReleaseWith's one more pass, once Held() turns false, closes that gap — no database
 // table of held keys, no later event of any kind needed.
-func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsAfterCommitIsRecordedThenPromoted(t *testing.T) {
+func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsCommitHookIsRecordedThenPromoted(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return admission.Reconcile(context.Background(), tx, []dispatch.IssueSummary{
-			{Key: "LEGION-RACE", Title: "race", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
-		}, 10, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
-	}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-RACE", Title: "race", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
+	}, 10, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind unlabeled record, want it held")
 	}
@@ -518,14 +499,14 @@ func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsAfterCommitIsRe
 	})
 
 	// release's own transaction commits here — its advisory lock is transaction-scoped and frees
-	// right at commit — but its AfterCommit, which clears pending, has not run yet: the exact
+	// right at commit — but its commit hook, which clears pending, has not run yet: the exact
 	// window a concurrent event can land in.
 	tx, err := pool.Begin(context.Background())
 	if err != nil {
 		t.Fatalf("begin release tx: %v", err)
 	}
-	result, err := admission.Apply(context.Background(), tx, intake.DispatchConsumerPosition{AckFloorStream: 10})
-	if err != nil {
+	applied, committed := intake.WithCommitHooks(context.Background())
+	if _, err := admission.Apply(applied, tx, intake.DispatchConsumerPosition{AckFloorStream: 10}); err != nil {
 		t.Fatalf("apply position fact: %v", err)
 	}
 	if err := tx.Commit(context.Background()); err != nil {
@@ -553,13 +534,11 @@ func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsAfterCommitIsRe
 		t.Fatal("LEGION-RACE already slotted before pending cleared, want it recorded but not yet promoted (that transaction's own promote still saw it held)")
 	}
 
-	// AfterCommit finally runs, clearing pending — exactly what ApplyFact would have done right
+	// The commit hook finally runs, clearing pending — exactly what ApplyFact would have done right
 	// after its own commit.
-	for _, after := range result.AfterCommit {
-		after()
-	}
+	committed()
 	if admission.Held() {
-		t.Fatal("Held() = true after AfterCommit ran, want the hold cleared")
+		t.Fatal("Held() = true after the commit hook ran, want the hold cleared")
 	}
 
 	// Driven through the real ticker: the running poll's own next tick, having observed
@@ -587,13 +566,9 @@ func TestPollHoldReleaseRetriesAFailedClosingPass(t *testing.T) {
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return admission.Reconcile(context.Background(), tx, []dispatch.IssueSummary{
-			{Key: "LEGION-RACE", Title: "race", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
-		}, 10, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
-	}); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
+	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-RACE", Title: "race", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
+	}, 10, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind unlabeled record, want it held")
 	}
@@ -616,14 +591,14 @@ func TestPollHoldReleaseRetriesAFailedClosingPass(t *testing.T) {
 		return reader.calls > 0
 	})
 
-	// The exact commit/AfterCommit window leaves LEGION-RACE recorded but unpromoted once
+	// The exact window between the commit and its hook leaves LEGION-RACE recorded but unpromoted once
 	// pending clears.
 	tx, err := pool.Begin(context.Background())
 	if err != nil {
 		t.Fatalf("begin release tx: %v", err)
 	}
-	result, err := admission.Apply(context.Background(), tx, intake.DispatchConsumerPosition{AckFloorStream: 10})
-	if err != nil {
+	applied, committed := intake.WithCommitHooks(context.Background())
+	if _, err := admission.Apply(applied, tx, intake.DispatchConsumerPosition{AckFloorStream: 10}); err != nil {
 		t.Fatalf("apply position fact: %v", err)
 	}
 	if err := tx.Commit(context.Background()); err != nil {
@@ -634,11 +609,9 @@ func TestPollHoldReleaseRetriesAFailedClosingPass(t *testing.T) {
 	}, engine, admission); err != nil {
 		t.Fatalf("apply the racing event: %v", err)
 	}
-	for _, after := range result.AfterCommit {
-		after()
-	}
+	committed()
 	if admission.Held() {
-		t.Fatal("Held() = true after AfterCommit ran, want the hold cleared")
+		t.Fatal("Held() = true after the commit hook ran, want the hold cleared")
 	}
 
 	// The first closing pass fails (failing's one failure, never consumed by the held phase); the
@@ -653,4 +626,17 @@ func TestPollHoldReleaseRetriesAFailedClosingPass(t *testing.T) {
 	})
 	cancel()
 	<-done
+}
+
+// reconcileAdmission runs admission's boot reconcile as the workflow runtime does (reconcile): in
+// its own transaction, running the commit hooks it registered once that commits.
+func reconcileAdmission(t *testing.T, pool *pgxpool.Pool, admission *admit.Admission, summaries []dispatch.IssueSummary, target int64, position intake.DispatchConsumerPosition) {
+	t.Helper()
+	scoped, committed := intake.WithCommitHooks(context.Background())
+	if err := pgx.BeginFunc(scoped, pool, func(tx pgx.Tx) error {
+		return admission.Reconcile(scoped, tx, summaries, target, position)
+	}); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	committed()
 }

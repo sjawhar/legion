@@ -12,6 +12,12 @@
   URL and token, null when none is configured, and a `dispatch config: <reason>` throw on a broken
   configuration.
 
+### Changed
+
+- The `envoy_subscribe` description says a `pr.<n>.checks` settlement is published for every
+  commit of the pull request whose checks settle, the head or not, and names its `sha`
+  (LEGION-208).
+
 ### Fixed
 
 - `getArchitectureSource` reads both answers a server gives for a project with no architecture

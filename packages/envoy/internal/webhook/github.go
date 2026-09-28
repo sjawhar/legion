@@ -7,9 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/verify"
@@ -49,53 +47,14 @@ func githubSenderField(payload map[string]any, field string) string {
 	return s
 }
 
-// CIRecorder folds check-run, check-suite, and PR-head observations into CI state.
+// CIRecorder folds check-run and check-suite observations into CI state.
 type CIRecorder interface {
 	Record(contracts.CIObservation) error
 	RecordSuite(contracts.CIObservation) error
-	RecordHead(owner, repo, number, sha, updatedAt string) error
 }
 
 func reviewerVerdict(name string) bool {
 	return name == "tester" || name == "architect"
-}
-
-func githubPullRequestHead(event string, payload map[string]any) (owner, repo, number, sha, updatedAt string, ok bool) {
-	if event != "pull_request" {
-		return "", "", "", "", "", false
-	}
-	switch payload["action"] {
-	case "opened", "synchronize", "reopened":
-	default:
-		return "", "", "", "", "", false
-	}
-	repository, ok := payload["repository"].(map[string]any)
-	if !ok {
-		return "", "", "", "", "", false
-	}
-	repositoryOwner, ok := repository["owner"].(map[string]any)
-	if !ok {
-		return "", "", "", "", "", false
-	}
-	owner, _ = repositoryOwner["login"].(string)
-	repo, _ = repository["name"].(string)
-	pullRequest, ok := payload["pull_request"].(map[string]any)
-	if !ok {
-		return "", "", "", "", "", false
-	}
-	head, ok := pullRequest["head"].(map[string]any)
-	if !ok {
-		return "", "", "", "", "", false
-	}
-	sha, _ = head["sha"].(string)
-	updatedAt, _ = pullRequest["updated_at"].(string)
-	if updatedAt != "" {
-		if _, err := time.Parse(time.RFC3339, updatedAt); err != nil {
-			updatedAt = ""
-		}
-	}
-	number = contracts.GithubPRNumber(payload["number"])
-	return owner, repo, number, sha, updatedAt, owner != "" && repo != "" && number != "" && sha != ""
 }
 
 // githubMaxBody is the largest webhook body the handler reads: GitHub's documented payload cap,
@@ -163,18 +122,8 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			_, _ = w.Write([]byte("ok"))
 			return
 		}
-		if owner, repo, number, sha, updatedAt, ok := githubPullRequestHead(event, payload); ok {
-			if err := ci.RecordHead(owner, repo, number, sha, updatedAt); err != nil {
-				if errors.Is(err, cistore.ErrInvalidHeadSHA) {
-					log.Printf("github ci head skipped: invalid sha=%q pr=%s", sha, number)
-				} else {
-					deliveryFailed(w, "github ci head record", err)
-					return
-				}
-			}
-		}
 		// CI events only update durable state. The summary loop publishes one
-		// settled checks envelope when the head's suites and check runs are done.
+		// settled checks envelope for each commit whose suites and check runs are done.
 		if obs := contracts.GithubCIObservations(event, payload); len(obs) > 0 {
 			for _, o := range obs {
 				if o.CheckName == "" {

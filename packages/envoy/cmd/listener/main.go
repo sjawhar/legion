@@ -817,7 +817,8 @@ func main() {
 	registry.StartRoleClaimReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, sessions.TTL())
 
 	// Phase 6b2: Start the CI summary loop. It emits one pr.<n>.checks event
-	// once the head commit's checks settle; new runs re-arm settlement. The
+	// once a commit's checks settle, for every commit of a pull request, its
+	// head or not; new runs re-arm settlement. The
 	// debounce window is ENVOY_CI_DEBOUNCE (default 5s).
 	ciDebounce := 5 * time.Second
 	if v := os.Getenv("ENVOY_CI_DEBOUNCE"); v != "" {

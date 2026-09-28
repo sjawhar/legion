@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"log"
 	"net/http"
@@ -19,38 +18,6 @@ import (
 	"strings"
 	"testing"
 )
-
-func TestGithubPullRequestHeadRequiresStrictPRNumber(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		number     any
-		wantNumber string
-		wantOK     bool
-	}{
-		{name: "integer number", number: float64(42), wantNumber: "42", wantOK: true},
-		{name: "decimal digit string", number: "42", wantNumber: "42", wantOK: true},
-		{name: "fractional number", number: 42.5},
-		{name: "non-numeric string", number: "abc"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			payload := map[string]any{
-				"action": "opened",
-				"number": test.number,
-				"repository": map[string]any{
-					"name":  "example-repo",
-					"owner": map[string]any{"login": "example-org"},
-				},
-				"pull_request": map[string]any{
-					"head": map[string]any{"sha": "abcdef"},
-				},
-			}
-			_, _, number, _, _, ok := githubPullRequestHead("pull_request", payload)
-			if number != test.wantNumber || ok != test.wantOK {
-				t.Fatalf("githubPullRequestHead() = number %q, ok %t; want number %q, ok %t", number, ok, test.wantNumber, test.wantOK)
-			}
-		})
-	}
-}
 
 func TestGitHubHandler(t *testing.T) {
 	// Minimal issue_comment payload (no mention)
@@ -484,7 +451,7 @@ func TestGitHubHandlerMergeGroup(t *testing.T) {
 			if len(pub.published) != 0 {
 				t.Errorf("published = %d, want 0; first topic %q", len(pub.published), pub.published[0].Topic)
 			}
-			if n := len(recorder.calls) + len(recorder.suiteCalls) + len(recorder.headCalls); n != 0 {
+			if n := len(recorder.calls) + len(recorder.suiteCalls); n != 0 {
 				t.Errorf("recorder calls = %d, want 0", n)
 			}
 		})
@@ -716,163 +683,6 @@ func TestGitHubHandlerFiltersReviewerVerdicts(t *testing.T) {
 		}
 		if len(pub.published) != 0 {
 			t.Fatalf("published = %d, want 0", len(pub.published))
-		}
-	})
-}
-
-func TestGitHubHandlerRecordsHeadOnPullRequestSynchronize(t *testing.T) {
-	const (
-		secret = "s"
-		body   = `{
-			"action": "synchronize",
-			"number": 42,
-			"pull_request": {
-				"head": {"sha": "abcdef1234567"},
-				"updated_at": "2026-09-07T03:00:00Z",
-				"title": "Synchronize CI"
-			},
-			"sender": {"login": "ci-user", "type": "User"},
-			"repository": {
-				"name": "example-repo",
-				"owner": {"login": "example-org"},
-				"full_name": "example-org/example-repo"
-			}
-		}`
-	)
-	post := func(t *testing.T, rec *mockRecorder) (*httptest.ResponseRecorder, *mockPublisher) {
-		t.Helper()
-		pub := &mockPublisher{}
-		handler := GitHubHandler(secret, "@legion", "", pub, rec)
-		req := httptest.NewRequest("POST", "/webhook/github", strings.NewReader(body))
-		req.Header.Set("X-GitHub-Delivery", "delivery-head-sync")
-		req.Header.Set("X-GitHub-Event", "pull_request")
-		req.Header.Set("X-Hub-Signature-256", githubSign(secret, []byte(body)))
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-		return rr, pub
-	}
-
-	t.Run("records the new head before publishing", func(t *testing.T) {
-		rec := &mockRecorder{}
-		rr, pub := post(t, rec)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
-		}
-		if len(rec.headCalls) != 1 {
-			t.Fatalf("head calls = %d, want 1", len(rec.headCalls))
-		}
-		if got := rec.headCalls[0]; got != (headCall{
-			owner: "example-org", repo: "example-repo", number: "42", sha: "abcdef1234567", updatedAt: "2026-09-07T03:00:00Z",
-		}) {
-			t.Fatalf("head call = %+v", got)
-		}
-		if len(pub.published) != 1 {
-			t.Fatalf("published = %d, want 1", len(pub.published))
-		}
-	})
-
-	t.Run("returns 503 when recording the head fails", func(t *testing.T) {
-		rec := &mockRecorder{headErr: fmt.Errorf("kv down")}
-		rr, pub := post(t, rec)
-		if rr.Code != http.StatusServiceUnavailable {
-			t.Fatalf("status = %d, want 503", rr.Code)
-		}
-		if len(pub.published) != 0 {
-			t.Fatalf("published = %d, want 0 after head recording failure", len(pub.published))
-		}
-	})
-}
-
-func TestGitHubHandlerRecordsHeadWithoutPullRequestUpdatedAt(t *testing.T) {
-	const (
-		secret = "s"
-		body   = `{
-			"action": "synchronize",
-			"number": 42,
-			"pull_request": {
-				"head": {"sha": "abcdef1234567"}
-			},
-			"repository": {
-				"name": "example-repo",
-				"owner": {"login": "example-org"}
-			}
-		}`
-	)
-	pub := &mockPublisher{}
-	recorder := &mockRecorder{}
-	handler := GitHubHandler(secret, "@legion", "", pub, recorder)
-	req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(body))
-	req.Header.Set("X-GitHub-Delivery", "delivery-head-without-updated-at")
-	req.Header.Set("X-GitHub-Event", "pull_request")
-	req.Header.Set("X-Hub-Signature-256", githubSign(secret, []byte(body)))
-	rr := httptest.NewRecorder()
-
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
-	}
-	if len(recorder.headCalls) != 1 {
-		t.Fatalf("head calls = %d, want 1", len(recorder.headCalls))
-	}
-	if got := recorder.headCalls[0]; got != (headCall{
-		owner: "example-org", repo: "example-repo", number: "42", sha: "abcdef1234567",
-	}) {
-		t.Fatalf("head call = %+v", got)
-	}
-	if len(pub.published) != 1 {
-		t.Fatalf("published = %d, want 1", len(pub.published))
-	}
-}
-func TestGitHubHandlerTreatsMalformedHeadFieldsAsCallerData(t *testing.T) {
-	const secret = "s"
-	post := func(t *testing.T, body string, recorder *mockRecorder) (*httptest.ResponseRecorder, *mockPublisher) {
-		t.Helper()
-		pub := &mockPublisher{}
-		handler := GitHubHandler(secret, "@legion", "", pub, recorder)
-		req := httptest.NewRequest(http.MethodPost, "/webhook/github", strings.NewReader(body))
-		req.Header.Set("X-GitHub-Delivery", "delivery-malformed-head")
-		req.Header.Set("X-GitHub-Event", "pull_request")
-		req.Header.Set("X-Hub-Signature-256", githubSign(secret, []byte(body)))
-		rr := httptest.NewRecorder()
-		handler.ServeHTTP(rr, req)
-		return rr, pub
-	}
-
-	t.Run("invalid updated_at is absent", func(t *testing.T) {
-		body := `{
-			"action":"synchronize",
-			"number":42,
-			"pull_request":{"head":{"sha":"abcdef1234567"},"updated_at":"not-a-timestamp"},
-			"repository":{"name":"example-repo","owner":{"login":"example-org"}}
-		}`
-		recorder := &mockRecorder{}
-		rr, pub := post(t, body, recorder)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
-		}
-		if len(recorder.headCalls) != 1 || recorder.headCalls[0].updatedAt != "" {
-			t.Fatalf("head calls = %+v, want one timestamp-less call", recorder.headCalls)
-		}
-		if len(pub.published) != 1 {
-			t.Fatalf("published = %d, want 1", len(pub.published))
-		}
-	})
-
-	t.Run("invalid sha skips head recording", func(t *testing.T) {
-		body := `{
-			"action":"synchronize",
-			"number":42,
-			"pull_request":{"head":{"sha":"not-a-sha"},"updated_at":"2026-09-07T03:00:00Z"},
-			"repository":{"name":"example-repo","owner":{"login":"example-org"}}
-		}`
-		recorder := &mockRecorder{headErr: cistore.ErrInvalidHeadSHA}
-		rr, pub := post(t, body, recorder)
-		if rr.Code != http.StatusOK {
-			t.Fatalf("status = %d, want 200; body = %s", rr.Code, rr.Body.String())
-		}
-		if len(pub.published) != 1 {
-			t.Fatalf("published = %d, want 1", len(pub.published))
 		}
 	})
 }

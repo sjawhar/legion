@@ -565,7 +565,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state", "checked_head"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},
@@ -651,6 +651,54 @@ func TestReviewOrderMigrationCarriesTheReviewersMarkToThePullRequest(t *testing.
 		must(t, tx.QueryRow(ctx, `select decision ? 'id' from phases where issue = 'LEGION-208'`).Scan(&keepsID))
 		if keepsID {
 			t.Fatal("the stored decision still carries its review id")
+		}
+	})
+}
+
+// Migration 0024 records whose settlement a pull request's verdict is. A row recorded before it
+// held its own head's settlement, since a new head cleared the verdict, so its checked head is its
+// head: a verdict recorded before the upgrade keeps standing for the head it settled.
+func TestCheckedHeadMigrationKeepsARecordedVerdictStandingForItsHead(t *testing.T) {
+	ctx := context.Background()
+	st := emptyStore(t)
+	all, err := migrations.All()
+	must(t, err)
+	for _, migration := range all {
+		if migration.Version >= 24 {
+			break
+		}
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, func() error {
+				if _, err := tx.Exec(ctx, migration.SQL); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, "insert into schema_version (version) values ($1)", migration.Version)
+				return err
+			}())
+		})
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, statement := range []string{
+			`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+				values ('LEGION-208', 'LEGION-208', 'LEGION', 'the issue', 'reviewing', 1, 'needs_review', 'U', 0)`,
+			`insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at, head_updated_at_source,
+				verdict, failing, failing_statuses, fix_attempts, blocked_attempts, check_runs, generation, snapshot,
+				reconciled, pushes, head_counted, planned_red, state)
+				values ('LEGION-208', 'sjawhar/legion', 42, 'legion/LEGION-208', 'head', now(), 'webhook', 'green', '[]', '[]',
+				0, 0, '[{"name": "ci", "id": 7}]', 1, 'green-head', false, '[]', '', false, 'open')`,
+		} {
+			_, err := tx.Exec(ctx, statement)
+			must(t, err)
+		}
+	})
+
+	_, err = st.Migrate(ctx)
+	must(t, err)
+	inTx(t, st, func(tx pgx.Tx) {
+		pr, err := NewStore().PullRequest(ctx, tx, "LEGION-208")
+		must(t, err)
+		if pr == nil || pr.CheckedHead != "head" || pr.Verdict != "green" {
+			t.Fatalf("pull request after 0024 = %+v, want checked head \"head\" with its green verdict", pr)
 		}
 	})
 }

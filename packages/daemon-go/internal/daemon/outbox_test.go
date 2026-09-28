@@ -116,6 +116,41 @@ func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
 	}
 }
 
+// A done write with a reason posts the reason on the issue before it writes the status, since
+// Dispatch refuses a message on a closed issue, and no status is written until the message posts.
+// The message is the row's own, under its marker, so a retry after a failed status write finds it
+// and posts none.
+func TestADoneWriteWithAReasonPostsItFirstAndOnce(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "done", Reason: "Closed by its architect before its first phase: no change"}, time.Now())
+	row.ID = 56
+	client := &outboxDispatch{issue: dispatch.Issue{Key: row.Issue, Status: "in_progress"}, postErr: errors.New("Dispatch refused the message")}
+	runner := &outbox{dispatch: client}
+
+	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "refused the message") {
+		t.Fatalf("first attempt = %v, want the message's failure", err)
+	}
+	if len(client.statuses) != 0 {
+		t.Fatalf("status writes %v after the message failed, want none", client.statuses)
+	}
+
+	client.postErr, client.statusErr = nil, errors.New("Dispatch refused the status")
+	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "refused the status") {
+		t.Fatalf("second attempt = %v, want the status write's failure", err)
+	}
+	posted := "Closed by its architect before its first phase: no change\n\n<!-- legion-outbox:56 -->"
+	if len(client.messages) != 2 || client.messages[1] != posted {
+		t.Fatalf("messages %q, want the reason under the row's marker", client.messages)
+	}
+
+	client.bodies, client.statusErr = []string{posted}, nil
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("third attempt: %v", err)
+	}
+	if len(client.messages) != 2 || fmt.Sprint(client.statuses) != "[done done]" {
+		t.Fatalf("messages %q, statuses %v; want no second post and the done write retried", client.messages, client.statuses)
+	}
+}
+
 func TestOutboxMessagePostsItsMarkerAndReturnsReadFailure(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-208", record.MessagePost{Body: "Dispatch message."}, time.Now())
 	row.ID = 55
@@ -960,7 +995,7 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 			putOutboxIssue(t, pool, records, issue)
 			const head = "16973163"
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, Verdict: "green", Failing: []string{}, FailingStatuses: []string{}, State: record.PullRequestOpen})
+				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Verdict: "green", Failing: []string{}, FailingStatuses: []string{}, State: record.PullRequestOpen})
 			}); err != nil {
 				t.Fatalf("put the pull request: %v", err)
 			}
