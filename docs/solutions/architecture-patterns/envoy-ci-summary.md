@@ -59,6 +59,8 @@ on-prem compose deploy, which is stop-then-start, on a slow path whose named ter
 | subscribe retry loop around `startListenerSubscription`, sleeping attempt×3 s after each of its first nine attempts | 135 s |
 | **floor, before container start and image pull** | **260 s** |
 
+`cistore.go` (`handoverGrace`) and `packages/envoy/AGENTS.md` cite this total; update them if it changes.
+
 The degraded path adds terms that are bounded but not counted: `bus.connectWithContext` retries the
 dial up to ten times (about 59 s); `cistore.Open`, `store.Open`'s two buckets and
 `session.OpenSessionRegistry` each wait up to the 10 s MaxWait (40 s); and
