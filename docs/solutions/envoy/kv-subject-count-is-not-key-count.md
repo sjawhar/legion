@@ -54,16 +54,35 @@ production. It would have scaled to 35 s only on a deployment that really held 7
 
 ## Rules
 
-- **Size a read from the count the read actually pays.** `Keys()` streams one metadata entry per
-  *subject* (markers included) and returns one entry per *key*; a per-key `Get` pays one round
+- **Size a read from the count the read actually pays.** `Keys()` streams one header-only message
+  per *subject* (markers included) and returns one entry per *key*; a per-key `Get` pays one round
   trip per key. Say which one a number is before using it to size anything.
 - **Confirm a retention hypothesis against the values, not the subject count.** One
   `WatchAll(nats.MetaOnly())` pass reports each entry's `Operation()` and `Created()`, which
-  separates live keys from markers and dates the markers, in one round trip.
-- **A marker cannot be swept away separately.** A KV `MaxAge` expires values as well as markers,
-  so it is not a way to trim tombstones from a bucket whose claims must outlive it.
-  `nats-server` 2.11's per-message TTL (`SubjectDeleteMarkerTTL`) is the only mechanism that
-  targets markers alone, and it applies to buckets created with it.
-- **Read the bucket in one pass anyway.** Both the marker count and the key count then stop
-  mattering: `roleRevisions` (`packages/envoy/internal/store/kv.go`) takes one watch over existing
-  keys, as `internal/kvwatch` does for the interest, session and CI caches.
+  separates live keys from markers and dates the markers, in one streamed pass rather than a read
+  per subject.
+- **Markers can be swept alone, and `MaxAge` is not how.** A KV `MaxAge` expires values as well as
+  markers, so it is not a way to trim tombstones from a bucket whose claims must outlive it.
+  `KeyValue.PurgeDeletes` is: it watches the bucket, then purges the subject of each delete or
+  purge marker and leaves live keys untouched (nats.go v1.50.0 `kv.go:802-870`), and
+  `nats kv compact <bucket>` calls it. It keeps markers newer than 30 minutes unless
+  `DeleteMarkersOlderThan` says otherwise, and for a marker past that threshold it purges the
+  whole subject, so a key re-created between the watch and the purge goes with it. Measured on a
+  scratch bucket of 3 live keys and 20 markers: `subjects=23 msgs=23 live keys=3` before,
+  `subjects=3 msgs=3 live keys=3` after `PurgeDeletes(DeleteMarkersOlderThan(-1))`, every live
+  claim still at its original revision. `SubjectDeleteMarkerTTL` (nats.go `jsm.go:253`) is a
+  stream setting for the markers the server itself adds, not a per-message TTL, and it applies to
+  streams created with it.
+- **Read the bucket in one pass anyway.** The key count then stops mattering and the marker count
+  costs bandwidth rather than round trips: `roleRevisions`
+  (`packages/envoy/internal/store/kv.go`) takes one watch over existing keys, as
+  `internal/kvwatch` does for the interest, session and CI caches. Timed on loopback against that
+  function, best of five: 9 claims 0.87 ms, 9 claims and 1,000 markers 4.9 ms, 9 claims and 5,000
+  markers 17.2 ms. Linear and cheap, but not free, and markers accrue with nothing expiring them —
+  which is what `PurgeDeletes` is for.
+- **A scan can end early, and one of the two ways looks like success.** nats.go sends a nil entry
+  when it has delivered every existing key, and its idle timer sends the *same* nil when nothing
+  arrived within the JetStream `MaxWait`, reporting the timeout only on `Error()`
+  (`kv.go:1145-1156`). A reader that treats the nil as "done" returns a silently short snapshot on
+  a stalled link. Check `Error()` at the marker, and treat a closed updates channel with no marker
+  (`kv.go:1168`) as the other early end.

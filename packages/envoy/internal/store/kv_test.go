@@ -2136,12 +2136,11 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 	}
 }
 
-// Opening the registry snapshots the revision of every stored role claim, for the grace a restored
-// holder gets to register again. It must read them in one pass over the bucket, not one round trip
-// per key: production's role bucket held 767 subjects on 2026-09-28, and a listener reached over a
-// relayed link paid about one round trip for each before it was ready (LEGION-360). The claims'
-// revisions are still exactly the ones the bucket holds, and a deleted key — which a
-// limits-retention KV keeps a marker for forever — is not a claim and gets no grace.
+// Opening the registry snapshots the revision of every stored role claim, so a claim restored by a
+// restart keeps its holder's grace while the bucket still holds the revision the restart read. It
+// must read them in one pass over the bucket rather than one round trip per key, and the snapshot
+// it ends up with must be the bucket's: every claim at the revision stored for it, no entry for a
+// deleted key, and the grace those revisions exist for.
 func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -2158,16 +2157,11 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 	want := map[string]uint64{}
 	for i := range claims + 1 {
 		role := fmt.Sprintf("role-%03d", i)
-		value, err := json.Marshal(RoleClaim{HolderSessionID: fmt.Sprintf("ses_%03d", i), ClaimedAt: time.Now().UnixMilli()})
-		if err != nil {
-			t.Fatalf("encode claim: %v", err)
-		}
-		revision, err := rawRoles.Put(role, value)
-		if err != nil {
-			t.Fatalf("store %s: %v", role, err)
-		}
+		revision := putRoleClaim(t, rawRoles, role, fmt.Sprintf("ses_%03d", i))
 		want[role] = revision
 	}
+	// A deleted claim leaves a marker on its subject, which the bucket keeps until something
+	// purges it. The marker is not a claim and gets no grace.
 	deleted := fmt.Sprintf("role-%03d", claims)
 	if err := rawRoles.Delete(deleted); err != nil {
 		t.Fatalf("delete %s: %v", deleted, err)
@@ -2198,7 +2192,7 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 	if err := conn.Flush(); err != nil {
 		t.Fatalf("flush after Open: %v", err)
 	}
-	if sent := drain(t, gets) + drain(t, legacyGets); sent != 0 {
+	if sent := pending(t, gets) + pending(t, legacyGets); sent != 0 {
 		t.Fatalf("Open sent %d per-key reads of the role bucket holding %d claims; want none, one pass over the bucket", sent, claims)
 	}
 
@@ -2210,70 +2204,95 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 			t.Fatalf("restored revision of %s = %d, want the stored %d", role, got, revision)
 		}
 	}
-	if revision, ok := registry.restoredRoleRevisions[deleted]; ok {
-		t.Fatalf("a deleted key was restored as a claim at revision %d", revision)
+	// What the snapshot is for, through the caller that reads it: an absent holder keeps its claim
+	// for one session TTL after the restart, and a key the bucket no longer holds has none to keep.
+	if release, err := registry.ReleaseExpiredRoleClaim("role-000", "ses_000", time.Minute); err != nil || release != ExpiredRoleClaimRetained {
+		t.Fatalf("restored claim within its grace = %v, %v; want it retained", release, err)
+	}
+	if release, err := registry.ReleaseExpiredRoleClaim(deleted, fmt.Sprintf("ses_%03d", claims), time.Minute); err != nil || release != ExpiredRoleClaimMissing {
+		t.Fatalf("deleted claim = %v, %v; want it missing", release, err)
 	}
 }
 
-// drain counts the requests sub has received, up to the first idle window.
-func drain(t *testing.T, sub *natsgo.Subscription) int {
+// pending counts the requests sub has received. conn.Flush has already round-tripped every request
+// the store sent, so the server has echoed each one back to sub before this reads the count.
+func pending(t *testing.T, sub *natsgo.Subscription) int {
 	t.Helper()
-	count := 0
-	for {
-		if _, err := sub.NextMsg(200 * time.Millisecond); err != nil {
-			if errors.Is(err, natsgo.ErrTimeout) {
-				return count
-			}
-			t.Fatalf("drain %s: %v", sub.Subject, err)
-		}
-		count++
+	count, _, err := sub.Pending()
+	if err != nil {
+		t.Fatalf("pending on %s: %v", sub.Subject, err)
 	}
+	return count
 }
 
-// truncatedWatchKV hands out a watcher over the real bucket whose updates channel closes after
-// one entry, without the nil marker nats.go sends once it has delivered every existing key.
-// nats.go closes that channel whenever the watcher's subscription ends — an ordered consumer it
-// could not recreate, or a closed connection — so this is what a scan cut short looks like to its
-// caller.
-type truncatedWatchKV struct {
+func putRoleClaim(t *testing.T, kv natsgo.KeyValue, role, holder string) uint64 {
+	t.Helper()
+	value, err := json.Marshal(RoleClaim{HolderSessionID: holder, ClaimedAt: time.Now().UnixMilli()})
+	if err != nil {
+		t.Fatalf("encode claim: %v", err)
+	}
+	revision, err := kv.Put(role, value)
+	if err != nil {
+		t.Fatalf("store %s: %v", role, err)
+	}
+	return revision
+}
+
+// cutWatchKV hands out a watcher over the real bucket that ends its scan early, the two ways
+// nats.go ends one early (nats.go v1.50.0 kv.go). With no fault it closes the updates channel
+// after `after` entries and never sends the nil marker, which is what a subscription that ends
+// mid-scan looks like (:1168). With one it sends the marker after `after` entries and puts the
+// fault on Error() first, which is what the idle timer does when no entry arrives within the
+// JetStream MaxWait (:1145-1156).
+type cutWatchKV struct {
 	natsgo.KeyValue
 
 	after int
+	fault error
 }
 
-func (k truncatedWatchKV) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
+func (k cutWatchKV) Watch(keys string, opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
 	watcher, err := k.KeyValue.Watch(keys, opts...)
 	if err != nil {
 		return nil, err
 	}
-	truncated := make(chan natsgo.KeyValueEntry)
+	cut := &cutWatcher{KeyWatcher: watcher, updates: make(chan natsgo.KeyValueEntry), faults: make(chan error, 1)}
 	go func() {
-		defer close(truncated)
+		defer close(cut.updates)
 		for delivered := 0; delivered < k.after; delivered++ {
 			entry, ok := <-watcher.Updates()
 			if !ok || entry == nil {
 				return
 			}
-			truncated <- entry
+			cut.updates <- entry
+		}
+		if k.fault != nil {
+			cut.faults <- k.fault
+			cut.updates <- nil
 		}
 	}()
-	return &truncatedWatcher{KeyWatcher: watcher, updates: truncated}, nil
+	return cut, nil
 }
 
-type truncatedWatcher struct {
+type cutWatcher struct {
 	natsgo.KeyWatcher
 
 	updates chan natsgo.KeyValueEntry
+	faults  chan error
 }
 
-func (w *truncatedWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
+func (w *cutWatcher) Updates() <-chan natsgo.KeyValueEntry { return w.updates }
+
+func (w *cutWatcher) Error() <-chan error { return w.faults }
 
 // A revision snapshot that ends before the bucket's keys are all delivered is not a snapshot: the
 // claims it missed are still in the bucket, and each one is a restored holder that would lose the
-// grace a restart owes it and be released a session TTL early. So roleRevisions reports the short
-// scan instead of returning what it managed to read, and Open returns that error unchanged
-// (kv.go, Open), failing the start as a dead connection did before this read became a watch.
-func TestATruncatedRoleRevisionScanIsAnErrorNotAShortSnapshot(t *testing.T) {
+// grace a restart owes it and be released a session TTL early. nats.go ends a scan early two ways
+// and they look different to the caller - a closed updates channel, and its own idle timeout,
+// which arrives as the same nil marker a complete scan ends with. Neither may return what the scan
+// managed to read; Open returns the error unchanged, failing the start as a failed read did when
+// this was one Get per key.
+func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 	js, err := conn.JetStream()
@@ -2285,23 +2304,32 @@ func TestATruncatedRoleRevisionScanIsAnErrorNotAShortSnapshot(t *testing.T) {
 		t.Fatalf("create the role bucket: %v", err)
 	}
 	for i := range 4 {
-		value, err := json.Marshal(RoleClaim{HolderSessionID: fmt.Sprintf("ses_%d", i), ClaimedAt: time.Now().UnixMilli()})
-		if err != nil {
-			t.Fatalf("encode claim: %v", err)
-		}
-		if _, err := rawRoles.Put(fmt.Sprintf("role-%d", i), value); err != nil {
-			t.Fatalf("store role-%d: %v", i, err)
-		}
+		putRoleClaim(t, rawRoles, fmt.Sprintf("role-%d", i), fmt.Sprintf("ses_%d", i))
 	}
 
-	revisions, err := roleRevisions(bus.KeyValue{KeyValue: truncatedWatchKV{KeyValue: rawRoles, after: 1}})
-	if err == nil {
-		t.Fatalf("a scan that ended after 1 of 4 claims returned %d revisions and no error", len(revisions))
-	}
-	if revisions != nil {
-		t.Fatalf("a failed scan returned %d revisions; a partial snapshot must not reach the registry", len(revisions))
-	}
-	if !strings.Contains(err.Error(), "after 1 keys") {
-		t.Fatalf("error = %q, want it to name how many keys the watch delivered", err)
+	for _, ending := range []struct {
+		name  string
+		fault error
+		want  string
+	}{
+		{name: "the subscription ends mid-scan", want: "ended after 1 keys"},
+		{name: "the idle timer gives up mid-scan", fault: natsgo.ErrKeyWatcherTimeout, want: "stopped after 1 keys"},
+	} {
+		t.Run(ending.name, func(t *testing.T) {
+			handle := bus.KeyValue{KeyValue: cutWatchKV{KeyValue: rawRoles, after: 1, fault: ending.fault}}
+			revisions, err := roleRevisions(handle)
+			if err == nil {
+				t.Fatalf("a scan that ended after 1 of 4 claims returned %d revisions and no error", len(revisions))
+			}
+			if revisions != nil {
+				t.Fatalf("a failed scan returned %d revisions; a partial snapshot must not reach the registry", len(revisions))
+			}
+			if !strings.Contains(err.Error(), ending.want) {
+				t.Fatalf("error = %q, want it to say %q: how the scan ended and how many keys it read", err, ending.want)
+			}
+			if ending.fault != nil && !errors.Is(err, ending.fault) {
+				t.Fatalf("error = %q, want it to carry %v", err, ending.fault)
+			}
+		})
 	}
 }

@@ -158,17 +158,24 @@ func (r *Registry) roles() bus.KeyValue {
 
 // roleRevisions reads the revision of every role claim kv holds, for the grace a restored claim's
 // holder gets to register again. It is one watch over the bucket's existing keys, the way the
-// interest, session and CI caches read theirs (internal/kvwatch): readiness must not cost a round
-// trip per stored claim. It is the same watch nats.go's kv.Keys() runs — IgnoreDeletes and
-// MetaOnly over every key — which discards each entry's revision, so this keeps the revision
-// instead of reading it back with a Get per key. Production's role bucket carried 767 subjects on
-// 2026-09-28 — 9 claims and 758 delete markers, which a limits-retention KV keeps for every key
-// ever deleted — and a listener reached over a relayed link paid about one round trip for each
-// claim before it was ready (LEGION-360). The watch names no key, so a claim whose key this build
-// cannot read (bus.ErrRefused: an earlier build stored it past what a read of it may send) gets a
-// revision here; it still gets no grace, because ReleaseExpiredRoleClaim, the only reader of these
-// revisions, reads the claim itself first and cannot. A delete marker is not a claim and is
-// skipped.
+// interest, session and CI caches read theirs (internal/kvwatch), so readiness costs one pass over
+// the bucket rather than a round trip per stored claim. It is the same watch nats.go's kv.Keys()
+// runs — IgnoreDeletes and MetaOnly over every key — which discards each entry's revision, so this
+// keeps the revision instead of reading it back with a Get per key. The watch names no key, so a
+// claim whose key this build cannot read (bus.ErrRefused: an earlier build stored it past what a
+// read of it may send) gets a revision here; it still gets no grace, because
+// ReleaseExpiredRoleClaim, the only reader of these revisions, reads the claim itself first and
+// cannot. A delete marker is not a claim and is skipped.
+//
+// A snapshot short of the bucket is missing claims that are in it, and each one it misses is a
+// restored holder that loses its grace and is released a session TTL early, so a scan that did not
+// reach the end of the bucket fails the caller instead. nats.go ends a scan three ways (kv.go in
+// nats.go v1.50.0): it sends a nil entry once it has delivered every existing key (:1096-1099,
+// :1140-1142); its idle timer sends the same nil when no entry arrived within the JetStream
+// MaxWait, after putting ErrKeyWatcherTimeout on Error() under the watcher's lock (:1145-1156), so
+// the error is there to read by the time the nil arrives; and it closes the updates channel with no
+// nil at all when the subscription ends first (:1168), an ordered consumer it could not recreate or
+// a closed connection. Only the first is a complete scan.
 func roleRevisions(kv bus.KeyValue) (map[string]uint64, error) {
 	watcher, err := kv.Watch(nats.AllKeys, nats.IgnoreDeletes(), nats.MetaOnly())
 	if err != nil {
@@ -180,24 +187,21 @@ func roleRevisions(kv bus.KeyValue) (map[string]uint64, error) {
 		}
 	}()
 	revisions := map[string]uint64{}
-	// nats.go sends a nil entry once it has delivered every key the bucket already held, and
-	// closes the channel instead when the watcher's subscription ends first — an ordered consumer
-	// it could not recreate, or a closed connection. A snapshot short of the marker is missing
-	// claims that are in the bucket, and each one it misses is a restored holder that loses its
-	// grace and is released a session TTL early, so a start that cannot read the whole bucket
-	// fails here rather than opening on a partial snapshot.
-	scanned := false
 	for entry := range watcher.Updates() {
-		if entry == nil {
-			scanned = true
-			break
+		if entry != nil {
+			revisions[entry.Key()] = entry.Revision()
+			continue
 		}
-		revisions[entry.Key()] = entry.Revision()
+		select {
+		case err := <-watcher.Error():
+			if err != nil {
+				return nil, fmt.Errorf("role revisions: the bucket's watch stopped after %d keys: %w", len(revisions), err)
+			}
+		default:
+		}
+		return revisions, nil
 	}
-	if !scanned {
-		return nil, fmt.Errorf("role revisions: the bucket's watch ended after %d keys, before it had delivered them all", len(revisions))
-	}
-	return revisions, nil
+	return nil, fmt.Errorf("role revisions: the bucket's watch ended after %d keys, before it had delivered them all", len(revisions))
 }
 
 func (r *Registry) cachedRevision(sessionID string) uint64 {
