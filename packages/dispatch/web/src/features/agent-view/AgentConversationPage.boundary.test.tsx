@@ -40,6 +40,8 @@ const agent: Agent = {
 // renders a conversation.
 const spies = [
   spyOn(api, "listAgents"),
+  spyOn(api, "listAgentMessages"),
+  spyOn(api, "getMyAgentState"),
   spyOn(live, "readEventStream"),
   spyOn(conversation, "toThreadMessages"),
 ];
@@ -66,6 +68,8 @@ function renderPage() {
 
 test("a conversation the runtime cannot convert costs the thread, not the page around it", async () => {
   spyOn(api, "listAgents").mockResolvedValue([agent]);
+  spyOn(api, "listAgentMessages").mockResolvedValue([]);
+  spyOn(api, "getMyAgentState").mockResolvedValue({});
   // The stream never opens: this test is about rendering, and an open stream would retry.
   spyOn(live, "readEventStream").mockReturnValue(new Promise<void>(() => undefined));
   spyOn(conversation, "toThreadMessages").mockImplementation(() => {
@@ -82,5 +86,5 @@ test("a conversation the runtime cannot convert costs the thread, not the page a
   expect(screen.getByTestId("agent-conversation")).toBeTruthy();
   expect(screen.getByRole("link", { name: /Agents/ })).toBeTruthy();
   expect(screen.getByRole("combobox", { name: "Delivery mode" })).toBeTruthy();
-  expect(screen.getByText(/Nothing here is stored/)).toBeTruthy();
+  expect(screen.getByText(/relayed while this page is open/)).toBeTruthy();
 });

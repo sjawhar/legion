@@ -8,8 +8,10 @@ const repoRoot = resolve(import.meta.dir, "../../..");
 
 describe("gen-go", () => {
   // The generator shells out to gofmt, so Bun's 5 s default cannot cover a cold CI runner.
-  test("emits the envelope Go contract without a question schema", async () => {
-    const process = Bun.spawn(["bun", generator], {
+  // `--check` compares a fresh render with the committed file and never writes it, so a constant
+  // changed in TypeScript without regenerating fails here instead of being rewritten in place.
+  test("the committed Go contract is what the generator emits, without a question schema", async () => {
+    const process = Bun.spawn(["bun", generator, "--check"], {
       cwd: repoRoot,
       stderr: "pipe",
       stdout: "pipe",

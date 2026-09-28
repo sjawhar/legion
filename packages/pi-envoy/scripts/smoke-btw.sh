@@ -161,16 +161,21 @@ wait_for_sleep_running() {
 }
 
 workdir="$(mktemp -d "/tmp/${session}.XXXXXX")"
+# The smoke runs its own tmux server on a socket in its scratch directory, so its cleanup can end
+# only the session it started: `tmux kill-session` on the shared default server could end anyone's.
+readonly tmux_socket="${workdir}/tmux.sock"
+tmux() { command tmux -S "$tmux_socket" "$@"; }
 dispatch_header_file="${workdir}/dispatch-headers"
 write_dispatch_header_file "$dispatch_header_file"
 printf 'plugin version: %s (from %s)\n' "$plugin_version" "$plugin_pkg"
 printf 'asking as %s\n' "$asker"
-printf 'starting isolated OMP session %s in %s\n' "$session" "$workdir"
-# The target must answer on the same Dispatch this script asks. An existing tmux
-# server gives a new session its own global environment, not this shell's, so
-# the coordinates go in with -e: the URL as is, the bearer through a 0600 file
-# (never as argv, which /proc exposes). Human-header mode has no bearer to
-# forward; the spawned session then relies on its own configured dispatch.token.
+printf 'starting isolated OMP session %s in %s; watch it with: tmux -S %s attach -t %s\n' \
+  "$session" "$workdir" "$tmux_socket" "$session"
+# The target must answer on the same Dispatch this script asks. The new tmux server takes this
+# shell's exported environment, which does not hold these coordinates, so they go in with -e: the
+# URL as is, the bearer through a 0600 file (never as argv, which /proc exposes). Human-header
+# mode has no bearer to forward; the spawned session then relies on its own configured
+# dispatch.token.
 launch_env=(-e "DISPATCH_URL=${dispatch_url}")
 if [[ -n "$bearer" ]]; then
   token_file="${workdir}/dispatch-token"

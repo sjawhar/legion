@@ -135,7 +135,8 @@ function renderAgents({
   });
   const getMyAgentState = spyOn(api, "getMyAgentState").mockResolvedValue(agentState);
   const putAgentState = spyOn(api, "putAgentState").mockImplementation(async (_session, input) => ({
-    cleared_before: input.cleared_before,
+    ...input,
+    unread_replies: 0,
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
@@ -905,11 +906,12 @@ function exchange(
   id: string,
   body: string,
   createdAt: string,
-  reply?: { body: string; createdAt: string }
+  reply?: { body: string; createdAt: string; unread?: boolean }
 ): MessageRead {
   const root = message(body, { created_at: createdAt, id });
   return {
     message: root,
+    unread: reply?.unread,
     replies:
       reply === undefined
         ? []
@@ -963,6 +965,148 @@ test("Agents shows only the newest exchange and folds the rest behind Show N old
     fireEvent.click(older);
     expect(within(conversation).queryByText("Second question")).toBeNull();
     expect(within(conversation).getByText("Third question")).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// An agent answering a human's direct message is news the human did not go looking for: the
+// count shows in the navigation and on the agent's row until the conversation is opened, and
+// opening it records how far it was read, so the count stays gone on every device.
+test("an agent's unread reply shows on its row and in the navigation until its conversation is opened", async () => {
+  const page = renderAgents({
+    agentState: { "planner-session": { unread_replies: 1 } },
+    messages: [
+      exchange("m1", "Where is the dashboard?", "2026-09-14T01:00:00Z", {
+        body: "At /dash.",
+        createdAt: "2026-09-14T01:05:00Z",
+      }),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    // The test viewport is compact, so the shell's header carries the badge the rail would.
+    await expect(screen.findByRole("link", { name: "New reply 1" })).resolves.toBeTruthy();
+    expect(within(planner).queryByText("At /dash.")).toBeNull();
+
+    fireEvent.click(
+      await within(planner).findByRole("button", { name: "Planner replied: 1 unread" })
+    );
+    await expect(within(planner).findByText("At /dash.")).resolves.toBeTruthy();
+    await waitFor(() =>
+      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
+        read_through: "2026-09-14T01:05:00Z",
+      })
+    );
+    await waitFor(() =>
+      expect(within(planner).queryByRole("button", { name: /unread/ })).toBeNull()
+    );
+    expect(screen.queryByRole("link", { name: /^New repl/ })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// The count sums every session that answered the viewer, and a session often answers and then
+// exits. A reply from a session no longer in the live list still has a row, whose Open reads it,
+// so the badge is always one the viewer can clear.
+test("a reply from a session that has ended keeps a row that opens its conversation", async () => {
+  const ended = "01a0e52e-0000-7000-8000-00000000abcd";
+  const page = renderAgents({
+    agentState: { [ended]: { unread_replies: 1 } },
+    listedAgents: [],
+  });
+
+  try {
+    await expect(screen.findByRole("link", { name: "New reply 1" })).resolves.toBeTruthy();
+    const region = await screen.findByRole("region", { name: "Replied, no longer connected" });
+    const open = within(region).getByRole("link", { name: "Open session:01a0e52e…" });
+    expect(open.getAttribute("href")).toBe(`/agents/${ended}/live`);
+    expect(within(region).getByText("New reply 1")).toBeTruthy();
+    expect(screen.getByLabelText("Agents empty state")).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// Opening a row marks the conversation read through its newest reply, and a read mark covers
+// every older reply too. So each exchange holding an unread reply is shown when the row opens,
+// not folded behind "Show N older" where the viewer would never see what was just marked read.
+test("opening a row shows an older exchange's unread follow-up instead of folding it", async () => {
+  const page = renderAgents({
+    agentState: { "planner-session": { unread_replies: 1 } },
+    messages: [
+      exchange("m3", "Third question", "2026-09-14T03:00:00Z"),
+      exchange("m2", "Second question", "2026-09-14T02:00:00Z"),
+      // The server's flag, not the timestamps, is what the row renders: this exchange's reply is
+      // the oldest one on screen and still the unread one.
+      exchange("m1", "First question", "2026-09-14T01:00:00Z", {
+        body: "First answer, followed up",
+        createdAt: "2026-09-14T00:30:00Z",
+        unread: true,
+      }),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    fireEvent.click(
+      await within(planner).findByRole("button", { name: "Planner replied: 1 unread" })
+    );
+    await expect(within(planner).findByText("First answer, followed up")).resolves.toBeTruthy();
+    expect(within(planner).getByText("Third question")).toBeTruthy();
+    expect(within(planner).queryByText("Second question")).toBeNull();
+    expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
+    await waitFor(() =>
+      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
+        read_through: "2026-09-14T00:30:00Z",
+      })
+    );
+    await waitFor(() =>
+      expect(within(planner).queryByRole("button", { name: /unread/ })).toBeNull()
+    );
+    // Read now, and still on screen: marking it read does not fold it away again.
+    expect(within(planner).getByText("First answer, followed up")).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// The server decides which conversations hold an unread reply; the row renders that verdict and
+// derives nothing from timestamps. This fixture disagrees with the clock in both directions: the
+// flagged exchange's reply is older than the read mark, and the unflagged one's is newer. Both
+// directions are load-bearing - a fixture that disagreed one way only would still pass against a
+// client that re-derived the rule from read_through and cleared_before.
+test("Agents shows the exchanges the server flags unread, whatever their timestamps say", async () => {
+  const page = renderAgents({
+    agentState: {
+      "planner-session": { read_through: "2026-09-14T03:00:00Z", unread_replies: 1 },
+    },
+    messages: [
+      exchange("m3", "Newest question", "2026-09-14T05:00:00Z"),
+      exchange("m2", "Answered after the mark", "2026-09-14T02:00:00Z", {
+        body: "Reply the server calls read",
+        createdAt: "2026-09-14T04:00:00Z",
+      }),
+      exchange("m1", "Answered before the mark", "2026-09-14T01:00:00Z", {
+        body: "Reply the server calls unread",
+        createdAt: "2026-09-14T01:30:00Z",
+        unread: true,
+      }),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    await expect(within(planner).findByText("Reply the server calls unread")).resolves.toBeTruthy();
+    expect(within(planner).queryByText("Reply the server calls read")).toBeNull();
+    expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();
@@ -1034,7 +1178,15 @@ test("Agents Clear hides every exchange up to now for this viewer and persists t
 
 test("Agents keeps exchanges with activity after the persisted cutoff and hides the rest", async () => {
   const page = renderAgents({
-    agentState: { "planner-session": { cleared_before: "2026-09-14T12:00:00Z" } },
+    agentState: {
+      // The viewer has read through the late answer, so nothing is unread and the fold is the
+      // Clear's alone.
+      "planner-session": {
+        cleared_before: "2026-09-14T12:00:00Z",
+        read_through: "2026-09-14T13:00:00Z",
+        unread_replies: 0,
+      },
+    },
     messages: [
       exchange("m3", "New question", "2026-09-15T00:00:00Z"),
       // Asked before the Clear, answered after it: the answer is fresh, so the exchange shows.
@@ -1326,28 +1478,96 @@ test("a mode both recipients advertise takes the excluded one back in", async ()
   }
 });
 
-test("a directory filter narrows the listed agents and what Select all ticks", async () => {
+test("the header checkbox follows the filters and its count never hides a selected row the filter hides", async () => {
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    fireEvent.change(within(region).getByRole("searchbox", { name: "Directory contains" }), {
-      target: { value: "PLANNER" },
-    });
+    expect(within(region).queryByRole("button", { name: /^Select all/ })).toBeNull();
+    const header = within(region).getByRole("checkbox", {
+      name: "Select all matching agents",
+    }) as HTMLInputElement;
+    const directory = within(region).getByRole("searchbox", { name: "Directory contains" });
+    expect(within(region).getByText("2 matching")).toBeTruthy();
+
+    // Everything, then narrow: the header counts the matching row and names the other one.
+    fireEvent.click(header);
+    expect(within(region).getByText("2 of 2 matching selected")).toBeTruthy();
+    fireEvent.change(directory, { target: { value: "PLANNER" } });
     await waitFor(() =>
       expect(within(region).queryByRole("heading", { level: 2, name: "Reviewer" })).toBeNull()
     );
-    fireEvent.click(within(region).getByRole("button", { name: "Select all (1)" }));
+    expect(
+      within(region).getByText("1 of 1 matching selected · 1 more selected outside the filter")
+    ).toBeTruthy();
+    expect(header.checked).toBe(true);
     const broadcast = within(region).getByRole("region", { name: "Broadcast" });
     expect(
-      within(broadcast).getByRole("heading", { name: "Broadcast to 1 of 1 selected" })
+      within(broadcast).getByRole("heading", { name: "Broadcast to 1 of 2 selected" })
     ).toBeTruthy();
+
+    // Clearing the matching row leaves a selection wholly outside the filter, which must not
+    // read like an empty one.
+    fireEvent.click(header);
+    expect(within(region).getByText("1 matching · 1 selected outside the filter")).toBeTruthy();
+    expect(header.checked).toBe(false);
+    expect(header.indeterminate).toBe(false);
     const chips = within(broadcast).getByRole("list", { name: "Selected agents" });
     expect(
       within(chips)
         .getAllByRole("button")
         .map((chip) => chip.textContent)
-    ).toEqual(["Planner ✕"]);
+    ).toEqual(["Reviewer · does not advertise btw ✕"]);
+
+    // Widening the filter shows the unticked row beside the ticked one: the header turns mixed.
+    fireEvent.change(directory, { target: { value: "" } });
+    await waitFor(() => expect(within(region).getByText("1 of 2 matching selected")).toBeTruthy());
+    expect(header.checked).toBe(false);
+    expect(header.indeterminate).toBe(true);
+
+    // Clear selection empties the whole selection, the header with it.
+    fireEvent.click(within(region).getByRole("button", { name: "Clear selection" }));
+    expect(within(region).getByText("2 matching")).toBeTruthy();
+    expect(header.indeterminate).toBe(false);
+    expect(header.checked).toBe(false);
+    expect(within(region).queryByRole("region", { name: "Broadcast" })).toBeNull();
+    expect(within(region).queryByRole("button", { name: "Clear selection" })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("the header checkbox selects a folded row and the fold says how many of its rows are selected", async () => {
+  // Seen a minute ago with no Dispatch signal: it sits under the collapsed `No Dispatch
+  // activity` fold.
+  const silent: Agent = {
+    ...agents[0],
+    last_activity: null,
+    open_asks: 0,
+    session_id: "silent-session",
+    title: "Silent",
+  };
+  const page = renderAgents({ inboxRows: [], listedAgents: [agents[0], silent] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    expect(within(region).getByRole("button", { name: "No Dispatch activity (1)" })).toBeTruthy();
+    expect(within(region).queryByRole("heading", { level: 2, name: "Silent" })).toBeNull();
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select all matching agents" }));
+    expect(within(region).getByText("2 of 2 matching selected")).toBeTruthy();
+    expect(
+      within(region).getByRole("button", { name: "No Dispatch activity (1, 1 selected)" })
+    ).toBeTruthy();
+    const chips = within(within(region).getByRole("region", { name: "Broadcast" })).getByRole(
+      "list",
+      { name: "Selected agents" }
+    );
+    expect(
+      within(chips)
+        .getAllByRole("button")
+        .map((chip) => chip.textContent)
+    ).toEqual(["Planner ✕", "Silent ✕"]);
   } finally {
     page.view.unmount();
     page.restore();

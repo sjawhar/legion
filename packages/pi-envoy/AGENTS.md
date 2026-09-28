@@ -263,24 +263,88 @@ transcript (`legion-phase-stall` entries) and restored at `session_start`, so a 
 subagents: the check runs in the `tool_call` hook ahead of the subagent exemption, beside
 `PANE_RULES`) to the boundary `docs/deployment.md` "The pane guard" describes: no deletion, move,
 truncation, overwrite of an existing file, or recursive mode or owner change outside
-`LEGION_WORKSPACE` and any directory below `/tmp` except `/tmp` itself, a glob over it, and the
-tmux and ssh socket directories. The guard cannot tell which allowed `/tmp` directory belongs to
-the pane. A TypeScript-daemon root, which has no `LEGION_WORKSPACE` and whose bash is one `legion`
-command, gets the `/tmp` root alone. No signal reaches a process that is not a descendant of the
-pane's Oh My Pi process (`/proc` read at check time). It reads the variables both daemons set on
-every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify, `LEGION_WORKSPACE`, `HOME`), so
-it adds nothing to either daemon contract. Commands are parsed with `unbash` (a bash parser,
-bundled into `dist/legion.js`) and walked as bash would run them: word expansion with quoting,
-tilde, variables assigned earlier (`$(mktemp -d)` is a fresh `/tmp` path), `cd`, brace expansion,
-command substitutions, subshells and branches, functions, wrappers (`sudo`, `env`, `timeout`, ...),
-and the scripts a command runs, whose refusal names the script and line. `src/legion/pane-guard-code.ts`
-tokenizes Python and JavaScript for known deletion, move, overwrite, signal, and shell-out calls
-whose arguments it can evaluate; an argument it cannot evaluate is let through, where a shell
-target it cannot resolve, and a command `unbash` reports as malformed, are refused. Command tables
-are `Set`/`Map`, never object literals, since their keys come from the command (`constructor` would
-otherwise match). `src/legion/pane-guard.test.ts` holds the family matrix, the incident's script,
-the signal cases, and the eval tool; `extensions/legion.test.ts` proves the hook refuses the
-incident's script through a booted worker.
+`LEGION_WORKSPACE` and any directory below `/tmp` except `/tmp` itself, a glob over it, the tmux
+and ssh socket directories (by prefix), and the `/tmp` directory holding the pane's `HOME` or
+`TMUX_TMPDIR` (by exact name; a rig's run directory). The guard cannot tell which other allowed
+`/tmp` directory belongs to the pane. A TypeScript-daemon root, which has no `LEGION_WORKSPACE` and
+whose bash is one `legion` command, gets the `/tmp` root alone. No signal reaches a process that is
+not a descendant of the pane's Oh My Pi process (`/proc` read at check time). It reads the variables
+both daemons set on every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify,
+`LEGION_WORKSPACE`, `HOME`), so it adds nothing to either daemon contract.
+
+Commands are parsed with `unbash` (a bash parser, bundled into `dist/legion.js`) and walked as bash
+would run them: word expansion with quoting, tilde, variables assigned earlier (`$(mktemp -d)` is a
+fresh `/tmp` path, and `printf -v` assigns), `cd`, brace expansion, the paths `realpath`,
+`dirname`, `basename` and `readlink -f` print, pattern replacement and removal of a known ASCII
+value (`${v//a/b}`, `${v#*:}`), command substitutions, subshells and branches, functions,
+wrappers (`sudo`, `env`, `timeout`, ...), and the scripts a command runs or writes first, whose
+refusal names the script and line. A script or function run with arguments the guard knows has
+them as its positional parameters (`$#` their count, one past the last unset, a `shift` past the
+last a no-op as in bash, `"$@"` of none no argument); a word that may be several arguments or none
+(an unquoted expansion it cannot read or that holds whitespace, a glob) leaves them unknown, as
+does a shell that did not say what its arguments are, to `${1-…}` and `${1+…}` too. `unset` leaves
+a name unset, apart from empty and from the pane's environment. So an argument loop
+(`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`) is walked pass by pass, each
+`case` taking the one item its known word selects. A loop or `case` it cannot decide, a `case`
+whose word matches no item included, is walked as one that may take any branch, and a `shift`
+inside one leaves the arguments unknown after it. A variable every branch leaves empty or a pid the
+shell started (a retry loop's `pid=$!`) stays a pid it may signal. Unknown on purpose:
+`$(git rev-parse --show-toplevel)`, whose answer the repository's config decides and an earlier
+command in the same line can rewrite; an operand `unbash` splits differently from bash (a pattern
+starting with `/` after `/` or `//`); text outside ASCII, which bash counts by the locale; and a
+replacement holding `&`. A pattern is matched by stepping the positions it can reach along the
+value, never by a backtracking regular expression, and its work (the value's length times the
+pattern's) is charged to the walk budget, a `case` item's included. No value the guard builds is
+longer than 65,536 characters or 4,096 pieces (`MAX_VALUE_LENGTH`, `MAX_VALUE_PIECES`, each pinned
+by a test): a replacement of a replacement or `x="$x$x"`
+repeated reached tens of millions of characters and held the pane on each read, so past the bound
+a value is unknown, and a refusal names the cause. A script a command writes (a rendered brace
+group, `printf` or `echo` into a file, appends, a here-document through `cat` or `tee`) is read
+whole up to the 1 MiB the guard reads of a script on disk, and past it is one the guard cannot
+read. So is one holding a value the guard cannot know through `printf %s`, `printf %q` or `echo`:
+bash parses the value as code, where a `;`, a quote or a newline it holds reaches out of any
+position, a comment included, and `%q`'s output form is not fixed (a value containing a newline
+selects `$'…'`, which carries the value's own quote characters raw and closes a single- or
+double-quoted position). `printf %d` writes digits and a sign, so there a value it cannot know
+stays one unknown word. `echo` with an option first, and a here-document whose unquoted text
+bash expands, are scripts it cannot read too; a shell or interpreter reading such a
+here-document as its program is refused.
+
+A write to a variable that the guard sees reaches its model, and one it cannot model leaves the
+value unknown, never the one already approved: a builtin that assigns by name (`printf -v`,
+`read`, `mapfile`, `getopts`, `declare` and its kin, `unset`, `wait -p`), arithmetic, `${v:=x}`,
+a loop variable, a plain assignment to an array's name (its element 0), and an array's literal,
+which holds the words bash gives it (none for `"$@"` of none, and every element unknown when a
+word may be several), assign as bash does; `"$@"` of none assigned is the empty string, one
+argument when quoted; a function's `local` is the caller's variable again when it returns, unknown
+when only some paths made it local; `readonly`, `-i`, `-l` and `-u` make a later write unknown; and
+a write under a name the guard cannot read, or `eval` of text it cannot read, makes every variable
+unknown and possibly unset (`ANY_NAME`), the pane's environment included. A nameref (`declare -n`) is
+refused. Two writes it does not follow: a `source` of a path it cannot read at check time (a
+process substitution, `/dev/fd/N`, `/dev/stdin`, a file a command before it creates) is taken as
+sourcing nothing, though bash may read assignments from it (LEGION-332); and an assignment to
+`IFS` leaves its splitting model as it was, which splits an unquoted value on whitespace alone,
+so a value bash splits on another character is taken as one word.
+
+`src/legion/pane-guard-bash.ts` holds bash's pattern matching, removal and replacement, `test`'s
+string and integer forms, and `printf %q` quoting as pure functions;
+`src/legion/pane-guard-bash.test.ts` holds every pattern operator over operands and values, every
+set-ness operator over set, empty, unset and environment names, a function's arguments over words
+that give one, none, several or an unknown number, and every writer above over variables, arrays,
+elements and attributed names, to one real bash, through the guard. Each differential also asserts
+that more than a tenth of its cases reach outside the roots, so a harness that stopped
+discriminating fails rather than passing on an empty comparison.
+`src/legion/pane-guard-code.ts` tokenizes Python and JavaScript for known deletion, move,
+overwrite, signal, and shell-out calls whose arguments it can evaluate; an argument it cannot
+evaluate is let through, where a shell target it cannot resolve, and a command `unbash` reports as
+malformed, are refused. Command tables are `Set`/`Map`, never object literals, since their keys come
+from the command (`constructor` would otherwise match). `src/legion/pane-guard.test.ts` holds the
+family matrix, the incident's script, the signal cases, the eval tool, and the sweep of every
+tracked shell script against `EXPECTED_SCRIPT_REFUSALS` (each refused script with its first
+refusal's site, filed under why it is refused); `src/legion/pane-guard-walk.ts` prints every
+refusal a script meets, not only the first, and never writes that set, so a change to it is a
+person's decision to fix the guard, the script, or the set. `extensions/legion.test.ts` proves the
+hook refuses the incident's script through a booted worker.
 
 ## Native Dispatch tools
 
@@ -439,4 +503,4 @@ state never nudges.
 - `spawnWorker` in `src/legion/daemon-client.ts` carries the caller's `requestId` (minted once per `legion` `spawn_worker` call in `src/legion/tools.ts`) and retries only a `fetch` that rejected — never a `LegionDaemonApiError`, whatever its status, and never a response-shape error — up to `SPAWN_WORKER_ATTEMPTS` (3) with `SPAWN_WORKER_RETRY_DELAYS_MS` between attempts, the same id every time so the daemon's ledger dedupes it; the last rejected fetch is a `LegionDaemonTransportError` naming the cause, attempts, and id. A response whose headers arrived but body cannot be read is not retried because `fetch` fulfilled; it is a `LegionDaemonResponseReadError` with the same request id and `legion state` guidance. The 403 recovery above composes with both paths unchanged (LEGION-102).
 - `envoy_list` must report the union of locally live and registry-persisted topics, with each topic marked `live`, `registry`, or `both`.
 - Do not alter `~/.omp` from this package. The README documents the local developer symlink.
-- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider. A Legion pane cannot run their default tmux cleanup under the pane guard; do not edit the smoke to bypass that refusal. LEGION-300 owns a pane-safe smoke path.
+- `smoke-delivery.sh` and `smoke-btw.sh` are manual, real end-to-end smokes against the installed plugin; never wire either into CI without live Envoy/NATS, Dispatch, and a configured model provider. Each runs its session on its own tmux server, on a socket in its temp directory (`tmux() { command tmux -S "$tmux_socket" "$@"; }`), and prints the `tmux -S <socket> attach -t <session>` line that watches it, so its cleanup's `tmux kill-session` can end only the session it started: on the shared default server that kill could end anyone's session, and the pane guard refuses it there. Keep new tmux calls on that wrapper rather than the default server.

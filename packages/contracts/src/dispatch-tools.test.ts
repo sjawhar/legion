@@ -261,6 +261,19 @@ describe("dispatchToolSpecs", () => {
     );
   });
 
+  test("dispatch_read reads a direct-message conversation by message id alone", () => {
+    const schema = schemaFor("dispatch_read");
+    const message = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+
+    // A human's direct message and the replies to it belong to no issue or document, so the
+    // message id is the whole address of that conversation.
+    expect(schema.safeParse({ message }).success).toBe(true);
+    for (const owner of [{ issue: "DSP-1" }, { project: "CORE", artifact: "runbook" }]) {
+      expect(schema.safeParse({ message, ...owner }).success, JSON.stringify(owner)).toBe(false);
+    }
+    expect(schema.safeParse({}).success).toBe(false);
+  });
+
   test("dispatch_whoami accepts no arguments and rejects any key", () => {
     const schema = schemaFor("dispatch_whoami");
 

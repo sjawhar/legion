@@ -542,6 +542,7 @@ test("project list rows and board cards set an issue's priority in place", async
     await unsetCard.getByLabel(`Priority of ${unset.key}`).selectOption("0");
     expect((await unsetPatch).postDataJSON()).toEqual({ priority: 0 });
     await expect(priorityBadge(unsetCard, "P0")).toBeVisible();
+    await expect.poll(() => getIssue(unset.key)).toMatchObject({ priority: 0 });
 
     // Tab order inside a card: the card itself (the drag activator), its title link, then the
     // priority control, so a keyboard shortcut can focus it too; the screenshot shows the

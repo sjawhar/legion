@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -155,47 +156,94 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, value)
 }
 
-// userAgentState is a viewer's Clear on one agent's conversation: the Agents page hides every
-// exchange whose newest message is at or before cleared_before, for this login only.
+// userAgentState is one viewer's state for one agent's conversation. The Agents page hides every
+// exchange whose newest message is at or before cleared_before (the viewer's Clear); read_through
+// is how far the viewer has read; unread_replies counts the session's replies to messages this
+// viewer sent that are newer than both, which is how the dashboard says an agent answered.
 type userAgentState struct {
-	ClearedBefore string `json:"cleared_before"`
+	ClearedBefore *string `json:"cleared_before,omitempty"`
+	ReadThrough   *string `json:"read_through,omitempty"`
+	UnreadReplies int     `json:"unread_replies"`
 }
 
-// clearedBeforeSkew is how far ahead of the server clock a Clear may land. The client stamps
-// the cutoff with its own clock, and a browser a few seconds fast must not be refused.
-const clearedBeforeSkew = time.Minute
+// agentStateCutoffSkew is how far ahead of the server clock a Clear or a read mark may land. The
+// client stamps the cutoff with its own clock, and a browser a few seconds fast must not be
+// refused.
+const agentStateCutoffSkew = time.Minute
+
+// userAgentStatesQuery reads a viewer's per-session state from the shared unreadDirectRepliesCTE
+// alone: `direct_marks` is every session with a Clear (user_agent_state) or a read mark
+// (user_agent_read), and `unread_direct_replies` counted per session is every session holding a
+// reply the viewer has not read. Parameters are the fragment's own (unreadDirectRepliesArgs).
+const userAgentStatesQuery = `
+	with recursive` + unreadDirectRepliesCTE + `,
+	unread as (
+		select session_id, count(*)::int as unread from unread_direct_replies group by session_id
+	)
+	select coalesce(direct_marks.session_id, unread.session_id),
+	       direct_marks.cleared_before, direct_marks.read_through,
+	       coalesce(unread.unread, 0)
+	from direct_marks full join unread on unread.session_id = direct_marks.session_id
+	order by 1
+`
+
+// loadUserAgentStates runs userAgentStatesQuery for login, narrowed to sessionID when it is
+// not nil. The read mark and the viewer's own direct messages are matched on the canonical
+// login, so one person is one viewer however their identity source spells them; the Clear
+// (user_agent_state, migration 0033) is keyed on the raw actor id.
+func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionID *string) (map[string]userAgentState, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, unreadDirectRepliesArgs(login, sessionID)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := map[string]userAgentState{}
+	for rows.Next() {
+		var session string
+		var clearedBefore, readThrough *time.Time
+		var state userAgentState
+		if err := rows.Scan(&session, &clearedBefore, &readThrough, &state.UnreadReplies); err != nil {
+			return nil, err
+		}
+		state.ClearedBefore = timestampPtr(clearedBefore)
+		state.ReadThrough = timestampPtr(readThrough)
+		states[session] = state
+	}
+	return states, rows.Err()
+}
 
 func (s *server) getUserAgentState(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select session_id, cleared_before
-		from user_agent_state where login = $1 order by session_id
-	`, actor.ID)
+	states, err := s.loadUserAgentStates(r.Context(), actor.ID, nil)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	defer rows.Close()
-	state := map[string]userAgentState{}
-	for rows.Next() {
-		var sessionID string
-		var clearedBefore time.Time
-		if err := rows.Scan(&sessionID, &clearedBefore); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		state[sessionID] = userAgentState{ClearedBefore: timestampValue(clearedBefore)}
-	}
-	if err := rows.Err(); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	WriteJSON(w, http.StatusOK, state)
+	WriteJSON(w, http.StatusOK, states)
 }
 
+// parseAgentStateCutoff reads one optional cutoff of a PUT: absent is nil, anything else must
+// be an RFC3339 timestamp no further ahead of the server clock than agentStateCutoffSkew.
+func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
+	if value == nil {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, *value)
+	if err != nil {
+		return nil, errorf(http.StatusBadRequest, "INVALID_STATE", "%s must be an RFC3339 timestamp", name)
+	}
+	if parsed.After(time.Now().Add(agentStateCutoffSkew)) {
+		return nil, errorf(http.StatusBadRequest, "INVALID_STATE", "%s must not be in the future", name)
+	}
+	return &parsed, nil
+}
+
+// putUserAgentState records a Clear (cleared_before, which replaces the previous one) and/or a
+// read mark (read_through, which only ever moves forward, so a tab that read less a moment ago
+// cannot make a reply unread again), and answers with the session's whole state.
 func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -203,33 +251,88 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct {
 		ClearedBefore *string `json:"cleared_before"`
+		ReadThrough   *string `json:"read_through"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if input.ClearedBefore == nil {
-		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before is required")
+	if input.ClearedBefore == nil && input.ReadThrough == nil {
+		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before or read_through is required")
 		return
 	}
-	clearedBefore, err := time.Parse(time.RFC3339, *input.ClearedBefore)
+	clearedBefore, err := parseAgentStateCutoff("cleared_before", input.ClearedBefore)
 	if err != nil {
-		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before must be an RFC3339 timestamp")
-		return
-	}
-	if clearedBefore.After(time.Now().Add(clearedBeforeSkew)) {
-		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before must not be in the future")
-		return
-	}
-	var stored time.Time
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
-		insert into user_agent_state (login, session_id, cleared_before)
-		values ($1, $2, $3)
-		on conflict (login, session_id) do update set cleared_before = excluded.cleared_before
-		returning cleared_before
-	`, actor.ID, r.PathValue("session_id"), clearedBefore).Scan(&stored); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, userAgentState{ClearedBefore: timestampValue(stored)})
+	readThrough, err := parseAgentStateCutoff("read_through", input.ReadThrough)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	sessionID := r.PathValue("session_id")
+	// The state is announced on an event the session owns, and only a session id a route can
+	// name can own one, so any other is refused here rather than failing the write.
+	if _, err := model.ParseRoute("session:" + sessionID); err != nil {
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_STATE",
+			"session id %q is not one Dispatch can route", sessionID))
+		return
+	}
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	// A cutoff up to agentStateCutoffSkew ahead of the server clock is accepted, so a browser a few
+	// seconds fast is not refused, but it is stored as no later than now: a reply that lands in
+	// the gap is still after the viewer's Clear and read mark, so it shows and it counts.
+	if clearedBefore != nil {
+		// The Clear is keyed on the raw actor id on purpose: user_agent_state is migration 0033's
+		// table and its rows predate the canonical convention 0048 and 0051 follow. This is not
+		// the missing canonicalLogin a grep for one would take it for.
+		if _, err := tx.Exec(r.Context(), `
+			insert into user_agent_state (login, session_id, cleared_before)
+			values ($1, $2, least($3::timestamptz, now()))
+			on conflict (login, session_id) do update set cleared_before = excluded.cleared_before
+		`, actor.ID, sessionID, *clearedBefore); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if readThrough != nil {
+		if _, err := tx.Exec(r.Context(), `
+			insert into user_agent_read (login, session_id, read_through)
+			values ($1, $2, least($3::timestamptz, now()))
+			on conflict (login, session_id) do update set
+				read_through = greatest(user_agent_read.read_through, excluded.read_through)
+		`, canonicalLogin(actor.ID), sessionID, *readThrough); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	// The viewer's other open tabs and devices refresh their badge from this event rather than
+	// waiting for a focus or the next message. It is owned by the session, like its messages,
+	// so the outbox publishes it nowhere and it reaches only the dashboard's event stream.
+	event, err := s.appendEvent(r.Context(), tx, model.Event{
+		Type:    "user_agent_state.updated",
+		Actor:   actor,
+		Payload: model.UserAgentStateEventPayload{Login: actor.ID, SessionID: sessionID},
+	})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.publish(event)
+	states, err := s.loadUserAgentStates(r.Context(), actor.ID, &sessionID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, states[sessionID])
 }

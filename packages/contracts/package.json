@@ -33,6 +33,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "gen:go": "bun run scripts/gen-go.ts",
+    "check:go": "bun run scripts/gen-go.ts --check",
     "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts src/dispatch-tools.ts src/legion-go-api.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",

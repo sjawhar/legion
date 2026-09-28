@@ -458,6 +458,12 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	followUp, err := followUpRequested(r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -490,28 +496,31 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "REPLY_FORBIDDEN", http.StatusForbidden, "session may reply only to its own delivery")
 		return
 	}
-	if attempt.ReplyID != nil {
-		reply, err := s.loadMessage(r.Context(), tx, messageIssueKey(message), *attempt.ReplyID)
+	// Each outcome is a response, its status, and the event it appended, if any; they share one
+	// commit, publish and write.
+	var response any
+	status := http.StatusOK
+	var events []model.Event
+	switch {
+	case attempt.ReplyID != nil:
+		answer, err := s.loadMessage(r.Context(), tx, messageIssueKey(message), *attempt.ReplyID)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := tx.Commit(r.Context()); err != nil {
+		read, posted, err := s.replyAfterAnswer(r.Context(), tx, answer, actor, input.Body, followUp)
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		WriteJSON(w, http.StatusOK, reply)
-		return
-	}
-	if attempt.State == "failed" && input.Error != nil {
-		if err := tx.Commit(r.Context()); err != nil {
-			s.writeHandlerError(w, err)
-			return
+		response = read
+		if posted != nil {
+			events = append(events, *posted)
+			status = http.StatusCreated
 		}
-		WriteJSON(w, http.StatusOK, attempt)
-		return
-	}
-	if input.Error != nil {
+	case input.Error != nil && attempt.State == "failed":
+		response = attempt
+	case input.Error != nil:
 		updated, err := scanMessageDelivery(tx.QueryRow(r.Context(), `
 			update message_deliveries set state = 'failed', error = $3 where message_id = $1 and attempt = $2
 			returning `+messageDeliveryColumns,
@@ -521,73 +530,138 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		attempt = updated
-		event, err := s.appendEvent(r.Context(), tx, messageDeliveryReceipt(message, actor, attempt, ""))
+		receipt, err := s.appendEvent(r.Context(), tx, messageDeliveryReceipt(message, actor, updated, ""))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := tx.Commit(r.Context()); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		s.publish(event)
-		WriteJSON(w, http.StatusOK, attempt)
-		return
-	}
-	author, err := json.Marshal(actor)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	reply, err := scanMessage(tx.QueryRow(r.Context(), `
-		insert into messages (issue_key, author, body, target, in_reply_to)
-		values ($1, $2, $3, $4, $5)
-		returning `+messageColumns+`
-	`, message.IssueKey, author, *input.Body, message.Target, message.ID))
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	var referenceChanges model.ReferenceChanges
-	if reply.IssueKey != nil {
-		referenceChanges, err = s.replaceReferences(r.Context(), tx, "message", reply.ID, reply.Body)
+		response, events = updated, append(events, receipt)
+	default:
+		reply, answered, err := s.insertSessionReply(r.Context(), tx, message, actor, *input.Body)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-	}
-	// The session answered, so the message reached it whatever the attempt recorded: a failed
-	// attempt (a stale receipt, an error the session itself reported) reads as sent and answered.
-	if _, err := tx.Exec(r.Context(), `
-		update message_deliveries set reply_id = $3, state = 'sent', error = null
-		where message_id = $1 and attempt = $2
-	`, message.ID, input.Attempt, reply.ID); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	thread, err := messageReplyParentOf(message).thread(r.Context(), tx)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	event, err := s.appendEvent(r.Context(), tx, messageEvent(reply, "message.answered", actor, thread.payload(reply, referenceChanges)))
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if reply.IssueKey != nil {
-		if err := refs.Stamp(r.Context(), tx, "message", reply.ID, event.ID); err != nil {
+		// The session answered, so the message reached it whatever the attempt recorded: a failed
+		// attempt (a stale receipt, an error the session itself reported) reads as sent and answered.
+		if _, err := tx.Exec(r.Context(), `
+			update message_deliveries set reply_id = $3, state = 'sent', error = null
+			where message_id = $1 and attempt = $2
+		`, message.ID, input.Attempt, reply.ID); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		response, events, status = replyRead{Message: reply}, append(events, answered), http.StatusCreated
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(event)
-	WriteJSON(w, http.StatusCreated, reply)
+	s.publish(events...)
+	WriteJSON(w, status, response)
+}
+
+// replyAfterAnswer is the reply route on an attempt the session already answered with answer.
+// Without a follow-up every call is a retry of that answer and posts nothing: the host's
+// automatic BTW answer is sent that way, so a frame the session is handed twice can never post a
+// second answer, and an error report after an answer is a retry too. A follow-up whose text the
+// session already posted in this conversation (its first reply, or an earlier follow-up) is a
+// resend and posts nothing; any other is posted under the first reply, and its event is returned.
+func (s *server) replyAfterAnswer(
+	ctx context.Context, tx pgx.Tx, answer model.Message, actor model.Actor, body *string, followUp bool,
+) (replyRead, *model.Event, error) {
+	if body == nil || !followUp {
+		return replyRead{Message: answer, Duplicate: true}, nil, nil
+	}
+	posted, err := scanMessage(tx.QueryRow(ctx, `
+		select `+messageColumns+`
+		from messages
+		where (id = $1 or in_reply_to = $1) and body = $2
+		  and author->>'kind' = 'session' and author->>'id' = $3
+		order by created_at desc limit 1
+	`, answer.ID, *body, actor.ID))
+	if err == nil {
+		return replyRead{Message: posted, Duplicate: true}, nil, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return replyRead{}, nil, err
+	}
+	followUpReply, event, err := s.insertSessionReply(ctx, tx, answer, actor, *body)
+	if err != nil {
+		return replyRead{}, nil, err
+	}
+	return replyRead{Message: followUpReply}, &event, nil
+}
+
+// replyRead is what the reply route answers with a message: the message, and `duplicate` when
+// the route posted nothing and handed back one the conversation already holds (an answered
+// attempt's stored reply, or a follow-up whose text the session already posted). A caller cannot
+// otherwise tell a resend from a send, since both carry the message it asked for.
+type replyRead struct {
+	model.Message
+	Duplicate bool `json:"duplicate,omitempty"`
+}
+
+// followUpRequested reads the reply route's `?follow_up=`: `true` is the session asking to post
+// more in a conversation whose attempt it already answered, `false` or absent is not, and any
+// other value is refused rather than read as a retry. It is a query parameter rather than a body
+// field because the route decodes its body strictly, so a Dispatch that predates follow-ups
+// would refuse a body naming it, where it ignores the parameter and answers with its stored
+// reply, which the tool already reports as "already answered".
+func followUpRequested(r *http.Request) (bool, error) {
+	values, present := r.URL.Query()["follow_up"]
+	if !present {
+		return false, nil
+	}
+	if len(values) == 1 {
+		switch values[0] {
+		case "true":
+			return true, nil
+		case "false":
+			return false, nil
+		}
+	}
+	return false, errorf(http.StatusBadRequest, "MESSAGE_INPUT", "follow_up must be true or false")
+}
+
+// insertSessionReply writes a session's reply to parent in parent's conversation - its issue,
+// or none, and its target - with the reply's references and its message.answered event.
+func (s *server) insertSessionReply(
+	ctx context.Context, tx pgx.Tx, parent model.Message, actor model.Actor, body string,
+) (model.Message, model.Event, error) {
+	author, err := json.Marshal(actor)
+	if err != nil {
+		return model.Message{}, model.Event{}, err
+	}
+	reply, err := scanMessage(tx.QueryRow(ctx, `
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		values ($1, $2, $3, $4, $5)
+		returning `+messageColumns+`
+	`, parent.IssueKey, author, body, parent.Target, parent.ID))
+	if err != nil {
+		return model.Message{}, model.Event{}, err
+	}
+	var referenceChanges model.ReferenceChanges
+	if reply.IssueKey != nil {
+		referenceChanges, err = s.replaceReferences(ctx, tx, "message", reply.ID, reply.Body)
+		if err != nil {
+			return model.Message{}, model.Event{}, err
+		}
+	}
+	thread, err := messageReplyParentOf(parent).thread(ctx, tx)
+	if err != nil {
+		return model.Message{}, model.Event{}, err
+	}
+	event, err := s.appendEvent(ctx, tx, messageEvent(reply, "message.answered", actor, thread.payload(reply, referenceChanges)))
+	if err != nil {
+		return model.Message{}, model.Event{}, err
+	}
+	if reply.IssueKey != nil {
+		if err := refs.Stamp(ctx, tx, "message", reply.ID, event.ID); err != nil {
+			return model.Message{}, model.Event{}, err
+		}
+	}
+	return reply, event, nil
 }
 
 // messageDeliveryColumns is the message_deliveries select list scanMessageDelivery reads, in

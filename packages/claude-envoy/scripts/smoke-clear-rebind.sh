@@ -22,6 +22,10 @@ done
 
 workdir="$(mktemp -d /tmp/claude-clear-rebind.XXXXXX)"
 readonly workdir
+# The smoke runs its own tmux server on a socket in its scratch directory, so its cleanup can end
+# only the session it started: `tmux kill-session` on the shared default server could end anyone's.
+readonly tmux_socket="${workdir}/tmux.sock"
+tmux() { command tmux -S "$tmux_socket" "$@"; }
 readonly claude_output="${workdir}/claude-output.txt"
 tmux_session="claude-clear-rebind-${workdir##*.}"
 session_ids=()
@@ -98,6 +102,8 @@ answer_startup_dialogs() {
 # User settings stay out (`--setting-sources project,local`) so an installed copy of the
 # plugin does not start a second channel server in this session; `--plugin-dir` loads the
 # build under test with its SessionStart hook, which writes the handoff file `/clear` needs.
+printf 'starting Claude /clear rebind smoke %s; watch it with: tmux -S %s attach -t %s\n' \
+  "$tmux_session" "$tmux_socket" "$tmux_session"
 tmux new-session -d -s "$tmux_session" -x 220 -y 50 -c "$workdir" \
   env ENVOY_NATS_URL="$nats_url" ENVOY_URL="$envoy_url" ENVOY_HEARTBEAT_MS="$heartbeat_ms" \
   CLAUDE_PROJECT_DIR="$workdir" \

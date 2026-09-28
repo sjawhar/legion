@@ -14086,6 +14086,16 @@ var messageValidation = {
   },
   message: "issue is required unless in_reply_to names a message delivered to this session, which is the one message with no issue."
 };
+var readOwner = documentOwnerValidation(true);
+var readValidation = {
+  check: (value) => {
+    const input = value;
+    if (typeof input.message !== "string")
+      return readOwner.check(value);
+    return input.issue === undefined && input.project === undefined && input.artifact === undefined && input.ref === undefined;
+  },
+  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`
+};
 var ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"];
 function componentsArgument(z2) {
   return z2.object({
@@ -14310,7 +14320,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A blocker only a human can " + "clear is an ask (dispatch_ask), so it lands in their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a decision (dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " + "one sent from the Agents page, which names no issue - pass that message's bare id as in_reply_to and no issue; " + "the reply lands in that conversation, and a second call with the same in_reply_to posts nothing because " + "Dispatch keeps the one reply per message. Every other message names its issue. " + `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A blocker only a human can " + "clear is an ask (dispatch_ask), so it lands in their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a decision (dispatch_ask) or document feedback (dispatch_comment). To answer a human's direct message to this session - " + "one sent from the Agents page, which names no issue - pass that message's bare id as in_reply_to and no issue; " + "the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
       body: z2.string({ max: 2000 }).describe("Update text, at most 2,000 characters."),
@@ -14404,14 +14414,15 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain. Do not use it for document " + "contents; use dispatch_doc_read instead. Supply ref, issue, or project plus artifact. " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
+    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
       artifact: z2.string().describe("Project document artifact id, slug, or filename.").optional(),
-      ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional()
+      ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
+      message: z2.string().describe("A message id (uuid): reads the conversation it belongs to, the root message and every " + "reply. Name nothing else with it.").optional()
     }),
-    validation: documentOwnerValidation(true)
+    validation: readValidation
   },
   {
     name: "dispatch_search",
@@ -15219,8 +15230,8 @@ class DispatchClient {
   async message(issue2, input) {
     return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "messages"], input);
   }
-  async messageReply(id, input) {
-    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input);
+  async messageReply(id, input, options = {}) {
+    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
   }
   async getMessage(issue2, id) {
     return this.#json("GET", [
@@ -15231,6 +15242,9 @@ class DispatchClient {
       "messages",
       id
     ]);
+  }
+  async getMessageThread(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
   }
   async artifact(issue2, input) {
     const artifactPath = ["api", "v1", "issues", await this.#resolveIssue(issue2), "artifacts"];
@@ -15906,6 +15920,13 @@ function argumentProblems(tool, args) {
       }
       break;
     }
+    case "dispatch_read": {
+      const message = optionalString(args, "message");
+      if (message !== undefined && messageIdOf(message) === undefined) {
+        problems.push("message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference");
+      }
+      break;
+    }
   }
   return problems;
 }
@@ -16041,6 +16062,9 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, pro
   }
   const replyTarget = args.in_reply_to;
   if (tool === "dispatch_message" && typeof replyTarget === "string" && !replyTarget.startsWith("dispatch://")) {
+    return { args, ref, owner: null };
+  }
+  if (tool === "dispatch_read" && typeof args.message === "string") {
     return { args, ref, owner: null };
   }
   const legionIssue = env.LEGION_ISSUE;
@@ -16962,16 +16986,30 @@ ${followsAsk(askOwner)}`,
       const inReplyTo = messageInReplyTo(args);
       const body = stringArg(args, "body");
       if (owner === null && inReplyTo !== undefined) {
-        const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor });
+        const reply = await client.messageReply(inReplyTo, { body, attempt: 1, actor }, { followUp: true });
+        if (reply.duplicate === true && reply.body === body) {
+          return {
+            text: `Dispatch already has this exact text in the conversation (message ${reply.id}); ` + "nothing new was posted. Send different text if you have more to say.",
+            details: { message: reply.id, in_reply_to: inReplyTo, posted: false, duplicate: true }
+          };
+        }
         if (reply.body !== body) {
           return {
             text: `Message ${inReplyTo} was already answered by message ${reply.id}; Dispatch kept ` + "that reply and posted nothing. Wait for their next message rather than answering " + "this one again.",
             details: { message: reply.id, in_reply_to: inReplyTo, posted: false }
           };
         }
+        const readBack = `dispatch_read({message: "${inReplyTo}"}) reads the conversation back.`;
+        const parent = reply.in_reply_to ?? undefined;
+        const follows = parent === inReplyTo ? undefined : parent;
         return {
-          text: `Replied to message ${inReplyTo} with message ${reply.id}`,
-          details: { message: reply.id, in_reply_to: inReplyTo, posted: true }
+          text: follows === undefined ? `Replied to message ${inReplyTo} with message ${reply.id}. ${readBack}` : `Replied to message ${inReplyTo} with message ${reply.id}, a follow-up threaded ` + `under your reply ${follows}. ${readBack}`,
+          details: {
+            message: reply.id,
+            in_reply_to: inReplyTo,
+            posted: true,
+            ...follows === undefined ? {} : { follows }
+          }
         };
       }
       const issueKey = issue2();
@@ -17143,6 +17181,21 @@ ${trailer.join(`
       };
     }
     case "dispatch_read": {
+      const message = optionalString(args, "message");
+      if (message !== undefined) {
+        const sessionId = input.sessionId?.trim();
+        if (!sessionId)
+          throw new Error("host session id is required for dispatch_read({message})");
+        const thread = await client.getMessageThread(messageIdOf(message), sessionId);
+        const issueKey2 = thread.message.issue_key;
+        return {
+          text: messageSummary(thread, issueKey2 === null ? [] : await graphSections(client, dispatchChildRef(dispatchIssueRef(issueKey2), "message", thread.message.id))),
+          details: {
+            message: thread.message.id,
+            ...issueKey2 === null ? {} : { issue: issueKey2 }
+          }
+        };
+      }
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
         const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));

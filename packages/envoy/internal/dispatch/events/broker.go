@@ -184,6 +184,8 @@ func agentEventSessionID(e model.Event) (string, error) {
 		}
 	case model.MessageDeliveryEventPayload:
 		target = payload.Target
+	case model.UserAgentStateEventPayload:
+		target = "session:" + payload.SessionID
 	}
 	route, err := model.ParseRoute(target)
 	if err != nil || route.Kind != "session" {
@@ -245,9 +247,9 @@ func (b *Broker) Notify(e model.Event) bool {
 		// author. Retain it for every stream consumer without waking anyone.
 		return false
 	case "project.created", "settings.repo_project.updated", "settings.architecture_source.updated",
-		"architecture.synced", "architecture.sync_failed", "user_state.updated":
-		// Settings and importer bookkeeping: retained on the project's log and
-		// carried by SSE, but nobody is woken by them.
+		"architecture.synced", "architecture.sync_failed", "user_state.updated", "user_agent_state.updated":
+		// Settings, importer and per-viewer bookkeeping: retained on their log and carried by
+		// SSE, but nobody is woken by them.
 		return false
 	case "child.status", "child.added", "child.removed":
 		// A child status flip or a reparent changes the parent's Children set whoever

@@ -1,6 +1,23 @@
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 
+/* A screen too narrow or too short for a wide sticky panel: a phone in either orientation, or a
+   tablet-width window below `md`. The Agents broadcast composer compacts under it (and further
+   under `short`, where two stacked rows of controls would still take half the height). The
+   height clause is what catches a phone in landscape. `short` is registered after
+   `narrow-or-short`, so its utilities win where both match. */
+@custom-variant narrow-or-short {
+  @media (max-width: 767px), (max-height: 500px) {
+    @slot;
+  }
+}
+
+@custom-variant short {
+  @media (max-height: 500px) {
+    @slot;
+  }
+}
+
 /* Dispatch has no theme toggle: every surface follows the OS `prefers-color-scheme`, which is
    exactly Tailwind v4's default `dark:` variant (a `@media (prefers-color-scheme: dark)` query,
    built into `@import "tailwindcss"` with no `@custom-variant` override here). Components import

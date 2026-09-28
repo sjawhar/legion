@@ -8,9 +8,10 @@
  *
  * A pane may delete, move, truncate, overwrite, or recursively change the mode or owner of paths
  * under its writable roots only: its issue workspace (`LEGION_WORKSPACE`, `.jj` included) and any
- * directory below `/tmp` except `/tmp` itself, a glob over it, or the tmux and ssh socket
- * directories there. The guard cannot tell which permitted `/tmp` directory belongs to the pane. A
- * pane signals only processes descended from its own Oh My Pi process.
+ * directory below `/tmp` except `/tmp` itself, a glob over it, the tmux and ssh socket directories
+ * there, or the one holding the pane's `HOME` or `TMUX_TMPDIR`. The guard cannot tell which other
+ * permitted `/tmp` directory belongs to the pane. A pane signals only processes descended from its
+ * own Oh My Pi process.
  *
  * Commands are parsed by `unbash`, a bash parser, and the guard follows what bash would do with
  * them: quoting, `$HOME`, `~`, variables assigned earlier in the same command (`$(mktemp -d)`
@@ -19,7 +20,34 @@
  * piped into a shell, a script executed by path, and python/node/bun scripts through
  * `pane-guard-code.ts`). A command the parser reports as malformed is refused, and so is a target
  * the guard cannot resolve (a variable read from input, a command's output): it never guesses.
- * A command whose walk visits more than `MAX_WALK_STEPS` nodes is refused, never allowed unread.
+ * A command whose walk visits more than `MAX_WALK_STEPS` nodes is refused, never allowed unread, and
+ * no value the guard builds is longer than `MAX_VALUE_LENGTH`: past it (a replacement of a
+ * replacement, `x="$x$x"` repeated) a value is unknown, since building one held the pane. A script
+ * a command writes is read whole up to `MAX_SCRIPT_BYTES`, as one on disk is, and past it is one
+ * the guard cannot read (`readable`).
+ *
+ * Every value the guard produces is known, unset, or unknown, and never one standing in for
+ * another: a value it cannot know taken as some harmless concrete one (the empty string, the text
+ * left as it was, a parameter taken as unset) turns a refusal into a silent allow. So an argument
+ * of a shell whose arguments it does not know is unknown, set or not; `unset` leaves a name unset
+ * rather than empty; a pattern it cannot split as bash does leaves the whole expansion unknown; and
+ * a word that may be several arguments or none leaves the arguments it is among unknown.
+ *
+ * The same holds for writes: a write the guard sees a command make to a variable reaches its model,
+ * and one it cannot model leaves the value unknown rather than the one already approved. A builtin
+ * that assigns by name (`printf -v`, `read`, `mapfile`, `getopts`, `declare` and its kin, `unset`,
+ * `wait -p`), arithmetic, `${v:=x}`, a loop variable and a plain assignment to an array's name all
+ * assign as bash does; a function's `local` is the caller's variable again once it returns; a
+ * name with `readonly`, `-i`, `-l` or `-u` is unknown after a write, which bash refuses or
+ * rewrites; and a write under a name the guard cannot read, or `eval` of text it cannot read,
+ * leaves every variable unknown and possibly unset, the pane's environment included. A nameref
+ * (`declare -n`) is refused, since its writes land elsewhere. Text `eval` runs that the guard
+ * cannot read is outside what it sees in any case (`docs/deployment.md`, "The pane guard"):
+ * besides running commands the guard never judges, it can make a name read-only, so that a later
+ * write the guard trusts is refused. Two writes it does not follow: a `source` of a path it cannot
+ * read at check time (a process substitution, `/dev/fd/N`, a file a command before it creates),
+ * which `runFile` takes as sourcing nothing (LEGION-332), and an assignment to `IFS`, since it
+ * splits an unquoted value on whitespace alone.
  *
  * A `trap` handler's body is judged once, against the state of the shell that set it after that
  * shell's last statement, where bash runs an EXIT handler; a subshell's handlers (a substitution,
@@ -53,16 +81,33 @@ import * as path from "node:path";
 import { messageFor } from "@legion/envoy-client/errors";
 import type {
   ArithmeticExpression,
+  BraceGroup,
+  Case,
+  CaseItem,
   Command,
+  CompoundList,
   Node,
   ParsedScript,
   Redirect,
   Statement,
   TestExpression,
+  While,
   Word,
   WordPart,
 } from "unbash";
 import { parse } from "unbash";
+import {
+  ANY_ONE,
+  ANY_RUN,
+  evaluateTest,
+  type Glob,
+  globMatches,
+  globWork,
+  isAscii,
+  removePattern,
+  replacePattern,
+  shellQuoted,
+} from "./pane-guard-bash";
 import { type CodeLanguage, scanCode, UNKNOWN_MARKER } from "./pane-guard-code";
 
 /** One run of an expanded shell word: text the guard knows, a glob pattern, or a value it cannot
@@ -76,14 +121,55 @@ interface Piece {
   readonly why?: string;
   readonly descendantPid?: true;
   readonly lenient?: true;
+  /** Only on `UNSET`'s piece. */
+  readonly unset?: true;
+  /** Only on `NO_ELEMENTS`'s piece. */
+  readonly noElements?: true;
+  /** A value whose name may also be unset: a branch may have unset it, or a write the guard could
+   * not read (`forgetVariables`). Whether it is set is unknown, so `-` and `+` cannot decide. */
+  readonly maybeUnset?: true;
+  /** A value whose name has an attribute with which bash refuses a later write (`readonly`,
+   * `declare -r`) or rewrites it (`-i`, `-l`, `-u`): such a write leaves the name unknown
+   * (`attributed`), whichever bash did. */
+  readonly rewrites?: true;
 }
 type Expansion = readonly Piece[];
 
+/** What `unset NAME` and `env -u NAME` leave for NAME: unset, which is neither empty (`${NAME-x}`
+ * takes `x`) nor absent (the pane's environment no longer supplies it). */
+const UNSET: Expansion = [{ kind: "literal", text: "", unset: true }];
+
+function isUnset(value: Expansion | undefined): boolean {
+  return value?.length === 1 && value[0]?.unset === true;
+}
+
+/** `$@`, `$*` or `${arr[@]}` over no elements: empty text, and no argument when it is all of a word
+ * (`f "$@" x` gives f one argument). An element that is empty is an ordinary empty piece. */
+const NO_ELEMENTS: Piece = { kind: "literal", text: "", noElements: true };
+
+/** A value as a variable or element holds it. `NO_ELEMENTS` marks a word, not a value: what
+ * `x="$@"` assigns from no elements is the empty string, which `"$x"` passes as one argument, so
+ * the mark never outlives the word it came from. */
+function stored(value: Expansion): Expansion {
+  if (!value.some((piece) => piece.noElements === true)) return value;
+  return value.map((piece) => (piece.noElements === true ? literal("") : piece));
+}
+
+/** The key under which `vars` holds the value of every name it does not list, once the shell ran
+ * a write the guard could not read (`forgetVariables`): any name, one from the pane's environment
+ * included, may since have been assigned or unset. */
+const ANY_NAME = "\u0000";
+const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ARRAY_ELEMENT = /^([A-Za-z_][A-Za-z0-9_]*)\[.*\]$/s;
+
 /** One argument of a command: the word as written (for the refusal) and one of its expansions
- * (brace expansion and `"$@"` give a word several). */
+ * (brace expansion and `"$@"` give a word several). `fields` says when bash may not make it one
+ * argument: `none` for an unquoted expansion that is empty, which bash drops, and `unknown` for a
+ * glob or an unquoted expansion the guard cannot read, which bash may split into several. */
 interface Arg {
   readonly text: string;
   readonly exp: Expansion;
+  readonly fields?: "none" | "unknown";
 }
 
 interface Roots {
@@ -91,8 +177,11 @@ interface Roots {
   readonly workspace: string | undefined;
   /** The scratch root's real path (`/tmp`). */
   readonly scratch: string;
-  /** First path components under the scratch root that other processes own (sockets). */
+  /** Prefixes of first path components under the scratch root that other processes own (sockets). */
   readonly protectedScratch: readonly string[];
+  /** First path components under the scratch root this pane lives in, not scratch: the directory
+   * holding its `HOME` or `TMUX_TMPDIR`, by exact name. */
+  readonly protectedDirectories: readonly string[];
 }
 
 interface Ctx {
@@ -135,6 +224,10 @@ interface State {
   /** The handlers this shell set with `trap`. Each body runs when this shell finishes, against its
    * state after its last statement; a subshell starts with none (`subshell`). */
   traps: readonly Trap[];
+  /** Inside a function: the names it made local (`local`, or `declare` and `typeset` without
+   * `-g`), which bash gives back to the caller when it returns; true for a name every path so far
+   * made local, false for one only some did. Undefined outside a function. */
+  locals: Map<string, boolean> | undefined;
 }
 
 interface FunctionDefinition {
@@ -227,7 +320,17 @@ const MAX_DEPTH = 8;
  * budget's worth of `rm -rf a;`, each target resolved against the pane's roots, takes about
  * 490 ms. So the budget bounds a walk's size, not its time. */
 const MAX_WALK_STEPS = 100_000;
+const WALK_LIMIT = `the guard reached its walk limit of ${MAX_WALK_STEPS} nodes; run a smaller script`;
 const MAX_ALTERNATIVES = 64;
+/** The longest value a pattern expansion is evaluated over; `//` matches from every start of it. */
+const MAX_PATTERN_VALUE = 512;
+/** The pattern matching work (`globWork`) one walk step stands for, so the budget bounds the time
+ * a walk spends matching as it bounds its nodes. Measured on a loaded devbox: a budget's worth of
+ * it takes 0.2 s in one `//` over 512 characters with a 762-position pattern, and 0.4 to 0.8 s
+ * spread over thousands of expansions or `case` items, against 0.86 s for 100,000 `rm -rf a;`.
+ * `globWork` charges every pass its full length, where a pass stops once no pattern position is
+ * left, so the charge errs high: too high refuses a command, too low would bring the time back. */
+const PATTERN_WORK_PER_STEP = 1024;
 const MAX_SCRIPT_BYTES = 1024 * 1024;
 const FRESH_TEMP_NAME = "tmp.XXXXXXXXXX";
 /** First components under `/tmp` that hold other processes' sockets. */
@@ -331,12 +434,17 @@ function realish(abs: string, followFinal: boolean): string {
   return path.join(realExisting(path.dirname(resolved)), path.basename(resolved));
 }
 
-/** Whether a first component under the scratch root is one other processes own. A component
- * that is only the literal start of a glob or an unknown value (`/tmp/t*`) is protected when it
- * could still grow into such a name. */
+/** Whether a first component under the scratch root is one other processes own, or one holding
+ * the pane's home or tmux directory. A component that is only the literal start of a glob or an
+ * unknown value (`/tmp/t*`) is protected when it could still grow into such a name. */
 function isProtectedScratchComponent(component: string, roots: Roots, partial = false): boolean {
-  return roots.protectedScratch.some(
-    (name) => component.startsWith(name) || (partial && name.startsWith(component))
+  return (
+    roots.protectedScratch.some(
+      (name) => component.startsWith(name) || (partial && name.startsWith(component))
+    ) ||
+    roots.protectedDirectories.some(
+      (name) => component === name || (partial && name.startsWith(component))
+    )
   );
 }
 
@@ -482,13 +590,105 @@ function unquotedLiteral(
   return pieces;
 }
 
-/** A variable's value: this command's assignments, then the pane's environment. */
+/** A variable's value: this command's assignments, then the pane's environment; undefined for one
+ * this command unset. Once a write the guard could not read ran, a name it does not list is
+ * unknown (`ANY_NAME`). */
 function lookup(name: string, st: State, ctx: Ctx): Expansion | undefined {
   const own = st.vars.get(name);
-  if (own !== undefined) return own;
+  if (own !== undefined) return isUnset(own) ? undefined : own;
+  const any = st.vars.get(ANY_NAME)?.[0];
+  if (any !== undefined) return [{ ...any, why: `\`$${name}\`, which ${any.why}` }];
   if (name === "PWD" && st.cwd !== undefined) return [literal(st.cwd)];
   const value = ctx.env[name];
   return value === undefined ? undefined : [literal(value)];
+}
+
+/** `name=value` as bash makes it: an array of that name keeps its other elements and holds the
+ * value at 0. A name with an attribute that refuses or rewrites the write is unknown after. */
+function assignScalar(st: State, name: string, value: Expansion): void {
+  if (attributed(st, name)) {
+    keepAttributed(st, name);
+    return;
+  }
+  const kept = stored(value);
+  st.vars.set(name, kept);
+  const elements = st.arrays.get(name);
+  if (elements !== undefined) st.arrays.set(name, new Map(elements).set("0", kept));
+}
+
+/** Whether `name` has an attribute bash refuses or rewrites a write with (`Piece.rewrites`). */
+function attributed(st: State, name: string): boolean {
+  return st.vars.get(name)?.some((piece) => piece.rewrites === true) === true;
+}
+
+/** A write to an attributed name: bash refused it or rewrote the value, so the name, and each of
+ * its elements, is unknown and keeps the attribute, and may be unset if it was, or may have been,
+ * before (a refused write leaves it as it was). */
+function keepAttributed(st: State, name: string, unsets = false): void {
+  const before = st.vars.get(name);
+  const maybeUnset =
+    unsets ||
+    before === undefined ||
+    isUnset(before) ||
+    before.some((piece) => piece.maybeUnset === true);
+  const kept: Expansion = [
+    {
+      ...unknown(
+        `\`$${name}\`, whose \`readonly\`, \`-i\`, \`-l\` or \`-u\` refuses or rewrites a write`
+      ),
+      rewrites: true,
+      ...(maybeUnset ? { maybeUnset: true as const } : {}),
+    },
+  ];
+  st.vars.set(name, kept);
+  if (st.arrays.has(name)) st.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, kept]]));
+}
+
+/** A builtin's write to the variable it names (`printf -v`, `read`, `declare`, `wait -p`, an
+ * arithmetic assignment): a plain name as `assignScalar`; an array element (`d[0]`), whose index
+ * the guard does not evaluate there, leaves that array and its name unknown; and a name the guard
+ * cannot read may be any variable (`forgetVariables`). A name bash refuses as no identifier
+ * assigns nothing. `writer` names the write for a refusal. */
+function assignByName(st: State, name: string | undefined, value: Expansion, writer: string): void {
+  if (name === undefined) {
+    forgetVariables(st, `${writer} under a name the guard cannot read may have changed`);
+    return;
+  }
+  if (IDENTIFIER.test(name)) {
+    assignScalar(st, name, value);
+    return;
+  }
+  const base = ARRAY_ELEMENT.exec(name)?.[1];
+  if (base === undefined) return;
+  if (attributed(st, base)) {
+    keepAttributed(st, base, true);
+    return;
+  }
+  // `unset 'd[0]'` of an array's last element leaves it unset.
+  const element: Expansion = [
+    { ...unknown(`\`$${base}\`, whose element ${writer} assigns`), maybeUnset: true },
+  ];
+  st.vars.set(base, element);
+  st.arrays.set(base, new Map([[UNKNOWN_ARRAY_INDEX, element]]));
+}
+
+/** After a write the guard cannot read: any variable may have been assigned or unset, so every
+ * value this shell holds, and every name it does not list (`ANY_NAME`), is unknown and may be
+ * unset until the command assigns it again. `why` completes "`$NAME`, which …", naming the write,
+ * so a refusal says what made the name unknown. */
+function forgetVariables(st: State, why: string): void {
+  const forgotten = (name: string): Expansion => [
+    {
+      ...unknown(`\`$${name}\`, which ${why}`),
+      maybeUnset: true,
+      ...(attributed(st, name) ? { rewrites: true as const } : {}),
+    },
+  ];
+  for (const name of st.vars.keys()) if (name !== ANY_NAME) st.vars.set(name, forgotten(name));
+  st.vars.set(ANY_NAME, [{ ...unknown(why), maybeUnset: true }]);
+  for (const name of st.arrays.keys()) {
+    st.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, forgotten(name)]]));
+  }
 }
 
 function resolveArrayIndex(index: string | undefined, st: State, ctx: Ctx): string | undefined {
@@ -503,12 +703,14 @@ function resolveArrayIndex(index: string | undefined, st: State, ctx: Ctx): stri
 function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][] {
   if (name === "@" || name === "*") {
     if (st.positional === undefined) return [[unknown(`\`$${name}\` (the positional parameters)`)]];
-    return st.positional.length === 0 ? [[literal("")]] : st.positional.map((p) => [...p]);
+    return elements(st.positional, name === "*" && quoted);
   }
   if (/^[0-9]+$/.test(name)) {
     if (name === "0") return [[...(st.argv0 ?? [literal(st.script ?? "bash")])]];
     const value = st.positional?.[Number(name) - 1];
     if (value !== undefined) return [[...value]];
+    // A shell whose arguments the guard knows has none past the last: that parameter is empty.
+    if (st.positional !== undefined) return [[literal("")]];
     return [[unknown(`\`$${name}\` (a positional parameter)`)]];
   }
   if (name === "$") {
@@ -517,7 +719,10 @@ function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][
   if (name === "!") {
     return [[unknown("`$!` (the last background job)", st.backgroundStarted ? true : undefined)]];
   }
+  if (name === "#" && st.positional !== undefined) return [[literal(String(st.positional.length))]];
   if (["?", "#", "-"].includes(name)) return [[unknown(`\`$${name}\``)]];
+  // Unset in this command, a name expands to nothing.
+  if (isUnset(st.vars.get(name))) return [[literal("")]];
   const value = lookup(name, st, ctx);
   if (value === undefined) {
     return [[unknown(`\`$${name}\`, which is not set in this command or the pane's environment`)]];
@@ -532,6 +737,44 @@ function parameter(name: string, quoted: boolean, st: State, ctx: Ctx): Piece[][
     } else pieces.push(...unquotedLiteral(piece.text.replaceAll("\\", "\\\\"), undefined, st, ctx));
   }
   return [pieces];
+}
+
+/** A list's elements as `$@` or `${arr[@]}` expands them, one word each (`NO_ELEMENTS` for none),
+ * or `joined`, as a quoted `$*` or `${arr[*]}` does, one word of them all separated by spaces. */
+function elements(values: readonly Expansion[], joined: boolean): Piece[][] {
+  if (joined)
+    return [values.flatMap((value, index) => (index === 0 ? value : [literal(" "), ...value]))];
+  return values.length === 0 ? [[NO_ELEMENTS]] : values.map((value) => [...value]);
+}
+
+/** A parameter as an operator (`${D-x}`, `${1:-x}`) tests it: whether it is set, undefined when the
+ * guard cannot tell (an argument of a shell whose arguments it does not know, `$!` before any
+ * background job it saw), and its value when set. A special parameter comes from what the shell
+ * holds (`$1` from its arguments, unset past the last), any other name from `lookup`. */
+function operatorValue(
+  name: string,
+  st: State,
+  ctx: Ctx
+): { readonly set: boolean | undefined; readonly value: Expansion } {
+  const unknownValue = [unknown(`\`$${name}\``)];
+  if (!/^([0-9]+|[@*#?$!-])$/.test(name)) {
+    const value = lookup(name, st, ctx);
+    if (value === undefined) return { set: false, value: [] };
+    return { set: value.some((piece) => piece.maybeUnset === true) ? undefined : true, value };
+  }
+  if (/^[1-9][0-9]*$/.test(name) || name === "@" || name === "*") {
+    if (st.positional === undefined) return { set: undefined, value: unknownValue };
+    const value =
+      name === "@" || name === "*"
+        ? st.positional.length === 0
+          ? undefined
+          : elements(st.positional, true)[0]
+        : st.positional[Number(name) - 1];
+    return value === undefined ? { set: false, value: [] } : { set: true, value };
+  }
+  if (name === "!" && !st.backgroundStarted) return { set: undefined, value: unknownValue };
+  const alternatives = parameter(name, true, st, ctx);
+  return { set: true, value: alternatives.length === 1 ? (alternatives[0] ?? []) : unknownValue };
 }
 
 function parameterExpansion(
@@ -549,8 +792,7 @@ function parameterExpansion(
     if (array !== undefined) {
       const unknownElement = array.get(UNKNOWN_ARRAY_INDEX);
       if (unknownElement !== undefined) return [[...unknownElement]];
-      const values = [...array.values()];
-      return values.length === 0 ? [[literal("")]] : values.map((value) => [...value]);
+      return elements([...array.values()], part.index === "*" && quoted);
     }
     return parameter(name, quoted, st, ctx);
   }
@@ -561,30 +803,50 @@ function parameterExpansion(
     }
     return [[unknown(`\`${part.text}\``)]];
   }
-  if (part.length || part.indirect || part.slice || part.replace) {
+  if (part.length || part.indirect || part.slice) {
     return [[unknown(`\`${part.text}\``)]];
+  }
+  if (part.replace !== undefined || ["#", "##", "%", "%%"].includes(part.operator ?? "")) {
+    return patternExpansion(part, quoted, st, ctx);
   }
   const operator = part.operator;
   if (operator === undefined) return parameter(name, quoted, st, ctx);
-  const value = lookup(name, st, ctx);
-  const set = value !== undefined;
-  const nonEmpty = set && value.map((p) => p.text).join("") !== "";
-  const known = !set || value.every((p) => p.kind === "literal");
+  const { set, value } = operatorValue(name, st, ctx);
+  const nonEmpty = set === true && value.map((p) => p.text).join("") !== "";
+  const known = set === false || (set === true && value.every((p) => p.kind === "literal"));
+  // A value holding known text or a pid this shell started is non-empty whatever else it holds.
+  const surelyNonEmpty =
+    set === true &&
+    value.some((p) => p.descendantPid === true || (p.kind === "literal" && p.text !== ""));
+  const undecided = [[unknown(`\`${part.text}\``)]];
   const operand = (): Piece[][] =>
     part.operand === undefined ? [[literal("")]] : expandWord(part.operand, st, ctx);
+  // `:=` and `=` assign the operand they take (bash refuses it for a special parameter). When the
+  // guard cannot tell whether they take it, the variable is set after, to a value it cannot know.
+  const assigning = (result: Piece[][], maybe: boolean): Piece[][] => {
+    if ((operator === ":=" || operator === "=") && IDENTIFIER.test(name)) {
+      const only = result.length === 1 && !maybe ? result[0] : undefined;
+      assignScalar(st, name, only ?? [unknown(`\`$${name}\`, which \`${part.text}\` may assign`)]);
+    }
+    return result;
+  };
   switch (operator) {
     case ":-":
     case ":=":
-      if (!known) return [[unknown(`\`${part.text}\``)]];
-      return nonEmpty ? parameter(name, quoted, st, ctx) : operand();
+      if (surelyNonEmpty) return parameter(name, quoted, st, ctx);
+      if (!known) return assigning(undecided, true);
+      return nonEmpty ? parameter(name, quoted, st, ctx) : assigning(operand(), false);
     case "-":
     case "=":
-      if (!known) return [[unknown(`\`${part.text}\``)]];
-      return set ? parameter(name, quoted, st, ctx) : operand();
+      // Only whether the parameter is set decides.
+      if (set === undefined) return assigning(undecided, true);
+      return set ? parameter(name, quoted, st, ctx) : assigning(operand(), false);
     case ":+":
-      if (!known) return [[unknown(`\`${part.text}\``)]];
+      if (surelyNonEmpty) return operand();
+      if (!known) return undecided;
       return nonEmpty ? operand() : [[literal("")]];
     case "+":
+      if (set === undefined) return undecided;
       return set ? operand() : [[literal("")]];
     case ":?":
     case "?":
@@ -592,6 +854,78 @@ function parameterExpansion(
     default:
       return [[unknown(`\`${part.text}\``)]];
   }
+}
+
+/** `${name#p}`, `##`, `%` and `%%`, and `${name/p/r}`, `//`, `/#` and `/%`, evaluated as bash does
+ * when the value, the pattern and the replacement are all known; unknown otherwise, and for a
+ * replacement holding `&` or `\`, which bash 5.2's `patsub_replacement` may rewrite. The parser's
+ * split must account for the expansion's own text, and after `/` or `//` the pattern must be
+ * non-empty: bash reads a `/` there as the pattern's first character (`${v////x}` replaces every
+ * `/`), where the parser reads an empty pattern, and a value left as it was is the one the caller
+ * already trusts. */
+function patternExpansion(
+  part: Extract<WordPart, { type: "ParameterExpansion" }>,
+  quoted: boolean,
+  st: State,
+  ctx: Ctx
+): Piece[][] {
+  const unknownResult = [[unknown(`\`${part.text}\``)]];
+  // An operand the guard cannot know makes the expansion unknown, for the operand's reason.
+  const because = (pieces: Expansion): Piece[][] => {
+    const cause = pieces.find((piece) => piece.kind === "unknown")?.why;
+    return cause === undefined ? unknownResult : [[unknown(`\`${part.text}\` (${cause})`)]];
+  };
+  const operator = part.operator ?? "";
+  const head = `\${${part.parameter}${operator}`;
+  const accounted =
+    part.replace === undefined
+      ? part.text === `${head}${part.operand?.text ?? ""}}`
+      : part.text === `${head}${part.replace.pattern.text}/${part.replace.replacement.text}}` ||
+        (part.replace.replacement.text === "" &&
+          part.text === `${head}${part.replace.pattern.text}}`);
+  const slashPattern = operator === "/" || operator === "//";
+  // A parsed empty pattern after `/` or `//` is `unbash` splitting a `/` bash reads as the
+  // pattern's (`${v////x}`). The empty-glob check below refuses it too, so removing either leaves
+  // the other the one defence of that split, and `pane-guard-bash.test.ts` fails only with both gone.
+  if (!accounted || (slashPattern && part.replace?.pattern.text === "")) return unknownResult;
+  // Unset expands empty: an argument past the last one this shell knows it was given, or a name it
+  // unset. A name merely absent from the command may still be in the environment bash runs with.
+  const { set, value: held } = operatorValue(part.parameter, st, ctx);
+  const knownUnset =
+    set === false &&
+    (/^([1-9][0-9]*|[@*])$/.test(part.parameter) || isUnset(st.vars.get(part.parameter)));
+  const value = set === true ? literalText(held) : knownUnset ? "" : undefined;
+  if (value === undefined) return because(held);
+  if (value.length > MAX_PATTERN_VALUE || !isAscii(value)) return unknownResult;
+  const patternWord = part.replace?.pattern ?? part.operand;
+  const patterns = patternWord === undefined ? [[literal("")]] : expandWord(patternWord, st, ctx);
+  const glob = patterns.length === 1 ? patternGlob(patterns[0] as Expansion) : undefined;
+  // Also the second defence of the split above: an empty pattern text gives an empty glob.
+  if (glob === undefined || (slashPattern && glob.length === 0)) return unknownResult;
+  // Past the budget the value is not computed, and the walk refuses the command.
+  if (!spendPatternWork(globWork(glob, value.length, operator), ctx)) return unknownResult;
+  let result: string;
+  if (part.replace === undefined) {
+    result = removePattern(value, operator, glob);
+  } else {
+    const replacements = expandWord(part.replace.replacement, st, ctx);
+    const pieces = replacements.length === 1 ? (replacements[0] as Expansion) : undefined;
+    if (pieces === undefined) return unknownResult;
+    if (pieces.some((piece) => piece.kind === "unknown")) return because(pieces);
+    const replacement = pieces.map((piece) => piece.text).join("");
+    if (/[&\\]/.test(replacement)) return unknownResult;
+    // `//` replaces at most one match per character; the others at most one. The bound stops the
+    // output being built at all: unquoted, it is scanned for splitting before any word joins it.
+    const most =
+      value.length + (operator === "//" ? Math.max(value.length, 1) : 1) * replacement.length;
+    if (most > MAX_VALUE_LENGTH) return [[overLong(`\`${part.text}\``)]];
+    result = replacePattern(value, operator, glob, replacement);
+  }
+  if (quoted) return [[literal(result)]];
+  if (/\s/.test(result)) {
+    return [[unknown(`unquoted \`${part.text}\`, which splits into several words`)]];
+  }
+  return [unquotedLiteral(result.replaceAll("\\", "\\\\"), undefined, st, ctx)];
 }
 
 /** A command substitution's value: `$(mktemp ...)` is a fresh path in its directory and
@@ -681,6 +1015,9 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
   if (!["dirname", "basename", "realpath", "readlink"].includes(base)) return undefined;
   const target = literalText(operands(list, "").operands.at(-1)?.exp);
   if (target === undefined || st.cwd === undefined) return undefined;
+  // An empty operand names no path: dirname prints `.`, basename nothing, and realpath and
+  // readlink fail and print nothing.
+  if (target === "") return base === "dirname" ? "." : "";
   const abs = path.resolve(st.cwd, target);
   if (base === "dirname") return path.dirname(abs);
   if (base === "basename") return path.basename(abs);
@@ -773,10 +1110,38 @@ function product(left: Piece[][], right: Piece[][]): Piece[][] {
       if (out.length >= MAX_ALTERNATIVES) {
         return [[unknown(`a brace expansion with more than ${MAX_ALTERNATIVES} alternatives`)]];
       }
-      out.push([...a, ...b]);
+      const long =
+        a.length + b.length > MAX_VALUE_PIECES || textLength(a) + textLength(b) > MAX_VALUE_LENGTH;
+      out.push(long ? [overLong("a word")] : [...a, ...b]);
     }
   }
   return out;
+}
+
+/** The longest value the guard builds, in characters and in pieces. A path is at most 4,096 bytes
+ * on Linux, so a longer value is never one target it resolves, and building values without a bound
+ * held the pane: a replacement of a replacement (`${v//?/$w}`) or `x="$x$x"` repeated in one line
+ * reached tens of millions of characters in a fraction of a second, and judging each read of one
+ * took seconds. The piece bound is its own: `z=""; z="$z$z"` repeated doubles empty pieces the
+ * length bound never sees. The bound is kept by `product` for every word join, plus a bound on
+ * each producer that can outgrow its inputs before a join: `patternExpansion`'s replacement, and
+ * `printf -v`, which assigns its rendered text without one. The join bound alone is not enough: an
+ * unquoted read (`$y`, `q=$y`, `case $y in`) scans the whole value for splitting and globbing
+ * (`parameter`, `unquotedLiteral`) before any join exists, so no value a variable holds may be
+ * longer either. Past the bound a value is unknown, and a refusal says why (`overLong`). */
+const MAX_VALUE_LENGTH = 65_536;
+const MAX_VALUE_PIECES = 4_096;
+
+function overLong(what: string): Piece {
+  return unknown(
+    `${what}, longer than the guard builds (${MAX_VALUE_LENGTH} characters or ${MAX_VALUE_PIECES} pieces)`
+  );
+}
+
+function textLength(pieces: readonly Piece[]): number {
+  let length = 0;
+  for (const piece of pieces) length += piece.text.length;
+  return length;
 }
 
 /** Every expansion of `word` bash could produce, as piece lists. Literal text holding the
@@ -806,10 +1171,46 @@ function runtimeText(exp: Expansion): string {
   return exp.map((piece) => (piece.kind === "unknown" ? UNKNOWN_MARKER : piece.text)).join("");
 }
 
+/** Word parts bash splits into fields when they stand unquoted. */
+const SPLIT_PARTS = new Set([
+  "SimpleExpansion",
+  "ParameterExpansion",
+  "CommandExpansion",
+  "ArithmeticExpansion",
+]);
+
 function args(words: readonly Word[], st: State, ctx: Ctx): Arg[] {
-  return words.flatMap((word) =>
-    expandWord(word, st, ctx).map((exp) => ({ text: word.text, exp }))
-  );
+  return words.flatMap((word) => {
+    const parts = word.parts ?? [];
+    const unquoted = parts.some((part) => SPLIT_PARTS.has(part.type));
+    const onlyExpansions = parts.length > 0 && parts.every((part) => SPLIT_PARTS.has(part.type));
+    return expandWord(word, st, ctx).map((exp): Arg => {
+      if (exp.some((piece) => piece.kind === "glob")) {
+        return { text: word.text, exp, fields: "unknown" };
+      }
+      // Unquoted, an expansion bash splits on whitespace (`$*`, `$(…)`) or that the guard cannot read
+      // may be several arguments.
+      if (unquoted && exp.some((piece) => piece.kind === "unknown" || /[ \t\n]/.test(piece.text))) {
+        return { text: word.text, exp, fields: "unknown" };
+      }
+      if (onlyExpansions && exp.every((piece) => piece.text === "")) {
+        return { text: word.text, exp, fields: "none" };
+      }
+      // `"$@"` or `"${arr[@]}"` over no elements, and nothing else in the word, is no argument.
+      if (exp.length > 0 && exp.every((piece) => piece.noElements === true)) {
+        return { text: word.text, exp, fields: "none" };
+      }
+      return { text: word.text, exp };
+    });
+  });
+}
+
+/** The positional parameters a list of arguments gives a script, function or `set --`: undefined
+ * when bash may make a different number of them (`fields`), so no parameter past the ones the
+ * guard saw is read as empty while bash holds a value there. */
+function positionalOf(list: readonly Arg[]): Expansion[] | undefined {
+  if (list.some((arg) => arg.fields === "unknown")) return undefined;
+  return list.filter((arg) => arg.fields !== "none").map((arg) => arg.exp);
 }
 
 function literalText(exp: Expansion | undefined): string | undefined {
@@ -861,15 +1262,36 @@ function visitWord(word: Word | undefined, st: State, ctx: Ctx): void {
   if (word !== undefined) visitParts(word.parts, st, ctx);
 }
 
+const ARITHMETIC_ASSIGNMENTS = new Set([
+  "=",
+  "+=",
+  "-=",
+  "*=",
+  "/=",
+  "%=",
+  "<<=",
+  ">>=",
+  "&=",
+  "^=",
+  "|=",
+]);
+
+/** Walks an arithmetic expression, which assigns: `d = 0`, `d += 1`, `d++` and `--d` leave `d` a
+ * number the guard does not compute, and a name written with an expansion (`$n = 1`) may be any
+ * variable. */
 function visitArithmetic(expression: ArithmeticExpression | undefined, st: State, ctx: Ctx): void {
   if (expression === undefined) return;
   switch (expression.type) {
     case "ArithmeticBinary":
       visitArithmetic(expression.left, st, ctx);
       visitArithmetic(expression.right, st, ctx);
+      if (ARITHMETIC_ASSIGNMENTS.has(expression.operator)) assignArithmetic(expression.left, st);
       break;
     case "ArithmeticUnary":
       visitArithmetic(expression.operand, st, ctx);
+      if (expression.operator === "++" || expression.operator === "--") {
+        assignArithmetic(expression.operand, st);
+      }
       break;
     case "ArithmeticTernary":
       visitArithmetic(expression.test, st, ctx);
@@ -886,6 +1308,13 @@ function visitArithmetic(expression: ArithmeticExpression | undefined, st: State
       walkSubstitution(expression.script, expression.inner, expression.text, st, ctx);
       break;
   }
+}
+
+function assignArithmetic(target: ArithmeticExpression, st: State): void {
+  if (target.type !== "ArithmeticWord") return;
+  const name = /[$`]/.test(target.value) ? undefined : target.value;
+  const number = [unknown(`\`$${target.value}\`, an arithmetic result`)];
+  assignByName(st, name, number, "an arithmetic expression");
 }
 
 function visitTest(expression: TestExpression, st: State, ctx: Ctx): void {
@@ -937,6 +1366,7 @@ function clone(st: State): State {
     traps: [...st.traps],
     runningFunctions: new Set(st.runningFunctions),
     pidFiles: st.pidFiles,
+    locals: st.locals === undefined ? undefined : new Map(st.locals),
   };
 }
 
@@ -949,9 +1379,13 @@ function clone(st: State): State {
  * After branches that may or may not run: everything a branch leaves in this shell, since any of
  * them may be the one that ran. A variable, the positional parameters (`shift`, `set --`) or the
  * working directory the branches leave differently is unknown, a function name holds every
- * definition they leave (`Callee`), and a handler any of them sets stays. Not merged: `files` and
- * `pidFiles`, which every branch shares; `output`, which each caller compares itself
- * (`outputChanged`); and `runningFunctions`, which only a function's own walk changes. */
+ * definition they leave (`Callee`), and a handler any of them sets stays. A variable some branch
+ * may leave unset is also unknown in whether it is set (`maybeUnset`), and a name a function makes
+ * local on some branches only is local on some paths (`locals`). A variable every branch leaves
+ * empty or a pid this shell started (`$!` in a retry loop, empty had it not run) stays a pid
+ * that is safe to signal. Not merged: `files` and `pidFiles`, which every branch shares; `output`,
+ * which each caller compares itself (`outputChanged`); and `runningFunctions`, which only a
+ * function's own walk changes. */
 function merge(target: State, branches: readonly State[]): void {
   const names = new Set<string>();
   for (const branch of branches) for (const name of branch.vars.keys()) names.add(name);
@@ -961,8 +1395,49 @@ function merge(target: State, branches: readonly State[]): void {
     if (first !== undefined && values.every((value) => value === values[0])) {
       target.vars.set(name, first);
     } else {
-      target.vars.set(name, [unknown(`\`$${name}\`, which a branch sets differently`)]);
+      const signalSafe = branches.every((branch) => {
+        const value = branch.vars.get(name);
+        return (
+          value !== undefined &&
+          (literalText(value) === "" ||
+            (value.length > 0 && value.every((piece) => piece.descendantPid === true)))
+        );
+      });
+      const maybeUnset = branches.some((branch) => {
+        const value = branch.vars.get(name);
+        return value === undefined || isUnset(value) || value.some((piece) => piece.maybeUnset);
+      });
+      const rewrites = branches.some((branch) => attributed(branch, name));
+      // Name what a branch did to it, so a refusal says why the value is unknown.
+      const cause = branches
+        .flatMap((branch) => branch.vars.get(name) ?? [])
+        .find((piece) => piece.kind === "unknown")?.why;
+      const merged = unknown(
+        name === ANY_NAME
+          ? `${cause ?? "a write the guard cannot read may have changed"}, in a branch or loop body`
+          : `\`$${name}\`, which a branch sets differently${cause === undefined ? "" : ` (${cause})`}`,
+        signalSafe ? true : undefined
+      );
+      target.vars.set(name, [
+        {
+          ...merged,
+          ...(maybeUnset ? { maybeUnset: true as const } : {}),
+          ...(rewrites ? { rewrites: true as const } : {}),
+        },
+      ]);
     }
+  }
+  if (target.locals !== undefined) {
+    const locals = new Map<string, boolean>();
+    for (const branch of branches) {
+      for (const name of branch.locals?.keys() ?? []) {
+        locals.set(
+          name,
+          branches.every((other) => other.locals?.get(name) === true)
+        );
+      }
+    }
+    target.locals = locals;
   }
   const arrayNames = new Set<string>();
   for (const branch of branches) for (const name of branch.arrays.keys()) arrayNames.add(name);
@@ -1108,6 +1583,122 @@ function walkList(statements: readonly Statement[], st: State, ctx: Ctx): void {
   for (const statement of statements) walkNode(statement, st, ctx, false);
 }
 
+/** The passes of a loop the guard can decide (an argument loop runs one per option) that it walks
+ * one at a time before it walks the rest as a loop that may run any number of times. */
+const MAX_DECIDED_PASSES = 64;
+
+/** A `while` or `until` loop that may run any number of times: its condition and body walked once
+ * on a copy, merged with not running at all. */
+function walkLoopAnyPasses(node: While, st: State, ctx: Ctx): void {
+  const before = st.output;
+  const body = clone(st);
+  walkList(node.clause.commands, body, ctx);
+  walkList(node.body.commands, body, ctx);
+  merge(st, [clone(st), body]);
+  if (outputChanged(before, body.output)) st.output = undefined;
+}
+
+/** A `while` or `until` loop: walked pass by pass as bash runs it while the guard can decide its
+ * condition (an argument loop over known arguments, `while [ $# -gt 0 ]; do case "$1" in ...`),
+ * and from the first condition it cannot decide on as a loop that may run any number of times. A
+ * body holding `break` or `continue` is never decided, since the passes would not end where the
+ * condition says. */
+function walkLoop(node: While, st: State, ctx: Ctx): void {
+  if (!/\b(break|continue)\b/.test(st.source.slice(node.body.pos, node.body.end))) {
+    for (let pass = 0; pass < MAX_DECIDED_PASSES; pass += 1) {
+      const holds = decideCondition(node.clause, st, ctx);
+      if (holds === undefined) break;
+      walkList(node.clause.commands, st, ctx);
+      if (holds === (node.kind === "until")) return;
+      walkList(node.body.commands, st, ctx);
+    }
+  }
+  walkLoopAnyPasses(node, st, ctx);
+}
+
+/** A condition's truth when it is one `[` or `test` command over words the guard knows, else
+ * undefined. A word that expands to nothing is undecided, since bash would drop it. */
+function decideCondition(clause: CompoundList, st: State, ctx: Ctx): boolean | undefined {
+  const [statement, ...others] = clause.commands;
+  if (statement === undefined || others.length > 0 || statement.background) return undefined;
+  const command = statement.command;
+  if (
+    statement.redirects.length > 0 ||
+    command.type !== "Command" ||
+    command.name === undefined ||
+    command.prefix.length > 0 ||
+    command.redirects.length > 0
+  ) {
+    return undefined;
+  }
+  // The name as written: `[` would expand as the start of a bracket glob.
+  const name = command.name.text;
+  if (name !== "[" && name !== "test") return undefined;
+  const argv = args(command.suffix, st, ctx);
+  if (argv.length !== command.suffix.length) return undefined;
+  const words = argv.map((arg) => literalText(arg.exp));
+  if (words.some((word) => word === undefined || word === "")) return undefined;
+  const operands = words as string[];
+  if (name === "[")
+    return operands.at(-1) === "]" ? evaluateTest(operands.slice(0, -1)) : undefined;
+  return evaluateTest(operands);
+}
+
+/** The one item a `case` runs when the guard knows its word: the first whose pattern matches.
+ * Undefined when it cannot tell, and then every branch is walked: a word or a pattern before the
+ * match it cannot know, a bracket expression or an extended pattern, an item that falls through,
+ * and no item matching at all, so a match the guard missed never leaves every branch unwalked. */
+function decideCase(node: Case, st: State, ctx: Ctx): CaseItem | undefined {
+  const words = expandWord(node.word, st, ctx);
+  const value = words.length === 1 ? literalText(words[0]) : undefined;
+  if (value === undefined) return undefined;
+  for (const item of node.items) {
+    for (const word of item.pattern) {
+      const patterns = expandWord(word, st, ctx);
+      const matched =
+        patterns.length === 1 ? matchesPattern(patterns[0] as Expansion, value, ctx) : undefined;
+      if (matched === undefined) return undefined;
+      if (matched)
+        return item.terminator === undefined || item.terminator === ";;" ? item : undefined;
+    }
+  }
+  return undefined;
+}
+
+/** Whether a `case` pattern matches `value` (`patternGlob`); undefined when the guard cannot
+ * match it exactly, a value outside ASCII included, or when the match would spend the walk's
+ * budget. */
+function matchesPattern(pattern: Expansion, value: string, ctx: Ctx): boolean | undefined {
+  const glob = patternGlob(pattern);
+  if (glob === undefined || !isAscii(value)) return undefined;
+  if (!spendPatternWork(globWork(glob, value.length, ""), ctx)) return undefined;
+  return globMatches(glob, value);
+}
+
+/** A bash pattern as a `Glob`: literal ASCII text exactly, unquoted `*` and `?` as wildcards.
+ * Undefined for what the guard cannot match exactly: an unknown part, a bracket expression, text
+ * that may be an extended pattern (`@(a|b)`), and text outside ASCII. */
+function patternGlob(pattern: Expansion): Glob | undefined {
+  const glob: number[] = [];
+  for (const piece of pattern) {
+    if (piece.kind === "unknown" || !isAscii(piece.text)) return undefined;
+    if (piece.kind === "glob") {
+      if (piece.text === "*") glob.push(ANY_RUN);
+      else if (piece.text === "?") glob.push(ANY_ONE);
+      else return undefined;
+    } else if (/[()|]/.test(piece.text)) return undefined;
+    else for (let i = 0; i < piece.text.length; i += 1) glob.push(piece.text.charCodeAt(i));
+  }
+  return glob;
+}
+
+/** Charges `work` (`globWork`) to the walk's budget; false when that spends it, and then the walk
+ * refuses the command. */
+function spendPatternWork(work: number, ctx: Ctx): boolean {
+  ctx.steps.count += Math.ceil(work / PATTERN_WORK_PER_STEP);
+  return ctx.steps.count <= MAX_WALK_STEPS;
+}
+
 function outputChanged(
   before: readonly Expansion[] | undefined,
   after: readonly Expansion[] | undefined
@@ -1121,11 +1712,7 @@ function outputChanged(
 function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
   if (++ctx.steps.count > MAX_WALK_STEPS) {
     const site = siteOf(node, st);
-    throw new Refusal(
-      site.snippet,
-      site.line,
-      `the guard reached its walk limit of ${MAX_WALK_STEPS} nodes; run a smaller script`
-    );
+    throw new Refusal(site.snippet, site.line, WALK_LIMIT);
   }
   switch (node.type) {
     case "Statement": {
@@ -1140,6 +1727,13 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         if (outputChanged(before, child.output)) st.output = undefined;
         st.backgroundStarted = true;
         return;
+      }
+      if (node.command.type === "BraceGroup") {
+        const written = groupOutputFile(node, st, ctx);
+        if (written !== undefined) {
+          st.files.set(written, walkRenderingGroup(node.command, st, ctx));
+          return;
+        }
       }
       walkNode(node.command, st, ctx, pipeIn);
       return;
@@ -1211,7 +1805,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       if (node.type === "For" && known.every((w) => w !== undefined) && known.length <= 16) {
         for (const value of known) {
           const body = clone(st);
-          body.vars.set(name, [literal(value as string)]);
+          assignScalar(body, name, [literal(value as string)]);
           walkList(node.body.commands, body, ctx);
           branches.push(body);
         }
@@ -1223,12 +1817,15 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
             text === "" || (word.exp.length > 0 && word.exp.every((piece) => piece.descendantPid))
           );
         });
-        body.vars.set(
+        assignScalar(
+          body,
           name,
           signalSafe
             ? [unknown(`\`$${name}\`, a loop variable`, true)]
             : [unknown(`\`$${name}\`, a loop variable`)]
         );
+        if (node.type === "Select")
+          assignScalar(body, "REPLY", [unknown("`$REPLY`, read from input")]);
         walkList(node.body.commands, body, ctx);
         branches.push(body);
       }
@@ -1248,15 +1845,17 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       return;
     }
     case "While": {
-      const before = st.output;
-      const body = clone(st);
-      walkList(node.clause.commands, body, ctx);
-      walkList(node.body.commands, body, ctx);
-      merge(st, [clone(st), body]);
-      if (outputChanged(before, body.output)) st.output = undefined;
+      walkLoop(node, st, ctx);
       return;
     }
     case "Case": {
+      const chosen = decideCase(node, st, ctx);
+      if (chosen !== undefined) {
+        visitWord(node.word, st, ctx);
+        for (const item of node.items) for (const word of item.pattern) visitWord(word, st, ctx);
+        walkList(chosen.body.commands, st, ctx);
+        return;
+      }
       const before = st.output;
       visitWord(node.word, st, ctx);
       const branches: State[] = [clone(st)];
@@ -1345,14 +1944,19 @@ function checkRedirects(
       const file = path.resolve(st.cwd ?? "/", target);
       let content: string | null = null;
       if (command?.name === "cat" && command.args.length === 0) {
-        content = heredoc?.content ?? (herestring ? herestringText(herestring, st, ctx) : null);
-      } else if (command?.name === "echo" || command?.name === "printf") {
-        const words = command.args.map((arg) => literalText(arg.exp));
-        content = words.every((word) => word !== undefined) ? `${words.join(" ")}\n` : null;
+        if (heredoc !== undefined) content = heredocText(heredoc);
+        else if (herestring !== undefined) content = herestringText(herestring, st, ctx);
+      } else if (command?.name === "echo") {
+        content = echoText(command.args);
+      } else if (command?.name === "printf") {
+        content = printfText(command.args, MAX_SCRIPT_BYTES, true) ?? null;
       }
       st.pidFiles.delete(file);
       const before = appends ? st.files.get(file) : "";
-      st.files.set(file, content === null || before === null ? null : `${before ?? ""}${content}`);
+      st.files.set(
+        file,
+        content === null || before === null ? null : readable(`${before ?? ""}${content}`)
+      );
       if (
         writes &&
         !appends &&
@@ -1370,6 +1974,157 @@ function checkRedirects(
 function herestringText(redirect: Redirect, st: State, ctx: Ctx): string | null {
   if (redirect.target === undefined) return null;
   return literalText(expandWord(redirect.target, st, ctx)[0]) ?? null;
+}
+
+/** The file a `{ ...; } > file` statement writes its output to, when that is its one redirection
+ * and the guard knows the path. */
+function groupOutputFile(statement: Statement, st: State, ctx: Ctx): string | undefined {
+  const [redirect, ...others] = statement.redirects;
+  if (redirect === undefined || others.length > 0 || redirect.fileDescriptor !== undefined) {
+    return undefined;
+  }
+  if ((redirect.operator !== ">" && redirect.operator !== ">|") || redirect.target === undefined) {
+    return undefined;
+  }
+  const targets = expandWord(redirect.target, st, ctx);
+  const target = targets.length === 1 ? literalText(targets[0]) : undefined;
+  if (target === undefined || (st.cwd === undefined && !target.startsWith("/"))) return undefined;
+  return path.resolve(st.cwd ?? "/", target);
+}
+
+/** Walks a brace group whose output goes to a file, and returns what it writes there: the
+ * concatenated output of each statement, with each part the guard cannot know as the unknown
+ * marker, or null once a statement prints something it cannot render or the text passes what the
+ * guard reads (`readable`). Each statement's output is read before the statement is walked, so it
+ * sees the variables the statements before it set. */
+function walkRenderingGroup(group: BraceGroup, st: State, ctx: Ctx): string | null {
+  let content: string | null = "";
+  for (const statement of group.body.commands) {
+    if (content !== null) {
+      const text = statementOutput(statement, st, ctx);
+      content = text === undefined ? null : readable(content + text);
+    }
+    walkNode(statement, st, ctx, false);
+  }
+  return content;
+}
+
+/** What `echo WORD...` prints to a file: its line, or null for one the guard cannot render. An
+ * option first (`-n`, `-e` and their kin, which change what it prints) and a word the guard cannot
+ * know (written as it is, into a script bash will parse) both leave it unrendered, and so does a
+ * line longer than a script the guard reads: joining the words builds the whole string, so the
+ * length is checked first. */
+function echoText(list: readonly Arg[]): string | null {
+  if (literalText(list[0]?.exp)?.startsWith("-")) return null;
+  const words: string[] = [];
+  let length = 0;
+  for (const arg of list) {
+    const word = literalText(arg.exp);
+    if (word === undefined) return null;
+    words.push(word);
+    length += word.length + 1;
+  }
+  return length > MAX_SCRIPT_BYTES ? null : `${words.join(" ")}\n`;
+}
+
+/** The text of a file a command writes, as the guard models it, or null (a file it cannot read)
+ * when it is longer than a script the guard reads from disk. Building it is cheap, since the text
+ * is joined lazily; reading it is not: a 176 KB command rendering 655 MB held the pane for 30 s. */
+function readable(content: string): string | null {
+  return content.length > MAX_SCRIPT_BYTES ? null : content;
+}
+
+/** A here-document's text as the command reads it, or null when bash expands it into something
+ * else: unquoted, `$` and a backquote expand, and a backslash before `$`, a backquote, a backslash
+ * or a newline is removed, while the guard holds the text as written. */
+function heredocText(heredoc: Redirect): string | null {
+  const text = heredoc.content;
+  if (text === undefined) return null;
+  return !heredoc.heredocQuoted && /[$`]|\\[$`\\\n]/.test(text) ? null : text;
+}
+
+/** What one statement of a rendered group prints: nothing for an assignment, a here-document fed
+ * to `cat` (`heredocText`), `printf`, or `echo` of values the guard knows. Undefined for anything
+ * else. */
+function statementOutput(statement: Statement, st: State, ctx: Ctx): string | undefined {
+  const command = statement.command;
+  if (statement.background || statement.redirects.length > 0 || command.type !== "Command") {
+    return undefined;
+  }
+  if (command.name === undefined) return command.redirects.length === 0 ? "" : undefined;
+  const name = literalText(expandWord(command.name, st, ctx)[0]);
+  const rest = args(command.suffix, st, ctx);
+  if (name === "cat" && rest.length === 0) {
+    const [heredoc, ...others] = command.redirects;
+    if (heredoc === undefined || others.length > 0) return undefined;
+    if (heredoc.operator !== "<<" && heredoc.operator !== "<<-") return undefined;
+    return heredocText(heredoc) ?? undefined;
+  }
+  if (command.redirects.length > 0) return undefined;
+  if (name === "printf") return printfText(rest, MAX_SCRIPT_BYTES, true);
+  if (name === "echo") return echoText(rest) ?? undefined;
+  return undefined;
+}
+
+/** What `printf FORMAT ARG...` prints, with each part the guard cannot know as the unknown marker:
+ * `%s`, `%q` (quoted for a shell to read back), `%d`, `%%`, and the escapes `\n`, `\t` and `\\`,
+ * the format reused while arguments remain. Undefined for a format it does not render: an unknown
+ * one, `-v`, a width or precision, or another conversion. It stops once the text passes `limit`,
+ * the most its caller keeps, so the text it returns is past the limit rather than built whole: a
+ * format reused over 100,000 arguments would build and scan gigabytes.
+ *
+ * Rendering a `script` bash will parse, it is also undefined for a value it cannot know under `%s`
+ * or `%q`, and for an argument that may be several (every value after it may belong to another
+ * conversion), since the marker standing in would read as one harmless word. `%s` writes the value
+ * as it is, and no position confines it, a comment included (a newline ends one). `%q`'s output
+ * form is not fixed. A value containing a newline selects the `$'…'` form, whose output carries the
+ * value's own quote characters raw, and that closes the format's quote in both the single- and
+ * double-quoted positions; the guard does not follow which position a conversion sits in. `%d`
+ * stays: its output is digits and a sign (`UNKNOWN_MARKER`). */
+function printfText(list: readonly Arg[], limit: number, script = false): string | undefined {
+  const [formatArg, ...values] = list;
+  const format = literalText(formatArg?.exp);
+  if (format === undefined || format.startsWith("-")) return undefined;
+  if (script && values.some((value) => value.fields === "unknown")) return undefined;
+  const parts: ({ readonly text: string } | { readonly conversion: "s" | "q" | "d" })[] = [];
+  for (let i = 0; i < format.length; i += 1) {
+    const char = format.charAt(i);
+    const next = format.charAt(i + 1);
+    if (char === "%") {
+      if (next === "%") parts.push({ text: "%" });
+      else if (next === "s" || next === "q" || next === "d") parts.push({ conversion: next });
+      else return undefined;
+      i += 1;
+    } else if (char === "\\") {
+      const text = next === "n" ? "\n" : next === "t" ? "\t" : next === "\\" ? "\\" : undefined;
+      if (text === undefined) return undefined;
+      parts.push({ text });
+      i += 1;
+    } else parts.push({ text: char });
+  }
+  const conversions = parts.filter((part) => "conversion" in part).length;
+  let out = "";
+  let index = 0;
+  do {
+    for (const part of parts) {
+      if ("text" in part) {
+        out += part.text;
+        continue;
+      }
+      const value = values[index];
+      index += 1;
+      if (script && part.conversion !== "d" && value !== undefined) {
+        if (literalText(value.exp) === undefined) return undefined;
+      }
+      const text = value === undefined ? "" : runtimeText(value.exp);
+      if (part.conversion === "s") out += text;
+      else if (part.conversion === "d")
+        out += /^-?[0-9]+$/.test(text) ? text : value === undefined ? "0" : UNKNOWN_MARKER;
+      else out += shellQuoted(text);
+      if (out.length > limit) return out;
+    }
+  } while (conversions > 0 && index < values.length);
+  return out;
 }
 
 /** A path refusal: the rule, the pane's roots, and what to do instead. */
@@ -1400,20 +2155,31 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
     visitParts(assignment.indexParts, st, ctx);
     for (const word of assignment.array ?? []) visitWord(word, st, ctx);
     if (assignment.name === undefined) continue;
-    const expanded =
+    const expanded = stored(
       assignment.value === undefined
         ? [literal("")]
-        : (expandWord(assignment.value, st, ctx)[0] ?? []);
+        : (expandWord(assignment.value, st, ctx)[0] ?? [])
+    );
     const arrayAssignment =
       assignment.array !== undefined || assignment.append || assignment.index !== undefined;
     const descendantPid = expanded.length > 0 && expanded.every((piece) => piece.descendantPid);
     const value = arrayAssignment
       ? [unknown(`\`$${assignment.name}\`, an array or appended value`, descendantPid || undefined)]
       : expanded;
-    overlay.set(assignment.name, value);
+    // A name whose attribute refuses or rewrites the write is unknown to the command it prefixes.
+    overlay.set(
+      assignment.name,
+      attributed(st, assignment.name)
+        ? [{ ...unknown(`\`$${assignment.name}\`, an attributed variable`), rewrites: true }]
+        : value
+    );
     // `a=1 b=$a` alone assigns left to right in this shell.
     if (command.name === undefined) {
-      if (arrayAssignment) {
+      if (!arrayAssignment) {
+        assignScalar(st, assignment.name, value);
+      } else if (attributed(st, assignment.name)) {
+        keepAttributed(st, assignment.name);
+      } else {
         const elements =
           assignment.array !== undefined && !assignment.append
             ? new Map<string, Expansion>()
@@ -1427,9 +2193,20 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
                   .map((key) => Number(key) + 1)
               )
             : 0;
-          for (const word of assignment.array) {
-            elements.set(String(index), expandWord(word, st, ctx)[0] ?? []);
-            index += 1;
+          // The words bash gives the literal: none for `"$@"` of none, and one per element; a word
+          // that may be several or none leaves every element unknown.
+          const words = args(assignment.array, st, ctx);
+          if (words.some((word) => word.fields === "unknown")) {
+            elements.clear();
+            elements.set(UNKNOWN_ARRAY_INDEX, [
+              unknown(`\`$${assignment.name}\`, an array a word of which may be several elements`),
+            ]);
+          } else {
+            for (const word of words) {
+              if (word.fields === "none") continue;
+              elements.set(String(index), stored(word.exp));
+              index += 1;
+            }
           }
         } else if (assignment.append) {
           const index = Math.max(
@@ -1451,10 +2228,8 @@ function handleCommand(command: Command, st: State, ctx: Ctx, pipeIn: boolean): 
           }
         }
         st.arrays.set(assignment.name, elements);
-      } else {
-        st.arrays.delete(assignment.name);
+        st.vars.set(assignment.name, value);
       }
-      st.vars.set(assignment.name, value);
     }
   }
   const words = command.name === undefined ? command.suffix : [command.name, ...command.suffix];
@@ -1609,7 +2384,7 @@ function unwrap(
       if (i !== -1) list = rest.slice(i);
       state = { ...clone(state), cwd, cwdWhy: "`env -C`" };
       for (const name of unset) {
-        state.vars.set(name, [literal("")]);
+        state.vars.set(name, UNSET);
         state.exported.delete(name);
       }
       for (const [name, value] of overlay) {
@@ -1631,9 +2406,10 @@ function runFunction(
   if (outer.runningFunctions.has(name)) return;
   const child: State = {
     ...clone(outer),
-    positional: args.map((arg) => arg.exp),
+    positional: positionalOf(args),
     source: definition.source,
     script: definition.file ?? outer.script,
+    locals: new Map(),
   };
   child.runningFunctions.add(name);
   try {
@@ -1641,9 +2417,11 @@ function runFunction(
   } catch (error) {
     locateRefusal(error, definition.file);
   }
+  returnLocals(name, child, outer);
   // A call runs in this shell, so everything the body leaves stays: the copy-back rule on `merge`
   // holds here too. Not carried: the positional parameters, which bash restores to the caller's
-  // when a function returns; `files` and `pidFiles` (shared); and `runningFunctions`.
+  // when a function returns; `locals`, the call's own frame, whose names `returnLocals` has
+  // handed back; `files` and `pidFiles` (shared); and `runningFunctions`.
   outer.vars = child.vars;
   outer.exported = child.exported;
   outer.arrays.clear();
@@ -1656,6 +2434,37 @@ function runFunction(
   outer.backgroundStarted ||= child.backgroundStarted;
 }
 
+/** A returning function's locals are the caller's variables again: a name every path made local
+ * gets back the value, array and export it had at the call; one only some paths made local may be
+ * either, so it is unknown and may be unset unless both agree. */
+function returnLocals(name: string, child: State, caller: State): void {
+  for (const [local, everyPath] of child.locals ?? []) {
+    const value = caller.vars.get(local);
+    const elements = caller.arrays.get(local);
+    if (everyPath) {
+      if (value === undefined) child.vars.delete(local);
+      else child.vars.set(local, value);
+      if (elements === undefined) child.arrays.delete(local);
+      else child.arrays.set(local, new Map(elements));
+      if (caller.exported.has(local)) child.exported.add(local);
+      else child.exported.delete(local);
+      continue;
+    }
+    const same =
+      JSON.stringify(child.vars.get(local) ?? null) === JSON.stringify(value ?? null) &&
+      JSON.stringify([...(child.arrays.get(local) ?? [])]) ===
+        JSON.stringify([...(elements ?? [])]);
+    if (same) continue;
+    const either: Expansion = [
+      { ...unknown(`\`$${local}\`, local to \`${name}\` on some paths`), maybeUnset: true },
+    ];
+    child.vars.set(local, either);
+    if (elements !== undefined || child.arrays.has(local)) {
+      child.arrays.set(local, new Map([[UNKNOWN_ARRAY_INDEX, either]]));
+    }
+  }
+}
+
 function functionOutput(
   name: string,
   definition: FunctionDefinition,
@@ -1666,10 +2475,11 @@ function functionOutput(
   if (outer.runningFunctions.has(name)) return undefined;
   const child: State = {
     ...clone(outer),
-    positional: args.map((arg) => arg.exp),
+    positional: positionalOf(args),
     source: definition.source,
     script: definition.file ?? outer.script,
     output: [],
+    locals: new Map(),
   };
   child.runningFunctions.add(name);
   try {
@@ -1717,11 +2527,17 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       (redirect.fileDescriptor === undefined || redirect.fileDescriptor === 1) &&
       [">", ">>", ">|", "&>", "&>>", ">&"].includes(redirect.operator)
   );
+  // `umask` prints the mask (`-S`, `-p`) only when it is given no mode to set.
+  const umaskWords = base === "umask" ? rest.map((arg) => literalText(arg.exp)) : [];
+  const silentUmask =
+    umaskWords.every((word) => word !== undefined) &&
+    umaskWords.some((word) => !word?.startsWith("-"));
   if (
     outer.output !== undefined &&
     !stdoutRedirected &&
     base !== "echo" &&
     base !== "printf" &&
+    !silentUmask &&
     FUNCTION_OUTPUT_SILENT[base] !== true
   ) {
     outer.output = undefined;
@@ -1748,58 +2564,138 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
     case "typeset":
     case "local":
     case "readonly":
-      declaration(base, rest, outer, ctx);
+      declaration(base, rest, outer, ctx, site);
       return;
-    case "unset":
-      for (const arg of operands(rest, "").operands) {
-        const variable = literalText(arg.exp);
-        if (variable !== undefined) {
-          outer.vars.set(variable, [literal("")]);
-          outer.arrays.delete(variable);
+    case "unset": {
+      const found = operands(rest, "");
+      const functionsOnly = found.options.some((option) => /^-[a-zA-Z]*f/.test(option));
+      const variablesOnly = found.options.some((option) => /^-[a-zA-Z]*v/.test(option));
+      for (const arg of found.operands) {
+        const name = literalText(arg.exp);
+        // `unset -f`, and a plain `unset` of a name no variable holds, remove a function, so the
+        // name runs the command of that name again.
+        if (!variablesOnly) {
+          if (name === undefined) {
+            for (const [fn, callee] of outer.functions) outer.functions.set(fn, orCommand(callee));
+          } else {
+            const callee = outer.functions.get(name);
+            const held = functionsOnly ? undefined : lookup(name, outer, ctx);
+            if (callee !== undefined && held === undefined) outer.functions.delete(name);
+            else if (callee !== undefined && held?.some((piece) => piece.maybeUnset)) {
+              outer.functions.set(name, orCommand(callee));
+            }
+          }
         }
+        if (functionsOnly) continue;
+        if (name === undefined || !IDENTIFIER.test(name)) {
+          assignByName(outer, name, [], "`unset`");
+          continue;
+        }
+        // Bash refuses to unset a `readonly` name, and unsets an `-i`, `-l` or `-u` one.
+        if (attributed(outer, name)) {
+          keepAttributed(outer, name, true);
+          continue;
+        }
+        outer.vars.set(name, UNSET);
+        outer.exported.delete(name);
+        outer.arrays.delete(name);
       }
       return;
+    }
     case "read":
     case "mapfile":
     case "readarray":
     case "getopts": {
-      const found = operands(rest, base === "read" || base === "getopts" ? "adnNptui" : "");
-      const names = base === "getopts" ? found.operands.slice(1, 2) : found.operands;
-      const arrayAt = base === "read" ? rest.findIndex((arg) => literalText(arg.exp) === "-a") : -1;
-      const readsArray = base === "mapfile" || base === "readarray" || arrayAt !== -1;
-      const destinations =
-        arrayAt === -1 || rest[arrayAt + 1] === undefined ? names : [rest[arrayAt + 1] as Arg];
-      for (const arg of destinations) {
-        const variable = literalText(arg.exp);
-        if (variable !== undefined) {
-          outer.vars.set(variable, [unknown(`\`$${variable}\`, read from input`)]);
-          if (readsArray) {
-            const unknownArray = [unknown(`\`$${variable}\`, read from input`)];
-            outer.arrays.set(variable, new Map([[UNKNOWN_ARRAY_INDEX, unknownArray]]));
-          }
-        }
+      readInput(base, rest, outer);
+      return;
+    }
+    case "wait": {
+      // `wait -p NAME` assigns NAME the pid of the job it waited for, or nothing.
+      for (const [index, arg] of rest.entries()) {
+        if (!/^-[a-zA-Z]*p$/.test(literalText(arg.exp) ?? "")) continue;
+        // With no job left to report it unsets NAME.
+        const pid = [{ ...unknown("the pid `wait -p` assigns", true), maybeUnset: true as const }];
+        assignByName(outer, literalText(rest[index + 1]?.exp), pid, "`wait -p`");
+      }
+      return;
+    }
+    case "let": {
+      // Each argument is an arithmetic expression, assigning as `(( … ))` does.
+      for (const arg of rest) {
+        const text = literalText(arg.exp);
+        const command =
+          text === undefined ? undefined : parse(`(( ${text} ))`).commands[0]?.command;
+        if (command?.type === "ArithmeticCommand") visitArithmetic(command.expression, outer, ctx);
+        else forgetVariables(outer, "`let` in text the guard cannot read may have changed");
       }
       return;
     }
     case "set": {
       const list = rest.map((arg) => literalText(arg.exp));
       const dashDash = list.indexOf("--");
-      if (dashDash !== -1) outer.positional = rest.slice(dashDash + 1).map((arg) => arg.exp);
+      if (dashDash !== -1) outer.positional = positionalOf(rest.slice(dashDash + 1));
       else if (list.length > 0 && !list[0]?.startsWith("-") && !list[0]?.startsWith("+")) {
-        outer.positional = rest.map((arg) => arg.exp);
+        outer.positional = positionalOf(rest);
       }
       return;
     }
     case "shift": {
-      const count = Number(literalText(rest[0]?.exp) ?? "1");
-      outer.positional = Number.isInteger(count) ? outer.positional?.slice(count) : undefined;
+      // Bash shifts nothing when the count is negative, not a number, or exceeds `$#`; a count the
+      // guard cannot read leaves the arguments unknown.
+      const text = rest.length === 0 ? "1" : literalText(rest[0]?.exp);
+      if (text === undefined) outer.positional = undefined;
+      else if (/^[0-9]+$/.test(text) && outer.positional !== undefined) {
+        const count = Number(text);
+        if (count <= outer.positional.length) outer.positional = outer.positional.slice(count);
+      }
       return;
     }
     case "printf": {
-      const at = rest.findIndex((arg) => literalText(arg.exp) === "-v");
-      const variable = at === -1 ? undefined : literalText(rest[at + 1]?.exp);
-      if (variable !== undefined) {
-        outer.vars.set(variable, [unknown(`\`$${variable}\` (printf -v)`)]);
+      // `-v NAME` or `-vNAME`, printf's one option, comes first.
+      const head = rest[0]?.exp ?? [];
+      const leading = head[0];
+      const spaced = literalText(head) === "-v";
+      const joined =
+        !spaced &&
+        leading?.kind === "literal" &&
+        leading.text.startsWith("-v") &&
+        (leading.text.length > 2 || head.length > 1);
+      if (spaced || joined) {
+        const variable = spaced
+          ? literalText(rest[1]?.exp)
+          : literalText([
+              { ...(leading as Piece), text: leading?.text.slice(2) ?? "" },
+              ...head.slice(1),
+            ]);
+        // `printf -v NAME '%s' VALUE` assigns VALUE as it is, a pid of this shell's included;
+        // another format assigns what printf renders, known only when every part of it is.
+        const printed = rest.slice(spaced ? 2 : 1);
+        const [format, value, ...others] = printed;
+        let assigned: Expansion;
+        if (literalText(format?.exp) === "%s" && value !== undefined && others.length === 0) {
+          assigned = value.exp;
+        } else {
+          const text = printfText(printed, MAX_VALUE_LENGTH);
+          // An argument the guard cannot know names why the value is unknown.
+          const cause = printed.flatMap((arg) => arg.exp).find((p) => p.kind === "unknown")?.why;
+          assigned =
+            text === undefined || text.includes(UNKNOWN_MARKER)
+              ? [
+                  unknown(
+                    `\`$${variable ?? "?"}\` (printf -v${cause === undefined ? "" : `: ${cause}`})`
+                  ),
+                ]
+              : // `printfText`'s early stop bounds the cost; this check bounds the truth. Past the
+                // limit it returns text it stopped building, which is never the value, and without
+                // this check that truncated text would be assigned as if whole. While the limit is
+                // this same bound, a partial would still be refused at the next join; if the limit
+                // moves or the early stop goes, this check is again the only bound on what
+                // `printf -v` stores, and an unquoted read scans a stored value whole.
+                text.length > MAX_VALUE_LENGTH
+                ? [overLong(`\`$${variable ?? "?"}\` (printf -v)`)]
+                : [literal(text)];
+        }
+        assignByName(outer, variable, assigned, "`printf -v`");
         return;
       }
       if (outer.output !== undefined && !stdoutRedirected) {
@@ -1811,13 +2707,12 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     case "eval": {
-      runText(
-        rest.map((arg) => runtimeText(arg.exp)).join(" "),
-        "the `eval` text",
-        outer,
-        ctx,
-        site
-      );
+      const text = rest.map((arg) => runtimeText(arg.exp)).join(" ");
+      runText(text, "the `eval` text", outer, ctx, site);
+      // What the guard could not read of the text may assign any variable.
+      if (text.includes(UNKNOWN_MARKER)) {
+        forgetVariables(outer, "`eval` of text the guard cannot read may have changed");
+      }
       return;
     }
     case "trap": {
@@ -2004,7 +2899,8 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         if (target !== undefined && st.cwd !== undefined) {
           const file = path.resolve(st.cwd, target);
           st.pidFiles.delete(file);
-          st.files.set(file, append ? null : (heredoc?.content ?? null));
+          const text = heredoc === undefined ? null : heredocText(heredoc);
+          st.files.set(file, append || text === null ? null : readable(text));
         }
       }
       return;
@@ -2132,37 +3028,182 @@ function changeDirectory(target: Arg | undefined, st: State, ctx: Ctx): void {
   st.cwd = path.resolve(st.cwd, text);
 }
 
-function declaration(builtin: string, list: readonly Arg[], st: State, ctx: Ctx): void {
-  const array = list.some((arg) => /^-[a-zA-Z]*[aA]/.test(literalText(arg.exp) ?? ""));
+/** `export`, `declare`, `typeset`, `local` and `readonly` over their arguments. A name is the
+ * expanded argument's text before its first `=`, so `declare "d=x"` assigns `d`, and a name the
+ * guard cannot read may be any variable (`assignByName`). `-n` makes a nameref, whose later writes
+ * land in the variable it names, which the guard does not follow, so it refuses; `-f` and `-F`
+ * name functions. Inside a function, `local`, and `declare` or `typeset` without `-g`, make a name
+ * local to it (`locals`), unset until assigned; `local` outside one assigns nothing, as bash
+ * refuses it. `readonly` and `-r` keep the value and refuse later writes, and `-i`, `-l` and `-u`
+ * rewrite this value and later ones, so the name carries the attribute (`Piece.rewrites`). */
+function declaration(builtin: string, list: readonly Arg[], st: State, ctx: Ctx, site: Site): void {
+  const options = list
+    .map((arg) => literalText(arg.exp) ?? "")
+    .filter((text) => /^[-+][a-zA-Z]+$/.test(text));
+  const option = (letter: string) =>
+    options.some((text) => text.startsWith("-") && text.includes(letter));
+  if (builtin !== "export" && option("n")) {
+    throw new Refusal(
+      site.snippet,
+      site.line,
+      "the guard does not follow a nameref (`declare -n`), whose writes land in the variable it names"
+    );
+  }
+  if (option("f") || option("F")) return;
+  if (builtin === "local" && st.locals === undefined) return;
+  const array = option("a") || option("A");
+  const exports = builtin === "export" || option("x");
+  const keeps = builtin === "readonly" || option("r");
+  const rewrites = option("i") || option("l") || option("u");
+  const locals =
+    builtin === "local" || ((builtin === "declare" || builtin === "typeset") && !option("g"))
+      ? st.locals
+      : undefined;
+  const writer = `\`${builtin}\``;
   for (const arg of list) {
-    const first = arg.exp[0];
-    const equals = arg.text.indexOf("=");
-    const variable = equals === -1 ? literalText(arg.exp) : arg.text.slice(0, equals);
-    if (variable === undefined || variable.startsWith("-")) continue;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(variable)) continue;
-    if (builtin === "export") st.exported.add(variable);
-    if (equals === -1) continue;
-    let value =
-      first?.kind === "literal" && first.text.startsWith(`${variable}=`)
-        ? [
-            ...(first.text.length === equals + 1 ? [] : [literal(first.text.slice(equals + 1))]),
-            ...arg.exp.slice(1),
-          ]
-        : [...arg.exp];
-    // Tilde expands after an assignment's `=` in a declaration's argument too.
-    if (arg.text.charAt(equals + 1) === "~" && arg.text.startsWith(`${variable}=~`)) {
-      value = [...unquotedLiteral(arg.text.slice(equals + 1), 0, st, ctx), ...arg.exp.slice(1)];
+    const text = literalText(arg.exp);
+    if (text !== undefined && /^[-+][a-zA-Z]+$/.test(text)) continue;
+    const { name, value: assigned } = nameAndValue(arg);
+    if (name === undefined) {
+      forgetVariables(st, `${writer} under a name the guard cannot read may have changed`);
+      continue;
     }
-    st.vars.set(variable, array ? [unknown(`\`$${variable}\`, an array`)] : value);
-    if (array) {
-      if (arg.text.slice(equals + 1) === "()") {
-        st.arrays.set(variable, new Map());
-      } else {
-        const unknownArray = [unknown(`\`$${variable}\`, an array assignment`)];
-        st.arrays.set(variable, new Map([[UNKNOWN_ARRAY_INDEX, unknownArray]]));
+    const base = ARRAY_ELEMENT.exec(name)?.[1] ?? name;
+    if (!IDENTIFIER.test(base)) continue;
+    if (exports) st.exported.add(base);
+    // Bash refuses the write, or rewrites the value it takes; `export` or `readonly` of an
+    // attributed name alone changes nothing.
+    if (rewrites || (attributed(st, base) && (assigned !== undefined || locals !== undefined))) {
+      keepAttributed(st, base);
+      continue;
+    }
+    if (attributed(st, base)) continue;
+    if (locals !== undefined) {
+      locals.set(base, true);
+      if (assigned === undefined) {
+        st.vars.set(base, UNSET);
+        st.arrays.delete(base);
       }
     }
+    if (assigned === undefined) {
+      if (keeps) markKept(st, base, ctx);
+      continue;
+    }
+    // Tilde expands after an assignment's `=` in a declaration's argument too.
+    const value = arg.text.startsWith(`${name}=~`)
+      ? [...unquotedLiteral(arg.text.slice(name.length + 1), 0, st, ctx), ...arg.exp.slice(1)]
+      : assigned;
+    if (!array || name !== base) {
+      assignByName(st, name, value, writer);
+    } else {
+      st.vars.set(name, [unknown(`\`$${name}\`, an array`)]);
+      if (arg.text === `${name}=()`) {
+        st.arrays.set(name, new Map());
+      } else {
+        const unknownArray = [unknown(`\`$${name}\`, an array assignment`)];
+        st.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, unknownArray]]));
+      }
+    }
+    if (keeps) markKept(st, base, ctx);
   }
+}
+
+/** `readonly NAME`: the value NAME holds now, from the pane's environment or unset included,
+ * stays, and a later write is refused (`Piece.rewrites`). */
+function markKept(st: State, name: string, ctx: Ctx): void {
+  const held = st.vars.get(name) ?? lookup(name, st, ctx) ?? UNSET;
+  const value = held.length === 0 ? [literal("")] : held;
+  st.vars.set(
+    name,
+    value.map((piece) => ({ ...piece, rewrites: true }))
+  );
+}
+
+/** `read`, `mapfile`/`readarray` and `getopts`, which assign what they read, unknown to the guard:
+ * `read` its names (`REPLY` when it has none) or the array `-a` names, `mapfile` its array
+ * (`MAPFILE` when it has none), and `getopts` its name, `OPTARG` and `OPTIND`. An option that takes
+ * a value takes it spelled apart or joined (`read -ra arr`, `read -rarr`). */
+function readInput(builtin: string, rest: readonly Arg[], st: State): void {
+  const valued = builtin === "read" ? "adinNptu" : builtin === "getopts" ? "" : "dnOsuCc";
+  const writer = `\`${builtin}\``;
+  const input = (name: string | undefined): Expansion => [
+    unknown(`\`$${name ?? "?"}\`, read from input`),
+  ];
+  let array: Arg | undefined;
+  let arrayOption = false;
+  const names: Arg[] = [];
+  let options = builtin !== "getopts";
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i] as Arg;
+    const text = literalText(arg.exp);
+    if (options && text === "--") {
+      options = false;
+      continue;
+    }
+    if (options && text !== undefined && /^-./.test(text)) {
+      for (let j = 1; j < text.length; j += 1) {
+        const flag = text.charAt(j);
+        if (!valued.includes(flag)) continue;
+        const attached = text.slice(j + 1);
+        i += attached === "" ? 1 : 0;
+        const value = attached === "" ? rest[i] : { text: attached, exp: [literal(attached)] };
+        if (flag === "a" && builtin === "read") {
+          arrayOption = true;
+          array = value;
+        }
+        break;
+      }
+      continue;
+    }
+    options = false;
+    names.push(arg);
+  }
+  const fill = (arg: Arg | undefined, fallback: string): void => {
+    const name = arg === undefined ? fallback : literalText(arg.exp);
+    if (name === undefined || !IDENTIFIER.test(name) || attributed(st, name)) {
+      assignByName(st, name, input(name), writer);
+      return;
+    }
+    st.vars.set(name, input(name));
+    st.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, input(name)]]));
+  };
+  if (builtin === "getopts") {
+    const name = names[1];
+    if (name !== undefined) assignByName(st, literalText(name.exp), input(name.text), writer);
+    for (const variable of ["OPTARG", "OPTIND"]) assignScalar(st, variable, input(variable));
+  } else if (builtin !== "read") {
+    fill(names[0], "MAPFILE");
+  } else if (arrayOption) {
+    if (array !== undefined) fill(array, "");
+  } else if (names.length === 0) {
+    assignScalar(st, "REPLY", input("REPLY"));
+  } else {
+    for (const name of names) assignByName(st, literalText(name.exp), input(name.text), writer);
+  }
+}
+
+/** A function's callee after an `unset` that may have removed it: its name may run the command
+ * of that name too. */
+function orCommand(callee: Callee): Callee {
+  return callee.includes(undefined) ? callee : [...callee, undefined];
+}
+
+/** A declaration argument's name, its expanded text before the first `=` (undefined when the
+ * guard cannot read it), and the value after that `=` (undefined when it has none). */
+function nameAndValue(arg: Arg): { name: string | undefined; value: Expansion | undefined } {
+  let name = "";
+  for (const [index, piece] of arg.exp.entries()) {
+    if (piece.kind !== "literal") return { name: undefined, value: undefined };
+    const equals = piece.text.indexOf("=");
+    if (equals === -1) {
+      name += piece.text;
+      continue;
+    }
+    const rest = piece.text.slice(equals + 1);
+    const value = [...(rest === "" ? [] : [{ ...piece, text: rest }]), ...arg.exp.slice(index + 1)];
+    return { name: name + piece.text.slice(0, equals), value };
+  }
+  return { name, value: undefined };
 }
 
 function checkTargets(
@@ -2456,10 +3497,16 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
     const value = st.vars.get(name);
     if (value !== undefined) vars.set(name, value);
   }
+  // A name unset here is not in the child's environment either, the pane's included.
+  for (const [name, value] of st.vars) if (isUnset(value)) vars.set(name, value);
   for (const [name, value] of overlay) vars.set(name, value);
+  const exported = new Set(vars.keys());
+  // After a write the guard could not read, any name may have been exported with any value.
+  const any = st.vars.get(ANY_NAME);
+  if (any !== undefined) vars.set(ANY_NAME, any);
   return {
     vars,
-    exported: new Set(vars.keys()),
+    exported,
     cwd: st.cwd,
     cwdWhy: st.cwdWhy,
     positional: [],
@@ -2476,6 +3523,7 @@ function childState(st: State, overlay: ReadonlyMap<string, Expansion>): State {
     functions: new Map(),
     traps: [],
     runningFunctions: new Set(),
+    locals: undefined,
   };
 }
 
@@ -2525,20 +3573,28 @@ function runShell(list: readonly Arg[], invocation: Invocation, st: State, ctx: 
   child.argv0 = operand[1]?.exp;
   if (command) {
     const text = operand[0] === undefined ? "" : runtimeText(operand[0].exp);
-    child.positional = operand.slice(2).map((arg) => arg.exp);
+    child.positional = positionalOf(operand.slice(2));
     runText(text, "its `-c` text", child, ctx, site);
     return;
   }
   const file = operand[0];
   if (file !== undefined) {
-    child.positional = operand.slice(1).map((arg) => arg.exp);
+    child.positional = positionalOf(operand.slice(1));
     runFile(file, operand.slice(1), child, ctx, site, "shell");
     return;
   }
   // No -c and no file: the shell reads its script from standard input.
   const heredoc = invocation.redirects.find((r) => r.operator === "<<" || r.operator === "<<-");
-  if (heredoc?.content !== undefined) {
-    runText(heredoc.content, "the script it reads from the heredoc", child, ctx, site);
+  if (heredoc !== undefined) {
+    const text = heredocText(heredoc);
+    if (text === null) {
+      throw new Refusal(
+        site.snippet,
+        site.line,
+        "the guard cannot read the script this shell reads from its here-document, which bash expands first; quote its delimiter (`<<'EOF'`) or write the script with the write tool"
+      );
+    }
+    runText(text, "the script it reads from the heredoc", child, ctx, site);
     return;
   }
   const herestring = invocation.redirects.find((r) => r.operator === "<<<");
@@ -2608,15 +3664,16 @@ function runInterpreter(
     // `python3 - <<'PY'`: the program is standard input.
     if (word === "-") {
       const heredoc = invocation.redirects.find((r) => r.operator === "<<" || r.operator === "<<-");
-      if (heredoc?.content !== undefined) {
-        runCode(
-          language,
-          { text: "<heredoc>", exp: [literal(heredoc.content)] },
-          invocation,
-          st,
-          ctx,
-          site
-        );
+      if (heredoc !== undefined) {
+        const text = heredocText(heredoc);
+        if (text === null) {
+          throw new Refusal(
+            site.snippet,
+            site.line,
+            "the guard cannot read the program this interpreter reads from its here-document, which bash expands first; quote its delimiter (`<<'PY'`) or write the program with the write tool"
+          );
+        }
+        runCode(language, { text: "<heredoc>", exp: [literal(text)] }, invocation, st, ctx, site);
       }
       return;
     }
@@ -2677,7 +3734,7 @@ function runFile(
       throw new Refusal(
         site.snippet,
         site.line,
-        `this command writes ${abs} in a way the guard cannot read before running it; write the script with the write tool first`
+        `this command writes ${abs} in a way the guard cannot read before running it (output it cannot render, or more than the ${MAX_SCRIPT_BYTES} bytes it reads of a script); write the script with the write tool first`
       );
     }
     content = written;
@@ -2724,9 +3781,11 @@ function runFile(
         );
       }
       const child: State = { ...clone(st), source: content, script: abs, depth: st.depth + 1 };
-      const operands = positional.map((arg) => arg.exp);
-      // `. file` with no operands runs the file with this shell's own arguments.
-      child.positional = source && operands.length === 0 ? st.positional : operands;
+      const operands = positionalOf(positional);
+      // `. file` with no operands (none left once empty unquoted ones drop) runs the file with this
+      // shell's own arguments.
+      const noOperands = operands !== undefined && operands.length === 0;
+      child.positional = source && noOperands ? st.positional : operands;
       walkScript(parse(content), child, ctx, !source);
       if (source) {
         // A sourced file runs in this shell, so everything it leaves stays: the copy-back rule on
@@ -2737,12 +3796,11 @@ function runFile(
         // so a list the file touched is unknown. Touched, not changed: `shift` and `set --` each
         // leave a new list, so identity tells a file that never touched them from one that ran
         // `set -- "$@"`, which bash keeps.
-        st.positional =
-          operands.length === 0
-            ? child.positional
-            : child.positional === operands
-              ? st.positional
-              : undefined;
+        st.positional = noOperands
+          ? child.positional
+          : child.positional === operands
+            ? st.positional
+            : undefined;
         st.vars = child.vars;
         st.exported = child.exported;
         st.arrays.clear();
@@ -2753,6 +3811,8 @@ function runFile(
         st.traps = child.traps;
         st.output = child.output;
         st.backgroundStarted ||= child.backgroundStarted;
+        // A `local` in a file sourced inside a function belongs to that function's frame.
+        st.locals = child.locals;
       }
     } else checkCode(language, content, st, ctx);
   } catch (error) {
@@ -2795,7 +3855,8 @@ function checkCode(
   const env = { ...ctx.env };
   for (const [name, value] of st.vars) {
     const text = literalText(value);
-    if (text !== undefined) env[name] = text;
+    if (isUnset(value)) delete env[name];
+    else if (text !== undefined) env[name] = text;
   }
   scanCode(
     language,
@@ -2934,12 +3995,17 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     ) {
       workspace = undefined;
     }
-    const protectedScratch = [...PROTECTED_SCRATCH];
+    // A home or tmux directory under the scratch root is not the pane's scratch: the /tmp
+    // directory holding it is protected whole, as a rig's run directory holds its OMP home.
     const tmuxDir = env.TMUX_TMPDIR === undefined ? undefined : realish(env.TMUX_TMPDIR, true);
-    if (tmuxDir?.startsWith(`${scratch}/`)) {
-      protectedScratch.push(tmuxDir.slice(scratch.length + 1).split("/")[0] ?? "");
+    const protectedDirectories: string[] = [];
+    for (const owned of [tmuxDir, home]) {
+      const component = owned?.startsWith(`${scratch}/`)
+        ? owned.slice(scratch.length + 1).split("/")[0]
+        : undefined;
+      if (component !== undefined && component !== "") protectedDirectories.push(component);
     }
-    return { workspace, scratch, protectedScratch };
+    return { workspace, scratch, protectedScratch: PROTECTED_SCRATCH, protectedDirectories };
   };
   const context = (env: NodeJS.ProcessEnv): Ctx => ({
     roots: roots(env),
@@ -2967,11 +4033,16 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     arrays: new Map(),
     functions: new Map(),
     traps: [],
+    locals: undefined,
   });
-  const run = (attempt: () => void, fallback: string): string | undefined => {
+  const run = (ctx: Ctx, attempt: () => void, fallback: string): string | undefined => {
     try {
       attempt();
-      return undefined;
+      // A value past the budget is left uncomputed, and the walk's next node refuses; a command
+      // whose last expansion spent the budget has no next node, so it is refused here.
+      return ctx.steps.count > MAX_WALK_STEPS
+        ? `refused \`${fallback}\`: ${WALK_LIMIT}`
+        : undefined;
     } catch (error) {
       if (!(error instanceof Refusal)) throw error;
       return `refused \`${error.snippet || fallback}\`: ${error.detail}`;
@@ -2980,13 +4051,14 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
   return {
     bash: (command, cwd, env) => {
       const ctx = context(env);
-      return run(() => walkScript(parse(command), initial(cwd, command), ctx), command.trim());
+      return run(ctx, () => walkScript(parse(command), initial(cwd, command), ctx), command.trim());
     },
     argv: (argv, cwd, env) => {
       const ctx = context(env);
       const list: Arg[] = argv.map((item) => ({ text: item, exp: [literal(item)] }));
       const snippet = argv.join(" ");
       return run(
+        ctx,
         () =>
           dispatch(
             {
@@ -3005,6 +4077,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     code: (language, code, cwd, env) => {
       const ctx = context(env);
       return run(
+        ctx,
         () => checkCode(language, code, initial(cwd, code), ctx, true),
         `${language} code`
       );
