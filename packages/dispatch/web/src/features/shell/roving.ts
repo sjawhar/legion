@@ -4,30 +4,41 @@ export function closestMatching(node: Element | null, selector: string): HTMLEle
 }
 
 /**
- * Moves keyboard focus one step through the nodes of `nodes` the reader can see: from `current`
- * to its neighbour, clamped at both ends; when nothing in the list holds focus, to the first
- * node going down and the last going up. Nothing happens on an empty list.
+ * The rows of `nodes` a reader can actually reach, for the keys that step over them and for
+ * the `when` that offers those keys - one rule, so the two cannot disagree.
  *
- * A node the reader cannot see is not a step. A list's rows can be in the DOM and unrendered -
- * the project List keeps each status band in a `details`, and a closed one hides its rows -
- * and such a row can take no focus at all, so counting it would dead-end the keys on the row
- * before it and strand every row past the closed band.
+ * A row inside a collapsed `details` is in the DOM, is not rendered, and can take no focus at
+ * all, so counting it would dead-end the keys on the row before the band and strand every row
+ * past it. A closed band is the whole of it for the three lists that rove: the project List
+ * keeps each status band in a `details` (`project/IssueList.tsx`), while the Inbox renders no
+ * row of a folded band (`inbox/Inbox.tsx:541-548`) and Architecture renders only the current
+ * level's rows. `checkVisibility()` would answer this and more, and needs Safari 17.4 / Chrome
+ * 105 / Firefox 106; a focus rule is not worth raising the browsers Dispatch runs on.
+ */
+export function reachableRows(nodes: readonly HTMLElement[]): HTMLElement[] {
+  return nodes.filter((node) => node.closest("details:not([open])") === null);
+}
+
+/**
+ * Moves keyboard focus one step through the rows of `nodes` the reader can reach: from
+ * `current` to its neighbour, clamped at both ends; when nothing in the list holds focus, to
+ * the first node going down and the last going up. Nothing happens when none is reachable.
  */
 export function roveFocus(
   nodes: readonly HTMLElement[],
   current: HTMLElement | null,
   delta: 1 | -1
 ): void {
-  const visible = nodes.filter((node) => node.checkVisibility());
-  if (visible.length === 0) {
+  const reachable = reachableRows(nodes);
+  if (reachable.length === 0) {
     return;
   }
-  const at = current === null ? -1 : visible.indexOf(current);
+  const at = current === null ? -1 : reachable.indexOf(current);
   const next =
     at === -1
       ? delta === 1
         ? 0
-        : visible.length - 1
-      : Math.max(0, Math.min(visible.length - 1, at + delta));
-  visible[next]?.focus();
+        : reachable.length - 1
+      : Math.max(0, Math.min(reachable.length - 1, at + delta));
+  reachable[next]?.focus();
 }

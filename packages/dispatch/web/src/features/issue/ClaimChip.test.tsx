@@ -9,6 +9,7 @@ import type { Agent, Issue, IssueClaim, IssueDetails } from "../../api/types";
 import { MarginProvider } from "../margin/margin-context";
 import { IssueHeader } from "./IssueHeader";
 import { stateForIssue } from "./pins";
+import type { IssuePriorityWrite } from "./useIssuePriority";
 
 const claim: IssueClaim = {
   actor: { kind: "session", id: "session-one", origin: { session_title: "Implementer" } },
@@ -38,6 +39,14 @@ const base: Issue = {
   updated_at: "2026-09-24T06:00:00Z",
 };
 
+/** These rows are about the claim chip, not the priority: the header's write never runs. */
+const idlePriorityWrite: IssuePriorityWrite = {
+  failed: false,
+  pending: false,
+  retry: () => undefined,
+  submit: () => undefined,
+};
+
 function header(issue: Issue): { unmount: () => void } {
   const details: IssueDetails = {
     route_status: null,
@@ -61,6 +70,7 @@ function header(issue: Issue): { unmount: () => void } {
       documentArtifact={undefined}
       isClosed={false}
       issue={details}
+      priorityWrite={idlePriorityWrite}
       state={stateForIssue(undefined, issue.key)}
     />,
     { wrapper }

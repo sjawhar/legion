@@ -267,3 +267,133 @@ test("j and k cross a collapsed band instead of dead-ending in it, and reach its
     await context.close();
   }
 });
+
+test("a priority the server refuses shows the header's own failure, whether the digit key or the picker sent it", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Refused priority" });
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openIssue(page, issue.key, "Refused priority");
+    const header = page.getByTestId("issue-header");
+    await page.route(`**/api/v1/issues/${issue.key}`, async (route) => {
+      if (route.request().method() !== "PATCH") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        body: JSON.stringify({ error: { code: "INTERNAL", message: "nope" } }),
+        contentType: "application/json",
+        status: 500,
+      });
+    });
+
+    // The digit key and the picker are one write, so a refusal of either is reported once, by
+    // the control the reader is looking at, and the badge rolls back.
+    await page.keyboard.press("2");
+    const failure = header
+      .getByRole("alert")
+      .filter({ hasText: `Could not update the priority of ${issue.key}.` });
+    await expect(failure).toBeVisible();
+    await expect(failure.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(header.locator("span", { hasText: /^Priority$/ })).toBeVisible();
+    await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: null });
+  } finally {
+    await context.close();
+  }
+});
+
+test("a closed issue greys the shortcuts its header disables, and keeps the ones it does not", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Closed issue" });
+  await patchIssue(issue.key, { status: "done" });
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await openIssue(page, issue.key, "Closed issue");
+    await expect(page.getByRole("button", { name: "Reopen issue" })).toBeVisible();
+
+    await page.keyboard.press("?");
+    const issueSection = page
+      .getByRole("dialog", { name: "Keyboard shortcuts" })
+      .getByRole("region", { name: "Issue", exact: true });
+    const row = (label: string) => issueSection.getByRole("listitem").filter({ hasText: label });
+    // The title heading takes no focus while the issue is closed, so `e` is greyed with the
+    // controls the header disables; pinning a closed issue still works, so Shift+P is not.
+    await expect(row("Edit the title")).toHaveAttribute("data-enabled", "false");
+    await expect(row("Focus the status")).toHaveAttribute("data-enabled", "false");
+    await expect(row("Edit labels")).toHaveAttribute("data-enabled", "false");
+    await expect(row("Set priority P0–P3")).toHaveAttribute("data-enabled", "false");
+    await expect(row("Pin or unpin the issue")).toHaveAttribute("data-enabled", "true");
+    await expect(row("Conversation tab")).toHaveAttribute("data-enabled", "true");
+  } finally {
+    await context.close();
+  }
+});
+
+test("with every band collapsed j and k do nothing and ? greys them, and opening one restores both", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  for (const [title, status] of [
+    ["Alpha", "backlog"],
+    ["Bravo", "todo"],
+  ] as const) {
+    const issue = await createIssue({ project: "CORE", title });
+    await patchIssue(issue.key, { status });
+  }
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto("/projects/CORE/issues");
+    const rows = page.locator("[data-issue-row]");
+    await expect(rows).toHaveCount(2);
+    for (const band of ["Backlog (1)", "Todo (1)"]) {
+      await page.getByRole("group", { name: band }).locator("summary").click();
+    }
+    await expect(rows.first()).toBeHidden();
+    await expect(rows.last()).toBeHidden();
+    await leaveFocus(page);
+
+    // Nothing the reader can see is a step, so the keys move nothing …
+    await page.keyboard.press("j");
+    await page.keyboard.press("k");
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+
+    // … and `?` says so, as it does for the issue scope's disabled controls.
+    await page.keyboard.press("?");
+    const dialog = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+    const project = dialog.getByRole("region", { name: "Project", exact: true });
+    const roving = ["Next issue", "Previous issue"].map((label) =>
+      project.getByRole("listitem").filter({ hasText: label }).first()
+    );
+    for (const row of roving) {
+      await expect(row).toHaveAttribute("data-enabled", "false");
+    }
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    // Opening one band gives them somewhere to go again.
+    await page.getByRole("group", { name: "Todo (1)" }).locator("summary").click();
+    await expect(rows.last()).toBeVisible();
+    await leaveFocus(page);
+    await page.keyboard.press("j");
+    await expect(rows.last()).toBeFocused();
+    await page.keyboard.press("?");
+    for (const row of roving) {
+      await expect(row).toHaveAttribute("data-enabled", "true");
+    }
+  } finally {
+    await context.close();
+  }
+});

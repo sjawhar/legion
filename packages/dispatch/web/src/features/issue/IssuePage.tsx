@@ -95,6 +95,7 @@ const LABELS_TRIGGER = 'button[aria-label="Edit labels"]';
 const PIN_TOGGLE = 'button[aria-label="Pin issue"], button[aria-label="Unpin issue"]';
 const PRIORITY_SELECT = 'select[aria-label^="Priority of "]';
 const STATUS_SELECT = 'select[aria-label="Status"]';
+const TITLE_HEADING = 'h1[tabindex="0"]';
 
 /** The header control `selector` names, or `null` when it is absent or refuses input (a closed
  *  issue, a save in flight), so `?` offers a shortcut exactly while its control takes a click. */
@@ -189,11 +190,13 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       when: () => headerControl(LABELS_TRIGGER) !== null,
     },
     {
+      // The heading takes focus only while the issue is open: closed, its `tabIndex` is -1 and
+      // `onFocus` does not open the editor, so the key is offered exactly while it edits.
       id: "title",
       keys: "e",
       label: "Edit the title",
-      run: () => headerControl("h1")?.focus(),
-      when: () => headerControl("h1") !== null,
+      run: () => headerControl(TITLE_HEADING)?.focus(),
+      when: () => headerControl(TITLE_HEADING) !== null,
     },
     {
       id: "pin",
@@ -303,6 +306,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         documentArtifact={primaryArtifact}
         isClosed={isClosed}
         issue={issue.data}
+        priorityWrite={priority}
         state={issueState}
       />
       <IssueTabs

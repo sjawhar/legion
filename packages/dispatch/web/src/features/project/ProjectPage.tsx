@@ -23,7 +23,7 @@ import { BlockedOnYou } from "../inbox/BlockedOnYou";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { NotFoundPage } from "../shell/NotFoundPage";
-import { closestMatching, roveFocus } from "../shell/roving";
+import { closestMatching, reachableRows, roveFocus } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { DocumentList } from "./DocumentList";
@@ -80,6 +80,10 @@ export function ProjectPage(): ReactNode {
   // deeper scope while it shows, and these are inert unless the List is what the reader sees.
   const showsList = () => route?.kind === "issues" && issueView === "list";
   const rows = () => [...document.querySelectorAll<HTMLElement>(ROW_SELECTOR)];
+  // The same rule `roveFocus` steps by, so the keys are offered exactly while they move: a
+  // project whose every issue sits in a collapsed band (a Done-only one, since Done renders
+  // closed) has nowhere for them to go, and `?` says so.
+  const hasReachableRow = () => reachableRows(rows()).length > 0;
   const focusedRow = () => closestMatching(document.activeElement, ROW_SELECTOR);
   useKeymapScope("project");
   useKeymap("project", [
@@ -95,14 +99,14 @@ export function ProjectPage(): ReactNode {
       keys: "j",
       label: "Next issue",
       run: () => roveFocus(rows(), focusedRow(), 1),
-      when: () => showsList() && rows().length > 0,
+      when: () => showsList() && hasReachableRow(),
     },
     {
       id: "list-previous",
       keys: "k",
       label: "Previous issue",
       run: () => roveFocus(rows(), focusedRow(), -1),
-      when: () => showsList() && rows().length > 0,
+      when: () => showsList() && hasReachableRow(),
     },
     {
       id: "list-open",

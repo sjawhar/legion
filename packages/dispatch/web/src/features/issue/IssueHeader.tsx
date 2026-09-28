@@ -62,11 +62,12 @@ import { ClaimChip } from "./ClaimChip";
 import { GitHubLink } from "./GitHubLink";
 import { IssueComponentsLine } from "./IssueComponentsLine";
 import { IssueLabels } from "./IssueLabels";
-import { PriorityControl } from "./PriorityControl";
+import { PriorityEditor } from "./PriorityControl";
 import { stateForIssue } from "./pins";
 import { UnreachableRouteMarker } from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
+import type { IssuePriorityWrite } from "./useIssuePriority";
 
 const routeHint =
   "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";
@@ -75,11 +76,15 @@ export function IssueHeader({
   documentArtifact,
   isClosed,
   issue,
+  priorityWrite,
   state,
 }: {
   documentArtifact: Artifact | undefined;
   isClosed: boolean;
   issue: IssueDetails;
+  /** The page's one priority write, shared with the keyboard's `0`–`3`, so a refusal of
+   *  either is reported once and by this header. */
+  priorityWrite: IssuePriorityWrite;
   state: UserIssueState;
 }): ReactNode {
   const queryClient = useQueryClient();
@@ -376,10 +381,11 @@ export function IssueHeader({
               ))}
             </select>
           </label>
-          <PriorityControl
+          <PriorityEditor
             disabled={isClosed || updateIssue.isPending}
             issueKey={issue.key}
             priority={issue.priority}
+            write={priorityWrite}
           />
           <AssigneeControl
             assignee={issue.assignee}
