@@ -1828,6 +1828,11 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       // conditions it can read, so `trap - "$x"` resets nothing; a handler set for one records
       // UNREADABLE_CONDITION, which no removal names, so it stays and is walked.
       const readable = conditions.map((arg) => literalText(arg.exp));
+      const signals = readable.map((condition) =>
+        condition === undefined ? UNREADABLE_CONDITION : trapSignal(condition)
+      );
+      const handled = signals.length === 0 ? ["EXIT"] : signals;
+      const file = outer.script ?? outer.source;
       if (text === "-") {
         // `trap - INT` resets INT and leaves every other handler, the EXIT one included; `trap -`
         // naming nothing is a usage error that resets nothing.
@@ -1853,19 +1858,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
             return `\${${name}}`;
           })
           .join("");
-        const signals = readable.map((condition) =>
-          condition === undefined ? UNREADABLE_CONDITION : trapSignal(condition)
-        );
-        outer.traps = [
-          ...outer.traps,
-          {
-            text: handlerText,
-            site,
-            signals: signals.length === 0 ? ["EXIT"] : signals,
-            file: outer.script ?? outer.source,
-            pids,
-          },
-        ];
+        outer.traps = [...outer.traps, { text: handlerText, site, signals: handled, file, pids }];
       } else if (text === undefined) {
         throw new Refusal(
           site.snippet,
@@ -1873,18 +1866,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           `the guard cannot read the handler this \`trap\` sets, \`${handler.text}\` (${handler.exp.find((piece) => piece.kind !== "literal")?.why ?? "a value the guard cannot know"}), so it cannot check what runs when this shell exits; write the handler out, or put it in a function`
         );
       } else if (!text.startsWith("-")) {
-        const signals = readable.map((condition) =>
-          condition === undefined ? UNREADABLE_CONDITION : trapSignal(condition)
-        );
-        outer.traps = [
-          ...outer.traps,
-          {
-            text,
-            site,
-            signals: signals.length === 0 ? ["EXIT"] : signals,
-            file: outer.script ?? outer.source,
-          },
-        ];
+        outer.traps = [...outer.traps, { text, site, signals: handled, file }];
       }
       return;
     }
