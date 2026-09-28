@@ -879,7 +879,8 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 		return err
 	}
 	deadline, _ := ctx.Deadline()
-	return c.publishConfirmed(c.Conn, &nats.Msg{Subject: subject, Data: data}, deadline, c.Conn.PublishMsg)
+	conn := c.Conn
+	return c.publishConfirmed(conn, &nats.Msg{Subject: subject, Data: data}, deadline, conn.PublishMsg)
 }
 
 // ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
