@@ -686,8 +686,11 @@ the tree's null is not that default, the live document holds a value the editor 
 (`liveNulls`): `"none"` for a table cell with no alignment, whose default, left, would left-align
 the column at its first edit, and `""` for a code block with no language and an image with no
 title. A read gives each back as null. `pmdoc/gen/decode.ts` decodes Go-written bytes into the node
-the browser holds, schema defaults applied, so a new attribute of this kind fails
-`TestUpdateFromEmptyEqualsAuthoredByBrowser` until it is added there.
+the browser holds, schema defaults applied, so `TestUpdateFromEmptyEqualsAuthoredByBrowser` fails
+for an attribute of this kind `liveNulls` lacks. It cannot tell an absent attribute from the
+editor's value, since the editor shows its default for both; `TestNullAttributesSurviveABrowserEdit`
+edits a node of each kind through the editor's sync plugin (`pmdoc/gen/edit-blocks.ts`), which
+writes the editor's values back, and requires the read to give each back as null.
 
 A document `pmdoc` refuses names the first refused block it writes. One walk of the tree goldmark
 reads decides every block refusal in document order before conversion (`refuseBlocks`), and it

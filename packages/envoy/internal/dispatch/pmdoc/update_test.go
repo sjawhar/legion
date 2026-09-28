@@ -222,19 +222,21 @@ func runDecoder(script, encoded string) ([]byte, []byte, error) {
 	return output, stderr, err
 }
 
-// A table Go writes into the live document keeps each column's alignment through the browser
-// editor: loaded as its sync plugin loads it, a header cell and a body cell typed into and written
-// back as that plugin writes them, it reads back with every column as written. The editor gives a
-// cell whose alignment attribute is absent its schema's default, left, so an unaligned column
-// written that way came back left-aligned from its first edit.
-func TestTableAlignmentSurvivesABrowserCellEdit(t *testing.T) {
+// Every null attribute Go writes into the live document survives the browser editor: loaded as its
+// sync plugin loads it, with a header cell, a body cell and a code block typed into and an image's
+// alt text edited, written back as that plugin writes them, the document reads back with each
+// attribute as written. The plugin writes an edited node back with the attributes the editor
+// holds, schema defaults included: an unaligned column comes back left unless the live document
+// holds "none", and a code block with no language and an image with no title come back holding ""
+// unless the read gives "" back as null (liveNulls).
+func TestNullAttributesSurviveABrowserEdit(t *testing.T) {
 	if _, err := exec.LookPath("bun"); err != nil {
 		if os.Getenv("CI") == "" {
 			t.Skip("bun is not on PATH; the browser editor's sync is required in CI")
 		}
 		t.Fatalf("bun is required in CI: %v", err)
 	}
-	written, err := Parse("| a | b | c |\n| --- | :---: | ---: |\n| d | e | f |\n")
+	written, err := Parse("| a | b | c |\n| --- | :---: | ---: |\n| d | e | f |\n\n```\ncode\n```\n\n![alt](src.png) tail\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,13 +249,13 @@ func TestTableAlignmentSurvivesABrowserCellEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	output, stderr, err := runDecoder("edit-cells.ts", base64.StdEncoding.EncodeToString(crdt.EncodeStateAsUpdateV1(doc, nil)))
+	output, stderr, err := runDecoder("edit-blocks.ts", base64.StdEncoding.EncodeToString(crdt.EncodeStateAsUpdateV1(doc, nil)))
 	if err != nil {
-		t.Fatalf("run edit-cells.ts: %v\nstderr:\n%s", err, stderr)
+		t.Fatalf("run edit-blocks.ts: %v\nstderr:\n%s", err, stderr)
 	}
 	update, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(output)))
 	if err != nil {
-		t.Fatalf("edit-cells.ts output: %v\n%s", err, output)
+		t.Fatalf("edit-blocks.ts output: %v\n%s", err, output)
 	}
 	edited := crdt.New()
 	if err := crdt.ApplyUpdateV1(edited, update, nil); err != nil {
@@ -267,9 +269,31 @@ func TestTableAlignmentSurvivesABrowserCellEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "| ax | b | c |\n| --- | :---: | ---: |\n| dy | e | f |\n"; markdown != want {
-		t.Fatalf("after the browser editor's cell edits, the table renders %q, want %q", markdown, want)
+	if want := "| ax | b | c |\n| --- | :---: | ---: |\n| dy | e | f |\n\n```\ncodez\n```\n\n![alt2](src.png) tail\n"; markdown != want {
+		t.Fatalf("after the browser editor's edits, the document renders %q, want %q", markdown, want)
 	}
+	for _, attr := range []struct{ node, name string }{{"code_block", "language"}, {"image", "title"}} {
+		node := firstNodeOfType(tree, attr.node)
+		if node == nil {
+			t.Fatalf("no %s in the edited tree", attr.node)
+		}
+		if value := node.Attrs[attr.name]; value != nil {
+			t.Errorf("after the browser editor's edit, the %s's %s reads back %#v, want null", attr.node, attr.name, value)
+		}
+	}
+}
+
+// firstNodeOfType is the first node of type in node's tree, in document order, or nil.
+func firstNodeOfType(node *Node, nodeType string) *Node {
+	if node.Type == nodeType {
+		return node
+	}
+	for _, child := range node.Children {
+		if found := firstNodeOfType(child, nodeType); found != nil {
+			return found
+		}
+	}
+	return nil
 }
 
 func TestUpdateAppliesMarksToInsertedTextAtRunBoundary(t *testing.T) {
