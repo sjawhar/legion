@@ -5,49 +5,75 @@ export type MatchingSelectionState = "none" | "some" | "all";
 export interface MatchingSelection {
   /** Selected sessions among the rows the filters match, folded sections included. */
   readonly selectedMatching: number;
-  /** Selected sessions outside the filter: hidden by it, or no longer live. */
-  readonly selectedOutside: number;
+  /** Selected sessions still listed that an active filter hides. */
+  readonly selectedHidden: number;
+  /** Selected sessions gone from the list: the registry no longer has them. */
+  readonly selectedGone: number;
   /** The header checkbox's state, read from the matching rows alone. */
   readonly state: MatchingSelectionState;
 }
 
-/** How much of what the filters match is selected. A selected session outside the filter
- *  never makes the header mixed; it is counted apart, so nothing passes part of the selection
- *  off as all of it. */
+function countSelected(rows: readonly Agent[], selected: ReadonlySet<string>): number {
+  let count = 0;
+  for (const agent of rows) if (selected.has(agent.session_id)) count += 1;
+  return count;
+}
+
+/** How much of what the filters match is selected, out of every listed session. A selected
+ *  session the filters hide, or one gone from the list, never makes the header mixed; each is
+ *  counted apart, so nothing passes part of the selection off as all of it. */
 export function matchingSelection(
+  listed: readonly Agent[],
   matching: readonly Agent[],
   selected: ReadonlySet<string>
 ): MatchingSelection {
-  let selectedMatching = 0;
-  for (const agent of matching) if (selected.has(agent.session_id)) selectedMatching += 1;
+  const selectedMatching = countSelected(matching, selected);
+  const selectedListed = countSelected(listed, selected);
   const state =
     selectedMatching === 0 ? "none" : selectedMatching === matching.length ? "all" : "some";
-  return { selectedMatching, selectedOutside: selected.size - selectedMatching, state };
+  return {
+    selectedGone: selected.size - selectedListed,
+    selectedHidden: selectedListed - selectedMatching,
+    selectedMatching,
+    state,
+  };
 }
 
 /** The header's count: how many rows the filters match and how many of them are selected,
- *  then any selected sessions outside the filter, since the composer names and sends to those
- *  too. */
+ *  then every other selected session, since the composer names and sends to those too - the
+ *  ones an active filter hides apart from the ones gone from the list. */
 export function selectionSummary(matchingCount: number, selection: MatchingSelection): string {
-  const { selectedMatching, selectedOutside } = selection;
-  const matchingPart =
+  const { selectedGone, selectedHidden, selectedMatching } = selection;
+  const more = selectedMatching === 0 ? "" : "more ";
+  const parts = [
     selectedMatching === 0
       ? `${matchingCount} matching`
-      : `${selectedMatching} of ${matchingCount} matching selected`;
-  if (selectedOutside === 0) return matchingPart;
-  const more = selectedMatching === 0 ? "" : "more ";
-  return `${matchingPart} · ${selectedOutside} ${more}selected outside the filter`;
+      : `${selectedMatching} of ${matchingCount} matching selected`,
+  ];
+  if (selectedHidden > 0) parts.push(`${selectedHidden} ${more}selected outside the filter`);
+  if (selectedGone > 0) parts.push(`${selectedGone} ${more}selected, no longer listed`);
+  return parts.join(" · ");
+}
+
+/** A folded section's disclosure label: `<label> (N)`, and `<label> (N, K selected)` once any
+ *  of its rows is selected, so the header checkbox never selects a row out of sight silently. */
+export function foldLabel(
+  label: string,
+  rows: readonly Agent[],
+  selected: ReadonlySet<string>
+): string {
+  const count = countSelected(rows, selected);
+  return `${label} (${rows.length}${count === 0 ? "" : `, ${count} selected`})`;
 }
 
 /** The header checkbox's click: select every matching session unless all of them already
- *  are, and otherwise unselect them. Selected sessions outside the filter stay selected either
- *  way. */
+ *  are, and otherwise unselect them. Every other selected session stays selected either way. */
 export function toggleMatching(
   matching: readonly Agent[],
   selected: ReadonlySet<string>
 ): Set<string> {
   const next = new Set(selected);
-  const selectAll = matchingSelection(matching, selected).state !== "all";
+  const selectAll = countSelected(matching, selected) !== matching.length;
   for (const agent of matching) {
     if (selectAll) next.add(agent.session_id);
     else next.delete(agent.session_id);

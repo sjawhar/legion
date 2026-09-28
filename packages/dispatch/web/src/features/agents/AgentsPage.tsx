@@ -65,7 +65,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 
 import { deliveryAttempts } from "./attempts";
-import { matchingSelection, selectionSummary, toggleMatching } from "./selection";
+import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
@@ -747,10 +747,8 @@ function AgentRow({
   );
 }
 
-/** A collapsed `<label> (N)` disclosure over rows the page keeps out of the way; absent when
- * empty, closed on every load, and open only while this page stays mounted. Once any of its
- * rows is selected it reads `<label> (N, K selected)`, so the header checkbox never selects a
- * row out of sight without saying so. */
+/** A collapsed disclosure over rows the page keeps out of the way, labelled by `foldLabel`;
+ * absent when empty, closed on every load, and open only while this page stays mounted. */
 function AgentFold({
   agents,
   label,
@@ -770,14 +768,13 @@ function AgentFold({
 }): ReactNode {
   const [expanded, setExpanded] = useState(false);
   if (agents.length === 0) return null;
-  const { selectedMatching } = matchingSelection(agents, selected);
   return (
     // A block wrapper, not a fragment: the global `button { display: inline-flex }` would
     // otherwise let two collapsed toggles share one line below the desktop breakpoint.
     <div className="space-y-3">
       <DisclosureToggle
         expanded={expanded}
-        label={`${label} (${agents.length}${selectedMatching === 0 ? "" : `, ${selectedMatching} selected`})`}
+        label={foldLabel(label, agents, selected)}
         onToggle={() => setExpanded((open) => !open)}
       />
       {expanded ? (
@@ -930,17 +927,19 @@ function AgentFilterBar({
  * included, and `Clear selection` also empties the selected rows the filters hide.
  */
 function SelectionHeader({
+  listed,
+  matching,
   onClear,
   onToggle,
   selected,
-  matching,
 }: {
+  listed: readonly Agent[];
   onClear: () => void;
   onToggle: () => void;
   selected: ReadonlySet<string>;
   matching: readonly Agent[];
 }): ReactNode {
-  const selection = matchingSelection(matching, selected);
+  const selection = matchingSelection(listed, matching, selected);
   const { state } = selection;
   const checkbox = useRef<HTMLInputElement>(null);
   const countId = useId();
@@ -1174,6 +1173,7 @@ export function AgentsPage(): ReactNode {
         <>
           <AgentFilterBar agents={agents} filters={filters} onFilters={setFilters} />
           <SelectionHeader
+            listed={agents}
             onClear={() => setSelected(new Set())}
             onToggle={() => setSelected((current) => toggleMatching(matching, current))}
             selected={selected}

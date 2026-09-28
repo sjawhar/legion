@@ -518,14 +518,30 @@ test("the header checkbox selects and clears only the rows the filters match, by
     await count("2 matching · 1 selected outside the filter");
     await expect(chips).toHaveText(["Reviewer ✕"]);
 
-    await header.click();
-    await expect(chips).toHaveText(["Reviewer ✕", "Planner A ✕", "Planner B ✕"]);
-    await header.click();
-    await expect(chips).toHaveText(["Reviewer ✕"]);
-
     // Clear selection takes the hidden row too.
     await agents.getByRole("button", { name: "Clear selection" }).click();
     await expect(composer).toHaveCount(0);
+
+    // Build the filtered selection again and send it. The set the server receives is pinned by
+    // name, not by the `Send to N` count the page computes: the matching planners plus the
+    // hand-ticked Reviewer, never the Tester the filter hides.
+    await agents.getByRole("combobox", { name: "Role" }).selectOption("");
+    await row("Reviewer").check();
+    await agents.getByRole("combobox", { name: "Role" }).selectOption("planner");
+    await header.click();
+    await expect(chips).toHaveText(["Reviewer ✕", "Planner A ✕", "Planner B ✕"]);
+    await composer.getByRole("textbox", { name: "Broadcast message" }).fill("Report status.");
+    await composer.getByRole("button", { name: "Send to 3" }).click();
+    await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
+    const view = page.getByRole("region", { name: "Broadcast" });
+    await expect(view.getByRole("heading", { name: "Broadcast to 3 agents" })).toBeVisible();
+    for (const title of ["Reviewer", "Planner A", "Planner B"]) {
+      await expect(view.getByRole("article", { name: title })).toBeVisible();
+    }
+    await expect(view.getByRole("article", { name: "Tester" })).toHaveCount(0);
+    await expect
+      .poll(async () => (await getSentMessages()).map((entry) => entry.target_session).sort())
+      .toEqual(["planner-a-session", "planner-b-session", "reviewer-session"]);
   } finally {
     await alice.close();
   }
