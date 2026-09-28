@@ -35,6 +35,8 @@ import type {
   MessageRead,
   Project,
   UpdateIssueInput,
+  UserAgentState,
+  UserAgentStateInput,
   UserIssueState,
   Version,
 } from "../web/src/api/types";
@@ -467,13 +469,17 @@ export function getMessage(
   );
 }
 
+/** A session answers a targeted message's delivery. `followUp` is `dispatch_message`'s
+ *  `?follow_up=true`: once the attempt is answered, other text posts as a follow-up instead of
+ *  handing back the stored reply. */
 export function replyToMessageDelivery(
   messageID: string,
   input: { attempt: number; body?: string; error?: string },
-  actor: Actor
+  actor: Actor,
+  { followUp = false }: { followUp?: boolean } = {}
 ): Promise<Message | MessageDelivery> {
   return request<Message | MessageDelivery>(
-    `/api/v1/messages/${encodeURIComponent(messageID)}/reply`,
+    `/api/v1/messages/${encodeURIComponent(messageID)}/reply${followUp ? "?follow_up=true" : ""}`,
     "POST",
     input,
     {
@@ -503,10 +509,10 @@ export function replyToCommentDelivery(
 /** The signed-in human's own per-agent conversation state, as another of their devices sets it. */
 export function putAgentState(
   sessionID: string,
-  input: { cleared_before: string },
+  input: UserAgentStateInput,
   options: ApiOptions = {}
-): Promise<{ cleared_before: string }> {
-  return request<{ cleared_before: string }>(
+): Promise<UserAgentState> {
+  return request<UserAgentState>(
     `/api/v1/me/agents/${encodeURIComponent(sessionID)}/state`,
     "PUT",
     input,

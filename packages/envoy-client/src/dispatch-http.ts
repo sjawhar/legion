@@ -37,6 +37,7 @@ import type {
   Message,
   MessageRead,
   MessageReplyInput,
+  MessageReplyResult,
   OpenAsksResponse,
   ResolveAskInput,
   SearchResponse,
@@ -369,10 +370,21 @@ export class DispatchClient {
    * `POST /api/v1/messages/{id}/reply`: the targeted session's reply to the delivery it
    * received. It takes no issue, so it is the route that answers a human's direct message -
    * a conversation Dispatch keeps without one - and the server settles the delivery attempt
-   * with the reply it inserts.
+   * with the reply it inserts. `followUp` asks to post more once the attempt is answered
+   * (`?follow_up=true`); without it an answered attempt hands back its stored reply and posts
+   * nothing. The result's `duplicate` says the route posted nothing.
    */
-  async messageReply(id: string, input: MessageReplyInput): Promise<Message> {
-    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input);
+  async messageReply(
+    id: string,
+    input: MessageReplyInput,
+    options: { readonly followUp?: boolean } = {}
+  ): Promise<MessageReplyResult> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "messages", id, "reply"],
+      input,
+      options.followUp === true ? { follow_up: "true" } : undefined
+    );
   }
 
   async getMessage(issue: string, id: string): Promise<MessageRead> {
@@ -384,6 +396,14 @@ export class DispatchClient {
       "messages",
       id,
     ]);
+  }
+
+  /** `GET /api/v1/messages/{id}`: the conversation a message belongs to, by any message id in
+   *  it - the root and every reply. It takes no issue, so it reads a human's direct message to
+   *  a session and the replies to it, which belong to none. It reads as `session`; which
+   *  threads a session may read is the route's rule (`GET /api/v1` describes it). */
+  async getMessageThread(id: string, session: string): Promise<MessageRead> {
+    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
   }
 
   async artifact(

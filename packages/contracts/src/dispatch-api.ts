@@ -1170,6 +1170,13 @@ export interface UserStateUpdatedEventPayload {
   readonly state: UserIssueState;
 }
 
+/** `user_agent_state.updated`: one viewer's Clear or read mark on one session's conversation
+ *  changed. It carries no state; the viewer's other tabs and devices refetch theirs. */
+export interface UserAgentStateUpdatedEventPayload {
+  readonly login: string;
+  readonly session_id: string;
+}
+
 /**
  * `issue.claimed` and `issue.released`: who is working the issue now, whose claim this one
  * replaced or cleared, and why. `previous_claim` is present on a takeover (the holder's
@@ -1226,6 +1233,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "user_state.updated";
       readonly payload: UserStateUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "user_agent_state.updated";
+      readonly payload: UserAgentStateUpdatedEventPayload;
     })
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })
@@ -1387,10 +1398,23 @@ export interface UserIssueState {
 
 export type UserState = Record<string, UserIssueState>;
 
-/** A viewer's Clear on one agent's conversation: exchanges whose newest message is at or
- * before `cleared_before` (RFC3339) are hidden for that viewer only. */
+/** One viewer's state for one agent's conversation. Exchanges whose newest message is at or
+ * before `cleared_before` (RFC3339, the viewer's Clear) are hidden for that viewer only;
+ * `read_through` is how far the viewer has read; `unread_replies` counts the session's replies
+ * to messages this viewer sent that are newer than both. */
 export interface UserAgentState {
-  readonly cleared_before: string;
+  readonly cleared_before?: string;
+  readonly read_through?: string;
+  /** Absent from an API older than the count, which a rollback can leave a live tab talking to,
+   *  so every reader treats it as none rather than rendering NaN. */
+  readonly unread_replies?: number;
+}
+
+/** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, or both. `read_through`
+ * only moves forward; the response is the session's whole `UserAgentState`. */
+export interface UserAgentStateInput {
+  readonly cleared_before?: string;
+  readonly read_through?: string;
 }
 
 /** `GET /api/v1/me/agents/state`: keyed by session ID. */
@@ -1540,6 +1564,14 @@ export interface MessageReplyInput {
   readonly actor: Actor;
 }
 
+/** What `POST /api/v1/messages/{id}/reply` answers for a body: the message, with `duplicate`
+ *  when the route posted nothing and handed back one the conversation already holds (the
+ *  answered attempt's stored reply, or a follow-up whose text the session already posted). A
+ *  Dispatch that predates follow-ups never sets it. */
+export interface MessageReplyResult extends Message {
+  readonly duplicate?: boolean;
+}
+
 interface CreateArtifactOptions {
   readonly name: string;
   readonly summary?: string;
@@ -1591,6 +1623,10 @@ export interface AskFollowersRead {
 export interface MessageRead {
   readonly message: Message;
   readonly replies: Message[];
+  /** `GET /api/v1/agents/{session_id}/messages` only: whether this conversation holds a reply
+   *  the caller has not read. The server's own verdict, from the definition `unread_replies`
+   *  counts; a client never derives it from timestamps. Absent means no. */
+  readonly unread?: boolean;
 }
 
 /**

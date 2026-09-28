@@ -32,6 +32,10 @@ type createMessageInput struct {
 type messageRead struct {
 	Message model.Message   `json:"message"`
 	Replies []model.Message `json:"replies"`
+	// Unread is this conversation's own unread verdict for the caller, from the shared
+	// unreadDirectRepliesCTE: the one definition the count reads too, so a client never
+	// re-derives it from timestamps. Only the agent-conversation list sets it.
+	Unread bool `json:"unread,omitempty"`
 }
 
 func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
@@ -454,27 +458,97 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) || !requireUUIDPath(w, r, "message") {
 		return
 	}
-	message, err := s.loadMessage(r.Context(), s.deps.Store.Pool, r.PathValue("key"), r.PathValue("id"))
+	read, err := s.readMessage(r.Context(), r.PathValue("key"), r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	deliveries, err := s.loadMessageDeliveries(r.Context(), s.deps.Store.Pool, []string{message.ID})
+	WriteJSON(w, http.StatusOK, read)
+}
+
+// getMessageThread reads the conversation a message belongs to by the id of any message in it:
+// the thread root with its deliveries, and every reply, oldest first. It takes no issue, so it
+// is how a session reads back a human's direct message and its own replies to it, which belong
+// to no issue. A thread on an issue follows the issue's rule, as GET /issues/{key}/messages/{id}
+// does. An issue-less thread is a direct conversation between a human and one session: a human
+// reads any of them, and a bearer names its session in ?session= and reads only one that session
+// is in (the root targets it, or it authored a reply). The session is the caller's own claim,
+// like `actor`, so this keeps a session from reading another session's direct conversation by
+// mistake; it is not an authorization boundary. Direct-conversation text also reaches every
+// authenticated caller through GET /api/v1/events; nothing in Dispatch restricts it by session.
+func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
+	_, human, err := s.optionalActor(r)
+	if err != nil {
+		s.writeAuthenticationError(w, err)
+		return
+	}
+	if !requireUUIDPath(w, r, "message") {
+		return
+	}
+	var rootID string
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), messageThreadCTE+`
+		select id::text from thread where in_reply_to is null
+	`, r.PathValue("id")).Scan(&rootID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	read, err := s.readMessage(r.Context(), "", rootID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	if !human && read.Message.IssueKey == nil {
+		session := strings.TrimSpace(r.URL.Query().Get("session"))
+		if session == "" {
+			writeError(w, "SESSION_REQUIRED", http.StatusBadRequest,
+				"a direct conversation is read as a session in it: name yours in ?session=")
+			return
+		}
+		if !read.hasSession(session) {
+			writeError(w, "THREAD_FORBIDDEN", http.StatusForbidden,
+				"session "+session+" is not in this direct conversation: its root targets another session and it has not replied in it")
+			return
+		}
+	}
+	WriteJSON(w, http.StatusOK, read)
+}
+
+// hasSession reports whether session is in this conversation: the root targets it, or it
+// authored a reply.
+func (read messageRead) hasSession(session string) bool {
+	if messageTarget(read.Message.Target) == "session:"+session {
+		return true
+	}
+	for _, reply := range read.Replies {
+		if reply.Author.Kind == "session" && reply.Author.ID == session {
+			return true
+		}
+	}
+	return false
+}
+
+// readMessage is one message, on issueKey when it is not empty, with its deliveries and every
+// message transitively replying to it.
+func (s *server) readMessage(ctx context.Context, issueKey, id string) (messageRead, error) {
+	message, err := s.loadMessage(ctx, s.deps.Store.Pool, issueKey, id)
+	if err != nil {
+		return messageRead{}, err
+	}
+	deliveries, err := s.loadMessageDeliveries(ctx, s.deps.Store.Pool, []string{message.ID})
+	if err != nil {
+		return messageRead{}, err
 	}
 	message.Deliveries = deliveries[message.ID]
-	replies, err := s.loadMessageReplyChains(r.Context(), s.deps.Store.Pool, []string{message.ID})
+	replies, err := s.loadMessageReplyChains(ctx, s.deps.Store.Pool, []string{message.ID})
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return messageRead{}, err
 	}
-	WriteJSON(w, http.StatusOK, messageRead{Message: message, Replies: replies[message.ID]})
+	return messageRead{Message: message, Replies: replies[message.ID]}, nil
 }
 
 func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
 		return
 	}
 	sessionID := strings.TrimSpace(r.PathValue("session_id"))
@@ -482,34 +556,78 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "MESSAGE_INPUT", http.StatusBadRequest, "session id is required")
 		return
 	}
-	target := "session:" + sessionID
+	// Newest activity first: a conversation moves up when anyone replies anywhere in it, so the
+	// newest one the Agents page opens on is the one that last moved, not the one last started.
+	// The window is the 50 that moved last, plus every conversation holding a reply this viewer
+	// has not read, in one activity order. The unread term has no ceiling: it is exactly what
+	// `unread_replies` counts (both read the shared unreadDirectRepliesCTE), so the count and the
+	// window can never disagree. Bounding it would reopen LEGION-301's defect at a higher
+	// threshold - a reply counted, never shown, and then marked read by a watermark that only
+	// moves forward.
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select m.id::text, m.issue_key, m.author, m.body, m.target, m.in_reply_to::text, m.created_at
-		from messages m
-		where m.in_reply_to is null
-		  and (
-			m.target = $1
-			or exists (
-				select 1 from message_deliveries d
-				where d.message_id = m.id and d.session_id = $2
-			)
-		  )
-		order by m.created_at desc, m.id desc
-		limit 50
-	`, target, sessionID)
+		with recursive`+unreadDirectRepliesCTE+`,
+		-- Two indexed branches rather than one scan with an OR across two tables: the roots
+		-- targeted at this session (messages_session_roots) and the roots one of its deliveries
+		-- names (message_deliveries_session). An OR spanning messages and message_deliveries can
+		-- use neither index, and Postgres reads every root there is.
+		candidates as (
+			select m.id, m.issue_key, m.author, m.body, m.target, m.in_reply_to, m.created_at
+			from messages m
+			where m.in_reply_to is null and m.target = 'session:' || $3::text
+			union
+			select m.id, m.issue_key, m.author, m.body, m.target, m.in_reply_to, m.created_at
+			from messages m
+			join message_deliveries d on d.message_id = m.id
+			where m.in_reply_to is null and d.session_id = $3::text
+		),
+		-- One walk down every candidate's replies, not one per candidate. A lateral per root
+		-- estimates at the recursive walk's cost times the number of roots, which put the plan
+		-- a million units over jit_above_cost: on production's own data the read spent 780 ms
+		-- compiling and 3 ms running (LEGION-301).
+		descendants as (
+			select candidates.id as root_id, reply.id, reply.created_at
+			from messages reply join candidates on reply.in_reply_to = candidates.id
+			union all
+			select descendants.root_id, reply.id, reply.created_at
+			from messages reply join descendants on reply.in_reply_to = descendants.id
+		),
+		activity as (
+			select root_id, max(created_at) as latest from descendants group by root_id
+		),
+		roots as (
+			select c.id::text as id, c.issue_key, c.author, c.body, c.target,
+			       c.in_reply_to::text as in_reply_to, c.created_at,
+			       greatest(c.created_at, activity.latest) as moved,
+			       unread.root_id is not null as unread
+			from candidates c
+			left join activity on activity.root_id = c.id
+			left join (select distinct root_id from unread_direct_replies) unread
+			  on unread.root_id = c.id
+		),
+		ranked as (
+			select *, row_number() over (order by moved desc, id desc) as rank from roots
+		)
+		select `+messageColumns+`, unread
+		from ranked
+		where rank <= 50 or unread
+		order by moved desc, id desc
+	`, unreadDirectRepliesArgs(actor.ID, &sessionID)...)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	defer rows.Close()
 	roots := []model.Message{}
+	unread := map[string]bool{}
 	for rows.Next() {
-		message, err := scanMessage(rows)
+		var holdsUnread bool
+		message, err := scanMessage(rows, &holdsUnread)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		roots = append(roots, message)
+		unread[message.ID] = holdsUnread
 	}
 	if err := rows.Err(); err != nil {
 		s.writeHandlerError(w, err)
@@ -533,7 +651,7 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 	result := make([]messageRead, 0, len(roots))
 	for _, root := range roots {
 		root.Deliveries = deliveries[root.ID]
-		result = append(result, messageRead{Message: root, Replies: replies[root.ID]})
+		result = append(result, messageRead{Message: root, Replies: replies[root.ID], Unread: unread[root.ID]})
 	}
 	WriteJSON(w, http.StatusOK, result)
 }

@@ -249,7 +249,7 @@ func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing
 				Actor:   model.Actor{Kind: "user", ID: "alice"},
 				Payload: map[string]any{"ask_id": "5a660655-04ad-4ce0-8a9b-93dd03c412b7", "session_id": "session-asker"},
 			}
-			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
 				t.Fatalf("publish author routes: %v", err)
 			}
 			got := publisher.all()
@@ -311,7 +311,7 @@ func TestPublishPreviousClaimantTellsTheSessionThatLostTheClaim(t *testing.T) {
 			deps := Deps{Store: database, Publisher: publisher}
 			item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1." + tc.eventType}
 			event := model.Event{Type: tc.eventType, Actor: tc.actor, Payload: tc.payload}
-			if err := publishPreviousClaimant(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+			if err := publishPreviousClaimant(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
 				t.Fatalf("publish previous claimant: %v", err)
 			}
 			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
@@ -719,7 +719,7 @@ func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 		Actor:   model.Actor{Kind: "session", ID: "session-writer"},
 		Payload: map[string]any{"reply_to": rootID},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -743,7 +743,7 @@ func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T)
 			"topics":     []any{"notifications.dispatch.issue.T-1.>"},
 		},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -764,7 +764,7 @@ func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing
 		Actor:   model.Actor{Kind: "user", ID: "alice"},
 		Payload: map[string]any{"by": map[string]any{"kind": "user", "id": "alice"}, "topics": []any{}},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 

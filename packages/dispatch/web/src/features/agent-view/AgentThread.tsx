@@ -4,6 +4,7 @@ import {
   type ReasoningMessagePartComponent,
   ThreadPrimitive,
   type ToolCallMessagePartComponent,
+  useAuiState,
 } from "@assistant-ui/react";
 import { type ReactNode, useState } from "react";
 
@@ -25,6 +26,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
+import { readDispatchMarks } from "./dispatch-marks";
 
 /**
  * The session's conversation, rendered with assistant-ui's primitives (MIT) over Dispatch's own
@@ -83,6 +85,21 @@ const Reasoning: ReasoningMessagePartComponent = ({ text }) => (
 );
 
 function UserMessage(): ReactNode {
+  // A stored message someone other than the viewer sent the session (AgentRuntimeThread names
+  // them): it sits on the session's side of the thread with its author, never styled as the
+  // viewer's own.
+  const author = useAuiState((state) => readDispatchMarks(state.message.metadata.custom).author);
+  if (author !== undefined) {
+    return (
+      <div
+        className={`mt-4 max-w-[80%] rounded-xl border px-3 py-2 text-sm whitespace-pre-wrap ${borderDefault} ${textPrimaryOnCanvas}`}
+        data-testid="agent-message-other"
+      >
+        <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>{author}</p>
+        <MessagePrimitive.Parts />
+      </div>
+    );
+  }
   return (
     <div className="mt-4 flex justify-end" data-testid="agent-message-user">
       <div
@@ -95,6 +112,21 @@ function UserMessage(): ReactNode {
 }
 
 function AssistantMessage(): ReactNode {
+  // A reply the session sent through Dispatch (AgentRuntimeThread marks it), not a streamed turn.
+  const fromDispatch = useAuiState(
+    (state) => readDispatchMarks(state.message.metadata.custom).dispatch === true
+  );
+  if (fromDispatch) {
+    return (
+      <div
+        className={`mt-4 rounded-xl border px-3 py-2 text-sm whitespace-pre-wrap ${card} ${borderDefault} ${textPrimaryOnCanvas}`}
+        data-testid="agent-dispatch-reply"
+      >
+        <p className={`mb-1 text-xs font-semibold ${textSecondaryOnCanvas}`}>Reply via Dispatch</p>
+        <MessagePrimitive.Parts />
+      </div>
+    );
+  }
   return (
     <div
       className={`mt-4 text-sm whitespace-pre-wrap ${textPrimaryOnCanvas}`}

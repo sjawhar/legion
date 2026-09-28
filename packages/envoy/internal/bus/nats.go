@@ -1,6 +1,7 @@
 package bus
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -859,9 +860,11 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 	return c.PublishCoreTo(item.Topic, item)
 }
 
-// PublishCoreTo publishes item directly to subject. The subject can differ
-// from item.Topic when an authoritative router forwards an envelope while
-// retaining its original topic for the recipient.
+// PublishCoreTo publishes item directly to subject and confirms the server accepted it
+// (publishConfirmed), so a nil error means it did: a publish NATS denies (a permissions violation
+// of a per-client grant), a flush that fails and a publish the server cannot be shown to have
+// accepted all return an error. The subject can differ from item.Topic when an authoritative
+// router forwards an envelope while retaining its original topic for the recipient.
 func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err
@@ -875,23 +878,31 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}
-	return c.refused(c.Conn.Publish(subject, data), len(data))
+	deadline, _ := ctx.Deadline()
+	conn := c.Conn
+	return c.publishConfirmed(conn, &nats.Msg{Subject: subject, Data: data}, deadline, conn.PublishMsg)
 }
 
 // ErrReceiptTimeout is returned by RequestCoreTo only when the publish and the
-// flush both succeeded and no empty receipt arrived before the deadline: the
+// flush both succeeded, the server reported nothing and the connection stayed
+// up through them, and no empty receipt arrived before the deadline: the
 // forward is known to have reached the server, and whoever holds the subject
 // did not acknowledge it in time. A flush that fails or times out — a
 // reconnecting or stalled connection still buffering the forward — is returned
 // as the client's own error, never this one, because that forward is not known
-// to have left this process.
+// to have left this process; so is a forward the server denied
+// (ErrPublishDenied), or one during which the server reported another error or
+// the connection dropped, since either may have hidden its denial.
 var ErrReceiptTimeout = errors.New("bus: no receipt inside the request window")
 
 // RequestCoreTo delivers item directly to subject and waits for an empty
 // receiver receipt. Agent subjects are captured by the notification stream,
 // whose non-empty JetStream publish acknowledgement is not a receiver receipt.
 // The flush is bounded by the same window as the receipt wait, so the call
-// never outlives timeout by the client's default 10 s flush.
+// never outlives timeout by the client's default 10 s flush. A forward the
+// server denied returns at once; one publishConfirmed cannot confirm for
+// another reason still waits, since a receipt proves it was delivered, and
+// returns that reason instead of ErrReceiptTimeout if none arrives.
 func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout time.Duration) error {
 	if err := checkSubject(subject); err != nil {
 		return err
@@ -906,31 +917,27 @@ func (c *Client) RequestCoreTo(subject string, item contracts.Envelope, timeout 
 		return err
 	}
 	deadline, _ := ctx.Deadline()
+	conn := c.Conn
 	inbox := nats.NewInbox()
-	receipt, err := c.Conn.SubscribeSync(inbox)
+	receipt, err := conn.SubscribeSync(inbox)
 	if err != nil {
 		return err
 	}
 	defer receipt.Unsubscribe()
-	if err := c.Conn.PublishRequest(subject, inbox, data); err != nil {
-		return c.refused(err, len(data))
+	err = c.publishConfirmed(conn, &nats.Msg{Subject: subject, Reply: inbox, Data: data}, deadline, conn.PublishMsg)
+	if err != nil && !errors.Is(err, errPublishUnconfirmed) {
+		return err
 	}
-	remaining := time.Until(deadline)
-	if remaining <= 0 {
-		return fmt.Errorf("bus: request window of %s elapsed before the forward was flushed", timeout)
-	}
-	if err := c.Conn.FlushTimeout(remaining); err != nil {
-		return fmt.Errorf("bus: flush forward: %w", err)
-	}
+	timedOut := cmp.Or(err, ErrReceiptTimeout)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return ErrReceiptTimeout
+			return timedOut
 		}
 		response, err := receipt.NextMsg(remaining)
 		if err != nil {
 			if errors.Is(err, nats.ErrTimeout) {
-				return ErrReceiptTimeout
+				return timedOut
 			}
 			return err
 		}
