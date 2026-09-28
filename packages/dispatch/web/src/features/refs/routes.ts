@@ -1,4 +1,5 @@
 import { itemFromSearch } from "@legion/contracts";
+import { matchPath } from "react-router-dom";
 
 import type { Artifact } from "../../api/types";
 
@@ -488,4 +489,16 @@ export function routeHasMargin(pathname: string, search = ""): boolean {
     parseIssuePath(pathname, search) !== undefined ||
     parseProjectPath(pathname, search)?.kind === "document"
   );
+}
+
+/** The live agent view's route pattern, shared by the router and `routeFillsViewport`. */
+export const AGENT_LIVE_PATH = "/agents/:sessionId/live";
+
+/**
+ * Whether this route's page owns its scroller and so gets exactly the viewport from the shell:
+ * the live agent view, whose thread scrolls while its header and composer stay put. Every other
+ * page scrolls the document, which `ViewportAnchor` and the sticky composers depend on.
+ */
+export function routeFillsViewport(pathname: string): boolean {
+  return matchPath(AGENT_LIVE_PATH, pathname) !== null;
 }

@@ -119,7 +119,13 @@ interface LiveViewLayout {
   viewportHeight: number;
   /** The visual viewport's bottom edge, in the layout viewport's coordinates. */
   visualBottom: number;
+  composerTop: number;
   composerBottom: number;
+  /** The newest turn's edges, and the thread's own top edge and scroll position. */
+  newestTop: number;
+  newestBottom: number;
+  threadTop: number;
+  threadScrollTop: number;
   mainBottom: number;
   mainPaddingBottom: number;
   threadScrollHeight: number;
@@ -135,15 +141,24 @@ function liveViewLayout(page: Page): Promise<LiveViewLayout> {
     };
     const main = box("main-content");
     const thread = box("agent-thread");
+    const composer = box("agent-composer").getBoundingClientRect();
+    const turns = thread.querySelectorAll('[data-testid^="agent-message-"]');
+    const newest = turns[turns.length - 1]?.getBoundingClientRect();
+    if (newest === undefined) throw new Error("no turns");
     const viewport = window.visualViewport;
     if (viewport === null) throw new Error("no visualViewport");
     return {
-      composerBottom: box("agent-composer").getBoundingClientRect().bottom,
+      composerBottom: composer.bottom,
+      composerTop: composer.top,
       documentHeight: document.documentElement.scrollHeight,
       mainBottom: main.getBoundingClientRect().bottom,
       mainPaddingBottom: Number.parseFloat(getComputedStyle(main).paddingBottom),
+      newestBottom: newest.bottom,
+      newestTop: newest.top,
       threadClientHeight: thread.clientHeight,
       threadScrollHeight: thread.scrollHeight,
+      threadScrollTop: thread.scrollTop,
+      threadTop: thread.getBoundingClientRect().top,
       viewportHeight: window.innerHeight,
       visualBottom: viewport.offsetTop + viewport.height,
     };
@@ -164,6 +179,43 @@ async function expectViewportBound(page: Page): Promise<void> {
   await page.getByTestId("agent-thread").evaluate((thread) => thread.scrollTo(0, 0));
   await expect(page.getByText("Turn 0:")).toBeInViewport();
   expect((await liveViewLayout(page)).composerBottom).toBe(layout.composerBottom);
+}
+
+/** iOS Safari's keyboard: the composer takes focus and only the visual viewport shrinks, to
+ *  `height`. The composer then sits one page gutter above the visual viewport's bottom edge. */
+async function raiseKeyboard(page: Page, height: number): Promise<void> {
+  await page.getByTestId("agent-composer").locator("textarea").focus();
+  await page.evaluate((visualHeight) => {
+    const viewport = window.visualViewport;
+    if (viewport === null) throw new Error("no visualViewport");
+    Object.defineProperty(viewport, "height", { configurable: true, get: () => visualHeight });
+    viewport.dispatchEvent(new Event("resize"));
+  }, height);
+  await expect
+    .poll(async () => {
+      const layout = await liveViewLayout(page);
+      return layout.visualBottom - layout.mainPaddingBottom - layout.composerBottom;
+    })
+    .toBe(0);
+  expect((await liveViewLayout(page)).visualBottom).toBe(height);
+}
+
+/** The keyboard closes: the visual viewport is the whole window again and the composer blurs,
+ *  which returns it to one page gutter above the bottom of the screen. */
+async function lowerKeyboard(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const viewport = window.visualViewport;
+    if (viewport === null) throw new Error("no visualViewport");
+    Reflect.deleteProperty(viewport, "height");
+    viewport.dispatchEvent(new Event("resize"));
+  });
+  await page.getByTestId("agent-composer").locator("textarea").blur();
+  await expect
+    .poll(async () => {
+      const layout = await liveViewLayout(page);
+      return layout.viewportHeight - layout.mainPaddingBottom - layout.composerBottom;
+    })
+    .toBe(0);
 }
 
 test.beforeEach(async () => {
@@ -316,33 +368,37 @@ test("on a phone the live view never scrolls the page, keeps its header and comp
     await expectViewportBound(page);
     await page.setViewportSize({ height: 844, width: 390 });
 
-    // iOS Safari opens it by shrinking only the visual viewport, and the composer follows.
-    const textarea = page.getByTestId("agent-composer").locator("textarea");
-    await textarea.focus();
-    await page.evaluate(() => {
-      const viewport = window.visualViewport;
-      if (viewport === null) throw new Error("no visualViewport");
-      Object.defineProperty(viewport, "height", { configurable: true, get: () => 500 });
-      viewport.dispatchEvent(new Event("resize"));
-    });
+    // iOS Safari opens it by shrinking only the visual viewport. A reader at the newest turn
+    // raises the keyboard: the composer sits one page gutter above it, and the newest turn stays
+    // in view above the composer.
+    const thread = page.getByTestId("agent-thread");
+    await thread.evaluate((element) => element.scrollTo(0, element.scrollHeight));
+    await raiseKeyboard(page, 500);
+    await expect(page.getByRole("link", { name: "← Agents" })).toBeInViewport({ ratio: 1 });
     await expect
       .poll(async () => {
         const layout = await liveViewLayout(page);
-        return layout.composerBottom <= layout.visualBottom;
+        return layout.newestBottom <= layout.composerTop && layout.newestBottom > layout.threadTop;
       })
       .toBe(true);
-    expect((await liveViewLayout(page)).visualBottom).toBe(500);
-    await expect(page.getByRole("link", { name: "← Agents" })).toBeInViewport({ ratio: 1 });
 
-    // The keyboard closing takes the composer back to the bottom of the screen.
-    await page.evaluate(() => {
-      const viewport = window.visualViewport;
-      if (viewport === null) throw new Error("no visualViewport");
-      Reflect.deleteProperty(viewport, "height");
-      viewport.dispatchEvent(new Event("resize"));
-    });
-    await textarea.blur();
-    await expect.poll(async () => (await liveViewLayout(page)).composerBottom).toBeGreaterThan(800);
+    // Closing it takes the composer back to the bottom of the screen, still under the newest turn.
+    await lowerKeyboard(page);
+    await expect
+      .poll(async () => {
+        const layout = await liveViewLayout(page);
+        return layout.newestBottom <= layout.composerTop && layout.newestBottom > layout.threadTop;
+      })
+      .toBe(true);
+
+    // A reader scrolled back into the history keeps their place through a raise and a lower.
+    await thread.evaluate((element) => element.scrollTo(0, 1_200));
+    const reading = (await liveViewLayout(page)).threadScrollTop;
+    expect(reading).toBe(1_200);
+    await raiseKeyboard(page, 500);
+    expect((await liveViewLayout(page)).threadScrollTop).toBe(reading);
+    await lowerKeyboard(page);
+    expect((await liveViewLayout(page)).threadScrollTop).toBe(reading);
   } finally {
     await context.close();
   }

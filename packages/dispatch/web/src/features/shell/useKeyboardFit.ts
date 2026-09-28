@@ -6,9 +6,10 @@ import { type RefObject, useEffect } from "react";
 const KEYBOARD_FIT_VARIABLE = "--keyboard-fit-height";
 
 /**
- * While a text field inside `ref`'s element has focus, caps the element so its bottom edge meets
- * the visual viewport's bottom edge: the composer at the bottom of the live view then sits
- * directly above the on-screen keyboard.
+ * While `enabled` and a textarea inside `ref`'s element has focus, caps the element so its bottom
+ * edge meets the visual viewport's bottom edge. The shell passes `<main>` on a route that fills
+ * the viewport, so the page's composer, the textarea at its bottom, keeps `<main>`'s bottom
+ * gutter above the on-screen keyboard.
  *
  * Chromium on Android does not need this - the page's `interactive-widget=resizes-content`
  * viewport shrinks the layout viewport, and the dynamic-viewport shell with it. iOS Safari
@@ -17,12 +18,12 @@ const KEYBOARD_FIT_VARIABLE = "--keyboard-fit-height";
  * `offsetTop + height`; element rectangles are measured in the same coordinates. Where the
  * layout viewport did shrink, that bottom is at or below the element's own and the cap is inert.
  */
-export function useKeyboardFit(ref: RefObject<HTMLElement | null>): void {
+export function useKeyboardFit(ref: RefObject<HTMLElement | null>, enabled: boolean): void {
   useEffect(() => {
     const element = ref.current;
     // `== null`: happy-dom leaves `visualViewport` undefined where the DOM types say `null`.
     const viewport = window.visualViewport;
-    if (element === null || viewport == null) return;
+    if (!enabled || element === null || viewport == null) return;
     const fit = () => {
       const focused = document.activeElement;
       if (focused instanceof HTMLTextAreaElement && element.contains(focused)) {
@@ -44,5 +45,5 @@ export function useKeyboardFit(ref: RefObject<HTMLElement | null>): void {
       element.removeEventListener("focusout", fit);
       element.style.removeProperty(KEYBOARD_FIT_VARIABLE);
     };
-  }, [ref]);
+  }, [ref, enabled]);
 }

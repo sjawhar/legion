@@ -1,5 +1,5 @@
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
-import { type ReactNode, useCallback, useRef, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -20,7 +20,6 @@ import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentRuntimeThread, type SentMessage } from "./AgentRuntimeThread";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
-import { useKeyboardFit } from "./useKeyboardFit";
 
 /** What the live dot says about the relay, and how it reads to a screen reader. */
 const STATUS: Record<AgentStreamStatus, { dot: string; label: string }> = {
@@ -93,18 +92,12 @@ export function AgentConversationPage(): ReactNode {
     [mode, sessionId]
   );
   const presence = STATUS[status];
-  const root = useRef<HTMLDivElement>(null);
-  useKeyboardFit(root);
 
   // The shell hands this route the viewport below its header as a flex column; the page takes
   // all of it and the thread is its only scroller, so the header and composer never leave the
-  // screen and the document never scrolls. `max-h` is `useKeyboardFit`'s cap for the keyboard.
+  // screen and the document never scrolls.
   return (
-    <div
-      className="flex min-h-0 flex-1 flex-col max-h-(--keyboard-fit-height)"
-      data-testid="agent-conversation"
-      ref={root}
-    >
+    <div className="flex min-h-0 flex-1 flex-col" data-testid="agent-conversation">
       <header className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <Link className={`text-sm ${linkText} ${linkHoverText}`} to="/agents">
           ← Agents
