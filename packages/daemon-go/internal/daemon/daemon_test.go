@@ -469,7 +469,7 @@ func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 	t.Cleanup(d.stop)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		response, err := pollClient.Get(d.base + "/healthz")
+		response, err := d.client.Get(d.base + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {

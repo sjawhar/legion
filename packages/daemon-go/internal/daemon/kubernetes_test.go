@@ -177,6 +177,31 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	}
 }
 
+// The address every pod's shim dials derives from runtime.kubernetes's own worker_stream_port
+// (readSandbox, kubernetes.go), not a value prepare hardcodes or leaves at the zero a test's own
+// config happens to carry: a daemon configured with a distinctive port builds its plan's stream
+// address from exactly that port, before anything binds. The test above proves the bound address
+// is real and dialable; it cannot catch worker_stream_port being ignored, since testConfig's own
+// port is always 0 — this does, by configuring a nonzero one and checking prepare()'s plan
+// directly, with no listener bound.
+func TestPrepareDerivesTheWorkerStreamAddressFromWorkerStreamPort(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.EnvoyTokenFile = filepath.Join(t.TempDir(), "envoy-token")
+	if err := os.WriteFile(cfg.EnvoyTokenFile, []byte("envoy-bearer\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
+	cfg.WorkerStreamPort = 47381
+
+	p, err := prepare(cfg, quietLogger(), overrides{environ: []string{}})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if want := "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort)); p.stream != want {
+		t.Errorf("prepare's worker stream address = %q, want %q (derived from worker_stream_port)", p.stream, want)
+	}
+}
+
 // prepare refuses what the cluster would refuse only later: a kubeconfig with no current context
 // when runtime.kubernetes.context names none, and a role's request above its limit.
 func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *testing.T) {
