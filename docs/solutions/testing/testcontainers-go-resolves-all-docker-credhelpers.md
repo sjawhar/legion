@@ -25,10 +25,10 @@ severity: low
 
 ## Problem
 
-`packages/envoy/internal/smoke/listener_test.go` pulls `nats:2.10` from Docker Hub, and —
-unless `ENVOY_SMOKE_IMAGE` names an image built beforehand — builds the local Dockerfile with
-`testcontainers.WithDockerfile`; nothing in the test targets any private registry
-(`listener_test.go:46-101`). It still fails locally on a machine whose
+The smoke test pulls `nats:2.10` from Docker Hub and runs the listener image
+`ENVOY_SMOKE_IMAGE` names (`packages/envoy/internal/smoke/listener_test.go:31-61`); the
+`docker buildx build` that produces that image reads only the local Dockerfile. Nothing in
+either targets a private registry. Both still fail locally on a machine whose
 `~/.docker/config.json` has a `credHelpers` entry mapping an unrelated registry (here,
 `us-east1-docker.pkg.dev` → `gcloud`) to a helper that is currently unable to authenticate
 non-interactively:
@@ -61,12 +61,10 @@ Fix the credential helper, not the test:
   minimal `config.json` (no `credHelpers`/`credsStore`), so local runs don't depend on every
   registry credential on the machine being healthy.
 
-Do not weaken the smoke test (skip it, stub the Docker build, mock the container) to route
-around this — the test is exercising the exact thing it should: a real NATS container, and a
-real Docker build on the local fallback this failure belongs to. CI never reproduces it, for
-two reasons rather than one: the runner has no `config.json`, and the build it runs is the
-workflow step before the test. A broken local credential helper is an environment problem, not
-a test design problem.
+Do not weaken the smoke test (skip it, stub the build, mock the container) to route around this
+— the test is exercising the exact thing it should: a real image in a real container against a
+real NATS. CI never reproduces it because the runner has no `config.json`. A broken local
+credential helper is an environment problem, not a test design problem.
 
 ## Why This Works
 

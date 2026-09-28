@@ -38,7 +38,8 @@ and the release published no image until a human re-ran the job.
 
 ## Solution
 
-Build the image in a step of its own and hand the test its tag:
+Three parts, and the third is the one that keeps the other two honest: **build the artifact in a
+CI step, pass its name in the environment, and fail when the name is absent.**
 
 ```yaml
 env:
@@ -51,8 +52,18 @@ steps:
     working-directory: packages/envoy
 ```
 
-The test reads `ENVOY_SMOKE_IMAGE` and passes it to `testcontainers.Run`; unset, it falls back
-to `WithDockerfile` so a local run still needs no setup. The assertions are untouched.
+```go
+image := os.Getenv("ENVOY_SMOKE_IMAGE")
+if image == "" {
+    t.Fatal("ENVOY_SMOKE_IMAGE is unset, and this test never builds the image itself.\n…")
+}
+```
+
+Keeping a build-it-yourself fallback would undo the fix in silence. A rename, a typo in the
+variable, or a new lane that forgets the build step leaves the test building again inside its own
+deadline, and CI stays green until the build is slow enough to cross it — which is the failure
+this learning is about. The refusal turns all three into an immediate red that names the
+variable and prints the build command. The assertions are untouched.
 
 `docker buildx build --load` is the portable form: it loads into the daemon's image store both
 on a runner where `docker/setup-buildx-action` has made a `docker-container` builder the default
@@ -64,8 +75,8 @@ where the build also reads base images the job pre-pulled.
 A step has the job's budget; a test has its own. Moving the build moves it from a five-minute
 deadline to one measured in hours, and what is left under `-timeout` is only what the test
 exists to exercise. Measured in CI: `TestSmoke` 283.84 s before, 0.98 s after, with the build
-155 s in its own step. On a devbox at load average 80: 2.2–6.2 s with a prebuilt image, 521.6 s
-when the same test built the image itself.
+155 s in its own step. On a devbox at load average 80: 2.2–20.7 s across four runs with a
+prebuilt image, 521.6 s when the same test built the image itself.
 
 The bound that remains is deliberate and stated beside the step, with the numbers it came from.
 

@@ -3,17 +3,10 @@
 // Package smoke contains container-level smoke tests for the Envoy listener.
 // Verifies critical endpoints work end-to-end with a real NATS server via testcontainers.
 //
-// ENVOY_SMOKE_IMAGE names an already-built listener image to run against. Both CI workflows
-// build it in a step of their own and set it, so the build is not work `go test` has to finish
-// inside its own deadline — what this test asserts is the container's behaviour, not a build-time
-// budget. Unset, the test builds the Dockerfile itself, which is what a local run does.
-//
-// Run, from the repository root:
-// `docker buildx build --load -t legion-envoy-smoke -f packages/envoy/docker/Dockerfile .`
-// then, in packages/envoy:
-// `ENVOY_SMOKE_IMAGE=legion-envoy-smoke go test -tags smoke -v ./internal/smoke/`
-// The test never rebuilds a named image, so run the build again after changing anything it
-// contains — listener or dispatch source, the contracts schemas, the SPA, or the Dockerfile.
+// ENVOY_SMOKE_IMAGE names the already-built listener image to run. This test never builds one:
+// a build inside `go test` spends the test's deadline, which is what LEGION-361 removed. Unset,
+// the test fails immediately and prints the build command, so a lane that loses its build step
+// — a rename, a typo, a new workflow — goes red instead of quietly building again.
 package smoke
 
 import (
@@ -35,6 +28,18 @@ import (
 )
 
 func TestSmoke(t *testing.T) {
+	image := os.Getenv("ENVOY_SMOKE_IMAGE")
+	if image == "" {
+		t.Fatal("ENVOY_SMOKE_IMAGE is unset, and this test never builds the image itself.\n" +
+			"Build it first, from the repository root:\n" +
+			"  docker buildx build --load --tag legion-envoy-smoke:local " +
+			"--file packages/envoy/docker/Dockerfile .\n" +
+			"then, in packages/envoy:\n" +
+			"  ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local go test -tags smoke -v ./internal/smoke/\n" +
+			"Rebuild after changing anything the image contains. In CI the build is a step of " +
+			"its own; see .github/workflows/envoy-and-contracts.yaml.")
+	}
+
 	ctx := context.Background()
 
 	// Shared Docker network for container-to-container communication.
@@ -53,7 +58,7 @@ func TestSmoke(t *testing.T) {
 		t.Fatalf("start NATS: %v", err)
 	}
 
-	listenerOpts := []testcontainers.ContainerCustomizer{
+	listenerC, err := testcontainers.Run(ctx, image,
 		network.WithNetwork([]string{"listener"}, net),
 		testcontainers.WithEnv(map[string]string{
 			"NATS_URLS": "nats://nats:4222",
@@ -85,22 +90,9 @@ func TestSmoke(t *testing.T) {
 					}
 					return json.NewDecoder(body).Decode(&health) == nil && health.Status == "healthy"
 				}).
-				WithStartupTimeout(60 * time.Second),
+				WithStartupTimeout(60*time.Second),
 		),
-	}
-	image := os.Getenv("ENVOY_SMOKE_IMAGE")
-	if image == "" {
-		listenerOpts = append(listenerOpts, testcontainers.WithDockerfile(testcontainers.FromDockerfile{
-			// The shared Dockerfile builds from the repo root: its bun stage needs
-			// the whole workspace to bake the dispatch SPA and regenerate contracts.
-			Context:       "../../../../",
-			Dockerfile:    "packages/envoy/docker/Dockerfile",
-			PrintBuildLog: true,
-			KeepImage:     true,
-		}))
-	}
-
-	listenerC, err := testcontainers.Run(ctx, image, listenerOpts...)
+	)
 	testcontainers.CleanupContainer(t, listenerC)
 	if err != nil {
 		t.Fatalf("start listener: %v", err)

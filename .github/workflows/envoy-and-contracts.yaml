@@ -464,13 +464,15 @@ jobs:
       # of `go test -timeout 5m` across ten Release Envoy Listener runs while the five
       # assertions measured 0.00 s each (LEGION-361;
       # docs/solutions/testing/a-container-build-inside-go-test-spends-the-tests-deadline.md).
+      # The test refuses to run without ENVOY_SMOKE_IMAGE rather than building one, so dropping
+      # or renaming this step turns the lane red instead of restoring that budget silently.
       # The pull step above put this Dockerfile's base images in the daemon's store, which the
       # `docker` driver reads; no LEGION_COMMIT, since this job publishes no image to match.
       - name: Build the listener image the smoke test runs against
         run: docker buildx build --load --tag "$ENVOY_SMOKE_IMAGE" --file packages/envoy/docker/Dockerfile .
       # 5m bounds only what the test does: pull NATS, start both containers behind the test's
-      # own 60 s health wait, and assert. Measured at 1.0 s in CI and 2.2–6.2 s on a devbox at
-      # load average 80, so the bound is deliberate headroom, not a build budget.
+      # own 60 s health wait, and assert. Measured at 1.0 s here and 2.2–20.7 s across four runs
+      # on a devbox at load average 80, so the bound is deliberate headroom, not a build budget.
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy
