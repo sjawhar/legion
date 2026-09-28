@@ -25,6 +25,8 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   ".github/scripts/release-push.sh": ".github/scripts/release-push.sh:103",
   "packages/claude-envoy/scripts/smoke-channel.sh":
     "packages/claude-envoy/scripts/smoke-channel.sh:149",
+  "packages/claude-envoy/scripts/smoke-clear-rebind.sh":
+    "packages/claude-envoy/scripts/smoke-clear-rebind.sh:42",
   "packages/dispatch/e2e/acceptance/omp-roundtrip.sh":
     "packages/dispatch/e2e/acceptance/omp-roundtrip.sh:76",
   "packages/envoy/deploy/scripts/autodeploy.sh": "packages/envoy/deploy/scripts/autodeploy.sh:145",
