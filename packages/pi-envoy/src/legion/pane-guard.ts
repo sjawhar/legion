@@ -1114,10 +1114,12 @@ function product(left: Piece[][], right: Piece[][]): Piece[][] {
  * held the pane: a replacement of a replacement (`${v//?/$w}`) or `x="$x$x"` repeated in one line
  * reached tens of millions of characters in a fraction of a second, and judging each read of one
  * took seconds. The piece bound is its own: `z=""; z="$z$z"` repeated doubles empty pieces the
- * length bound never sees. A value becomes a target only once a word joins it, and `product` is
- * that join, so bounding it bounds every target; `patternExpansion` bounds the one producer that
- * outgrows its inputs before a join (`printf -v`'s text is joined before it is judged too). Past
- * the bound a value is unknown, and a refusal says why (`overLong`). */
+ * length bound never sees. The bound is kept by `product` for every word join, plus a bound on
+ * each producer that can outgrow its inputs before a join: `patternExpansion`'s replacement, and
+ * `printf -v`, which assigns its rendered text without one. The join bound alone is not enough: an
+ * unquoted read (`$y`, `q=$y`, `case $y in`) scans the whole value for splitting and globbing
+ * (`parameter`, `unquotedLiteral`) before any join exists, so no value a variable holds may be
+ * longer either. Past the bound a value is unknown, and a refusal says why (`overLong`). */
 const MAX_VALUE_LENGTH = 65_536;
 const MAX_VALUE_PIECES = 4_096;
 
@@ -1938,7 +1940,7 @@ function checkRedirects(
         const words = command.args.map((arg) => literalText(arg.exp));
         content = words.every((word) => word !== undefined) ? echoLine(words as string[]) : null;
       } else if (command?.name === "printf") {
-        content = printfText(command.args) ?? null;
+        content = printfText(command.args, MAX_SCRIPT_BYTES) ?? null;
       }
       st.pidFiles.delete(file);
       const before = appends ? st.files.get(file) : "";
@@ -2034,7 +2036,7 @@ function statementOutput(statement: Statement, st: State, ctx: Ctx): string | un
     return text;
   }
   if (command.redirects.length > 0) return undefined;
-  if (name === "printf") return printfText(rest);
+  if (name === "printf") return printfText(rest, MAX_SCRIPT_BYTES);
   if (name === "echo") {
     if (literalText(rest[0]?.exp)?.startsWith("-")) return undefined;
     return echoLine(rest.map((arg) => runtimeText(arg.exp))) ?? undefined;
@@ -2045,8 +2047,10 @@ function statementOutput(statement: Statement, st: State, ctx: Ctx): string | un
 /** What `printf FORMAT ARG...` prints, with each part the guard cannot know as the unknown marker:
  * `%s`, `%q` (quoted for a shell to read back), `%d`, `%%`, and the escapes `\n`, `\t` and `\\`,
  * the format reused while arguments remain. Undefined for a format it does not render: an unknown
- * one, `-v`, a width or precision, or another conversion. */
-function printfText(list: readonly Arg[]): string | undefined {
+ * one, `-v`, a width or precision, or another conversion. It stops once the text passes `limit`,
+ * the most its caller keeps, so the text it returns is past the limit rather than built whole: a
+ * format reused over 100,000 arguments would build and scan gigabytes. */
+function printfText(list: readonly Arg[], limit: number): string | undefined {
   const [formatArg, ...values] = list;
   const format = literalText(formatArg?.exp);
   if (format === undefined || format.startsWith("-")) return undefined;
@@ -2082,6 +2086,7 @@ function printfText(list: readonly Arg[]): string | undefined {
       else if (part.conversion === "d")
         out += /^-?[0-9]+$/.test(text) ? text : value === undefined ? "0" : UNKNOWN_MARKER;
       else out += shellQuoted(text);
+      if (out.length > limit) return out;
     }
   } while (conversions > 0 && index < values.length);
   return out;
@@ -2623,7 +2628,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         if (literalText(format?.exp) === "%s" && value !== undefined && others.length === 0) {
           assigned = value.exp;
         } else {
-          const text = printfText(printed);
+          const text = printfText(printed, MAX_VALUE_LENGTH);
           // An argument the guard cannot know names why the value is unknown.
           const cause = printed.flatMap((arg) => arg.exp).find((p) => p.kind === "unknown")?.why;
           assigned =
@@ -2633,7 +2638,12 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
                     `\`$${variable ?? "?"}\` (printf -v${cause === undefined ? "" : `: ${cause}`})`
                   ),
                 ]
-              : [literal(text)];
+              : // Past the limit `printfText` returns text it stopped building, which is never
+                // the value; and no variable may hold one over the bound, since an unquoted read
+                // scans it whole before any join bounds it.
+                text.length > MAX_VALUE_LENGTH
+                ? [overLong(`\`$${variable ?? "?"}\` (printf -v)`)]
+                : [literal(text)];
         }
         assignByName(outer, variable, assigned, "`printf -v`");
         return;
