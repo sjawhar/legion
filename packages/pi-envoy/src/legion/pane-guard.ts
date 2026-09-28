@@ -2638,9 +2638,12 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
                     `\`$${variable ?? "?"}\` (printf -v${cause === undefined ? "" : `: ${cause}`})`
                   ),
                 ]
-              : // Past the limit `printfText` returns text it stopped building, which is never
-                // the value; and no variable may hold one over the bound, since an unquoted read
-                // scans it whole before any join bounds it.
+              : // `printfText`'s early stop bounds the cost; this check bounds the truth. Past the
+                // limit it returns text it stopped building, which is never the value, and without
+                // this check that truncated text would be assigned as if whole. While the limit is
+                // this same bound, a partial would still be refused at the next join; if the limit
+                // moves or the early stop goes, this check is again the only bound on what
+                // `printf -v` stores, and an unquoted read scans a stored value whole.
                 text.length > MAX_VALUE_LENGTH
                 ? [overLong(`\`$${variable ?? "?"}\` (printf -v)`)]
                 : [literal(text)];

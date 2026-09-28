@@ -534,10 +534,12 @@ describe("resolution", () => {
     expect(bash(`${doubled}; rm -rf "/$x"`)).toContain("longer than");
     // `printf -v` assigns what it renders without a join, and an unquoted read scans the value
     // whole before any join bound applies: 2,000 arguments of 65,536 characters read back as
-    // `$y` took seconds. Its text stops past the bound and the variable is unknown.
+    // `$y` took seconds. The first row covers that unquoted-read route and is a timing canary: it
+    // is allowed either way, only slowly without the bound. The second pins `printf -v`'s own
+    // check by the reason only it gives; without it, the join's bound refuses as "a word".
     const rendered = `b=${"b".repeat(65_536)}; printf -v y '%s' ${Array.from({ length: 2000 }, () => '"$b"').join(" ")}`;
     expect(bash(`${rendered}; w=$y; rm -rf "$LEGION_WORKSPACE/$w"`)).toBeUndefined();
-    expect(bash(`${rendered}; rm -rf $y`)).toContain("longer than");
+    expect(bash(`${rendered}; rm -rf $y`)).toContain("`$y` (printf -v), longer than");
     // Zero characters doubled 24 times is 16 million pieces the length bound never sees.
     const pieces = `z=""; ${Array.from({ length: 24 }, () => 'z="$z$z"').join("; ")}`;
     expect(bash(`${pieces}; rm -rf "/$z"`)).toContain("longer than");
