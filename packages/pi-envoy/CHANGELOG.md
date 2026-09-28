@@ -69,17 +69,27 @@
 
 ### Fixed
 
-- The pane guard (LEGION-121) runs a script's EXIT trap once, when the script ends, as bash does,
-  and no longer at the end of every command substitution after the `trap`. A substitution runs
-  in a subshell, where bash resets the parent's EXIT trap, so only a trap the substitution sets
-  itself runs at its end. Before, the first `$(…)` after a `trap cleanup EXIT` ran `cleanup`
-  against the state at that line, where a pid file or loop variable the cleanup reads was not yet
-  written. So the guard refused a script for a line of its cleanup that bash never runs there, and
-  a change to any sourced function holding a `$(…)` moved which line was refused. Tracked scripts
-  it now judges on their real first refusal: `packages/envoy/scripts/e2e-api.sh`, whose cleanup
-  kills only the child whose pid it wrote, now runs; Stage 2, Stage 3 and the 4b.13b acceptance
-  are refused at their gateway key command's write, the controller proof at its plugin unpack,
-  and Stage 4b at the guard's walk limit.
+- The pane guard (LEGION-121) models a subshell as bash runs one, everywhere it sees one: a command
+  or process substitution, `( … )`, `( … ) &`, each part of a pipeline, and a coprocess. A subshell
+  starts with none of the parent's traps and runs the handlers it sets itself at its own end; the
+  parent's run once, at the parent's end. Before, a substitution ran every handler set before it
+  against the state at that line, and the other four walked a handler they set into a state that
+  was then discarded. So `( trap 'rm -rf "$HOME/y"' EXIT; echo hi )`, its background and piped
+  forms, and the coprocess form were allowed, and bash deletes the target in each. `! command`, a
+  pipeline of one, is walked in this shell, as bash runs it, so `! cd "$HOME"; rm -rf x` is refused.
+- `trap - <condition>` removes only the conditions it names: `trap - INT` leaves the EXIT handler,
+  which bash still runs, and `trap -` naming none resets nothing. Before, any `trap -` dropped every
+  handler, so `trap 'rm -rf "$HOME/y"' EXIT; trap - INT` was allowed.
+- The guard walks up to 100,000 nodes of one command before refusing it as too large to judge,
+  from 10,000. The repository's largest tracked script, Stage 4b's driver, needs about 20,700 to
+  reach its first refusal, and 10,000 refused it for size alone. The limit still refuses and never
+  allows unread.
+- Tracked scripts the guard now judges on their real first refusal:
+  `packages/envoy/scripts/e2e-api.sh`, whose cleanup kills only the child whose pid it wrote, runs.
+  Stage 2, Stage 3 and the 4b.13b
+  acceptance are refused at their gateway key command's write, and Stage 4b and the controller
+  proof at the plugin unpack. The allow-list test records each refused script's `file:line`, derived
+  by `src/legion/pane-guard-scripts.ts`, where it had recorded a phrase several refusals share.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot

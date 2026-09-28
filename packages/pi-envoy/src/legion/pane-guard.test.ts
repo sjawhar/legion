@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createPaneGuard, type PaneGuard } from "./pane-guard";
+import { trackedScriptRefusals } from "./pane-guard-scripts";
 
 // A pane laid out as the Go daemon's tmux runtime lays it out: the issue workspace inside the
 // daemon's state directory, so the workspace allowance has to win over the state directory's
@@ -18,29 +18,32 @@ let guard: PaneGuard;
 let env: NodeJS.ProcessEnv;
 
 const repository = path.resolve(import.meta.dir, "../../../..");
-let repositoryGuard: PaneGuard;
-let repositoryEnv: NodeJS.ProcessEnv;
 
+// Where the guard refuses each tracked shell script: the innermost `file:line` its refusal names.
+// When a refusal moves on purpose, regenerate it as pane-guard-scripts.ts says.
 const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
-  ".github/scripts/release-push.sh": "a positional parameter",
-  "packages/claude-envoy/scripts/smoke-channel.sh": "tmux kill-session",
-  "packages/dispatch/e2e/acceptance/omp-roundtrip.sh": "tmux kill-session",
-  "packages/envoy/deploy/scripts/autodeploy.sh": "dispatch-backups",
-  "packages/envoy/deploy/scripts/autodeploy_test.sh": "dumps[i]",
-  "packages/envoy/deploy/scripts/sync-host.sh": "$1",
-  "packages/envoy/scripts/verify-cluster.sh": "cannot parse",
-  "packages/pi-envoy/scripts/grant-rig/setup.sh": "profiles/l12rig",
-  "packages/pi-envoy/scripts/smoke-btw.sh": "tmux kill-session",
-  "packages/pi-envoy/scripts/smoke-delivery.sh": "tmux kill-session",
-  "scripts/e2e/controller-start-tmux.sh": "realpath -m",
-  "scripts/e2e/lib/check-model-route.sh": "$control",
-  "scripts/e2e/lib/install-model-gateway.sh": "realpath -m",
-  "scripts/e2e/lib/install-plugin-profile.sh": "realpath -m",
-  "scripts/e2e/stage2-tmux-supervision.sh": "realpath -m",
-  "scripts/e2e/stage3-4b13b-acceptance.sh": "realpath -m",
-  "scripts/e2e/stage3-devbox-workflow.sh": "realpath -m",
-  "scripts/e2e/stage4b-sandbox-tree.sh": "walk limit",
-  "scripts/sync-envoy-host.sh": "$1",
+  ".github/scripts/release-push.sh": ".github/scripts/release-push.sh:103",
+  "packages/claude-envoy/scripts/smoke-channel.sh":
+    "packages/claude-envoy/scripts/smoke-channel.sh:149",
+  "packages/dispatch/e2e/acceptance/omp-roundtrip.sh":
+    "packages/dispatch/e2e/acceptance/omp-roundtrip.sh:76",
+  "packages/envoy/deploy/scripts/autodeploy.sh": "packages/envoy/deploy/scripts/autodeploy.sh:145",
+  "packages/envoy/deploy/scripts/autodeploy_test.sh":
+    "packages/envoy/deploy/scripts/autodeploy.sh:80",
+  "packages/envoy/deploy/scripts/sync-host.sh": "packages/envoy/deploy/scripts/sync-host.sh:11",
+  "packages/envoy/scripts/verify-cluster.sh": "packages/envoy/scripts/verify-cluster.sh:94",
+  "packages/pi-envoy/scripts/grant-rig/setup.sh": "packages/pi-envoy/scripts/grant-rig/setup.sh:56",
+  "packages/pi-envoy/scripts/smoke-btw.sh": "packages/pi-envoy/scripts/smoke-btw.sh:219",
+  "packages/pi-envoy/scripts/smoke-delivery.sh": "packages/pi-envoy/scripts/smoke-delivery.sh:230",
+  "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
+  "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:99",
+  "scripts/e2e/lib/install-model-gateway.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
+  "scripts/e2e/lib/install-plugin-profile.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
+  "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
+  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
+  "scripts/sync-envoy-host.sh": "packages/envoy/deploy/scripts/sync-host.sh:11",
 };
 
 beforeAll(() => {
@@ -68,25 +71,6 @@ beforeAll(() => {
     LEGION_STATE_DIR: state,
     TMPDIR: scratch,
     PATH: "/usr/bin:/bin",
-  };
-  repositoryGuard = createPaneGuard({
-    workspace: repository,
-    ompPid: process.pid,
-    scratch: "/tmp",
-  });
-  // This HOME is a fixture, never a configuration: no machine has it, and no real pane runs with a
-  // home that does not exist. It is unreal on purpose, so that what the machine running the test
-  // keeps under its own home cannot change a verdict. A redirection to a file that does not exist
-  // yet is allowed, so the lock a Stage 4b run leaves under the operator's home would stop that
-  // script's walk at `exec 9>"$lock"` on one machine and not on another. What the table therefore
-  // cannot see is a tracked script refused only because the operator's home already holds a file
-  // it writes. The rule itself, that an existing file in a home with contents is refused and a new
-  // one is not, is covered by the redirection and tee families above, on the fixture home.
-  repositoryEnv = {
-    ...env,
-    HOME: "/home/legion-guard-test-operator",
-    LEGION_WORKSPACE: repository,
-    TMPDIR: "/tmp",
   };
 });
 
@@ -322,18 +306,55 @@ describe("scripts a command runs", () => {
     expect(reason).not.toContain(sourced);
   });
 
-  test("runs a parent's EXIT trap when the parent ends, never at a command substitution's end", () => {
-    const parent = script(
-      "substitution-trap-parent.sh",
-      `p=$(pgrep x)\ncleanup() { kill "$p"; }\ntrap cleanup EXIT\nx=$(echo hi)\nrm -rf "$HOME/x"\n`
-    );
-    const reason = bash(`bash ${parent}`);
-    expect(reason).toContain(`line 5 of ${parent}`);
-    expect(reason).toContain('`rm -rf "$HOME/x"`');
+  // Every construct bash runs in a subshell: the subshell resets the parent's traps, runs the ones
+  // it sets itself at its own end, and the parent's run once, at the parent's end.
+  const SUBSHELLS: Record<string, (body: string) => string> = {
+    "a command substitution": (body) => `x=$(${body})`,
+    "a process substitution": (body) => `cat <(${body})`,
+    "a subshell": (body) => `( ${body} )`,
+    "a background subshell": (body) => `( ${body} ) &`,
+    "a pipeline's part": (body) => `{ ${body}; } | cat`,
+    "a coprocess": (body) => `coproc C { ${body}; }`,
+  };
+
+  for (const [shape, wrap] of Object.entries(SUBSHELLS)) {
+    test(`runs a parent's EXIT trap when the parent ends, never at the end of ${shape}`, () => {
+      const parent = script(
+        `subshell-trap-parent-${shape.replaceAll(/\W+/g, "-")}.sh`,
+        `p=$(pgrep x)\ncleanup() { kill "$p"; }\ntrap cleanup EXIT\n${wrap("echo hi")}\nrm -rf "$HOME/x"\n`
+      );
+      const reason = bash(`bash ${parent}`);
+      expect(reason).toContain(`line 5 of ${parent}`);
+      expect(reason).toContain('`rm -rf "$HOME/x"`');
+    });
+
+    test(`runs the EXIT trap ${shape} sets at its end`, () => {
+      expect(bash(wrap(`trap 'rm -rf "$HOME/y"' EXIT; echo hi`))).toContain(home);
+    });
+  }
+
+  test("`trap -` resets only the conditions it names", () => {
+    const armed = `trap 'rm -rf "$HOME/y"' EXIT`;
+    // bash keeps the EXIT handler through each of these and runs it.
+    for (const reset of [
+      "trap - INT",
+      "trap - TERM",
+      "trap - SIGINT",
+      "trap -",
+      "trap - SIGEXIT",
+    ]) {
+      expect(bash(`${armed}; ${reset}; echo done`)).toContain(home);
+    }
+    // …and removes it with these.
+    for (const reset of ["trap - EXIT", "trap - exit", "trap - 0"]) {
+      expect(bash(`${armed}; ${reset}; echo done`)).toBeUndefined();
+    }
+    // A handler for several conditions stays for the ones not reset, and its body is reachable.
+    expect(bash(`trap 'rm -rf "$HOME/y"' EXIT INT; trap - EXIT; echo done`)).toContain(home);
   });
 
-  test("runs the EXIT trap a command substitution sets at that substitution's end", () => {
-    expect(bash(`x=$(trap 'rm -rf "$HOME/y"' EXIT; echo hi)`)).toContain(home);
+  test("walks `! command`, a pipeline of one, in this shell", () => {
+    expect(bash('! cd "$HOME"; rm -rf x')).toContain(path.join(home, "x"));
   });
 
   test("attributes a sourced parent's EXIT trap to its declaring file", () => {
@@ -497,28 +518,7 @@ describe("scripts a command runs", () => {
   });
 
   test("checks every tracked shell script against the documented allow-list", () => {
-    const listed = spawnSync("git", ["ls-files", "-z", "--", ":(glob)**/*.sh"], {
-      cwd: repository,
-      encoding: "utf8",
-    });
-    if (listed.status !== 0) throw new Error(listed.stderr);
-    const refusals = Object.fromEntries(
-      listed.stdout
-        .split("\0")
-        .filter((file) => file !== "")
-        .flatMap((file) => {
-          const reason = repositoryGuard.bash(`bash ${file}`, repository, repositoryEnv);
-          return reason === undefined ? [] : [[file, reason]];
-        })
-    );
-    const expected = Object.fromEntries(
-      Object.entries(EXPECTED_SCRIPT_REFUSALS).map(([file, reason]) => [
-        file,
-        expect.stringContaining(reason),
-      ])
-    );
-    expect(refusals).toMatchObject(expected);
-    expect(Object.keys(refusals).sort()).toEqual(Object.keys(EXPECTED_SCRIPT_REFUSALS).sort());
+    expect(trackedScriptRefusals(repository)).toEqual(EXPECTED_SCRIPT_REFUSALS);
   });
 
   test("refuses the incident's shape: a probe script whose last line removes its work dir and $HOME", () => {

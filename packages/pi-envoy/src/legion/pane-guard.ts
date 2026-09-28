@@ -19,6 +19,13 @@
  * piped into a shell, a script executed by path, and python/node/bun scripts through
  * `pane-guard-code.ts`). A command the parser reports as malformed is refused, and so is a target
  * the guard cannot resolve (a variable read from input, a command's output): it never guesses.
+ * A command whose walk visits more than `MAX_WALK_STEPS` nodes is refused, never allowed unread.
+ *
+ * A `trap` handler's body is judged once, against the state of the shell that set it after that
+ * shell's last statement, where bash runs an EXIT handler; a subshell's handlers are judged at the
+ * subshell's end. A handler that would be dangerous only at an earlier exit (an `exit` before a
+ * later assignment makes its target safe) is not caught: the guard does not model where a shell
+ * exits.
  */
 import {
   closeSync,
@@ -110,9 +117,10 @@ interface State {
   readonly arrays: Map<string, Map<string, Expansion>>;
   /** Functions available in this shell, with their definition source for diagnostic locations. */
   functions: Map<string, FunctionDefinition>;
-  /** EXIT handlers run when this shell finishes, after its last assignment. */
   /** Functions whose current body walk has not returned; recursive calls add no new code to check. */
   readonly runningFunctions: Set<string>;
+  /** The handlers this shell set with `trap`. Each body runs when this shell finishes, against its
+   * state after its last statement; a subshell starts with none (`subshell`). */
   traps: readonly Trap[];
 }
 
@@ -125,7 +133,19 @@ interface FunctionDefinition {
 interface Trap {
   readonly text: string;
   readonly site: Site;
+  /** The conditions it handles (`EXIT`, `INT`, …), as `trapSignal` names them. Every handler's
+   * body is reachable, so each is walked; the set is what `trap - <signal>` removes. */
+  readonly signals: readonly string[];
   readonly file: string;
+}
+
+/** A `trap` operand as bash names the condition: case aside, `0` is `EXIT`, and a signal may carry
+ * its `SIG` prefix (`SIGINT` is `INT`). `SIGEXIT` is no condition bash knows, so it stays as
+ * written and matches nothing. */
+function trapSignal(operand: string): string {
+  const name = operand.toUpperCase();
+  if (name === "0") return "EXIT";
+  return name.startsWith("SIG") && name !== "SIGEXIT" ? name.slice(3) : name;
 }
 
 /** What a refusal names: the simple command it came from, where that command sits, and the
@@ -164,7 +184,11 @@ interface Site {
 }
 
 const MAX_DEPTH = 8;
-const MAX_WALK_STEPS = 10_000;
+/** The syntax nodes one command's walk may visit before the guard refuses it as too large to judge.
+ * The repository's largest tracked script, `scripts/e2e/stage4b-sandbox-tree.sh`, reaches its
+ * first refusal after about 20,700; a walk of 200,000 nodes took 260 ms on a loaded devbox, so the
+ * budget bounds a pane's wait near 130 ms. */
+const MAX_WALK_STEPS = 100_000;
 const MAX_ALTERNATIVES = 64;
 const MAX_SCRIPT_BYTES = 1024 * 1024;
 const FRESH_TEMP_NAME = "tmp.XXXXXXXXXX";
@@ -838,10 +862,7 @@ function walkSubstitution(
     throw new Refusal(text, 1, `the guard could not read the command in \`${text}\``);
   }
   const source = parsed.source ?? (script === undefined ? (inner ?? "") : st.source);
-  // Bash runs a command substitution in a subshell, where the parent's EXIT trap is reset: the
-  // substitution's end runs only the traps it sets itself, and the parent's runs once, at the
-  // parent's end.
-  walkScript(parsed, { ...clone(st), source, traps: [] }, ctx);
+  walkScript(parsed, subshell(st, { source }), ctx);
 }
 
 // --- Statements --------------------------------------------------------------------------------
@@ -930,16 +951,22 @@ function walkScript(script: ParsedScript, st: State, ctx: Ctx, runTraps = true):
     );
   }
   for (const statement of script.commands) walkNode(statement, st, ctx, false);
-  if (!runTraps) return;
+  if (runTraps) runSetTraps(st, ctx);
+}
+
+/** A subshell of this shell: `( … )`, each part of a pipeline, a coprocess, a command or process
+ * substitution. Bash resets the parent's traps in one, so a subshell runs only the handlers it sets
+ * itself, at its own end (`runSetTraps`), and the parent's run once, at the parent's end. */
+function subshell(st: State, patch?: Partial<State>): State {
+  return { ...clone(st), traps: [], ...patch };
+}
+
+/** Runs the body of every handler this shell set, at its end: each against the state after the
+ * shell's last statement. */
+function runSetTraps(st: State, ctx: Ctx): void {
   for (const trap of st.traps) {
     try {
-      runText(
-        trap.text,
-        "the EXIT trap",
-        { ...clone(st), source: trap.file, traps: [] },
-        ctx,
-        trap.site
-      );
+      runText(trap.text, "the EXIT trap", subshell(st, { source: trap.file }), ctx, trap.site);
     } catch (error) {
       locateRefusal(error, trap.file);
     }
@@ -980,12 +1007,18 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       handleCommand(node, st, ctx, pipeIn);
       return;
     case "Pipeline": {
-      // Every part of a pipeline runs in a subshell of its own.
+      // `! command`, a pipeline of one, runs in this shell; bash runs every part of a longer
+      // pipeline in a subshell of its own.
+      if (node.commands.length === 1) {
+        for (const command of node.commands) walkNode(command, st, ctx, pipeIn);
+        return;
+      }
       const before = st.output;
       const parts: State[] = [];
       for (const [index, command] of node.commands.entries()) {
-        const part = clone(st);
+        const part = subshell(st);
         walkNode(command, part, ctx, index > 0);
+        runSetTraps(part, ctx);
         parts.push(part);
       }
       if (parts.some((part) => outputChanged(before, part.output))) st.output = undefined;
@@ -1002,8 +1035,9 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       return;
     case "Subshell": {
       const before = st.output;
-      const child = clone(st);
+      const child = subshell(st);
       walkList(node.body.commands, child, ctx);
+      runSetTraps(child, ctx);
       if (outputChanged(before, child.output)) st.output = undefined;
       return;
     }
@@ -1101,8 +1135,9 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       return;
     case "Coproc": {
       const before = st.output;
-      const child = clone(st);
+      const child = subshell(st);
       walkNode(node.body, child, ctx, false);
+      runSetTraps(child, ctx);
       if (outputChanged(before, child.output)) st.output = undefined;
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
       return;
@@ -1620,11 +1655,28 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     case "trap": {
-      const text = literalText(operands(rest, "").operands[0]?.exp);
+      const [handler, ...conditions] = operands(rest, "").operands;
+      const text = literalText(handler?.exp);
+      // A condition the guard cannot read could be any of them: a removal names none it can apply,
+      // and a handler set for it is still walked.
+      const named = conditions.map((arg) => trapSignal(literalText(arg.exp) ?? ""));
       if (text === "-") {
-        outer.traps = [];
+        // `trap - INT` resets INT and leaves every other handler, the EXIT one included; `trap -`
+        // naming nothing is a usage error that resets nothing.
+        outer.traps = outer.traps.flatMap((trap) => {
+          const signals = trap.signals.filter((signal) => !named.includes(signal));
+          return signals.length === 0 ? [] : [{ ...trap, signals }];
+        });
       } else if (text !== undefined && !text.startsWith("-")) {
-        outer.traps = [...outer.traps, { text, site, file: outer.script ?? outer.source }];
+        outer.traps = [
+          ...outer.traps,
+          {
+            text,
+            site,
+            signals: named.length === 0 ? ["EXIT"] : named,
+            file: outer.script ?? outer.source,
+          },
+        ];
       }
       return;
     }
