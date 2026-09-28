@@ -25,6 +25,12 @@ package api
 //	$2  the caller's raw actor id (keys the Clear, user_agent_state, migration 0033)
 //	$3  one session id to narrow to, or null for every session
 //
+// The login is bound once by unreadDirectRepliesArgs, referenced only inside this fragment
+// (direct_roots and direct_marks), and never inside a union arm - the window's candidates union
+// takes $3 alone. The hazard a future edit opens is exactly that: put a login predicate into one
+// candidate branch (filtering the delivered branch to roots the viewer authored, say) and the
+// surface genuinely doubles, with only the call-site mutation's test standing behind it.
+//
 // unreadDirectRepliesArgs builds them, so no call site spells the canonical login itself.
 const unreadDirectRepliesCTE = `
 	direct_roots as (
@@ -41,6 +47,14 @@ const unreadDirectRepliesCTE = `
 		select m.id, m.author, m.created_at, direct_thread.root_id, direct_thread.session_id
 		from messages m join direct_thread on m.in_reply_to = direct_thread.id
 	),
+	-- $1 (canonical) keys user_agent_read and $2 (raw) keys user_agent_state: the deliberate
+	-- asymmetry between 0048's convention and 0033's, which nothing here is free to swap. Swapping
+	-- them is caught by TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin alone.
+	-- That the Clear write stays raw is held by TestClearIsKeyedOnTheRawActorID; why it stays raw
+	-- is held by neither that test nor any other, because canonicalising the write and this read
+	-- together is self-consistent and green. The reason is the deploy: a Dispatch image predating
+	-- user_agent_read wrote cleared_before under the raw actor id and must still read it back
+	-- across a rolling deploy, which is rehearsed rather than tested (LEGION-301, #1533).
 	direct_marks as (
 		select coalesce(marked.session_id, cleared.session_id) as session_id,
 		       marked.read_through, cleared.cleared_before,

@@ -1079,7 +1079,9 @@ test("opening a row shows an older exchange's unread follow-up instead of foldin
 
 // The server decides which conversations hold an unread reply; the row renders that verdict and
 // derives nothing from timestamps. This fixture disagrees with the clock in both directions: the
-// flagged exchange's reply is older than the read mark, and the unflagged one's is newer.
+// flagged exchange's reply is older than the read mark, and the unflagged one's is newer. Both
+// directions are load-bearing - a fixture that disagreed one way only would still pass against a
+// client that re-derived the rule from read_through and cleared_before.
 test("Agents shows the exchanges the server flags unread, whatever their timestamps say", async () => {
   const page = renderAgents({
     agentState: {

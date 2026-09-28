@@ -289,6 +289,9 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	// seconds fast is not refused, but it is stored as no later than now: a reply that lands in
 	// the gap is still after the viewer's Clear and read mark, so it shows and it counts.
 	if clearedBefore != nil {
+		// The Clear is keyed on the raw actor id on purpose: user_agent_state is migration 0033's
+		// table and its rows predate the canonical convention 0048 and 0051 follow. This is not
+		// the missing canonicalLogin a grep for one would take it for.
 		if _, err := tx.Exec(r.Context(), `
 			insert into user_agent_state (login, session_id, cleared_before)
 			values ($1, $2, least($3::timestamptz, now()))

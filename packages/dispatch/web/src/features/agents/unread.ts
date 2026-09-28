@@ -29,7 +29,7 @@ function newestSessionReply(
   let newest: string | undefined;
   for (const read of exchanges) {
     for (const reply of read.replies) {
-      if (reply.author.kind !== "session" || reply.author.id !== sessionId) continue;
+      if (reply.author.id !== sessionId) continue;
       if (newest === undefined || Date.parse(reply.created_at) > Date.parse(newest)) {
         newest = reply.created_at;
       }

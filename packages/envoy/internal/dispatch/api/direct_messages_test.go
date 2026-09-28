@@ -334,9 +334,19 @@ func TestAgentRepliesToADirectMessageAreUnreadForItsSenderUntilRead(t *testing.T
 	}
 }
 
+// Three things turn this red and nothing else does: the read-mark write's canonicalLogin
+// (state.go:307), direct_marks' deliberate canonical/raw split, and the arguments the shared read
+// path builds (unreadDirectRepliesArgs). It never calls the conversation window, so it is not
+// window coverage; deleting it as redundant would take all three guards away with every other
+// test still green.
+//
+// It exercises GET /me/agents/state and the read-mark write; it never reads the conversation
+// window.
+//
 // A viewer is one person however their identity source spells their login: the replies to the
 // direct messages they sent count unread under any casing of it, and a read mark written under
-// one casing clears them under another.
+// one casing clears them under another. The Clear is keyed the other way and is
+// TestClearIsKeyedOnTheRawActorID's.
 func TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin(t *testing.T) {
 	handler, _, _, reply, _ := directConversationFrom(t, "Alice")
 	first := decodeBody[model.Message](t, reply("On it."))
@@ -355,6 +365,36 @@ func TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin(t *testing.T)
 		if got := unreadReplies(t, handler, login, "s1"); got.UnreadReplies != 0 || got.ReadThrough == nil {
 			t.Fatalf("%s after aLiCe read it: %#v, want nothing unread and the read mark", login, got)
 		}
+	}
+}
+
+// The Clear is the other half of that state, keyed the other way: user_agent_state is migration
+// 0033's table, on the raw actor id, while the read mark above is canonical. The write's rawness
+// is what this pins - canonicalising it while the read stays raw loses a non-lowercase viewer's
+// Clear outright and puts their count back up. The second read pins the keying itself, which
+// packages/envoy/AGENTS.md records as a known inconsistency this change does not fix: a future
+// backfill that normalises user_agent_state turns it red on purpose, as the invariant asking to
+// be decided again rather than a fault in the change that trips it. Why the write must stay raw
+// is held by neither assertion, since canonicalising the write and the state query's read
+// together is self-consistent and green: a Dispatch image predating user_agent_read wrote
+// cleared_before under the raw actor id and must still read it back across a rolling deploy.
+func TestClearIsKeyedOnTheRawActorID(t *testing.T) {
+	handler, _, _, reply, _ := directConversationFrom(t, "Alice")
+	first := decodeBody[model.Message](t, reply("On it."))
+	if got := unreadReplies(t, handler, "Alice", "s1"); got.UnreadReplies != 1 {
+		t.Fatalf("before the Clear: %#v, want the reply unread", got)
+	}
+	cleared := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"cleared_before": first.CreatedAt,
+	}, "Alice")
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear: status=%d body=%s", cleared.Code, cleared.Body.String())
+	}
+	if got := unreadReplies(t, handler, "Alice", "s1"); got.ClearedBefore == nil || got.UnreadReplies != 0 {
+		t.Fatalf("Alice reads %#v, want the Clear they wrote and nothing unread", got)
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.ClearedBefore != nil {
+		t.Fatalf("alice reads Alice's Clear (%#v); the Clear is keyed on the raw actor id", got)
 	}
 }
 
@@ -416,7 +456,8 @@ func TestAgentStateWriteAnnouncesItselfToTheViewersOtherDevices(t *testing.T) {
 // that conversation ahead of a newer one nobody has answered, so the one that last moved is the
 // one the Agents page opens on and is never the one left outside the list's window.
 func TestAgentConversationsListByLatestActivity(t *testing.T) {
-	handler, root, reply, _ := directConversation(t)
+	handler, database, root, reply, _ := directConversationFrom(t, "alice")
+	assertRootCarriesDelivery(t, database, root.ID, "s1")
 	later := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
 		"body": "A newer question nobody has answered.", "delivery": "aside",
 	}, "alice")
@@ -654,12 +695,16 @@ func TestTheUnreadCountEqualsWhatTheWindowShowsForEverySession(t *testing.T) {
 			t.Fatalf("session %s: unread_replies=%d, window shows %d unread replies; the count and the window disagree", session, counted, shown)
 		}
 	}
+	// The vacuity guard: an equality of two zeroes proves nothing, and a fork that passed the raw
+	// login to one side of unreadDirectRepliesArgs would agree at zero on every session. Both
+	// call sites move together through that helper now, so reaching zero on both is one edit.
 	if states["s1"].UnreadReplies == 0 {
 		t.Fatalf("session s1 counts nothing unread, so the equality above proves nothing; first reply %s", first.ID)
 	}
 	if root.Target == nil {
 		t.Fatalf("the fixture's root has no target")
 	}
+	assertRootCarriesDelivery(t, database, root.ID, "s1")
 }
 
 // unreadRepliesShownInWindow counts, in the conversation list a viewer reads, the replies the
@@ -727,11 +772,16 @@ func TestAnOldConversationAnsweredNowIsInsideTheWindow(t *testing.T) {
 	}
 }
 
+// This test and TestAnOldConversationAnsweredNowIsInsideTheWindow read alike and are not one
+// test: that one fails if the ranking drifts to the root's own created_at, this one if it ranks
+// on direct replies alone. Merging them would drop whichever mutation the survivor does not see.
+//
 // A conversation moves on its newest message wherever it sits: a reply to a reply, deep in the
 // chain, is what brings an old question back to the top. Ranking roots on their own created_at,
 // or on their direct replies alone, would bury it under a newer question nobody has touched.
 func TestAConversationMovesOnActivityDeepInItsChain(t *testing.T) {
 	handler, database, root, reply, _ := directConversationFrom(t, "alice")
+	assertRootCarriesDelivery(t, database, root.ID, "s1")
 	first := decodeBody[model.Message](t, reply("On it."))
 	newer := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
 		"body": "A newer question nobody has touched.", "delivery": "aside",
@@ -753,10 +803,6 @@ func TestAConversationMovesOnActivityDeepInItsChain(t *testing.T) {
 	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
 		t.Fatalf("%#v, want everything read, so only the activity order can rank these", got)
 	}
-	if _, err := database.Pool.Exec(context.Background(), `select 1`); err != nil {
-		t.Fatal(err)
-	}
-
 	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	if len(window) != 2 || window[0].Message.ID != root.ID || window[1].Message.ID != newer.ID {
 		ids := []string{}
@@ -814,5 +860,192 @@ func TestADeliveredOnlyConversationIsListedAndCountsNothingUnread(t *testing.T) 
 	}
 	if shown := unreadRepliesShownInWindow(t, handler, "s1", states["s1"]); shown != states["s1"].UnreadReplies {
 		t.Fatalf("session s1: unread_replies=%d, window shows %d", states["s1"].UnreadReplies, shown)
+	}
+}
+
+// assertRootCarriesDelivery pins what a test's coverage rests on: a root created through the API
+// carries a message_deliveries row, so it is a candidate down the window's delivered branch as
+// well as its targeted one. Re-seeding the fixture with raw inserts would silently drop that
+// half of the coverage.
+func assertRootCarriesDelivery(t *testing.T, database *store.Store, rootID, sessionID string) {
+	t.Helper()
+	var deliveries int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from message_deliveries where message_id = $1::uuid and session_id = $2
+	`, rootID, sessionID).Scan(&deliveries); err != nil {
+		t.Fatalf("read %s deliveries: %v", rootID, err)
+	}
+	if deliveries == 0 {
+		t.Fatalf("root %s carries no delivery to %s, so this fixture no longer covers the window's delivered branch", rootID, sessionID)
+	}
+}
+
+// The flag a conversation comes back with is the read mark's verdict, not "this session has
+// replied here". Written by the Legion PO's reviewer (#1533, issuecomment-5865095561), green at
+// 13dbc553; it hangs off directConversationFrom, as TestARootInBothCandidateBranchesIsListedOnce
+// does, so a change to that helper fails both at once, which is the point of sharing it.
+func TestTheWindowsUnreadFlagIsReadAgainstTheMarkNotThePresenceOfAReply(t *testing.T) {
+	handler, _, readRoot, replyToRead, _ := directConversationFrom(t, "alice")
+	readReply := decodeBody[model.Message](t, replyToRead("Answered, and read."))
+
+	followed := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "A question its session answered twice.", "delivery": "aside",
+	}, "alice"))
+	answer := func(body string, followUp bool) model.Message {
+		t.Helper()
+		query := ""
+		if followUp {
+			query = "?follow_up=true"
+		}
+		response := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+followed.ID+"/reply"+query, map[string]any{
+			"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": body,
+		})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("answer %q: status=%d body=%s", body, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Message](t, response)
+	}
+	firstAnswer := answer("The first answer, which they read.", false)
+
+	// Read through the first answer: at this point nothing is unread.
+	mark := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"read_through": firstAnswer.CreatedAt,
+	}, "alice")
+	if mark.Code != http.StatusOK {
+		t.Fatalf("mark read: status=%d body=%s", mark.Code, mark.Body.String())
+	}
+	// Then a follow-up, after the mark.
+	followUp := answer("And the follow-up, which they have not.", true)
+
+	state := unreadReplies(t, handler, "alice", "s1")
+	if state.ReadThrough == nil {
+		t.Fatalf("%#v, want a read mark", state)
+	}
+	watermark := parseTimestamp(t, *state.ReadThrough)
+
+	// The fixture really does hold both shapes. Without these the two checks below can pass
+	// while reaching neither case.
+	if readReply.CreatedAt.After(watermark) {
+		t.Fatalf("the read conversation's reply %s is after the mark; it must be at or before it", readReply.ID)
+	}
+	if firstAnswer.CreatedAt.After(watermark) {
+		t.Fatalf("the followed conversation's first answer %s is after the mark, so it holds no read reply", firstAnswer.ID)
+	}
+	if !followUp.CreatedAt.After(watermark) {
+		t.Fatalf("the follow-up %s is not after the mark, so nothing is unread", followUp.ID)
+	}
+
+	if state.UnreadReplies != 1 {
+		t.Fatalf("unread_replies = %d, want 1: the follow-up alone", state.UnreadReplies)
+	}
+	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	flags := map[string]bool{}
+	for _, read := range window {
+		flags[read.Message.ID] = read.Unread
+	}
+	if flags[readRoot.ID] {
+		t.Fatalf("the read conversation %s is flagged unread: the flag is the presence of a reply, not a verdict against the mark", readRoot.ID)
+	}
+	if !flags[followed.ID] {
+		t.Fatalf("the followed conversation %s is not flagged unread, though its follow-up is after the mark", followed.ID)
+	}
+	if shown := unreadRepliesShownInWindow(t, handler, "s1", state); shown != 1 {
+		t.Fatalf("the window shows %d unread replies, want 1: the follow-up, not the first answer the viewer already read", shown)
+	}
+}
+
+// windowEntry is one conversation as the viewer's own conversation list answers it.
+func windowEntry(t *testing.T, handler http.Handler, login, sessionID, rootID string) messageRead {
+	t.Helper()
+	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+sessionID+"/messages", nil, login))
+	for _, read := range window {
+		if read.Message.ID == rootID {
+			return read
+		}
+	}
+	t.Fatalf("window of %d conversations does not hold %s", len(window), rootID)
+	return messageRead{}
+}
+
+// The flag a conversation comes back with is the read mark's verdict, not "this session has ever
+// replied here": a conversation whose every reply the viewer has read is not unread, and one that
+// has gained a reply since is, counting that reply alone.
+func TestTheUnreadFlagFollowsTheReadMark(t *testing.T) {
+	handler, _, root, reply, _ := directConversationFrom(t, "alice")
+	first := decodeBody[model.Message](t, reply("The reply the viewer has read."))
+	marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"read_through": first.CreatedAt,
+	}, "alice")
+	if marked.Code != http.StatusOK {
+		t.Fatalf("mark read: status=%d body=%s", marked.Code, marked.Body.String())
+	}
+	if entry := windowEntry(t, handler, "alice", "s1", root.ID); entry.Unread {
+		t.Fatalf("a conversation whose only reply is read comes back unread: %#v", entry.Message.ID)
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
+		t.Fatalf("after reading the only reply: %#v, want nothing unread", got)
+	}
+
+	second := decodeBody[model.Message](t, reply("The reply that arrived after it."))
+	// The fixture's point is one reply at or before the read mark and one after it: without both
+	// sides, a flag derived from "this session has replied" would pass too.
+	if !first.CreatedAt.After(second.CreatedAt) && !second.CreatedAt.After(first.CreatedAt) {
+		t.Fatalf("both replies carry %s, so the mark divides nothing", first.CreatedAt)
+	}
+	state := unreadReplies(t, handler, "alice", "s1")
+	if state.ReadThrough == nil {
+		t.Fatalf("no read mark after the PUT: %#v", state)
+	}
+	mark := parseTimestamp(t, *state.ReadThrough)
+	if first.CreatedAt.After(mark) || !second.CreatedAt.After(mark) {
+		t.Fatalf("read mark %s does not sit between %s and %s", mark, first.CreatedAt, second.CreatedAt)
+	}
+	entry := windowEntry(t, handler, "alice", "s1", root.ID)
+	if !entry.Unread {
+		t.Fatalf("a conversation holding a reply newer than the read mark is not flagged unread")
+	}
+	if len(entry.Replies) != 2 {
+		t.Fatalf("the conversation holds %d replies, want the read one and the new one", len(entry.Replies))
+	}
+	states := decodeBody[map[string]userAgentState](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/agents/state", nil, "alice"))
+	if got := states["s1"].UnreadReplies; got != 1 {
+		t.Fatalf("unread_replies = %d, want 1: %s alone is newer than the mark", got, second.ID)
+	}
+	if shown := unreadRepliesShownInWindow(t, handler, "s1", states["s1"]); shown != 1 {
+		t.Fatalf("the window shows %d unread replies, want 1: the read reply must not count again", shown)
+	}
+}
+
+// The candidate roots are read as two indexed branches unioned, so a root that is in both - one
+// targeted at the session that also carries a delivery to it - must come back once. `union all`
+// would list it twice.
+func TestARootInBothCandidateBranchesIsListedOnce(t *testing.T) {
+	handler, database, root, _, _ := directConversationFrom(t, "alice")
+
+	// The fixture's root is targeted at s1; make sure it is also one a delivery to s1 names, so
+	// it is a candidate down both branches.
+	var targeted, delivered int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select
+			(select count(*) from messages where id = $1::uuid and in_reply_to is null
+			   and target = 'session:s1'),
+			(select count(*) from message_deliveries where message_id = $1::uuid and session_id = 's1')
+	`, root.ID).Scan(&targeted, &delivered); err != nil {
+		t.Fatalf("read the root's branches: %v", err)
+	}
+	if targeted != 1 || delivered < 1 {
+		t.Fatalf("root %s is targeted=%d delivered=%d, want it in both candidate branches",
+			root.ID, targeted, delivered)
+	}
+
+	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	seen := 0
+	for _, read := range window {
+		if read.Message.ID == root.ID {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("the window lists %s %d times, want once: a root in both candidate branches is one conversation", root.ID, seen)
 	}
 }
