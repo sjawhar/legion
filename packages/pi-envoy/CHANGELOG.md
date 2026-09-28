@@ -120,24 +120,28 @@
 - The pane guard resolves more of what a script computes before it refuses a target it cannot
   (LEGION-300). A script or function run with arguments the guard knows has them as `$1`, `$#` and
   `${1:-…}`, so an argument loop (`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`)
-  is walked pass by pass, and a `case` on a known word takes its one matching item. It also resolves
-  pattern replacement and removal of a known value (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`,
-  a function whose output
+  is walked pass by pass, a `case` on a known word takes its one matching item, and a `shift` past
+  the last argument shifts nothing, as in bash. It also evaluates pattern replacement and removal
+  of a known ASCII value (`${v//a/b}`, `${v#*:}`, `${v%/*}`), `printf -v`, a function whose output
   passes through `(umask 077 && …)`, and a script a brace group writes from here-documents and
-  `printf` before running it. A variable every branch leaves empty or holding a pid of this shell's
-  (a retry loop's `pid=$!`) is still a pid it may signal. A target it cannot resolve is still
-  refused. The Stage 2, 3, 4b.13b, 4b and controller drivers are now refused only for killing the
-  processes a query selects (`$(run_processes)`, `first_child`), and the four manual smokes
-  (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `omp-roundtrip.sh`) run their sessions
-  on their own tmux server, so the guard allows their cleanup. `src/legion/pane-guard-walk.ts`
-  prints every refusal a script meets, not only the first.
+  `printf` before running it. A target it cannot resolve is still refused, and some stay unknown on
+  purpose: `$(git rev-parse --show-toplevel)`, whose answer the repository's config decides and an
+  earlier command in the same line can rewrite; an operand the parser splits differently from bash
+  (`${v///tmp//etc}`); text outside ASCII, which bash counts by the locale; a `case` whose word
+  matches no item, which walks every branch. A pattern expansion spends the walk budget by the
+  slices it tests. The Stage 2, 3, 4b.13b, 4b and controller drivers are now refused only for
+  killing the processes a query selects (`$(run_processes)`, `first_child`), and the four manual
+  smokes (`smoke-delivery.sh`, `smoke-btw.sh`, `smoke-channel.sh`, `omp-roundtrip.sh`) run their
+  sessions on their own tmux server, so the guard allows their cleanup.
+  `src/legion/pane-guard-walk.ts` prints every refusal a script meets, not only the first.
 - A pane whose `HOME` sits under `/tmp` keeps it (LEGION-300). The guard counted every directory
-  below `/tmp` as the pane's scratch, so where an e2e rig's `make_omp_home` puts the pane's home
-  (`/tmp/<run>/omp-home`), `rm -rf ~`, `rm -rf "$HOME/.ssh"` and `rm -rf /tmp/<run>` were allowed:
-  the 2026-09-13 incident's shape, in the panes that run the most unattended agents. The `/tmp`
-  directory holding `HOME` is now protected whole, as the one holding `TMUX_TMPDIR` already was;
-  the workspace inside it stays writable. A pane whose home is outside `/tmp` (`/home/ubuntu`, the
-  daemon's state home) was never exposed.
+  below `/tmp` except the socket families as the pane's scratch, so with `HOME` at
+  `/tmp/<run>/omp-home` and no `TMUX_TMPDIR` in the same directory, `rm -rf ~`,
+  `rm -rf "$HOME/.ssh"`, `find /tmp/<run> -delete` and `rm -rf "$LEGION_STATE_DIR"` were allowed.
+  The e2e rigs that run guarded panes set `TMUX_TMPDIR` beside their Oh My Pi home, so the
+  protection of its directory covered them by that coincidence, which nothing enforced. The
+  directory holding `HOME` is now protected as the one holding `TMUX_TMPDIR` is, by exact name; the
+  workspace inside it stays writable.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot

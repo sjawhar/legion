@@ -11,29 +11,29 @@ Kubernetes deployments (`docs/kubernetes.md`) get a pod boundary instead and do 
 Because every pane runs as the daemon's own user, the Legion extension (`packages/pi-envoy`) holds
 each phase worker's and root architect's tool calls, and those of any `task` subagent they spawn,
 to a boundary before they run; it refuses the shared jj operation-log rewrites (LEGION-45) and,
-since LEGION-121, destructive commands and signals outside the pane's own work.
-A `bash` command, `eval` code, or `hub` process start may delete (`rm`, `unlink`, `find -delete`,
-`find -exec rm`, `shred`), move (`mv`), truncate (`truncate`), overwrite by redirection or `tee`
-(an existing file only), or recursively change the mode or owner (`chmod -R`, `chown -R`) of paths
-under the pane's issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and any directory below
-`/tmp` except `/tmp` itself, a glob over it, its tmux and ssh socket directories, and the `/tmp`
-directory that holds the pane's `HOME` or `TMUX_TMPDIR` when either sits there (an e2e rig's run
-directory holds its Oh My Pi home). The guard cannot tell which other permitted `/tmp` directory
-belongs to this pane. It parses the command with a bash
-parser and resolves each target as bash would: through `$HOME`, `~`, variables set earlier in the
-same command, `$(mktemp -d)`, `cd`, braces, the paths `realpath`, `dirname`, `basename` and
-`readlink -f` print, pattern replacement and removal of a known value (`${v//a/b}`, `${v#*:}`), a
-function's output, command substitutions, and the scripts the
-command runs (`bash <file>`, `sh -c`, `source`, a heredoc fed to a shell, a script run by path,
-python/node/bun scripts, one it writes first), with the arguments it gives them: an argument loop
-(`while [ $# -gt 0 ]; do case "$1" in ...`) over arguments it knows is walked as bash runs it. A
-target with no proven path prefix is refused, as is a command the
-parser reports as malformed. An unknown trailing component under a prefix already proven inside a
-permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused outright. For `tmux
-kill-*`, the guard resolves the socket as tmux does (`-S`, then `-L` under `TMUX_TMPDIR` or `/tmp`,
-then `$TMUX`, then the default socket) and refuses a resolved path outside the pane roots. `kill`
-only reaches a pid that `/proc` shows descending from the pane's own Oh My Pi process. Every refusal
-names the target, where it resolved, and the rule, so the agent can rewrite the command.
+since LEGION-121, destructive commands and signals outside the pane's own work. A `bash` command,
+`eval` code, or `hub` process start may delete (`rm`, `unlink`, `find -delete`, `find -exec rm`,
+`shred`), move (`mv`), truncate (`truncate`), overwrite by redirection or `tee` (an existing file
+only), or recursively change the mode or owner (`chmod -R`, `chown -R`) of paths under the pane's
+issue workspace (`LEGION_WORKSPACE`, its `.jj` included) and any directory below `/tmp` except
+`/tmp` itself, a glob over it, its tmux and ssh socket directories, and the `/tmp` directory that
+holds the pane's `HOME` or `TMUX_TMPDIR` when either sits there, by that directory's exact name (an
+e2e rig's run directory holds its Oh My Pi home). The guard cannot tell which other permitted
+`/tmp` directory belongs to this pane. It parses the command with a bash parser and resolves each
+target as bash would: through `$HOME`, `~`, variables set earlier in the same command,
+`$(mktemp -d)`, `cd`, braces, the paths `realpath`, `dirname`, `basename` and `readlink -f` print,
+pattern replacement and removal of a known ASCII value (`${v//a/b}`, `${v#*:}`), a function's
+output, command substitutions, and the scripts the command runs (`bash <file>`, `sh -c`, `source`,
+a heredoc fed to a shell, a script run by path, python/node/bun scripts, one it writes first), with
+the arguments it gives them: an argument loop (`while [ $# -gt 0 ]; do case "$1" in ...`) over
+arguments it knows is walked as bash runs it. A target with no proven path prefix is refused, as is
+a command the parser reports as malformed. An unknown trailing component under a prefix already
+proven inside a permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused
+outright. For `tmux kill-*`, the guard resolves the socket as tmux does (`-S`, then `-L` under
+`TMUX_TMPDIR` or `/tmp`, then `$TMUX`, then the default socket) and refuses a resolved path outside
+the pane roots. `kill` only reaches a pid that `/proc` shows descending from the pane's own Oh My Pi
+process. Every refusal names the target, where it resolved, and the rule, so the agent can rewrite
+the command.
 
 The guard reads text before it runs, so it cannot see what is only decided at run time: a compiled
 program or anything a command runs without naming it on the command line (a `make` target, a test

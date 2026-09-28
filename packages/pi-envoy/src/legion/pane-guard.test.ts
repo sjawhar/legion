@@ -21,8 +21,8 @@ let env: NodeJS.ProcessEnv;
 const repository = path.resolve(import.meta.dir, "../../../..");
 
 // Where the guard refuses each tracked shell script: the innermost `file:line` its refusal names.
-// It is regenerated with pane-guard-scripts.ts, never edited by hand. A failure has one of two
-// shapes, and they want opposite responses:
+// Every entry is pane-guard-scripts.ts's output, never typed by hand, filed under the comment that
+// says why its script is refused. A failure has one of two shapes, and they want opposite responses:
 //
 // - Entries changed (`Expected - N`, `Received + N`) for files the branch contains: a refusal moved
 //   to another line or file. If the guard or the script changed it on purpose, regenerate;

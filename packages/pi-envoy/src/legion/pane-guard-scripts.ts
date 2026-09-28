@@ -11,6 +11,11 @@
  *
  * `bun src/legion/pane-guard-walk.ts <script>...` lists every refusal a script meets, not only the
  * first.
+ *
+ * A script leaving the table is not always a stronger guard: each is judged as `bash <file>` with
+ * no arguments, so a script that stops at its argument check (`command=${1:?usage}`, then
+ * `case "$command"`) walks none of its body, and a script whose empty `$1` makes a path inside the
+ * roots is allowed on that path alone. Such a script's real invocations are what judge it.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";

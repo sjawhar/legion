@@ -264,39 +264,47 @@ subagents: the check runs in the `tool_call` hook ahead of the subagent exemptio
 `PANE_RULES`) to the boundary `docs/deployment.md` "The pane guard" describes: no deletion, move,
 truncation, overwrite of an existing file, or recursive mode or owner change outside
 `LEGION_WORKSPACE` and any directory below `/tmp` except `/tmp` itself, a glob over it, the tmux
-and ssh socket directories, and the `/tmp` directory holding the pane's `HOME` or `TMUX_TMPDIR`
-(a rig's run directory). The guard cannot tell which other allowed `/tmp` directory belongs to
-the pane. A TypeScript-daemon root, which has no `LEGION_WORKSPACE` and whose bash is one `legion`
-command, gets the `/tmp` root alone. No signal reaches a process that is not a descendant of the
-pane's Oh My Pi process (`/proc` read at check time). It reads the variables both daemons set on
-every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify, `LEGION_WORKSPACE`, `HOME`), so
-it adds nothing to either daemon contract. Commands are parsed with `unbash` (a bash parser,
-bundled into `dist/legion.js`) and walked as bash would run them: word expansion with quoting,
-tilde, variables assigned earlier (`$(mktemp -d)` is a fresh `/tmp` path, and `printf -v` assigns),
-`cd`, brace expansion, the paths `realpath`, `dirname`, `basename` and `readlink -f` print (never
-`git rev-parse --show-toplevel`, whose answer the repository's config decides and an earlier
-command in the same line can rewrite), pattern replacement and removal of a known value
-(`${v//a/b}`, `${v#*:}`; a replacement holding `&`, an operand the parser splits differently from
-bash, and an empty pattern after `/` or `//` stay unknown), command substitutions, subshells and
-branches, functions, wrappers (`sudo`, `env`,
-`timeout`, ...), and the scripts a command runs or writes first, whose refusal names the script and
-line. A script or function run
-with arguments the guard knows has them as its positional parameters (`$#` their count, one past
-the last empty), so an argument loop (`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`)
-is walked pass by pass, each `case` taking the one item its known word selects; a loop or `case` it
-cannot decide is walked as one that may take any branch, and a `shift` inside one leaves the
-arguments unknown after it. A variable every branch leaves empty or a pid the shell started (a retry
-loop's `pid=$!`) stays a pid it may signal. `src/legion/pane-guard-code.ts`
-tokenizes Python and JavaScript for known deletion, move, overwrite, signal, and shell-out calls
-whose arguments it can evaluate; an argument it cannot evaluate is let through, where a shell
-target it cannot resolve, and a command `unbash` reports as malformed, are refused. Command tables
-are `Set`/`Map`, never object literals, since their keys come from the command (`constructor` would
-otherwise match). `src/legion/pane-guard.test.ts` holds the family matrix, the incident's script,
-the signal cases, the eval tool, and the sweep of every tracked shell script against
-`EXPECTED_SCRIPT_REFUSALS` (each refused script with its first refusal's reason);
-`src/legion/pane-guard-walk.ts` prints every refusal a script meets, not only the first, and never
-writes that set, so a change to it is a person's decision to fix the guard, the script, or the set.
-`extensions/legion.test.ts` proves the hook refuses the incident's script through a booted worker.
+and ssh socket directories (by prefix), and the `/tmp` directory holding the pane's `HOME` or
+`TMUX_TMPDIR` (by exact name; a rig's run directory). The guard cannot tell which other allowed
+`/tmp` directory belongs to the pane. A TypeScript-daemon root, which has no `LEGION_WORKSPACE` and
+whose bash is one `legion` command, gets the `/tmp` root alone. No signal reaches a process that is
+not a descendant of the pane's Oh My Pi process (`/proc` read at check time). It reads the variables
+both daemons set on every pane (`LEGION_ROLE`/`LEGION_TREE`/`LEGION_ISSUE` to classify,
+`LEGION_WORKSPACE`, `HOME`), so it adds nothing to either daemon contract.
+
+Commands are parsed with `unbash` (a bash parser, bundled into `dist/legion.js`) and walked as bash
+would run them: word expansion with quoting, tilde, variables assigned earlier (`$(mktemp -d)` is a
+fresh `/tmp` path, and `printf -v` assigns), `cd`, brace expansion, the paths `realpath`,
+`dirname`, `basename` and `readlink -f` print, pattern replacement and removal of a known ASCII
+value (`${v//a/b}`, `${v#*:}`), command substitutions, subshells and branches, functions,
+wrappers (`sudo`, `env`, `timeout`, ...), and the scripts a command runs or writes first, whose
+refusal names the script and line. A script or function run with arguments the guard knows has
+them as its positional parameters (`$#` their count, one past the last empty, a `shift` past the
+last a no-op as in bash), so an argument loop
+(`while [ $# -gt 0 ]; do case "$1" in --dest) dest=$2; shift 2`) is walked pass by pass, each
+`case` taking the one item its known word selects. A loop or `case` it cannot decide, a `case`
+whose word matches no item included, is walked as one that may take any branch, and a `shift`
+inside one leaves the arguments unknown after it. A variable every branch leaves empty or a pid the
+shell started (a retry loop's `pid=$!`) stays a pid it may signal. Unknown on purpose:
+`$(git rev-parse --show-toplevel)`, whose answer the repository's config decides and an earlier
+command in the same line can rewrite; an operand `unbash` splits differently from bash (a pattern
+starting with `/` after `/` or `//`); text outside ASCII, which bash counts by the locale; and a
+replacement holding `&`. A pattern expansion spends the walk budget by the slices it tests.
+
+`src/legion/pane-guard-bash.ts` holds bash's pattern removal and replacement, `test`'s string and
+integer forms, and `printf %q` quoting as pure functions; `src/legion/pane-guard-bash.test.ts` holds
+every pattern operator over operands and values to one real bash, through the guard.
+`src/legion/pane-guard-code.ts` tokenizes Python and JavaScript for known deletion, move,
+overwrite, signal, and shell-out calls whose arguments it can evaluate; an argument it cannot
+evaluate is let through, where a shell target it cannot resolve, and a command `unbash` reports as
+malformed, are refused. Command tables are `Set`/`Map`, never object literals, since their keys come
+from the command (`constructor` would otherwise match). `src/legion/pane-guard.test.ts` holds the
+family matrix, the incident's script, the signal cases, the eval tool, and the sweep of every
+tracked shell script against `EXPECTED_SCRIPT_REFUSALS` (each refused script with its first
+refusal's site, filed under why it is refused); `src/legion/pane-guard-walk.ts` prints every
+refusal a script meets, not only the first, and never writes that set, so a change to it is a
+person's decision to fix the guard, the script, or the set. `extensions/legion.test.ts` proves the
+hook refuses the incident's script through a booted worker.
 
 ## Native Dispatch tools
 
