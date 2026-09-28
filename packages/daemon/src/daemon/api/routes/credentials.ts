@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { LegionDaemonApi } from "@legion/contracts";
+import { GITHUB_APP_ROLES, type GitHubAppRole } from "../../config";
 import { appRoleForLegionRole } from "../../github-apps";
 import type { RouteContext } from "../context";
 import {
@@ -84,11 +85,45 @@ export async function handleGhToken(
     throw new HttpError(403, CONTROLLER_HAS_NO_REPOSITORY);
   }
   const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(grant.role), grant.issue);
+  const legionAppLogins = await legionAppLoginsFor(ctx, grant.issue);
   ctx.auth.resolveGrant(body);
   return Response.json(
     validateContractResponse(LegionDaemonApi.GitHubToken.response, {
       token: lease.token,
       appLogin: lease.gitIdentity.name,
+      legionAppLogins,
     })
   );
+}
+
+/** Each Legion role App's login for the issue's repository, keyed by its App role: the accounts
+ * Legion's own roles post as. `legion threads resolve` keeps their threads out of its bot-thread
+ * rule and takes the review App's `Accepted:` on a thread any other bot opened. Undefined when any
+ * App's identity cannot be read: the command then cannot tell a Legion App from another bot, and a
+ * bot's thread closes only on its opener's `Accepted:`. That turns the rule off for the answer, so
+ * it is logged. */
+async function legionAppLoginsFor(
+  ctx: RouteContext,
+  issue: string
+): Promise<Record<GitHubAppRole, string> | undefined> {
+  try {
+    const leases = await Promise.all(
+      GITHUB_APP_ROLES.map(
+        async (role) =>
+          [role, (await ctx.github.tokenForIssue(role, issue)).gitIdentity.name] as const
+      )
+    );
+    return Object.fromEntries(leases) as Record<GitHubAppRole, string>;
+  } catch (error) {
+    // Every `legion gh` call in every pane asks for a token, so the failure is logged at most once a
+    // minute.
+    if (ctx.now() - ctx.loginWarnings.lastAt >= 60_000) {
+      ctx.loginWarnings.lastAt = ctx.now();
+      console.warn(
+        "[legion] gh-token: could not read a Legion App's login, so legion threads resolve applies no bot-thread rule for this answer (logged at most once a minute):",
+        error
+      );
+    }
+    return undefined;
+  }
 }

@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createPaneGuard, type PaneGuard } from "./pane-guard";
+import { trackedScriptRefusals } from "./pane-guard-scripts";
 
 // A pane laid out as the Go daemon's tmux runtime lays it out: the issue workspace inside the
 // daemon's state directory, so the workspace allowance has to win over the state directory's
@@ -18,30 +18,47 @@ let guard: PaneGuard;
 let env: NodeJS.ProcessEnv;
 
 const repository = path.resolve(import.meta.dir, "../../../..");
-let repositoryGuard: PaneGuard;
-let repositoryEnv: NodeJS.ProcessEnv;
 
+// Where the guard refuses each tracked shell script: the innermost `file:line` its refusal names.
+// It is regenerated with pane-guard-scripts.ts, never edited by hand. A failure has one of two
+// shapes, and they want opposite responses:
+//
+// - Entries changed (`Expected - N`, `Received + N`) for files the branch contains: a refusal moved
+//   to another line or file. If the guard or the script changed it on purpose, regenerate;
+//   otherwise the change is the finding.
+// - An entry added or removed for a file the branch does not contain: the table is derived from the
+//   checkout, and CI tests a pull request merged with main, so a script that lands on main changes
+//   this expectation without the branch changing. Merge main forward and regenerate. An entry added
+//   by hand for a file the branch lacks fails the other way on the branch itself.
+//
+// This is the accepted cost of recording `file:line` rather than a substring of each refusal, which
+// is what makes a refusal that moves fail here. The test is not flaky: it is right about a
+// population that changed.
 const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
-  ".github/scripts/release-push.sh": "a positional parameter",
-  "packages/claude-envoy/scripts/smoke-channel.sh": "tmux kill-session",
-  "packages/dispatch/e2e/acceptance/omp-roundtrip.sh": "tmux kill-session",
-  "packages/envoy/deploy/scripts/autodeploy.sh": "dispatch-backups",
-  "packages/envoy/deploy/scripts/autodeploy_test.sh": "dumps[i]",
-  "packages/envoy/deploy/scripts/sync-host.sh": "$1",
-  "packages/envoy/scripts/e2e-api.sh": "$sse_pid",
-  "packages/envoy/scripts/verify-cluster.sh": "cannot parse",
-  "packages/pi-envoy/scripts/grant-rig/setup.sh": "profiles/l12rig",
-  "packages/pi-envoy/scripts/smoke-btw.sh": "tmux kill-session",
-  "packages/pi-envoy/scripts/smoke-delivery.sh": "tmux kill-session",
-  "scripts/e2e/controller-start-tmux.sh": "a loop variable",
-  "scripts/e2e/lib/check-model-route.sh": "$control",
-  "scripts/e2e/lib/install-model-gateway.sh": "realpath -m",
-  "scripts/e2e/lib/install-plugin-profile.sh": "realpath -m",
-  "scripts/e2e/stage2-tmux-supervision.sh": "realpath -m",
-  "scripts/e2e/stage3-4b13b-acceptance.sh": "prod_header_file",
-  "scripts/e2e/stage3-devbox-workflow.sh": "prod_header_file",
-  "scripts/e2e/stage4b-sandbox-tree.sh": "$p",
-  "scripts/sync-envoy-host.sh": "$1",
+  ".github/scripts/release-push.sh": ".github/scripts/release-push.sh:103",
+  "packages/claude-envoy/scripts/smoke-channel.sh":
+    "packages/claude-envoy/scripts/smoke-channel.sh:149",
+  "packages/claude-envoy/scripts/smoke-clear-rebind.sh":
+    "packages/claude-envoy/scripts/smoke-clear-rebind.sh:42",
+  "packages/dispatch/e2e/acceptance/omp-roundtrip.sh":
+    "packages/dispatch/e2e/acceptance/omp-roundtrip.sh:76",
+  "packages/envoy/deploy/scripts/autodeploy.sh": "packages/envoy/deploy/scripts/autodeploy.sh:145",
+  "packages/envoy/deploy/scripts/autodeploy_test.sh":
+    "packages/envoy/deploy/scripts/autodeploy.sh:80",
+  "packages/envoy/deploy/scripts/sync-host.sh": "packages/envoy/deploy/scripts/sync-host.sh:11",
+  "packages/envoy/scripts/verify-cluster.sh": "packages/envoy/scripts/verify-cluster.sh:94",
+  "packages/pi-envoy/scripts/grant-rig/setup.sh": "packages/pi-envoy/scripts/grant-rig/setup.sh:56",
+  "packages/pi-envoy/scripts/smoke-btw.sh": "packages/pi-envoy/scripts/smoke-btw.sh:219",
+  "packages/pi-envoy/scripts/smoke-delivery.sh": "packages/pi-envoy/scripts/smoke-delivery.sh:230",
+  "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
+  "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:99",
+  "scripts/e2e/lib/install-model-gateway.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
+  "scripts/e2e/lib/install-plugin-profile.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
+  "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
+  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
+  "scripts/sync-envoy-host.sh": "packages/envoy/deploy/scripts/sync-host.sh:11",
 };
 
 beforeAll(() => {
@@ -70,12 +87,6 @@ beforeAll(() => {
     TMPDIR: scratch,
     PATH: "/usr/bin:/bin",
   };
-  repositoryGuard = createPaneGuard({
-    workspace: repository,
-    ompPid: process.pid,
-    scratch: "/tmp",
-  });
-  repositoryEnv = { ...env, HOME: "/home/ubuntu", LEGION_WORKSPACE: repository, TMPDIR: "/tmp" };
 });
 
 afterAll(() => {
@@ -310,6 +321,267 @@ describe("scripts a command runs", () => {
     expect(reason).not.toContain(sourced);
   });
 
+  // Every construct bash runs in a subshell: the subshell resets the parent's traps, runs the ones
+  // it sets itself at its own end, and the parent's run once, at the parent's end.
+  const SUBSHELLS: Record<string, (body: string) => string> = {
+    "a command substitution": (body) => `x=$(${body})`,
+    "a process substitution": (body) => `cat <(${body})`,
+    "a subshell": (body) => `( ${body} )`,
+    "a background subshell": (body) => `( ${body} ) &`,
+    "a pipeline's part": (body) => `{ ${body}; } | cat`,
+    "a coprocess": (body) => `coproc C { ${body}; }`,
+  };
+
+  for (const [shape, wrap] of Object.entries(SUBSHELLS)) {
+    test(`runs a parent's EXIT trap when the parent ends, never at the end of ${shape}`, () => {
+      const parent = script(
+        `subshell-trap-parent-${shape.replaceAll(/\W+/g, "-")}.sh`,
+        `p=$(pgrep x)\ncleanup() { kill "$p"; }\ntrap cleanup EXIT\n${wrap("echo hi")}\nrm -rf "$HOME/x"\n`
+      );
+      const reason = bash(`bash ${parent}`);
+      expect(reason).toContain(`line 5 of ${parent}`);
+      expect(reason).toContain('`rm -rf "$HOME/x"`');
+    });
+
+    test(`runs the EXIT trap ${shape} sets at its end`, () => {
+      expect(bash(wrap(`trap 'rm -rf "$HOME/y"' EXIT; echo hi`))).toContain(home);
+    });
+  }
+
+  test("`trap -` resets only the conditions it names", () => {
+    const armed = `trap 'rm -rf "$HOME/y"' EXIT`;
+    // bash keeps the EXIT handler through each of these and runs it.
+    for (const reset of [
+      "trap - INT",
+      "trap - TERM",
+      "trap - SIGINT",
+      "trap -",
+      "trap - SIGEXIT",
+    ]) {
+      expect(bash(`${armed}; ${reset}; echo done`)).toContain(home);
+    }
+    // …and removes it with these.
+    for (const reset of ["trap - EXIT", "trap - exit", "trap - 0"]) {
+      expect(bash(`${armed}; ${reset}; echo done`)).toBeUndefined();
+    }
+    // A handler for several conditions stays for the ones not reset, and its body is reachable.
+    expect(bash(`trap 'rm -rf "$HOME/y"' EXIT INT; trap - EXIT; echo done`)).toContain(home);
+    // A signal number other than 0 is not translated, so a removal naming one removes nothing.
+    expect(bash(`trap 'rm -rf "$HOME/y"' INT; trap - 2; echo done`)).toContain(home);
+  });
+
+  test("keeps a handler set for a condition it cannot read, whatever a removal names", () => {
+    const set = (condition: string) => `trap 'rm -rf "$HOME/y"' ${condition}`;
+    // bash runs the handler in every one of these: an unreadable condition could be any.
+    for (const command of [
+      `${set('"$(echo EXIT)"')}; trap - "$(echo INT)"`,
+      `a=$(cat); b=$(cat); ${set('"$a"')}; trap - "$b"`,
+      `s=$(cat /dev/stdin); ${set('"$s"')}; trap - "$s"`,
+      `${set('"$1"')}; trap - "$2"`,
+      `( ${set('"$(echo EXIT)"')}; trap - "$(echo INT)" )`,
+      `${set('"$(echo EXIT)"')}; trap - EXIT`,
+      `${set("EXIT")}; trap - "$(echo INT)"`,
+      set('"$(echo EXIT)"'),
+      `trap - "$(echo INT)"; ${set('"$(echo EXIT)"')}`,
+    ]) {
+      expect(bash(command)).toContain(home);
+    }
+    // One unreadable removal keeps every handler set for an unreadable condition.
+    expect(
+      bash(`${set('"$(echo EXIT)"')}; trap 'rm -rf "$HOME/z"' "$(echo TERM)"; trap - "$(echo INT)"`)
+    ).toContain(home);
+    // Conditions that resolve are matched as written.
+    expect(bash(`a=EXIT; b=INT; ${set('"$a"')}; trap - "$b"`)).toContain(home);
+    expect(bash(`a=EXIT; ${set('"$a"')}; trap - "$a"`)).toBeUndefined();
+  });
+
+  test("keeps a handler a branch or loop body sets, judged with that body's variables", () => {
+    const set = `trap 'rm -rf "$HOME/y"' EXIT`;
+    // bash keeps each of these handlers after the construct and runs it at exit.
+    for (const command of [
+      `if true; then ${set}; fi`,
+      `if false; then :; else ${set}; fi`,
+      `if true; then if true; then ${set}; fi; fi`,
+      `for i in 1 2; do ${set}; done`,
+      `for i in $(ls); do ${set}; done`,
+      `for ((i = 0; i < 2; i++)); do ${set}; done`,
+      `while true; do ${set}; break; done`,
+      `while read l; do ${set}; done`,
+      `until false; do ${set}; break; done`,
+      `select x in a b; do ${set}; break; done`,
+      `case a in a) ${set};; esac`,
+      `f() { if true; then ${set}; fi; }; f`,
+      `if true; then t=$HOME; trap 'rm -rf "$t"' EXIT; fi`,
+    ]) {
+      expect(bash(command)).toContain(home);
+    }
+    // The body's own values, not the merged ones: a scratch file the body made is its own.
+    expect(bash(`if true; then t=$(mktemp); trap 'rm -f "$t"' EXIT; fi`)).toBeUndefined();
+    expect(bash(`for i in 1; do d=$(mktemp -d); trap 'rm -rf "$d"' EXIT; done`)).toBeUndefined();
+  });
+
+  test("judges a lifted handler with a value the shell assigns after the construct", () => {
+    const set = `t=$(mktemp -d); trap 'rm -rf "$t"' EXIT`;
+    // A single-quoted handler reads `$t` when it runs, so an assignment after the branch wins.
+    for (const command of [
+      `if true; then ${set}; fi; t="$HOME/y"`,
+      `if true; then if true; then ${set}; fi; fi; t="$HOME/y"`,
+      `for i in a; do ${set}; done; t="$HOME/y"`,
+      `for i in a b; do if true; then ${set}; fi; done; t="$HOME/y"`,
+      `while true; do ${set}; break; done; t="$HOME/y"`,
+      `case x in x) ${set};; esac; t="$HOME/y"`,
+      `t=$(mktemp -d); if true; then trap 'rm -rf "$t"' EXIT; fi; t="$HOME/y"`,
+      `if true; then ${set}; fi; export t="$HOME"`,
+      `f() { if true; then ${set}; fi; }; f; t="$HOME/y"`,
+    ]) {
+      expect(bash(command)).toContain(home);
+    }
+    // Blurred again by a later branch or loop that may give it another value.
+    for (const command of [
+      `if true; then ${set}; fi; if [ -n "$x" ]; then t="$HOME/y"; fi`,
+      `if true; then ${set}; fi; for i in 1; do t="$HOME/y"; done`,
+    ]) {
+      expect(bash(command)).toContain("which a branch sets differently");
+    }
+    expect(bash(`if true; then ${set}; fi; t=$(cat)`)).toContain("(a command's output)");
+    expect(
+      bash(`if true; then t="$HOME"; trap 'rm -rf "$t"' EXIT; fi; t=$(mktemp -d)`)
+    ).toBeUndefined();
+    // A double-quoted handler froze the value when it was set; a later assignment changes nothing.
+    expect(
+      bash(`if true; then t=$(mktemp -d); trap "rm -rf $t" EXIT; fi; t="$HOME/y"`)
+    ).toBeUndefined();
+    expect(bash(`if true; then t="$HOME/y"; trap "rm -rf $t" EXIT; fi; t=$(mktemp -d)`)).toContain(
+      home
+    );
+  });
+
+  test("runs every definition a branch or loop body may have left for a name", () => {
+    const f = `f() { rm -rf "$HOME/y"; }`;
+    for (const command of [
+      `if true; then ${f}; fi; f`,
+      `if false; then :; else ${f}; fi; f`,
+      `for i in a; do ${f}; done; f`,
+      `for ((i = 0; i < 1; i++)); do ${f}; done; f`,
+      `while true; do ${f}; break; done; f`,
+      `select x in a; do ${f}; break; done; f`,
+      `case a in a) ${f};; esac; f`,
+      `f() { :; }; if true; then ${f}; fi; f`,
+      `if true; then ${f}; else f() { :; }; fi; f`,
+      `if true; then f() { :; }; else ${f}; fi; f`,
+      `if true; then ${f}; fi; x=$(f)`,
+      `if true; then h() { rm -rf "$HOME/y"; }; fi; trap h EXIT`,
+      // A path that defined no `rm` runs the command itself.
+      `if true; then rm() { :; }; fi; rm -rf "$HOME/y"`,
+      'g() { h() { rm -rf "$HOME/y"; }; };' +
+        ' if [ -n "$a" ]; then g; fi; if [ -n "$b" ]; then g; fi; h',
+      `if [ -n "$y" ]; then e() { echo "$HOME"; }; else e() { echo "$TMPDIR/a"; }; fi;` +
+        ' rm -rf "$(e)"',
+    ]) {
+      expect(bash(command)).toContain(home);
+    }
+    expect(bash(`if true; then f() { echo hi; }; fi; f`)).toBeUndefined();
+    expect(bash(`if true; then f() { :; }; else f() { echo x; }; fi; f`)).toBeUndefined();
+    expect(
+      bash(
+        `if [ -n "$y" ]; then e() { echo "$TMPDIR/a"; }; else e() { echo "$TMPDIR/b"; }; fi;` +
+          ' rm -rf "$(e)"'
+      )
+    ).toBeUndefined();
+  });
+
+  test("makes the arguments unknown after a branch that may change them", () => {
+    const safe = '"$LEGION_WORKSPACE/a"';
+    for (const command of [
+      `set -- ${safe}; if true; then set -- "$HOME/y"; fi; rm -rf "$1"`,
+      `set -- ${safe} "$HOME/y"; if true; then shift; fi; rm -rf "$1"`,
+      `set -- ${safe} "$HOME/y"; for x in 1; do shift; done; rm -rf "$1"`,
+      `set -- ${safe} "$HOME/y"; case "$(cat f)" in a) shift ;; esac; rm -rf "$1"`,
+      `f() { if true; then set -- "$HOME/y"; fi; rm -rf "$1"; }; f ${safe}`,
+      `f() { if true; then shift; fi; rm -rf "$1"; }; f ${safe} "$HOME/y"`,
+    ]) {
+      expect(bash(command)).toContain("(a positional parameter)");
+    }
+    // The same `shift` outside a branch is known, and so is a branch that leaves them alone.
+    expect(bash(`set -- ${safe} "$HOME/y"; shift; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- ${safe}; if true; then echo hi; fi; rm -rf "$1"`)).toBeUndefined();
+    expect(bash(`f() { if true; then echo x; fi; rm -rf "$1"; }; f ${safe}`)).toBeUndefined();
+  });
+
+  test("keeps the arguments a sourced file changes", () => {
+    const safe = '"$LEGION_WORKSPACE/a"';
+    const sets = script("source-sets-args.sh", 'set -- "$HOME/y"\n');
+    const setsSafe = script("source-sets-safe-args.sh", 'set -- "$LEGION_WORKSPACE/in"\n');
+    const shifts = script("source-shifts-args.sh", "shift\n");
+    const reads = script("source-reads-args.sh", 'echo "$1"\n');
+    const noop = script("source-noop.sh", ":\n");
+    const removesAll = script("source-removes-args.sh", 'rm -rf "$@"\n');
+    // With no operands the file runs with this shell's arguments, and what it does to them stays.
+    expect(bash(`set -- "$HOME/y" ${safe}; . ${noop}; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- ${safe} "$HOME/y"; . ${shifts}; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- ${safe}; . ${sets}; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- "$HOME/y"; . ${setsSafe}; rm -rf "$1"`)).toBeUndefined();
+    expect(bash(`set -- "$HOME/y"; . ${removesAll}`)).toContain(home);
+    expect(bash(`set -- ${safe}; . ${removesAll}`)).toBeUndefined();
+    // With operands bash restores this shell's arguments afterwards, undoing a `shift`, and keeps
+    // a list the file set with `set --`.
+    expect(bash(`set -- "$HOME/y"; . ${noop} ${safe}; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- ${safe}; . ${noop} "$HOME/y"; rm -rf "$1"`)).toBeUndefined();
+    expect(bash(`set -- ${safe}; . ${removesAll} "$HOME/y"`)).toContain(home);
+    expect(bash(`set -- ${safe}; if true; then . ${sets}; fi; rm -rf "$1"`)).toContain(
+      "(a positional parameter)"
+    );
+    // The guard does not tell a `set --` from a `shift`, so a list the file touched is unknown,
+    // even when it set the same list again, which bash keeps.
+    const resets = script("source-resets-args.sh", 'set -- "$@"\n');
+    expect(bash(`set -- ${safe}; . ${resets} "$HOME/y"; rm -rf "$1"`)).toContain(
+      "(a positional parameter)"
+    );
+    expect(bash(`set -- ${safe}; . ${sets} q; rm -rf "$1"`)).toContain("(a positional parameter)");
+    expect(bash(`set -- "$HOME/y"; . ${shifts} ${safe} ${safe}; rm -rf "$1"`)).toContain(
+      "(a positional parameter)"
+    );
+    expect(bash(`set -- ${safe}; . ${reads} ${safe}; rm -rf "$1"`)).toBeUndefined();
+    expect(bash(`set -- ${safe}; . ${reads}; rm -rf "$1"`)).toBeUndefined();
+    // A function's arguments are its own, and the caller's come back when it returns.
+    expect(bash(`set -- ${safe} "$HOME/y"; f() { shift; }; f; rm -rf "$1"`)).toBeUndefined();
+  });
+
+  test("walks a backgrounded command in a subshell", () => {
+    const cleanup = 'cleanup() { rm -rf "$HOME"; }; trap cleanup EXIT; f() { trap - EXIT; }';
+    // `f &` clears only its own subshell's handler, so the parent's still runs at exit.
+    expect(bash(`${cleanup}; f &`)).toContain(home);
+    expect(bash(`${cleanup}; { trap - EXIT; } &`)).toContain(home);
+    expect(bash(`${cleanup}; trap - EXIT &`)).toContain(home);
+    expect(bash(`${cleanup}; f`)).toBeUndefined();
+    // A `cd` in a background command leaves this shell where it was.
+    expect(bash('f() { cd "$HOME"; }; f & rm -rf .bashrc')).toBeUndefined();
+    expect(bash('f() { cd "$HOME"; }; f; rm -rf .bashrc')).toContain(path.join(home, ".bashrc"));
+    // Nothing a background command assigns reaches this shell…
+    expect(bash('d=$LEGION_WORKSPACE/x; d=$HOME & rm -rf "$d"')).toBeUndefined();
+    // …and the handler it sets runs at its own end.
+    expect(bash(`{ trap 'rm -rf "$HOME/y"' EXIT; } &`)).toContain(home);
+    expect(bash('sleep 60 & p=$!; kill "$p"')).toBeUndefined();
+  });
+
+  test("reads back the pids a double-quoted handler expanded when it was set", () => {
+    expect(bash('sleep 60 & pid=$!; trap "kill $pid" EXIT')).toBeUndefined();
+    expect(bash('sleep 60 & a=$!; sleep 60 & b=$!; trap "kill $a $b" EXIT')).toBeUndefined();
+    expect(bash('x=$(cat); trap "kill $x" EXIT')).toContain("cannot read the handler");
+    expect(bash('sleep 60 & pid=$!; trap "rm -rf $HOME/$pid" EXIT')).toContain(home);
+  });
+
+  test("refuses a trap whose handler it cannot read", () => {
+    expect(bash('c=$(cat); trap "$c" EXIT')).toContain("cannot read the handler");
+    expect(
+      bash('cleanup() { rm -rf "$LEGION_WORKSPACE/build"; }; trap cleanup EXIT')
+    ).toBeUndefined();
+  });
+
+  test("walks `! command`, a pipeline of one, in this shell", () => {
+    expect(bash('! cd "$HOME"; rm -rf x')).toContain(path.join(home, "x"));
+  });
+
   test("attributes a sourced parent's EXIT trap to its declaring file", () => {
     const sourced = script("source-trap-owner-body.sh", ":\n");
     const parent = script(
@@ -471,28 +743,7 @@ describe("scripts a command runs", () => {
   });
 
   test("checks every tracked shell script against the documented allow-list", () => {
-    const listed = spawnSync("git", ["ls-files", "-z", "--", ":(glob)**/*.sh"], {
-      cwd: repository,
-      encoding: "utf8",
-    });
-    if (listed.status !== 0) throw new Error(listed.stderr);
-    const refusals = Object.fromEntries(
-      listed.stdout
-        .split("\0")
-        .filter((file) => file !== "")
-        .flatMap((file) => {
-          const reason = repositoryGuard.bash(`bash ${file}`, repository, repositoryEnv);
-          return reason === undefined ? [] : [[file, reason]];
-        })
-    );
-    const expected = Object.fromEntries(
-      Object.entries(EXPECTED_SCRIPT_REFUSALS).map(([file, reason]) => [
-        file,
-        expect.stringContaining(reason),
-      ])
-    );
-    expect(refusals).toMatchObject(expected);
-    expect(Object.keys(refusals).sort()).toEqual(Object.keys(EXPECTED_SCRIPT_REFUSALS).sort());
+    expect(trackedScriptRefusals(repository)).toEqual(EXPECTED_SCRIPT_REFUSALS);
   });
 
   test("refuses the incident's shape: a probe script whose last line removes its work dir and $HOME", () => {

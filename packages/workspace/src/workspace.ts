@@ -100,54 +100,112 @@ async function runChecked(
 }
 
 const PROVISIONING_TOKEN_ENV = "LEGION_PROVISIONING_TOKEN";
-const PROVISIONING_ASKPASS_SCRIPT = `#!/bin/sh
-case "$1" in
-  *Username*) printf '%s\n' x-access-token ;;
-  *Password*) printf '%s\n' "$LEGION_PROVISIONING_TOKEN" ;;
-  *) exit 1 ;;
-esac
+/** The one-shot credential: a git credential helper that answers `get` with the token. git asks it
+ * for https://github.com alone (`credential.https://github.com.helper`), so a remote a URL rewrite
+ * sends to another scheme, host or port gets nothing (the Go twin's provisioningHelper). */
+const PROVISIONING_CREDENTIAL_HELPER = `#!/bin/sh
+[ "$1" = get ] || exit 0
+printf 'username=x-access-token\npassword=%s\n' "$LEGION_PROVISIONING_TOKEN"
 `;
 
+/** jj's git for the credentialed commands: the one on PATH, whatever the clone's configuration
+ * names in `git.executable-path`. */
+const PINNED_GIT_EXECUTABLE = "--config=git.executable-path=git";
+
+/** What provisioning's two network commands, the clone and the fetch, run with. Only
+ * `runCredentialedJj` reads its environment. */
 interface ProvisioningCredential {
   readonly directory: string;
   readonly env: Readonly<Record<string, string>>;
 }
 
-/** The credential — and the git configuration — provisioning's own `jj git clone` and
- * `jj git fetch` run with. The token travels only through the askpass script (`GIT_ASKPASS`
- * answers `x-access-token` and `$LEGION_PROVISIONING_TOKEN`), never as a config value or an
- * argument. The clone's persisted config is the pane's: `credential.helper` and the
- * github.com-specific entry name the pane helper (`deps.credentialHelper`), and
- * `credential.interactive=false` keeps a pane's git from ever prompting. Provisioning runs with
- * no grant — the daemon host, a pod's init container — so that helper must not be consulted:
- * it fails there, and from git 2.44 on (the worker image ships 2.47) `credential.interactive=false`
- * then forbids the askpass fallback too, `fatal: unable to get password from user` on every second
- * provisioning of a clone (LEGION-178). So the environment resets the helper chain and re-enables
- * askpass for these commands alone, as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
- * pairs rather than `-c` flags: jj, not this code, spawns the git that fetches. Git reads that
- * environment config after the repository's, so the empty `credential.helper` clears every helper
- * read before it — the general entry and the URL-specific one alike — and `credential.interactive`
- * is last-wins. The persisted config is untouched. */
+/** Runs `jj <args>` as a credentialed command: with the credential's environment and jj's pinned
+ * git, the two together, so no command carries the token without the pins. */
+function runCredentialedJj(
+  deps: CommandDeps,
+  credential: ProvisioningCredential,
+  args: readonly string[]
+): Promise<RunResult> {
+  return runChecked(deps, ["jj", ...args, PINNED_GIT_EXECUTABLE], { env: credential.env });
+}
+
+/** The credential, and the configuration pins, provisioning's own `jj git clone` and
+ * `jj git fetch` run with. This is the one description of what those two commands guarantee; the
+ * daemon's AGENTS.md, `legion workspace-init`'s runner and the git-config learning point here.
+ *
+ * The token reaches git only through the one-shot helper, which reads `$LEGION_PROVISIONING_TOKEN`,
+ * never as a config value or an argument. The clone's persisted config is the pane's:
+ * `credential.helper` and the github.com-specific entry name the pane helper
+ * (`deps.credentialHelper`), which provisioning, running with no grant, must not consult: it fails
+ * there (LEGION-178). So the environment resets the helper chain and then names the one-shot
+ * helper for https://github.com, as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
+ * pairs rather than `-c` flags, since jj, not this code, spawns the git that fetches. git reads
+ * those pairs after every file, so they win, and the persisted config is untouched.
+ *
+ * The shared clone's working copy and configuration are the tree's to write. Against that, the two
+ * commands pin a closed set, not an enumerated subset:
+ * - the credential: the helper answers for https://github.com alone; there is no askpass
+ *   (`GIT_ASKPASS` is empty, which git reads as none, `core.askPass` and `SSH_ASKPASS` included)
+ *   and no terminal prompt. `provisionIssueWorkspace` also persists `credential.interactive=false`
+ *   into this same clone, a few dozen lines below — that is for the pane's own git, which holds a
+ *   grant and would otherwise prompt a headless worker, not a substitute for this pin: it is
+ *   tree-writable, so it protects nothing this pin does not, and this call's credentialed fetch
+ *   runs before its own write repairs the value, so a `--unset` written between two provisionings
+ *   is still in force for the next one's fetch (`workspace.test.ts`, "core.askPass never answers
+ *   the credentialed fetch's fill, and the pin is what stops it");
+ * - every other source of git configuration a tree, an operator's shell, or an inherited process
+ *   could reach: the global and system config files (`GIT_CONFIG_GLOBAL=/dev/null`,
+ *   `GIT_CONFIG_NOSYSTEM=1`, the Go twin's `isolatedGitConfig`) and `GIT_CONFIG_PARAMETERS`, which
+ *   git reads *after* the numbered `GIT_CONFIG_COUNT` pairs and so survives their reset on its own
+ *   (`GIT_CONFIG_PARAMETERS: ""`, which git parses as zero pairs, whatever the ambient value was).
+ *   Hiding the global and system config hides an operator's legitimate settings there too — an
+ *   operator's `safe.directory` or `filter.lfs.*` registrations, as this host has — which the
+ *   clone and fetch can go without only because nothing here needs them yet: every
+ *   *uncredentialed* command still reads them, so a clone whose ownership stops matching the
+ *   process uid would fail `dubious ownership` on the credentialed fetch alone, and an LFS
+ *   repository would clone pointers with `filter.lfs.required` silently gone. A TLS-inspecting
+ *   proxy's CA is the harder case: `http.sslCAInfo` in global or system config is hidden the same
+ *   way, but `GIT_SSL_CAINFO` names no environment route this pin (or `PANE_ENV_ALLOW_LIST`)
+ *   carries, and the credential's own environment sets none — so, unlike the two cases above,
+ *   that host has no recoverable path short of editing this function;
+ * - git's hooks: none run (`core.hooksPath=/dev/null`);
+ * - git's transport: https alone (`GIT_ALLOW_PROTOCOL=https`), all https://github.com needs;
+ * - jj's git: the one on PATH (`PINNED_GIT_EXECUTABLE`);
+ * - the fetch takes no snapshot of the clone's working copy (`--ignore-working-copy`).
+ *
+ * That is defence, not a boundary. Both commands still read the shared clone's own repo-scoped
+ * configuration, so two classes remain: a program that tree-written jj or git configuration names,
+ * running inside one of them, and tree-written http or TLS configuration that changes where the
+ * session to github.com ends or what it trusts. On the tmux runtime a pane shares the daemon's uid
+ * and can read provisioning's environment anyway, and this daemon refuses the pod runtime
+ * (LEGION-286). The Go daemon keeps the token from a pod's tree with a container boundary
+ * (docs/kubernetes.md, "Trust model: the provisioning token"). */
 async function createProvisioningCredential(
   stateDir: string,
   token: string
 ): Promise<ProvisioningCredential> {
   await mkdir(stateDir, { recursive: true });
   const directory = await mkdtemp(path.join(stateDir, "provisioning-credential-"));
-  const askpass = path.join(directory, "askpass");
-  await writeFile(askpass, PROVISIONING_ASKPASS_SCRIPT, { mode: 0o700 });
-  await chmod(askpass, 0o700);
+  const helper = path.join(directory, "helper");
+  await writeFile(helper, PROVISIONING_CREDENTIAL_HELPER, { mode: 0o700 });
+  await chmod(helper, 0o700);
   return {
     directory,
     env: {
-      GIT_ASKPASS: askpass,
+      GIT_ASKPASS: "",
       GIT_TERMINAL_PROMPT: "0",
+      GIT_ALLOW_PROTOCOL: "https",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_PARAMETERS: "",
       [PROVISIONING_TOKEN_ENV]: token,
-      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_COUNT: "3",
       GIT_CONFIG_KEY_0: "credential.helper",
       GIT_CONFIG_VALUE_0: "",
-      GIT_CONFIG_KEY_1: "credential.interactive",
-      GIT_CONFIG_VALUE_1: "true",
+      GIT_CONFIG_KEY_1: "credential.https://github.com.helper",
+      GIT_CONFIG_VALUE_1: `!'${helper.replaceAll("'", "'\\''")}'`,
+      GIT_CONFIG_KEY_2: "core.hooksPath",
+      GIT_CONFIG_VALUE_2: "/dev/null",
     },
   };
 }
@@ -166,7 +224,7 @@ async function ensureRepoClone(
   repoCloneDir: string,
   owner: string,
   repo: string,
-  credentialEnv: Readonly<Record<string, string>>
+  credential: ProvisioningCredential
 ): Promise<void> {
   const jjDir = path.join(repoCloneDir, ".jj");
   if (existsSync(repoCloneDir)) {
@@ -181,7 +239,7 @@ async function ensureRepoClone(
   const tempDir = await mkdtemp(`${repoCloneDir}.clone-`);
   try {
     const remote = `https://github.com/${owner}/${repo}`;
-    await runChecked(deps, ["jj", "git", "clone", remote, tempDir], { env: credentialEnv });
+    await runCredentialedJj(deps, credential, ["git", "clone", remote, tempDir]);
     const tempJjDir = path.join(tempDir, ".jj");
     if (!existsSync(tempJjDir)) {
       throw new Error(`Incomplete Jujutsu clone at ${tempDir}: missing ${tempJjDir}`);
@@ -593,7 +651,7 @@ export async function provisionIssueWorkspace(
     await deps.provisioningToken()
   );
   try {
-    await ensureRepoClone(deps, repoCloneDir, owner, repo, credential.env);
+    await ensureRepoClone(deps, repoCloneDir, owner, repo, credential);
     // Checked on every provisioning, not only at clone time (the production clone predates this
     // rule), and before the fetch, the one command it governs: in a clone shared by one workspace
     // per issue, a commit Git no longer reaches is still somebody's work, so jj's default of
@@ -624,9 +682,14 @@ export async function provisionIssueWorkspace(
         repoCloneDir,
       ]);
     }
-    await runChecked(deps, ["jj", "git", "fetch", "-R", repoCloneDir], {
-      env: credential.env,
-    });
+    // No snapshot of the clone's working copy (createProvisioningCredential's pins).
+    await runCredentialedJj(deps, credential, [
+      "git",
+      "fetch",
+      "--ignore-working-copy",
+      "-R",
+      repoCloneDir,
+    ]);
   } finally {
     await rm(credential.directory, { force: true, recursive: true });
   }

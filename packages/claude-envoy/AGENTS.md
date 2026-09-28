@@ -33,6 +33,7 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
 | Outbound transport | `src/envoy-client.ts` | Envoy listener HTTP client. |
 | Send CLI parsing | `src/send-arguments.ts` | Validates destination and message arguments. |
 | Manual channel smoke | `scripts/smoke-channel.sh` | Real smoke, unattended (answers every startup dialog, captures the pane); documented and deliberately excluded from CI. |
+| Manual `/clear` smoke | `scripts/smoke-clear-rebind.sh` | Real `/clear` against the live listener with the build in `CLAUDE_PLUGIN_DIR` (default: this package); checks the registry entry moves to the new id without the old direct subject. Sends no prompt to the model; excluded from CI. |
 
 ## Critical conventions
 
@@ -43,10 +44,21 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
   `expects_reply`, and `in_reply_to` are the current contract. Never emit a `source` key: Claude
   Code stamps its own `source="plugin:claude-envoy:envoy"` attribute on the `<channel>` tag.
 - Subscribe NATS before registering the self-subscribed session route — on startup, on a session-id
-  handoff (new direct subject first, then deregister the old id, register, drop the old subject,
-  move the role by soft claim), and when rebuilding the interests a resumed id already registered.
-  On shutdown (stdin end, SIGTERM, SIGINT, SIGHUP) drain NATS, deregister the session, close the
-  transport, and let the stdio process exit.
+  handoff (new direct subject first, then deregister the old id, drop the old subject, register,
+  move the role by soft claim; a handoff that fails before the id switch drops the new subject
+  again), and when rebuilding the interests a resumed id already registered.
+  A handoff is adopted within 250 ms of the SessionStart hook writing the handoff file: the server
+  polls the file by path (`fs.watchFile`), because a directory watch reports only the hook's
+  temporary file, not the rename onto `session-id`. The heartbeat is the fallback. On shutdown
+  (stdin end, SIGTERM, SIGINT, SIGHUP) drain NATS, deregister the session, close the transport, and
+  let the stdio process exit.
+- The listener merges each registration's topics into the entry and never removes one. So every
+  registry write (register, unsubscribe, deregister, the handoff) goes through the session's one
+  `serialized` chain, a registration reads the id and topics when it runs, and a topic leaves the
+  forwarder's topic list (`unfollow` removes it before its first await) before the listener is
+  told or the next registration is sent. A human Dispatch subscription removal is repeated to the
+  listener through the same chain. Nothing inside the chain may wait without a bound (the
+  handoff's NATS flush has a timeout), because shutdown's deregistration queues behind it.
 - Publish the empty receipt only for a forwarded lane (envelope topic differs from the direct
   subject: the listener's role lane, which waits for it). A plain direct send is a JetStream publish
   whose reply inbox expects the server's acknowledgement; an empty receipt there makes the listener

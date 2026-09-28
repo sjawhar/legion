@@ -1,230 +1,33 @@
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
-import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
+import { dirname } from "node:path"
 import plugin from "../.claude-plugin/plugin.json" with { type: "json" }
 import ompPlugin from "../.omp-plugin/plugin.json" with { type: "json" }
 import pkg from "../package.json" with { type: "json" }
-import type {
-  ChannelBrokerMessage,
-  ChannelForwarderConnection,
-  ChannelTopicSubscription,
-} from "../src/channel-forwarder"
 import {
-  type ChannelNotification,
-  type ChannelNotifier,
-  type ChannelSessionOptions,
   createChannelDelivery,
   enqueueChannelMessage,
-  executeEnvoyTool,
   MCP_SERVER_INFO,
   sanitizeChannelMetadata,
   startChannelSession,
 } from "../src/envoy-channel-server"
+import { roleStateFile, SessionIdentity } from "../src/session-identity"
 import {
-  roleStateFile,
-  SessionIdentity,
-  sessionHandoffFile,
-  writeSessionHandoff,
-} from "../src/session-identity"
+  deliveryRaw,
+  directSubject,
+  type FakeClient,
+  FakeNats,
+  FakeNotifier,
+  noInterest,
+  recordingClient,
+  scratchState,
+  sessionOptions,
+  settled,
+} from "./channel-session-harness"
 import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
 
-interface Queue {
-  readonly subject: string
-  readonly messages: ChannelBrokerMessage[]
-  waiter: PromiseWithResolvers<ChannelBrokerMessage | null> | undefined
-}
-
-class FakeNats implements ChannelForwarderConnection {
-  readonly published: Array<{ readonly subject: string; readonly data: Uint8Array }> = []
-  readonly order: string[] = []
-  readonly unsubscribed: string[] = []
-  readonly subscriptions = new Map<string, Queue>()
-  closed = false
-
-  constructor(readonly calls: string[] = []) {}
-
-  subscribe(subject: string): ChannelTopicSubscription {
-    this.calls.push(`nats.subscribe ${subject}`)
-    const queue: Queue = { subject, messages: [], waiter: undefined }
-    this.subscriptions.set(subject, queue)
-    return {
-      unsubscribe: () => {
-        this.calls.push(`nats.unsubscribe ${subject}`)
-        this.unsubscribed.push(subject)
-        this.subscriptions.delete(subject)
-        queue.waiter?.resolve(null)
-      },
-      async *[Symbol.asyncIterator]() {
-        for (;;) {
-          const message = queue.messages.shift()
-          if (message !== undefined) {
-            yield message
-            continue
-          }
-          const waiter = Promise.withResolvers<ChannelBrokerMessage | null>()
-          queue.waiter = waiter
-          const next = await waiter.promise
-          queue.waiter = undefined
-          if (next === null) return
-          yield next
-        }
-      },
-    }
-  }
-
-  publish(subject: string, data: Uint8Array): void {
-    this.order.push("receipt")
-    this.published.push({ subject, data })
-  }
-
-  flush(): Promise<void> {
-    return Promise.resolve()
-  }
-
-  isClosed(): boolean {
-    return this.closed
-  }
-
-  drain(): Promise<void> {
-    this.closed = true
-    return Promise.resolve()
-  }
-
-  close(): Promise<void> {
-    this.closed = true
-    return Promise.resolve()
-  }
-
-  emit(subject: string, raw: string, reply?: string): void {
-    const queue = this.subscriptions.get(subject)
-    if (queue === undefined) throw new Error(`no subscription for ${subject}`)
-    const message = {
-      subject,
-      data: new TextEncoder().encode(raw),
-      ...(reply === undefined ? {} : { reply }),
-    }
-    if (queue.waiter === undefined) {
-      queue.messages.push(message)
-      return
-    }
-    const waiter = queue.waiter
-    queue.waiter = undefined
-    waiter.resolve(message)
-  }
-}
-
-class FakeNotifier implements ChannelNotifier {
-  readonly notifications: ChannelNotification[] = []
-
-  constructor(readonly order: string[] = []) {}
-
-  notification(notification: ChannelNotification): Promise<void> {
-    this.order.push("notification")
-    this.notifications.push(notification)
-    return Promise.resolve()
-  }
-}
-
-type FakeClient = Pick<
-  EnvoyClient,
-  "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
->
-
-function settled(): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>()
-  setImmediate(resolve)
-  return promise
-}
-
-/**
- * Polls `condition` every 5 ms until it holds; fails naming `what` after 5 s.
- * Real time on purpose: the awaited conditions are filesystem writes the
- * server's own heartbeat performs, which no fake clock can advance.
- */
-async function waitFor(condition: () => Promise<boolean>, what: string): Promise<void> {
-  const deadline = Date.now() + 5_000
-  while (!(await condition())) {
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
-    await Bun.sleep(5)
-  }
-}
-
-async function scratchState(): Promise<string> {
-  return mkdtemp(join(tmpdir(), "claude-envoy-state-"))
-}
-
-function noInterest(): Interest {
-  return {
-    session_id: "ses_claude",
-    machine_id: "devbox",
-    dir: "/tmp",
-    topics: [directSubject],
-  }
-}
-
-/** A client that records every call it sees, in order, into `calls`. */
-function recordingClient(calls: string[], overrides: Partial<FakeClient> = {}): FakeClient {
-  return {
-    subscribe: async (input) => {
-      calls.push(`subscribe ${input.sessionID} [${input.capabilities?.join(",") ?? ""}]`)
-      return noInterest()
-    },
-    unsubscribe: async (input) => {
-      calls.push(`unsubscribe ${input.sessionID} ${input.topics.join(",")}`)
-    },
-    unregisterSession: async (sessionID) => {
-      calls.push(`unregister ${sessionID}`)
-    },
-    setRole: async (input) => {
-      calls.push(
-        `setRole ${input.sessionID} ${input.role}${input.soft ? " soft" : ""}${input.previousSessionID === undefined ? "" : ` previous=${input.previousSessionID}`}`,
-      )
-      return { claimed: true, interest: noInterest() }
-    },
-    getRole: async (role) => ({ role, holder: "ses_claude", last_seen: 1 }),
-    getInterest: async (sessionID) => {
-      calls.push("getInterest")
-      return {
-        ...noInterest(),
-        session_id: sessionID,
-        topics: [`notifications.agent.${sessionID}`],
-      }
-    },
-    ...overrides,
-  }
-}
-
-function sessionOptions(
-  identity: SessionIdentity,
-  stateDirectory: string,
-  extra: Partial<ChannelSessionOptions> = {},
-): ChannelSessionOptions {
-  return {
-    identity,
-    connection: new FakeNats(),
-    notifier: new FakeNotifier(),
-    client: recordingClient([]),
-    heartbeatMs: 60_000,
-    stateDirectory,
-    ...extra,
-  }
-}
-
-const directSubject = "notifications.agent.ses_claude"
-const deliveryRaw = JSON.stringify({
-  event_id: "evt-42",
-  dedupe_key: "delivery-42",
-  source: "agent",
-  source_session: "ses_sender",
-  topic: directSubject,
-  issued_at: 1_760_000_000_000,
-  urgency: "high",
-  payload_summary: "Use the channel",
-})
 /** A role-lane envelope the listener forwarded to the direct subject and awaits a receipt for. */
 const roleForwardRaw = JSON.stringify({
   event_id: "evt-role-7",
@@ -454,47 +257,6 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
   }
 })
 
-test("drops local topics named by a human Dispatch subscription removal", async () => {
-  const nats = new FakeNats()
-  const stateDirectory = await scratchState()
-  const session = await startChannelSession(
-    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
-      connection: nats,
-    }),
-  )
-  const topic = "notifications.dispatch.issue.DSP-3.>"
-
-  try {
-    await session.follow([topic])
-    nats.emit(
-      directSubject,
-      JSON.stringify({
-        event_id: "remove-1",
-        source: "dispatch",
-        payload: JSON.stringify({
-          issue_key: "DSP-3",
-          type: "subscription.removed",
-          actor: { kind: "user", id: "alice" },
-          payload: {
-            session_id: "ses_claude",
-            by: { kind: "user", id: "alice" },
-            topics: [topic],
-          },
-        }),
-      }),
-    )
-    await settled()
-
-    expect(nats.unsubscribed).toEqual([
-      "notifications.dispatch.issue.DSP-3",
-      "notifications.dispatch.issue.DSP-3.>",
-    ])
-  } finally {
-    await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
-  }
-})
-
 test("the plugin manifest, package, and MCP server all report one version", () => {
   expect(plugin.version).toBe(pkg.version)
   expect(ompPlugin.version).toBe(pkg.version)
@@ -507,183 +269,6 @@ test("the Oh My Pi manifest declares no MCP server", () => {
   // channel server that exits without Claude Code's session identity. Dropping the key falls
   // through to .mcp.json and starts it again.
   expect(ompPlugin.mcpServers).toEqual({})
-})
-
-test("follows the session id its Claude process hands off: new subject first, then re-register, unfollow, and role transfer", async () => {
-  const stateDirectory = await scratchState()
-  const calls: string[] = []
-  const nats = new FakeNats(calls)
-  const identity = new SessionIdentity("ses_old", "/tmp")
-  const oldRoleFile = roleStateFile(stateDirectory, "ses_old")
-  await mkdir(dirname(oldRoleFile), { recursive: true })
-  await writeFile(oldRoleFile, JSON.stringify({ session_id: "ses_old", role: "reviewer" }))
-  const handoff = sessionHandoffFile(stateDirectory, 777)
-  await writeSessionHandoff(handoff, "ses_old")
-  // The tick that adopts the handoff registers once more after it, so the second
-  // registration under the new id comes after the role file is in place; the wait
-  // below still checks the file itself so a failure names what is missing.
-  let newRegistrations = 0
-  const client = recordingClient(calls, {
-    subscribe: async (input) => {
-      calls.push(`subscribe ${input.sessionID} [${input.capabilities?.join(",") ?? ""}]`)
-      if (input.sessionID === "ses_new") newRegistrations += 1
-      return noInterest()
-    },
-    // The listener reports this session as the holder once a claim landed, so
-    // heartbeats reassert nothing and the recorded calls stay the handoff's own.
-    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1 }),
-  })
-  const session = await startChannelSession(
-    sessionOptions(identity, stateDirectory, {
-      connection: nats,
-      client,
-      heartbeatMs: 25,
-      handoffPid: 777,
-    }),
-  )
-
-  try {
-    calls.length = 0
-    await writeSessionHandoff(handoff, "ses_new")
-    const newRoleFile = roleStateFile(stateDirectory, "ses_new")
-    const expectedRole = `${JSON.stringify({ session_id: "ses_new", role: "reviewer" })}\n`
-    await waitFor(
-      async () =>
-        newRegistrations >= 2 &&
-        (await readFile(newRoleFile, "utf8").catch(() => undefined)) === expectedRole,
-      `a second registration of ses_new and ${expectedRole.trim()} in ${newRoleFile}`,
-    )
-
-    const reregister = "subscribe ses_new [aside]"
-    // A tick that fired before the handoff file landed only re-registered the old id.
-    const handoffCalls = calls.filter((call) => call !== "subscribe ses_old [aside]")
-    expect(handoffCalls.slice(0, 6)).toEqual([
-      "nats.subscribe notifications.agent.ses_new",
-      "unregister ses_old",
-      reregister,
-      "nats.unsubscribe notifications.agent.ses_old",
-      "setRole ses_new reviewer soft previous=ses_old",
-      reregister,
-    ])
-    // Whatever followed is a later tick doing nothing but re-registering.
-    expect(handoffCalls.slice(6).filter((call) => call !== reregister)).toEqual([])
-    expect(identity.id).toBe("ses_new")
-    expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_new.json"])
-    expect(
-      await executeEnvoyTool(
-        { identity, client: client as EnvoyClient, session },
-        "envoy_whoami",
-        {},
-      ),
-    ).toMatchObject({ session_id: "ses_new" })
-
-    calls.length = 0
-    await session.shutdown()
-    expect(calls).toEqual(["nats.unsubscribe notifications.agent.ses_new", "unregister ses_new"])
-    // The handoff file outlives this server: a restart inside the same Claude process reads it.
-    expect(await readdir(join(stateDirectory, "sessions"))).toEqual(["777"])
-  } finally {
-    await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
-  }
-})
-
-test("two channel servers under different Claude processes rebind independently", async () => {
-  const stateDirectory = await scratchState()
-  const callsA: string[] = []
-  const callsB: string[] = []
-  const identityA = new SessionIdentity("ses_a", "/tmp")
-  const identityB = new SessionIdentity("ses_b", "/tmp")
-  await writeSessionHandoff(sessionHandoffFile(stateDirectory, 1001), "ses_a")
-  await writeSessionHandoff(sessionHandoffFile(stateDirectory, 1002), "ses_b")
-  const rebound = Promise.withResolvers<void>()
-  const serverA = await startChannelSession(
-    sessionOptions(identityA, stateDirectory, {
-      connection: new FakeNats(callsA),
-      client: recordingClient(callsA, {
-        unregisterSession: async (sessionID) => {
-          callsA.push(`unregister ${sessionID}`)
-          rebound.resolve()
-        },
-      }),
-      heartbeatMs: 25,
-      handoffPid: 1001,
-    }),
-  )
-  let heartbeatsB = 0
-  let afterRebind: PromiseWithResolvers<void> | undefined
-  const serverB = await startChannelSession(
-    sessionOptions(identityB, stateDirectory, {
-      connection: new FakeNats(callsB),
-      client: recordingClient(callsB, {
-        subscribe: async (input) => {
-          callsB.push(`subscribe ${input.sessionID}`)
-          heartbeatsB += 1
-          afterRebind?.resolve()
-          return noInterest()
-        },
-      }),
-      heartbeatMs: 25,
-      handoffPid: 1002,
-    }),
-  )
-
-  try {
-    callsA.length = 0
-    callsB.length = 0
-    await writeSessionHandoff(sessionHandoffFile(stateDirectory, 1001), "ses_a2")
-    await rebound.promise
-    // B must get a heartbeat of its own after A rebound to prove it read its file and stayed.
-    afterRebind = Promise.withResolvers<void>()
-    await afterRebind.promise
-
-    expect(identityA.id).toBe("ses_a2")
-    expect(identityB.id).toBe("ses_b")
-    expect(callsA).toContain("unregister ses_a")
-    expect(heartbeatsB).toBeGreaterThan(0)
-    expect(callsB.filter((call) => call !== "subscribe ses_b")).toEqual([])
-  } finally {
-    await serverA.shutdown()
-    await serverB.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
-  }
-})
-
-test("a heartbeat tick that outlives the interval is never overlapped by the next one", async () => {
-  const stateDirectory = await scratchState()
-  const identity = new SessionIdentity("ses_claude", "/tmp")
-  const events: string[] = []
-  const release = Promise.withResolvers<void>()
-  let registrations = 0
-  const client = recordingClient([], {
-    subscribe: async () => {
-      registrations += 1
-      events.push(`start ${registrations}`)
-      // Startup registers once; the first heartbeat tick then stalls until released.
-      if (registrations === 2) await release.promise
-      events.push(`end ${registrations}`)
-      return noInterest()
-    },
-  })
-  const session = await startChannelSession(
-    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
-  )
-
-  try {
-    await waitFor(async () => registrations === 2, "the first heartbeat tick to begin")
-    // Real time on purpose: the server's own setInterval is what must not fire
-    // a second registration while this one is stalled, so give it several
-    // intervals to try.
-    await Bun.sleep(100)
-    expect(events).toEqual(["start 1", "end 1", "start 2"])
-
-    release.resolve()
-    await waitFor(async () => registrations === 3, "the heartbeat to resume after the slow tick")
-    expect(events.slice(0, 5)).toEqual(["start 1", "end 1", "start 2", "end 2", "start 3"])
-  } finally {
-    await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
-  }
 })
 
 const rejectedFrameRaw = JSON.stringify({
@@ -844,45 +429,4 @@ test("drops a malformed targeted frame that has no reply address", async () => {
 
   expect(notifier.notifications).toEqual([])
   expect(delivery.inbox()).toEqual([])
-})
-
-test("a resumed server rebuilds the interests its session id already registered and follow reports them as not fresh", async () => {
-  const stateDirectory = await scratchState()
-  const nats = new FakeNats()
-  const subscribes: Array<readonly string[]> = []
-  const issueTopic = "notifications.dispatch.issue.DSP-3.>"
-  const client = recordingClient([], {
-    getInterest: async () => ({
-      ...noInterest(),
-      topics: [
-        directSubject,
-        "notifications.dispatch.issue.DSP-3",
-        issueTopic,
-        "notifications.role.reviewer",
-      ],
-    }),
-    subscribe: async (input) => {
-      subscribes.push(input.topics)
-      return noInterest()
-    },
-  })
-  const session = await startChannelSession(
-    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
-      connection: nats,
-      client,
-    }),
-  )
-
-  try {
-    expect(subscribes).toEqual([[directSubject, "notifications.dispatch.issue.DSP-3", issueTopic]])
-    expect([...nats.subscriptions.keys()]).toEqual([
-      directSubject,
-      "notifications.dispatch.issue.DSP-3",
-      issueTopic,
-    ])
-    expect(await session.follow([issueTopic])).toEqual([])
-  } finally {
-    await session.shutdown()
-    await rm(stateDirectory, { recursive: true, force: true })
-  }
 })

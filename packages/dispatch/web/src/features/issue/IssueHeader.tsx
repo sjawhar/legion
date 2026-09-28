@@ -17,6 +17,7 @@ import { userStateQuery } from "../../api/queries";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import { QueryError } from "../../components/QueryError";
+import { TruncatedText } from "../../components/TruncatedText";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   badgePrimary,
@@ -499,7 +500,7 @@ export function IssueHeader({
                 title={drafts.route === "" ? undefined : drafts.route}
                 type="button"
               >
-                {drafts.route === "" ? "No route" : drafts.route}
+                <TruncatedText>{drafts.route === "" ? "No route" : drafts.route}</TruncatedText>
               </button>
             </div>
           )}
@@ -531,7 +532,7 @@ export function IssueHeader({
               )}
               <button
                 aria-label={issue.parent === null ? "Set parent issue" : "Edit parent issue"}
-                className={`inline-flex min-h-11 max-w-[14ch] shrink-0 items-center truncate rounded-full px-3 py-2 text-left text-sm outline-none focus-visible:ring-2 xl:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
+                className={`inline-flex min-h-11 max-w-[14ch] shrink-0 items-center rounded-full px-3 py-2 text-left text-sm outline-none focus-visible:ring-2 xl:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
                 disabled={isClosed}
                 onClick={() => setParentEditing(true)}
                 type="button"

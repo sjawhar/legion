@@ -408,6 +408,49 @@ assert_handoff_committer() {
   [ "$identity" = "$want" ] || fail "$1's $2 $3 round $4 handoff commit $commit is authored|committed by $identity, want $want"
   note "$2 $3 round $4 handoff $commit authored and committed by $identity"
 }
+# post_bot_thread opens one file-level review thread on the proof's pull request as the proof human,
+# a GitHub App and so a bot account, as a CI bot is, and none of Legion's role Apps; it prints the
+# thread's first comment's node id. The account is the devbox gh's, which acts as the user when its
+# App routing fails; the Legion reviewer's acceptance closes only a bot's thread, so the thread's
+# author is read back and anything but a bot outside Legion's Apps is refused, naming it.
+post_bot_thread() {
+  local head posted id login type
+  head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
+  posted=$(jq -cn --arg head "$head" --arg path "$smoke_file" \
+    '{commit_id:$head, path:$path, subject_type:"file", body:"Stage 3 proof bot: is this file change needed?"}' |
+    timeout 60 gh api --method POST "repos/$repo/pulls/$pr_number/comments" --input - --jq '"\(.node_id) \(.user.login) \(.user.type)"') || return 1
+  read -r id login type <<<"$posted"
+  if [ "$type" != Bot ] || [ "$login" = "$(role_app implementer)" ] || [ "$login" = "$(role_app reviewer)" ]; then
+    echo "the thread was opened by $login ($type), not a bot account outside Legion's role Apps: the devbox gh is not acting as its App" >&2
+    return 1
+  fi
+  printf '%s\n' "$id"
+}
+# bot_thread_replies COMMENT prints the review thread whose first comment is COMMENT: its isResolved
+# on the first line, then each reply's author (GraphQL names an App by its bare slug) and first
+# line, tab-separated.
+bot_thread_replies() {
+  timeout 60 gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$pr_number" -f query='
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+        reviewThreads(first: 100) { nodes { isResolved comments(first: 50) { nodes { id author { login } body } } } } } } }' \
+    --jq ".data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].id == \"$1\") |
+      (.isResolved | tostring), (.comments.nodes[1:][] | \"\\(.author.login)\\t\\(.body | ltrimstr(\" \") | split(\"\\n\")[0])\")"
+}
+# bot_thread_answered_open COMMENT: the implementer has replied on the bot's thread, and the thread is
+# still open, since the pull request author's reply closes nothing.
+bot_thread_answered_open() {
+  local replies
+  replies=$(bot_thread_replies "$1") || return 1
+  [ "$(head -1 <<<"$replies")" = false ] && grep -q $'^legion-implementer\t' <<<"$replies"
+}
+# bot_thread_resolved_on_acceptance COMMENT: the bot's thread is resolved and carries the Legion
+# reviewer's Accepted: reply.
+bot_thread_resolved_on_acceptance() {
+  local replies
+  replies=$(bot_thread_replies "$1") || return 1
+  [ "$(head -1 <<<"$replies")" = true ] && grep -q $'^legion-reviewer\tAccepted:' <<<"$replies"
+}
 # assert_review_of_own_handoff ISSUE ROUND STATE: the reviewer's newest STATE review
 # (CHANGES_REQUESTED or APPROVED) on the proof's pull request names the commit carrying its round
 # ROUND handoff, the head its own handoff push made. The Go reviewer prompt orders the round so: an

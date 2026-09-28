@@ -27,6 +27,9 @@ const (
 	Review    AppRole = "review"
 )
 
+// Roles is every App role, the Apps a Legion deployment configures one of each of.
+var Roles = []AppRole{Implement, Review}
+
 // GitIdentity is the bot identity that jj and git must use for work a role performs.
 type GitIdentity = runtime.GitIdentity
 

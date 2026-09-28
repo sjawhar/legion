@@ -92,6 +92,8 @@ type overrides struct {
 	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
 	// production daemon always mints through appauth.New.
 	workflowTokens appauth.Tokens
+	// listen opens the API listener; nil is net.Listen.
+	listen func(network, address string) (net.Listener, error)
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
@@ -200,7 +202,11 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	}
 
 	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
-	listener, err := net.Listen("tcp", address)
+	listen := net.Listen
+	if o.listen != nil {
+		listen = o.listen
+	}
+	listener, err := listen("tcp", address)
 	if err != nil {
 		workflow.stop()
 		st.Close()

@@ -70,6 +70,9 @@ export interface RouteContext {
   github: GitHubService;
   /** The per-request-id dedupe behind `/legion/v1/worker/spawn` (LEGION-102). */
   spawnRequests: SpawnRequestLedger;
+  /** When this daemon last logged that it could not read a Legion App's login for gh-token
+   * (`legionAppLoginsFor`), which it does at most once a minute. */
+  loginWarnings: { lastAt: number };
   /** `sha256(config.operatorToken)`, what `POST /controller/secret` compares its bearer against in
    * constant time; `undefined` disables the route (a tmux daemon launches its own controller). */
   operatorTokenHash?: Buffer;
