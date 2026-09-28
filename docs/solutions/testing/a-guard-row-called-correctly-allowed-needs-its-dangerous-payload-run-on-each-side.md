@@ -65,8 +65,8 @@ after that run.
 
 Re-running everything is not a defence. More than ten rounds of re-derivation are what made three
 reviewers confident enough to call the same wrong row correct; the re-running was real, and the row
-was in its output. More coverage would not have changed the outcome. An adversarial reading of what an
-allowed row is evidence of would have.
+was in its output. More coverage would not have changed the outcome. An adversarial reading of what
+an allowed row is evidence of would have.
 
 ## 2. A pattern count drops the name that looks like every other name and is not
 
@@ -84,21 +84,21 @@ left-out and walk-position lists sums to 18: `merge` 9 + 4 + 5, `runFunction` 9 
 sourced branch 10 + 3 + 5. `argv0` crosses no site because no shell command writes it, only a new
 `bash -c` child. That makes the omission checkable rather than asserted.
 
-The guard now opens `merge()`'s comment with the rule: anything a copy-back site does not carry
-out of a child is a candidate hole, and a field added to `State` belongs at all three sites, or in
-each site's list of what it leaves out and why, or among the fields that cross no site.
+At #1536's `1dbc42ff`, the guard opens `merge()`'s comment with the rule: anything a copy-back site
+does not carry out of a child is a candidate hole, and a field added to `State` belongs at all three
+sites, or in each site's list of what it leaves out and why, or among the fields that cross no site.
 
 ## 3. Value equality stands for provenance only where the semantics are value
 
 `merge`'s variable and array comparisons are by value, and there value equality is the semantics.
 Two branches that leave the same value leave shells bash cannot tell apart. A follow-up pass ran
-fifteen equal-by-value shapes, each through a branch, a source and a function: a variable re-set
-to the same dangerous value, an array re-set to the same values, `cd` to where the shell already
-is, a byte-identical function redefinition, a byte-identical EXIT handler re-set by a source, and
-a substitution emitting one value twice. Every verdict matched bash.
+fifteen equal-by-value shapes across a branch, a source and a function: a variable re-set to the
+same dangerous value, an array re-set to the same values, `cd` to where the shell already is, a
+byte-identical function redefinition, a byte-identical EXIT handler re-set by a source, and a
+substitution emitting one value twice. Every verdict matched bash.
 
-Exactly two places in the guard compare where equal value does not mean the same thing, and both
-compare by identity:
+At #1536's `1dbc42ff`, exactly two places in the guard compare where equal value does not mean the
+same thing, and both compare by identity:
 
 - The sourced-operands restore: the operand list and the caller's list can hold the same words
   while bash keeps one or the other.
