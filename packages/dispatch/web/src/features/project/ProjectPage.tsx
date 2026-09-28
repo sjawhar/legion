@@ -23,6 +23,7 @@ import { BlockedOnYou } from "../inbox/BlockedOnYou";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { NotFoundPage } from "../shell/NotFoundPage";
+import { closestMatching, roveFocus } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { DocumentList } from "./DocumentList";
@@ -39,6 +40,9 @@ const tabs: readonly TabDefinition<ProjectTab>[] = [
 ];
 
 type IssueView = "list" | "board";
+
+/** What `IssueList` marks each of its rows with. */
+const ROW_SELECTOR = "[data-issue-row]";
 
 export function ProjectPage(): ReactNode {
   const location = useLocation();
@@ -71,6 +75,12 @@ export function ProjectPage(): ReactNode {
     enabled: projectKey !== undefined,
   });
   const hasSource = source.data != null;
+  // The List's rows are `IssueList`'s `[data-issue-row]` elements, so the keys that rove them
+  // belong to this scope beside `v`: the Board keeps its own `j`/`k`/`o`/`Enter` and is the
+  // deeper scope while it shows, and these are inert unless the List is what the reader sees.
+  const showsList = () => route?.kind === "issues" && issueView === "list";
+  const rows = () => [...document.querySelectorAll<HTMLElement>(ROW_SELECTOR)];
+  const focusedRow = () => closestMatching(document.activeElement, ROW_SELECTOR);
   useKeymapScope("project");
   useKeymap("project", [
     {
@@ -79,6 +89,35 @@ export function ProjectPage(): ReactNode {
       label: "Toggle List / Board",
       run: () => setIssueView(issueView === "list" ? "board" : "list"),
       when: () => route?.kind === "issues",
+    },
+    {
+      id: "list-next",
+      keys: "j",
+      label: "Next issue",
+      run: () => roveFocus(rows(), focusedRow(), 1),
+      when: () => showsList() && rows().length > 0,
+    },
+    {
+      id: "list-previous",
+      keys: "k",
+      label: "Previous issue",
+      run: () => roveFocus(rows(), focusedRow(), -1),
+      when: () => showsList() && rows().length > 0,
+    },
+    {
+      id: "list-open",
+      keys: "o",
+      label: "Open issue",
+      run: () => focusedRow()?.querySelector("a")?.click(),
+      when: () => showsList() && focusedRow() !== null,
+    },
+    {
+      // Only from the row itself: Enter on its title link is the browser's own navigation.
+      id: "list-open-enter",
+      keys: "Enter",
+      label: "Open the focused issue",
+      run: () => focusedRow()?.querySelector("a")?.click(),
+      when: () => showsList() && document.activeElement?.matches(ROW_SELECTOR) === true,
     },
   ]);
   useDocumentTitle(

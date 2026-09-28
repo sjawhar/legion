@@ -2,7 +2,7 @@ import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError } from "../../api/client";
-import type { Artifact } from "../../api/types";
+import type { Artifact, IssuePriority } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   dangerText,
@@ -23,6 +23,7 @@ import {
   type IssueTab,
   parseIssuePath,
 } from "../refs/routes";
+import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ChildrenTab } from "./ChildrenTab";
@@ -31,6 +32,7 @@ import { IssueTabs } from "./IssueTabs";
 import { stateForIssue } from "./pins";
 import { SpecToolbar } from "./SpecToolbar";
 import { useIssueDetail } from "./useIssueDetail";
+import { useIssuePriority } from "./useIssuePriority";
 import { type ItemLanding, type ItemRoute, isItemRoute, useItemLanding } from "./useItemLanding";
 
 export function IssuePage(): ReactNode {
@@ -83,6 +85,40 @@ function ItemLandingFailure({
   );
 }
 
+/**
+ * What the `issue` scope acts on. Every target is a control the header or the tablist already
+ * renders, so a key does exactly what a click on it does. Scoping the header lookup to
+ * `issue-header` keeps a child issue's row in the Children tab - it carries the same accessible
+ * names - out of reach.
+ */
+const LABELS_TRIGGER = 'button[aria-label="Edit labels"]';
+const PIN_TOGGLE = 'button[aria-label="Pin issue"], button[aria-label="Unpin issue"]';
+const PRIORITY_SELECT = 'select[aria-label^="Priority of "]';
+const STATUS_SELECT = 'select[aria-label="Status"]';
+
+/** The header control `selector` names, or `null` when it is absent or refuses input (a closed
+ *  issue, a save in flight), so `?` offers a shortcut exactly while its control takes a click. */
+function headerControl(selector: string): HTMLElement | null {
+  const node = document
+    .querySelector("[data-testid=issue-header]")
+    ?.querySelector<HTMLElement>(selector);
+  if (node == null) {
+    return null;
+  }
+  const disabled =
+    (node instanceof HTMLButtonElement || node instanceof HTMLSelectElement) && node.disabled;
+  return disabled ? null : node;
+}
+
+/** The tab chords `IssueTabs` answers, keyed by the tablist button id `components/Tabs.tsx`
+ *  gives each tab. */
+const tabChords: readonly { id: string; keys: string; label: string; tab: IssueTab }[] = [
+  { id: "tab-spec", keys: "t s", label: "Spec tab", tab: "spec" },
+  { id: "tab-conversation", keys: "t c", label: "Conversation tab", tab: "conversation" },
+  { id: "tab-children", keys: "t h", label: "Children tab", tab: "children" },
+  { id: "tab-artifacts", keys: "t a", label: "Artifacts tab", tab: "artifacts" },
+];
+
 function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const {
     activeTab,
@@ -116,6 +152,64 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       setArtifactShowDiff(false);
     }
   }, []);
+
+  // The scope is the issue page itself, and every binding drives the header control or the tab
+  // its label names - the same handler a click reaches, offered while that control is. The
+  // digits go through `useIssuePriority` on the route's key, the query key this page reads, so
+  // a keyed priority lands in the same cache the picker writes.
+  const priority = useIssuePriority(route.key);
+  useKeymapScope("issue");
+  useKeymap("issue", [
+    {
+      id: "status",
+      keys: "s",
+      label: "Focus the status",
+      run: () => headerControl(STATUS_SELECT)?.focus(),
+      when: () => headerControl(STATUS_SELECT) !== null,
+    },
+    {
+      id: "priority",
+      keys: "p",
+      label: "Focus the priority",
+      run: () => headerControl(PRIORITY_SELECT)?.focus(),
+      when: () => headerControl(PRIORITY_SELECT) !== null,
+    },
+    {
+      id: "set-priority",
+      keys: ["0", "1", "2", "3"],
+      label: "Set priority P0–P3",
+      run: (event) => priority.submit(Number(event.key) as IssuePriority),
+      when: () => headerControl(PRIORITY_SELECT) !== null,
+    },
+    {
+      id: "labels",
+      keys: "l",
+      label: "Edit labels",
+      run: () => headerControl(LABELS_TRIGGER)?.click(),
+      when: () => headerControl(LABELS_TRIGGER) !== null,
+    },
+    {
+      id: "title",
+      keys: "e",
+      label: "Edit the title",
+      run: () => headerControl("h1")?.focus(),
+      when: () => headerControl("h1") !== null,
+    },
+    {
+      id: "pin",
+      keys: "Shift+P",
+      label: "Pin or unpin the issue",
+      run: () => headerControl(PIN_TOGGLE)?.click(),
+      when: () => headerControl(PIN_TOGGLE) !== null,
+    },
+    ...tabChords.map(({ id, keys, label, tab }) => ({
+      id,
+      keys,
+      label,
+      run: () => document.getElementById(`issue-${tab}-tab`)?.click(),
+      when: () => document.getElementById(`issue-${tab}-tab`) !== null,
+    })),
+  ]);
 
   useLayoutEffect(() => {
     const top = panelScroll.current[activeTab];

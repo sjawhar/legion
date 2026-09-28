@@ -40,6 +40,7 @@ const SCOPE_LABELS: Record<KeymapScope, string> = {
   dialog: "Dialog",
   global: "Global",
   inbox: "Inbox",
+  issue: "Issue",
   project: "Project",
 };
 
@@ -53,6 +54,7 @@ const SCOPE_ORDER: readonly KeymapScope[] = [
   "project",
   "architecture",
   "board",
+  "issue",
   "inbox",
   "dialog",
 ];

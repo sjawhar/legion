@@ -12,6 +12,7 @@ import {
   borderDefault,
   cardHoverBorder,
   dangerText,
+  focusVisibleRing,
   linkHoverText,
   linkText,
   textMutedOnCanvas,
@@ -27,11 +28,16 @@ import { issueStatuses, statusLabel } from "./board-model";
 import { useIssueFilters } from "./issue-filters";
 import { issueIsUnread, UnreadDot } from "./UnreadDot";
 
+/** A row is a keyboard target for `ProjectPage`'s `j`/`k`/`o`/`Enter`: `tabIndex={-1}` so those
+ *  keys reach it and Tab does not, and `data-issue-row` names it for them, as the board's cards
+ *  do. The focus ring is the row's own, since the row is what focus lands on. */
 function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): ReactNode {
   return (
     <li
       aria-label={`${issue.key} ${issue.title}`}
-      className={`border-t py-3 first:border-t-0 ${borderDefault}`}
+      className={`border-t py-3 outline-none first:border-t-0 focus-visible:ring-2 ${borderDefault} ${focusVisibleRing}`}
+      data-issue-row={issue.key}
+      tabIndex={-1}
     >
       {/* One grid, two arrangements. From `sm` the reference and the timestamp share the first
           line and the metadata runs below. On a phone the reference takes the whole first line

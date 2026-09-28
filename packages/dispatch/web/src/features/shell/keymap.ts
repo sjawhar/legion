@@ -10,7 +10,14 @@ import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
  * letter, `"?"` the character an unshifted or shifted key produces.
  */
 
-export type KeymapScope = "global" | "dialog" | "inbox" | "project" | "architecture" | "board";
+export type KeymapScope =
+  | "global"
+  | "dialog"
+  | "inbox"
+  | "project"
+  | "architecture"
+  | "board"
+  | "issue";
 
 export interface KeyBinding {
   /** Stable identifier, unique within the registering component. */
