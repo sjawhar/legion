@@ -189,16 +189,31 @@ the devbox shim names an inherited `GH_TOKEN` or a fallback personal token the c
 `--input` body it cannot read; the pane uses its grant. Either way the same
 `resolveAcceptedThreads` resolves each unresolved thread whose newest comment was written by the
 account that opened it, begins `Accepted:` after nothing but space, tab, CR or LF, and is submitted
-(one `resolveReviewThread` per thread), prints `resolved <url>` / `left open <url> — newest reply
-by <login> is not an acceptance`, and exits 1 naming the first thread GitHub refuses; any newest
+(one `resolveReviewThread` per thread), prints `resolved <url> — its opener's acceptance` / `left
+open <url> — newest reply by <login> is not an acceptance`, and exits 1 naming the first thread
+GitHub refuses; any newest
 comment that is not the opener's own `Accepted:` — a `Still open:` reply, a reply by another
 account, the opener's own later follow-up, or an `Accepted:` after a no-break space — leaves the
-thread open with exit 0. A newest comment that is a draft in a pending review never counts either
+thread open with exit 0, but for the bot's thread below. A newest comment that is a draft in a pending review never counts either
 (`left open <url> — newest reply by <login> is an unsubmitted draft in a pending review`). GitHub
 shows a draft only to its author, so a caller posting as the opener's account would otherwise
 resolve on an acceptance nobody submitted. For every caller, then, a thread is resolved only when
-its newest submitted comment is the opener's `Accepted:`; a caller's own draft newer than that can
-only make it leave the thread open. A newest comment with no `state` (the query stopped selecting
+its newest submitted comment is the opener's `Accepted:`, or, on a thread a bot account opened
+that is none of Legion's role Apps, the Legion review App's `Accepted:` (`resolution`), printed
+`resolved <url> — the Legion reviewer's acceptance of a bot's thread`. The subject of a finding
+never closes it: the pull request author's reply (`Fixed in <commit>: …`, `Declined: …`) closes
+nothing. GitHub cannot tell a CI bot, which never accepts, from a person whose `gh` is routed to
+an App, so the reviewer adjudicates any such finding and may accept one an App-routed person
+raised; the resolved line says so. Every account the rule compares is its GraphQL type and login
+together, never a login alone: the review App's bare slug is a free username anyone could register
+on a public repository, so the review App's `Accepted:` counts only from a `Bot`, and an opener's
+only from an account of the opener's own type. Which accounts are Legion's, and which is the review App, is
+the daemon's to say: `/gh-token` names each role App's login keyed by App role
+(`legionAppLogins`), leasing each App to read it, and omits them when any cannot be read, logging
+that at most once a minute. The command then counts no thread as a bot's and says so on a bot's
+left-open line, and so does `--gh`, which has no grant. An answer naming some Apps and not others is
+refused as invalid. A caller's own draft
+newer than that can only make it leave the thread open. A newest comment with no `state` (the query stopped selecting
 it), or an unresolved thread with no comments, exits 1 before anything is resolved. The Go CLI's
 `threads resolve` (`packages/daemon-go/cmd/legion/threads.go`) applies the same rule, whitespace,
 pending drafts and both refusals included; `threads_test.go` and `review-threads.test.ts` share
