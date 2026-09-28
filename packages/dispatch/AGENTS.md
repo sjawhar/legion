@@ -436,6 +436,16 @@ reset does not retry. It still waits for any open server transaction before trun
 deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database and `E2E_AGENT_TOKEN` for
 bearer-seeded API calls.
 
+That reset is also the one rig failure that presents as a code failure. Any other process holding
+a non-idle connection to the test database — most often a Dispatch server from an earlier run
+still listening on `DISPATCH_E2E_PORT` — keeps a client backend out of `idle`, so the wait above
+never clears and `resetDatabase` throws in `beforeEach`. Because it throws in the hook, **every**
+spec in the file reports failed, each carrying the `psql … DO $$` wait loop in its message, which
+reads as a catastrophic regression in the change under test. Recognise that shape as the rig: kill
+whatever holds the port and run again. Relatedly, `e2e/playwright.config.ts` reuses an
+already-running harness server only while `CI` is unset; with `CI` set it refuses the port instead
+of reusing it, so a shell that exports `CI` cannot share one harness across runs.
+
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts` alone. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
 while Firefox is unaffected, so that spec is the one that needs a second engine. CI installs
