@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/webhook"
 )
@@ -49,7 +50,7 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 	handler := webhook.GitHubHandler(secret, "@legion", "", client, store)
 	loopCtx, loopCancel := context.WithCancel(ctx)
 	defer loopCancel()
-	cistore.StartSummaryLoop(loopCtx, store, client, 100*time.Millisecond, 20*time.Millisecond, logging.New("e2e"))
+	cistore.StartSummaryLoop(loopCtx, store, client, 100*time.Millisecond, 20*time.Millisecond, metrics.New().NewGauge("held", ""), logging.New("e2e"))
 
 	sub, err := client.Conn.SubscribeSync("notifications.github.example-org.example-repo.pr.42.checks")
 	if err != nil {
@@ -137,7 +138,7 @@ func TestEndToEndACodeHeadSettlesAfterASkippedHandoffHead(t *testing.T) {
 	handler := webhook.GitHubHandler(secret, "@legion", "", client, store)
 	loopCtx, loopCancel := context.WithCancel(ctx)
 	defer loopCancel()
-	cistore.StartSummaryLoop(loopCtx, store, client, 100*time.Millisecond, 20*time.Millisecond, logging.New("e2e"))
+	cistore.StartSummaryLoop(loopCtx, store, client, 100*time.Millisecond, 20*time.Millisecond, metrics.New().NewGauge("held", ""), logging.New("e2e"))
 	sub, err := client.Conn.SubscribeSync("notifications.github.example-org.example-repo.pr.42.checks")
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)

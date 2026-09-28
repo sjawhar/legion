@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/metrics"
 )
 
 // Publisher publishes a rendered summary envelope. *bus.Client satisfies this.
@@ -29,9 +30,11 @@ type Publisher interface {
 // earlier head's, which can settle after the new head arrives. Consumers decide
 // which SHA a settlement stands for. A record a head-gated listener left
 // terminal and unsettled settles only within the handover grace (due,
-// legacyBacklog). The store's CAS makes the loop idempotent across replicas.
-func StartSummaryLoop(ctx context.Context, store *Store, pub Publisher, debounce, tick time.Duration, logger *logging.Logger) {
+// legacyBacklog). held is set each tick to how many such records the tick held
+// back (backlogHeld). The store's CAS makes the loop idempotent across replicas.
+func StartSummaryLoop(ctx context.Context, store *Store, pub Publisher, debounce, tick time.Duration, held *metrics.Gauge, logger *logging.Logger) {
 	t := time.NewTicker(tick)
+	backlog := &backlogHeld{gauge: held}
 	go func() {
 		defer t.Stop()
 		for {
@@ -39,20 +42,41 @@ func StartSummaryLoop(ctx context.Context, store *Store, pub Publisher, debounce
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				runSummaryTick(store, pub, debounce, logger)
+				backlog.observe(runSummaryTick(store, pub, debounce, logger), logger)
 			}
 		}
 	}()
 }
 
-// runSummaryTick performs a single reconcile pass. Split out for testability.
-func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger *logging.Logger) {
+// backlogHeld reports the records a head-gated listener left that the summary loop holds back
+// (heldBack): its gauge is set to each tick's count, and the first tick that holds any logs the
+// count once, at INFO.
+type backlogHeld struct {
+	gauge  *metrics.Gauge
+	logged bool
+}
+
+func (b *backlogHeld) observe(held int, logger *logging.Logger) {
+	b.gauge.Set(int64(held))
+	if held > 0 && !b.logged {
+		b.logged = true
+		logger.Info("checks held back a head-gated listener's unsettled records", slog.Int("records", held))
+	}
+}
+
+// runSummaryTick performs a single reconcile pass and returns how many records it held back
+// (heldBack). Split out for testability.
+func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger *logging.Logger) int {
 	now := time.Now().UnixMilli()
 	staleBefore := now - (2 * debounce).Milliseconds()
+	held := 0
 	for _, cached := range store.List() {
 		if !due(cached, now, debounce) {
 			// Checked before a stale claim is reclaimed: the reclaim's write would stamp a record
 			// without a schema.
+			if heldBack(cached, now, debounce) {
+				held++
+			}
 			continue
 		}
 		key := Key(cached.Owner, cached.Repo, cached.Number, cached.SHA)
@@ -127,6 +151,7 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			logger.Warn("checks mark-settled failed", slog.String("error", err.Error()))
 		}
 	}
+	return held
 }
 
 // settlementEnvelope is the checks envelope that settles state, issued at issuedAt.

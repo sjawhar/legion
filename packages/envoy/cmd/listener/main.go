@@ -559,6 +559,7 @@ func main() {
 	messagesDelivered := met.NewCounter("envoy_messages_delivered_total", "Total message delivery attempts")
 	messagesNAKed := met.NewCounter("envoy_messages_naked_total", "Total messages NAK'd for retry")
 	deliveryDuration := met.NewHistogram("envoy_delivery_duration_seconds", "Duration of message delivery attempts", metrics.DefaultBuckets)
+	ciLegacyHeld := met.NewGauge("envoy_ci_legacy_records_held", "CI records a head-gated listener left unsettled that the last summary tick held back")
 	met.NewGaugeFunc("envoy_active_sessions", "Number of active sessions", func() int64 {
 		d := deps.Load()
 		if d == nil {
@@ -829,7 +830,7 @@ func main() {
 		}
 	}
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
-	cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, logger)
+	cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
 
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
 	// the listener. Terminal watcher/consumer failures are rebuilt immediately;

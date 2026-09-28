@@ -167,11 +167,15 @@ func encodeRecord(st *State) ([]byte, error) {
 
 // handoverGrace bounds how long after its debounce a record without a schema can still settle. A
 // head-gated listener settled its head as soon as the debounce passed, so the only settlement it
-// can still owe is a head whose debounce ran out while no listener was ticking. Production's ECS
-// rollouts take 0.6 to 20.5 s from SIGTERM to ready, once 58.9 s; the on-prem compose deploy stops
-// and then starts, with a 30 s stop grace and two 30 s fail-open cache gates before the first tick
-// (cmd/listener/main.go). Two minutes covers both.
-const handoverGrace = 2 * time.Minute
+// can still owe is a head whose debounce ran out while no listener was ticking. The longest such
+// gap is the on-prem compose deploy, which stops the old listener before starting the new one, on
+// its slowest startup path before the first tick: the 30 s stop grace
+// (deploy/compose/listener.compose.yml:12), the interest and session cache gates of 30 s each
+// (cmd/listener/main.go:668, :689), and the subscribe retry loop (cmd/listener/main.go:750-784),
+// which sleeps attempt*3 s after each of its first nine attempts, 135 s in all. That sums to 225 s,
+// which four minutes covers. Production's ECS rollouts take 0.6 to 20.5 s from SIGTERM to ready,
+// once 58.9 s.
+const handoverGrace = 4 * time.Minute
 
 // legacyBacklog reports whether st is a head-gated listener's leftover: it has no schema and its
 // last event is at least debounce plus handoverGrace before now. A record without a schema settles
@@ -196,6 +200,11 @@ func due(st State, now int64, debounce time.Duration) bool {
 		settlementReady(st) &&
 		now-st.LastEventAt >= debounce.Milliseconds() &&
 		!legacyBacklog(st, now, debounce)
+}
+
+// heldBack reports whether st would be due but for legacyBacklog.
+func heldBack(st State, now int64, debounce time.Duration) bool {
+	return !st.SettledEmitted && settlementReady(st) && legacyBacklog(st, now, debounce)
 }
 
 // UnmarshalJSON maps the retired resettled marker to the durable fact that
