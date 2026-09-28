@@ -21,37 +21,37 @@ for (const [cell, quote, pasted, stored] of [
     "a body cell",
     "delta",
     "First\n\nSecond\n",
-    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaFirst Second four |\n",
+    "| alpha one | beta two |\n| --- | --- |\n| gamma three | deltaFirst Second four |\n",
   ],
   [
     "a header cell",
     "alpha",
     "First\n\nSecond\n",
-    "| alphaFirst Second one | beta two |\n| :--- | :--- |\n| gamma three | delta four |\n",
+    "| alphaFirst Second one | beta two |\n| --- | --- |\n| gamma three | delta four |\n",
   ],
   [
     "a body cell",
     "delta",
     loneAsk,
-    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaWhich one? A B four |\n",
+    "| alpha one | beta two |\n| --- | --- |\n| gamma three | deltaWhich one? A B four |\n",
   ],
   [
     "a header cell",
     "alpha",
     loneAsk,
-    "| alphaWhich one? A B one | beta two |\n| :--- | :--- |\n| gamma three | delta four |\n",
+    "| alphaWhich one? A B one | beta two |\n| --- | --- |\n| gamma three | delta four |\n",
   ],
   [
     "a body cell",
     "delta",
     "First\nSecond",
-    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaFirst Second four |\n",
+    "| alpha one | beta two |\n| --- | --- |\n| gamma three | deltaFirst Second four |\n",
   ],
   [
     "a body cell",
     "delta",
     "More words.",
-    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaMore words. four |\n",
+    "| alpha one | beta two |\n| --- | --- |\n| gamma three | deltaMore words. four |\n",
   ],
 ] as const) {
   test(`${JSON.stringify(pasted)} pasted as plain text into ${cell} stays in that cell`, async ({
@@ -80,12 +80,12 @@ for (const [cell, quote, stored] of [
   [
     "a body cell",
     "delta",
-    "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | delta**Bold** [Link](https://example.com) `Code` *Second* four |\n",
+    "| alpha one | beta two |\n| --- | --- |\n| gamma three | delta**Bold** [Link](https://example.com) `Code` *Second* four |\n",
   ],
   [
     "a header cell",
     "alpha",
-    "| alpha**Bold** [Link](https://example.com) `Code` *Second* one | beta two |\n| :--- | :--- |\n| gamma three | delta four |\n",
+    "| alpha**Bold** [Link](https://example.com) `Code` *Second* one | beta two |\n| --- | --- |\n| gamma three | delta four |\n",
   ],
 ] as const) {
   test(`HTML pasted into ${cell} stays in that cell with its marks`, async ({ browser }) => {
@@ -139,7 +139,7 @@ for (const [name, clipboard, target, stored] of [
 
       await expect
         .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-        .toBe(`| alpha one | beta two |\n| :--- | :--- |\n| gamma three | ${stored} |\n`);
+        .toBe(`| alpha one | beta two |\n| --- | --- |\n| gamma three | ${stored} |\n`);
     } finally {
       await alice.close();
     }
@@ -156,7 +156,7 @@ for (const [cell, quote, stored] of [
   [
     "a body cell",
     "delta",
-    "| alpha one | beta two |  |\n| :--- | :--- | :--- |\n| gamma three | one | two |\n|  | 1 | 2 |\n",
+    "| alpha one | beta two |  |\n| --- | --- | :--- |\n| gamma three | one | two |\n|  | 1 | 2 |\n",
   ],
 ] as const) {
   test(`cells copied from a table and pasted into ${cell} fill the table from there`, async ({
@@ -224,7 +224,7 @@ test("HTML holding a paragraph and a table, pasted into a body cell, stays in th
 
     await expect
       .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-      .toBe("| alpha one | beta two |\n| :--- | :--- |\n| gamma three | deltaIntro c1 c2 four |\n");
+      .toBe("| alpha one | beta two |\n| --- | --- |\n| gamma three | deltaIntro c1 c2 four |\n");
   } finally {
     await alice.close();
   }
@@ -349,7 +349,7 @@ for (const [name, clipboard, target, stored] of [
     "HTML with a line break",
     lineBreakHtml,
     ["alpha one", "gamma three"],
-    "| one two | beta two |\n| :--- | :--- |\n| one two | delta four |\n",
+    "| one two | beta two |\n| :--- | --- |\n| one two | delta four |\n",
   ],
   [
     "HTML with a line break",
@@ -367,7 +367,7 @@ for (const [name, clipboard, target, stored] of [
     "cells holding a line break",
     lineBreakCells,
     "delta",
-    "| alpha one | beta two |  |\n| :--- | :--- | :--- |\n| gamma three | b1 b2 | c |\n",
+    "| alpha one | beta two |  |\n| --- | --- | :--- |\n| gamma three | b1 b2 | c |\n",
   ],
   [
     "cells holding a line break",
@@ -379,7 +379,7 @@ for (const [name, clipboard, target, stored] of [
     "cells holding a line break",
     lineBreakCells,
     ["gamma three", "delta four"],
-    "| alpha one | beta two |\n| :--- | :--- |\n| b1 b2 | c |\n",
+    "| alpha one | beta two |\n| --- | --- |\n| b1 b2 | c |\n",
   ],
   [
     "cells holding a line break",
@@ -431,17 +431,14 @@ for (const [blocks, cellHtml, joined] of cellBlocks) {
   for (const [target, stored] of [
     [
       "delta",
-      `| alpha one | beta two |  |\n| :--- | :--- | :--- |\n| gamma three | ${joined} | z |\n`,
+      `| alpha one | beta two |  |\n| --- | --- | :--- |\n| gamma three | ${joined} | z |\n`,
     ],
     ["alpha", `| ${joined} | z |\n| :--- | :--- |\n| gamma three | delta four |\n`],
     [
       ["delta four", "delta four"],
-      `| alpha one | beta two |\n| :--- | :--- |\n| gamma three | ${joined} |\n`,
+      `| alpha one | beta two |\n| --- | --- |\n| gamma three | ${joined} |\n`,
     ],
-    [
-      ["gamma three", "delta four"],
-      `| alpha one | beta two |\n| :--- | :--- |\n| ${joined} | z |\n`,
-    ],
+    [["gamma three", "delta four"], `| alpha one | beta two |\n| --- | --- |\n| ${joined} | z |\n`],
     [["alpha one", "delta four"], `| ${joined} | z |\n| :--- | :--- |\n| ${joined} | z |\n`],
   ] as const) {
     test(`cells, one holding ${blocks}, pasted ${targetName(target)} keep all of it`, async ({
@@ -507,7 +504,7 @@ for (const [shape, html, cells] of [
 
         await expect
           .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-          .toBe(`| c1 | c2 | c3 |\n| :--- | :--- | :--- |\n${row}\n`);
+          .toBe(`| c1 | c2 | c3 |\n| --- | --- | --- |\n${row}\n`);
       } finally {
         await alice.close();
       }
@@ -530,13 +527,13 @@ for (const [clipboard, target, stored] of [
   [
     emptyFirstRow,
     "delta",
-    "| alpha one | beta two |  |\n| :--- | :--- | :--- |\n| gamma three | a | b |\n",
+    "| alpha one | beta two |  |\n| --- | --- | :--- |\n| gamma three | a | b |\n",
   ],
   [emptyFirstRow, "alpha", "| a | b |\n| :--- | :--- |\n| gamma three | delta four |\n"],
   [
     emptyFirstRow,
     ["gamma three", "delta four"],
-    "| alpha one | beta two |\n| :--- | :--- |\n| a | b |\n",
+    "| alpha one | beta two |\n| --- | --- |\n| a | b |\n",
   ],
   [emptyLastRow, ["alpha one", "delta four"], "| a | b |\n| :--- | :--- |\n| a | b |\n"],
 ] as const) {
@@ -614,7 +611,7 @@ for (const target of [
       await expect
         .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
         .toBe(
-          "| alpha one | beta two |\n| :--- | :--- |\n| gamma three | delta four |\n| gamma three | delta four |\n"
+          "| alpha one | beta two |\n| --- | --- |\n| gamma three | delta four |\n| gamma three | delta four |\n"
         );
     } finally {
       await alice.close();
@@ -639,7 +636,7 @@ test("plain text pasted onto a selection of cells fills them line by line", asyn
 
     await expect
       .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
-      .toBe("| alpha one | beta two |\n| :--- | :--- |\n| First | Second |\n");
+      .toBe("| alpha one | beta two |\n| --- | --- |\n| First | Second |\n");
   } finally {
     await alice.close();
   }

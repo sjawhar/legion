@@ -1,0 +1,316 @@
+package pmdoc
+
+import "strings"
+
+// blanksAfterList is how many blank lines separate list from next, the block after it: as many as
+// spread what they space there (spacingAfterList) when it is spread; none where next can open on
+// the list's next line and one blank line would spread something; and one everywhere else, which
+// spaces nothing. In a quote a list ending in a footnote definition takes the definition's count
+// (blanksAfterDefinitionItem). exact reports whether the count is one of the first two; the one
+// blank line everywhere else spaces nothing, so a list item may write none instead.
+func (r *renderer) blanksAfterList(list, next *Node) (blanks int, exact bool) {
+	if last := list.Children[len(list.Children)-1]; r.definitionEndsItem(last) {
+		return r.blanksAfterDefinitionItem(last, next), true
+	}
+	spaced, spacing := r.spacingAfterList(list, next)
+	if spaced != nil && spaced.Attrs["spread"] == true {
+		return spacing, true
+	}
+	// next can open on the list's next line: a list opens there whatever its first item, and so
+	// does a block that opens after a paragraph as well (opensAfterParagraph), or anything where
+	// the list ends in no paragraph it would continue (endsInParagraph).
+	opensOnNextLine := isList(next) || opensAfterParagraph(next) || !endsInParagraph(list)
+	// One blank line would spread something: what it spaces, where one does (spacingAfterList); in
+	// a typed block in a footnote definition outside quotes, the list's last item, which the
+	// browser editor reads any blank line after the list as spreading (spacedAfter), unless it is
+	// spread already; and inside a list item, a list ending in an empty item, at a blank line after
+	// which goldmark ends the list item around it or a quote the list stands in
+	// (emptyItemEndsOuterItem).
+	frame := r.scope()
+	blankWouldSpread := spaced != nil && spacing == 1 ||
+		frame.footnote != nil && frame.typed != nil && frame.quotes == 0 && spacedAfter(list, false).Attrs["spread"] != true ||
+		frame.items > 0 && endsInEmptyItem(list)
+	if opensOnNextLine && blankWouldSpread {
+		return 0, true
+	}
+	return 1, false
+}
+
+// blanksAfterDefinitionItem is how many blank lines follow item, in a list in a quote, where it
+// ends in a footnote definition, before next, the next item or the block after the list: those
+// lines are the definition's (definitionEndSpreadsItem), so an item spread by none of its own
+// lines takes what spreads it (definitionSpreadBlanks), and none spreads the list. Otherwise it
+// takes none before a quote, a list or a definition and before the next item, and one before
+// anything else, which would continue the definition's paragraph - except after a definition
+// ending in a list no line continues (endsInClosedList), where it takes none.
+func (r *renderer) blanksAfterDefinitionItem(item, next *Node) int {
+	if item.Attrs["spread"] == true && !spreadByItsOwnLines(item, true, r.scope().items > 0) {
+		return definitionSpreadBlanks(next)
+	}
+	if next != nil && quoteListOrDefinition(next) || next == nil || next.Type == "list_item" || endsInClosedList(item.Children[len(item.Children)-1]) {
+		return 0
+	}
+	return 1
+}
+
+// definitionEndsItem reports whether item ends in a footnote definition whose blank lines after it
+// are the definition's: in a quote, outside a footnote definition (blanksAfterDefinitionItem).
+func (r *renderer) definitionEndsItem(item *Node) bool {
+	return r.scope().quotes > 0 && !r.inFootnote() && item.Children[len(item.Children)-1].Type == "footnote_definition"
+}
+
+// definitionSpreadBlanks is how many blank lines after a footnote definition in a quote spread the
+// list item holding it, before next, as the browser editor's parser counts them there, where they
+// are the definition's (definitionBlanksInQuote, definitionEndSpreadsItem): one before a quote, a
+// list or a definition, and two before anything else, the next item and the quote's end included.
+func definitionSpreadBlanks(next *Node) int {
+	if next != nil && quoteListOrDefinition(next) {
+		return 1
+	}
+	return 2
+}
+
+// quoteListOrDefinition reports whether block is a quote, a list or a footnote definition, which
+// the browser editor's parser keeps open across lines by their prefix.
+func quoteListOrDefinition(block *Node) bool {
+	return block.Type == "blockquote" || block.Type == "footnote_definition" || isList(block)
+}
+
+// endsInClosedList reports whether block's last block is a list, directly or at the end of a quote
+// it ends in, that ends in no paragraph a line of text after it would continue (endsInParagraph).
+// In a quote, a blank line after such a list at the end of a footnote definition is the list's,
+// which the reader refuses (footnotedQuoteListSpread), and the block after it opens on the next
+// line without one.
+func endsInClosedList(block *Node) bool {
+	switch last := block.Children[len(block.Children)-1]; {
+	case isList(last):
+		return !endsInParagraph(last)
+	case last.Type == "blockquote":
+		return endsInClosedList(last)
+	default:
+		return false
+	}
+}
+
+// spacingAfterList is what the browser editor's parser reads blank lines after list, before next,
+// as spacing (spacedAfter), and how many it takes, where the lines carry a quote's or a footnote
+// definition's prefix; nil where they space nothing, or what they space is spread without them
+// (spreadByItsOwnLines). In a quote they space the list, one before a quote or a list (or
+// anything, in a typed block inside the quote) and two before anything else; in a footnote
+// definition, its last item, one before a quote or a list; in both, the last item, one before a
+// quote or a list and two before anything else, which with the definition inside the quote space
+// the list instead.
+func (r *renderer) spacingAfterList(list, next *Node) (*Node, int) {
+	quotes := r.scope().quotes
+	container := quoteListOrDefinition(next)
+	inTyped := r.inQuotedTypedBlock()
+	var spaced *Node
+	blanks := 1
+	switch {
+	case quotes > 0 && r.inFootnote() && container:
+		spaced = spacedAfter(list, false)
+	case quotes > 0 && r.inFootnote():
+		// The quote stands inside the definition when the definition's lines carry fewer quote
+		// markers than the list's.
+		spaced, blanks = spacedAfter(list, quotes == r.scope().footnote.quotes), 2
+	case quotes > 0 && (container || inTyped):
+		spaced = spacedAfter(list, true)
+		// In a typed block inside the quote, a quote the last item ends in takes one blank line.
+		if last := spaced.Children[len(spaced.Children)-1]; inTyped && last.Children[len(last.Children)-1].Type == "blockquote" {
+			blanks = 2
+		}
+	case quotes > 0:
+		spaced, blanks = spacedAfter(list, true), 2
+	case r.inFootnote() && container:
+		spaced = spacedAfter(list, false)
+	}
+	if spaced == nil || spreadByItsOwnLines(spaced, quotes > 0 && !r.inFootnote(), r.scope().items > 0) {
+		return nil, 0
+	}
+	return spaced, blanks
+}
+
+// inQuotedTypedBlock reports whether the blocks being written stand in a quote and in a typed block
+// that stands inside a quote, whether their own quote holds the typed block or stands inside it.
+func (r *renderer) inQuotedTypedBlock() bool {
+	frame := r.scope()
+	return frame.quotes > 0 && frame.typed != nil && frame.typed.quotes > 0
+}
+
+// spreadByItsOwnLines reports whether a spread list or list item is written spread without a blank
+// line after it: an item by a blank line between two of the blocks it writes, which an empty first
+// paragraph is not (opensWithUnwrittenParagraph), or, where the one block it writes is a footnote
+// definition, by one the definition writes between its blocks after a block that is neither a list
+// nor a definition (spreadElsewhere); and a list in a quote outside footnote definitions (quoted)
+// by one after an item that neither ends in a list nor, in a list item (nested), is empty
+// (writesBlankAfterItem).
+func spreadByItsOwnLines(spaced *Node, quoted, nested bool) bool {
+	if spaced.Attrs["spread"] != true {
+		return false
+	}
+	if spaced.Type == "list_item" {
+		written := spaced.Children
+		if opensWithUnwrittenParagraph(spaced) {
+			written = written[1:]
+		}
+		if len(written) == 1 && written[0].Type == "footnote_definition" {
+			return spreadElsewhere(written[0].Children)
+		}
+		return len(written) > 1
+	}
+	if !quoted {
+		return false
+	}
+	for _, item := range spaced.Children[:len(spaced.Children)-1] {
+		if !isList(item.Children[len(item.Children)-1]) && !(nested && holdsOnlyAnEmptyParagraph(item)) {
+			return true
+		}
+	}
+	return false
+}
+
+// spacedAfter is what the browser editor's parser spaces by blank lines after list: in a quote, the
+// list, and in a footnote definition, its last item - or, when the last item ends in a list, what
+// that list's blank lines space.
+func spacedAfter(list *Node, quoted bool) *Node {
+	last := list.Children[len(list.Children)-1]
+	switch inner := last.Children[len(last.Children)-1]; {
+	case isList(inner):
+		return spacedAfter(inner, quoted)
+	case quoted && inner.Type == "footnote_definition":
+		// The blank lines after an item ending in a footnote definition are the definition's,
+		// and spread the item (definitionEndSpreadsItem).
+		return last
+	case quoted:
+		return list
+	default:
+		return last
+	}
+}
+
+// blanksEndingQuotedList writes the two blank lines that, at the end of a quote or of a typed block
+// inside one (atFence), spread the list its blocks end in, where nothing else does - three before a
+// typed block's fence where the list's last item ends in a quote, which takes one of them.
+func (r *renderer) blanksEndingQuotedList(blocks []*Node, prefix string, atFence bool) {
+	last := blocks[len(blocks)-1]
+	if !isList(last) || r.inFootnote() || r.scope().quotes == 0 {
+		return
+	}
+	if spaced := spacedAfter(last, true); spaced.Attrs["spread"] == true && !spreadByItsOwnLines(spaced, true, r.scope().items > 0) {
+		blanks := 2
+		if item := spaced.Children[len(spaced.Children)-1]; atFence && r.inQuotedTypedBlock() && item.Children[len(item.Children)-1].Type == "blockquote" {
+			blanks = 3
+		}
+		r.writeSyntax(strings.Repeat("\n"+strings.TrimRight(prefix, " "), blanks))
+	}
+}
+
+// endsInParagraph reports whether list's last item ends in a paragraph holding text, directly or in
+// a list or quote it ends in, which a line of text after the list would continue.
+func endsInParagraph(list *Node) bool {
+	last := list.Children[len(list.Children)-1]
+	return blockEndsInParagraph(last.Children[len(last.Children)-1])
+}
+
+// blockEndsInParagraph reports whether block is a paragraph holding text, or a list or quote whose
+// last block ends in one.
+func blockEndsInParagraph(block *Node) bool {
+	switch {
+	case isList(block):
+		return endsInParagraph(block)
+	case block.Type == "blockquote":
+		return blockEndsInParagraph(block.Children[len(block.Children)-1])
+	default:
+		return block.Type == "paragraph" && len(block.Children) > 0
+	}
+}
+
+// endsInEmptyItem reports whether list's last item holds only an empty paragraph.
+func endsInEmptyItem(list *Node) bool {
+	return holdsOnlyAnEmptyParagraph(list.Children[len(list.Children)-1])
+}
+
+func isList(n *Node) bool {
+	return n.Type == "bullet_list" || n.Type == "ordered_list"
+}
+
+// opensAfterParagraph reports whether block opens on the line after a paragraph without a blank
+// line: a quote, a code block (written fenced), a heading written on one line, a rule, a typed
+// block, a footnote definition, a bullet list, or an ordered list starting at one, whose first item
+// holds something (an empty item interrupts no paragraph, emptyItemGuard).
+func opensAfterParagraph(block *Node) bool {
+	if _, typed := typedBlock(block.Type); typed {
+		return true
+	}
+	switch block.Type {
+	case "blockquote", "code_block", "hr", "footnote_definition":
+		return true
+	case "heading":
+		return !holdsHardBreak(block.Children)
+	case "bullet_list", "ordered_list":
+		if block.Type == "ordered_list" && int(num(block.Attrs["order"], 1)) != 1 {
+			return false
+		}
+		return !holdsOnlyAnEmptyParagraph(block.Children[0])
+	}
+	return false
+}
+
+// opensWithListThatCannotInterrupt reports whether block is a quote whose first block, or the
+// first block of a quote it opens with, is a list whose first item cannot interrupt a paragraph
+// (opensAfterParagraph).
+func opensWithListThatCannotInterrupt(block *Node) bool {
+	for block.Type == "blockquote" && len(block.Children) > 0 {
+		block = block.Children[0]
+		if isList(block) {
+			return !opensAfterParagraph(block)
+		}
+	}
+	return false
+}
+
+// writesBlankAfterItem reports whether blank lines follow item, before the next item of list. The
+// browser editor's parser reads them as spreading the list, except where the lines carry a quote's
+// or a footnote definition's prefix: in a footnote definition, a quote around it or inside it
+// included, they spread the item, and are written only where its own lines do not already
+// (spreadByItsOwnLines); in a quote blank lines after an item that ends in a list are that list's,
+// two of them spreading the list it ends in (spacedAfter).
+func (r *renderer) writesBlankAfterItem(list, item *Node) bool {
+	quoted := r.scope().quotes > 0
+	switch last := item.Children[len(item.Children)-1]; {
+	case r.inFootnote() && quoted && isList(last):
+		// The blank lines are the list's, spacing what they would after its last item there.
+		return spacedAfter(last, r.scope().quotes == r.scope().footnote.quotes).Attrs["spread"] == true
+	case r.inFootnote():
+		return item.Attrs["spread"] == true && !spreadByItsOwnLines(item, false, false)
+	case quoted && isList(last):
+		// A list spread by its own lines needs none.
+		spaced := spacedAfter(last, true)
+		return spaced.Attrs["spread"] == true && !spreadByItsOwnLines(spaced, true, true)
+	case quoted && r.scope().items > 0 && holdsOnlyAnEmptyParagraph(item):
+		// Goldmark ends the list item around this list at a blank line after an empty item
+		// (emptyItemEndsOuterItem); in a quote, blank lines after another item or after the list
+		// spread it instead (spreadByItsOwnLines).
+		return false
+	case r.scope().items > 0 && holdsOnlyAnEmptyParagraph(item) && spreadAtAnotherItem(list):
+		// Goldmark ends the list item around this list at a blank line after an empty item
+		// (emptyItemEndsOuterItem), and one after another item spreads the list as well.
+		return false
+	default:
+		return list.Attrs["spread"] == true
+	}
+}
+
+// spreadAtAnotherItem reports whether list is spread and one of its items but the last is neither
+// empty nor ends in a list, so that blank lines after it spread the list.
+func spreadAtAnotherItem(list *Node) bool {
+	if list.Attrs["spread"] != true {
+		return false
+	}
+	for _, item := range list.Children[:len(list.Children)-1] {
+		if !holdsOnlyAnEmptyParagraph(item) && !isList(item.Children[len(item.Children)-1]) {
+			return true
+		}
+	}
+	return false
+}

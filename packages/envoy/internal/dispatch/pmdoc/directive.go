@@ -1,8 +1,10 @@
 package pmdoc
 
 import (
+	"bytes"
 	"fmt"
 	"html"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -23,10 +25,17 @@ type typedDirective struct {
 	Closed bool
 	// closer is where the line of the fence that closed the typed block starts, once Closed.
 	closer int
-	indent int
-	// fence is the number of colons the directive opened with; only a line of exactly as many
+	// fence is the number of colons the directive opened with; only a line of at least as many
 	// closes it, so a typed block written with a longer fence holds one written with a shorter.
 	fence int
+	// indent is how many columns past its container's lines the opening line's text starts. The
+	// browser editor's parser takes up to that many columns of indentation off each of the typed
+	// block's lines, as off a fenced code block's, so a typed block nested inside it, and every
+	// other block, is read from there.
+	indent int
+	// values is the typed block's attributes, defaults included, as the schema reads them, once
+	// the block passes its refusals (typedDirectiveRefusal).
+	values Attrs
 }
 
 func (n *typedDirective) Dump(source []byte, level int) {
@@ -67,7 +76,7 @@ func (p *typedDirectiveParser) Open(_ ast.Node, reader gmtext.Reader, pc parser.
 		return nil, parser.NoChildren
 	}
 	reader.AdvanceToEOL()
-	return &typedDirective{Name: name, Attrs: attrs, indent: indent, fence: colonRun(line[offset:])}, parser.HasChildren
+	return &typedDirective{Name: name, Attrs: attrs, fence: colonRun(line[offset:]), indent: indent}, parser.HasChildren
 }
 
 func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ parser.Context) parser.State {
@@ -77,14 +86,18 @@ func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ p
 	}
 	line, segment := reader.PeekLine()
 	indent, offset := util.IndentWidth(line, reader.LineOffset())
-	// A fence closes the typed block when it is indented no further than the opener. The opener
-	// of a typed block that begins a footnote definition stands after the definition's `]: `, one
-	// column past where the definition's later lines start.
-	if indent <= directive.indent && offset < len(line) && fenceColons(string(line[offset:])) == directive.fence {
+	// A line of at least the fence's colons indented less than four columns past where the typed
+	// block's lines start closes it, as the browser editor's parser closes it, whatever block inside
+	// it the line would otherwise continue.
+	if indent < 4 && offset < len(line) && fenceColons(string(line[offset:])) >= directive.fence {
 		directive.Closed = true
 		directive.closer = segment.Start
 		reader.AdvanceToEOL()
 		return parser.Close
+	}
+	if strip := min(indent, directive.indent); strip > 0 && offset < len(line) {
+		pos, padding := util.IndentPosition(line, reader.LineOffset(), strip)
+		reader.AdvanceAndSetPadding(pos, padding)
 	}
 	return parser.Continue | parser.HasChildren
 }
@@ -98,9 +111,8 @@ func (p *typedDirectiveParser) Close(_ ast.Node, _ gmtext.Reader, _ parser.Conte
 // advances to the next multiple of four from the column it stands at, so in a typed block two
 // columns in, a tab reaches only two past it. A line in a blockquote begins with its `>` and closes
 // nothing outside it. Such a line is a line of code, or the fence of a typed block nested where its
-// fence is written so. That parser closes n at such a line of at least as many colons as n's fence,
-// and this one at a line of exactly as many indented no further than n's opener, so a fence longer
-// than every such line reads the same in both (typedFence).
+// fence is written so. Both parsers close n at such a line of at least as many colons as n's
+// fence, so a fence longer than every such line keeps them in n (typedFence).
 func closingColons(n *Node, column int) int {
 	longest := 0
 	var visit func(node *Node, at int)
@@ -287,12 +299,25 @@ func parseDirectiveAttributes(value string) (Attrs, error) {
 			for offset < len(value) && directiveNameByte(value[offset]) {
 				offset++
 			}
-			if start == offset || offset == len(value) || value[offset] != '=' {
+			if start == offset {
 				return nil, fmt.Errorf("expected key=\"value\"")
 			}
 			name := value[start:offset]
+			if attrs[name] != nil {
+				return nil, fmt.Errorf("repeated attribute %q", name)
+			}
+			// A name alone is an empty value: the browser editor writes an attribute holding
+			// the empty string so (`title`), and reads it back as `title=""`. It reads a name up
+			// to a space, so a tab after one is part of it.
+			if offset == len(value) || value[offset] == ' ' {
+				attrs[name] = ""
+				continue
+			}
+			if value[offset] != '=' {
+				return nil, fmt.Errorf("expected key=\"value\"")
+			}
 			offset++
-			if offset == len(value) || value[offset] != '"' || attrs[name] != nil {
+			if offset == len(value) || value[offset] != '"' {
 				return nil, fmt.Errorf("expected quoted value for %q", name)
 			}
 			offset++
@@ -341,13 +366,67 @@ func directiveNameByte(char byte) bool {
 	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-'
 }
 
+// paragraphDirectiveReason is the browser editor's refusal of a paragraph a line of which opens
+// with directive syntax: that parser takes the paragraph's source from where its text starts to
+// where it ends, and each line of it with the whitespace it opens with trimmed, so a line
+// continuing the paragraph refuses it however far in it stands, while a quote's marker opening the
+// line keeps it text. A line that could open a block is refused as it is read
+// (unsupportedDirectiveParser).
+func paragraphDirectiveReason(lines *gmtext.Segments, source []byte) (string, bool) {
+	if lines.Len() == 0 {
+		return "", false
+	}
+	text := source[lines.At(0).Start:lines.At(lines.Len()-1).Stop]
+	for len(text) > 0 {
+		line := text
+		if end := bytes.IndexByte(text, '\n'); end >= 0 {
+			line, text = text[:end], text[end+1:]
+		} else {
+			text = nil
+		}
+		if reason, ok := paragraphLineDirectiveReason(string(bytes.TrimLeftFunc(line, jsWhitespace))); ok {
+			return reason, true
+		}
+	}
+	return "", false
+}
+
+// jsWhitespace reports whether JavaScript's String.prototype.trimStart takes char off: its white
+// space and line terminators.
+func jsWhitespace(char rune) bool {
+	switch char {
+	case '\t', '\n', '\v', '\f', '\r', '\ufeff', '\u2028', '\u2029':
+		return true
+	}
+	return unicode.Is(unicode.Zs, char)
+}
+
+// paragraphLineDirectiveReason is that parser's refusal of a line of a paragraph opening with a
+// colon: `:::` alone and a three-colon typed block opening (`:::name{…}`) pass, and any other line
+// opening with three colons is refused, a four-colon opening a block would open with included.
+func paragraphLineDirectiveReason(line string) (string, bool) {
+	if strings.HasPrefix(line, ":::") {
+		if line == ":::" || paragraphTypedOpening.MatchString(line) {
+			return "", false
+		}
+		return malformedDirectiveReason, true
+	}
+	return unsupportedDirectiveReason(line)
+}
+
+// paragraphTypedOpening is the browser editor's pattern of a typed block's opening line; `.` there
+// matches no line terminator of JavaScript's.
+var paragraphTypedOpening = regexp.MustCompile(`^:::[A-Za-z0-9_-]+\{[^\x{2028}\x{2029}]*\}$`)
+
+const malformedDirectiveReason = "typed block directives use :::name{...}; Pandoc fenced divs and malformed directives are not supported"
+
 func unsupportedDirectiveReason(line string) (string, bool) {
 	if strings.HasPrefix(line, ":::") {
 		if line == ":::" {
 			return "", false
 		}
 		if _, _, ok := parseTypedDirectiveOpen(line); !ok {
-			return "typed block directives use :::name{...}; Pandoc fenced divs and malformed directives are not supported", true
+			return malformedDirectiveReason, true
 		}
 		return "", false
 	}

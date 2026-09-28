@@ -144,7 +144,8 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 		return fmt.Errorf("%w: Yjs element %q does not match %q", ErrSchema, element.NodeName, want.Type)
 	}
 	current := Attrs(element.GetAttributeValues())
-	for key, value := range want.Attrs {
+	wantAttrs := liveAttrs(want)
+	for key, value := range wantAttrs {
 		if value == nil {
 			if _, ok := current[key]; ok {
 				element.DeleteAttribute(txn, key)
@@ -156,11 +157,48 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 		}
 	}
 	for key := range current {
-		if value, ok := want.Attrs[key]; !ok || value == nil {
+		if value, ok := wantAttrs[key]; !ok || value == nil {
 			element.DeleteAttribute(txn, key)
 		}
 	}
 	return updateChildren(txn, &element.YXmlFragment, want.Children)
+}
+
+// liveNulls is, by node type, the value the live document holds for an attribute whose tree value
+// is null, where the browser editor's schema gives an absent attribute a default other than null.
+// That editor builds each node it loads with its schema, so an absent attribute takes the default,
+// and it writes the default back into the live document for any node it edits. A table cell with
+// no alignment holds "none": the default, left, would turn an unaligned column left-aligned at its
+// first edit, while "none" it keeps and writes unaligned, as the tree's null is written. A code
+// block with no language and an image with no title hold "", that editor's default and its value
+// for none.
+// readElement reads each back as null (treeAttrs).
+var liveNulls = map[string]map[string]any{
+	"table_cell":   {"alignment": "none"},
+	"table_header": {"alignment": "none"},
+	"code_block":   {"language": ""},
+	"image":        {"title": ""},
+}
+
+// liveAttrs is node's attributes as the live document holds them (liveNulls).
+func liveAttrs(node *Node) Attrs {
+	var attrs Attrs
+	for name, value := range liveNulls[node.Type] {
+		if node.Attrs[name] != nil {
+			continue
+		}
+		if attrs == nil {
+			attrs = make(Attrs, len(node.Attrs)+1)
+			for key, current := range node.Attrs {
+				attrs[key] = current
+			}
+		}
+		attrs[name] = value
+	}
+	if attrs == nil {
+		return node.Attrs
+	}
+	return attrs
 }
 
 func insertPChild(txn *crdt.Transaction, frag *crdt.YXmlFragment, index int, child normalizedChild) error {
@@ -202,7 +240,7 @@ func createTypeFromElementNode(txn *crdt.Transaction, node *Node) (*crdt.YXmlEle
 		return nil, fmt.Errorf("%w: text is not an element", ErrSchema)
 	}
 	element := crdt.NewYXmlElement(node.Type)
-	for key, value := range node.Attrs {
+	for key, value := range liveAttrs(node) {
 		if value != nil && key != "ychange" {
 			element.SetAttributeValue(txn, key, yjsAttributeValue(value))
 		}
@@ -227,7 +265,7 @@ func equalYChildPChild(ychild any, pchild normalizedChild) bool {
 }
 
 func equalYElementPNode(element *crdt.YXmlElement, node *Node) bool {
-	if element.NodeName != node.Type || !attrsEqual(Attrs(element.GetAttributeValues()), node.Attrs) {
+	if element.NodeName != node.Type || !attrsEqual(treeAttrs(element.NodeName, element.GetAttributeValues()), node.Attrs) {
 		return false
 	}
 	children := element.Children()

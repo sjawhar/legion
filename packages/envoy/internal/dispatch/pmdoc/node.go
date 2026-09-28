@@ -161,6 +161,28 @@ func validateNode(n *Node) error {
 	return nil
 }
 
+// undeclaredAttributes is the refusal for a typed block holding attributes its schema does not
+// declare, naming every one of them in sorted order, or nil when it declares them all.
+func undeclaredAttributes(typeName string, attrs Attrs, declared map[string]BlockAttributeSchema) error {
+	var names []string
+	for name := range attrs {
+		if _, ok := declared[name]; !ok && name != BlockIDAttr {
+			names = append(names, name)
+		}
+	}
+	switch len(names) {
+	case 0:
+		return nil
+	case 1:
+		return fmt.Errorf("%w: typed block %q does not declare attribute %q", ErrSchema, typeName, names[0])
+	}
+	sort.Strings(names)
+	for index, name := range names {
+		names[index] = fmt.Sprintf("%q", name)
+	}
+	return fmt.Errorf("%w: typed block %q does not declare attributes %s", ErrSchema, typeName, strings.Join(names, ", "))
+}
+
 func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 	switch typ.Content {
 	case BlockContentParagraphs:
@@ -188,6 +210,9 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 	default:
 		return fmt.Errorf("%w: typed block %q has unsupported content rule %q", ErrSchema, n.Type, typ.Content)
 	}
+	if err := undeclaredAttributes(n.Type, n.Attrs, typ.Attributes); err != nil {
+		return err
+	}
 	for name, value := range n.Attrs {
 		if name == BlockIDAttr {
 			if _, ok := value.(string); !ok {
@@ -195,10 +220,7 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 			}
 			continue
 		}
-		definition, ok := typ.Attributes[name]
-		if !ok {
-			return fmt.Errorf("%w: typed block %q does not declare attribute %q", ErrSchema, n.Type, name)
-		}
+		definition := typ.Attributes[name]
 		if value == nil && definition.Default == nil {
 			continue
 		}

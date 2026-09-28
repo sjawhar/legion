@@ -59,6 +59,25 @@ A block rewritten in place under its own id is one block, and neither the halves
 splice splits nor a repeat the live document already carries (a browser write can leave one until
 settlement repairs it) refuse anything. Only a typed block's markdown can name its id.
 
+Markdown a caller writes is stored as its rendering, so a write whose rendering reads back as
+another document is refused, naming what reads back (`pmdoc.RefuseMisreadDocument` for a whole
+document, `pmdoc.RefuseMisreadWrite` over the accept path's `pmdoc.NewMisread` for an insert):
+`ParseForWrite` reads back the whole document a spec, an upload or a version writes
+(`400 INVALID_MARKDOWN`). An `insert` takes one of two paths. A fragment of only table rows
+anchored in a table's row goes to `pmdoc.InsertTableRows` (`docs/edits.go:865`), which returns
+before any read-back, so a table-row insert is not read back, and it can leave a live document
+its own markdown reads back otherwise: a row inserted under an aligned column is stored without
+alignment and reads back with the column's, and a row whose cells the upload path refuses for
+reading back otherwise (a fused emphasis run, a link inside a link) is stored as it renders.
+Every other insert is spliced and read back on the document it leaves against the one it started
+from, as an accept is (`400 INVALID_OP` on `markdown`). The reading rules refuse every shape they
+know first, so this refusal names one none of them reads, and each is logged (`pmdoc: refused a
+write whose markdown reads back otherwise`). Wherever a check reads a write back - here, and in an
+accept's, a replace's and an ask edit's checks - only a refusal (`pmdoc.ErrSchema`) is a verdict;
+any other error, a panic (`pmdoc.ErrPanic`) among them, is `pmdoc`'s own and answers `500`. A tree
+a browser edit makes is not checked, so its rendering can still fail to read back when it is
+uploaded again.
+
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
 after; the one measure the room's update observer, `updateChangesMarkdown`, a transactional live
@@ -158,24 +177,24 @@ fills legacy anchors only when their cached quote has one current match.
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
 block a `replace`, like an accepted suggestion, writes `with` as the code's literal text
-(`codeReplacement`), and none of the rules below apply. Markdown cannot carry two things there: line
-breaks at the end of the code's text and a line holding only whitespace in a list item's code read
-back without them, and an accepted suggestion writes its code as it reads back (`acceptedCode`):
-in a list item's code, a line it leaves holding only spaces and tabs, CommonMark's blank line, is
-written empty, the spaces and tabs that line keeps around it included, while any other character,
-a no-break space or a form feed among them, is kept, as both readers keep it; then, where only
-line breaks follow it, its text loses the line breaks that end it. A suggestion can run past the
-code into the blocks after it. One that takes all of the text of the textblock it ends in leaves
-nothing after its own text, as at the code's end, so both rules apply. One that ends inside that
-text is written as sent, and the rest of that text joins the code after it, so a line of spaces
-and tabs it leaves in a list item's code reads back empty and the accept is refused. Code on other
-lines stays as it was. An accept whose code changes how a block around it reads back is refused,
-advising rejecting the suggestion (`refuseAcceptedCodeThatReshapes`). It names the typed block
-holding the code when the document-level block that reads back otherwise is the one holding the
-code, and otherwise names that block, such as the list of a task item the suggestion empties ahead
-of its nested list. The edit route's
-refusal of the same shape advises moving the code out of the typed block instead, and a reject in
-code, like any reject, is not read back. A line of colons in code inside a typed block is kept: the browser editor's
+(`codeReplacement`), and none of the rules below apply. Markdown cannot carry line breaks at the
+end of the code's text, which read back without them, and an accepted suggestion writes its code
+as it reads back (`acceptedCode`): where only line breaks follow it, its text loses the line breaks
+that end it. A line holding only spaces and tabs is written as sent: a list item takes no more
+than its own columns from a blank line, as the browser editor's parser does (`listItemColumns`),
+so both readers keep what the line holds past them. A footnote definition takes none, and a blank
+code line inside one is written without the definition's indentation (`writeCodeLinePrefix`). A
+suggestion can run past the code into the blocks after it. One that takes all of the text of the
+textblock it ends in leaves nothing after its own text, as at the code's end, so the same rule
+applies. One that ends inside that text is written as sent, and the rest of that text joins the
+code after it. Code on other lines stays as it was. An accept whose code changes how a block
+around it reads back is refused, advising rejecting the suggestion
+(`refuseAcceptedCodeThatReshapes`). It names the typed block holding the code when the
+document-level block that reads back otherwise is the one holding the code, and otherwise names
+that block, such as the list of a task item the suggestion empties ahead of its nested list. The
+edit route's refusal of the same shape advises moving the code out of the typed block instead,
+and a reject in code, like any reject, is not read back. A line of colons in code inside a typed
+block is kept: the browser editor's
 parser ends a typed block at a line of at least its fence's colons, with spaces and tabs around
 them, starting less than four columns
 past where the typed block's own lines start on the written line, even inside fenced code -
@@ -224,7 +243,7 @@ blocks. Outside an ask it then runs, over every document-level block it changed,
 checked by that block's own `Splice` content rule, and `refuseBrokenAsks` checks an ask's
 `paragraph+ bullet_list?` rule. Last, the whole document is read back (`refuseMisreadAccept`:
 `pmdoc.NewMisread`), each document-level block beside the ones around it and with its attributes
-and text, a column without alignment expected back left as the renderer writes it: an accept is
+and text, a column without alignment expected back unaligned as the renderer writes it: an accept is
 refused where a block now reads back otherwise that did not before, such as a task item emptied to
 `- [ ]`, which reads back as a plain item. Each block that reads back otherwise is found as far
 down as its markdown still pairs, and one that already read back otherwise the same way before,
@@ -273,9 +292,8 @@ break is itself `INVALID_OP` when the matched textblock is a heading or a table 
 line break inside a code span or inline HTML there ends it too, and the replace is refused because
 the block would read back as blocks of another shape (`refuseReshapedReplacement`). A bare
 newline is a soft break, which renders as a space and reaches no line start; an ordered marker
-whose start number is not 1 cannot interrupt a paragraph, and leading zeros do not change that
-number, so `01.` and `001)` are refused with `1.`, while `02.`, `10.` and a run of zeros past the
-nine digits a start number may have (`0000000001.`) are not; and marked text opens with its
+interrupts a paragraph only numbered a lone `1`, as the browser editor's parser reads it, so `1.`
+and `1)` are refused, while `01.`, `001)`, `02.` and `10.` are not; and marked text opens with its
 mark's delimiter, not the marker — none of the three is refused. A batch that leaves the document's
 semantic identity unchanged — `nodeToken` over the whole tree, inline marks included — mints no
 version, named or not, and the response carries `changed: false` with `unchanged_ops` naming each
@@ -401,8 +419,12 @@ since the same accept is refused every time.
 the table in place. Row `0` is the header; deleting it promotes the first body row into the header,
 including its cells' alignment. An index is required. A missing, non-integer, negative, or out-of-range
 index is `INVALID_OP` on `index`, naming the supplied value and the table's actual row and column dimensions; no operation
-partially mutates a table. Parsing canonicalizes a short ragged Markdown row by padding its missing
-cells, so column deletion operates on that complete canonical representation and leaves every
+partially mutates a table. Parsing pads a short row to the header's width, as the browser editor's
+table plugin does on load: Milkdown's gfm preset installs prosemirror-tables' `tableEditing`, whose
+`fixTables` pads a table a transaction brings in (verified on an `EditorState`; that the browser
+loads by a transaction is y-prosemirror's sync, not checked in a browser). The headless engine runs
+no plugins and keeps the short row. Each padded cell takes its column's alignment, as its rendering
+reads back, so column deletion operates on that complete representation and leaves every
 non-selected cell intact. Deleting the last remaining body row or any row's last remaining column
 is refused, retaining the table block. Table `references` from `GET /api/v1/artifacts/{id}/blocks`
 aggregate anchors pinned to descendant cells. A row or column deletion that would remove an open
@@ -680,20 +702,49 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
 exists, and refuses to run without `dispatch.server_url`.
 
+The live document holds the tree as the browser editor holds it (`pmdoc.Update`, `pmdoc.Read`).
+That editor builds each node it loads with its schema, so an attribute the live document lacks
+takes the schema's default, and it writes a node's attributes back when the node is edited. Where
+the tree's null is not that default, the live document holds a value the editor keeps instead
+(`liveNulls`): `"none"` for a table cell with no alignment, whose default, left, would left-align
+the column at its first edit, and `""` for a code block with no language and an image with no
+title. A read gives each back as null. `pmdoc/gen/decode.ts` decodes Go-written bytes into the node
+the browser holds, schema defaults applied, so `TestUpdateFromEmptyEqualsAuthoredByBrowser` fails
+for an attribute of this kind `liveNulls` lacks. It cannot tell an absent attribute from the
+editor's value, since the editor shows its default for both; `TestNullAttributesSurviveABrowserEdit`
+edits a node of each kind through the editor's sync plugin (`pmdoc/gen/edit-blocks.ts`), which
+writes the editor's values back, and requires the read to give each back as null.
+
+A document `pmdoc` refuses names the first refused block it writes. One walk of the tree goldmark
+reads decides every block refusal in document order before conversion (`refuseBlocks`), and it
+refuses every block kind conversion does not convert (`convertedBlocks`), a link reference
+definition among them, so conversion refuses no block; `TestParseNamesTheFirstRefusedBlock` holds
+that order for every pair of block refusals. Spacing refusals (`browserListSpacing`) come before
+the walk, and inline ones, such as a footnote reference, in conversion after it.
+
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive
-syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of exactly as
-many colons as the opener. The browser editor's parser closes it at a line of at least as many
-colons indented less than four columns, even inside a fenced code block it holds, so the renderer
-writes three colons, or one more than the longest such line inside the typed block
-(`closingColons`): a nested typed block's fence, or a line of code, measured in the written line's
+syntax: `:::name{#block-id key="value"}` followed by block children and a closing line of colons.
+Both parsers close it at a line of at least as many colons as the opener, indented less than four
+columns past where its lines start, whatever block inside it the line would otherwise continue - a
+paragraph, a list item or a fenced code block - so the renderer escapes a lone `:::` in text
+written within that reach of a typed block fenced with three colons, and at a typed block's own
+prefix whatever its fence, and writes three colons, or one more than the longest such line inside
+the typed block (`closingColons`): a nested typed block's fence, or a line of code, measured in the written line's
 columns - the width of the list markers and `> ` around it, and a tab advancing to the next
 multiple of four from the column it stands at. A callout nested directly in a callout is written `::::callout{…}` …
 `::::`, as the browser editor writes it. There is
 no whitespace between `name` and `{`; Pandoc fenced divs, leaf directives, and text directives are
-invalid outside code blocks. An unclosed typed block at document level is rejected, while one nested
-inside another block runs to that parent’s end.
+invalid outside code blocks: a line opening with one is refused where it could open a block, and in
+a paragraph wherever it stands, since the browser editor's parser checks each line of a
+paragraph's source with the whitespace it opens with trimmed (`paragraphDirectiveReason`), so only
+a quote's marker opening the line keeps it text, and there passes only `:::` alone or a three-colon
+opening, a four-colon one included in what it refuses. An unclosed typed block at document level is rejected, while one nested
+inside another block runs to that parent’s end. A typed block's lines start where its opening line's
+text does: both parsers take up to that many columns of indentation off each of its lines, as off a
+fenced code block's (`typedDirective.indent`), so a typed block nested in an indented one closes,
+and every block inside is read, from there.
 
 Text a caller writes reaches the parser with line feeds alone: `pmdoc.LineFeeds` writes each CR LF
 and each lone carriage return as a line feed, as CommonMark and the browser editor's parser read
@@ -704,14 +755,54 @@ markdown whether it becomes blocks or table rows, a retype's attributes); in a s
 typed block (`SetBlockAttributes`, `pmdoc.LineFeedAttrs`), and in an answer's text, which its
 ask block carries; and in a block ask's edited question and options. The browser editor's own
 updates cannot carry a carriage return. No stored document holds one, and `pmdoc` handles line
-feeds alone. A code span keeps the whitespace that
+feeds alone. Marks are read as that parser reads them, as a set, where goldmark nests them: a mark
+opened where the same mark is already open adds nothing, and its close ends the mark for the rest
+of the text around it, up to the node that opened it (`parseInlineMarks`), so `*x *y* z*` is
+`x y` in emphasis and ` z` without, and `****a****` is strong once. Delimiter runs pair as that
+parser pairs them: CommonMark's rule of three is judged on the lengths two runs have left after
+the pairs already made from them (`emphasisDelimiters`), where goldmark judged the lengths they were
+written with, so in `***a.****&#32;b*` the closer's last `**` is text. A code span keeps the whitespace that
 starts each of its later lines past the prefix of the containers around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
-such a span sheds at each end (`codeSpanPadded`), and the writer pads a span whose text starts and
-ends with one. A lazy continuation line - one that
+such a span sheds at each end (`codeSpanPadded`) where something else stands between, and the
+writer pads a span whose text starts and ends with one. The columns left of a tab a container's
+marker took part of are text to that parser, not spaces, so they stand between, and a span ending
+in them sheds nothing. The writer writes a span's later line as it is, without the containers'
+prefix, except where a list item or footnote definition would take columns off the whitespace it
+opens with, and there behind the prefix (`takesCodeLineIndent`). The spaces and tabs a line of text
+ends with are dropped, as that parser drops them, and are a hard break only where they are two
+spaces or more and no tab (`trimLineSuffixes`); goldmark kept all but the last and broke at any two
+spaces. A backslash ending the line keeps what stands before it. A lazy continuation line - one that
 continues a paragraph in a list item, a quote or a footnote definition without the container's
-prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM.
+prefix - is never a table's header or delimiter row (`lazyTableRows`), as in GFM, and a table one
+would be a body row of is refused (`markLazyRows`): goldmark continues the paragraph the table is
+made of with the line, where the browser editor's parser ends the table, and every container the
+line does not continue, before it. So is a table a line opening another block would be a row of - a
+list item that cannot interrupt a paragraph, whatever its marker, or indented code
+(`markBlockRows`): goldmark's table is a paragraph, which such a line continues, where that parser's
+table is no paragraph and ends there, reading the line as that block. A setext underline under a
+table is the table's row, as that parser reads it (`underlineAfterTable`), all but a lone `-`, an
+empty list item there: goldmark's setext heading took the table's paragraph, then wrote the
+underline as a paragraph after the table, or made the lines before the table a heading after it.
+Under a lone `-` goldmark's own handling still does that where text stands before the table in its
+paragraph, making the text a heading after the table where that parser reads the paragraph, the
+table and an empty item, so such a document is refused (`underlinedTextAttr`).
+A tab in a line's indentation spans the columns to the next multiple of four from where it stands,
+as CommonMark and the browser editor's parser read it, so after a quote's `> ` it spans two: `> \t- a`
+opens a list, `> \t| a |` over `> \t| - |` is a table, and `> a` over `> \t===` a setext heading
+(`tabIndented`, `tabExpandedLines`). Goldmark measured such indentation as if it began the line, or
+took a list marker or an underline only after spaces, and read each as paragraph text.
+An indented code block right after a list, outside it - which only a last item holding its content
+five or more columns in allows, by a wide ordered marker, spaces or tabs - or right after a quote,
+on the line after the quote's last, is refused when it holds more than one line: the browser
+editor's parser keeps the list or quote open across the code's first line, which it does not
+continue, and reads the code's later lines as a second code block. A blank line before the code
+ends a quote, so there the code is read whole.
+A fenced code block whose language - the info string's first word - holds a backslash escape or a
+character reference is refused: that parser decodes both, and goldmark keeps them as written. What
+it leaves as written (`\q`, `&bogus;`) is read as before, as is the rest of the info string, which
+both drop.
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
@@ -723,10 +814,12 @@ first line that is `---`, with any spaces or tabs after it, opens it, the first 
 the same closes it, and its text is stored between plain `---` fences with line feeds between its
 lines. A `---` opener nothing closes is a thematic break. That parser, having tried such an opener
 as front matter to the document's end, reads no list, quote or footnote definition at the
-document's level in the rest. So the renderer writes a rule that opens a document as `***` where
-`---` would be misread - a later `---` line would close front matter, or the document holds a
-list, quote or footnote definition at its level (`holdsAContainerTheBrowserDrops`) - and `---`
-everywhere else.
+document's level in the rest, since no container opens inside front matter; the lines read as the
+other blocks they make, so `---\n- a\n- b` is a rule and one paragraph holding both lines. Parse
+reads them so too (`pmdoc.frontmatterAttempt`); a typed block's content opens them as anywhere.
+So the renderer writes a rule that opens a document as `***` where `---` would be misread - a
+later `---` line would close front matter, or the document holds a list, quote or footnote
+definition at its level (`holdsAContainerTheBrowserDrops`) - and `---` everywhere else.
 
 Two lists of one kind side by side read back as one when written with one marker, so the
 renderer writes a list whose kind matches the block before it - past an empty paragraph, which
@@ -735,6 +828,21 @@ as the browser editor does (`otherListMarkers`); a list anywhere else keeps `-` 
 that leaves two lists side by side (deleting or emptying what stood between them, inserting or
 accepting a list beside one) therefore stores the two lists it made, and a `replace` refusal that
 names a list item's marker names the one it is written with (`BlockMarker.Other`).
+
+The renderer writes a run of inline text so that it reads back as written. A bare URL ends where
+linkify stops, so where a run does not read back because linkify would continue a URL into the
+character after it, that character is written behind a backslash (`endsBareURL`) - a backslash even
+for `&` and `~`, whose other escapes are character references, which linkify runs through. Marks are
+written in one order - link, strong, emphasis - so where a text still carries a mark the text
+before it opened, and the order puts that mark after the text's other marks, the mark is closed and
+opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
+`*`, `**` and `*`), the parser reads one run. Such a run is kept where it reads back, as the parser
+then splits it as written, and one that does not is written again in the plain respellings, as main
+writes it again. Only where none of those reads back is it written with the marks still open kept
+open, then the marks the next text still carries, and the text's others opened inside them
+(`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written
+`***a** b*`; a run that fuses nothing is written as before, so italic closed around a link keeps
+its bytes.
 
 A container that holds nothing is read as the browser editor's parser reads it, holding one empty
 paragraph (`emptyParagraphFirst`): an empty list item (`-`), quote (`>`), typed block or footnote
@@ -747,22 +855,90 @@ item cannot be written so, since its marker's line would carry the next block as
 and the browser reads no other form of it as a task: a task item whose emptied first paragraph has
 another block after it does not render, and an edit that would leave one is refused.
 An empty list item that would interrupt a paragraph is not opened, as that parser reads it on the
-whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`.
+whole line (`emptyItemGuard`): after `- a`, the line `  - -` is an item holding the text `-`. Nor is
+an ordered item numbered anything but a lone `1` (`orderedCannotInterrupt`): goldmark takes the
+number's value and so lets `01.` interrupt a paragraph, where that parser reads `a` over `01. b` as one
+paragraph. Neither is opened on a line after indented code, blank lines between or not, whatever
+containers the line opens first, since that parser holds the code open to that line and decides
+once per line whether it interrupts - except code right after a list, which that parser ends on its
+own line (`interruptsOpenBlock`): `    code\n> 2. b` is a quote holding the paragraph `2. b`, and
+`1.\n\n    code\n2. b` is two lists with the code between. A table is no paragraph to that parser,
+so after one such an item opens in a container the line opens first (`| a |\n| - |\n* -` is a list
+item holding an empty one). An item whose marker line holds nothing
+takes its content from the next line when that line reaches its content column with no blank line
+between, a list marker there included (`emptyItemGuard.Continue`): goldmark closed the list for a
+marker that cannot continue it, so `-\n  1.` read as two lists.
 
-A document holding one of those shapes, or a footnote definition that ends in a block other than
-a paragraph, has its lists' spacing read as that parser reads it (`browserListSpacing`): outside
+Every document's lists are spaced as that parser reads them (`browserListSpacing`): outside
 quotes and footnote definitions a blank line between two items spreads the list, and one between
-an item's blocks spreads the item; in a footnote definition a list is never spread and only an
-item's own blank lines spread it; in a quote a list is read only when no blank line lies at or
-after it but the one before flow content the quote goes on with, and then nothing is spread. Where
-that parser's spread depends on more - a blank line after an item in a footnote definition, any
-other blank line in a quote, a typed block holding one in a list item - the document is refused,
-and so it is where goldmark reads its blocks otherwise: an empty list item and a blank line before
-a block its outer item holds, and a footnote definition inside another block, ahead of another
-block, out of the order of its first references, or referred to by nothing, which goldmark moves
-or drops. Every other document keeps goldmark's looseness - a loose list's items holding more
-than one block are spread, the list when none is - which is how the documents Dispatch stores were
-read.
+an item's blocks spreads the item; in a footnote definition a list is never spread, and an item is
+spread by a blank line between its blocks or after it, before the next item or a quote or list the
+definition goes on with; in a quote a blank line after an item spreads the list, and so do blank
+lines after its last item, one before a quote or a list (or anything, in a typed block inside the
+quote) and two before anything else, or at a typed block's fence - where no fence of its own closes
+a typed block, the fence of the typed block it stands in (`fenceEnding`) - three at the quote's end
+where no fence ends the typed block, but for a container opening on the line right after them, and
+one more of each after an item ending in a quote in the typed block (`quotedListSpread`,
+`blanksEndingQuotedList`), and where a typed block inside the list's quote stands in a quote that
+goes on past them, the blank lines of the quotes around the list's after one of its own count among
+them (`blanksThroughOuterQuotes`). A typed block's content is a document of its own to that parser,
+ending where its fence or the block around it ends it, so where quotes and typed blocks nest around
+a list more than once a blank line in its quote at or after it, outside the code it holds, is
+refused (`quoteTypedAlternations`); blank lines after an item that ends in a quote or a list are
+that block's, and in a quote those after a footnote definition an item holds are the definition's -
+one spreads the item only before a quote, a list or a definition, and two before anything
+(`definitionBlanksInQuote`), the same after an item ending in one, where the next item and the
+quote's end count as anything, and none spreads the list (`definitionEndSpreadsItem`,
+`blanksAfterDefinitionItem`), an empty definition's own line being one of them (`emptyDefinition`,
+so `> - [^m]:\n>` is a spread item); and a quote and a footnote definition together mix the two
+(`footnotedQuoteListSpread`). A blank line after a fenced code block no fence closed is the code's
+and spreads nothing, even where the code's text drops it, unless a quote between ends at it
+(`keepsBlankLinesAfter`). The code's text drops that line where it ends a list item or a footnote
+definition that flow content follows (a paragraph, a heading, a rule, a fence, a typed block or a
+table), or a quote no container opens right after, and keeps it before a quote, a list item or a
+definition, as that parser reads it (`blankTaker`). A list item decides by what follows its list only
+inside its own quote or typed block; past one, that container's rule decides, so a typed block's
+fence keeps the line and a quote's end judges it by what opens right after. The renderer writes each spacing so that it reads back
+(`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
+a list where one would spread what it follows, none inside a list item after a list ending in
+an empty item, where goldmark ends the item at a blank line, and none in a quote after a footnote
+definition ending in a list no line continues, where the reader refuses one (`endsInClosedList`); a footnote definition a tight list item
+holds writes its blocks with the item's tight lines, since that parser reads them as the item's
+(`itemBlocks`). Where the lines alone do not decide
+the spread - a typed block holding a blank line in a list item, a blank line at the end of a quote
+after a list, or at or after a list in a typed block in a footnote definition, whatever quotes or
+typed blocks stand between - a document holding
+one of those shapes, or a footnote definition that ends in a block other than a paragraph, is
+refused, and so it is where goldmark reads its blocks otherwise: an empty list item and a blank
+line before a block an item around it holds, however far out, since goldmark ends every item around
+the empty one there (`emptyItemEndsOuterItem`), an item's content starting one column past its
+marker where its marker line holds nothing more or indented code (`itemContentColumn`). Every other document keeps goldmark's looseness there -
+a loose list's items holding more than one block are spread, the list when none is - which is how
+the documents Dispatch stores were read; but a blank line at or after a list in a typed block in a
+footnote definition is refused there too, unless goldmark spreads every item a blank line follows
+(`goldmarkSpreadsItemsBeforeBlanks`), since that parser spreads such an item and never the list.
+
+A footnote definition is read where it is written, as that parser keeps it: inside another block,
+ahead of other blocks, in any order, and whether or not anything refers to it. One inside another
+footnote definition is refused, since that parser reads a line of `=` or `-` continuing the inner
+one's paragraph as a heading's underline, where CommonMark reads it as the paragraph's text, and so
+is one inside a typed block, which that parser's references reach only from inside a typed block or
+after it. A definition whose label holds whitespace is refused, which that parser reads as a
+paragraph. A label is stored as that parser reads it, its escapes and character references decoded
+(`[^a\*]` is `a*`, `[^f&amp;g]` is `f&g`), while a reference still finds its definition by the
+label as written; the writer escapes a bracket, a pipe, a backslash before punctuation or at the
+end, an ampersand opening a character reference, and white space as a numeric one, so each label
+reads back and one that needs none is written as it is (`escapeFootnoteLabel`). A reference whose
+label matches its definition's only as written, not once both are decoded (`[^&AUML;]` beside
+`[^&auml;]: `, whose written forms fold to one key while `&AUML;` names no character), is refused,
+since written from the decoded labels it would no longer find the definition. A definition's later
+lines start four columns past where its container's content starts, whatever indentation stands
+before its `[^` (`browserTextColumn`, `quoteContentColumn`). Goldmark gathers each definition, as
+it closes, into a list the parser keeps ahead of every block written while the document parses, so
+a check of the block before another meets the block written there (`footnoteDefinitionParser.Close`),
+and the parser puts each definition back where it was written and removes the list once the
+document is read (`definitionsInPlace`). Goldmark's footnote transformer, which would order the
+definitions by first reference, drop the rest and append backlinks, is not used.
 
 A typed block renders its `blockId`, defaulted attributes, and every explicitly set optional
 attribute. Parsing mints an omitted id, while live document reads and writes validate each node

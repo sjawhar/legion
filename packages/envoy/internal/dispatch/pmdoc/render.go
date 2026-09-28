@@ -3,8 +3,10 @@ package pmdoc
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 type renderer struct {
@@ -15,27 +17,26 @@ type renderer struct {
 	// text node of that label. One node cannot judge it: what pairs with a bracket may sit in a
 	// sibling node of the same link.
 	labelBrackets labelBrackets
-	// typedPrefix is the prefix the innermost typed block's lines are written at, or nil outside
-	// one. A lone `:::` closes the block only as a line at that prefix, which only a paragraph
-	// written at the same prefix can produce.
-	typedPrefix *string
 	// heldLineStart is the current line's first text character, held until the line is written.
 	heldLineStart *lineCandidate
 	// footnoteLineAt is where the last footnote definition's first line begins in the markdown,
 	// and footnoteLabel is its label as written, so that the line is read after a reference to it.
 	footnoteLineAt int
 	footnoteLabel  string
-	// inFootnote reports whether the blocks being written are inside a footnote definition.
-	inFootnote bool
+	// scopes is a frame for each container the blocks being written stand in, outermost first
+	// (scope).
+	scopes []scope
 	// asteriskRule makes the next rule written `***` rather than `---` (list).
 	asteriskRule bool
 	// otherListMarker makes the next list written with its kind's other marker (otherListMarkers).
 	otherListMarker bool
-	// footnoteLabels is every footnote label the document defines, lowercased: text shaped like a
-	// reference to one would read as that reference.
-	footnoteLabels map[string]bool
-	err            error
-	blockOffsets   []BlockOffset
+	// footnoteLabels is every footnote label the document defines (footnoteLabelSet).
+	footnoteLabels footnoteLabelSet
+	// bareEmptyCode writes an empty code block in a typed block in a list item as its fences alone,
+	// and wroteBlankEmptyCode records one written with a line between them (emptyCodeWrittenBare).
+	bareEmptyCode, wroteBlankEmptyCode bool
+	err                                error
+	blockOffsets                       []BlockOffset
 }
 
 // BlockOffset identifies one rendered block in byte offsets of the markdown.
@@ -67,7 +68,9 @@ func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
 	return r.b.String(), r.blockOffsets, nil
 }
 
-func render(doc *Node) (*renderer, error) {
+func render(doc *Node) (r *renderer, err error) {
+	// The renderer reads back what it writes (blockKinds, parseInlineWithDefinitions).
+	defer recoverPanic(&r, &err, "rendering a document")
 	if doc == nil || doc.Type != "doc" {
 		if doc == nil {
 			return nil, fmt.Errorf("%w: Render wants a doc, got nil", ErrSchema)
@@ -81,13 +84,31 @@ func render(doc *Node) (*renderer, error) {
 	// runs, and an escape is decided within one run: rendering the document without them merges
 	// the runs, so a mark never changes the markdown (`snake_case`, never `snake\_case`).
 	doc = StripAnchorMarks(doc)
-	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
+	if holdsOnlyAnEmptyParagraph(doc) {
 		return &renderer{}, nil
 	}
-	r := &renderer{footnoteLabels: definedFootnoteLabels(doc)}
-	r.blocks(doc.Children, "")
+	labels := definedFootnoteLabels(doc)
+	r = renderBlocks(doc, labels, false)
+	// An empty code block in a typed block in a spread list item is written with a line between its
+	// fences, as main wrote it, except in a document holding a shape this parser reads only as the
+	// browser editor does, where that line is refused (emptyCodeWrittenBare): there the document is
+	// written again with the fences alone.
+	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
+		r = renderBlocks(doc, labels, true)
+	}
 	if r.err != nil {
 		return nil, r.err
+	}
+	return r, nil
+}
+
+// renderBlocks writes doc's blocks, an empty code block in a typed block in a spread list item as
+// its fences alone when bareEmptyCode says so.
+func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool) *renderer {
+	r := &renderer{footnoteLabels: labels, bareEmptyCode: bareEmptyCode}
+	r.blocks(doc.Children, "")
+	if r.err != nil {
+		return r
 	}
 	// A rule opening the document is written `---`, as it always was, except where that is
 	// misread; there it is `***`, the same length. A `---` there opens front matter: a later line
@@ -95,11 +116,18 @@ func render(doc *Node) (*renderer, error) {
 	// front matter, and with no such line the browser editor's parser, having tried the front
 	// matter to the document's end, reads no list, quote or footnote definition in the rest.
 	if doc.Children[0].Type == "hr" {
-		if front, _ := parseFrontmatterBlock(r.b.Bytes()); front != nil || holdsAContainerTheBrowserDrops(doc) {
+		if front, _, _ := parseFrontmatterBlock(r.b.Bytes()); front != nil || holdsAContainerTheBrowserDrops(doc) {
 			copy(r.b.Bytes(), "***")
 		}
 	}
-	return r, nil
+	return r
+}
+
+// holdsBrowserOnlyShape reports whether markdown, read as Parse reads it, holds a shape this
+// parser reads only as the browser editor's parser does (browserOnlyShape).
+func holdsBrowserOnlyShape(markdown []byte) bool {
+	_, rest, unclosed := parseFrontmatterBlock(markdown)
+	return browserOnlyShape(blockReader.parse(markdown[rest:], unclosed)) != ""
 }
 
 // holdsAContainerTheBrowserDrops reports whether doc holds, at its top level, a block the browser
@@ -115,17 +143,34 @@ func holdsAContainerTheBrowserDrops(doc *Node) bool {
 	return false
 }
 
-// definedFootnoteLabels is every label doc's footnote definitions carry, lowercased, since the
-// browser editor's parser matches a reference to its definition whatever the case.
-func definedFootnoteLabels(doc *Node) map[string]bool {
-	labels := make(map[string]bool)
-	for _, child := range doc.Children {
-		if child.Type == "footnote_definition" {
-			if label, ok := child.Attrs["label"].(string); ok {
-				labels[strings.ToLower(label)] = true
+// footnoteLabelSet is every label a document's footnote definitions carry, wherever they stand,
+// kept two ways: as the browser editor's parser compares labels (footnoteLabelKey), since it
+// matches a reference to its definition whatever the case, and lowercased, as this renderer
+// compared them before it did, since text escaped then must be escaped still.
+type footnoteLabelSet struct{ keys, lowered map[string]bool }
+
+// refersTo reports whether text shaped like a reference with label is escaped: it would read as a
+// reference to a defined label, or this renderer escaped it when it lowercased labels. An escape
+// the parser does not need reads back as the same text.
+func (labels footnoteLabelSet) refersTo(label string) bool {
+	return labels.keys[footnoteLabelKey(label)] || labels.lowered[strings.ToLower(label)]
+}
+
+func definedFootnoteLabels(doc *Node) footnoteLabelSet {
+	labels := footnoteLabelSet{keys: make(map[string]bool), lowered: make(map[string]bool)}
+	var walk func(*Node)
+	walk = func(node *Node) {
+		if node.Type == "footnote_definition" {
+			if label, ok := node.Attrs["label"].(string); ok {
+				labels.keys[footnoteLabelKey(label)] = true
+				labels.lowered[strings.ToLower(label)] = true
 			}
 		}
+		for _, child := range node.Children {
+			walk(child)
+		}
 	}
+	walk(doc)
 	return labels
 }
 
@@ -147,7 +192,11 @@ func (r *renderer) blocksNoTrailing(nodes []*Node, prefix string) {
 	otherMarkers := otherListMarkers(nodes)
 	for i, n := range nodes {
 		if i > 0 {
-			r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + prefix)
+			blanks := 1
+			if previous := nodes[i-1]; isList(previous) {
+				blanks, _ = r.blanksAfterList(previous, n)
+			}
+			r.writeSyntax("\n" + strings.Repeat(strings.TrimRight(prefix, " ")+"\n", blanks) + prefix)
 		}
 		r.otherListMarker = otherMarkers[i]
 		r.block(n, prefix)
@@ -166,7 +215,7 @@ func otherListMarkers(blocks []*Node) []bool {
 		if block.Type == "paragraph" && len(block.Children) == 0 {
 			continue
 		}
-		if (block.Type == "bullet_list" || block.Type == "ordered_list") && previous >= 0 && blocks[previous].Type == block.Type {
+		if isList(block) && previous >= 0 && blocks[previous].Type == block.Type {
 			other[index] = !other[previous]
 		}
 		previous = index
@@ -210,18 +259,28 @@ func (r *renderer) block(n *Node, prefix string) {
 	case "paragraph":
 		r.inline(n.Children, prefix)
 	case "heading":
-		level := int(num(n.Attrs["level"], 1))
-		r.writeSyntax(strings.Repeat("#", level) + " ")
-		r.headingInline(n.Children, prefix)
+		r.heading(n, prefix)
 	case "blockquote":
 		r.writeSyntax("> ")
+		r.enter(n, prefix+"> ")
 		r.blocksNoTrailing(n.Children, prefix+"> ")
+		r.blanksEndingQuotedList(n.Children, prefix+"> ", false)
+		r.leave()
 	case "bullet_list", "ordered_list":
 		r.list(n, prefix)
 	case "code_block":
 		language, _ := n.Attrs["language"].(string)
 		fence := codeBlockFence(n)
-		r.writeSyntax(fence + language + "\n" + prefix)
+		if emptyCode(n) && r.emptyCodeWrittenBare() {
+			r.writeSyntax(fence + language + "\n" + prefix + fence)
+			return
+		}
+		r.writeSyntax(fence + language + "\n")
+		var text strings.Builder
+		for _, child := range n.Children {
+			text.WriteString(child.Text)
+		}
+		r.writeCodeLinePrefix(text.String(), prefix)
 		for _, child := range n.Children {
 			if child.Type != "text" {
 				r.err = fmt.Errorf("%w: code block contains %q", ErrSchema, child.Type)
@@ -250,10 +309,22 @@ func (r *renderer) block(n *Node, prefix string) {
 	case "footnote_definition":
 		label, _ := n.Attrs["label"].(string)
 		r.footnoteLineAt, r.footnoteLabel = r.b.Len(), escapeFootnoteLabel(label)
-		r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
-		r.inFootnote = true
-		r.blocksNoTrailing(n.Children, prefix+"    ")
-		r.inFootnote = false
+		if r.definitionOpensOnALaterLine() {
+			r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]:\n" + prefix + definitionIndent)
+		} else {
+			r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
+		}
+		// The browser editor's parser reads the lines of a definition a list item holds as the
+		// item's, so in a tight item a blank line between two of its blocks would spread the item.
+		around := r.scope().node
+		tightItem := around != nil && around.Type == "list_item" && around.Attrs["spread"] != true
+		r.enter(n, prefix+definitionIndent)
+		if tightItem {
+			r.itemBlocks(n.Children, false, prefix, prefix+definitionIndent, false)
+		} else {
+			r.blocksNoTrailing(n.Children, prefix+definitionIndent)
+		}
+		r.leave()
 	default:
 		typ, typed := typedBlock(n.Type)
 		if !typed {
@@ -265,14 +336,49 @@ func (r *renderer) block(n *Node, prefix string) {
 			r.err = err
 			return
 		}
-		fence := strings.Repeat(":", typedFence(n, len(prefix)))
+		colons := typedFence(n, len(prefix))
+		fence := strings.Repeat(":", colons)
+		if holdsOnlyAnEmptyParagraph(n) && r.inItemBelowQuotes() {
+			// Its empty paragraph written as a line would be a blank line in a typed block in a
+			// list item, which the browser editor reads as spacing the item; written as nothing,
+			// both parsers read the typed block back holding it.
+			r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix + fence)
+			return
+		}
 		r.writeSyntax(fence + n.Type + "{" + attrs + "}\n" + prefix)
-		outer := r.typedPrefix
-		r.typedPrefix = &prefix
+		r.enterTyped(n, prefix, colons)
 		r.blocksNoTrailing(n.Children, prefix)
-		r.typedPrefix = outer
+		r.blanksEndingQuotedList(n.Children, prefix, true)
+		r.leave()
 		r.writeSyntax("\n" + prefix + fence)
 	}
+}
+
+// loosenessReadsSpread reports whether goldmark's looseness reads list's and its items' spread as
+// list holds them (parseList): an item is spread exactly where it writes more than one block, an
+// empty paragraph beside other blocks writing nothing, and the list only where no item is.
+func loosenessReadsSpread(list *Node) bool {
+	anySpread := false
+	for _, item := range list.Children {
+		written := 0
+		for _, child := range item.Children {
+			if child.Type != "paragraph" || len(child.Children) > 0 {
+				written++
+			}
+		}
+		spread := item.Attrs["spread"] == true
+		if spread != (written > 1) {
+			return false
+		}
+		anySpread = anySpread || spread
+	}
+	return !anySpread || list.Attrs["spread"] != true
+}
+
+// holdsOnlyAnEmptyParagraph reports whether container n holds nothing but one empty paragraph,
+// which both parsers read an empty container as holding (emptyParagraphFirst).
+func holdsOnlyAnEmptyParagraph(n *Node) bool {
+	return len(n.Children) == 1 && n.Children[0].Type == "paragraph" && len(n.Children[0].Children) == 0
 }
 
 // typedFence is the number of colons a typed block whose lines start at column is written with:
@@ -282,12 +388,38 @@ func typedFence(n *Node, column int) int {
 	return max(3, closingColons(n, column)+1)
 }
 
+// heading writes heading n. An ATX heading is one line, so a heading holding a line break is
+// written setext, its lines as a paragraph's and an underline after them, as the browser editor
+// writes it. Only levels one and two have that form; past them the break is written as a space, as
+// the browser editor also writes it.
+func (r *renderer) heading(n *Node, prefix string) {
+	level := int(num(n.Attrs["level"], 1))
+	if !holdsHardBreak(n.Children) {
+		r.writeSyntax(strings.Repeat("#", level) + " ")
+		r.headingInline(n.Children, prefix)
+		return
+	}
+	switch level {
+	case 1, 2:
+		underline := "---"
+		if level == 1 {
+			underline = "==="
+		}
+		r.inline(n.Children, prefix)
+		r.writeSyntax("\n" + prefix + underline)
+	default:
+		r.writeSyntax(strings.Repeat("#", level) + " ")
+		r.headingInline(hardBreaksAsSpaces(n.Children), prefix)
+	}
+}
+
 func (r *renderer) list(n *Node, prefix string) {
 	other := r.otherListMarker
 	start := 1
 	if n.Type == "ordered_list" {
 		start = int(num(n.Attrs["order"], 1))
 	}
+	readsLoose := loosenessReadsSpread(n)
 	for index, item := range n.Children {
 		if item.Type != "list_item" {
 			r.err = fmt.Errorf("%w: list contains %q", ErrSchema, item.Type)
@@ -295,13 +427,23 @@ func (r *renderer) list(n *Node, prefix string) {
 		}
 		if index > 0 {
 			r.writeSyntax("\n" + prefix)
-			if n.Attrs["spread"] == true {
+			blanks := 0
+			if previous := n.Children[index-1]; r.definitionEndsItem(previous) {
+				blanks = r.blanksAfterDefinitionItem(previous, item)
+			} else if r.writesBlankAfterItem(n, previous) {
+				blanks = 1
+			}
+			for range blanks {
 				r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + prefix)
 			}
 		}
 		marker := listItemMarker(n.Type == "ordered_list", start+index, other)
 		r.writeSyntax(marker)
-		if checked, ok := item.Attrs["checked"].(bool); ok {
+		// A task item holding only an empty paragraph is written as an empty item, as the browser
+		// editor writes it: no form of the marker alone reads back as a task, and `- [ ]` reads back
+		// as an item holding the text `[ ]`.
+		emptyTask := holdsOnlyAnEmptyParagraph(item)
+		if checked, ok := item.Attrs["checked"].(bool); ok && !emptyTask {
 			if checked {
 				r.writeSyntax("[x] ")
 			} else {
@@ -317,7 +459,7 @@ func (r *renderer) list(n *Node, prefix string) {
 		// be written so: its marker's line would carry the next block as the task's text, and the
 		// browser editor reads no other form of it as a task.
 		children := item.Children
-		skipped := len(children) > 1 && children[0].Type == "paragraph" && len(children[0].Children) == 0
+		skipped := opensWithUnwrittenParagraph(item)
 		if skipped {
 			if _, task := item.Attrs["checked"].(bool); task {
 				r.err = fmt.Errorf("%w: a task item whose first paragraph is empty cannot hold another block after it; the browser editor reads no such item as a task", ErrSchema)
@@ -325,24 +467,86 @@ func (r *renderer) list(n *Node, prefix string) {
 			}
 			children = children[1:]
 		}
-		otherMarkers := otherListMarkers(children)
-		for childIndex, child := range children {
-			// A tight item writes its blocks on consecutive lines, where a paragraph would run on
-			// into a paragraph after it and underline itself with a rule's `---`. The browser
-			// editor's writer puts a blank line between two paragraphs (the item then reads back
-			// spread) and writes a rule `***`, and so does this renderer.
-			afterParagraph := childIndex > 0 && children[childIndex-1].Type == "paragraph"
-			if childIndex > 0 {
-				if item.Attrs["spread"] == true || afterParagraph && child.Type == "paragraph" {
-					r.writeSyntax("\n" + strings.TrimRight(prefix, " ") + "\n" + indent)
-				} else {
-					r.writeSyntax("\n" + indent)
+		r.enterItem(item, indent, readsLoose)
+		r.itemBlocks(children, item.Attrs["spread"] == true, prefix, indent, skipped && marker != "* ")
+		r.leave()
+	}
+}
+
+// spreadElsewhere reports whether a blank line a spread item writes between two of blocks, its
+// own, spreads it wherever it stands: one after a block that is neither a list nor a footnote
+// definition, whose blank lines after them can be theirs.
+func spreadElsewhere(blocks []*Node) bool {
+	for index := 1; index < len(blocks); index++ {
+		if previous := blocks[index-1]; previous.Type != "footnote_definition" && !isList(previous) {
+			return true
+		}
+	}
+	return false
+}
+
+// opensWithUnwrittenParagraph reports whether item's first block is an empty paragraph with another
+// block after it, which the renderer writes as nothing, the next block on the marker's line.
+func opensWithUnwrittenParagraph(item *Node) bool {
+	children := item.Children
+	return len(children) > 1 && children[0].Type == "paragraph" && len(children[0].Children) == 0
+}
+
+// itemBlocks writes blocks the browser editor's parser reads as a list item's lines - the item's
+// own, or those of a footnote definition the item holds - at indent, their lines' prefix, where
+// prefix is the list's. A tight item writes its blocks on consecutive lines, where a paragraph
+// would run on into a paragraph after it and underline itself with a rule's `---`. The browser
+// editor's writer puts a blank line between two paragraphs (the item then reads back spread) and
+// writes a rule `***`, and so does this renderer; firstRule reports whether a rule opening the
+// blocks is written `***` too.
+func (r *renderer) itemBlocks(blocks []*Node, spread bool, prefix, indent string, firstRule bool) {
+	otherMarkers := otherListMarkers(blocks)
+	for index, child := range blocks {
+		afterParagraph := index > 0 && blocks[index-1].Type == "paragraph"
+		if index > 0 {
+			blanks := 0
+			if spread || afterParagraph && child.Type == "paragraph" {
+				blanks = 1
+			}
+			if previous := blocks[index-1]; isList(previous) {
+				after, exact := r.blanksAfterList(previous, child)
+				switch {
+				case exact:
+					blanks = after
+				// One blank line keeps a block that cannot open on the line after a paragraph off
+				// the paragraph the list ends in.
+				case !isList(child) && !opensAfterParagraph(child) && endsInParagraph(previous):
+					blanks = 1
+				}
+			} else if previous.Type == "footnote_definition" && r.scope().quotes > 0 && !quoteListOrDefinition(child) {
+				// In a quote the blank lines after a footnote definition are the definition's, an
+				// empty definition's own line being one of them (definitionSpreadBlanks). A spread
+				// item writes what spreads it where no blank line between two of its other blocks
+				// does, and a tight one writes one only to keep a block that cannot open on the
+				// line after a paragraph off the definition's, and none after a definition ending
+				// in a list no line continues (endsInClosedList) or an empty one.
+				own := 0
+				if holdsOnlyAnEmptyParagraph(previous) {
+					own = 1
+				}
+				switch {
+				case spread && !spreadElsewhere(blocks):
+					blanks = definitionSpreadBlanks(child) - own
+				case spread || own == 0 && !opensAfterParagraph(child) && !endsInClosedList(previous):
+					blanks = 1
 				}
 			}
-			r.asteriskRule = child.Type == "hr" && (afterParagraph && item.Attrs["spread"] != true || skipped && childIndex == 0 && marker != "* ")
-			r.otherListMarker = otherMarkers[childIndex]
-			r.block(child, indent)
+			r.writeSyntax("\n" + strings.Repeat(strings.TrimRight(prefix, " ")+"\n", blanks) + indent)
+			// A quote on the line after a paragraph opens there, and a list opening it whose first
+			// item cannot interrupt a paragraph would not: a quote line first leaves the list its
+			// own line.
+			if blanks == 0 && afterParagraph && opensWithListThatCannotInterrupt(child) {
+				r.writeSyntax(">\n" + indent)
+			}
 		}
+		r.asteriskRule = child.Type == "hr" && (afterParagraph && !spread || firstRule && index == 0)
+		r.otherListMarker = otherMarkers[index]
+		r.block(child, indent)
 	}
 }
 
@@ -411,21 +615,49 @@ func (r *renderer) writeCodeText(node *Node, prefix string) {
 		}
 		end := offset + newline + 1
 		r.writeText(value[offset:end])
-		// A blank line does not take a footnote definition's indentation, and both parsers keep
-		// what it holds as the code's, so a blank code line there, behind indentation alone, is
-		// written without it.
-		if !r.inFootnote || strings.TrimSpace(prefix) != "" || !blankLineAhead(value[end:]) {
-			r.writeSyntax(prefix)
-		}
+		r.writeCodeLinePrefix(value[end:], prefix)
 		offset = end
 	}
 }
 
-// blankLineAhead reports whether text's first line holds only spaces and tabs before its line
-// ending.
+// writeCodeLinePrefix writes prefix ahead of a code line, the first of rest. A blank line does not
+// take a footnote definition's indentation, and both parsers keep what it holds as the code's, while
+// every other container around the code takes its own columns from it, a list item no more than its
+// width. So a blank code line there, where no quote stands inside the definition to carry its
+// marker after that indentation, is written without the definition's indentation, and one holding
+// nothing with no indentation after the prefix's last quote marker (`> `) - the code's first line
+// as well as a later one.
+func (r *renderer) writeCodeLinePrefix(rest, prefix string) {
+	if frame := r.scope(); frame.footnote != nil && frame.quotes == frame.footnote.quotes && blankLineAhead(rest) {
+		switch marker := strings.LastIndex(prefix, "> "); {
+		case rest != "" && rest[0] != '\n':
+			prefix = prefix[:frame.footnote.indentAt] + prefix[frame.footnote.indentAt+len(definitionIndent):]
+		case marker >= 0:
+			prefix = prefix[:marker+len("> ")]
+		default:
+			prefix = ""
+		}
+	}
+	r.writeSyntax(prefix)
+}
+
+// blankLineAhead reports whether text's first line, its last included, holds only spaces and tabs.
 func blankLineAhead(text string) bool {
 	end := strings.IndexByte(text, '\n')
-	return end >= 0 && strings.Trim(text[:end], " \t") == ""
+	if end < 0 {
+		end = len(text)
+	}
+	return strings.Trim(text[:end], " \t") == ""
+}
+
+// emptyCode reports whether code block node holds no text.
+func emptyCode(node *Node) bool {
+	for _, child := range node.Children {
+		if child.Text != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func codeBlockFence(node *Node) string {
@@ -473,144 +705,6 @@ func isBareAutolink(value string) bool {
 		return false
 	}
 	return !strings.ContainsAny(value[len(value)-1:], ".,!?;:")
-}
-
-func containsMark(marks []Mark, markType string) bool {
-	for _, mark := range marks {
-		if mark.Type == markType {
-			return true
-		}
-	}
-	return false
-}
-
-func withoutMark(marks []Mark, markType string) []Mark {
-	out := marks[:0]
-	for _, mark := range marks {
-		if mark.Type != markType {
-			out = append(out, mark)
-		}
-	}
-	return out
-}
-
-func nodeHasMark(node *Node, markType string) bool {
-	for _, mark := range node.Marks {
-		if mark.Type == markType {
-			return true
-		}
-	}
-	return false
-}
-
-// renderedMarkTypes are the marks canonical Markdown writes. Every other mark the schema allows
-// (markTypes) is an anchor, invisible to the rendering, and StripAnchorMarks removes exactly the
-// marks that are not here: what renders is one list, not two of opposite polarity that a new
-// invisible mark could fall between.
-var renderedMarkTypes = map[string]bool{
-	"link": true, "strong": true, "emphasis": true, "strike_through": true, "inlineCode": true,
-}
-
-// writtenMarks is the marks a node's text is written under: its visible marks, less a bare URL's
-// link, which the parser links again on its own. A node that is not text is written under none.
-func writtenMarks(node *Node, escapePipes bool) []Mark {
-	if node.Type != "text" {
-		return nil
-	}
-	marks := visibleMarks(node.Marks)
-	if isBareURLLink(node, marks, escapePipes) {
-		marks = withoutMark(marks, "link")
-	}
-	return marks
-}
-
-// adjacentDelimiter is the delimiter character of the innermost of marks opened or closed beside a
-// text, the one written next to it, or 0 when that mark is not written with a delimiter run.
-func adjacentDelimiter(marks []Mark) byte {
-	if len(marks) == 0 {
-		return 0
-	}
-	switch marks[len(marks)-1].Type {
-	case "strong", "emphasis":
-		return '*'
-	case "strike_through":
-		return '~'
-	}
-	return 0
-}
-
-func visibleMarks(marks []Mark) []Mark {
-	out := make([]Mark, 0, len(marks))
-	for _, mark := range marks {
-		if renderedMarkTypes[mark.Type] {
-			out = append(out, mark)
-		}
-	}
-	sortMarks(out)
-	for i := range out {
-		for j := i + 1; j < len(out); j++ {
-			if renderMarkRank(out[j].Type) < renderMarkRank(out[i].Type) {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
-	return out
-}
-
-func sharedMarks(left, right []Mark) int {
-	limit := len(left)
-	if len(right) < limit {
-		limit = len(right)
-	}
-	for i := range limit {
-		if left[i].Type != right[i].Type || !attrsEqual(left[i].Attrs, right[i].Attrs) {
-			return i
-		}
-	}
-	return limit
-}
-
-func renderMarkRank(markType string) int {
-	switch markType {
-	case "link":
-		return 0
-	case "strong":
-		return 1
-	case "emphasis":
-		return 2
-	case "strike_through":
-		return 3
-	case "inlineCode":
-		return 4
-	default:
-		return 5
-	}
-}
-
-func openMark(mark Mark) string {
-	switch mark.Type {
-	case "link":
-		return "["
-	case "strong":
-		return "**"
-	case "emphasis":
-		return "*"
-	case "strike_through":
-		return "~~"
-	case "inlineCode":
-		return "`"
-	default:
-		return ""
-	}
-}
-
-func closeMark(mark Mark, escapePipes bool) string {
-	if mark.Type == "link" {
-		href, _ := mark.Attrs["href"].(string)
-		title, _ := mark.Attrs["title"].(string)
-		return "](" + escapeLinkDestination(href, escapePipes) + titleSuffix(title, escapePipes) + ")"
-	}
-	return openMark(mark)
 }
 
 func escapeLinkDestination(href string, escapePipes bool) string {
@@ -664,36 +758,71 @@ func escapeTableLinkDestination(value string) string {
 	}
 	return rendered.String()
 }
+
+// escapeFootnoteLabel writes label so that the browser editor's parser, which decodes a label's
+// escapes and character references, reads it back: a bracket, a pipe, and a backslash before ASCII
+// punctuation or at the label's end are escaped, an ampersand only where it would open a character
+// reference, and white space, which no label holds as written, is a numeric character reference.
+// A label that reads back as written stays as it is.
 func escapeFootnoteLabel(label string) string {
-	return escapeTableSyntaxPipes(label)
-}
-
-func escapeTableSyntaxPipes(value string) string {
-	if !strings.Contains(value, "|") {
-		return value
-	}
-	var escaped bool
-	var rendered strings.Builder
-	rendered.Grow(len(value))
-	for _, char := range value {
-		if char == '|' && !escaped {
-			rendered.WriteByte('\\')
+	var written strings.Builder
+	written.Grow(len(label))
+	for index, char := range label {
+		switch {
+		case char == '[' || char == ']' || char == '|':
+			written.WriteByte('\\')
+		case char == '\\' && (index+1 == len(label) || isASCIIPunctuation(label[index+1])):
+			written.WriteByte('\\')
+		case char == '&' && characterReference.MatchString(label[index:]):
+			written.WriteByte('\\')
+		case unicode.IsSpace(char):
+			written.WriteString("&#" + strconv.Itoa(int(char)) + ";")
+			continue
 		}
-		rendered.WriteRune(char)
-		escaped = char == '\\'
+		written.WriteRune(char)
 	}
-	return rendered.String()
+	return written.String()
 }
 
+// characterReference is a character reference opening text: a named one, or a decimal or
+// hexadecimal numeric one.
+var characterReference = regexp.MustCompile(`^&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6});`)
+
+func holdsHardBreak(nodes []*Node) bool {
+	for _, n := range nodes {
+		if n.Type == "hardbreak" {
+			return true
+		}
+	}
+	return false
+}
+
+// hardBreaksAsSpaces is nodes with each hard break a space carrying no marks.
+func hardBreaksAsSpaces(nodes []*Node) []*Node {
+	out := make([]*Node, len(nodes))
+	for index, n := range nodes {
+		if n.Type == "hardbreak" {
+			n = &Node{Type: "text", Text: " "}
+		}
+		out[index] = n
+	}
+	return out
+}
+
+// tableAlignment is the delimiter row's cell for a column's alignment. A column with none - null,
+// or the "none" this parser once stored - is written `---`, which both parsers read as no
+// alignment; `:---` reads as left.
 func tableAlignment(value any) string {
 	alignment, _ := value.(string)
 	switch alignment {
+	case "left":
+		return ":---"
 	case "center":
 		return ":---:"
 	case "right":
 		return "---:"
 	default:
-		return ":---"
+		return "---"
 	}
 }
 

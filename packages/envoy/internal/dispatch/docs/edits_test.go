@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -435,7 +436,7 @@ func TestApplyOperationInsertsParagraphAfterTableContainingCellAnchor(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n\nInserted paragraph\n\nAfter.\n"
+	const want = "| Key | Value |\n| --- | --- |\n| A10 | old |\n\nInserted paragraph\n\nAfter.\n"
 	if markdown != want {
 		t.Fatalf("paragraph after cell anchor = %q, want %q", markdown, want)
 	}
@@ -504,7 +505,7 @@ func TestApplyOperationExtendsTableAfterCellAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "| Key | Value |\n| :--- | :--- |\n| A10 | old |\n| A11 | new |\n"
+	const want = "| Key | Value |\n| --- | --- |\n| A10 | old |\n| A11 | new |\n"
 	if markdown != want {
 		t.Fatalf("table-row insertion = %q, want %q", markdown, want)
 	}
@@ -703,7 +704,7 @@ func TestApplyOperationDeletingABlocksWholeTextRemovesTheBlock(t *testing.T) {
 			name:     "table cell text is removed but the cell stays",
 			markdown: "| Key | Value |\n| --- | --- |\n| A10 | old |\n",
 			ops:      []model.EditOp{{Op: "delete", Find: "old"}},
-			want:     "| Key | Value |\n| :--- | :--- |\n| A10 |  |\n",
+			want:     "| Key | Value |\n| --- | --- |\n| A10 |  |\n",
 		},
 		{
 			name:     "a parent bullet's nested list is hoisted into its place",
@@ -1051,18 +1052,13 @@ func TestApplyOperationReplaceRefusesAWithThatParsesToNoText(t *testing.T) {
 // `# ` and `> ` are block markers — and replace is inline, so that text can only continue the
 // matched block as escaped literal prose, never open the list, heading or blockquote the caller
 // wrote the marker for. It used to be spliced in silently, which is the same silent structural
-// mismatch LEGION-280 closed at position 0, one hard break further in. Leading zeros keep an
-// ordered marker's start number at 1, so `01.` and `001)` interrupt a paragraph exactly as `1.`
-// does and are refused with it.
+// mismatch LEGION-280 closed at position 0, one hard break further in.
 func TestApplyOperationReplaceRejectsABlockMarkerAfterAHardBreak(t *testing.T) {
 	for _, test := range []struct{ name, with, marker string }{
 		{name: "a two-space break into an ordered one", with: "Body.  \n1. item", marker: "1. "},
 		{name: "a backslash break into a bullet", with: "Body.\\\n- item", marker: "- "},
 		{name: "a break into a heading", with: "Body.  \n# Heading", marker: "# "},
 		{name: "a break into a blockquote", with: "Body.  \n> Quote", marker: ">"},
-		{name: "a break into a zero-padded ordered one", with: "Body.  \n01. item", marker: "01. "},
-		{name: "a break into a twice-padded ordered paren", with: "Body.  \n001) x", marker: "001) "},
-		{name: "a break into the longest ordered one there is", with: "Body.  \n000000001. item", marker: "000000001. "},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := parseInput("Body.\n")
@@ -1085,13 +1081,12 @@ func TestApplyOperationReplaceRejectsABlockMarkerAfterAHardBreak(t *testing.T) {
 }
 
 // The refusal is about a marker that genuinely opens a block at a true line start, and nothing
-// else: a bare newline is a soft break, which renders as a space; an ordered marker whose start
-// number is not 1 cannot interrupt a paragraph, so `2024. was a year` after a break stays prose,
-// and neither zero-padding a different number (`02.`, start number 2), nor a `1` the digit run
-// continues past (`10.`, start number 10), nor a zero run carrying the digits past the nine a
-// start number may have (`0000000001.`, which opens no list at all) makes one; and marked text
-// opens with its mark's delimiter, not the marker character. Each of these still replaces, and
-// its canonical markdown still reads back as the document it was rendered from.
+// else: a bare newline is a soft break, which renders as a space; an ordered marker opens a list
+// there only numbered a lone `1`, as the browser editor's parser reads it, so `2024. was a year`
+// after a break stays prose, and so do a zero-padded one (`01.`, `001)`, `000000001.`), a
+// zero-padded two (`02.`) and a `1` the digit run continues past (`10.`); and marked text opens
+// with its mark's delimiter, not the marker character. Each of these still replaces, and its
+// canonical markdown still reads back as the document it was rendered from.
 func TestApplyOperationReplaceKeepsAHardBreakThatOpensNoBlock(t *testing.T) {
 	for _, test := range []struct{ name, with string }{
 		{name: "a hard break into plain text", with: "Body.  \ntwo"},
@@ -1099,6 +1094,9 @@ func TestApplyOperationReplaceKeepsAHardBreakThatOpensNoBlock(t *testing.T) {
 		{name: "a hard break into an ordered marker that is not one", with: "Body.  \n4. was a year"},
 		{name: "a hard break into a zero-padded two", with: "Body.  \n02. was a year"},
 		{name: "a hard break into a ten", with: "Body.  \n10. items"},
+		{name: "a hard break into a zero-padded one", with: "Body.  \n01. item"},
+		{name: "a hard break into a twice-padded paren", with: "Body.  \n001) x"},
+		{name: "a hard break into the longest zero-padded one", with: "Body.  \n000000001. item"},
 		{name: "a hard break into a zero run past the digit cap", with: "Body.  \n0000000001. items"},
 		{name: "a hard break into marked text", with: "Body.  \n**- bold**"},
 	} {
@@ -2477,5 +2475,42 @@ func TestApplyOperationInsertReadsFrontMatterOnlyAtTheStart(t *testing.T) {
 	}
 	if opening["---"] != opening["***"] {
 		t.Fatalf("inserting `---` at the start = %q, want what `***` writes, %q", opening["---"], opening["***"])
+	}
+}
+
+// A panic in the check a write's changed blocks go through is this package's bug, never the
+// caller's text, so replacementBroke passes it on as its error, answered as an internal one:
+// read as a verdict before the write it would wave the write through, and after it it would
+// refuse the caller's text with the panic's message.
+func TestReplacementBrokePassesAPanicOnAsAnError(t *testing.T) {
+	before, err := pmdoc.Parse("Intro.\n\nBody.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := pmdoc.Parse("Intro.\n\nChanged.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	panicked := fmt.Errorf("%w: reading markdown: boom", pmdoc.ErrPanic)
+	// "Body." is the second paragraph's text, from position 9.
+	match := pmdoc.Range{From: 9, To: 14}
+	for _, test := range []struct {
+		name  string
+		check func(*pmdoc.Node) error
+	}{
+		{"before the write", func(*pmdoc.Node) error { return panicked }},
+		{"after the write", func(block *pmdoc.Node) error {
+			if block == after.Children[1] {
+				return panicked
+			}
+			return nil
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			block, broke, err := replacementBroke(before, after, match, test.check)
+			if block != -1 || broke != nil || !errors.Is(err, pmdoc.ErrPanic) {
+				t.Fatalf("replacementBroke = (%d, %v, %v), want an ErrPanic error and no verdict", block, broke, err)
+			}
+		})
 	}
 }

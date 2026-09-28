@@ -1,7 +1,9 @@
 package pmdoc
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"slices"
 	"sort"
@@ -44,22 +46,26 @@ func ReadBack(doc *Node) (*Node, error) {
 // another value anywhere (a table cell's alignment) is not compared. A before whose markdown the
 // parser refuses (a browser edit can leave one) gives nothing to judge against, and is "" whether
 // or not after parses: the checks that read each changed block alone still refuse one the write
-// leaves unreadable.
-func NewMisread(before, after *Node) string {
+// leaves unreadable. Only a refusal (ErrSchema) reading either back is a verdict; any other error,
+// a panic (ErrPanic) among them, is this package's bug, not a misread, and is the error.
+func NewMisread(before, after *Node) (string, error) {
 	backAfter, err := ReadBack(after)
-	if err != nil {
-		if _, beforeErr := ReadBack(before); beforeErr != nil {
-			return ""
-		}
-		return err.Error()
+	if err != nil && !errors.Is(err, ErrSchema) {
+		return "", err
 	}
 	written := StripAnchorMarks(after)
-	if readDifference(written, backAfter, skip{}) == "" {
-		return ""
+	if err == nil && readDifference(written, backAfter, skip{}) == "" {
+		return "", nil
 	}
-	backBefore, err := ReadBack(before)
+	backBefore, beforeErr := ReadBack(before)
+	if beforeErr != nil && !errors.Is(beforeErr, ErrSchema) {
+		return "", beforeErr
+	}
+	if beforeErr != nil {
+		return "", nil
+	}
 	if err != nil {
-		return ""
+		return err.Error(), nil
 	}
 	previous := StripAnchorMarks(before)
 	drift := skip{names: attributeDrift(previous, backBefore)}
@@ -70,10 +76,60 @@ func NewMisread(before, after *Node) string {
 	}
 	for _, found := range misreads(written, backAfter, drift) {
 		if found.id == "" || !known[sameMisread{found.id, found.differs}] {
-			return found.reason
+			return found.reason, nil
 		}
 	}
-	return ""
+	return "", nil
+}
+
+// documentMisread names how doc, a whole document a write makes, reads back otherwise, or is ""
+// when it does not: every block that reads back otherwise is the write's, the first named as far
+// down as its markdown still pairs (misreads), and a doc whose markdown the parser refuses is named
+// by that refusal. Only a refusal (ErrSchema) is a verdict; any other error is the error.
+func documentMisread(doc *Node) (string, error) {
+	back, err := ReadBack(doc)
+	if err != nil {
+		if errors.Is(err, ErrSchema) {
+			return err.Error(), nil
+		}
+		return "", err
+	}
+	written := StripAnchorMarks(doc)
+	difference := readDifference(written, back, skip{})
+	if difference == "" {
+		return "", nil
+	}
+	if found := misreads(written, back, skip{}); len(found) > 0 {
+		return found[0].reason, nil
+	}
+	return difference, nil
+}
+
+// RefuseMisreadDocument refuses (ErrSchema) a whole document a write makes, a spec, an upload or a
+// version, that reads back otherwise (documentMisread), and RefuseMisreadWrite a write into a
+// document, an insert, whose result reads back otherwise where before did not (NewMisread). What
+// is stored is the rendering, which the next read would give back as another document or refuse.
+// The rules that read a shape refuse what they know first, so a refusal here names a shape none of
+// them reads, and is logged. Any other error reading it back, a panic (ErrPanic) among them, is
+// the error.
+func RefuseMisreadDocument(doc *Node) error {
+	return refuseMisread(documentMisread(doc))
+}
+
+// RefuseMisreadWrite refuses a write into a document; see RefuseMisreadDocument.
+func RefuseMisreadWrite(before, after *Node) error {
+	return refuseMisread(NewMisread(before, after))
+}
+
+func refuseMisread(misread string, err error) error {
+	if err != nil {
+		return err
+	}
+	if misread == "" {
+		return nil
+	}
+	slog.Warn("pmdoc: refused a write whose markdown reads back otherwise", "misread", misread)
+	return fmt.Errorf("%w: the markdown the document would be stored as reads back otherwise (%s)", ErrSchema, misread)
 }
 
 // misread is a block that reads back otherwise: its id, what differs (the same for the same
@@ -403,7 +459,10 @@ func resync(written, back []*Node, i, j int, ignore skip) (int, int, bool) {
 }
 
 // attributeDrift is the attributes doc's blocks read back with other values where they read back
-// holding the same blocks and text.
+// holding the same blocks and text - but a task item's checked, which is its own item's: a task
+// item emptied of its text is written as a plain empty item and reads back with checked none, and
+// NewMisread tells a stale one from a new one by its block id, so the attribute drifting would hide
+// every other task item emptied.
 func attributeDrift(doc, back *Node) map[string]bool {
 	drift := map[string]bool{}
 	pairs, _ := alignBlocks(doc, back, skip{all: true})
@@ -411,6 +470,7 @@ func attributeDrift(doc, back *Node) map[string]bool {
 	for _, pair := range pairs {
 		collectDrift(written[pair[0]], back.Children[pair[1]], drift)
 	}
+	delete(drift, "checked")
 	return drift
 }
 
@@ -515,12 +575,15 @@ func attributeDifference(want, got *Node, ignore skip) (string, any, any, bool) 
 }
 
 // writtenAttrs is the attributes node's markdown writes: tokenAttrs, with a table column that has
-// no alignment written left (tableAlignment).
+// no alignment - null, or the "none" this parser once stored - written unaligned (tableAlignment),
+// which reads back with none.
 func writtenAttrs(node *Node) Attrs {
 	attrs := tokenAttrs(node.Type, node.Attrs)
 	if node.Type == "table_header" || node.Type == "table_cell" {
-		if alignment, _ := attrs["alignment"].(string); alignment != "center" && alignment != "right" {
-			attrs["alignment"] = "left"
+		switch attrs["alignment"] {
+		case "left", "center", "right":
+		default:
+			delete(attrs, "alignment")
 		}
 	}
 	return attrs

@@ -8,6 +8,7 @@ const blockSchema = JSON.parse(readFileSync(join(import.meta.dir, "..", "schema"
 const { schema } = await createHeadlessProof({ blockSchema });
 const ydoc = new Y.Doc();
 Y.applyUpdate(ydoc, Buffer.from(process.argv[2], "base64"));
+// The document the browser editor holds: y-prosemirror builds each node with the schema, so an
+// attribute the live document lacks takes the schema's default.
 const root = yXmlFragmentToProsemirrorJSON(ydoc.getXmlFragment("prosemirror"));
-schema.nodeFromJSON(root);
-console.log(JSON.stringify(root));
+console.log(JSON.stringify(schema.nodeFromJSON(root).toJSON()));

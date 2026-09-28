@@ -61,13 +61,14 @@ func TestRenderKeepsTheBlocksAfterALineThatWouldOpenAFenceOrCloseATypedBlock(t *
 	}
 	after := paragraph(text("After."))
 	for name, doc := range map[string]*Node{
-		"a paragraph of tildes":        {Type: "doc", Children: []*Node{paragraph(text("~~~")), after}},
-		"tildes with an info string":   {Type: "doc", Children: []*Node{paragraph(text("~~~ go")), after}},
-		"tildes after a hard break":    {Type: "doc", Children: []*Node{paragraph(text("a"), hardBreak, text("~~~")), after}},
-		"tildes in a list item":        {Type: "doc", Children: []*Node{{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{paragraph(text("~~~"))}}}}, after}},
-		"tildes in a blockquote":       {Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{paragraph(text("~~~"))}}, after}},
-		"tildes in a typed block":      {Type: "doc", Children: []*Node{callout(paragraph(text("~~~"))), after}},
-		"::: after a hard break in it": {Type: "doc", Children: []*Node{callout(paragraph(text("a"), hardBreak, text(":::")), paragraph(text("Inside."))), after}},
+		"a paragraph of tildes":                       {Type: "doc", Children: []*Node{paragraph(text("~~~")), after}},
+		"tildes with an info string":                  {Type: "doc", Children: []*Node{paragraph(text("~~~ go")), after}},
+		"tildes after a hard break":                   {Type: "doc", Children: []*Node{paragraph(text("a"), hardBreak, text("~~~")), after}},
+		"tildes in a list item":                       {Type: "doc", Children: []*Node{{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{paragraph(text("~~~"))}}}}, after}},
+		"tildes in a blockquote":                      {Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{paragraph(text("~~~"))}}, after}},
+		"tildes in a typed block":                     {Type: "doc", Children: []*Node{callout(paragraph(text("~~~"))), after}},
+		"::: after a hard break in it":                {Type: "doc", Children: []*Node{callout(paragraph(text("a"), hardBreak, text(":::")), paragraph(text("Inside."))), after}},
+		"::: after a hard break in a list item in it": {Type: "doc", Children: []*Node{callout(&Node{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: []*Node{paragraph(text("a"), hardBreak, text(":::"))}}}}, paragraph(text("Inside."))), after}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			markdown := mustRender(t, doc)
@@ -760,32 +761,84 @@ func TestRenderKeepsLeadingWhitespaceOnAParagraph(t *testing.T) {
 }
 
 // The line a setext underline underlines can end at a hard break, where the underline opens a
-// fresh text node whose own offsets show no predecessor.
+// fresh text node whose own offsets show no predecessor. The line before it can be a container's
+// first, which opens with the list marker or quote the container's later lines write as spaces.
 func TestRenderEscapesASetextUnderlineAfterAHardBreak(t *testing.T) {
-	doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{
-		{Type: "text", Text: "Title"},
-		{Type: "hardbreak"},
-		{Type: "text", Text: "=="},
-	}}}}
-	markdown, err := Render(doc)
-	if err != nil {
-		t.Fatal(err)
+	paragraph := func() *Node {
+		return &Node{Type: "paragraph", Children: []*Node{
+			{Type: "text", Text: "Title"},
+			{Type: "hardbreak"},
+			{Type: "text", Text: "=="},
+		}}
 	}
-	if markdown != "Title\\\n\\==\n" {
-		t.Fatalf("Render() = %q", markdown)
+	quote := func(child *Node) *Node { return &Node{Type: "blockquote", Children: []*Node{child}} }
+	item := func(child *Node) *Node {
+		children := []*Node{child}
+		if child.Type != "paragraph" {
+			children = []*Node{{Type: "paragraph"}, child}
+		}
+		return &Node{Type: "bullet_list", Children: []*Node{{Type: "list_item", Children: children}}}
 	}
-	back, err := Parse(markdown)
-	if err != nil {
-		t.Fatal(err)
+	reference := &Node{Type: "paragraph", Children: []*Node{
+		{Type: "text", Text: "x"},
+		{Type: "footnote_reference", Attrs: Attrs{"label": "n"}},
+	}}
+	definition := func(child *Node) *Node {
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": "n"}, Children: []*Node{child}}
 	}
-	// The parser stamps a hard break with its own `isInline` attribute, so the tree is compared
-	// by what it renders and by the block it is: one paragraph, not a heading with an underline.
-	if len(back.Children) != 1 || back.Children[0].Type != "paragraph" {
-		t.Fatalf("Parse(Render()) children = %#v", back.Children)
+	for _, test := range []struct {
+		name   string
+		blocks []*Node
+		want   string
+	}{
+		{name: "a paragraph", blocks: []*Node{paragraph()}, want: "Title\\\n\\==\n"},
+		{name: "a quote", blocks: []*Node{quote(paragraph())}, want: "> Title\\\n> \\==\n"},
+		{name: "a list item", blocks: []*Node{item(paragraph())}, want: "- Title\\\n  \\==\n"},
+		{name: "a quote in a list item", blocks: []*Node{item(quote(paragraph()))}, want: "- > Title\\\n  > \\==\n"},
+		{name: "a list item in a quote", blocks: []*Node{quote(item(paragraph()))}, want: "> - Title\\\n>   \\==\n"},
+		{name: "a footnote definition", blocks: []*Node{reference, definition(paragraph())}, want: "x[^n]\n\n[^n]: Title\\\n    \\==\n"},
+		{name: "a quote in a footnote definition", blocks: []*Node{reference, definition(quote(paragraph()))}, want: "x[^n]\n\n[^n]: > Title\\\n    > \\==\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc := &Node{Type: "doc", Children: test.blocks}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("Render() = %q, want %q", markdown, test.want)
+			}
+			back, err := Parse(markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The parser stamps a hard break with its own `isInline` attribute, so the tree is
+			// compared by what it renders and by its blocks: a paragraph, not a heading.
+			if shape, want := blockKindsOf(back), blockKindsOf(doc); shape != want {
+				t.Fatalf("Parse(Render()) blocks = %s, want %s", shape, want)
+			}
+			if again := mustRender(t, back); again != markdown {
+				t.Fatalf("Render(Parse(Render())) = %q, want %q", again, markdown)
+			}
+		})
 	}
-	if again := mustRender(t, back); again != markdown {
-		t.Fatalf("Render(Parse(Render())) = %q, want %q", again, markdown)
+}
+
+// blockKindsOf is the block types of doc, depth first.
+func blockKindsOf(doc *Node) string {
+	var kinds []string
+	var walk func(*Node)
+	walk = func(n *Node) {
+		if isInlineNodeType(n.Type) {
+			return
+		}
+		kinds = append(kinds, n.Type)
+		for _, child := range n.Children {
+			walk(child)
+		}
 	}
+	walk(doc)
+	return strings.Join(kinds, ",")
 }
 
 // Stored markdown that main already renders byte for byte must come back byte for byte: a changed
@@ -823,10 +876,12 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"1. Step one\n\n   ---\n2. -1 means unlimited\n",
 		"> - a\n>\n>   ---\n> - -b\n",
 		"- a\\\n  <br>\n- <- x\n",
-		// A lone `:::` inside a blockquote or list within a typed block cannot close it.
+		// A lone `:::` inside a blockquote within a typed block, or on a list marker's line, cannot
+		// close it, and nor can one in a list item inside a typed block written with a longer fence.
 		":::callout{#c1 kind=\"note\" title=\"T\"}\n> :::\n:::\n",
+		"::::callout{#c1 kind=\"note\" title=\"T\"}\n- a\\\n  :::\n\n```\n:::\n```\n::::\n",
+		"::::callout{#c1 kind=\"note\" title=\"T\"}\n1. a\\\n   :::\n\n```\n:::\n```\n::::\n",
 		":::callout{#c1 kind=\"note\" title=\"T\"}\n- :::\n:::\n",
-		":::callout{#c1 kind=\"note\" title=\"T\"}\n- a\\\n  :::\n:::\n",
 		":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich?\n\n- first\n- :::\n:::\n",
 		":::callout{#c1 kind=\"note\" title=\"T\"}\n1. :::\n:::\n",
 		// A task item's checkbox is already on the line, so its text opens no block.
@@ -835,6 +890,32 @@ func TestRenderKeepsStoredMarkdownThatReadsBack(t *testing.T) {
 		"- [ ] ~~~ tildes\n",
 		// Whitespace just inside a mark's marker is the mark's text, not a paragraph's indentation.
 		"[    x](https://x.test)\n",
+		// An empty typed block or code block written with a line holding only the prefix, where a
+		// quote stands between it and any list item or footnote definition around it: both parsers
+		// read that line as the quote's, so it stays as main wrote it.
+		"- > :::callout{#e kind=\"note\" title=\"T\"}\n  > \n  > :::\n",
+		":::callout{#t1 kind=\"note\" title=\"T\"}\n- ```\n  \n  ```\n:::\n",
+		"x[^f1]\n\n[^f1]: > ```\n    > \n    > ```\n",
+		// A blank code line in a list item in a quote inside a footnote definition carries the
+		// quote's marker after the definition's indentation, so the definition takes that
+		// indentation there as on any line, and the item's stays as main wrote it.
+		"x[^f2]\n\n[^f2]: > - a\n    >\n    >   ```\n    >   \n    >   ```\n",
+		"- :::callout{#t1 kind=\"note\" title=\"T\"}\n  > ```\n  > \n  > ```\n  :::\n",
+		// An empty code block in a typed block in a spread list item, in a document holding no shape
+		// this parser reads only as the browser editor does: that line spreads the item for the
+		// browser editor, which is spread already, and goldmark's looseness reads it here, so it
+		// stays as main wrote it.
+		"- a\n\n  :::callout{#t1 kind=\"note\" title=\"T\"}\n  ```\n  \n  ```\n  :::\n",
+		"1. a\n\n   :::callout{#t1 kind=\"note\" title=\"T\"}\n   ```\n   \n   ```\n   :::\n2. b\n",
+		// No blank lines after an item that ends in a list in a quote, where that list is spread by
+		// the blank line after its own first item.
+		"> - a\n>   - b\n>   \n>\n>   - c\n> - z\n",
+		// A blank line after a list in a typed block in a footnote definition, where it spreads a last
+		// item that is spread already.
+		"ref[^n] here.\n\n[^n]: :::callout{#c kind=\"note\" title=\"\"}\n    - a\n\n      > q\n\n    > q\n    :::\n\n    tail\n",
+		// Reference-shaped text whose label lowercases to a defined label's, which main escaped: the
+		// engine keeps `İ` apart from `i`, and the escaped text reads back as the same text.
+		"Ref[^i] and \\[^İ] text.\n\n[^i]: Def.\n",
 	} {
 		t.Run(markdown, func(t *testing.T) {
 			tree, err := Parse(markdown)

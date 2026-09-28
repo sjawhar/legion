@@ -872,6 +872,11 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err := pmdoc.RepeatedBlockID(tree, out, with); err != nil {
 			return nil, &ErrInvalidOp{Field: "markdown", Reason: err.Error()}
 		}
+		// What is stored is the document's rendering, so an insert that leaves it reading back
+		// otherwise than it did would store another document than the one it wrote.
+		if err := pmdoc.RefuseMisreadWrite(tree, out); err != nil {
+			return nil, invalidSchemaOp("markdown", err)
+		}
 		return out, nil
 	case "delete_row":
 		if op.Block == "" {
@@ -1218,16 +1223,12 @@ func inlineReplacement(markdown string, edges textEdges) (*pmdoc.Node, error) {
 
 // hardBreakOrderedMarker and hardBreakBlockquoteMarker are the two block markers
 // pmdoc.LeadingBlockMarker cannot answer for a line after a hard break. An ordered item may
-// interrupt a paragraph only when its start number is 1, so LeadingBlockMarker's any-digit-run
-// pattern would refuse `2024. was a year`, which stays prose. Leading zeros do not change that
-// start number, so `01.` and `001)` interrupt exactly as `1.` does, while `02.` (start number 2)
-// and `10.` (start number 10) do not — which is why the digit run must end at the `1`. The zero
-// run is bounded at eight because a start number is at most nine digits, so `0000000001.` is a
-// tenth digit past that cap and opens no list at all: the bound is what keeps this pattern the
-// exact start-number-1 set the parser reads rather than a superset that refuses prose. A
+// interrupt a paragraph only when it is numbered a lone `1`, as the browser editor's parser reads
+// it, so LeadingBlockMarker's any-digit-run pattern would refuse `2024. was a year`, which stays
+// prose, and so do `01.`, `001)`, `02.` and `10.`, which the parser reads as text there too. A
 // blockquote's `>` is no textblock's own marker, so pmdoc has no MarkerKind for it.
 var (
-	hardBreakOrderedMarker    = regexp.MustCompile(`^[ \t]*0{0,8}1[.)][ \t]`)
+	hardBreakOrderedMarker    = regexp.MustCompile(`^[ \t]*1[.)][ \t]`)
 	hardBreakBlockquoteMarker = regexp.MustCompile(`^[ \t]*>`)
 )
 

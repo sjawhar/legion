@@ -177,9 +177,12 @@ func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error
 	}
 
 	if edit.Question != nil {
-		rebuilt, err := parsedBlockBody(questionParagraphs(normalizeAskQuestion(*edit.Question)))
+		rebuilt, refusal, err := parsedBlockBody(questionParagraphs(normalizeAskQuestion(*edit.Question)))
 		if err != nil {
-			return nil, &ErrAskBlockUnrepresentable{Field: "question", Reason: err.Error()}
+			return nil, err
+		}
+		if refusal != "" {
+			return nil, &ErrAskBlockUnrepresentable{Field: "question", Reason: refusal}
 		}
 		for _, node := range rebuilt {
 			if node.Type != "paragraph" {
@@ -199,9 +202,12 @@ func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error
 		options := normalizeAskOptions(*edit.Options)
 		list = nil
 		if len(options) > 0 {
-			rebuilt, err := parsedBlockBody([]*pmdoc.Node{optionList(options)})
+			rebuilt, refusal, err := parsedBlockBody([]*pmdoc.Node{optionList(options)})
 			if err != nil {
-				return nil, &ErrAskBlockUnrepresentable{Field: "options", Reason: err.Error()}
+				return nil, err
+			}
+			if refusal != "" {
+				return nil, &ErrAskBlockUnrepresentable{Field: "options", Reason: refusal}
 			}
 			if len(rebuilt) != 1 || rebuilt[0].Type != "bullet_list" {
 				return nil, &ErrAskBlockUnrepresentable{
@@ -222,22 +228,32 @@ func askBlockChildren(current askBlock, edit AskBlockEdit) ([]*pmdoc.Node, error
 
 // parsedBlockBody is what the document's own markdown pipeline makes of nodes: rendering escapes
 // the text so it reads back literally, and parsing supplies the attributes and block ids a
-// hand-built node has no business inventing.
-func parsedBlockBody(nodes []*pmdoc.Node) ([]*pmdoc.Node, error) {
+// hand-built node has no business inventing. refusal is why the text cannot be held, when the
+// renderer or the parser refuses it (ErrDocSchema, pmdoc.ErrSchema); any other error, a panic
+// (pmdoc.ErrPanic) among them, is pmdoc's bug rather than a reason, and is err.
+func parsedBlockBody(nodes []*pmdoc.Node) (parsed []*pmdoc.Node, refusal string, err error) {
 	markdown, err := renderTree(&pmdoc.Node{Type: "doc", Children: nodes})
-	if err != nil {
-		return nil, fmt.Errorf("the text cannot be written as document markdown: %w", err)
+	if err != nil && !errors.Is(err, ErrDocSchema) {
+		return nil, "", err
 	}
-	parsed, err := pmdoc.Parse(markdown)
 	if err != nil {
-		return nil, errors.New("the text would leave the document's markdown unreadable")
+		return nil, "the text cannot be written as document markdown: " + err.Error(), nil
 	}
-	return parsed.Children, nil
+	doc, err := pmdoc.Parse(markdown)
+	if err != nil && !errors.Is(err, pmdoc.ErrSchema) {
+		return nil, "", err
+	}
+	if err != nil {
+		return nil, "the text would leave the document's markdown unreadable", nil
+	}
+	return doc.Children, "", nil
 }
 
 // verifyAskBlockRoundTrip reads the written block back the ways the rest of Dispatch reads it -
 // settlement's own parser, and, when this edit rewrote text, the canonical markdown a version
-// records and an upload re-parses - and reports the first that does not return want.
+// records and an upload re-parses - and reports the first that does not return want. An error
+// writing or reading it that is no refusal, a panic (pmdoc.ErrPanic) among them, is pmdoc's bug,
+// and is returned as it is.
 func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText, wroteBody bool) error {
 	block, err := askBlockOf(next, blockID)
 	if err != nil {
@@ -250,10 +266,16 @@ func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText
 		return nil
 	}
 	markdown, err := renderTree(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{block.node}})
+	if err != nil && !errors.Is(err, ErrDocSchema) {
+		return err
+	}
 	if err != nil {
 		return &ErrAskBlockUnrepresentable{Field: "block", Reason: "the text cannot be written as document markdown"}
 	}
 	rendered, err := pmdoc.Parse(markdown)
+	if err != nil && !errors.Is(err, pmdoc.ErrSchema) {
+		return err
+	}
 	if err != nil {
 		return &ErrAskBlockUnrepresentable{
 			Field:  "block",

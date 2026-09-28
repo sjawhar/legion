@@ -65,9 +65,11 @@ type lineCandidate struct {
 	// afterLine reports whether the line continues its textblock, so the line before is read
 	// with it.
 	afterLine bool
-	// atTypedPrefix reports whether the textblock is written at the prefix of the typed block
-	// around it, where a lone `:::` line closes that block.
-	atTypedPrefix bool
+	// closesTyped reports whether a lone `:::` line of the textblock is escaped as one that could
+	// close the typed block around it: the textblock is written at the typed block's own prefix, or,
+	// in a block fenced with three colons, less than four columns past it with no quote marker
+	// between (typedFenceReach).
+	closesTyped bool
 	// prefix is the prefix the textblock's lines are written at.
 	prefix string
 }
@@ -75,27 +77,117 @@ type lineCandidate struct {
 // inlineWithEscapes writes one textblock's inline nodes. Delimiters in text the escape rules leave
 // alone can still pair into a mark the text never had, or break one it has: GFM reads a single
 // tilde as a strikethrough delimiter and refuses a run of three, and asterisks and underscores pair
-// across a hard break, around a reference or inside a link label. A run whose text holds one is
-// read back after it is written, and when it does not come back as written it is written again
-// with its text's tildes escaped, then with its asterisks and underscores escaped as well - each
-// kept only if it reads back, so a run that fails for another reason keeps the bytes it had.
+// across a hard break, around a reference or inside a link label. Linkify continues a bare URL
+// into the text written right after it, which a backslash escape had stopped as written. A run
+// whose text holds either is read back after it is written, and when it does not come back as
+// written it is written again in each spelling respellings lists, keeping the first that reads
+// back, so a run that fails for another reason keeps the bytes it had.
+//
+// And the marks are written in one order, so a mark the next text still carries is closed and
+// opened again inside that text's other marks wherever the order puts it after them: bold inside
+// italic comes out as `*`, `**` and `*` side by side, one run of four asterisks. The parser splits
+// such a fused run as written where its flanking allows, so a fused first writing that reads back
+// is kept, as main writes it, and one that does not is written again in the plain respellings, as
+// main writes it again. Only where none of those reads back is it written with open marks kept
+// open (keepingOpen), each such spelling kept only where it reads back with no delimiter run fused.
 func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlineContext) {
 	from := r.b.Len()
-	r.writeInlineRun(nodes, prefix, context, delimitersAsRuled)
+	fused := r.writeInlineRun(nodes, prefix, context, runSpelling{})
 	held := delimitersInText(nodes)
-	if r.err != nil || held == delimitersAsRuled || r.runReadsBack(from, prefix, nodes) {
+	bareURL := textAfterBareURL(nodes, context.tableCell)
+	if r.err != nil || held == delimitersAsRuled && !bareURL && !fused || r.runReadsBack(from, prefix, nodes) {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
-	for escapes := held; escapes <= delimitersAll; escapes++ {
+	spellings := respellings(held, bareURL, false)
+	if fused {
+		spellings = append(spellings, respellings(held, bareURL, true)...)
+	}
+	for _, spelling := range spellings {
 		r.b.Truncate(from)
-		r.writeInlineRun(nodes, prefix, context, escapes)
-		if r.err == nil && r.runReadsBack(from, prefix, nodes) {
+		fusedAgain := r.writeInlineRun(nodes, prefix, context, spelling)
+		if r.err == nil && !(spelling.keepOpen && fusedAgain) && r.runReadsBack(from, prefix, nodes) {
 			return
 		}
 	}
 	r.b.Truncate(from)
 	r.b.WriteString(written)
+}
+
+// runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
+// text it escapes, whether it escapes the character after each bare URL (endsBareURL), and whether
+// a mark the next text still carries stays open around that text's other marks (keepingOpen).
+type runSpelling struct {
+	escapes      delimiterEscapes
+	afterBareURL bool
+	keepOpen     bool
+}
+
+// respellings is every spelling, open marks kept open or not, that inlineWithEscapes writes a run
+// in after its first writing, in the order it tries them: the delimiter escapes from the fewest,
+// then each again with the character after a bare URL escaped.
+func respellings(held delimiterEscapes, bareURL, keepOpen bool) []runSpelling {
+	escapes := []delimiterEscapes{delimitersAsRuled}
+	if held != delimitersAsRuled {
+		for next := held; next <= delimitersAll; next++ {
+			escapes = append(escapes, next)
+		}
+	}
+	var spellings []runSpelling
+	for _, afterBareURL := range []bool{false, true} {
+		if afterBareURL && !bareURL {
+			continue
+		}
+		for _, delimiters := range escapes {
+			spelling := runSpelling{escapes: delimiters, afterBareURL: afterBareURL, keepOpen: keepOpen}
+			if spelling != (runSpelling{}) {
+				spellings = append(spellings, spelling)
+			}
+		}
+	}
+	return spellings
+}
+
+// keepingOpen orders marks, the marks a text is written under, so that no mark it or the text
+// after it still carries is closed and opened again between them: the longest run of active, the
+// marks written open before it, from the outermost, whose every mark it carries comes first, as
+// active holds them; then its other marks that following, the next text's marks, carries; then
+// the rest, each group in its written order, opened inside the one before.
+func keepingOpen(active, marks, following []Mark) []Mark {
+	kept := 0
+	for kept < len(active) && containsSameMark(marks, active[kept]) {
+		kept++
+	}
+	ordered := append(make([]Mark, 0, len(marks)), active[:kept]...)
+	for _, carried := range []bool{true, false} {
+		for _, mark := range marks {
+			if !containsSameMark(active[:kept], mark) && containsSameMark(following, mark) == carried {
+				ordered = append(ordered, mark)
+			}
+		}
+	}
+	return ordered
+}
+
+// textAfterBareURL reports whether nodes write text right after a bare URL, which linkify can
+// continue into that text's first character.
+func textAfterBareURL(nodes []*Node, escapePipes bool) bool {
+	for index := 1; index < len(nodes); index++ {
+		if followsBareURL(nodes, index, escapePipes) {
+			return true
+		}
+	}
+	return false
+}
+
+// followsBareURL reports whether nodes[index] is text outside any link written right after a bare
+// URL (isBareURLLink), whose link linkify reads again from the text alone.
+func followsBareURL(nodes []*Node, index int, escapePipes bool) bool {
+	if index == 0 || nodes[index].Type != "text" || nodeHasMark(nodes[index], "link") {
+		return false
+	}
+	previous := nodes[index-1]
+	return previous.Type == "text" && nodeHasMark(previous, "link") && isBareURLLink(previous, visibleMarks(previous.Marks), escapePipes)
 }
 
 // runReadsBack reports whether the inline markdown written since from reads back as nodes: the
@@ -110,13 +202,16 @@ func (r *renderer) runReadsBack(from int, prefix string, nodes []*Node) bool {
 	return err == nil && slices.Equal(inlineSignature(parsed), inlineSignature(nodes))
 }
 
-func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineContext, escapes delimiterEscapes) {
+// writeInlineRun writes nodes in spelling, reporting whether it fused two delimiter runs: closed a
+// mark and at once opened one written with the same delimiter character, which the parser reads as
+// one run.
+func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineContext, spelling runSpelling) (fused bool) {
 	escapePipes := context.tableCell
 	var active []Mark
 	position := inlinePosition{atLineStart: context.startsLine, atTextStart: true}
 	for index, n := range nodes {
 		if r.err != nil {
-			return
+			return fused
 		}
 		switch n.Type {
 		case "text":
@@ -126,9 +221,22 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 			if index+1 < len(nodes) {
 				following = writtenMarks(nodes[index+1], escapePipes)
 			}
+			if spelling.keepOpen {
+				next = keepingOpen(active, next, following)
+				if index+1 < len(nodes) {
+					var after []Mark
+					if index+2 < len(nodes) {
+						after = writtenMarks(nodes[index+2], escapePipes)
+					}
+					following = keepingOpen(next, following, after)
+				}
+			}
 			common := sharedMarks(active, next)
 			for i := len(active) - 1; i >= common; i-- {
 				r.closeInlineMark(active[i], escapePipes)
+			}
+			if common < len(active) && common < len(next) && markDelimiter(active[common]) != 0 && markDelimiter(active[common]) == markDelimiter(next[common]) {
+				fused = true
 			}
 			for _, mark := range next[common:] {
 				r.openInlineMark(mark, nodes, index)
@@ -150,7 +258,8 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 				urlSchemes:     !hasLink,
 				label:          label,
 				followed:       index+1 < len(nodes) || len(next) > 0,
-				delimiters:     escapes,
+				delimiters:     spelling.escapes,
+				afterBareURL:   spelling.afterBareURL && followsBareURL(nodes, index, escapePipes),
 				heading:        context.heading,
 				marked:         len(next) > 0,
 				opener:         adjacentDelimiter(next[common:]),
@@ -196,6 +305,7 @@ func (r *renderer) writeInlineRun(nodes []*Node, prefix string, context inlineCo
 	}
 	r.closeMarks(active, escapePipes)
 	r.endLine(false)
+	return fused
 }
 
 // endLine judges the line just written when its text began with a lineCandidate: the character is
@@ -215,7 +325,7 @@ func (r *renderer) endLine(continues bool) {
 	line := string(written[lineFrom:])
 	width := utf8.RuneLen(candidate.char)
 	escape := escaped(candidate.char)
-	if !candidate.atTypedPrefix || !closesTypedBlock(line, candidate.prefix) {
+	if !candidate.closesTyped || !closesTypedBlock(line, candidate.prefix) {
 		readFrom, before := lineFrom, ""
 		if candidate.afterLine && lineFrom > 0 {
 			readFrom = markdownLineStart(written, lineFrom-1)
@@ -307,6 +417,31 @@ func inlineCodePadding(value string) bool {
 	return codeSpanPadded(value)
 }
 
+// takesCodeLineIndent reports whether the containers around a code span would take columns off the
+// whitespace its later line, the first of rest, opens with, were the line written as it is, without
+// their prefix, as it is everywhere else: outermost first, each list item and footnote definition
+// takes its own columns while that whitespace reaches them, until a quote, which the line does not
+// continue, so the rest of the line is the paragraph's, whitespace and all. Where one would, the
+// line is written behind the prefix, which the containers take instead.
+func (r *renderer) takesCodeLineIndent(rest string) bool {
+	whitespace := len(rest) - len(strings.TrimLeft(rest, " \t"))
+	columns, taken, from := columnOf([]byte(rest[:whitespace])), 0, 0
+	for _, container := range r.scopes {
+		width := len(container.prefix) - from
+		from = len(container.prefix)
+		switch container.node.Type {
+		case "blockquote":
+			return taken > 0
+		case "list_item", "footnote_definition":
+			if columns-taken < width {
+				return taken > 0
+			}
+			taken += width
+		}
+	}
+	return taken > 0
+}
+
 func (r *renderer) writeSyntax(value string) {
 	r.b.WriteString(value)
 }
@@ -335,6 +470,9 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 			r.endLine(true)
 			r.writeText(value[lineEnd : lineEnd+1])
 			value = value[lineEnd+1:]
+			if r.takesCodeLineIndent(value) {
+				r.writeSyntax(prefix)
+			}
 			endsLine, position.afterLine = value == "", true
 		}
 		r.writeText(value)
@@ -375,7 +513,7 @@ func (r *renderer) writeInlineText(node *Node, position *inlinePosition, prefix 
 		}
 		if escape {
 			r.writeText(value[segmentStart:byteOffset])
-			r.writeSyntax(textEscape(char))
+			r.writeSyntax(textEscape(char, endsBareURL(byteOffset, char, context)))
 			segmentStart = byteOffset + width
 		}
 		lineEnd := char == '\n'
@@ -408,11 +546,12 @@ func markdownLineStart(written []byte, offset int) int {
 // endLine to judge once the line is written.
 func (r *renderer) holdLineStart(before string, char rune, position *inlinePosition, prefix string) {
 	r.writeText(before)
+	typed := r.scope().typed
 	r.heldLineStart = &lineCandidate{
-		at:            r.b.Len(),
-		char:          char,
-		afterLine:     position.afterLine,
-		atTypedPrefix: r.typedPrefix != nil && *r.typedPrefix == prefix,
-		prefix:        prefix,
+		at:          r.b.Len(),
+		char:        char,
+		afterLine:   position.afterLine,
+		closesTyped: typed != nil && (typed.prefix == prefix || typed.colons == 3 && typedFenceReach(typed.prefix, prefix)),
+		prefix:      prefix,
 	}
 }
