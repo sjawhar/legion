@@ -1600,3 +1600,138 @@ describe("hub process starts", () => {
     expect(guard.argv(["bun", "run", "dev"], workspace, env)).toBeUndefined();
   });
 });
+
+/** A word the guard cannot read may be the option or subcommand that makes a command dangerous,
+ * so it is taken as one and the command's other arguments decide what that means. Each row names
+ * the site and three commands at equal standing:
+ *
+ * - `literal` is refused, and was refused before this rule: it is the control that the site's
+ *   refusal still works at all.
+ * - `unreadable` reaches the same command through one word the guard cannot read. Every row's was
+ *   ALLOWED until this rule, and each was proved live against a canary home directory: the `tar`
+ *   row overwrote the canary's files, the `fuser` row killed a process holding it open, and the
+ *   `busybox` rows deleted it.
+ * - `harmless` carries the same unreadable word with arguments no reading of it can hurt, and
+ *   must keep running. Without it the rule could pass by refusing everything.
+ *
+ * `$(cat …)` is the one indirection the bypass costs: a pane cannot be assumed not to write it. */
+const UNREADABLE_WORDS: {
+  readonly site: string;
+  readonly literal: string;
+  readonly unreadable: string;
+  readonly harmless: string;
+}[] = [
+  {
+    site: "tar extract mode",
+    literal: 'tar xf a.tar -C "$HOME"',
+    unreadable: 'm=$(cat mode); tar "$m" -C "$HOME" -f a.tar',
+    harmless: 'm=$(cat mode); tar "$m" -C "$LEGION_WORKSPACE" -f a.tar',
+  },
+  {
+    site: "tar -C option",
+    literal: 'tar xf a.tar -C "$HOME"',
+    unreadable: 'f=$(cat flag); tar xf a.tar "$f" "$HOME"',
+    harmless: 'f=$(cat flag); tar xf a.tar "$f" "$LEGION_WORKSPACE"',
+  },
+  {
+    site: "unzip -d option",
+    literal: 'unzip a.zip -d "$HOME"',
+    unreadable: 'f=$(cat flag); unzip a.zip "$f" "$HOME"',
+    harmless: 'f=$(cat flag); unzip a.zip "$f" "$LEGION_WORKSPACE"',
+  },
+  {
+    site: "fuser -k option",
+    literal: 'fuser -k "$HOME"',
+    unreadable: 'f=$(cat flag); fuser "$f" "$HOME"',
+    // `fuser -k` with no file to search kills nothing, so one word that is either the option or
+    // the file, and cannot be both, is not a kill.
+    harmless: 'f=$(cat flag); fuser "$f"',
+  },
+  {
+    site: "tmux kill subcommand",
+    literal: "tmux kill-server",
+    unreadable: 'c=$(cat command); tmux "$c"',
+    // The subcommand is read, so a later word the guard cannot read is its argument.
+    harmless: 'c=$(cat command); tmux set-option -t "$c" remain-on-exit on',
+  },
+  {
+    site: "busybox applet",
+    literal: "busybox rm -rf ~",
+    unreadable: 'a=$(cat applet); busybox "$a" -rf ~',
+    // With no word after it every applet is inert.
+    harmless: 'a=$(cat applet); busybox "$a"',
+  },
+  {
+    site: "toybox applet",
+    literal: "toybox rm -rf ~",
+    unreadable: 'a=$(cat applet); toybox "$a" -rf ~',
+    harmless: 'a=$(cat applet); toybox "$a"',
+  },
+  {
+    site: "busybox as a shell",
+    literal: 'busybox sh -c "rm -rf ~"',
+    unreadable: 'a=$(cat applet); busybox "$a" -c "rm -rf ~"',
+    harmless: 'busybox sh -c "ls ~"',
+  },
+  {
+    site: "chmod -R option",
+    literal: "chmod -R 700 ~",
+    unreadable: 'f=$(cat flag); chmod "$f" 700 ~',
+    // Read as `-R` the word is no path, and then this command has no path left to change.
+    harmless: 'f=$(cat flag); chmod +x "$f"',
+  },
+  {
+    site: "chown -R option",
+    literal: "chown -R nobody ~",
+    unreadable: 'f=$(cat flag); chown "$f" nobody ~',
+    harmless: 'f=$(cat flag); chown nobody "$f"',
+  },
+  {
+    site: "find predicate",
+    literal: "find ~ -delete",
+    unreadable: 'p=$(cat predicate); find ~ "$p"',
+    // Read as a predicate the word is no root, so this search starts from the working directory.
+    harmless: "p=$(cat predicate); find \"$p\" -type f -name '*.log'",
+  },
+  {
+    site: "find -exec program",
+    literal: "find ~ -exec rm -f {} +",
+    unreadable: 'c=$(cat command); find ~ -exec "$c" -f {} +',
+    harmless: 'c=$(cat command); find "$LEGION_WORKSPACE" -exec "$c" -f {} +',
+  },
+  {
+    site: "declare -n nameref",
+    literal: "declare -n r=v",
+    unreadable: 'f=$(cat flag); declare "$f" r=v',
+    // `r="$v"` reads as no option, however unreadable its value.
+    harmless: 'v=$(cat value); declare r="$v"',
+  },
+  {
+    site: "interpreter option",
+    literal: "python3 -c \"import os; os.remove(os.environ['HOME'] + '/.bashrc')\"",
+    unreadable:
+      "f=$(cat flag); python3 \"$f\" -c \"import os; os.remove(os.environ['HOME'] + '/.bashrc')\"",
+    harmless: 'f=$(cat flag); python3 "$f" -c "print(1)"',
+  },
+];
+
+describe("a word the guard cannot read", () => {
+  for (const { site, literal, unreadable, harmless } of UNREADABLE_WORDS) {
+    test(`${site}: refused as a literal, refused through a word the guard cannot read, and allowed when no reading of that word can hurt`, () => {
+      expect(bash(literal), literal).toBeDefined();
+      expect(bash(unreadable), unreadable).toBeDefined();
+      expect(bash(harmless), harmless).toBeUndefined();
+    });
+  }
+
+  test("reads a word's leading literal prefix, so an assignment is no option", () => {
+    // The prefix is what keeps the rule affordable: `local root="$1"` is unreadable whole and an
+    // option word never, so every script that writes one still runs.
+    expect(bash('f() { local root="$1"; rm -rf "$root"; }; f notes.txt')).toBeUndefined();
+    expect(bash('readonly dir="$(mktemp -d)"; chmod 700 "$dir"')).toBeUndefined();
+    // The value it holds is still followed.
+    expect(bash('f() { local root="$1"; rm -rf "$root"; }; f "$HOME"')).toContain(home);
+    // A word whose first character the guard cannot see may be any option at all.
+    expect(bash('f=$(cat flag); chmod "$f" 700 ~')).toContain(home);
+  });
+});

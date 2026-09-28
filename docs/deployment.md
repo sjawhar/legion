@@ -46,6 +46,22 @@ a resolved path outside the pane roots. `kill` only reaches a pid that `/proc` s
 from the pane's own Oh My Pi process. Every refusal names the target, where it resolved, and the
 rule, so the agent can rewrite the command.
 
+A word the guard cannot read whole is not read as harmless. Where a word selects a dangerous
+option or subcommand — an extract mode and `-C` for `tar`, `-d` for `unzip`, `-k` for `fuser`,
+a kill subcommand for `tmux`, `-R` for `chmod` and `chown`, a `find` predicate, `-n` for
+`declare`, an interpreter's `-c`, and a `busybox` or `toybox` applet — the guard takes it as that
+option and the command's other arguments decide what that means, so `tar "$mode" -C .` runs and
+`tar "$mode" -C "$HOME"` does not. Two things keep that from refusing ordinary scripts. The guard
+reads a word's leading literal prefix, so `local root="$1"` is an assignment and never an option
+and `--socket="$s"` is never `-k`. And it judges the readings together rather than taking the
+worst of each: read as `-R` a word is no path, so `chmod +x "$out"` has no path left to change
+recursively, and read as a predicate a word is no search root, so `find "$dir" -type f` searches
+the working directory. A `busybox` or `toybox` applet word it cannot read is refused once the
+applet carries an argument of its own, because that binary's applets include `killall`, whose
+refusal does not depend on its arguments; with no argument every applet is inert and it runs. A
+command whose own name the guard cannot read is the residual below, not this rule, and so is the
+program word of `xargs`, which names that same open set.
+
 The guard reads text before it runs, so it cannot see what is only decided at run time: a compiled
 program or anything a command runs without naming it on the command line (a `make` target, a test
 runner, `npm run`), a program whose name is itself a variable or a command's output
