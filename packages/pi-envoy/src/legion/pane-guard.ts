@@ -943,7 +943,8 @@ function clone(st: State): State {
 /** Anything a copy-back site does not carry out of a child is a candidate hole. Three sites carry
  * a child's state back into this shell, `merge`, `runFunction` and `runFile`'s sourced branch, and
  * each lists `State`'s fields by hand: a field added to `State` belongs in all three, or in the
- * list of what each leaves out and why.
+ * list of what each leaves out and why. None of the three carries the fields that say where the
+ * walk is rather than what the shell holds: `nested`, `depth`, `source`, `script` and `argv0`.
  *
  * After branches that may or may not run: everything a branch leaves in this shell, since any of
  * them may be the one that ran. A variable, the positional parameters (`shift`, `set --`) or the
@@ -2751,11 +2752,13 @@ function runFile(
         // `runningFunctions`. The arguments: with no operands the file changed this shell's own,
         // which stay changed; with operands bash restores this shell's afterwards unless the file
         // set new ones with `set`, which the guard does not tell apart from a `shift` bash undoes,
-        // so a list the file changed is unknown.
+        // so a list the file touched is unknown. Touched, not changed: `shift` and `set --` each
+        // leave a new list, so identity tells a file that never touched them from one that ran
+        // `set -- "$@"`, which bash keeps.
         st.positional =
           operands.length === 0
             ? child.positional
-            : JSON.stringify(child.positional) === JSON.stringify(operands)
+            : child.positional === operands
               ? st.positional
               : undefined;
         st.vars = child.vars;

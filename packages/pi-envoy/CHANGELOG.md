@@ -101,11 +101,12 @@
   caller's arguments, as bash does; before, the guard kept the caller's, so `set --
   "$LEGION_WORKSPACE/a"; . lib.sh; rm -rf "$1"` with `lib.sh` running `set -- "$HOME/y"` was
   allowed. With operands, bash restores the caller's arguments afterwards, undoing a `shift` and
-  keeping a `set --`; the guard does not tell those apart, so a list the file changed is unknown. `.
-  file` with no operands runs the file with the caller's arguments, not none, so `set -- "$HOME/y";
-  . lib.sh` with `lib.sh` running `rm -rf "$@"` is refused. A backgrounded command (`f &`) is walked
-  in a subshell, so its `trap - EXIT` no longer clears the parent's handler, and nothing else it
-  changes reaches the parent.
+  keeping a `set --`; the guard does not tell those apart, so a list the file touched is unknown,
+  even one set to the same values (`set -- "$@"`), which bash keeps. `. file` with no operands runs
+  the file with the caller's arguments, not none, so `set -- "$HOME/y"; . lib.sh` with `lib.sh`
+  running `rm -rf "$@"` is refused. A backgrounded command (`f &`) is walked in a subshell, so its
+  `trap - EXIT` no longer clears the parent's handler, and nothing else it changes reaches the
+  parent.
 - The guard walks up to 100,000 nodes of one command before refusing it as too large to judge,
   from 10,000. The repository's largest tracked script, Stage 4b's driver, needs about 20,700 to
   reach its first refusal, and 10,000 refused it for size alone. The limit still refuses and never

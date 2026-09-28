@@ -516,7 +516,12 @@ describe("scripts a command runs", () => {
     expect(bash(`set -- ${safe}; if true; then . ${sets}; fi; rm -rf "$1"`)).toContain(
       "(a positional parameter)"
     );
-    // The guard does not tell a `set --` from a `shift`, so a list the file changed is unknown.
+    // The guard does not tell a `set --` from a `shift`, so a list the file touched is unknown,
+    // even when it set the same list again, which bash keeps.
+    const resets = script("source-resets-args.sh", 'set -- "$@"\n');
+    expect(bash(`set -- ${safe}; . ${resets} "$HOME/y"; rm -rf "$1"`)).toContain(
+      "(a positional parameter)"
+    );
     expect(bash(`set -- ${safe}; . ${sets} q; rm -rf "$1"`)).toContain("(a positional parameter)");
     expect(bash(`set -- "$HOME/y"; . ${shifts} ${safe} ${safe}; rm -rf "$1"`)).toContain(
       "(a positional parameter)"
