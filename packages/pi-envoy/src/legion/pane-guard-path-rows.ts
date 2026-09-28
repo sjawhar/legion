@@ -799,6 +799,22 @@ export const PATH_ROWS: readonly PathRow[] = [
     command: 'chmod -R 700 "$(realpath -L -P "$HOME/mine/../keep")"',
     dotdot: true,
   },
+  {
+    name: "realpath.s.P.physical",
+    family: "substitution",
+    role: "probe",
+    // Bash takes the LAST of `-s` and `-P`, so `-s` does not win merely by being present: this
+    // is physical. `e` differs from its physical target, so lexical and physical disagree here.
+    command: 'chmod -R 000 "$(realpath -s -P e/../keep)"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.P.s.lexical",
+    family: "substitution",
+    role: "must-allow",
+    command: 'chmod -R 700 "$(realpath -P -s e/../keep)"',
+    dotdot: true,
+  },
 
   // --- a resolution that fails: each must be unknown, never harmless ---
   {

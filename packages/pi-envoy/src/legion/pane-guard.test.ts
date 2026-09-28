@@ -318,6 +318,10 @@ describe("resolution", () => {
     expect(bash(`chmod -R 000 "$(basename /)\${HOME#/}"`)).toBeDefined();
     // `cd -@` is an invalid option on Linux: bash stays where it was.
     expect(bash('cd "$HOME"; cd -@ "$LEGION_WORKSPACE"; rm -f .bashrc')).toBeDefined();
+    // `--relative-to`/`--relative-base` override any `-s`/`-L`/`-P` reading and must be checked
+    // first: an earlier round checked `-s` before `--relative*`, which returned the wrong
+    // (unmodelled) answer as if `--relative-to` were not there at all.
+    expect(bash('rm -rf $(realpath -s --relative-to=d "$LEGION_WORKSPACE/keep")')).toBeDefined();
     // A `..` after a component that is not there is never resolved to the path the text reads
     // as: whatever creates that component decides where the `..` leads, so the guard models no
     // path at all and the value stays a command's output (LEGION-355).

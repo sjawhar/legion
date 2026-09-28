@@ -1292,33 +1292,32 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
   if (base === "readlink" && !list.some((arg) => literalText(arg.exp)?.includes("f")))
     return undefined;
   if (base === "realpath") {
+    // `--relative-to`/`--relative-base` print a path relative to another directory, which this
+    // function does not compute — checked first, since it overrides any `-s`/`-L`/`-P` reading.
+    if (found.options.some((option) => option.startsWith("--relative"))) return undefined;
     // `realpath` resolves a relative operand against `getcwd()`, the PHYSICAL directory —
     // `st.cwd` is bash's LOGICAL PWD, which a `cd` into a symlink leaves pointed at the link's
-    // text, not its target. Both lexical modes below need the physical directory first.
+    // text, not its target. Both non-default modes below need the physical directory first.
     const here = physical("/", st.cwd, true);
-    // `-s`/`--strip`/`--no-symlinks` expand no symlink at all: the operand's own text, resolved
-    // lexically against the physical cwd, is what bash prints.
-    if (
-      found.options.some(
-        (option) => option === "--strip" || option === "--no-symlinks" || /^-[^-]*s/.test(option)
-      )
-    ) {
-      return "unknown" in here ? undefined : path.resolve(here.real, target);
-    }
-    // `--relative-to`/`--relative-base` print a path relative to another directory, which this
-    // function does not compute.
-    if (found.options.some((option) => option.startsWith("--relative"))) return undefined;
-    // Bash takes the LAST of `-L` and `-P`, the same rule as `cd`. `-L`/`--logical` resolves the
-    // text's own `..` BEFORE following the symlink in front of it — the reverse of the physical
-    // walk below, which follows each symlink first and takes `..` as the parent of what it found.
+    // Bash takes the LAST of `-s`/`--strip`/`--no-symlinks`, `-L`/`--logical` and
+    // `-P`/`--physical`, across option words and within one: `-sP`/`-s -P` are physical, `-Ps`/
+    // `-P -s` are lexical. `-s` expands no symlink at all; `-L` resolves the text's own `..`
+    // BEFORE following the symlink in front of it — the reverse of the physical walk below,
+    // which follows each symlink first and takes `..` as the parent of what it found.
     const mode = found.options
       .flatMap((option) => {
+        if (option === "--strip" || option === "--no-symlinks") return ["s"];
         if (option === "--logical") return ["L"];
         if (option === "--physical") return ["P"];
         if (!/^-[a-zA-Z]+$/.test(option)) return [];
-        return [...option.slice(1)].filter((letter) => letter === "L" || letter === "P");
+        return [...option.slice(1)].filter(
+          (letter) => letter === "s" || letter === "L" || letter === "P"
+        );
       })
       .at(-1);
+    if (mode === "s") {
+      return "unknown" in here ? undefined : path.resolve(here.real, target);
+    }
     if (mode === "L") {
       if ("unknown" in here) return undefined;
       const resolved = physical("/", path.resolve(here.real, target), true);
