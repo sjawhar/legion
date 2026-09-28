@@ -648,7 +648,9 @@ function patternExpansion(
   const slashPattern = operator === "/" || operator === "//";
   if (!accounted || (slashPattern && part.replace?.pattern.text === "")) return unknownResult;
   const value = literalText(operatorValue(part.parameter, st, ctx));
-  if (value === undefined || value.length > MAX_PATTERN_VALUE) return unknownResult;
+  if (value === undefined || value.length > MAX_PATTERN_VALUE || !isAscii(value)) {
+    return unknownResult;
+  }
   const patternWord = part.replace?.pattern ?? part.operand;
   const patterns = patternWord === undefined ? [[literal("")]] : expandWord(patternWord, st, ctx);
   const source = patterns.length === 1 ? patternSource(patterns[0] as Expansion) : undefined;
@@ -1356,10 +1358,11 @@ function evaluateTest(operands: readonly string[]): boolean | undefined {
   }
 }
 
-/** The one item a `case` runs when the guard knows its word: the first whose pattern matches, or
- * null when none does. Undefined when it cannot tell: a word or a pattern before the match it
- * cannot know, a bracket expression or an extended pattern, or an item that falls through. */
-function decideCase(node: Case, st: State, ctx: Ctx): CaseItem | null | undefined {
+/** The one item a `case` runs when the guard knows its word: the first whose pattern matches.
+ * Undefined when it cannot tell, and then every branch is walked: a word or a pattern before the
+ * match it cannot know, a bracket expression or an extended pattern, an item that falls through,
+ * and no item matching at all, so a match the guard missed never leaves every branch unwalked. */
+function decideCase(node: Case, st: State, ctx: Ctx): CaseItem | undefined {
   const words = expandWord(node.word, st, ctx);
   const value = words.length === 1 ? literalText(words[0]) : undefined;
   if (value === undefined) return undefined;
@@ -1373,23 +1376,32 @@ function decideCase(node: Case, st: State, ctx: Ctx): CaseItem | null | undefine
         return item.terminator === undefined || item.terminator === ";;" ? item : undefined;
     }
   }
-  return null;
+  return undefined;
 }
 
 /** Whether a `case` pattern matches `value` (`patternSource`); undefined when the guard cannot
- * match it exactly. */
+ * match it exactly, a value outside ASCII included. */
 function matchesPattern(pattern: Expansion, value: string): boolean | undefined {
   const source = patternSource(pattern);
-  return source === undefined ? undefined : new RegExp(`^${source}$`).test(value);
+  if (source === undefined || !isAscii(value)) return undefined;
+  return new RegExp(`^${source}$`).test(value);
 }
 
-/** A bash pattern as a regular expression's source: literal text exactly, unquoted `*` and `?` as
- * wildcards. Undefined for what the guard cannot match exactly: an unknown part, a bracket
- * expression, or text that may be an extended pattern (`@(a|b)`). */
+/** Whether `text` is ASCII alone. Outside it, what bash counts as one character (`?`, a removal's
+ * length) is a character in a UTF-8 locale and a byte in the C locale, and the guard knows neither
+ * the locale nor the encoding. */
+function isAscii(text: string): boolean {
+  for (let i = 0; i < text.length; i += 1) if (text.charCodeAt(i) > 0x7f) return false;
+  return true;
+}
+
+/** A bash pattern as a regular expression's source: literal ASCII text exactly, unquoted `*` and
+ * `?` as wildcards. Undefined for what the guard cannot match exactly: an unknown part, a bracket
+ * expression, text that may be an extended pattern (`@(a|b)`), and text outside ASCII. */
 function patternSource(pattern: Expansion): string | undefined {
   let source = "";
   for (const piece of pattern) {
-    if (piece.kind === "unknown") return undefined;
+    if (piece.kind === "unknown" || !isAscii(piece.text)) return undefined;
     if (piece.kind === "glob") {
       if (piece.text === "*") source += "[\\s\\S]*";
       else if (piece.text === "?") source += "[\\s\\S]";
@@ -1555,7 +1567,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       if (chosen !== undefined) {
         visitWord(node.word, st, ctx);
         for (const item of node.items) for (const word of item.pattern) visitWord(word, st, ctx);
-        if (chosen !== null) walkList(chosen.body.commands, st, ctx);
+        walkList(chosen.body.commands, st, ctx);
         return;
       }
       const before = st.output;

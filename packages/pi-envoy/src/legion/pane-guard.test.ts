@@ -242,6 +242,19 @@ describe("resolution", () => {
     );
   });
 
+  test("matches no pattern over text outside ASCII, whose characters depend on the locale", () => {
+    // `?` is one character to bash in a UTF-8 locale and one byte in the C locale, so a value or
+    // pattern outside ASCII is unknown: removal, and a `case` the guard would otherwise decide.
+    expect(bash(`v='📁'"$HOME/.ssh"; rm -rf "\${v#?}"`)).toContain("{v#?}`)");
+    expect(bash(`v='é'"$HOME/.ssh"; rm -rf "\${v#?}"`)).toContain("{v#?}`)");
+    expect(bash(`v='📁'; case "$v" in ?) rm -rf "$HOME/.ssh" ;; *) : ;; esac`)).toContain(
+      path.join(home, ".ssh")
+    );
+    expect(bash(`v=x; case "$v" in é) rm -rf "$HOME/.ssh" ;; *) : ;; esac`)).toContain(
+      path.join(home, ".ssh")
+    );
+  });
+
   test("refuses a target it cannot resolve, and never guesses one", () => {
     expect(bash('read d; rm -rf "$d"')).toContain("read from input");
     expect(bash('rm -rf "$NOT_SET_ANYWHERE"')).toContain("`$NOT_SET_ANYWHERE`");
