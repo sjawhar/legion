@@ -28,19 +28,18 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "packages/envoy/deploy/scripts/autodeploy.sh": "dispatch-backups",
   "packages/envoy/deploy/scripts/autodeploy_test.sh": "dumps[i]",
   "packages/envoy/deploy/scripts/sync-host.sh": "$1",
-  "packages/envoy/scripts/e2e-api.sh": "$sse_pid",
   "packages/envoy/scripts/verify-cluster.sh": "cannot parse",
   "packages/pi-envoy/scripts/grant-rig/setup.sh": "profiles/l12rig",
   "packages/pi-envoy/scripts/smoke-btw.sh": "tmux kill-session",
   "packages/pi-envoy/scripts/smoke-delivery.sh": "tmux kill-session",
-  "scripts/e2e/controller-start-tmux.sh": "a loop variable",
+  "scripts/e2e/controller-start-tmux.sh": "realpath -m",
   "scripts/e2e/lib/check-model-route.sh": "$control",
   "scripts/e2e/lib/install-model-gateway.sh": "realpath -m",
   "scripts/e2e/lib/install-plugin-profile.sh": "realpath -m",
   "scripts/e2e/stage2-tmux-supervision.sh": "realpath -m",
-  "scripts/e2e/stage3-4b13b-acceptance.sh": "prod_header_file",
-  "scripts/e2e/stage3-devbox-workflow.sh": "prod_header_file",
-  "scripts/e2e/stage4b-sandbox-tree.sh": "$p",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "realpath -m",
+  "scripts/e2e/stage3-devbox-workflow.sh": "realpath -m",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "stage4b.lock",
   "scripts/sync-envoy-host.sh": "$1",
 };
 
@@ -308,6 +307,20 @@ describe("scripts a command runs", () => {
     expect(reason).toContain(`line 5 of ${parent}`);
     expect(reason).toContain('`rm -rf "$HOME/x"`');
     expect(reason).not.toContain(sourced);
+  });
+
+  test("runs a parent's EXIT trap when the parent ends, never at a command substitution's end", () => {
+    const parent = script(
+      "substitution-trap-parent.sh",
+      `p=$(pgrep x)\ncleanup() { kill "$p"; }\ntrap cleanup EXIT\nx=$(echo hi)\nrm -rf "$HOME/x"\n`
+    );
+    const reason = bash(`bash ${parent}`);
+    expect(reason).toContain(`line 5 of ${parent}`);
+    expect(reason).toContain('`rm -rf "$HOME/x"`');
+  });
+
+  test("runs the EXIT trap a command substitution sets at that substitution's end", () => {
+    expect(bash(`x=$(trap 'rm -rf "$HOME/y"' EXIT; echo hi)`)).toContain(home);
   });
 
   test("attributes a sourced parent's EXIT trap to its declaring file", () => {

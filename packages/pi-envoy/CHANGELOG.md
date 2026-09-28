@@ -69,6 +69,17 @@
 
 ### Fixed
 
+- The pane guard (LEGION-121) runs a script's EXIT trap once, when the script ends, as bash does,
+  and no longer at the end of every command substitution after the `trap`. A substitution runs
+  in a subshell, where bash resets the parent's EXIT trap, so only a trap the substitution sets
+  itself runs at its end. Before, the first `$(…)` after a `trap cleanup EXIT` ran `cleanup`
+  against the state at that line, where a pid file or loop variable the cleanup reads was not yet
+  written. So the guard refused a script for a line of its cleanup that bash never runs there, and
+  a change to any sourced function holding a `$(…)` moved which line was refused. Tracked scripts
+  it now judges on their real first refusal: `packages/envoy/scripts/e2e-api.sh`, whose cleanup
+  kills only the child whose pid it wrote, now runs; Stage 2, Stage 3 and the 4b.13b acceptance
+  are refused at their gateway key command's write, the controller proof at its plugin unpack,
+  and Stage 4b at its lock file.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot

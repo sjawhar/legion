@@ -838,7 +838,10 @@ function walkSubstitution(
     throw new Refusal(text, 1, `the guard could not read the command in \`${text}\``);
   }
   const source = parsed.source ?? (script === undefined ? (inner ?? "") : st.source);
-  walkScript(parsed, { ...clone(st), source }, ctx);
+  // Bash runs a command substitution in a subshell, where the parent's EXIT trap is reset: the
+  // substitution's end runs only the traps it sets itself, and the parent's runs once, at the
+  // parent's end.
+  walkScript(parsed, { ...clone(st), source, traps: [] }, ctx);
 }
 
 // --- Statements --------------------------------------------------------------------------------
