@@ -2,6 +2,7 @@ package pmdoc
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -24,5 +25,27 @@ func TestParseForWriteRefusesADocumentItsRenderingReadsBackOtherwise(t *testing.
 		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), "reads back otherwise") {
 			t.Errorf("ParseForWrite(%q) = %v, want a schema refusal of a document that reads back otherwise", markdown, err)
 		}
+	}
+}
+
+// A short table row is padded to the header's width, and a padded cell takes its column's
+// alignment: the rendering writes it as a cell of that column, which reads back with the column's
+// alignment, so a padded cell holding another would store a table that reads back otherwise.
+func TestParsePadsAShortRowWithItsColumnsAlignment(t *testing.T) {
+	markdown := "| a | b | c | d |\n| :--- | :---: | ---: | --- |\n| x |\n"
+	doc, err := Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := doc.Children[0].Children[1]
+	var got []any
+	for _, cell := range row.Children {
+		got = append(got, cell.Attrs["alignment"])
+	}
+	if want := []any{"left", "center", "right", nil}; !slices.Equal(got, want) {
+		t.Errorf("Parse(%q) pads the short row with alignments %v, want %v", markdown, got, want)
+	}
+	if _, err := ParseForWrite(markdown, nil); err != nil {
+		t.Errorf("ParseForWrite(%q) = %v, want the table stored", markdown, err)
 	}
 }

@@ -678,8 +678,10 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 		nodeType = "table_header_row"
 		cellType = "table_header"
 	}
+	columns := row.Parent().(*extensionast.Table).Alignments
 	children := make([]*Node, 0, row.ChildCount())
-	for child := row.FirstChild(); child != nil; child = child.NextSibling() {
+	index := 0
+	for child := row.FirstChild(); child != nil; child, index = child.NextSibling(), index+1 {
 		cell, ok := child.(*extensionast.TableCell)
 		if !ok {
 			// refuseBlocks refuses every block outside convertedBlocks, and goldmark builds a row of cells.
@@ -689,11 +691,14 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 		if err != nil {
 			return nil, err
 		}
-		// A column its delimiter row aligns nowhere (`---`) has no alignment, as the browser
-		// editor reads it; goldmark names that "none".
+		// A cell takes its column's alignment. goldmark gives each written cell its column's, but
+		// the cells it pads a short row with none, and the renderer writes a padded cell as a cell
+		// of its column, which reads back with the column's alignment. A column its delimiter row
+		// aligns nowhere (`---`) has no alignment, as the browser editor reads it; goldmark names
+		// that "none".
 		var alignment any
-		if cell.Alignment != extensionast.AlignNone {
-			alignment = cell.Alignment.String()
+		if column := columns[index]; column != extensionast.AlignNone {
+			alignment = column.String()
 		}
 		children = append(children, &Node{
 			Type:  cellType,

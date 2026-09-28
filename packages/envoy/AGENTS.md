@@ -401,8 +401,9 @@ the table in place. Row `0` is the header; deleting it promotes the first body r
 including its cells' alignment. An index is required. A missing, non-integer, negative, or out-of-range
 index is `INVALID_OP` on `index`, naming the supplied value and the table's actual row and column dimensions; no operation
 partially mutates a table. Parsing canonicalizes a short ragged Markdown row by padding its missing
-cells, so column deletion operates on that complete canonical representation and leaves every
-non-selected cell intact. Deleting the last remaining body row or any row's last remaining column
+cells, each with its column's alignment, as its rendering reads back, so column deletion operates on
+that complete canonical representation and leaves every non-selected cell intact. The browser
+editor's parser does not pad a short row. Deleting the last remaining body row or any row's last remaining column
 is refused, retaining the table block. Table `references` from `GET /api/v1/artifacts/{id}/blocks`
 aggregate anchors pinned to descendant cells. A row or column deletion that would remove an open
 ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
