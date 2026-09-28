@@ -64,8 +64,8 @@ sits is not the same as running the dangerous row on each side of it. Write the 
 after that run.
 
 Re-running everything is not a defence. More than ten rounds of re-derivation are what made three
-reviewers confident enough to publish the same wrong row; the re-running was real, and the row was
-in its output. More coverage would not have changed the outcome. An adversarial reading of what an
+reviewers confident enough to call the same wrong row correct; the re-running was real, and the row
+was in its output. More coverage would not have changed the outcome. An adversarial reading of what an
 allowed row is evidence of would have.
 
 ## 2. A pattern count drops the name that looks like every other name and is not
