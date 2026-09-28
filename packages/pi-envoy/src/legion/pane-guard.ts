@@ -68,6 +68,13 @@ import type {
   WordPart,
 } from "unbash";
 import { parse } from "unbash";
+import {
+  evaluateTest,
+  isAscii,
+  removePattern,
+  replacePattern,
+  shellQuoted,
+} from "./pane-guard-bash";
 import { type CodeLanguage, scanCode, UNKNOWN_MARKER } from "./pane-guard-code";
 
 /** One run of an expanded shell word: text the guard knows, a glob pattern, or a value it cannot
@@ -684,59 +691,6 @@ function patternExpansion(
   return [unquotedLiteral(result.replaceAll("\\", "\\\\"), undefined, st, ctx)];
 }
 
-/** `value` with the shortest (`#`, `%`) or longest (`##`, `%%`) prefix (`#`) or suffix (`%`)
- * `pattern` matches removed; `value` itself when none matches. */
-function removePattern(value: string, operator: string, pattern: RegExp): string {
-  const n = value.length;
-  const prefix = operator.startsWith("#");
-  for (let k = 0; k <= n; k += 1) {
-    const length = operator.length === 2 ? n - k : k;
-    if (prefix && pattern.test(value.slice(0, length))) return value.slice(length);
-    if (!prefix && pattern.test(value.slice(n - length))) return value.slice(0, n - length);
-  }
-  return value;
-}
-
-/** `value` with the longest match of `pattern` replaced: the first (`/`), every one left to right
- * (`//`), one at the start (`/#`) or one at the end (`/%`). `/` and `//` replace an empty match
- * only in an empty value; their pattern is never null (`patternExpansion`). */
-function replacePattern(
-  value: string,
-  operator: string,
-  pattern: RegExp,
-  replacement: string
-): string {
-  const n = value.length;
-  if (operator === "/#") {
-    for (let end = n; end >= 0; end -= 1) {
-      if (pattern.test(value.slice(0, end))) return replacement + value.slice(end);
-    }
-    return value;
-  }
-  if (operator === "/%") {
-    for (let start = 0; start <= n; start += 1) {
-      if (pattern.test(value.slice(start))) return value.slice(0, start) + replacement;
-    }
-    return value;
-  }
-  if (n === 0) return pattern.test("") ? replacement : value;
-  let out = "";
-  let at = 0;
-  while (at < n) {
-    let end = n;
-    while (end > at && !pattern.test(value.slice(at, end))) end -= 1;
-    if (end === at) {
-      out += value[at];
-      at += 1;
-      continue;
-    }
-    out += replacement;
-    at = end;
-    if (operator === "/") return out + value.slice(at);
-  }
-  return out;
-}
-
 /** A command substitution's value: `$(mktemp ...)` is a fresh path in its directory and
  * `$(pwd)` the working directory; script-location helpers resolve while the guard reads a script.
  * Anything else is a command's output, unknown. */
@@ -1331,41 +1285,6 @@ function decideCondition(clause: CompoundList, st: State, ctx: Ctx): boolean | u
   return evaluateTest(operands);
 }
 
-/** `test`'s answer for the forms an argument loop uses: a string's emptiness, string equality,
- * and integer comparison. Anything else (file tests, `-a`, `-o`, parentheses) is undecided. */
-function evaluateTest(operands: readonly string[]): boolean | undefined {
-  const [left = "", operator = "", right = ""] = operands;
-  if (operands.length === 1) return left !== "";
-  if (operands.length === 2) {
-    if (left === "!") return operator === "";
-    if (left === "-n") return operator !== "";
-    if (left === "-z") return operator === "";
-    return undefined;
-  }
-  if (operands.length !== 3) return undefined;
-  if (operator === "=" || operator === "==") return left === right;
-  if (operator === "!=") return left !== right;
-  if (!/^-?[0-9]+$/.test(left) || !/^-?[0-9]+$/.test(right)) return undefined;
-  const a = Number(left);
-  const b = Number(right);
-  switch (operator) {
-    case "-eq":
-      return a === b;
-    case "-ne":
-      return a !== b;
-    case "-gt":
-      return a > b;
-    case "-ge":
-      return a >= b;
-    case "-lt":
-      return a < b;
-    case "-le":
-      return a <= b;
-    default:
-      return undefined;
-  }
-}
-
 /** The one item a `case` runs when the guard knows its word: the first whose pattern matches.
  * Undefined when it cannot tell, and then every branch is walked: a word or a pattern before the
  * match it cannot know, a bracket expression or an extended pattern, an item that falls through,
@@ -1393,14 +1312,6 @@ function matchesPattern(pattern: Expansion, value: string): boolean | undefined 
   const source = patternSource(pattern);
   if (source === undefined || !isAscii(value)) return undefined;
   return new RegExp(`^${source}$`).test(value);
-}
-
-/** Whether `text` is ASCII alone. Outside it, what bash counts as one character (`?`, a removal's
- * length) is a character in a UTF-8 locale and a byte in the C locale, and the guard knows neither
- * the locale nor the encoding. */
-function isAscii(text: string): boolean {
-  for (let i = 0; i < text.length; i += 1) if (text.charCodeAt(i) > 0x7f) return false;
-  return true;
 }
 
 /** A bash pattern as a regular expression's source: literal ASCII text exactly, unquoted `*` and
@@ -1799,13 +1710,6 @@ function printfText(list: readonly Arg[]): string | undefined {
     }
   } while (conversions > 0 && index < values.length);
   return out;
-}
-
-/** `text` as a word a shell reads back as `text`, which is what `printf %q` guarantees. */
-function shellQuoted(text: string): string {
-  if (text === "") return "''";
-  if (/^[A-Za-z0-9_/.:@%+=,-]+$/.test(text)) return text;
-  return `'${text.replaceAll("'", "'\\''")}'`;
 }
 
 /** A path refusal: the rule, the pane's roots, and what to do instead. */
