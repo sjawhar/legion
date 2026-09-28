@@ -1,9 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
 import { api } from "../../api/client";
 import { userAgentStateQuery } from "../../api/queries";
-import type { MessageRead, UserAgentStates } from "../../api/types";
+import type { MessageRead, UserAgentState, UserAgentStates } from "../../api/types";
 
 /** The badge an unread count wears wherever it shows: the navigation, the compact header, and
  *  the agent's row. */
@@ -14,6 +14,19 @@ export function unreadRepliesLabel(count: number): string {
 /** Every session's unread replies to the viewer's direct messages, summed. */
 export function totalUnreadReplies(states: UserAgentStates | undefined): number {
   return Object.values(states ?? {}).reduce((total, state) => total + state.unread_replies, 0);
+}
+
+/** Puts the session's state a PUT answered with into the viewer's shared agent-state query, so
+ *  every badge and row reads it at once. */
+export function storeAgentState(
+  queryClient: QueryClient,
+  sessionId: string,
+  next: UserAgentState
+): void {
+  queryClient.setQueryData<UserAgentStates>(userAgentStateQuery().queryKey, (current) => ({
+    ...current,
+    [sessionId]: next,
+  }));
 }
 
 /**
@@ -50,11 +63,7 @@ export function useMarkRepliesRead(
     onError: () => {
       marked.current = undefined;
     },
-    onSuccess: (next) =>
-      queryClient.setQueryData<UserAgentStates>(userAgentStateQuery().queryKey, (current) => ({
-        ...current,
-        [sessionId]: next,
-      })),
+    onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
     retry: 2,
   });
   useEffect(() => {

@@ -159,7 +159,7 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
     return [
       ["agents", target.slice("session:".length), "messages"],
       ["broadcast"],
-      ["user-agent-state"],
+      ...(event.type === "message.answered" ? [["user-agent-state"]] : []),
     ];
   }
   if (event.issue_key === null) {

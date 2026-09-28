@@ -4,14 +4,18 @@ import { type ReactNode, useCallback, useEffect, useId, useMemo, useState } from
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { inboxQuery, userAgentStateQuery, whoAmIQuery } from "../../api/queries";
+import {
+  agentMessagesQuery,
+  inboxQuery,
+  userAgentStateQuery,
+  whoAmIQuery,
+} from "../../api/queries";
 import type {
   Agent,
   Message,
   MessageDelivery,
   MessageDeliveryMode,
   MessageRead,
-  UserAgentStates,
 } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { ChevronIcon, DisclosureToggle } from "../../components/DisclosureToggle";
@@ -57,7 +61,7 @@ import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 
 import { deliveryAttempts } from "./attempts";
-import { unreadRepliesLabel, useMarkRepliesRead } from "./unread";
+import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead } from "./unread";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
@@ -377,18 +381,16 @@ function AgentMessageList({
   onReply: (reply: AgentReply) => void;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const messages = useQuery({
-    queryFn: () => api.listAgentMessages(agent.session_id),
-    queryKey: ["agents", agent.session_id, "messages"],
-  });
+  const messages = useQuery(agentMessagesQuery(agent.session_id));
   const agentState = useQuery(userAgentStateQuery());
   const [showOlder, setShowOlder] = useState(false);
   const [showCleared, setShowCleared] = useState(false);
   // Exchanges shown because they held an unread reply when the row opened. They stay shown once
   // read, so marking a reply read never folds it away from the viewer who is reading it.
   const [revealed, setRevealed] = useState<ReadonlySet<string>>(() => new Set());
-  const clearedBefore = agentState.data?.[agent.session_id]?.cleared_before;
-  const readThrough = agentState.data?.[agent.session_id]?.read_through;
+  const sessionState = agentState.data?.[agent.session_id];
+  const clearedBefore = sessionState?.cleared_before;
+  const readThrough = sessionState?.read_through;
   const all = messages.data ?? [];
   const unread = exchangesAfter(all, clearedBefore);
   const visible = showCleared ? all : unread;
@@ -402,7 +404,7 @@ function AgentMessageList({
     clearedBefore === undefined ? Number.NEGATIVE_INFINITY : Date.parse(clearedBefore),
     readThrough === undefined ? Number.NEGATIVE_INFINITY : Date.parse(readThrough)
   );
-  const serverUnread = agentState.data?.[agent.session_id]?.unread_replies ?? 0;
+  const serverUnread = sessionState?.unread_replies ?? 0;
   const holdsUnread = (read: MessageRead) =>
     serverUnread > 0 &&
     read.message.issue_key === null &&
@@ -437,10 +439,7 @@ function AgentMessageList({
     mutationFn: (cutoff: string) => api.putAgentState(agent.session_id, { cleared_before: cutoff }),
     onSuccess: (next) => {
       setShowCleared(false);
-      queryClient.setQueryData<UserAgentStates>(userAgentStateQuery().queryKey, (current) => ({
-        ...current,
-        [agent.session_id]: next,
-      }));
+      storeAgentState(queryClient, agent.session_id, next);
     },
   });
   const label = sessionLabel(agent.session_id, agent.title);

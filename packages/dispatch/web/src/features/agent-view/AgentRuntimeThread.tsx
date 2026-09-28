@@ -73,9 +73,8 @@ export function AgentRuntimeThread({
           content,
           createdAt,
           id,
-          metadata: {
-            custom: author === undefined ? { dispatch: true } : { author, dispatch: true },
-          },
+          // AgentThread names a user-role message carrying an author as someone else's.
+          metadata: { custom: { author } },
           role: "user" as const,
         };
       });

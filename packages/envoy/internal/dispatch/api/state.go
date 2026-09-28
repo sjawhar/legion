@@ -166,10 +166,10 @@ type userAgentState struct {
 	UnreadReplies int     `json:"unread_replies"`
 }
 
-// clearedBeforeSkew is how far ahead of the server clock a Clear or a read mark may land. The
+// agentStateCutoffSkew is how far ahead of the server clock a Clear or a read mark may land. The
 // client stamps the cutoff with its own clock, and a browser a few seconds fast must not be
 // refused.
-const clearedBeforeSkew = time.Minute
+const agentStateCutoffSkew = time.Minute
 
 // userAgentStatesQuery reads a viewer's per-session state ($1 is the login), narrowed to one
 // session when $2 is not null: every session with a Clear (user_agent_state) or a read mark
@@ -232,19 +232,11 @@ func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionI
 		if err := rows.Scan(&session, &clearedBefore, &readThrough, &state.UnreadReplies); err != nil {
 			return nil, err
 		}
-		state.ClearedBefore = optionalTimestamp(clearedBefore)
-		state.ReadThrough = optionalTimestamp(readThrough)
+		state.ClearedBefore = timestampPtr(clearedBefore)
+		state.ReadThrough = timestampPtr(readThrough)
 		states[session] = state
 	}
 	return states, rows.Err()
-}
-
-func optionalTimestamp(value *time.Time) *string {
-	if value == nil {
-		return nil
-	}
-	formatted := timestampValue(*value)
-	return &formatted
 }
 
 func (s *server) getUserAgentState(w http.ResponseWriter, r *http.Request) {
@@ -261,7 +253,7 @@ func (s *server) getUserAgentState(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseAgentStateCutoff reads one optional cutoff of a PUT: absent is nil, anything else must
-// be an RFC3339 timestamp no further ahead of the server clock than clearedBeforeSkew.
+// be an RFC3339 timestamp no further ahead of the server clock than agentStateCutoffSkew.
 func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 	if value == nil {
 		return nil, nil
@@ -270,7 +262,7 @@ func parseAgentStateCutoff(name string, value *string) (*time.Time, error) {
 	if err != nil {
 		return nil, errorf(http.StatusBadRequest, "INVALID_STATE", "%s must be an RFC3339 timestamp", name)
 	}
-	if parsed.After(time.Now().Add(clearedBeforeSkew)) {
+	if parsed.After(time.Now().Add(agentStateCutoffSkew)) {
 		return nil, errorf(http.StatusBadRequest, "INVALID_STATE", "%s must not be in the future", name)
 	}
 	return &parsed, nil
@@ -313,7 +305,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	// A cutoff up to clearedBeforeSkew ahead of the server clock is accepted, so a browser a few
+	// A cutoff up to agentStateCutoffSkew ahead of the server clock is accepted, so a browser a few
 	// seconds fast is not refused, but it is stored as no later than now: a reply that lands in
 	// the gap is still after the viewer's Clear and read mark, so it shows and it counts.
 	if clearedBefore != nil {

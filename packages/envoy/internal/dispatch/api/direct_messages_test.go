@@ -226,20 +226,13 @@ func TestBearerReadsADirectConversationOnlyAsItsSessionAndAnIssueThreadAsTheIssu
 	}
 }
 
-// unreadAgentState is the part of GET /api/v1/me/agents/state a viewer's unread signal reads.
-type unreadAgentState struct {
-	ClearedBefore *string `json:"cleared_before"`
-	ReadThrough   *string `json:"read_through"`
-	UnreadReplies int     `json:"unread_replies"`
-}
-
-func unreadReplies(t *testing.T, handler http.Handler, login, sessionID string) unreadAgentState {
+func unreadReplies(t *testing.T, handler http.Handler, login, sessionID string) userAgentState {
 	t.Helper()
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/agents/state", nil, login)
 	if response.Code != http.StatusOK {
 		t.Fatalf("%s agent state: status=%d body=%s", login, response.Code, response.Body.String())
 	}
-	return decodeBody[map[string]unreadAgentState](t, response)[sessionID]
+	return decodeBody[map[string]userAgentState](t, response)[sessionID]
 }
 
 // A session's reply to a human's direct message is unread for that human until they read it or

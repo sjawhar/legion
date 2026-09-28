@@ -45,6 +45,14 @@ export const userAgentStateQuery = () =>
     queryFn: () => api.getMyAgentState(),
   });
 
+/** One session's stored conversations: the direct messages and issue messages sent to it, with
+ *  their replies. The Agents page row and the live view read this one key. */
+export const agentMessagesQuery = (sessionId: string) =>
+  queryOptions({
+    queryKey: ["agents", sessionId, "messages"],
+    queryFn: () => api.listAgentMessages(sessionId),
+  });
+
 /** Every native project, shared by the shell, project routes, and settings. */
 export const projectsQuery = () =>
   queryOptions({

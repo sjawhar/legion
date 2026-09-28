@@ -401,8 +401,11 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // refreshed by key prefix rather than by threading a broadcast id through the message,
     // delivery and reply payloads; nothing else is keyed under ["broadcast"], and the
     // queries only exist while a broadcast page is mounted. A reply in a direct conversation can
-    // be unread for its asker, and the count lives in the viewer's per-agent state.
-    return [key, ["broadcast"], userAgentStateQuery().queryKey];
+    // be unread for its asker, and the count lives in the viewer's per-agent state; every reply
+    // row is written with a message.answered event, so only that event can move the count.
+    return event.type === "message.answered"
+      ? [key, ["broadcast"], userAgentStateQuery().queryKey]
+      : [key, ["broadcast"]];
   }
   if (event.issue_key === null) {
     if (event.artifact_id === null || event.artifact_id === undefined) {

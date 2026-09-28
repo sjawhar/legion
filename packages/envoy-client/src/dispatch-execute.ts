@@ -2281,12 +2281,8 @@ export async function executeDispatchTool(
           };
         }
         const readBack = `dispatch_read({message: "${inReplyTo}"}) reads the conversation back.`;
-        const follows =
-          reply.in_reply_to !== null &&
-          reply.in_reply_to !== undefined &&
-          reply.in_reply_to !== inReplyTo
-            ? reply.in_reply_to
-            : undefined;
+        const parent = reply.in_reply_to ?? undefined;
+        const follows = parent === inReplyTo ? undefined : parent;
         return {
           text:
             follows === undefined

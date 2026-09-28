@@ -110,6 +110,7 @@ const messageValidation: NonNullable<DispatchToolSpec["validation"]> = {
  * `message` alone, which addresses a conversation by any message in it. A human's direct message
  * to this session and the replies to it belong to no issue or document, so the id is all there is.
  */
+const readOwner = documentOwnerValidation(true);
 const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => {
     const input = value as {
@@ -119,7 +120,7 @@ const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
       readonly artifact?: unknown;
       readonly ref?: unknown;
     };
-    if (typeof input.message !== "string") return documentOwnerValidation(true).check(value);
+    if (typeof input.message !== "string") return readOwner.check(value);
     return (
       input.issue === undefined &&
       input.project === undefined &&
@@ -127,9 +128,7 @@ const readValidation: NonNullable<DispatchToolSpec["validation"]> = {
       input.ref === undefined
     );
   },
-  message:
-    "Exactly one of issue and project is required; with project, artifact names the document. " +
-    "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.",
+  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`,
 };
 
 /** Component attachment modes an issue write accepts. */

@@ -36595,14 +36595,15 @@ var messageValidation = {
   },
   message: "issue is required unless in_reply_to names a message delivered to this session, which is the one message with no issue."
 };
+var readOwner = documentOwnerValidation(true);
 var readValidation = {
   check: (value) => {
     const input = value;
     if (typeof input.message !== "string")
-      return documentOwnerValidation(true).check(value);
+      return readOwner.check(value);
     return input.issue === undefined && input.project === undefined && input.artifact === undefined && input.ref === undefined;
   },
-  message: "Exactly one of issue and project is required; with project, artifact names the document. " + "message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it."
+  message: `${readOwner.message} message stands alone: it names the conversation, so name no issue, project, artifact, or ref with it.`
 };
 var ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"];
 function componentsArgument(z2) {
@@ -40724,7 +40725,8 @@ ${followsAsk(askOwner)}`,
           };
         }
         const readBack = `dispatch_read({message: "${inReplyTo}"}) reads the conversation back.`;
-        const follows = reply.in_reply_to !== null && reply.in_reply_to !== undefined && reply.in_reply_to !== inReplyTo ? reply.in_reply_to : undefined;
+        const parent = reply.in_reply_to ?? undefined;
+        const follows = parent === inReplyTo ? undefined : parent;
         return {
           text: follows === undefined ? `Replied to message ${inReplyTo} with message ${reply.id}. ${readBack}` : `Replied to message ${inReplyTo} with message ${reply.id}, a follow-up threaded ` + `under your reply ${follows}. ${readBack}`,
           details: {

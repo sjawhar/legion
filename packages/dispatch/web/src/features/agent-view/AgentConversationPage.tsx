@@ -4,7 +4,7 @@ import { type ReactNode, useCallback, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { whoAmIQuery } from "../../api/queries";
+import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -73,10 +73,7 @@ export function AgentConversationPage(): ReactNode {
   // these the thread would show replies to messages the human cannot see, and no replies at all.
   // Seeing them here is reading them.
   const queryClient = useQueryClient();
-  const stored = useQuery({
-    queryFn: () => api.listAgentMessages(sessionId),
-    queryKey: ["agents", sessionId, "messages"],
-  });
+  const stored = useQuery(agentMessagesQuery(sessionId));
   useMarkRepliesRead(sessionId, stored.data);
   const viewer = useQuery(whoAmIQuery()).data;
 
@@ -93,7 +90,7 @@ export function AgentConversationPage(): ReactNode {
       setSendError(null);
       try {
         await api.createAgentMessage(sessionId, { body, delivery: mode });
-        await queryClient.invalidateQueries({ queryKey: ["agents", sessionId, "messages"] });
+        await queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
       } catch (error) {
         setSendError(error instanceof Error ? error.message : "could not reach the session");
       }
