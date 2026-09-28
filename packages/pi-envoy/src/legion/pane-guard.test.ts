@@ -39,7 +39,7 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "scripts/e2e/stage2-tmux-supervision.sh": "realpath -m",
   "scripts/e2e/stage3-4b13b-acceptance.sh": "realpath -m",
   "scripts/e2e/stage3-devbox-workflow.sh": "realpath -m",
-  "scripts/e2e/stage4b-sandbox-tree.sh": "stage4b.lock",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "walk limit",
   "scripts/sync-envoy-host.sh": "$1",
 };
 
@@ -74,7 +74,20 @@ beforeAll(() => {
     ompPid: process.pid,
     scratch: "/tmp",
   });
-  repositoryEnv = { ...env, HOME: "/home/ubuntu", LEGION_WORKSPACE: repository, TMPDIR: "/tmp" };
+  // This HOME is a fixture, never a configuration: no machine has it, and no real pane runs with a
+  // home that does not exist. It is unreal on purpose, so that what the machine running the test
+  // keeps under its own home cannot change a verdict. A redirection to a file that does not exist
+  // yet is allowed, so the lock a Stage 4b run leaves under the operator's home would stop that
+  // script's walk at `exec 9>"$lock"` on one machine and not on another. What the table therefore
+  // cannot see is a tracked script refused only because the operator's home already holds a file
+  // it writes. The rule itself, that an existing file in a home with contents is refused and a new
+  // one is not, is covered by the redirection and tee families above, on the fixture home.
+  repositoryEnv = {
+    ...env,
+    HOME: "/home/legion-guard-test-operator",
+    LEGION_WORKSPACE: repository,
+    TMPDIR: "/tmp",
+  };
 });
 
 afterAll(() => {

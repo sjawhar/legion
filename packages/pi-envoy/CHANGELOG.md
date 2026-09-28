@@ -79,7 +79,7 @@
   it now judges on their real first refusal: `packages/envoy/scripts/e2e-api.sh`, whose cleanup
   kills only the child whose pid it wrote, now runs; Stage 2, Stage 3 and the 4b.13b acceptance
   are refused at their gateway key command's write, the controller proof at its plugin unpack,
-  and Stage 4b at its lock file.
+  and Stage 4b at the guard's walk limit.
 - The Go `legion` tool's `register_gate` takes the spec document as the Dispatch tools name it
   (`spec` for the primary document, or its id, slug or filename) and registers its id, where it
   passed any reference to the daemon, which refused one that was not an id. A Dispatch it cannot
