@@ -72,6 +72,11 @@ one of your own commits is wrong, the pane environment is wrong — a pane opene
 that set it, or a command run outside the pane with the variables unset — and the fix is to report
 it to the architect, not to pin.
 
+**Superseded 2026-09-28 (LEGION-118):** the committer half no longer holds. A conflict resolves
+by forward merge, which rewrites nothing and changes no committer, so another role's commit
+carrying you as committer is evidence a rewrite moved commits that were not yours — report it
+rather than accept it. `skills/legion-worker/SKILL.md` carries the current rule.
+
 ## Hazard 2 — another workspace's `jj undo` / `op restore` rewinds your operations (LEGION-45)
 
 The operation log is shared. Mid-rebase, another workspace ran `undo: restore to operation …`
