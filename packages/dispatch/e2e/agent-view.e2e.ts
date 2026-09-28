@@ -121,8 +121,7 @@ interface LiveViewLayout {
   visualBottom: number;
   composerTop: number;
   composerBottom: number;
-  /** The newest turn's edges, and the thread's own top edge and scroll position. */
-  newestTop: number;
+  /** The newest turn's bottom edge, and the thread's own top edge and scroll position. */
   newestBottom: number;
   threadTop: number;
   threadScrollTop: number;
@@ -134,14 +133,14 @@ interface LiveViewLayout {
 
 function liveViewLayout(page: Page): Promise<LiveViewLayout> {
   return page.evaluate(() => {
-    const box = (testId: string) => {
+    const byTestId = (testId: string) => {
       const element = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
       if (element === null) throw new Error(`no ${testId}`);
       return element;
     };
-    const main = box("main-content");
-    const thread = box("agent-thread");
-    const composer = box("agent-composer").getBoundingClientRect();
+    const main = byTestId("main-content");
+    const thread = byTestId("agent-thread");
+    const composer = byTestId("agent-composer").getBoundingClientRect();
     const turns = thread.querySelectorAll('[data-testid^="agent-message-"]');
     const newest = turns[turns.length - 1]?.getBoundingClientRect();
     if (newest === undefined) throw new Error("no turns");
@@ -154,7 +153,6 @@ function liveViewLayout(page: Page): Promise<LiveViewLayout> {
       mainBottom: main.getBoundingClientRect().bottom,
       mainPaddingBottom: Number.parseFloat(getComputedStyle(main).paddingBottom),
       newestBottom: newest.bottom,
-      newestTop: newest.top,
       threadClientHeight: thread.clientHeight,
       threadScrollHeight: thread.scrollHeight,
       threadScrollTop: thread.scrollTop,
@@ -179,6 +177,16 @@ async function expectViewportBound(page: Page): Promise<void> {
   await page.getByTestId("agent-thread").evaluate((thread) => thread.scrollTo(0, 0));
   await expect(page.getByText("Turn 0:")).toBeInViewport();
   expect((await liveViewLayout(page)).composerBottom).toBe(layout.composerBottom);
+}
+
+/** The newest turn is in view: its bottom edge is inside the thread and above the composer. */
+async function expectNewestTurnAboveComposer(page: Page): Promise<void> {
+  await expect
+    .poll(async () => {
+      const layout = await liveViewLayout(page);
+      return layout.newestBottom <= layout.composerTop && layout.newestBottom > layout.threadTop;
+    })
+    .toBe(true);
 }
 
 /** iOS Safari's keyboard: the composer takes focus and only the visual viewport shrinks, to
@@ -375,21 +383,11 @@ test("on a phone the live view never scrolls the page, keeps its header and comp
     await thread.evaluate((element) => element.scrollTo(0, element.scrollHeight));
     await raiseKeyboard(page, 500);
     await expect(page.getByRole("link", { name: "← Agents" })).toBeInViewport({ ratio: 1 });
-    await expect
-      .poll(async () => {
-        const layout = await liveViewLayout(page);
-        return layout.newestBottom <= layout.composerTop && layout.newestBottom > layout.threadTop;
-      })
-      .toBe(true);
+    await expectNewestTurnAboveComposer(page);
 
     // Closing it takes the composer back to the bottom of the screen, still under the newest turn.
     await lowerKeyboard(page);
-    await expect
-      .poll(async () => {
-        const layout = await liveViewLayout(page);
-        return layout.newestBottom <= layout.composerTop && layout.newestBottom > layout.threadTop;
-      })
-      .toBe(true);
+    await expectNewestTurnAboveComposer(page);
 
     // A reader scrolled back into the history keeps their place through a raise and a lower.
     await thread.evaluate((element) => element.scrollTo(0, 1_200));

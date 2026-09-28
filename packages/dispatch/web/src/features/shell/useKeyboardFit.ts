@@ -1,15 +1,11 @@
-import { type RefObject, useEffect } from "react";
-
-/** The height, in px, that `useKeyboardFit` caps its element to while the keyboard is up. The
- *  element reads it through its `max-h-(--keyboard-fit-height)` class; unset, that declaration
- *  is invalid at computed-value time and the cap is `none`. */
-const KEYBOARD_FIT_VARIABLE = "--keyboard-fit-height";
+import { type RefObject, useLayoutEffect } from "react";
 
 /**
- * While `enabled` and a textarea inside `ref`'s element has focus, caps the element so its bottom
- * edge meets the visual viewport's bottom edge. The shell passes `<main>` on a route that fills
- * the viewport, so the page's composer, the textarea at its bottom, keeps `<main>`'s bottom
- * gutter above the on-screen keyboard.
+ * While `enabled` and a textarea inside `ref`'s element has focus, caps the element's inline
+ * `max-height` so its bottom edge meets the visual viewport's bottom edge. The shell passes
+ * `<main>` on a route that fills the viewport, so the page's composer, the textarea at its
+ * bottom, keeps `<main>`'s bottom gutter above the on-screen keyboard. A layout effect, so a
+ * route change with the keyboard up drops the cap before the next paint.
  *
  * Chromium on Android does not need this - the page's `interactive-widget=resizes-content`
  * viewport shrinks the layout viewport, and the dynamic-viewport shell with it. iOS Safari
@@ -19,7 +15,7 @@ const KEYBOARD_FIT_VARIABLE = "--keyboard-fit-height";
  * layout viewport did shrink, that bottom is at or below the element's own and the cap is inert.
  */
 export function useKeyboardFit(ref: RefObject<HTMLElement | null>, enabled: boolean): void {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = ref.current;
     // `== null`: happy-dom leaves `visualViewport` undefined where the DOM types say `null`.
     const viewport = window.visualViewport;
@@ -28,10 +24,9 @@ export function useKeyboardFit(ref: RefObject<HTMLElement | null>, enabled: bool
       const focused = document.activeElement;
       if (focused instanceof HTMLTextAreaElement && element.contains(focused)) {
         const bottom = viewport.offsetTop + viewport.height;
-        const height = Math.max(0, bottom - element.getBoundingClientRect().top);
-        element.style.setProperty(KEYBOARD_FIT_VARIABLE, `${height}px`);
+        element.style.maxHeight = `${Math.max(0, bottom - element.getBoundingClientRect().top)}px`;
       } else {
-        element.style.removeProperty(KEYBOARD_FIT_VARIABLE);
+        element.style.removeProperty("max-height");
       }
     };
     viewport.addEventListener("resize", fit);
@@ -43,7 +38,7 @@ export function useKeyboardFit(ref: RefObject<HTMLElement | null>, enabled: bool
       viewport.removeEventListener("scroll", fit);
       element.removeEventListener("focusin", fit);
       element.removeEventListener("focusout", fit);
-      element.style.removeProperty(KEYBOARD_FIT_VARIABLE);
+      element.style.removeProperty("max-height");
     };
   }, [ref, enabled]);
 }
