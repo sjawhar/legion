@@ -44,10 +44,14 @@ record without `schema` settles only in `[debounce, debounce + 5 min)` after its
 head that finished just before the old listener was replaced is still owed its settlement, and
 the window must cover the longest time between the old listener's last tick (it stops ticking at
 SIGTERM) and the new one's first. That is the on-prem compose deploy, which is stop-then-start, on
-its slowest path: a 30 s stop grace, up to 25 s to connect and reconcile the stream, a 10 s durable
-check, two 30 s fail-open cache gates and the subscribe retry loop's 135 s of backoff, 260 s before
-the container's own start and image pull. Production's ECS rollouts take 0.6 to 20.5 s from
-SIGTERM to ready (once 58.9 s). Past the band such a record never settles. It stays
+a slow path whose named terms are a floor: a 30 s stop grace, a first 5 s dial and the stream's
+reconcile (up to 25 s), a 10 s durable check, two 30 s fail-open cache gates and the subscribe retry
+loop's 135 s of backoff, at least 260 s before the container's own start and image pull. The
+degraded path adds terms that are bounded but not counted (the dial's retries, the four bucket
+opens, the durable check each subscribe attempt repeats), and the grace does not grow to absorb
+them: a sixth minute would put the band's far edge at 365 s, past the youngest measured backlog
+record (360 s). Production's ECS rollouts take 0.6 to 20.5 s from SIGTERM to ready (once 58.9 s).
+Past the band such a record never settles. It stays
 `settled_emitted: false` with no `schema` until the TTL expires it; that is expected, and it is
 history, not pending work. The listener's `/metrics` gauge `envoy_ci_legacy_records_held` carries
 how many the last tick held back, and it logs `checks held back a head-gated listener's unsettled
