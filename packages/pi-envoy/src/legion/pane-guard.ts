@@ -938,12 +938,11 @@ function clone(st: State): State {
 }
 
 /** After branches that may or may not run: everything a branch leaves in this shell, since any of
- * them may be the one that ran. A variable or working directory the branches leave differently is
- * unknown, a function name holds every definition they leave (`Callee`), and a handler any of them
- * sets stays. Not merged: `files` and `pidFiles`, which every branch shares; `output`, which each
- * caller compares itself (`outputChanged`); `runningFunctions`, which only a function's own walk
- * changes; and the positional parameters, so a `shift` or `set --` inside a branch leaves the
- * arguments as they were before it. */
+ * them may be the one that ran. A variable, the positional parameters (`shift`, `set --`) or the
+ * working directory the branches leave differently is unknown, a function name holds every
+ * definition they leave (`Callee`), and a handler any of them sets stays. Not merged: `files` and
+ * `pidFiles`, which every branch shares; `output`, which each caller compares itself
+ * (`outputChanged`); and `runningFunctions`, which only a function's own walk changes. */
 function merge(target: State, branches: readonly State[]): void {
   const names = new Set<string>();
   for (const branch of branches) for (const name of branch.vars.keys()) names.add(name);
@@ -969,6 +968,10 @@ function merge(target: State, branches: readonly State[]): void {
       target.arrays.set(name, new Map([[UNKNOWN_ARRAY_INDEX, unknownElement]]));
     }
   }
+  const positionals = branches.map((branch) => JSON.stringify(branch.positional ?? null));
+  target.positional = positionals.every((value) => value === positionals[0])
+    ? branches[0]?.positional
+    : undefined;
   const cwds = new Set(branches.map((branch) => branch.cwd));
   if (cwds.size > 1) {
     target.cwd = undefined;

@@ -475,6 +475,24 @@ describe("scripts a command runs", () => {
     ).toBeUndefined();
   });
 
+  test("makes the arguments unknown after a branch that may change them", () => {
+    const safe = '"$LEGION_WORKSPACE/a"';
+    for (const command of [
+      `set -- ${safe}; if true; then set -- "$HOME/y"; fi; rm -rf "$1"`,
+      `set -- ${safe} "$HOME/y"; if true; then shift; fi; rm -rf "$1"`,
+      `set -- ${safe} "$HOME/y"; for x in 1; do shift; done; rm -rf "$1"`,
+      `set -- ${safe} "$HOME/y"; case "$(cat f)" in a) shift ;; esac; rm -rf "$1"`,
+      `f() { if true; then set -- "$HOME/y"; fi; rm -rf "$1"; }; f ${safe}`,
+      `f() { if true; then shift; fi; rm -rf "$1"; }; f ${safe} "$HOME/y"`,
+    ]) {
+      expect(bash(command)).toContain("(a positional parameter)");
+    }
+    // The same `shift` outside a branch is known, and so is a branch that leaves them alone.
+    expect(bash(`set -- ${safe} "$HOME/y"; shift; rm -rf "$1"`)).toContain(home);
+    expect(bash(`set -- ${safe}; if true; then echo hi; fi; rm -rf "$1"`)).toBeUndefined();
+    expect(bash(`f() { if true; then echo x; fi; rm -rf "$1"; }; f ${safe}`)).toBeUndefined();
+  });
+
   test("walks a backgrounded command in a subshell", () => {
     const cleanup = 'cleanup() { rm -rf "$HOME"; }; trap cleanup EXIT; f() { trap - EXIT; }';
     // `f &` clears only its own subshell's handler, so the parent's still runs at exit.
