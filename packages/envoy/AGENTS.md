@@ -679,6 +679,16 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
 exists, and refuses to run without `dispatch.server_url`.
 
+The live document holds the tree as the browser editor holds it (`pmdoc.Update`, `pmdoc.Read`).
+That editor builds each node it loads with its schema, so an attribute the live document lacks
+takes the schema's default, and it writes a node's attributes back when the node is edited. Where
+the tree's null is not that default, the live document holds a value the editor keeps instead
+(`liveNulls`): `"none"` for a table cell with no alignment, whose default, left, would left-align
+the column at its first edit, and `""` for a code block with no language and an image with no
+title. A read gives each back as null. `pmdoc/gen/decode.ts` decodes Go-written bytes into the node
+the browser holds, schema defaults applied, so a new attribute of this kind fails
+`TestUpdateFromEmptyEqualsAuthoredByBrowser` until it is added there.
+
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive

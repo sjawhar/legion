@@ -102,11 +102,13 @@ func readText(t *crdt.YXmlText, readDelta textDeltaReader) ([]*Node, error) {
 	return out, nil
 }
 
-// treeAttrs is attrs, a live element's attributes, as the tree holds them: a table cell's
-// unalignedCell is its null alignment (liveAttrs). It maps attrs in place.
+// treeAttrs is attrs, a live element's attributes, as the tree holds them: the value liveNulls
+// writes for a null attribute is null. It maps attrs in place.
 func treeAttrs(nodeName string, attrs map[string]any) Attrs {
-	if (nodeName == "table_cell" || nodeName == "table_header") && attrs["alignment"] == unalignedCell {
-		attrs["alignment"] = nil
+	for name, value := range liveNulls[nodeName] {
+		if attrs[name] == value {
+			attrs[name] = nil
+		}
 	}
 	return Attrs(attrs)
 }

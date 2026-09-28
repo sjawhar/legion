@@ -164,24 +164,40 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 	return updateChildren(txn, &element.YXmlFragment, want.Children)
 }
 
-// unalignedCell is the alignment the live document holds for a table cell with none, the tree's
-// null. The browser editor gives a cell whose alignment attribute is absent its schema's default,
-// left, and writes that back into the live document for any cell it edits, so an absent attribute
-// would turn an unaligned column into a left-aligned one at its first edit; it keeps "none", and
-// writes that column unaligned, as the tree's null is written. readElement reads it back as null.
-const unalignedCell = "none"
+// liveNulls is, by node type, the value the live document holds for an attribute whose tree value
+// is null, where the browser editor's schema gives an absent attribute a default other than null.
+// That editor builds each node it loads with its schema, so an absent attribute takes the default,
+// and it writes the default back into the live document for any node it edits. A table cell with
+// no alignment holds "none": the default, left, would turn an unaligned column left-aligned at its
+// first edit, while "none" it keeps and writes unaligned, as the tree's null is written. A code
+// block with no language and an image with no title hold "", that editor's default and its value
+// for none.
+// readElement reads each back as null (treeAttrs).
+var liveNulls = map[string]map[string]any{
+	"table_cell":   {"alignment": "none"},
+	"table_header": {"alignment": "none"},
+	"code_block":   {"language": ""},
+	"image":        {"title": ""},
+}
 
-// liveAttrs is node's attributes as the live document holds them: a table cell with no alignment
-// holds unalignedCell.
+// liveAttrs is node's attributes as the live document holds them (liveNulls).
 func liveAttrs(node *Node) Attrs {
-	if node.Type != "table_cell" && node.Type != "table_header" || node.Attrs["alignment"] != nil {
+	var attrs Attrs
+	for name, value := range liveNulls[node.Type] {
+		if node.Attrs[name] != nil {
+			continue
+		}
+		if attrs == nil {
+			attrs = make(Attrs, len(node.Attrs)+1)
+			for key, current := range node.Attrs {
+				attrs[key] = current
+			}
+		}
+		attrs[name] = value
+	}
+	if attrs == nil {
 		return node.Attrs
 	}
-	attrs := make(Attrs, len(node.Attrs)+1)
-	for key, value := range node.Attrs {
-		attrs[key] = value
-	}
-	attrs["alignment"] = unalignedCell
 	return attrs
 }
 

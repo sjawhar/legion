@@ -13,10 +13,11 @@ import (
 	"github.com/reearth/ygo/crdt"
 )
 
-// Go-authored bytes read back as the tree, and y-prosemirror decodes them as the browser editor
-// would author the tree, but for a table cell with no alignment: it holds "none", since the
-// browser editor gives a cell whose alignment attribute is absent its schema's default, left, and
-// writes that back when the cell is edited.
+// Go-authored bytes read back as the tree, and the browser editor loads them as the node it would
+// author the tree as, schema defaults applied, but for the null attributes whose default is not
+// null: a table cell with no alignment holds "none", since that editor gives an absent alignment
+// the default, left, and writes it back when the cell is edited, and a code block with no
+// language and an image with no title hold "", that editor's own default.
 func TestUpdateFromEmptyEqualsAuthoredByBrowser(t *testing.T) {
 	for _, fx := range loadFixtures(t) {
 		t.Run(fx.Name, func(t *testing.T) {
@@ -43,7 +44,7 @@ func TestUpdateFromEmptyEqualsAuthoredByBrowser(t *testing.T) {
 			}
 
 			pm := decodeWithYProsemirror(t, crdt.EncodeStateAsUpdateV1(doc, nil))
-			if live := unalignedCellsAsNone(want); !pm.Equal(live) {
+			if live := asTheLiveDocumentHoldsIt(want); !pm.Equal(live) {
 				actual, _ := pm.JSON()
 				expected, _ := live.JSON()
 				t.Fatalf("y-prosemirror decodes Go-authored bytes differently\n got: %s\nwant: %s", actual, expected)
@@ -52,19 +53,32 @@ func TestUpdateFromEmptyEqualsAuthoredByBrowser(t *testing.T) {
 	}
 }
 
-// unalignedCellsAsNone is doc with each table cell's null alignment written "none".
-func unalignedCellsAsNone(doc *Node) *Node {
+// asTheLiveDocumentHoldsIt is doc with each table cell's null alignment written "none", and each
+// code block's null language and image's null title "".
+func asTheLiveDocumentHoldsIt(doc *Node) *Node {
 	out := *doc
-	if (doc.Type == "table_cell" || doc.Type == "table_header") && doc.Attrs["alignment"] == nil {
-		out.Attrs = Attrs{}
-		for key, value := range doc.Attrs {
-			out.Attrs[key] = value
+	set := func(name string, value any) {
+		if doc.Attrs[name] != nil {
+			return
 		}
-		out.Attrs["alignment"] = "none"
+		attrs := Attrs{}
+		for key, current := range out.Attrs {
+			attrs[key] = current
+		}
+		attrs[name] = value
+		out.Attrs = attrs
+	}
+	switch doc.Type {
+	case "table_cell", "table_header":
+		set("alignment", "none")
+	case "code_block":
+		set("language", "")
+	case "image":
+		set("title", "")
 	}
 	out.Children = make([]*Node, len(doc.Children))
 	for index, child := range doc.Children {
-		out.Children[index] = unalignedCellsAsNone(child)
+		out.Children[index] = asTheLiveDocumentHoldsIt(child)
 	}
 	return &out
 }
