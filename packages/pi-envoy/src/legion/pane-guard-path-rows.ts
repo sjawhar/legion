@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import * as path from "node:path";
-import { createPaneGuard } from "./pane-guard";
+import { createPaneGuard, type PaneGuard } from "./pane-guard";
 
 /** One command measured twice: what `guard.bash` returns, and what real bash does to a canary
  * HOME. The row carries no expected verdict — the expectation is what bash did. */
@@ -1181,23 +1181,31 @@ export interface PathRowResult {
   readonly exit: number | null;
 }
 
+/** The pane a fixture stands for: the guard rooted on its workspace and scratch, and the
+ * environment real bash runs the same command under, with `HOME` on the canary. */
+export function fixtureGuard(fixture: PathFixture): { guard: PaneGuard; env: NodeJS.ProcessEnv } {
+  return {
+    guard: createPaneGuard({
+      workspace: fixture.workspace,
+      ompPid: process.pid,
+      scratch: fixture.scratch,
+    }),
+    env: {
+      HOME: fixture.home,
+      LEGION_WORKSPACE: fixture.workspace,
+      TMPDIR: fixture.scratch,
+      PATH: process.env.PATH,
+    },
+  };
+}
+
 /** Builds the row its own fixture, asks the guard, then runs the command under real bash in that
  * same fixture, so both columns see one filesystem. */
 export function measureRow(row: PathRow, root: string): PathRowResult {
   const base = mkdtempSync(path.join(root, "row-"));
   try {
     const fixture = buildPathFixture(base);
-    const env: NodeJS.ProcessEnv = {
-      HOME: fixture.home,
-      LEGION_WORKSPACE: fixture.workspace,
-      TMPDIR: fixture.scratch,
-      PATH: process.env.PATH,
-    };
-    const guard = createPaneGuard({
-      workspace: fixture.workspace,
-      ompPid: process.pid,
-      scratch: fixture.scratch,
-    });
+    const { guard, env } = fixtureGuard(fixture);
     const refusal = guard.bash(row.command, fixture.workspace, env);
     const before = canaryDigest(fixture.home);
     const run = spawnSync("bash", ["-c", row.command], {

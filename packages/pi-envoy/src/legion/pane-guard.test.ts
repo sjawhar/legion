@@ -51,8 +51,7 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   // check, and the guard, which walks a command whatever a test before it decides, reaches the
   // paths an empty argument makes (`--control`, `--dest`).
   "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:99",
-  // An unnameable write can replace the script it runs next. These two driver scripts exercise
-  // that shape; the other two changed scripts were already refused, so their refusal site moved.
+  // An unnameable write can replace the script it runs next; these two driver scripts do that.
   ".github/scripts/check-bun-version.test.sh": ".github/scripts/check-bun-version.test.sh:74",
   ".github/scripts/check-image-trigger-paths.test.sh":
     ".github/scripts/check-image-trigger-paths.test.sh:75",
@@ -318,9 +317,8 @@ describe("resolution", () => {
     expect(bash(`chmod -R 000 "$(basename /)\${HOME#/}"`)).toBeDefined();
     // `cd -@` is an invalid option on Linux: bash stays where it was.
     expect(bash('cd "$HOME"; cd -@ "$LEGION_WORKSPACE"; rm -f .bashrc')).toBeDefined();
-    // `--relative-to`/`--relative-base` override any `-s`/`-L`/`-P` reading and must be checked
-    // first: an earlier round checked `-s` before `--relative*`, which returned the wrong
-    // (unmodelled) answer as if `--relative-to` were not there at all.
+    // `--relative-to`/`--relative-base` override any `-s`/`-L`/`-P` reading: read `-s` first and
+    // the substitution gets a lexical path as if `--relative-to` were not there at all.
     expect(bash('rm -rf $(realpath -s --relative-to=d "$LEGION_WORKSPACE/keep")')).toBeDefined();
     // A `..` after a component that is not there is never resolved to the path the text reads
     // as: whatever creates that component decides where the `..` leads, so the guard models no

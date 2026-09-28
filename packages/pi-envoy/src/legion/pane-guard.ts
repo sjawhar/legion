@@ -581,6 +581,7 @@ type Resolved = { readonly real: string } | { readonly unknown: string };
 function physical(cwd: string, text: string, followFinal: boolean): Resolved {
   const joined = text.startsWith("/") ? text : `${cwd}/${text}`;
   const parts = joined.split("/");
+  const last = parts.findLastIndex((part) => part !== "" && part !== ".");
   const pending: string[] = [];
   let real = "/";
   for (let i = 0; i < parts.length; i += 1) {
@@ -602,7 +603,7 @@ function physical(cwd: string, text: string, followFinal: boolean): Resolved {
       continue;
     }
     const candidate = real === "/" ? `/${part}` : `${real}/${part}`;
-    if (!followFinal && !parts.slice(i + 1).some((later) => later !== "" && later !== ".")) {
+    if (!followFinal && i === last) {
       return { real: candidate };
     }
     let link: boolean;
@@ -636,13 +637,14 @@ function physical(cwd: string, text: string, followFinal: boolean): Resolved {
   return { real: pending.length === 0 ? real : path.join(real, ...pending) };
 }
 
-/** The key a file the command writes, reads back, or runs is modelled under: the path the kernel
- * opens, so a write and the read after it meet on the same entry. Undefined is "the guard cannot
- * say which file that is" — the caller records nothing and keeps the file unknown, rather than
- * modelling a file the command never touched. */
-function modelKey(st: State, text: string): string | undefined {
-  if (!text.startsWith("/") && st.cwd === undefined) return undefined;
-  const resolved = physical(st.cwd ?? "/", text, true);
+/** `physical` for the sites that record nothing rather than refuse: the key a file the command
+ * writes, reads back, or runs is modelled under, so a write and the read after it meet on the
+ * same entry; the directory a real `chdir(2)` leaves behind (`env -C`, `cd -P`); and the value a
+ * `realpath` prints. Undefined is a path the guard cannot name — the caller keeps the file, the
+ * working directory or the value unknown, rather than modelling one the command never touched. */
+function kernelPath(from: string | undefined, text: string): string | undefined {
+  if (from === undefined && !text.startsWith("/")) return undefined;
+  const resolved = physical(from ?? "/", text, true);
   return "unknown" in resolved ? undefined : resolved.real;
 }
 
@@ -1165,7 +1167,7 @@ function substitution(
   const file =
     directFile ??
     (variableRead === null ? undefined : literalText(lookup(variableRead[1] as string, st, ctx)));
-  const pidFile = file === undefined ? undefined : modelKey(st, file);
+  const pidFile = file === undefined ? undefined : kernelPath(st.cwd, file);
   if (pidFile !== undefined) {
     const pid = st.pidFiles.get(pidFile);
     if (pid !== undefined) return [[...pid]];
@@ -1295,37 +1297,26 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
     // `--relative-to`/`--relative-base` print a path relative to another directory, which this
     // function does not compute — checked first, since it overrides any `-s`/`-L`/`-P` reading.
     if (found.options.some((option) => option.startsWith("--relative"))) return undefined;
-    // `realpath` resolves a relative operand against `getcwd()`, the PHYSICAL directory —
-    // `st.cwd` is bash's LOGICAL PWD, which a `cd` into a symlink leaves pointed at the link's
-    // text, not its target. Both non-default modes below need the physical directory first.
-    const here = physical("/", st.cwd, true);
-    // Bash takes the LAST of `-s`/`--strip`/`--no-symlinks`, `-L`/`--logical` and
-    // `-P`/`--physical`, across option words and within one: `-sP`/`-s -P` are physical, `-Ps`/
-    // `-P -s` are lexical. `-s` expands no symlink at all; `-L` resolves the text's own `..`
-    // BEFORE following the symlink in front of it — the reverse of the physical walk below,
-    // which follows each symlink first and takes `..` as the parent of what it found.
-    const mode = found.options
-      .flatMap((option) => {
-        if (option === "--strip" || option === "--no-symlinks") return ["s"];
-        if (option === "--logical") return ["L"];
-        if (option === "--physical") return ["P"];
-        if (!/^-[a-zA-Z]+$/.test(option)) return [];
-        return [...option.slice(1)].filter(
-          (letter) => letter === "s" || letter === "L" || letter === "P"
-        );
-      })
-      .at(-1);
-    if (mode === "s") {
-      return "unknown" in here ? undefined : path.resolve(here.real, target);
-    }
-    if (mode === "L") {
-      if ("unknown" in here) return undefined;
-      const resolved = physical("/", path.resolve(here.real, target), true);
-      return "unknown" in resolved ? undefined : resolved.real;
+    const mode = lastModeFlag(found.options, "sLP", {
+      "--strip": "s",
+      "--no-symlinks": "s",
+      "--logical": "L",
+      "--physical": "P",
+    });
+    // `-s` and `-L` both start from the operand's own text with its `..` cut lexically: `-s`
+    // prints that, expanding no symlink at all, and `-L` follows the symlinks in THAT path — the
+    // reverse of the physical walk below, which follows each symlink first and takes `..` as the
+    // parent of what it found. Both take a relative operand against `getcwd()`, the PHYSICAL
+    // directory, where `st.cwd` is bash's LOGICAL PWD, which a `cd` into a symlink leaves
+    // pointed at the link's text rather than its target.
+    if (mode === "s" || mode === "L") {
+      const here = kernelPath("/", st.cwd);
+      if (here === undefined) return undefined;
+      const lexical = path.resolve(here, target);
+      return mode === "s" ? lexical : kernelPath("/", lexical);
     }
   }
-  const resolved = physical(st.cwd, target, true);
-  return "unknown" in resolved ? undefined : resolved.real;
+  return kernelPath(st.cwd, target);
 }
 
 function mktempPath(command: Command, st: State, ctx: Ctx): Piece[] {
@@ -1965,11 +1956,10 @@ function modelPidFile(st: State, ctx: Ctx, file: string, pid: Expansion | undefi
  * leaving the models usable is that mistake by omission: `ln -s sub late; echo <payload> >>
  * late/../run.sh; bash run.sh` appended to the very script it then ran.
  *
- * `ctx.unnameableWrite` is the whole mechanism for the file models. An earlier revision also
- * overwrote each `files` entry with an unknown, which is redundant and was removed: every read of
- * `files` that reaches a verdict goes through `runFile`, which refuses on the flag first. Measured
- * rather than reasoned — with the loop deleted, `PATH_ROWS` is byte-identical and both suites
- * pass. Narrow the flag and that loop has to come back.
+ * `ctx.unnameableWrite` alone protects `files`: every read of it that reaches a verdict goes
+ * through `runFile`, which refuses on the flag before it looks anything up, so the entries
+ * themselves are left as they are. Narrow the flag to fewer sites and each entry has to be blurred
+ * to an unknown here instead.
  *
  * The third writer beside `modelWrite` and `modelPidFile`, and the only one that forgets in bulk,
  * so no site can drop a model without saying why. */
@@ -2466,7 +2456,7 @@ function checkRedirects(
         }
       }
       const target = literalText(exp);
-      const file = target === undefined ? undefined : modelKey(st, target);
+      const file = target === undefined ? undefined : kernelPath(st.cwd, target);
       if (file === undefined) {
         // A target whose text the guard cannot read at all — a substitution, a glob, a variable —
         // may be any file, including the one about to run. A truncating write has the same effect
@@ -2542,7 +2532,7 @@ function groupOutputFile(statement: Statement, st: State, ctx: Ctx): string | un
   const targets = expandWord(redirect.target, st, ctx);
   const target = targets.length === 1 ? literalText(targets[0]) : undefined;
   if (target === undefined) return undefined;
-  return modelKey(st, target);
+  return kernelPath(st.cwd, target);
 }
 
 /** Walks a brace group whose output goes to a file, and returns what it writes there: the
@@ -2840,6 +2830,26 @@ function operands(
   return { options, operands: found };
 }
 
+/** The mode a command ends up in when its mode flags exclude one another: the LAST of `letters`
+ * given, across option words and within one (`-LP` is `P`, `-P -L` is `L`), which is what
+ * getopt-parsed builtins and coreutils do. `long` maps a long option (`--physical`) onto its
+ * letter; a word that is neither a long option in `long` nor a cluster of letters counts for
+ * nothing. Undefined is a command line naming no mode. */
+function lastModeFlag(
+  options: readonly string[],
+  letters: string,
+  long: Readonly<Record<string, string>> = {}
+): string | undefined {
+  return options
+    .flatMap((option) => {
+      const named = long[option];
+      if (named !== undefined) return [named];
+      if (!/^-[a-zA-Z]+$/.test(option)) return [];
+      return [...option.slice(1)].filter((letter) => letters.includes(letter));
+    })
+    .at(-1);
+}
+
 /** Strips the programs that run another program unchanged: `sudo rm` is `rm`.
  *
  * `alts` are the other argvs the same command line may run, for the one wrapper where words the
@@ -2952,10 +2962,10 @@ function unwrap(
         } else if (text === "-C" || text === "--chdir") {
           // `env -C` calls chdir(2): no logical path is kept, so the symlinks are followed.
           const dir = literalText(rest[i + 1]?.exp);
-          cwd = dir === undefined ? undefined : movedDirectory(state.cwd, dir);
+          cwd = dir === undefined ? undefined : kernelPath(state.cwd, dir);
           i += 1;
         } else if (text?.startsWith("--chdir=")) {
-          cwd = movedDirectory(state.cwd, text.slice(8));
+          cwd = kernelPath(state.cwd, text.slice(8));
         } else if (text === "-S" || text === "--split-string") {
           const split = literalText(rest[i + 1]?.exp);
           const tail = rest.slice(i + 2);
@@ -3177,14 +3187,8 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         outer.cwdWhy = "`cd` with an option the guard does not model";
         return;
       }
-      // Bash takes the LAST of `-L` and `-P`, across option words and within one (`-PL` is
-      // logical, `-LP` physical), so a `P` anywhere is not physical mode.
-      const mode = found.options
-        .filter((option) => /^-[a-zA-Z]+$/.test(option))
-        .flatMap((option) => [...option.slice(1)])
-        .filter((letter) => letter === "L" || letter === "P")
-        .at(-1);
-      changeDirectory(found.operands[0], mode === "P", outer, ctx);
+      // `-PL` is logical and `-LP` physical, so a `P` anywhere is not physical mode.
+      changeDirectory(found.operands[0], lastModeFlag(found.options, "LP") === "P", outer, ctx);
       return;
     }
     case "pushd": {
@@ -3607,7 +3611,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           }
         }
         const target = literalText(arg.exp);
-        const file = target === undefined ? undefined : modelKey(st, target);
+        const file = target === undefined ? undefined : kernelPath(st.cwd, target);
         if (file === undefined) {
           // As in `checkRedirects`, a target `tee` cannot name may be the script it runs next.
           forgetFileModels(st, ctx, `\`tee ${arg.text}\``);
@@ -3836,14 +3840,6 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
   }
 }
 
-/** The working directory a real `chdir(2)` leaves behind — `env -C`, and `cd -P`. Undefined is a
- * directory the guard cannot name, which makes every relative target after it unknown. */
-function movedDirectory(from: string | undefined, text: string): string | undefined {
-  if (from === undefined && !text.startsWith("/")) return undefined;
-  const resolved = physical(from ?? "/", text, true);
-  return "unknown" in resolved ? undefined : resolved.real;
-}
-
 /** `cd` keeps a logical working directory: bash canonicalises `..` in the path it was given and
  * changes to that, so `cd link/..` lands where the text says. `cd -P` does not — it chdirs to the
  * path the kernel resolves. Either way a later relative target is resolved from this directory
@@ -3870,7 +3866,7 @@ function changeDirectory(
     st.cwd = path.resolve(st.cwd, text);
     return;
   }
-  st.cwd = movedDirectory(st.cwd, text);
+  st.cwd = kernelPath(st.cwd, text);
   if (st.cwd === undefined) st.cwdWhy = `\`cd -P ${target.text}\``;
 }
 
@@ -4081,8 +4077,8 @@ function checkTargets(
       );
     }
     const text = literalText(target.exp);
-    // `judgePath` above refuses a target the guard cannot resolve, so `modelKey` answers here.
-    const file = text === undefined ? undefined : modelKey(st, text);
+    // `judgePath` above refuses a target the guard cannot resolve, so `kernelPath` answers here.
+    const file = text === undefined ? undefined : kernelPath(st.cwd, text);
     if (file !== undefined) st.pidFiles.delete(file);
   }
 }

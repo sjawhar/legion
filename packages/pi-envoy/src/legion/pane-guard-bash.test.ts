@@ -16,6 +16,7 @@ import { DESTRUCTIVE, KILL_PID, type Live, MODEL_ROWS, PID_ROWS } from "./pane-g
 import {
   buildPathFixture,
   DOTDOT_COMPONENT,
+  fixtureGuard,
   measureAllPathRows,
   PATH_ROWS,
   type PathRowResult,
@@ -433,21 +434,11 @@ test("matches bash's directory builtins without inventing a directory stack", ()
     const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-directory-"));
     try {
       const fixture = buildPathFixture(root);
-      const fixtureEnv = {
-        HOME: fixture.home,
-        LEGION_WORKSPACE: fixture.workspace,
-        TMPDIR: fixture.scratch,
-        PATH: process.env.PATH,
-      };
-      const fixtureGuard = createPaneGuard({
-        workspace: fixture.workspace,
-        ompPid: process.pid,
-        scratch: fixture.scratch,
-      });
-      expect(fixtureGuard.bash(command, fixture.workspace, fixtureEnv), command).toBeDefined();
+      const { guard: pane, env: paneEnv } = fixtureGuard(fixture);
+      expect(pane.bash(command, fixture.workspace, paneEnv), command).toBeDefined();
       const run = spawnSync("bash", ["-c", command], {
         cwd: fixture.workspace,
-        env: fixtureEnv,
+        env: paneEnv,
       });
       expect(run.status, command).toBe(0);
       expect(existsSync(path.join(fixture.home, ".bashrc")), command).toBe(false);
@@ -459,26 +450,12 @@ test("matches bash's directory builtins without inventing a directory stack", ()
   const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-directory-stack-"));
   try {
     const fixture = buildPathFixture(root);
-    const fixtureEnv = {
-      HOME: fixture.home,
-      LEGION_WORKSPACE: fixture.workspace,
-      TMPDIR: fixture.scratch,
-      PATH: process.env.PATH,
-    };
-    const fixtureGuard = createPaneGuard({
-      workspace: fixture.workspace,
-      ompPid: process.pid,
-      scratch: fixture.scratch,
-    });
-    expect(fixtureGuard.bash("pushd; rm -f inside", fixture.workspace, fixtureEnv)).toContain(
+    const { guard: pane, env: paneEnv } = fixtureGuard(fixture);
+    expect(pane.bash("pushd; rm -f inside", fixture.workspace, paneEnv)).toContain(
       "directory stack"
     );
     expect(
-      fixtureGuard.bash(
-        'pushd "$LEGION_WORKSPACE" >/dev/null; rm -f inside',
-        fixture.workspace,
-        fixtureEnv
-      )
+      pane.bash('pushd "$LEGION_WORKSPACE" >/dev/null; rm -f inside', fixture.workspace, paneEnv)
     ).toBeUndefined();
   } finally {
     removePathFixture(root);
@@ -489,28 +466,14 @@ test("uses basename's first operand and refuses options it does not model", () =
   const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-basename-"));
   try {
     const fixture = buildPathFixture(root);
-    const fixtureEnv = {
-      HOME: fixture.home,
-      LEGION_WORKSPACE: fixture.workspace,
-      TMPDIR: fixture.scratch,
-      PATH: process.env.PATH,
-    };
-    const fixtureGuard = createPaneGuard({
-      workspace: fixture.workspace,
-      ompPid: process.pid,
-      scratch: fixture.scratch,
-    });
+    const { guard: pane, env: paneEnv } = fixtureGuard(fixture);
     const command = 'rm -rf "$LEGION_WORKSPACE/$(basename ..x x)/home/keep"';
-    expect(fixtureGuard.bash(command, fixture.workspace, fixtureEnv), command).toBeDefined();
-    const run = spawnSync("bash", ["-c", command], { cwd: fixture.workspace, env: fixtureEnv });
+    expect(pane.bash(command, fixture.workspace, paneEnv), command).toBeDefined();
+    const run = spawnSync("bash", ["-c", command], { cwd: fixture.workspace, env: paneEnv });
     expect(run.status).toBe(0);
     expect(existsSync(path.join(fixture.home, "keep"))).toBe(false);
     expect(
-      fixtureGuard.bash(
-        'rm -f "$(basename -s ignored "$HOME/.ssh")"',
-        fixture.workspace,
-        fixtureEnv
-      )
+      pane.bash('rm -f "$(basename -s ignored "$HOME/.ssh")"', fixture.workspace, paneEnv)
     ).toBeDefined();
   } finally {
     removePathFixture(root);
@@ -529,21 +492,11 @@ test("blurs models after any write whose target it cannot name", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "legion-pane-guard-unnameable-write-"));
     try {
       const fixture = buildPathFixture(root);
-      const fixtureEnv = {
-        HOME: fixture.home,
-        LEGION_WORKSPACE: fixture.workspace,
-        TMPDIR: fixture.scratch,
-        PATH: process.env.PATH,
-      };
-      const fixtureGuard = createPaneGuard({
-        workspace: fixture.workspace,
-        ompPid: process.pid,
-        scratch: fixture.scratch,
-      });
-      expect(fixtureGuard.bash(command, fixture.workspace, fixtureEnv), command).toBeDefined();
+      const { guard: pane, env: paneEnv } = fixtureGuard(fixture);
+      expect(pane.bash(command, fixture.workspace, paneEnv), command).toBeDefined();
       const run = spawnSync("bash", ["-c", command], {
         cwd: fixture.workspace,
-        env: fixtureEnv,
+        env: paneEnv,
       });
       expect(run.status, command).toBe(0);
       expect(existsSync(path.join(fixture.home, ".bashrc")), command).toBe(false);
