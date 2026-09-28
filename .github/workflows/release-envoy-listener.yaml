@@ -86,8 +86,10 @@ jobs:
       # behaviour, so a slow build must fail nothing. Inside the test it spent 256.60–289.47 s
       # of `go test -timeout 5m` across ten runs while the five assertions measured 0.00 s each
       # (docs/solutions/testing/a-container-build-inside-go-test-spends-the-tests-deadline.md).
-      # Same Dockerfile, context, builder and LEGION_COMMIT as the publish step below, so this
-      # tag is the amd64 half of the image that gets published, not a sibling build.
+      # Built from the same inputs and LEGION_COMMIT as the published image — same Dockerfile,
+      # same context, same builder as the publish step below — so the smoke exercises what the
+      # release publishes rather than a differently configured build. Not byte identity: this
+      # step names no --platform and no gha cache, and the runtime stage installs from apt.
       - name: Build the listener image the smoke test runs against
         run: |
           docker buildx build --load --tag "$ENVOY_SMOKE_IMAGE" \
