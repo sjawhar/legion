@@ -50,7 +50,8 @@ func StartSummaryLoop(ctx context.Context, store *Store, pub Publisher, debounce
 
 // backlogHeld reports the records a head-gated listener left that the summary loop holds back
 // (heldBack): its gauge is set to each tick's count, and the first tick that holds any logs the
-// count once, at INFO.
+// count once, at INFO. The loop does not wait for the CI cache to load (cmd/listener starts it
+// before the cache is ready), so that first count is a floor, and the line says "at least".
 type backlogHeld struct {
 	gauge  *metrics.Gauge
 	logged bool
@@ -60,7 +61,7 @@ func (b *backlogHeld) observe(held int, logger *logging.Logger) {
 	b.gauge.Set(int64(held))
 	if held > 0 && !b.logged {
 		b.logged = true
-		logger.Info("checks held back a head-gated listener's unsettled records", slog.Int("records", held))
+		logger.Info("checks held back a head-gated listener's unsettled records, at least", slog.Int("records", held))
 	}
 }
 

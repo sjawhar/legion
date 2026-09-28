@@ -20,13 +20,13 @@
   `head.*` records in the CI bucket); a record an earlier listener wrote is skipped until its TTL.
 - Every write of a CI record stamps it `schema: 1`. A record without it was last written by a
   listener that settled only heads, and it settles only when its last event is between the
-  debounce and the debounce plus four minutes ago, so a head that finished during the handover
+  debounce and the debounce plus five minutes ago, so a head that finished during the handover
   still settles and the backlog of commits that listener never settled does not: on 2026-09-28
   production held 1,442 such records (595 `pr.<n>.checks` subjects, up to 168 hours old), which
   the first start would otherwise have published at once. Those records stay unsettled, without
   `schema`, until the bucket's seven-day TTL expires them; the `/metrics` gauge
   `envoy_ci_legacy_records_held` carries how many the last tick held back, and the first tick that
-  holds any logs the count once at INFO. An observation that changes the record
+  holds any logs the count, a floor, once at INFO. An observation that changes the record
   stamps it and the commit settles as usual; a stamped record settles however long it waited,
   across a restart too. A rolled-back listener ignores the field. A listener built with #1526 but
   without this change publishes the whole backlog, so every head-gated listener moves straight to

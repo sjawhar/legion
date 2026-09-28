@@ -40,17 +40,20 @@ A listener that settled only a pull request's head left every other terminal com
 unsettled until the bucket's seven-day TTL; on 2026-09-28 production held 1,442 of them across
 595 `pr.<n>.checks` subjects, the youngest six minutes old and the median 65 hours. Settling them
 would publish verdicts days late, which an agent waiting on its head can read as its head's. So a
-record without `schema` settles only in `[debounce, debounce + 4 min)` after its last event. A
+record without `schema` settles only in `[debounce, debounce + 5 min)` after its last event. A
 head that finished just before the old listener was replaced is still owed its settlement, and
-the window must cover the longest time between the old listener's last tick and the new one's
-first. That is the on-prem compose deploy, which is stop-then-start, on its slowest startup path:
-a 30 s stop grace, two 30 s fail-open cache gates and the subscribe retry loop's 135 s of backoff,
-225 s in all. Production's ECS rollouts take 0.6 to 20.5 s from SIGTERM to ready (once 58.9 s).
-Past the band such a record never settles. It stays `settled_emitted: false` with no `schema`
-until the TTL expires it; that is expected, and it is history, not pending work. The listener's
-`/metrics` gauge `envoy_ci_legacy_records_held` carries how many the last tick held back, and it
-logs `checks held back a head-gated listener's unsettled records` with the count the first time a
-process holds any. An observation that changes the record (a new check run, a re-run, a
+the window must cover the longest time between the old listener's last tick (it stops ticking at
+SIGTERM) and the new one's first. That is the on-prem compose deploy, which is stop-then-start, on
+its slowest path: a 30 s stop grace, up to 25 s to connect and reconcile the stream, a 10 s durable
+check, two 30 s fail-open cache gates and the subscribe retry loop's 135 s of backoff, 260 s before
+the container's own start and image pull. Production's ECS rollouts take 0.6 to 20.5 s from
+SIGTERM to ready (once 58.9 s). Past the band such a record never settles. It stays
+`settled_emitted: false` with no `schema` until the TTL expires it; that is expected, and it is
+history, not pending work. The listener's `/metrics` gauge `envoy_ci_legacy_records_held` carries
+how many the last tick held back, and it logs `checks held back a head-gated listener's unsettled
+records, at least` with the count the first time a process holds any; that count is a floor, since
+the loop does not wait for the CI cache to load. An observation that changes the record (a new
+check run, a re-run, a
 suite) stamps it, and the commit then settles as any other; a redelivery of what the record already
 holds writes nothing. A stamped record, of any schema, is never held back, so a settlement pending
 across a restart of the listener still publishes; a process-start cutoff would drop those. A record

@@ -323,7 +323,7 @@ func TestTheHeldBacklogIsCountedAndLoggedOnce(t *testing.T) {
 		}
 		return ""
 	}
-	const logLine = "checks held back a head-gated listener's unsettled records"
+	const logLine = "checks held back a head-gated listener's unsettled records, at least"
 
 	backlog.observe(runSummaryTick(store, pub, debounce, logger), logger)
 	backlog.observe(runSummaryTick(store, pub, debounce, logger), logger)
@@ -353,7 +353,8 @@ func TestTheHeldBacklogIsCountedAndLoggedOnce(t *testing.T) {
 // per-pull-request head record (it tells those apart by `kind`). Its own write of the record drops
 // the stamp, so a record it touched after a rollback reads as its own again.
 // It decodes records the current encoder writes, so an encoder change that breaks a rollback turns
-// it red.
+// it red. 9de053a2's State has no Overflowed, so a write of that listener drops the flag and the
+// record can settle again: the old listener's behaviour before this change, pinned here.
 func TestAHeadGatedListenerDecodesAStampedRecord(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -424,5 +425,31 @@ func TestAHeadGatedListenerDecodesAStampedRecord(t *testing.T) {
 	}
 	if !reread.SettledEmitted || reread.Hash() != current.Hash() {
 		t.Fatalf("the rolled-back write reads back as %+v, want the settled record", reread)
+	}
+
+	overflowed := current
+	overflowed.Overflowed = true
+	stampedOverflow, err := encodeRecord(&overflowed)
+	if err != nil {
+		t.Fatalf("encode the overflowed record: %v", err)
+	}
+	var keeps headGatedState
+	if err := json.Unmarshal(stampedOverflow, &keeps); err != nil || !keeps.Overflowed {
+		t.Fatalf("1ad2466c decodes the stamped overflowed record with Overflowed %v (%v), want true", keeps.Overflowed, err)
+	}
+	var drops liveHeadGatedState
+	if err := json.Unmarshal(stampedOverflow, &drops); err != nil {
+		t.Fatalf("9de053a2's State decodes the stamped overflowed record: %v", err)
+	}
+	liveWrite, err := json.Marshal(drops)
+	if err != nil {
+		t.Fatalf("encode through 9de053a2's State: %v", err)
+	}
+	var afterLive State
+	if err := json.Unmarshal(liveWrite, &afterLive); err != nil {
+		t.Fatalf("decode 9de053a2's write: %v", err)
+	}
+	if afterLive.Overflowed || afterLive.Schema != 0 || afterLive.Hash() != current.Hash() {
+		t.Fatalf("9de053a2's write of the overflowed record reads back as %+v, want the record without overflowed or schema", afterLive)
 	}
 }
