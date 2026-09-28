@@ -1014,7 +1014,10 @@ export function MentionComposer({
               <span className={`self-stretch font-medium ${textPrimaryOnSurface}`}>
                 {option.title}
               </span>
-              <TruncatedText className={`self-stretch text-xs ${textMutedOnSurface}`}>
+              <TruncatedText
+                className={`self-stretch text-xs ${textMutedOnSurface}`}
+                title={option.detail}
+              >
                 {option.detail}
               </TruncatedText>
             </button>

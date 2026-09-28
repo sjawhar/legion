@@ -530,7 +530,7 @@ export function ProofDocument({
             }}
             title={openDecision.question}
           >
-            <TruncatedText title={null}>{openDecision.question}</TruncatedText>
+            <TruncatedText>{openDecision.question}</TruncatedText>
           </a>
           {openBlockAsks.length > 1 ? (
             <button

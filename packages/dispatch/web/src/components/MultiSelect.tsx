@@ -264,6 +264,7 @@ export function MultiSelect({
               >
                 {visibleOptions.map((option) => {
                   const isSelected = selected.includes(option);
+                  const label = optionLabel(option);
                   return (
                     <button
                       aria-selected={isSelected}
@@ -282,8 +283,8 @@ export function MultiSelect({
                       >
                         {isSelected ? "✓" : ""}
                       </span>
-                      <TruncatedText className="min-w-0 flex-1">
-                        {optionLabel(option)}
+                      <TruncatedText className="min-w-0 flex-1" title={label}>
+                        {label}
                       </TruncatedText>
                     </button>
                   );

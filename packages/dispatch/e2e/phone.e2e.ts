@@ -438,10 +438,10 @@ async function expectEllipsis(link: Locator): Promise<void> {
         container === undefined || node.getBoundingClientRect().right > container.right + 0.5,
     };
   });
-  expect(state.overflowsContainer).toBe(false);
-  expect(state.clipperStyles.length).toBeGreaterThan(0);
+  expect.soft(state.overflowsContainer).toBe(false);
+  expect.soft(state.clipperStyles.length).toBeGreaterThan(0);
   for (const style of state.clipperStyles) {
-    expect(style).toMatch(/^(block|inline-block)\/ellipsis$/);
+    expect.soft(style).toMatch(/^(block|inline-block)\/ellipsis$/);
   }
 }
 
@@ -455,11 +455,11 @@ async function expectStacked(control: Locator): Promise<void> {
       return { bottom: box.bottom, left: box.left, top: box.top };
     })
   );
-  expect(rows.length).toBeGreaterThan(1);
+  expect.soft(rows.length).toBeGreaterThan(1);
   for (const [index, row] of rows.entries()) {
     if (index === 0) continue;
-    expect(Math.abs(row.left - rows[0].left)).toBeLessThanOrEqual(1);
-    expect(row.top).toBeGreaterThanOrEqual(rows[index - 1].bottom - 1);
+    expect.soft(Math.abs(row.left - rows[0].left)).toBeLessThanOrEqual(1);
+    expect.soft(row.top).toBeGreaterThanOrEqual(rows[index - 1].bottom - 1);
   }
 }
 
@@ -543,29 +543,29 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
       }
       return { kind: kind.getBoundingClientRect().top, time: time.getBoundingClientRect().top };
     });
-    expect(Math.abs(details.kind - details.time)).toBeLessThanOrEqual(4);
+    expect.soft(Math.abs(details.kind - details.time)).toBeLessThanOrEqual(4);
     // The cut name is still readable: the full name is the truncated text's title.
-    await expect(row.getByRole("link", { name: longName }).locator("[title]")).toHaveAttribute(
-      "title",
-      longName
-    );
+    await expect
+      .soft(row.getByRole("link", { name: longName }).locator("[title]"))
+      .toHaveAttribute("title", longName);
 
     await page.goto(`/issues/${issue.key}/artifacts`);
     const artifactLink = page.getByRole("link", { exact: true, name: longName });
     await expectEllipsis(artifactLink);
-    await expect(artifactLink.locator("[title]")).toHaveAttribute("title", longName);
+    await expect.soft(artifactLink.locator("[title]")).toHaveAttribute("title", longName);
 
     await page.goto("/?view=everyone");
     const inboxOwner = page.locator("[data-inbox-owner]", { hasText: longName });
     await expectEllipsis(inboxOwner);
-    await expect(inboxOwner.locator("[title]")).toHaveAttribute("title", `CORE · ${longName}`);
+    // The row already opens a RefPreview hover card (referenceTriggerProps); a native title
+    // would draw its own tooltip over that card, so this row carries none.
+    await expect.soft(inboxOwner.locator("[title]")).toHaveCount(0);
     // The ask's author chip is a flex button that opens the session's handles.
     const authorChip = page.getByRole("button", { exact: true, name: longTitle });
     await expectEllipsis(authorChip);
-    await expect(authorChip.getByText(longTitle, { exact: true })).toHaveAttribute(
-      "title",
-      longTitle
-    );
+    await expect
+      .soft(authorChip.getByText(longTitle, { exact: true }))
+      .toHaveAttribute("title", longTitle);
 
     await page.goto(`/issues/${issue.key}`);
     await expectEllipsis(page.getByRole("link", { name: longUrl }));
@@ -587,23 +587,22 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expectEllipsis(roleOption);
     await expectStacked(roleOption);
     const detail = roleOption.getByText(new RegExp(`^${longTitle} · /w/legion · `));
-    await expect(detail).toHaveAttribute("title", (await detail.textContent()) ?? "");
+    await expect.soft(detail).toHaveAttribute("title", (await detail.textContent()) ?? "");
 
     // A label picker row.
     await page.goto(`/issues/${labelled.key}`);
     await page.getByRole("button", { name: "Edit labels" }).click();
     const labelOption = page.getByRole("option", { exact: true, name: longLabel });
     await expectEllipsis(labelOption);
-    await expect(labelOption.getByText(longLabel, { exact: true })).toHaveAttribute(
-      "title",
-      longLabel
-    );
+    await expect
+      .soft(labelOption.getByText(longLabel, { exact: true }))
+      .toHaveAttribute("title", longLabel);
 
     // An agent row's name, which opens the row. The button carries the full name itself.
     await page.goto("/agents");
     const agentName = page.getByRole("heading", { name: longTitle }).getByRole("button");
     await expectEllipsis(agentName);
-    await expect(agentName).toHaveAttribute("title", longTitle);
+    await expect.soft(agentName).toHaveAttribute("title", longTitle);
 
     // A sent broadcast's row: the metadata line, then the message's first line under it.
     await page.goto("/agents/broadcasts");
@@ -613,10 +612,9 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
       .getByRole("link");
     await expectEllipsis(broadcastRow);
     await expectStacked(broadcastRow);
-    await expect(broadcastRow.getByText(longBroadcast, { exact: true })).toHaveAttribute(
-      "title",
-      longBroadcast
-    );
+    await expect
+      .soft(broadcastRow.getByText(longBroadcast, { exact: true }))
+      .toHaveAttribute("title", longBroadcast);
   } finally {
     await context.close();
     await setLiveSessions([]);

@@ -159,7 +159,7 @@ function ArtifactRow({
           className={`block max-w-full truncate font-medium underline ${linkText} ${linkHoverText}`}
           to={buildIssuePath({ key: issueKey, kind: "artifact", slug: artifact.slug })}
         >
-          <TruncatedText>{artifact.name}</TruncatedText>
+          <TruncatedText title={artifact.name}>{artifact.name}</TruncatedText>
         </Link>
         {/* The name truncates; its details wrap. Truncating them hid the update time on a row
             with room to spare. */}

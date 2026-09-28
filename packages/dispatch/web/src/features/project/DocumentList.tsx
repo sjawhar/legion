@@ -60,7 +60,7 @@ function DocumentRow({ document }: { document: Artifact }): ReactNode {
                 slug: document.slug,
               })}
             >
-              <TruncatedText>{document.name}</TruncatedText>
+              <TruncatedText title={document.name}>{document.name}</TruncatedText>
             </Link>
           ) : (
             <Link
@@ -71,7 +71,7 @@ function DocumentRow({ document }: { document: Artifact }): ReactNode {
                 slug: document.slug,
               })}
             >
-              <TruncatedText>{document.name}</TruncatedText>
+              <TruncatedText title={document.name}>{document.name}</TruncatedText>
             </Link>
           )}
           <CopyRefButton route={documentRoute(document)} />

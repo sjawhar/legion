@@ -650,9 +650,7 @@ function AgentRow({
               title={label}
               type="button"
             >
-              <TruncatedText className="min-w-0" title={null}>
-                {label}
-              </TruncatedText>
+              <TruncatedText className="min-w-0">{label}</TruncatedText>
               <span className={disclosureButtonText}>
                 <ChevronIcon expanded={expanded} />
               </span>

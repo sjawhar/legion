@@ -436,7 +436,9 @@ export function AskCard({
               </span>
             )}
             {handleCount === 0 ? (
-              <span className="min-w-0 truncate">{authorLabel === "" ? "asked" : authorLabel}</span>
+              <TruncatedText className="min-w-0" title={authorLabel === "" ? "asked" : authorLabel}>
+                {authorLabel === "" ? "asked" : authorLabel}
+              </TruncatedText>
             ) : (
               <button
                 aria-expanded={handlesOpen}
@@ -444,7 +446,10 @@ export function AskCard({
                 onClick={() => setHandlesOpen((open) => !open)}
                 type="button"
               >
-                <TruncatedText className="min-w-0">
+                <TruncatedText
+                  className="min-w-0"
+                  title={authorLabel === "" ? "asked" : authorLabel}
+                >
                   {authorLabel === "" ? "asked" : authorLabel}
                 </TruncatedText>
                 <ChevronIcon expanded={handlesOpen} />

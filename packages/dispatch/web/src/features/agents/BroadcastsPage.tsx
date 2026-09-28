@@ -78,7 +78,10 @@ export function BroadcastsPage(): ReactNode {
                     {sent.replies} of {sent.recipients} answered
                   </span>
                 </p>
-                <TruncatedText className={`mt-1 self-stretch text-sm ${textPrimaryOnCanvas}`}>
+                <TruncatedText
+                  className={`mt-1 self-stretch text-sm ${textPrimaryOnCanvas}`}
+                  title={firstLine(sent.body)}
+                >
                   {firstLine(sent.body)}
                 </TruncatedText>
               </Link>
