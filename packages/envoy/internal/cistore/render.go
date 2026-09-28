@@ -69,7 +69,7 @@ type Summary struct {
 	Number string `json:"number"`
 	SHA    string `json:"sha"`
 	// CheckRuns is the settlement's attempt set: the latest check-run id per
-	// check name, sorted by name. Consumers order same-head settlements by it
+	// check name, sorted by name. Consumers order settlements of one commit by it
 	// (within one record per-name ids never decrease), then by Generation at an
 	// equal set.
 	CheckRuns            []CheckRunRef  `json:"check_runs"`

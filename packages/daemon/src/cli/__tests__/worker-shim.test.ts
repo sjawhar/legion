@@ -35,11 +35,7 @@ async function socketPath(): Promise<string> {
 
 /** Waits for the shim's unix socket file to exist so the test's client does not race the listener. */
 async function waitForSocket(target: string): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (existsSync(target)) return;
-    await Bun.sleep(10);
-  }
-  throw new Error(`worker-shim socket never appeared at ${target}`);
+  await waitFor(() => existsSync(target), undefined, `the worker-shim socket at ${target}`);
 }
 
 /** The daemon side reduced to the wire contract: accepts, expects `hello` with `tok-1`, answers

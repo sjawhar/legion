@@ -1116,6 +1116,21 @@ secretsd config (the daemon resolves `provider_keys` with it), gh and jj their c
 unaffected, since the daemon moves their four XDG base directories under `<state_dir>/home`
 (LEGION-206 P1).
 
+jj reads a leading `~/` in a config value against `HOME`, which is `DIR` once the daemon runs. An
+operator's `signing.key = "~/.ssh/<key>.pub"` would then name a key inside `DIR`, where there is
+none. With `signing.behavior = "own"`, the first commit of every workspace clone the daemon makes is
+authored by the operator, so it fails to sign, and no pane ever starts: the daemon log shows each
+provision failing with `Couldn't load public key <dir>/.ssh/...`, and the run fails
+`panes-pinned-to-the-rig-before-any-agent-turn` waiting for the architect to register. So
+`make_omp_home` pins every `~/` value of the operator's jj config, in
+`DIR/.jjconfig-operator-paths.toml`, to the path it names under the operator's `HOME`. It exports
+`JJ_CONFIG` as the operator's own config files (`jj config path --user`, which names jj's default
+files when `JJ_CONFIG` is unset), with that overlay last, so the daemon's jj signs as the
+operator's does. A second call leaves its own overlay out when it reads the operator's config. A
+`~/` value it cannot pin, inside an array or a table or under a quoted key, fails the call, naming
+the key. Panes commit as their App's identity (`JJ_USER` and `JJ_EMAIL`), which `"own"` never
+signs.
+
 A proof's panes and controller therefore see none of the operator's `~/.gitconfig`, `~/.claude`,
 `~/.codex` or `~/.aws`, which is what a Sandbox pod sees. The gateway key command alone runs under
 the operator's `HOME` ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).

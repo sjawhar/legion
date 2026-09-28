@@ -21,9 +21,14 @@ type Publisher interface {
 }
 
 // StartSummaryLoop runs a reconcile ticker in a background goroutine until ctx
-// is cancelled. On each tick it emits one `pr.<n>.checks` envelope when a head
-// commit has been quiet, all recorded suites are complete, and all check runs
-// are terminal. The store's CAS makes the loop idempotent across replicas.
+// is cancelled. On each tick it emits one `pr.<n>.checks` envelope, carrying its
+// SHA, for each commit of a pull request that has been quiet, all of whose
+// recorded suites are complete and all of whose check runs are terminal - the
+// pull request's current head or not: a head whose push carried GitHub's
+// skip-checks trailer runs no CI, so the settlement that stands for it is the
+// earlier head's, which can settle after the new head arrives. Consumers decide
+// which SHA a settlement stands for. The store's CAS makes the loop idempotent
+// across replicas.
 func StartSummaryLoop(ctx context.Context, store *Store, pub Publisher, debounce, tick time.Duration, logger *logging.Logger) {
 	t := time.NewTicker(tick)
 	go func() {
@@ -47,11 +52,7 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 		if now-cached.LastEventAt < debounce.Milliseconds() {
 			continue
 		}
-		head, knownHead := store.Head(cached.Owner, cached.Repo, cached.Number)
-		if !knownHead {
-			head = cached.SHA
-		}
-		if cached.SHA != head || cached.SettledEmitted || !settlementReady(cached) {
+		if cached.SettledEmitted || !settlementReady(cached) {
 			continue
 		}
 		key := Key(cached.Owner, cached.Repo, cached.Number, cached.SHA)
@@ -96,19 +97,11 @@ func runSummaryTick(store *Store, pub Publisher, debounce time.Duration, logger 
 			continue
 		}
 		if !held {
-			headMatches, headErr := store.durableHeadMatches(state)
-			if headErr != nil {
-				logger.Warn("checks head verification failed", slog.String("error", headErr.Error()), slog.String("sha", state.SHA))
-			} else if !headMatches {
-				if _, releaseErr := store.ReleaseClaim(key, state.Generation); releaseErr != nil {
-					logger.Warn("checks release failed", slog.String("error", releaseErr.Error()), slog.String("sha", state.SHA))
-				}
-			}
 			continue
 		}
 		if err := pub.Publish(env); err != nil {
 			if errors.Is(err, bus.ErrRefused) {
-				// NATS refuses this settlement on every tick, so the head never settles from here: its
+				// NATS refuses this settlement on every tick, so the commit never settles from here: its
 				// record is marked overflowed, as one past its bounds is, and the refusal logged once.
 				logger.Error("checks settlement refused",
 					slog.String("error", err.Error()),

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
@@ -116,7 +117,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			view.PullRequest = &api.PullRequestView{
 				Number:         pr.Number,
 				Head:           pr.HeadSHA,
-				ChecksVerdict:  pr.Verdict,
+				ChecksVerdict:  classify.HeadVerdict(*pr),
 				ReviewDecision: reviewDecision,
 				FixAttempts:    pr.FixAttempts,
 			}
