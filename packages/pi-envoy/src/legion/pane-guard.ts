@@ -363,9 +363,11 @@ const FILE_COMMANDS = new Set([
 ]);
 const SIGNAL_COMMANDS = new Set(["kill", "pkill", "killall", "killall5"]);
 /** `find` predicates that take the word after them as their value, so that word is no predicate
- * of its own and `-name "$pattern"` is not a `-delete` the guard failed to read. `-fprintf` takes
- * two words and is listed as taking one: reading its second word as a possible predicate refuses
- * where it need not, which is the direction a miss here has to fall. */
+ * of its own and `-name "$pattern"` is not a `-delete` the guard failed to read. What the note
+ * above costs here: a `Record` would answer a bare `constructor` word, which would then swallow
+ * the word after it as its value and skip the refusal. `-fprintf` takes two words and is listed
+ * as taking one: reading its second word as a possible predicate refuses where it need not,
+ * which is the direction a miss here has to fall. */
 const FIND_VALUED_PREDICATES = new Set([
   "-amin",
   "-anewer",
@@ -2909,20 +2911,19 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       const extracting =
         base === "unzip" ||
         rest.some((arg, index) => {
+          // Bare mode letters, first on the line, are the one extract mode that is no option
+          // word, so a prefix of them the guard cannot read whole may still gain an `x`. Every
+          // other extract mode is an option word, and a prefix that can be none of them rules it
+          // out, so `tar cf "$archive" notes.txt` stays a create.
           const { text, whole } = readableWord(arg);
-          // A word the guard cannot read whole may still be an extract mode: an option cluster
-          // that gains an `x`, or, first on the line, bare mode letters that gain one. A prefix
-          // that can be neither rules it out, so `tar cf "$archive" notes.txt` stays a create.
-          if (!whole) {
-            return (
-              text === "" || /^-[a-zA-Z]*$/.test(text) || (index === 0 && /^[A-Za-z]*$/.test(text))
-            );
-          }
-          return (
-            text === "--extract" ||
-            text === "--get" ||
-            (text.startsWith("-") && !text.startsWith("--") && text.includes("x")) ||
-            (index === 0 && /^[A-Za-z]*x[A-Za-z]*$/.test(text))
+          if (!whole && index === 0 && /^[A-Za-z]*$/.test(text)) return true;
+          return mayBeOption(
+            arg,
+            (mode) =>
+              mode === "--extract" ||
+              mode === "--get" ||
+              (mode.startsWith("-") && !mode.startsWith("--") && mode.includes("x")) ||
+              (index === 0 && /^[A-Za-z]*x[A-Za-z]*$/.test(mode))
           );
         });
       if (!extracting) return;
