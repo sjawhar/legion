@@ -70,11 +70,12 @@ allowed row is evidence of would have.
 
 ## 2. A pattern count drops the name that looks like every other name and is not
 
-Two extraction patterns, `[A-Za-z]+` and `[A-Za-z_]+:`, counted the guard's `State` interface at
-17. One reviewer published that count; another caught its own 17 before publishing and diagnosed
-the cause. The interface declares 18: both patterns stop at the digit in `argv0` and drop it. That round was about three sites that copy a child's `State` back into the
-shell (`merge`, `runFunction`, and `runFile`'s sourced branch), each listing fields by hand, and
-those lists had also left out the five fields that say where the walk is, `argv0` among them.
+Two extraction patterns, `[A-Za-z]+` and `[A-Za-z_]+:`, counted the guard's `State` interface at 17.
+One reviewer published that count; another caught its own 17 before publishing and diagnosed the
+cause. The interface declares 18: both patterns stop at the digit in `argv0` and drop it. That round
+was about three sites that copy a child's `State` back into the shell (`merge`, `runFunction`, and
+`runFile`'s sourced branch), each listing fields by hand, and those lists had also left out the five
+fields that say where the walk is, `argv0` among them.
 
 Prediction: an enumeration by pattern drops exactly the names the pattern does not expect, and a
 list typed by hand drops the names nobody thinks of as fields. Derive the set from the declaration
