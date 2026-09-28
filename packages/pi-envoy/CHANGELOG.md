@@ -94,7 +94,10 @@
   set. A function an `if`, `case` or loop body defines is every definition a path may have left: a
   call runs each, and the command itself where a path defined none. Before, a definition inside a
   branch was dropped, so `if true; then f() { rm -rf "$HOME/y"; }; fi; f` was allowed, and one that
-  replaced an earlier definition was judged by the earlier one. A backgrounded
+  replaced an earlier definition was judged by the earlier one. The positional parameters merge as a variable
+  does: a `shift` or `set --` inside a branch makes them unknown after it, where before the guard
+  kept the arguments from before the branch, so `set -- "$LEGION_WORKSPACE/a" "$HOME/y"; if true;
+  then shift; fi; rm -rf "$1"` was allowed. A backgrounded
   command (`f &`) is walked in a subshell, so its `trap - EXIT` no longer clears the parent's
   handler, and nothing else it changes reaches the parent.
 - The guard walks up to 100,000 nodes of one command before refusing it as too large to judge,
