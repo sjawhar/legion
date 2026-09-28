@@ -49,7 +49,7 @@ const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
   "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/controller-start-tmux.sh:67",
   "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/stage2-tmux-supervision.sh:461",
   "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/stage3-4b13b-acceptance.sh:1254",
-  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/stage3-devbox-workflow.sh:1136",
+  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/stage3-devbox-workflow.sh:1160",
   "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/stage4b-sandbox-tree.sh:999",
   // A library run bare, without the arguments every caller passes: bash stops at its argument
   // check, and the guard, which walks a command whatever a test before it decides, reaches the

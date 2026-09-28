@@ -34,6 +34,19 @@
 
 ### Changed
 
+- `legion.goDaemonApiVersion` is 11. Contract 11 adds `legionAppLogins` to the Go daemon's `POST /legion/v1/gh-token` answer, each Legion role App's login keyed by its App role (`{implement, review}`), which the Go client's strict `LegionGoGitHubTokenResponse` now accepts (LEGION-208). Nothing in the extension calls `githubToken`, but the credential shapes are part of the contract.
+- `legion threads resolve` also resolves a thread a bot account opened that is none of Legion's
+  role Apps once the Legion review App's `Accepted:` is its newest submitted comment. A CI bot
+  never posts `Accepted:`, so the merger's zero-open-threads check could never pass on a
+  repository whose CI bot opens review threads; the reviewer, the independent party, now decides
+  such a finding. GitHub cannot tell a CI bot from a person whose `gh` is routed to an App, so the
+  reviewer may accept a finding such a person raised, and each `resolved <url>` line says whose
+  acceptance closed the thread. The pull request author's reply closes nothing. A Legion App's
+  thread and a person's still close only on the opener's `Accepted:`. Legion's role Apps are the
+  logins the daemon now names on `/legion/v1/gh-token`, keyed by App role (`legionAppLogins`,
+  optional, in both daemons). Without them (`--gh`, which has no grant, or a daemon that could not
+  read every App) no thread counts as a bot's, and a bot's left-open line says the session cannot
+  identify the review App. The implementer, reviewer and merger role texts say so (LEGION-208).
 - `legion.goDaemonApiVersion` is 10. Contract 9 adds the daemon's own agent-secrets machine login
   state (`agentSecretsLogin`) to `GET /legion/v1/state` (AGENTC-393). Contract 10 adds
   `POST /legion/v1/roots/close`, the Go `legion` tool's `close_root`: a tree root's own architect

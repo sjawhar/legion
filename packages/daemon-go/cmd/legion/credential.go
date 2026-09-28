@@ -22,6 +22,10 @@ type grantCredentialRequest struct {
 type githubTokenResponse struct {
 	Token    string `json:"token"`
 	AppLogin string `json:"appLogin"`
+	// LegionAppLogins is each Legion role App's login, keyed by its App role ("implement",
+	// "review"), which gh-token names beside the caller's; absent when the daemon could not read
+	// every one.
+	LegionAppLogins map[string]string `json:"legionAppLogins"`
 }
 
 // grantFromEnvironment follows the pane contract exactly: a set grant-file pointer is
