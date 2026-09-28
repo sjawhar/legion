@@ -1683,3 +1683,333 @@ describe("hub process starts", () => {
     expect(guard.argv(["bun", "run", "dev"], workspace, env)).toBeUndefined();
   });
 });
+
+/** A word the guard cannot read may be the option or subcommand that makes a command dangerous,
+ * so it is taken as one and the command's other arguments decide what that means. Each row names
+ * the site and three commands at equal standing:
+ *
+ * - `literal` is refused, and was refused before this rule: it is the control that the site's
+ *   refusal still works at all.
+ * - `unreadable` reaches the same command through one word the guard cannot read. Every row's was
+ *   ALLOWED until this rule, and each was proved live against a canary home directory: the `tar`
+ *   row overwrote the canary's files, the `fuser` row killed a process holding it open, and the
+ *   `busybox` rows deleted it.
+ * - `harmless` carries the same unreadable word with arguments no reading of it can hurt, and
+ *   must keep running. Without it the rule could pass by refusing everything.
+ *
+ * `$(cat …)` is the one indirection the bypass costs: a pane cannot be assumed not to write it. */
+const UNREADABLE_WORDS: {
+  readonly site: string;
+  readonly literal: string;
+  readonly unreadable: string;
+  readonly harmless: string;
+}[] = [
+  {
+    site: "tar extract mode",
+    literal: 'tar xf a.tar -C "$HOME"',
+    unreadable: 'm=$(cat mode); tar "$m" -C "$HOME" -f a.tar',
+    harmless: 'm=$(cat mode); tar "$m" -C "$LEGION_WORKSPACE" -f a.tar',
+  },
+  {
+    site: "tar -C option",
+    literal: 'tar xf a.tar -C "$HOME"',
+    unreadable: 'f=$(cat flag); tar xf a.tar "$f" "$HOME"',
+    harmless: 'f=$(cat flag); tar xf a.tar "$f" "$LEGION_WORKSPACE"',
+  },
+  {
+    site: "unzip -d option",
+    literal: 'unzip a.zip -d "$HOME"',
+    unreadable: 'f=$(cat flag); unzip a.zip "$f" "$HOME"',
+    harmless: 'f=$(cat flag); unzip a.zip "$f" "$LEGION_WORKSPACE"',
+  },
+  {
+    site: "fuser -k option",
+    literal: 'fuser -k "$HOME"',
+    unreadable: 'f=$(cat flag); fuser "$f" "$HOME"',
+    // `fuser -k` with no file to search kills nothing, so one word that is either the option or
+    // the file, and cannot be both, is not a kill.
+    harmless: 'f=$(cat flag); fuser "$f"',
+  },
+  {
+    site: "tmux kill subcommand",
+    literal: "tmux kill-server",
+    unreadable: 'c=$(cat command); tmux "$c"',
+    // The subcommand is read, so a later word the guard cannot read is its argument.
+    harmless: 'c=$(cat command); tmux set-option -t "$c" remain-on-exit on',
+  },
+  {
+    site: "busybox applet",
+    literal: "busybox rm -rf ~",
+    unreadable: 'a=$(cat applet); busybox "$a" -rf ~',
+    // No reading of an unreadable applet word is harmless — `halt`, `poweroff` and `reboot` need
+    // no operand — so this site's allowance comes from the readable side alone.
+    harmless: "busybox ls ~",
+  },
+  {
+    site: "toybox applet",
+    literal: "toybox rm -rf ~",
+    unreadable: 'a=$(cat applet); toybox "$a" -rf ~',
+    harmless: "toybox ls ~",
+  },
+  {
+    site: "busybox as a shell",
+    literal: 'busybox sh -c "rm -rf ~"',
+    unreadable: 'a=$(cat applet); busybox "$a" -c "rm -rf ~"',
+    harmless: 'busybox sh -c "ls ~"',
+  },
+  {
+    site: "chmod -R option",
+    literal: "chmod -R 700 ~",
+    unreadable: 'f=$(cat flag); chmod "$f" 700 ~',
+    // Read as `-R` the word is no path, and then this command has no path left to change.
+    harmless: 'f=$(cat flag); chmod +x "$f"',
+  },
+  {
+    site: "chown -R option",
+    literal: "chown -R nobody ~",
+    unreadable: 'f=$(cat flag); chown "$f" nobody ~',
+    harmless: 'f=$(cat flag); chown nobody "$f"',
+  },
+  {
+    site: "find predicate",
+    literal: "find ~ -delete",
+    unreadable: 'p=$(cat predicate); find ~ "$p"',
+    // Read as a predicate the word is no root, so this search starts from the working directory.
+    harmless: "p=$(cat predicate); find \"$p\" -type f -name '*.log'",
+  },
+  {
+    site: "find -exec program",
+    literal: "find ~ -exec rm -f {} +",
+    unreadable: 'c=$(cat command); find ~ -exec "$c" -f {} +',
+    harmless: 'c=$(cat command); find "$LEGION_WORKSPACE" -exec "$c" -f {} +',
+  },
+  {
+    site: "declare -n nameref",
+    literal: "declare -n r=v",
+    unreadable: 'f=$(cat flag); declare "$f" r=v',
+    // `r="$v"` reads as no option, however unreadable its value.
+    harmless: 'v=$(cat value); declare r="$v"',
+  },
+  {
+    site: "interpreter option",
+    literal: "python3 -c \"import os; os.remove(os.environ['HOME'] + '/.bashrc')\"",
+    unreadable:
+      "f=$(cat flag); python3 \"$f\" -c \"import os; os.remove(os.environ['HOME'] + '/.bashrc')\"",
+    harmless: 'f=$(cat flag); python3 "$f" -c "print(1)"',
+  },
+  // Every option this rule tests for has a long spelling, and reading only the short one left
+  // each long one a way through.
+  {
+    site: "tar long extract mode",
+    literal: 'tar --extract -C "$HOME" -f a.tar',
+    unreadable: 'm=$(cat mode); tar --"$m" -C "$HOME" -f a.tar',
+    harmless: 'm=$(cat mode); tar --"$m" -C "$LEGION_WORKSPACE" -f a.tar',
+  },
+  {
+    site: "chmod long recursive option",
+    literal: "chmod --recursive 777 ~",
+    unreadable: 'r=$(cat flag); chmod --"$r" 777 ~',
+    harmless: 'r=$(cat flag); chmod --"$r" 777 notes.txt',
+  },
+  {
+    site: "unzip long destination option",
+    literal: 'unzip a.zip --destination "$HOME"',
+    unreadable: 'd=$(cat flag); unzip a.zip "--$d" "$HOME"',
+    harmless: 'd=$(cat flag); unzip a.zip "--$d" "$LEGION_WORKSPACE"',
+  },
+  {
+    site: "printf option word",
+    // Missing the write leaves an approved value in the model while bash replaces it.
+    literal: 'dir="$LEGION_WORKSPACE"; printf -v dir "$HOME"; rm -rf "$dir"',
+    unreadable: 'dir="$LEGION_WORKSPACE"; f=$(cat flag); printf "$f" dir "$HOME"; rm -rf "$dir"',
+    harmless: 'dir="$LEGION_WORKSPACE"; printf "%s" x; rm -rf "$dir"',
+  },
+  {
+    site: "wrapper option word",
+    // The program the wrapper runs is written plainly; only the option before it is unreadable.
+    literal: "sudo -u nobody rm -rf ~",
+    unreadable: 'f=$(cat flag); sudo "$f" rm -rf ~',
+    harmless: 'f=$(cat flag); sudo "$f" rm -rf notes.txt',
+  },
+  {
+    site: "env option word",
+    literal: "env -i rm -rf ~",
+    unreadable: 'f=$(cat flag); env "$f" rm -rf ~',
+    harmless: 'f=$(cat flag); env "$f" rm -rf notes.txt',
+  },
+];
+
+describe("a word the guard cannot read", () => {
+  for (const { site, literal, unreadable, harmless } of UNREADABLE_WORDS) {
+    test(`${site}: refused as a literal, refused through a word the guard cannot read, and allowed when no reading of that word can hurt`, () => {
+      expect(bash(literal), literal).toBeDefined();
+      expect(bash(unreadable), unreadable).toBeDefined();
+      expect(bash(harmless), harmless).toBeUndefined();
+    });
+  }
+
+  test("reads a word's leading literal prefix, so an assignment is no option", () => {
+    // The prefix is what keeps the rule affordable: `local root="$1"` is unreadable whole and an
+    // option word never, so every script that writes one still runs.
+    expect(bash('f() { local root="$1"; rm -rf "$root"; }; f notes.txt')).toBeUndefined();
+    expect(bash('readonly dir="$(mktemp -d)"; chmod 700 "$dir"')).toBeUndefined();
+    // The value it holds is still followed.
+    expect(bash('f() { local root="$1"; rm -rf "$root"; }; f "$HOME"')).toContain(home);
+    // A word whose first character the guard cannot see may be any option at all.
+    expect(bash('f=$(cat flag); chmod "$f" 700 ~')).toContain(home);
+  });
+
+  test("scans every tmux subcommand on the line, not only the first", () => {
+    // A literal `;` argument starts another tmux command. Scanning only the first segment let
+    // everything after a `;` past the kill rule, and without `-L` it reaches the shared server.
+    for (const command of [
+      "tmux new-window \\; kill-server",
+      "tmux new-window \\; kill-session",
+      "tmux -L scratch new-window \\; kill-server",
+      "tmux list-panes \\; kill-pane",
+    ]) {
+      expect(bash(command), command).toContain("needs a socket");
+    }
+    expect(bash("tmux new-window \\; list-panes")).toBeUndefined();
+    expect(bash("tmux new-window")).toBeUndefined();
+  });
+
+  test("counts the words bash will make, not the words written", () => {
+    // An unquoted word bash may split supplies the option AND leaves the other operands
+    // standing, so it is not the lone word the harmless reading needs.
+    expect(bash("a=$(cat f); fuser $a")).toContain("fuser -k");
+    // The refusal names the word it could not resolve, which is the one that may be the option.
+    expect(bash('a=$(cat f); chmod $a "$HOME"')).toContain("recursively change the mode");
+    expect(bash("a=$(cat f); chmod $a")).toBeDefined();
+    // Quoted, the same word is one word, and the harmless reading holds.
+    expect(bash('a=$(cat f); fuser "$a"')).toBeUndefined();
+    expect(bash('a=$(cat f); chmod "$a" notes.txt')).toBeUndefined();
+  });
+
+  test("judges the directory an extract option carries inside its own word", () => {
+    // `-C"$dir"` puts the directory in the option's word, leaving the next word an operand:
+    // judging that operand instead passed the command AND reported the wrong path.
+    for (const command of [
+      'tar xf a.tar -C"$HOME" payload.txt',
+      'd=$(cat dir); tar xf a.tar -C"$d" payload.txt',
+      'unzip a.zip -d"$HOME" payload.txt',
+      'tar xf a.tar --directory="$HOME"',
+      'd=$(cat dir); tar xf a.tar --directory="$d"',
+    ]) {
+      expect(bash(command), command).toBeDefined();
+    }
+    expect(bash('tar xf a.tar -C"$HOME" payload.txt')).toContain(home);
+    expect(bash("tar xf a.tar -C. payload.txt")).toBeUndefined();
+    expect(bash('tar xf a.tar -C"$LEGION_WORKSPACE" payload.txt')).toBeUndefined();
+  });
+
+  test("promotes a readable applet word however many stand in front of the program", () => {
+    // The promotion runs the wrapper loop again, so a second applet word is promoted too. Before
+    // that it promoted at most once, which both reached the shells dispatch with an applet word
+    // still in place and refused an ordinary `busybox busybox ls`.
+    expect(bash("busybox busybox ls .")).toBeUndefined();
+    expect(bash("busybox busybox rm -rf ~")).toContain(home);
+    expect(bash("busybox busybox sh -c 'rm -rf ~'")).toContain(home);
+    // An applet word it cannot read still refuses, and says so of the word it cannot read.
+    expect(bash('a=$(cat applet); busybox "$a" -rf ~')).toContain("cannot read the applet");
+  });
+
+  test("takes a word it cannot read as possibly tmux's `;`", () => {
+    // A `;` argument separates tmux commands, and a word the guard cannot read may be one, so
+    // the kill standing after it is tested. The socket still decides: inside the pane's roots a
+    // kill is allowed, which is why this needs a socket outside them to show anything.
+    const outside = 'tmux -S "$HOME/s"';
+    expect(bash(`s=$(cat f); ${outside} list-sessions "$s" kill-server`)).toContain(
+      "needs a socket"
+    );
+    expect(bash(`s=$(cat f); ${outside} list-sessions $s kill-server`)).toContain("needs a socket");
+    expect(bash('s=$(cat f); tmux list-sessions "$s" kill-server')).toContain("needs a socket");
+    // No kill anywhere on the line, and a kill on a socket inside the roots, both still run.
+    expect(bash(`${outside} list-sessions`)).toBeUndefined();
+    expect(bash('s=$(cat f); tmux -S sock list-sessions "$s" kill-server')).toBeUndefined();
+    // Residual, recorded deliberately: a speculative segment whose subcommand is also unreadable
+    // is two unknowns deep, the shape the guard already allows for an unreadable command name.
+    expect(bash(`s=$(cat f); k=$(cat g); ${outside} list-sessions "$s" "$k"`)).toBeUndefined();
+  });
+
+  test("reads tmux's server options by prefix, so one holding a variable is no subcommand", () => {
+    // Naming a private socket as `-S"$sock"` is the ordinary way to do it. Asking `literalText`
+    // made each of these the segment's subcommand, and the kill after it was never tested.
+    for (const option of ['-L"$s"', '-S"$s"', '--socket="$s"', '-f"$s"', '-u"$s"']) {
+      const command = `s=$(cat f); tmux ${option} kill-server`;
+      expect(bash(command), command).toContain("needs a socket");
+    }
+    expect(bash('s=$(cat f); tmux -L"$s" respawn-pane -k')).toContain("needs a socket");
+    // A subcommand it cannot read at all is still a kill; a socket it can read, and that is
+    // inside the roots, is still allowed.
+    expect(bash('c=$(cat f); tmux "$c"')).toContain("needs a socket");
+    expect(bash(`tmux -S"${scratch}/mine/tmux" kill-server`)).toBeUndefined();
+  });
+
+  test("takes both readings of a word standing where timeout's duration does", () => {
+    // `timeout <options> <duration> <program>`: an unreadable word there may be an option, which
+    // puts the program after the duration, or the duration, which puts it next. Taking one
+    // reading only left the other unchecked, and the carve-out that did so is gone.
+    expect(bash('f=$(cat f); timeout "$f" 5 rm -rf "$HOME"')).toContain(home);
+    expect(bash('f=$(cat f); timeout "$f" rm -rf ~')).toContain(home);
+    expect(bash('timeout -k5 5 rm -rf "$HOME"')).toContain(home);
+    expect(bash("timeout 5 rm -rf notes.txt")).toBeUndefined();
+    expect(bash('f=$(cat f); timeout "$f" 5 rm -rf notes.txt')).toBeUndefined();
+  });
+
+  test("records printf's write only where a name could follow the option", () => {
+    // `printf -v` with no name is a usage error that assigns nothing, so forgetting every
+    // variable there refused with nothing behind it.
+    expect(bash('dir="$LEGION_WORKSPACE"; f=$(cat f); printf "$f"; rm -rf "$dir"')).toBeUndefined();
+    expect(
+      bash('dir="$LEGION_WORKSPACE"; f=$(cat f); printf "$f" dir "$HOME"; rm -rf "$dir"')
+    ).toBeDefined();
+  });
+
+  test("matches the long and clustered spellings the short patterns miss", () => {
+    // `AGENTS.md` says both spellings count; these are the ones that did not.
+    expect(bash('fuser --kill "$HOME"')).toContain("fuser -k");
+    expect(bash('tar -xC "$HOME" -f a.tar')).toContain(home);
+    expect(bash('d=$(cat f); tar -xC"$d" -f a.tar payload.txt')).toBeDefined();
+    // A cluster with no destination option in it is still just an extract.
+    expect(bash("tar -xf a.tar")).toBeUndefined();
+    expect(bash("tar -xC . -f a.tar")).toBeUndefined();
+  });
+
+  test("breaks a tmux line on a `;` at the end of a word, and keeps the word", () => {
+    // Verified against real tmux 3.7c on a private socket: `tmux -S s 'kill-server;'` leaves the
+    // server dead, so the trailing `;` separates and the rest of the word IS the subcommand;
+    // `'killserver;'` answers `unknown command: killserver` and leaves it alive, so the word
+    // must be kept stripped rather than joined across the `;`. Testing for a word that is
+    // exactly `;` made `list-sessions;` the subcommand and swallowed the kill after it — with no
+    // unreadable word anywhere on the line.
+    const outside = 'tmux -S "$HOME/s"';
+    expect(bash(`${outside} 'list-sessions;' kill-server`)).toContain("needs a socket");
+    expect(bash(`${outside} list-sessions\\; kill-server`)).toContain("needs a socket");
+    expect(bash(`${outside} 'kill-server;'`)).toContain("needs a socket");
+    // A trailing `;` the guard read is not speculative, so the segment it opens is judged even
+    // when its subcommand is the only thing in it.
+    expect(bash(`${outside} 'list-sessions;'`)).toBeUndefined();
+    expect(bash(`${outside} 'list-sessions;' list-clients`)).toBeUndefined();
+  });
+
+  test("takes one timeout reading per word standing where the duration could", () => {
+    // With two unreadable words neither the stopped scan nor the fully read one names the real
+    // program: the first takes the second word as the duration, the second walks past both.
+    expect(bash('a=$(cat f); b=$(cat g); timeout "$a" "$b" rm -rf "$HOME"')).toContain(home);
+    expect(bash('a=$(cat f); b=$(cat g); c=$(cat h); timeout "$a" "$b" "$c" rm -rf ~')).toContain(
+      home
+    );
+    expect(bash('a=$(cat f); b=$(cat g); timeout "$a" "$b" rm -rf notes.txt')).toBeUndefined();
+  });
+
+  test("reads the whole leading literal run of a word, not its first piece", () => {
+    // A quote opening inside the option text splits it into several literal pieces, and reading
+    // only the first stopped at `-` or `--dir`, hiding the option the word carries.
+    expect(bash('d=$(cat f); tar x -"C$d" -f a.tar')).toBeDefined();
+    expect(bash('d=$(cat f); tar x --dir"ectory=$d" -f a.tar')).toBeDefined();
+    expect(bash('d=$(cat f); unzip a.zip -"d$d"')).toBeDefined();
+    // The prefix still rules out what it can, so an assignment is no option however it is quoted.
+    expect(bash('f() { local roo"t=$1"; rm -rf "$root"; }; f notes.txt')).toBeUndefined();
+  });
+});

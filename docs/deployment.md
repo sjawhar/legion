@@ -58,6 +58,44 @@ a resolved path outside the pane roots. `kill` only reaches a pid that `/proc` s
 from the pane's own Oh My Pi process. Every refusal names the target, where it resolved, and the
 rule, so the agent can rewrite the command.
 
+A word the guard cannot read whole is not read as harmless. Where a word selects a dangerous
+option or subcommand — an extract mode and `-C` for `tar`, `-d` for `unzip`, `-k` for `fuser`,
+a kill subcommand for `tmux`, `-R` for `chmod` and `chown`, a `find` predicate, `-n` for
+`declare`, `-v` for `printf`, an interpreter's `-c`, a wrapper's own options (`sudo`, `env`,
+`nice`, `nohup`, …), and a `busybox` or `toybox` applet — the guard takes it as that option and
+the command's other arguments decide what that means, so `tar "$mode" -C .` runs and
+`tar "$mode" -C "$HOME"` does not. Both spellings count, since each of those options has a long
+form: `tar --"$m" -C "$HOME"` is refused as `tar -"$m" -C "$HOME"` is.
+
+Three things keep that from refusing ordinary scripts. The guard reads a word's leading literal
+prefix, so `local root="$1"` is an assignment and never an option and `--socket="$s"` is never
+`-k`. It judges the readings together rather than taking the worst of each: read as `-R` a word is
+no path, so `chmod +x "$out"` has no path left to change recursively, and read as a predicate a
+word is no search root, so `find "$dir" -type f` searches the working directory. And it counts the
+fields bash will make rather than the words written, so an unquoted word bash may split, which can
+supply the option and leave every operand standing at once, is judged where its quoted form is
+not.
+
+An option may also carry its value inside its own word, wherever the option stands (`-C"$dir"`,
+`-xC"$dir"`, `--directory="$d"`), and that carried value is the one judged. `tmux` is scanned per
+segment, a `;` starting another whether it stands as its own word or at the end of one (real tmux
+takes `'kill-server;'` as a kill), since a command after a `;` reaches the same server; a word the
+guard cannot read may itself be that `;`, and its server options are read by the prefix it can
+see, so `-S"$sock"` is an option and not the subcommand. `timeout` has one reading judged per word
+standing where its duration could, since each may be an option instead. A `busybox` or `toybox`
+applet word the guard cannot read is refused outright: no
+reading of it is harmless, because that binary carries `halt`, `poweroff` and `reboot` besides
+`rm`, `sh` and `killall`, and those need no operand.
+
+Two members of the family stay open, and both name an open set of programs the residual below
+already covers: a command whose own name the guard cannot read, and the program word of `xargs`.
+A wrapper's unreadable option word is not one of them, since the program it runs is written
+plainly after it. Two narrower residuals are known and measured: a tmux segment that exists only
+because a word may have been the `;` and whose subcommand is also unreadable, which is two
+unknowns deep and so the same shape as an unreadable command name; and, in the other direction,
+one over-refusal — an unquoted `chmod $mode <path>`, where the one word may be both the option
+and a path.
+
 The guard reads text before it runs, so it cannot see what is only decided at run time: a compiled
 program or anything a command runs without naming it on the command line (a `make` target, a test
 runner, `npm run`), a program whose name is itself a variable or a command's output
