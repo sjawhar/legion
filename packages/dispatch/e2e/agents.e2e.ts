@@ -612,15 +612,18 @@ function planners(count: number, capable: number): FakeSession[] {
 }
 
 /** Types lines into the message box until two consecutive heights agree: the composer at its
- *  tallest, the way it is while someone writes a long message. */
+ *  tallest, the way it is while someone writes a long message. A box that is not there is the
+ *  degenerate case, and it throws: defaulting its height to 0 would agree with the next 0 and
+ *  report stability, leaving every caller to measure an unfilled composer and pass. */
 async function fillUntilStable(textarea: Locator): Promise<void> {
   let previous = -1;
   // From three lines, past the two rows the empty box already holds.
   for (let lines = 3; lines <= 40; lines += 1) {
     await textarea.fill(Array.from({ length: lines }, (_, line) => `Line ${line + 1}`).join("\n"));
-    const height = (await textarea.boundingBox())?.height ?? 0;
-    if (height === previous) return;
-    previous = height;
+    const box = await textarea.boundingBox();
+    if (box === null) throw new Error("the message box is not on screen to measure");
+    if (box.height === previous) return;
+    previous = box.height;
   }
   throw new Error("the message box never stopped growing");
 }
@@ -798,8 +801,14 @@ const NOTICE_SIZES = [
 
 /**
  * At each compact size, with the message filled until it stops growing: the composer is within
- * 45% of the viewport, one notice at most renders, and the notice adds no grid row on a narrow
+ * 45% of the viewport, exactly one notice renders, and the notice adds no grid row on a narrow
  * screen (heading, chips, message, controls: four) and at most one on a short one (three).
+ *
+ * Every default here points at failure. `NOTICE` crosses into the page whole rather than as a
+ * source string, so a pattern that matches nothing cannot collapse the count to a passing 0;
+ * the count is `toBe(1)`, not a one-sided bound a 0 would satisfy; and the row budget asserts
+ * the grid it is counting, since `gridTemplateRows` reads `none` off a non-grid element and
+ * `none` splits to one passing token.
  */
 async function expectNoticeWithinBudget(
   page: Page,
@@ -816,14 +825,16 @@ async function expectNoticeWithinBudget(
       .toBeLessThanOrEqual(size.height * 0.45);
     const shape = await composer.evaluate(
       (section, notice) => ({
+        display: getComputedStyle(section).display,
         notices: [...section.querySelectorAll("p")].filter((line) =>
-          new RegExp(notice).test(line.textContent ?? "")
+          notice.test(line.textContent ?? "")
         ).length,
         rows: getComputedStyle(section).gridTemplateRows.split(" ").filter(Boolean).length,
       }),
-      NOTICE.source
+      NOTICE
     );
-    expect.soft(shape.notices, at).toBeLessThanOrEqual(1);
+    expect.soft(shape.notices, at).toBe(1);
+    expect.soft(shape.display, at).toBe("grid");
     expect.soft(shape.rows, at).toBeLessThanOrEqual(size.height <= 500 ? 3 : 4);
     await check(at);
   }
