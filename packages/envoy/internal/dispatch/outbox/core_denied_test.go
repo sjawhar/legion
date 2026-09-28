@@ -118,8 +118,9 @@ func TestRunRetriesARoleRouteNATSDenies(t *testing.T) {
 	for _, line := range strings.Split(logged.String(), "\n") {
 		if strings.Contains(line, "dispatch outbox: publish event") {
 			lines++
-			if !strings.Contains(line, roleTopic) || !strings.Contains(line, "Permissions Violation for Publish") {
-				t.Fatalf("retry line %q does not name the subject and the violation", line)
+			if !strings.Contains(line, `publish route \"role:reviewer\"`) || !strings.Contains(line, roleTopic) ||
+				!strings.Contains(line, "Permissions Violation for Publish") {
+				t.Fatalf("retry line %q does not name the route, the subject and the violation", line)
 			}
 		}
 	}

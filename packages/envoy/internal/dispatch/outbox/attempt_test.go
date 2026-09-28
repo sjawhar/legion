@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -110,19 +111,10 @@ func TestAFailedRecordWriteEndsTheAttempt(t *testing.T) {
 	}
 }
 
-// An attempt that goes on past a denial and then ends at a connection failure returns both: the
-// denial is not lost behind the error that ended the attempt.
-func TestAnAttemptEndedAfterADenialReturnsBoth(t *testing.T) {
-	database := storetest.Open(t)
-	broker := events.NewBroker()
-	event := seedThreeDestinationEvent(t, database, broker)
-	unreachable := errors.New("bus: waiting for NATS to reconnect: context deadline exceeded")
-	publisher := &countingPublisher{failTopics: map[string]error{
-		roleTopic:                    fmt.Errorf("bus: %w to %q", bus.ErrPublishDenied, roleTopic),
-		"notifications.agent.writer": unreachable,
-	}}
-	route := "role:reviewer"
-	// publish reads the payload as the scan decodes it from the row, a JSON object.
+// publishOnce runs one publish of event, routed to role:reviewer, as the scan would: with its
+// payload decoded from JSON, as the scan decodes it from the row.
+func publishOnce(t *testing.T, database *store.Store, publisher Publisher, event model.Event) error {
+	t.Helper()
 	raw, err := json.Marshal(event.Payload)
 	if err != nil {
 		t.Fatalf("encode payload: %v", err)
@@ -131,9 +123,53 @@ func TestAnAttemptEndedAfterADenialReturnsBoth(t *testing.T) {
 	if err := json.Unmarshal(raw, &event.Payload); err != nil {
 		t.Fatalf("decode payload: %v", err)
 	}
+	route := "role:reviewer"
+	return publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, "", &route, map[string]struct{}{})
+}
 
-	err = publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, "", &route, map[string]struct{}{})
+func denial(subject string) error {
+	return fmt.Errorf("bus: %w to %q", bus.ErrPublishDenied, subject)
+}
+
+// An attempt that goes on past a denial and then ends at a connection failure returns both: the
+// denial is not lost behind the error that ended the attempt.
+func TestAnAttemptEndedAfterADenialReturnsBoth(t *testing.T) {
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	event := seedThreeDestinationEvent(t, database, broker)
+	unreachable := errors.New("bus: waiting for NATS to reconnect: context deadline exceeded")
+	publisher := &countingPublisher{failTopics: map[string]error{
+		roleTopic:                    denial(roleTopic),
+		"notifications.agent.writer": unreachable,
+	}}
+
+	err := publishOnce(t, database, publisher, event)
 	if !errors.Is(err, bus.ErrPublishDenied) || !errors.Is(err, unreachable) {
 		t.Fatalf("publish returned %v, want the role route's denial and the author route's connection failure", err)
+	}
+}
+
+// Each denial names the destination it was for - the route, an author, a follower, the previous
+// claimant - since the subject alone does not say which, and it is still a bus.ErrPublishDenied.
+func TestEveryDenialNamesItsDestination(t *testing.T) {
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	event := seedThreeDestinationEvent(t, database, broker)
+	publisher := &countingPublisher{failTopics: map[string]error{
+		roleTopic:                    denial(roleTopic),
+		"notifications.agent.writer": denial("notifications.agent.writer"),
+	}}
+
+	err := publishOnce(t, database, publisher, event)
+	if !errors.Is(err, bus.ErrPublishDenied) {
+		t.Fatalf("publish returned %v, want a bus.ErrPublishDenied", err)
+	}
+	for _, want := range []string{
+		`publish route "role:reviewer": bus: NATS denied the publish`,
+		`publish author route to "writer": bus: NATS denied the publish`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("publish returned %q, which does not name the denied destination as %q", err, want)
+		}
 	}
 }
