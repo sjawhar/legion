@@ -146,18 +146,25 @@ function runCredentialedJj(
  * commands pin a closed set, not an enumerated subset:
  * - the credential: the helper answers for https://github.com alone; there is no askpass
  *   (`GIT_ASKPASS` is empty, which git reads as none, `core.askPass` and `SSH_ASKPASS` included)
- *   and no terminal prompt;
+ *   and no terminal prompt — not redundant with the `credential.interactive=false`
+ *   `provisionIssueWorkspace` persists into this same clone a few dozen lines below: that value
+ *   is tree-writable, so it protects nothing this pin does not (`workspace.test.ts`, "core.askPass
+ *   never answers the credentialed fetch's fill, and the pin is what stops it");
  * - every other source of git configuration a tree, an operator's shell, or an inherited process
  *   could reach: the global and system config files (`GIT_CONFIG_GLOBAL=/dev/null`,
  *   `GIT_CONFIG_NOSYSTEM=1`, the Go twin's `isolatedGitConfig`) and `GIT_CONFIG_PARAMETERS`, which
  *   git reads *after* the numbered `GIT_CONFIG_COUNT` pairs and so survives their reset on its own
  *   (`GIT_CONFIG_PARAMETERS: ""`, which git parses as zero pairs, whatever the ambient value was).
- *   Hiding the global and system config hides an operator's legitimate settings there too — this
- *   daemon host's `safe.directory=*` and `filter.lfs.*` registrations included — which the clone
- *   and fetch need only because nothing here needs them yet: every *uncredentialed* command still
- *   reads them, so a clone whose ownership stops matching the process uid would fail `dubious
- *   ownership` on the credentialed fetch alone, and an LFS repository would clone pointers with
- *   `filter.lfs.required` silently gone;
+ *   Hiding the global and system config hides an operator's legitimate settings there too — an
+ *   operator's `safe.directory` or `filter.lfs.*` registrations, as this host has — which the
+ *   clone and fetch can go without only because nothing here needs them yet: every
+ *   *uncredentialed* command still reads them, so a clone whose ownership stops matching the
+ *   process uid would fail `dubious ownership` on the credentialed fetch alone, and an LFS
+ *   repository would clone pointers with `filter.lfs.required` silently gone. A TLS-inspecting
+ *   proxy's CA is the harder case: `http.sslCAInfo` in global or system config is hidden the same
+ *   way, but `GIT_SSL_CAINFO` names no environment route this pin (or `PANE_ENV_ALLOW_LIST`)
+ *   carries, and the credential's own environment sets none — so, unlike the two cases above,
+ *   that host has no recoverable path short of editing this function;
  * - git's hooks: none run (`core.hooksPath=/dev/null`);
  * - git's transport: https alone (`GIT_ALLOW_PROTOCOL=https`), all https://github.com needs;
  * - jj's git: the one on PATH (`PINNED_GIT_EXECUTABLE`);
