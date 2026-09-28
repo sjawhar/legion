@@ -25,13 +25,7 @@ var errPublishUnconfirmed = errors.New("publish not known to have been accepted"
 // wrapping errPublishUnconfirmed.
 func (c *Client) publishConfirmed(conn *nats.Conn, subject, reply string, data []byte, deadline time.Time) error {
 	before := observe(conn)
-	var err error
-	if reply == "" {
-		err = conn.Publish(subject, data)
-	} else {
-		err = conn.PublishRequest(subject, reply, data)
-	}
-	if err != nil {
+	if err := conn.PublishMsg(&nats.Msg{Subject: subject, Reply: reply, Data: data}); err != nil {
 		return c.refused(err, len(data))
 	}
 	remaining := time.Until(deadline)
@@ -90,11 +84,12 @@ func observe(conn *nats.Conn) connState {
 // One change goes unseen: the last error set to a shared nats.go value (ErrSlowConsumer,
 // ErrMaxSubscriptionsExceeded), then this publish's violation, then that same value again, all
 // between the two observations. nats.go exposes no error counter to tell that from no change. Both
-// connections that publish on core subjects carry subscriptions - Dispatch's its JetStream reply
-// inboxes and the webhook sweeper's KV watch, the listener's its notification stream consumer and
-// the role-lane subscription whose handler forwards - but Envoy sets no pending limits, and at
-// nats.go's defaults (500,000 messages, 64 MiB per subscription) a subscription that falls far
-// enough behind to report a slow consumer, twice around one publish, is rare. So it is accepted.
+// connections that publish on core subjects carry subscriptions: Dispatch's carries its JetStream
+// reply inboxes and the webhook sweeper's KV watch, and the listener's carries its notification
+// stream consumer and the role-lane subscription whose handler forwards. But Envoy sets no pending
+// limits, and at nats.go's defaults (500,000 messages, 64 MiB per subscription) a subscription that
+// falls far enough behind to report a slow consumer, twice around one publish, is rare. So it is
+// accepted.
 func confirmPublished(conn *nats.Conn, subject string, before connState) error {
 	after := observe(conn)
 	if !after.connected || after.reconnects != before.reconnects {
