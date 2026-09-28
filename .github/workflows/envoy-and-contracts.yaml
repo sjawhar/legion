@@ -88,6 +88,9 @@ jobs:
               - 'skills/dispatch/**'
               - 'go.work'
               - 'go.work.sum'
+              # Its bun run gen:go step imports contracts' zod schemas.
+              - 'package.json'
+              - 'bun.lock'
             # The local acceptance run drives the Go listener and renders every frame with the
             # shared TypeScript renderer, so a change to either side, or to the contracts both
             # read, must run it.
