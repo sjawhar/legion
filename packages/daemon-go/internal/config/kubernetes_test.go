@@ -658,21 +658,40 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 	}
 }
 
+// operatorRouteAudience is the audience the tests fill into the operator route's placeholder, as an
+// operator and each live harness run fill in their gateway's.
+const operatorRouteAudience = "operator-audience"
+
 // operatorRoutePod is the operator route the Go live harnesses run on
-// (deploy/kubernetes/operator-route/pod.yml), indented to sit under `runtime.kubernetes.pod`.
-func operatorRoutePod(t *testing.T) string {
+// (deploy/kubernetes/operator-route/pod.yml), its token audience filled in with audience when that
+// is not empty, indented to sit under `runtime.kubernetes.pod`.
+func operatorRoutePod(t *testing.T, audience string) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	pod := string(raw)
+	if audience != "" {
+		pod = strings.ReplaceAll(pod, "${MODEL_TOKEN_AUDIENCE}", audience)
+	}
 	var indented strings.Builder
-	for _, line := range strings.SplitAfter(string(raw), "\n") {
+	for _, line := range strings.SplitAfter(pod, "\n") {
 		if line != "" {
 			indented.WriteString("      " + line)
 		}
 	}
 	return indented.String()
+}
+
+// The operator route copied as it stands, its audience placeholder unfilled, is refused at config
+// load: nothing expands the placeholder, and a pod carrying a token for its text would have every
+// model call refused.
+func TestLoadForValidationRefusesTheOperatorRouteWithItsAudienceUnfilled(t *testing.T) {
+	_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    pod:\n"+operatorRoutePod(t, "")), noEnv)
+	if err == nil || !strings.Contains(err.Error(), `.service_account_token.audience "${MODEL_TOKEN_AUDIENCE}" is an unfilled placeholder`) {
+		t.Fatalf("LoadForValidation = %v, want the unfilled audience placeholder refused", err)
+	}
 }
 
 // The Stage 4b proof's configuration (the LEGION-208 Stage 4b plan, decisions 1, 2, 4, 5, 6, 7),
@@ -719,7 +738,7 @@ runtime:
     kubeconfig: /home/ubuntu/.kube/legion-daemon-production
     context: legion-daemon@example
     pod:
-`+operatorRoutePod(t))
+`+operatorRoutePod(t, operatorRouteAudience))
 
 	cfg, err := LoadForValidation(path, noEnv)
 	if err != nil {

@@ -777,7 +777,8 @@ claim's pod and the image probe's.
 
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
   `volumes` are each one `secret`, `config_map`, or `projected` source; a projected
-  `service_account_token` must last at least 600 s, the least the API server issues. `volume_mounts`
+  `service_account_token` must last at least 600 s, the least the API server issues, and its
+  `audience` may not still hold a `${…}` placeholder, which nothing expands. `volume_mounts`
   are read-only unless `read_only: false`, and may use `sub_path`. `service_account` is the pods'
   ServiceAccount; unset, pods run as the namespace's `default` ServiceAccount. A name or path that
   collides with Legion's own is refused at load, naming both: a variable the runtime, the worker

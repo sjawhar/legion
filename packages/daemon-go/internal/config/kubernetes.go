@@ -481,7 +481,9 @@ const minTokenExpiry = 600
 
 // readTokenProjection is a projected ServiceAccount token: the file it is written to, and the
 // audience and lifetime it is issued for when set (the API server's own audience and default
-// lifetime when not).
+// lifetime when not). An audience still holding a ${…} placeholder is refused: nothing in Legion
+// expands one, so the pod would carry a token for the placeholder's text and every call made with
+// it would be refused.
 func readTokenProjection(value *yaml.Node, key string) (*corev1.ServiceAccountTokenProjection, error) {
 	if value.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", key)
@@ -496,6 +498,9 @@ func readTokenProjection(value *yaml.Node, key string) (*corev1.ServiceAccountTo
 	}
 	if token.Audience, err = optionalString(fields["audience"], key+".audience"); err != nil {
 		return nil, err
+	}
+	if strings.Contains(token.Audience, "${") {
+		return nil, fmt.Errorf("%s.audience %q is an unfilled placeholder: put the audience the token is for in its place", key, token.Audience)
 	}
 	expiry, err := readInt(fields["expiration_seconds"], key+".expiration_seconds")
 	switch {

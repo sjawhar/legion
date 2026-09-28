@@ -36,7 +36,7 @@ deploy/kubernetes/operator-route/apply.sh --context <kubectl context> --base-url
 `--context` is required, and the output names the cluster it wrote to. Then put `pod.yml` under
 `runtime.kubernetes.pod` in the deployment's `legion.yaml`, with the gateway's audience in place of
 `${MODEL_TOKEN_AUDIENCE}`, and run `legion start --config <file> --check-config`, which applies the
-daemon's own collision checks.
+daemon's own collision checks and refuses a token audience still holding the placeholder.
 
 `pod.yml` mounts both files by `subPath`, and the kubelet never refreshes a `subPath` mount. A
 changed ConfigMap therefore reaches only pods created after the change; a running pod keeps the

@@ -1230,7 +1230,7 @@ fqdn='[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+'
   fail "LEGION_E2E_NATS_URL is unset or not production NATS as nats://host:port with a fully-qualified host"
 nats_host=${nats_url#nats://} && nats_port=${nats_host##*:} && nats_host=${nats_host%:*}
 gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
-  fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the fixture's models.yml can name (the reason is above)"
+  fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
 [[ $dispatch_token_secret_id =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] ||
