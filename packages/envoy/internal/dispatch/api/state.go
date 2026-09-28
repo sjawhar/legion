@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -171,8 +172,9 @@ type userAgentState struct {
 // refused.
 const agentStateCutoffSkew = time.Minute
 
-// userAgentStatesQuery reads a viewer's per-session state ($1 is the login), narrowed to one
-// session when $2 is not null: every session with a Clear (user_agent_state) or a read mark
+// userAgentStatesQuery reads a viewer's per-session state ($1 is the login as the actor id spells
+// it, which keys the Clear; $3 is its canonical form, which keys the read mark and matches the
+// viewer's own direct messages), narrowed to one session when $2 is not null: every session with a Clear (user_agent_state) or a read mark
 // (user_agent_read), and every session with a reply the viewer has not read. A reply is unread
 // when a session wrote it anywhere under a direct message this viewer sent that session (an
 // issue-less message targeted at it, a broadcast's copy included) and it is newer than the
@@ -182,7 +184,7 @@ const userAgentStatesQuery = `
 		select id, substr(target, length('session:') + 1) as session_id
 		from messages
 		where issue_key is null and in_reply_to is null and target like 'session:%'
-		  and author->>'kind' = 'user' and author->>'id' = $1
+		  and author->>'kind' = 'user' and lower(author->>'id') = $3
 		  and ($2::text is null or target = 'session:' || $2::text)
 	),
 	replies as (
@@ -200,7 +202,7 @@ const userAgentStatesQuery = `
 		) cleared
 		full join (
 			select session_id, read_through from user_agent_read
-			where login = $1 and ($2::text is null or session_id = $2::text)
+			where login = $3 and ($2::text is null or session_id = $2::text)
 		) marked on marked.session_id = cleared.session_id
 	),
 	unread as (
@@ -217,9 +219,11 @@ const userAgentStatesQuery = `
 `
 
 // loadUserAgentStates runs userAgentStatesQuery for login, narrowed to sessionID when it is
-// not nil.
+// not nil. The read mark and the viewer's own direct messages are matched on the canonical
+// login, so one person is one viewer however their identity source spells them; the Clear
+// (user_agent_state, migration 0033) is still keyed on the raw actor id.
 func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionID *string) (map[string]userAgentState, error) {
-	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, login, sessionID)
+	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, login, sessionID, canonicalLogin(login))
 	if err != nil {
 		return nil, err
 	}
@@ -299,6 +303,12 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("session_id")
+	// The state is announced on an event the session owns, and only a session id a route can
+	// name can own one, so any other is refused here rather than failing the write.
+	if route, err := model.ParseRoute("session:" + sessionID); err != nil || route.Kind != "session" {
+		writeError(w, "INVALID_STATE", http.StatusBadRequest, fmt.Sprintf("session id %q is not one Dispatch can route", sessionID))
+		return
+	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -324,7 +334,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			values ($1, $2, least($3::timestamptz, now()))
 			on conflict (login, session_id) do update set
 				read_through = greatest(user_agent_read.read_through, excluded.read_through)
-		`, actor.ID, sessionID, *readThrough); err != nil {
+		`, canonicalLogin(actor.ID), sessionID, *readThrough); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

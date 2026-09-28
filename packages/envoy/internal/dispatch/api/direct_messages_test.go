@@ -16,6 +16,13 @@ import (
 // dispatch_message does, asking to follow up once it has answered.
 func directConversation(t *testing.T) (http.Handler, model.Message, func(body string) *httptest.ResponseRecorder, *[]map[string]any) {
 	t.Helper()
+	return directConversationFrom(t, "alice")
+}
+
+// directConversationFrom is directConversation with the message sent by login, spelled as the
+// identity source spells it.
+func directConversationFrom(t *testing.T, login string) (http.Handler, model.Message, func(body string) *httptest.ResponseRecorder, *[]map[string]any) {
+	t.Helper()
 	live := true
 	sent := []map[string]any{}
 	listener := sessionListener(t, &live, &sent)
@@ -23,7 +30,7 @@ func directConversation(t *testing.T) (http.Handler, model.Message, func(body st
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
 		"body": "Where is the dashboard?", "delivery": "aside",
-	}, "alice")
+	}, login)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("direct message: status=%d body=%s", created.Code, created.Body.String())
 	}
@@ -130,6 +137,27 @@ func TestAnsweredDeliveryPostsAFollowUpOnlyWhenAskedAndSaysWhenItPostedNothing(t
 	conversation := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
 	if replies := conversation[0].Replies; len(replies) != 2 || replies[0].ID != first.ID || replies[1].ID != followUp.ID {
 		t.Fatalf("replies = %#v, want only the first answer and the one follow-up", replies)
+	}
+}
+
+// follow_up is true, false or absent. Anything else is refused rather than read as a retry, so a
+// caller's typo is not answered as "already answered" with nothing posted.
+func TestReplyFollowUpIsTrueFalseOrAbsent(t *testing.T) {
+	handler, root, reply, _ := directConversation(t)
+	first := decodeBody[replyResponse](t, reply("On it."))
+	answer := func(query string) *httptest.ResponseRecorder {
+		return bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply"+query, map[string]any{
+			"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "More to say.",
+		})
+	}
+	for _, value := range []string{"1", "TRUE", "yes", ""} {
+		if got := answer("?follow_up=" + value); got.Code != http.StatusBadRequest || !strings.Contains(got.Body.String(), "follow_up") {
+			t.Fatalf("follow_up=%q: status=%d body=%s, want 400 naming follow_up", value, got.Code, got.Body.String())
+		}
+	}
+	retried := answer("?follow_up=false")
+	if got := decodeBody[replyResponse](t, retried); retried.Code != http.StatusOK || got.ID != first.ID || !got.Duplicate {
+		t.Fatalf("follow_up=false: status=%d %#v, want the stored answer marked duplicate", retried.Code, got)
 	}
 }
 
@@ -300,6 +328,43 @@ func TestAgentRepliesToADirectMessageAreUnreadForItsSenderUntilRead(t *testing.T
 		!parseTimestamp(t, *got.ClearedBefore).Equal(third.CreatedAt) || got.ReadThrough == nil ||
 		!parseTimestamp(t, *got.ReadThrough).Equal(second.CreatedAt) {
 		t.Fatalf("after a Clear: %#v, want nothing unread, cleared before %s, still read through %s", got, third.CreatedAt, second.CreatedAt)
+	}
+}
+
+// A viewer is one person however their identity source spells their login: the replies to the
+// direct messages they sent count unread under any casing of it, and a read mark written under
+// one casing clears them under another.
+func TestAViewersRepliesCountAndClearWhateverTheCasingOfTheirLogin(t *testing.T) {
+	handler, _, reply, _ := directConversationFrom(t, "Alice")
+	first := decodeBody[model.Message](t, reply("On it."))
+	for _, login := range []string{"Alice", "alice", "ALICE"} {
+		if got := unreadReplies(t, handler, login, "s1"); got.UnreadReplies != 1 {
+			t.Fatalf("%s reads %#v, want the reply to Alice's message unread", login, got)
+		}
+	}
+	marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"read_through": first.CreatedAt,
+	}, "aLiCe")
+	if marked.Code != http.StatusOK {
+		t.Fatalf("mark read: status=%d body=%s", marked.Code, marked.Body.String())
+	}
+	for _, login := range []string{"Alice", "alice"} {
+		if got := unreadReplies(t, handler, login, "s1"); got.UnreadReplies != 0 || got.ReadThrough == nil {
+			t.Fatalf("%s after aLiCe read it: %#v, want nothing unread and the read mark", login, got)
+		}
+	}
+}
+
+// A session id no route can name is refused as input, never answered 500 after the write.
+func TestAgentStateRefusesASessionIDNoRouteNames(t *testing.T) {
+	handler := newTestHandler(t)
+	for _, field := range []string{"read_through", "cleared_before"} {
+		put := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/odd.session/state", map[string]any{
+			field: time.Now().UTC().Format(time.RFC3339Nano),
+		}, "alice")
+		if put.Code != http.StatusBadRequest || !strings.Contains(put.Body.String(), "odd.session") {
+			t.Fatalf("%s for odd.session: status=%d body=%s, want 400 naming the session", field, put.Code, put.Body.String())
+		}
 	}
 }
 
