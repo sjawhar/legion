@@ -165,14 +165,12 @@ func encodeRecord(st *State) ([]byte, error) {
 	return json.Marshal(st)
 }
 
-// handoverGrace is how long past its debounce a record without a schema can still settle. It is
-// meant for a head whose debounce ran out while no listener was ticking: an on-prem
-// stop-then-start deploy takes at least about 260 s from the old listener's SIGTERM to the new
-// one's first tick. Any width also admits the non-head records the head-gated listener left in its
-// last debounce+handoverGrace, which this listener settles as it settles every commit; the width
-// bounds how late such a settlement can arrive, not whether one does. The derivation, its
-// constants and the dated measurements behind five minutes are in
-// docs/solutions/architecture-patterns/envoy-ci-summary.md.
+// handoverGrace is how long past its debounce a record without a schema can still settle, so every
+// such record admitted is at most debounce+handoverGrace old. Five minutes is the smallest round
+// figure above the ~260 s floor of an on-prem stop-then-start deploy, from the old listener's
+// SIGTERM to the new one's first tick, so a head that finished during a degraded handover still
+// settles; a wider grace would only make admitted settlements later. The derivation, its constants
+// and the dated measurements are in docs/solutions/architecture-patterns/envoy-ci-summary.md.
 const handoverGrace = 5 * time.Minute
 
 // legacyBacklog reports whether st is a head-gated listener's leftover: it has no schema and its

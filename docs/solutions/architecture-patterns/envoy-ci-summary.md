@@ -66,15 +66,29 @@ dial up to ten times (about 59 s); `cistore.Open`, `store.Open`'s two buckets an
 100 s), which is slow exactly when the backoff runs. Production's ECS rollouts take 0.6 to 20.5 s
 from SIGTERM to ready, once 58.9 s (2026-09-28).
 
-Any width admits something, because the head-gated listener keeps leaving non-head records until
-its SIGTERM: the band admits the ones it left in its last debounce plus grace, and a listener with
-#1526 settles those commits anyway. The width bounds how late such a settlement can arrive, at most
-debounce plus grace after the commit's last event, not whether one arrives; it is not bounded by
-the backlog's age, which was one snapshot. Measured on production NATS on 2026-09-28: at 07:17Z the
+Every admitted record is at most debounce plus grace old, by construction. The head-gated listener
+keeps leaving non-head records until its SIGTERM, so any width admits the ones it left in its last
+debounce plus grace, and a listener with #1526 settles those commits anyway: the width bounds how
+late such a settlement can arrive, not whether one arrives. The aged backlog is held back by its
+age at any width shorter than its records' ages, and widening only slides that age cutoff. There is
+no threshold anywhere: at 1,442 records over the 7-day TTL (0.143 arrivals a minute), the aged
+backlog is admitted in proportion to the width, 0.29 records per cutover at 2 minutes, 0.72 at 5,
+0.86 at 6, 8.6 at an hour, and all 1,442 only at a grace equal to the TTL. What prevents a burst is
+5 minutes against 7 days, about 1 in 2,000. Measured on production NATS on 2026-09-28: at 07:17Z the
 band `[5 s, 305 s)` held no record; over the past week a 305 s band held 0.73 records on average and
 14 at worst, and was empty 54% of the time (a 65 s band: 0.16 and 9); such records replenish at
-about 8.6 an hour. Five minutes covers the 260 s floor with 40 s for container start and image
-pull, at the cost of settlements up to 5 min 5 s late and those few admitted records per cutover.
+about 8.6 an hour.
+
+Five is the smallest round figure above the 260 s floor, leaving 40 s for container start and image
+pull. The residual risk at five minutes is under-admission, not over: a handover slower than the
+grace leaves its head's record held back, silently, until a new check event on that commit stamps
+it, while each extra minute of grace costs only 0.14 of a settlement, and that one correct and
+recent.
+
+Three limits on the bound. It is on `now - last_event_at`, where `last_event_at` was stamped by the
+writing listener's clock, not on the commit's true age. It governs only unstamped records: a stamped
+record is never held back. And `now` is computed once per summary pass, so at publish the bound is
+debounce plus grace plus that pass's duration.
 
 ### What an operator sees
 
