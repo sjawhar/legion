@@ -34,6 +34,19 @@
 
 ### Changed
 
+- `legion.goDaemonApiVersion` is 10. Contract 9 adds the daemon's own agent-secrets machine login
+  state (`agentSecretsLogin`) to `GET /legion/v1/state` (AGENTC-393). Contract 10 adds
+  `POST /legion/v1/roots/close`, the Go `legion` tool's `close_root`: a tree root's own architect
+  ends its admitted tree before any phase has started, and the daemon posts the architect's reason
+  on the issue before it writes `done` (LEGION-208).
+- The worker skill gives a reviewer round that writes a handoff one order: write, commit and push
+  the handoff, submit the review of that head by its SHA, then complete. An approval waits for the
+  CI verdict to settle green at that head first, and a red that settles there makes the round a
+  request for changes naming the failing checks; a request for changes does not wait. A review of a
+  head the handoff push then replaces named a head the pull request no longer had (LEGION-208).
+- The worker skill says which GitHub App each role pushes as, and it, the retro skill and the
+  implementer and reviewer role texts each say once that every path they cite is in sjawhar/legion
+  (LEGION-208).
 - `legion.goDaemonApiVersion` is 8. Contract 8 adds `NATS_NKEY_SEED_FILE` to the Go daemon's pane environment when the daemon has the `legion-pane` NATS nkey seed (LEGION-279): a 0600 file of the pane's own under tmux, the providers Secret's `NATS_NKEY_SEED` file on a Sandbox pod, and the operator file's `nats_nkey_seed_file` under `legion controller start`. The extension's Envoy connections authenticate with it. A Go daemon at 8 refuses to boot beside a plugin at 7.
 - Under the Go daemon, a claim no longer subscribes to an issue's notice topic (`notifications.legion.<project>.<issue>`): the architect's tree root and each phase worker's issue used to be subscribed. The Go daemon now sends every notice to the owning architect's role topic, which the architect already claims as its Envoy role, and a phase worker receives none. A plugin from this release beside a Go daemon that still publishes notices on issue topics hears none of them.
 - `legion.goDaemonApiVersion` is 7. Contract 7 adds `holdReason` to an issue on `/legion/v1/state` (`escalated` while an escalated issue stays held in a tree that runs; absent while its tree lingers or is closed), which the controller skill reads at every start. A plugin at 6 refuses a state response carrying it, and a Go daemon at 7 refuses to boot beside a plugin at 6.
@@ -62,6 +75,22 @@
   filename, on an issue or a project, naming both ids, where they took the slug's document; on a
   project an id also outranks another document's slug. A `dispatch://` document reference, or a
   dashboard document URL, still resolves by its slug.
+- A phase worker's or root architect's pane, and any `task` subagent it spawns, no longer runs a
+  command that would delete, move, truncate, overwrite an existing file, or recursively `chmod`
+  or `chown` a path outside its issue workspace or a permitted directory below `/tmp`. `/tmp`
+  itself, a glob over it, and its tmux and ssh socket directories remain out of bounds; the guard
+  cannot identify which other `/tmp` directory belongs to the pane. It also refuses a signal to a
+  process the pane did not start (LEGION-121). On 2026-09-13 a worker pane's probe script ended in
+  `rm -rf "$work" "$HOME"` and deleted the operator's SSH and commit-signing keys, stopping every
+  agent on the machine; the same day a subagent's `pkill -x sleep` killed other agents' processes.
+  The `tool_call` hook parses each `bash` command, `eval` code, and `hub` process start
+  (`src/legion/pane-guard.ts`, with the bundled `unbash` parser), resolves every target through
+  `$HOME`, `~`, earlier variables, `cd`, and the scripts the command runs (`bash <file>`, `sh -c`,
+  `source`, heredocs, python/node/bun scripts), refuses a target it cannot resolve and a command
+  it cannot parse, refuses `pkill`, `killall`, and `fuser -k`, resolves `tmux kill-*` to its actual
+  socket path and requires that path to stay inside the pane roots, and lets `kill` reach only
+  descendants of the pane's Oh My Pi process. Each refusal names the target, where it resolved,
+  and the rule.
 - A `task` subagent's `envoy_whoami`, `/whoami`, `envoy_send`, and `envoy_publish` now name the session that spawned it as the reply address, instead of reporting an empty id and sending an empty `source_session` the listener erased — which reached the recipient as `from: agent` with no reply address, and a reply attempt as `no live session`. A subagent still registers nothing (no listener registration, no agent-subject subscription, no heartbeat); every top-level instance publishes its own session on a process-wide record keyed by its transcript path (`src/envoy-session.ts`), dropping its previous key whenever its id or transcript changes, and a subagent resolves its own by walking OMP's transcript layout up, a nested subagent included. An ACP host running several top-level sessions in one process therefore answers each subagent with the session that actually spawned it. A session is recorded from its `session_start` even before the host mints its id, and dropped at `session_shutdown`, so a subagent never names a session that has no id yet or has already deregistered. `envoy_whoami` reports that address as `session_id` and the subagent's own host session id under `subagent`. Where the walk matches nothing and more than one top-level session is recorded, there is no reply address: `session_id` is empty, the `subagent` note says why, and `@legion/envoy-client`'s transport now omits `source_session` rather than sending an empty one. The `envoy_publish` result also names the delivery a subagent cannot get: the listener drops a message whose source session is its recipient, so a publish to a role the parent holds reaches nobody, and hub is that hop.
 - The TypeScript daemon keeps a reviewer's `changes_requested` decision across the reviewer's own handoff-only push (`.legion/review.json`), so its completion returns the issue to `in_progress` rather than `retro`, and the corrective implementer's completion writes `testing` (LEGION-285). A new head that changes anything outside `.legion/`, or whose push cannot be classified, still ends the round unless the review App pushed it (none of its commits answers a request made of the implementer; resync keeps a range whose every commit GitHub attributes to the review App), and a head whose push webhook never arrives, or that resync's read finds first, is settled by the reviewer's next review of that head or by resync from GitHub's compare of the round's head against it (a compare it cannot read drops the decision); an approval is still dropped on every new head. The reviewer's clean COMMENT round at a later head ends its own request, and a late changes-requested review of an earlier commit is settled from that commit. A push by the review App, a tester's red tests included, is never a fix attempt, and neither is the implementer's fix after the red those red tests earned, so tester rounds consume no `max_fix_attempts`; after the tester's handoff-only push onto the implementer's red, the implementer's next push still counts. The Go daemon counts the same way (it reads the pusher and stores `planned_red`), and both daemons refuse to boot when one GitHub App is configured for both roles. Daemon state is v34 (`PrState.reviewDecisionUnsettledFrom`, `changesRequest`, `plannedRed`, `pendingPush.before` and `byReviewApp`); a v33 file migrates on load and is kept as `<state>.v33.bak`.
 - The refusal on a pane without `LEGION_GRANT_FILE` now names its remedy: relaunch the pane from a daemon on the matching release, since a daemon restart keeps a live pane as it was launched.

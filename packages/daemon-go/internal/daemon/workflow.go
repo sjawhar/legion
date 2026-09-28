@@ -295,11 +295,15 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read Dispatch consumer position: %w", err)
 	}
-	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		return w.admission.Reconcile(ctx, tx, issues, target, position)
+	// The reconcile is its own transaction, so it owns the commit hooks its admission and workflow
+	// changes register (intake.OnCommit), as ApplyFact does for a fact.
+	scoped, committed := intake.WithCommitHooks(ctx)
+	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		return w.admission.Reconcile(scoped, tx, issues, target, position)
 	}); err != nil {
 		return fmt.Errorf("reconcile admission: %w", err)
 	}
+	committed()
 	return nil
 }
 
@@ -474,7 +478,7 @@ func (w *workflowRuntime) pollHoldReleaseWith(ctx context.Context, reader positi
 			haveLast, heldSince, warnedAt = false, time.Time{}, time.Time{}
 			if wasHeld {
 				// The hold just cleared: a record a held key's own recording put down between an
-				// earlier release's commit and its AfterCommit (which cleared pending) may still be
+				// earlier release's commit and its commit hook (which cleared pending) may still be
 				// sitting in the waiting line, held back by that same release's own promote, which
 				// ran before pending was actually cleared. One more pass, now that pending is
 				// provably empty, promotes it without waiting on an unrelated fact to notice. A

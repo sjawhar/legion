@@ -46,7 +46,8 @@ prune provably runs while generation 2's pane launch is in flight with no locato
 Timing never enters; only the gates do.
 
 **Wait for the observable precondition — then assert it, separately from the outcome.**
-`flushEventLoopUntil(cond)` returns silently after its tick budget. The C2 test waited for
+A bounded wait can end without its condition: `flushEventLoopUntil(cond)` returned silently after
+its tick budget, and its replacement, `waitFor(cond)`, throws at its clock deadline. The C2 test waited for
 `secrets/<architect>` to read `boot-gen-2` and then checked the outcome; had the poll exhausted,
 generation 1 would have settled first and the *pre-fix* code passes the same outcome assertions
 (round-2 R2). The fix is one line right after the wait:

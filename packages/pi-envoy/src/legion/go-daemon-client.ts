@@ -18,6 +18,7 @@ import {
   LegionGoPhaseRetryRequest,
   LegionGoRegisterResponse,
   type LegionGoRegistration,
+  LegionGoRootCloseRequest,
   LegionGoSignOffRequest,
   type LegionGoState,
   LegionGoStateResponse,
@@ -104,6 +105,9 @@ export interface LegionGoDaemonClient {
   ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
   readonly signOff: (
     input: z.input<typeof LegionGoSignOffRequest>
+  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+  readonly rootClose: (
+    input: z.input<typeof LegionGoRootCloseRequest>
   ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
   readonly childPark: (
     input: z.input<typeof LegionGoChildRequest>
@@ -318,6 +322,8 @@ export function createLegionGoDaemonClient(
       ),
     signOff: (input) =>
       post("/legion/v1/signoff", LegionGoSignOffRequest, LegionGoEmptyResponse, input),
+    rootClose: (input) =>
+      post("/legion/v1/roots/close", LegionGoRootCloseRequest, LegionGoEmptyResponse, input),
     childPark: (input) =>
       post("/legion/v1/children/park", LegionGoChildRequest, LegionGoEmptyResponse, input),
     childRerun: (input) =>

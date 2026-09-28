@@ -22,4 +22,6 @@ package api
 //
 // 9: AGENTC-393 Plan C -- the daemon's own agent-secrets machine login state
 // (agentSecretsLogin) on GET /legion/v1/state.
-const GoDaemonAPIVersion = 9
+//
+// 10: LEGION-208 -- POST /legion/v1/roots/close, the Go legion tool's close_root.
+const GoDaemonAPIVersion = 10

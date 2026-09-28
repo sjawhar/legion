@@ -129,8 +129,8 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 			// consumer catches up. A newer event, past the sequence the summary was taken at, is
 			// not a stale replay: it is recorded normally below, even while the key is still
 			// technically held — a release that has already committed but not yet run its
-			// AfterCommit (which clears pending) still shows this key as held, and dropping this
-			// event here would lose it once that AfterCommit clears pending out from under it, the
+			// commit hook (which clears pending) still shows this key as held, and dropping this
+			// event here would lose it once that hook clears pending out from under it, the
 			// event already acknowledged as processed. promote's own pending membership check —
 			// not this one — is what still holds the freshly recorded candidate back from a slot
 			// until pending is actually clear; a later pass once the hold clears promotes it.
@@ -429,10 +429,23 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 }
 
 func (a *Admission) releaseDoneSlots(ctx context.Context, tx pgx.Tx) error {
+	return a.releaseSlots(ctx, tx, "completed", func(issue record.Issue) bool { return issue.Phase == phase.Done })
+}
+
+func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
+	return a.releaseSlots(ctx, tx, "inactive", func(issue record.Issue) bool {
+		return issue.Phase == phase.Done || record.OutOfWorkflow(issue.Status)
+	})
+}
+
+// releaseSlots releases the slot of every issue of this project that release says is done with
+// it; which describes such an issue in an error. Each release is logged once the fact commits.
+func (a *Admission) releaseSlots(ctx context.Context, tx pgx.Tx, which string, release func(record.Issue) bool) error {
 	slots, err := a.store.Slots(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("list admission slots: %w", err)
 	}
+	own := []record.Issue{}
 	for _, slot := range slots {
 		issue, err := a.store.Issue(ctx, tx, slot.Issue)
 		if err != nil {
@@ -441,41 +454,28 @@ func (a *Admission) releaseDoneSlots(ctx context.Context, tx pgx.Tx) error {
 		if issue == nil {
 			return fmt.Errorf("slotted issue %s has no record", slot.Issue)
 		}
-		if issue.Project != a.project {
+		if issue.Project == a.project {
+			own = append(own, *issue)
+		}
+	}
+	inUse := len(own)
+	for _, issue := range own {
+		if !release(issue) {
 			continue
 		}
-		if issue.Phase == phase.Done {
-			if err := a.store.ReleaseSlot(ctx, tx, issue.Key); err != nil {
-				return fmt.Errorf("release completed issue %s: %w", issue.Key, err)
-			}
+		if err := a.store.ReleaseSlot(ctx, tx, issue.Key); err != nil {
+			return fmt.Errorf("release %s issue %s: %w", which, issue.Key, err)
 		}
+		inUse--
+		a.logSlot(ctx, "released", issue.Key, inUse)
 	}
 	return nil
 }
 
-func (a *Admission) releaseInactiveSlots(ctx context.Context, tx pgx.Tx) error {
-	slots, err := a.store.Slots(ctx, tx)
-	if err != nil {
-		return fmt.Errorf("list admission slots: %w", err)
-	}
-	for _, slot := range slots {
-		issue, err := a.store.Issue(ctx, tx, slot.Issue)
-		if err != nil {
-			return fmt.Errorf("read slotted issue %s: %w", slot.Issue, err)
-		}
-		if issue == nil {
-			return fmt.Errorf("slotted issue %s has no record", slot.Issue)
-		}
-		if issue.Project != a.project {
-			continue
-		}
-		if issue.Phase == phase.Done || record.OutOfWorkflow(issue.Status) {
-			if err := a.store.ReleaseSlot(ctx, tx, issue.Key); err != nil {
-				return fmt.Errorf("release inactive issue %s: %w", issue.Key, err)
-			}
-		}
-	}
-	return nil
+// logSlot logs a slot released or taken once the fact commits: the issue, the slots the project
+// holds after the change, and the cap.
+func (a *Admission) logSlot(ctx context.Context, change, issue string, inUse int) {
+	intake.OnCommit(ctx, func() { a.log.Info("admission: slot "+change, "issue", issue, "slots", inUse, "cap", a.cap) })
 }
 
 // promote assigns slots to waiting roots and orphans in rank order until the cap is reached or the
@@ -543,6 +543,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		}
 		slots, own = append(slots, slot), append(own, slot)
 		admitted++
+		a.logSlot(ctx, "taken", candidate.Key, len(own))
 	}
 	return admitted, nil
 }
@@ -593,7 +594,7 @@ func (a *Admission) refreshHeldSummary(observation intake.DispatchIssue) {
 // case the stream never delivers the event that would otherwise have caught it up — before
 // promote decides anything, so a held key is never admitted, or left admitted, on stale
 // information. The in-memory pending set only clears once this call's own transaction has
-// actually committed (intake.Result.AfterCommit): clearing it any earlier would say a hold is
+// actually committed (intake.OnCommit): clearing it any earlier would say a hold is
 // resolved while a failed commit leaves nothing of this release durable, so the next
 // promote-triggering call would trust an unreleased hold's authority.
 func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.DispatchConsumerPosition) (intake.Result, error) {
@@ -632,13 +633,14 @@ func (a *Admission) release(ctx context.Context, tx pgx.Tx, position intake.Disp
 	}
 	a.log.Info("admission: the Dispatch consumer has caught up; releasing held roots",
 		"count", len(releasing), "ack_floor", position.AckFloorStream, "idle", position.Idle, "admitted", admitted)
-	return intake.Result{AfterCommit: []func(){func() {
+	intake.OnCommit(ctx, func() {
 		a.mu.Lock()
 		for key := range releasing {
 			delete(a.pending, key)
 		}
 		a.mu.Unlock()
-	}}}, nil
+	})
+	return intake.Result{}, nil
 }
 
 // ownSlots is the slots of issues, this project's. The slots table is shared by every project's

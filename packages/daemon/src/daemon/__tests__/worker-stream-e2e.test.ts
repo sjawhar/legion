@@ -2,7 +2,7 @@
 // (through the real CLI entrypoint) dials a real WorkerStreamListener wired to a real LegionApi's
 // boot-token lookup, with a token that API minted. The listener is killed and restarted under
 // the shim mid-stream. No tmux: the shim is a plain child process here.
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +23,12 @@ const FAKE_OMP = path.join(
   "fake-omp-rpc.ts"
 );
 const root = "E2E-1" as IssueKey;
+
+/** Each test spawns real `bun` CLI children and waits on them for up to 10 s (a registration, a
+ * negative control's second dial), so bun's 5 s default would end a test mid-wait on a loaded
+ * host, and the listener's cleanup would then reject the abandoned wait as an unhandled
+ * "worker stream listener closed". */
+setDefaultTimeout(30_000);
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {

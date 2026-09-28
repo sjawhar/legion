@@ -255,12 +255,18 @@ func (h *harness) operator(method, target string, body any) *httptest.ResponseRe
 // the boot token its launch minted.
 func (h *harness) launch(issue string, role claim.Role) (claim.Token, string) {
 	h.t.Helper()
+	return h.launchIn(issue, issue, role)
+}
+
+// launchIn is launch for an issue of tree: a sub-architect or a worker on a child.
+func (h *harness) launchIn(tree, issue string, role claim.Role) (claim.Token, string) {
+	h.t.Helper()
 	token, err := claim.NewToken(testProject, issue, role)
 	if err != nil {
 		h.t.Fatalf("token: %v", err)
 	}
 	m, _, err := h.supervisor.Create(h.ctx, supervise.Claim{
-		Token: token, Project: testProject, Tree: issue, Issue: issue, Role: role, State: supervise.StateQueued,
+		Token: token, Project: testProject, Tree: tree, Issue: issue, Role: role, State: supervise.StateQueued,
 	}, "role prompt")
 	if err != nil {
 		h.t.Fatalf("create %s: %v", token, err)
