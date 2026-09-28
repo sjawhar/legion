@@ -2,7 +2,7 @@ package store
 
 import (
 	"context"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 )
@@ -51,7 +51,7 @@ func TestUserAgentReadBackfillMarksEveryExistingDirectConversationRead(t *testin
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"alice/s1", "alice/s4", "bob/s2"}; strings.Join(got, " ") != strings.Join(want, " ") {
+	if want := []string{"alice/s1", "alice/s4", "bob/s2"}; !slices.Equal(got, want) {
 		t.Fatalf("read marks = %v, want %v: one per human, by canonical login, and session they sent a direct message to, and nothing for an agent's message or a role", got, want)
 	}
 }

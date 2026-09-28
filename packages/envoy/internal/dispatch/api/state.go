@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -174,8 +173,9 @@ const agentStateCutoffSkew = time.Minute
 
 // userAgentStatesQuery reads a viewer's per-session state ($1 is the login as the actor id spells
 // it, which keys the Clear; $3 is its canonical form, which keys the read mark and matches the
-// viewer's own direct messages), narrowed to one session when $2 is not null: every session with a Clear (user_agent_state) or a read mark
-// (user_agent_read), and every session with a reply the viewer has not read. A reply is unread
+// viewer's own direct messages), narrowed to one session when $2 is not null: every session with
+// a Clear (user_agent_state) or a read mark (user_agent_read), and every session with a reply the
+// viewer has not read. A reply is unread
 // when a session wrote it anywhere under a direct message this viewer sent that session (an
 // issue-less message targeted at it, a broadcast's copy included) and it is newer than the
 // viewer's read mark and Clear, whichever is later.
@@ -221,7 +221,7 @@ const userAgentStatesQuery = `
 // loadUserAgentStates runs userAgentStatesQuery for login, narrowed to sessionID when it is
 // not nil. The read mark and the viewer's own direct messages are matched on the canonical
 // login, so one person is one viewer however their identity source spells them; the Clear
-// (user_agent_state, migration 0033) is still keyed on the raw actor id.
+// (user_agent_state, migration 0033) is keyed on the raw actor id.
 func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionID *string) (map[string]userAgentState, error) {
 	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, login, sessionID, canonicalLogin(login))
 	if err != nil {
@@ -305,8 +305,9 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("session_id")
 	// The state is announced on an event the session owns, and only a session id a route can
 	// name can own one, so any other is refused here rather than failing the write.
-	if route, err := model.ParseRoute("session:" + sessionID); err != nil || route.Kind != "session" {
-		writeError(w, "INVALID_STATE", http.StatusBadRequest, fmt.Sprintf("session id %q is not one Dispatch can route", sessionID))
+	if _, err := model.ParseRoute("session:" + sessionID); err != nil {
+		s.writeHandlerError(w, errorf(http.StatusBadRequest, "INVALID_STATE",
+			"session id %q is not one Dispatch can route", sessionID))
 		return
 	}
 	tx, err := s.begin(r.Context())

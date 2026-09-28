@@ -6,7 +6,7 @@ import {
 import { type ReactNode, useMemo } from "react";
 
 import type { MessageRead } from "../../api/types";
-import { actorName } from "../refs/actor";
+import { actorName, isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
 import { type AgentConversation, isRunning, toThreadMessages } from "./conversation";
 import { dispatchMetadata } from "./dispatch-marks";
@@ -57,17 +57,12 @@ export function AgentRuntimeThread({
             content,
             createdAt,
             id,
-            // AgentThread renders a message carrying this marker as Dispatch's, not the stream's.
             metadata: dispatchMetadata({ dispatch: true }),
             role: "assistant" as const,
             status: { reason: "stop", type: "complete" } as const,
           };
         }
-        const own =
-          message.author.kind === "user" &&
-          viewer !== undefined &&
-          message.author.id.toLowerCase() === viewer.toLowerCase();
-        const author = own
+        const author = isViewer(message.author, viewer)
           ? undefined
           : [actorName(message.author), message.issue_key].filter(Boolean).join(" · ");
         return {

@@ -500,7 +500,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	// commit, publish and write.
 	var response any
 	status := http.StatusOK
-	var event *model.Event
+	var events []model.Event
 	switch {
 	case attempt.ReplyID != nil:
 		answer, err := s.loadMessage(r.Context(), tx, messageIssueKey(message), *attempt.ReplyID)
@@ -513,8 +513,9 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		response, event = read, posted
+		response = read
 		if posted != nil {
+			events = append(events, *posted)
 			status = http.StatusCreated
 		}
 	case input.Error != nil && attempt.State == "failed":
@@ -534,7 +535,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		response, event = updated, &receipt
+		response, events = updated, append(events, receipt)
 	default:
 		reply, answered, err := s.insertSessionReply(r.Context(), tx, message, actor, *input.Body)
 		if err != nil {
@@ -550,15 +551,13 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		response, event, status = replyRead{Message: reply}, &answered, http.StatusCreated
+		response, events, status = replyRead{Message: reply}, append(events, answered), http.StatusCreated
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if event != nil {
-		s.publish(*event)
-	}
+	s.publish(events...)
 	WriteJSON(w, status, response)
 }
 

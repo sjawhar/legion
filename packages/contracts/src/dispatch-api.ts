@@ -1396,7 +1396,9 @@ export type UserState = Record<string, UserIssueState>;
 export interface UserAgentState {
   readonly cleared_before?: string;
   readonly read_through?: string;
-  readonly unread_replies: number;
+  /** Absent from an API older than the count, which a rollback can leave a live tab talking to,
+   *  so every reader treats it as none rather than rendering NaN. */
+  readonly unread_replies?: number;
 }
 
 /** `PUT /api/v1/me/agents/{session_id}/state`: a Clear, a read mark, or both. `read_through`

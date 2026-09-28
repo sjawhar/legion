@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { userAgentStateQuery } from "../../api/queries";
 import type { MessageRead, UserAgentState, UserAgentStates } from "../../api/types";
+import { isViewer } from "../refs/actor";
 
 /** The badge an unread count wears wherever it shows: the navigation, the compact header, and
  *  the agent's row. */
@@ -20,13 +21,19 @@ export function totalUnreadReplies(states: UserAgentStates | undefined): number 
   );
 }
 
-/** The newest reply `sessionId` wrote in an exchange, by its own (the server's) timestamp. */
-function newestSessionReply(read: MessageRead, sessionId: string): string | undefined {
+/** The newest reply `sessionId` wrote anywhere in `exchanges`, by its own (the server's)
+ *  timestamp. */
+function newestSessionReply(
+  exchanges: readonly MessageRead[],
+  sessionId: string
+): string | undefined {
   let newest: string | undefined;
-  for (const reply of read.replies) {
-    if (reply.author.kind !== "session" || reply.author.id !== sessionId) continue;
-    if (newest === undefined || Date.parse(reply.created_at) > Date.parse(newest)) {
-      newest = reply.created_at;
+  for (const read of exchanges) {
+    for (const reply of read.replies) {
+      if (reply.author.kind !== "session" || reply.author.id !== sessionId) continue;
+      if (newest === undefined || Date.parse(reply.created_at) > Date.parse(newest)) {
+        newest = reply.created_at;
+      }
     }
   }
   return newest;
@@ -71,15 +78,10 @@ export function holdsUnreadReply(
   viewerLogin: string | undefined,
   watermark: number
 ): boolean {
-  if (
-    viewerLogin === undefined ||
-    read.message.issue_key !== null ||
-    read.message.author.kind !== "user" ||
-    read.message.author.id.toLowerCase() !== viewerLogin.toLowerCase()
-  ) {
+  if (read.message.issue_key !== null || !isViewer(read.message.author, viewerLogin)) {
     return false;
   }
-  const newest = newestSessionReply(read, sessionId);
+  const newest = newestSessionReply([read], sessionId);
   return newest !== undefined && Date.parse(newest) > watermark;
 }
 
@@ -110,13 +112,7 @@ export function useMarkRepliesRead(
   const queryClient = useQueryClient();
   const states = useQuery(userAgentStateQuery());
   const unread = states.data?.[sessionId]?.unread_replies ?? 0;
-  let newest: string | undefined;
-  for (const read of exchanges ?? []) {
-    const reply = newestSessionReply(read, sessionId);
-    if (reply !== undefined && (newest === undefined || Date.parse(reply) > Date.parse(newest))) {
-      newest = reply;
-    }
-  }
+  const newest = newestSessionReply(exchanges ?? [], sessionId);
   // The reply this view last sent a read mark for, so a re-render does not send it again. A
   // failed write is retried twice with backoff; if it still fails the mark is cleared, so it is
   // sent again when the unread count or the newest reply next changes or the view is reopened,

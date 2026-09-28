@@ -26,16 +26,17 @@ import { unreadRepliesLabel } from "./unread";
  */
 export function EndedAgentsWithReplies({ live }: { live: readonly Agent[] }): ReactNode {
   const states = useQuery(userAgentStateQuery()).data ?? {};
-  const ended = Object.entries(states).filter(
-    ([sessionID, state]) =>
-      state.unread_replies > 0 && !live.some((agent) => agent.session_id === sessionID)
-  );
+  const ended = Object.entries(states)
+    .map(([sessionID, state]) => [sessionID, state.unread_replies ?? 0] as const)
+    .filter(
+      ([sessionID, unread]) => unread > 0 && !live.some((agent) => agent.session_id === sessionID)
+    );
   if (ended.length === 0) return null;
   const title = "Replied, no longer connected";
   return (
     <section aria-label={title} className="mt-5 space-y-3">
       <h2 className={`text-xs font-semibold uppercase ${textMutedOnCanvas}`}>{title}</h2>
-      {ended.map(([sessionID, state]) => {
+      {ended.map(([sessionID, unread]) => {
         const label = sessionLabel(sessionID, "");
         const to = `/agents/${encodeURIComponent(sessionID)}/live`;
         return (
@@ -55,7 +56,7 @@ export function EndedAgentsWithReplies({ live }: { live: readonly Agent[] }): Re
               Open
             </Link>
             <span className="ml-auto">
-              <LabelPill selected>{unreadRepliesLabel(state.unread_replies)}</LabelPill>
+              <LabelPill selected>{unreadRepliesLabel(unread)}</LabelPill>
             </span>
           </article>
         );

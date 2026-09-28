@@ -21,8 +21,8 @@ create table user_agent_read (
 -- was no read mark to count against, so without this every reply ever stored would turn unread
 -- at the deploy, for sessions long gone as well as live ones. The keys match the unread count's
 -- own: the human who wrote an issue-less root (lower(author->>'id'), the canonical login) and the
--- session it targets. A reply stored after this moment, by either image during a rolling deploy, is newer
--- than the mark and counts.
+-- session it targets. A reply stored after this moment, by either image during a rolling deploy,
+-- is newer than the mark and counts.
 insert into user_agent_read (login, session_id, read_through)
 select lower(author->>'id'), substr(target, length('session:') + 1), now()
 from messages
