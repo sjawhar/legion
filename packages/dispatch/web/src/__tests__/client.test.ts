@@ -370,10 +370,10 @@ test(
         })
       ).rejects.toMatchObject({ code: "FEATURE_OFF" });
 
-      // Before the fix, isRetryableQueryError treats FEATURE_OFF as retryable like a
-      // transient 5xx, so this issues three requests (and the browser logs three failed
-      // fetches) on every Inbox and Settings load where DISPATCH_AGENT_SECRETS_URL is unset
-      // — the same shape #1506 fixed for the architecture-source 404.
+      // isRetryableQueryError must treat FEATURE_OFF as non-retryable: if it doesn't, every
+      // Inbox and Settings load where DISPATCH_AGENT_SECRETS_URL is unset issues three
+      // requests (and logs three failed fetches) instead of one, the same shape as an
+      // unconfigured architecture source.
       expect(stub.requests).toHaveLength(1);
     } finally {
       queryClient.clear();
