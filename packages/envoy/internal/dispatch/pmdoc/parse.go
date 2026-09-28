@@ -739,9 +739,46 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 }
 
 func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) ([]*Node, error) {
+	children, _, err := parseInlineMarks(parent, source, initial, footnotes, tableCell)
+	return children, err
+}
+
+// parseInlineMarks reads parent's inline children under initial as the browser editor's parser
+// reads marks, which a text holds as a set: a mark opened where the same mark is already open adds
+// nothing, and its close ends that mark for the rest of the text around it, up to the node that
+// opened it, whose own close would have ended it. So `*x *y* z*` is `x y` in emphasis and ` z`
+// without, and `****a****` is strong once. ended is the marks of initial such a close inside parent
+// ended, which the text after parent does not carry either.
+func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) (children []*Node, ended []Mark, err error) {
 	trimLineSuffixes(parent, source)
 	active := append([]Mark(nil), initial...)
-	var children []*Node
+	// within reads a mark node's content under active and marks, then ends for the text after it
+	// each open mark that a close inside it ended, or that it opened again and so closed.
+	within := func(node ast.Node, marks ...Mark) ([]*Node, error) {
+		next := append([]Mark(nil), active...)
+		for _, mark := range marks {
+			if !containsSameMark(active, mark) {
+				next = append(next, mark)
+			}
+		}
+		content, inner, err := parseInlineMarks(node, source, next, footnotes, tableCell)
+		if err != nil {
+			return nil, err
+		}
+		for _, mark := range marks {
+			if containsSameMark(active, mark) {
+				active = withoutSameMark(active, mark)
+				ended = append(ended, mark)
+			}
+		}
+		for _, mark := range inner {
+			if !containsSameMark(marks, mark) && containsSameMark(active, mark) {
+				active = withoutSameMark(active, mark)
+				ended = append(ended, mark)
+			}
+		}
+		return content, nil
+	}
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
 		switch current := child.(type) {
 		case *ast.Text:
@@ -776,16 +813,16 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 		case *ast.String:
 			appendText(&children, parseTextValue(current.Value, active), active)
 		case *ast.Emphasis:
-			next := append([]Mark(nil), active...)
+			var marks []Mark
 			if current.Level >= 2 {
-				next = append(next, Mark{Type: "strong", Attrs: Attrs{"marker": "*"}})
+				marks = append(marks, Mark{Type: "strong", Attrs: Attrs{"marker": "*"}})
 			}
 			if current.Level%2 == 1 {
-				next = append(next, Mark{Type: "emphasis", Attrs: Attrs{"marker": "*"}})
+				marks = append(marks, Mark{Type: "emphasis", Attrs: Attrs{"marker": "*"}})
 			}
-			content, err := parseInlineWithTableCellLinks(current, source, next, footnotes, tableCell)
+			content, err := within(current, marks...)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			appendInline(&children, content)
 		case *ast.CodeSpan:
@@ -793,9 +830,9 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 				appendText(&children, value, append(append([]Mark(nil), active...), Mark{Type: "inlineCode"}))
 				continue
 			}
-			content, err := parseInlineWithTableCellLinks(current, source, append(active, Mark{Type: "inlineCode"}), footnotes, tableCell)
+			content, err := within(current, Mark{Type: "inlineCode"})
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			appendInline(&children, content)
 		case *ast.Link:
@@ -803,17 +840,17 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			if tableCell {
 				href = string(util.UnescapePunctuations(current.Destination))
 			}
-			content, err := parseInlineWithTableCellLinks(current, source, append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": titleOrNil(current.Title)}}), footnotes, tableCell)
+			content, err := within(current, Mark{Type: "link", Attrs: Attrs{"href": href, "title": titleOrNil(current.Title)}})
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			appendInline(&children, content)
 		case *ast.AutoLink:
 			appendText(&children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
 		case *extensionast.Strikethrough:
-			content, err := parseInlineWithTableCellLinks(current, source, append(active, Mark{Type: "strike_through"}), footnotes, tableCell)
+			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			appendInline(&children, content)
 		case *extensionast.TaskCheckBox:
@@ -821,13 +858,13 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 		case *ast.Image:
 			image, err := parseImage(current, source, footnotes)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			children = append(children, image)
 		case *extensionast.FootnoteLink:
 			definitionLabel, ok := footnotes[current.Index]
 			if !ok {
-				return nil, fmt.Errorf("%w: footnote reference %d has no definition", ErrSchema, current.Index)
+				return nil, nil, fmt.Errorf("%w: footnote reference %d has no definition", ErrSchema, current.Index)
 			}
 			label := definitionLabel
 			if written, set := current.AttributeString(string(referenceLabelAttr)); set {
@@ -839,7 +876,7 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			// decoding (`[^&AUML;]` beside `[^&auml;]: `), would not match once written.
 			decoded := unescapeMarkdownText([]byte(label))
 			if definition := unescapeMarkdownText([]byte(definitionLabel)); footnoteLabelKey(decoded) != footnoteLabelKey(definition) {
-				return nil, fmt.Errorf("%w: footnote reference %q matches its definition %q only as written, before their character references are decoded, which the document's markdown cannot keep", ErrSchema, decoded, definition)
+				return nil, nil, fmt.Errorf("%w: footnote reference %q matches its definition %q only as written, before their character references are decoded, which the document's markdown cannot keep", ErrSchema, decoded, definition)
 			}
 			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": decoded}})
 		case *ast.RawHTML:
@@ -858,10 +895,10 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 			}
 			children = append(children, &Node{Type: "html", Attrs: Attrs{"value": value}})
 		default:
-			return nil, fmt.Errorf("%w: unsupported markdown inline %s", ErrSchema, child.Kind())
+			return nil, nil, fmt.Errorf("%w: unsupported markdown inline %s", ErrSchema, child.Kind())
 		}
 	}
-	return children, nil
+	return children, ended, nil
 }
 
 func unescapeMarkdownText(value []byte) string {
@@ -901,6 +938,16 @@ func appendText(target *[]*Node, value string, marks []Mark) {
 		}
 	}
 	*target = append(*target, &Node{Type: "text", Text: value, Marks: marks})
+}
+
+func withoutSameMark(marks []Mark, mark Mark) []Mark {
+	out := make([]Mark, 0, len(marks))
+	for _, other := range marks {
+		if !sameMark(other, mark) {
+			out = append(out, other)
+		}
+	}
+	return out
 }
 
 func titleOrNil(title []byte) any {
