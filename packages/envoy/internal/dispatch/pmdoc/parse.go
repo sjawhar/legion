@@ -29,7 +29,7 @@ type markdownReader struct {
 var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParser(parser.NewParser(
 		parser.WithBlockParsers(blockParsers()...),
-		parser.WithInlineParsers(parser.DefaultInlineParsers()...),
+		parser.WithInlineParsers(inlineParsers()...),
 		parser.WithParagraphTransformers(parser.DefaultParagraphTransformers()...),
 	)),
 	goldmark.WithExtensions(extension.Linkify, lazyAwareTable{}, extension.Strikethrough, taskList{}, footnotes{}),
@@ -215,7 +215,7 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 func inlineParserOptions() []parser.Option {
 	return []parser.Option{
 		parser.WithBlockParsers(util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 1000)),
-		parser.WithInlineParsers(parser.DefaultInlineParsers()...),
+		parser.WithInlineParsers(inlineParsers()...),
 		parser.WithInlineParsers(
 			util.Prioritized(extension.NewStrikethroughParser(), 500),
 			util.Prioritized(extension.NewLinkifyParser(), 999),

@@ -97,6 +97,7 @@ func TestRenderKeepsAMarkOpenWhereAFusedRunDoesNotReadBack(t *testing.T) {
 		{"*a **b [l](https://e.com/u) c** d*\n", "*a **b [l](https://e.com/u) c** d*\n"},
 		{"*a **b***\n", "*a **b***\n"},
 		{"***a** b*\n", "***a** b*\n"},
+		{"_**Note:** see below_\n", "***Note:** see below*\n"},
 		{"x ***a** b* y\n", "x ***a** b* y\n"},
 		{"[***a** b*](https://e.com/u)\n", "[***a** b*](https://e.com/u)\n"},
 	})

@@ -304,3 +304,32 @@ func TestAPanicWhileReadingIsAnInternalErrorNotARefusal(t *testing.T) {
 		t.Fatalf("read() = %v, %v; want nil and an ErrPanic that is not an ErrSchema, reading \"panic: ...\"", doc, err)
 	}
 }
+
+// A run that can both open and close pairs by the lengths it has left once a pair used part of
+// it, as the browser editor's parser pairs it: after the strong pair, `***Note:****&#32;see
+// below*` leaves the closer's other `**` as text, and the opener's last `*` pairs with the final
+// one. Goldmark judged the lengths the runs were written with and paired that `*` with the
+// closer, reading " see below" as emphasis alone.
+func TestParsePairsARunByTheLengthsItHasLeft(t *testing.T) {
+	nodes, err := ParseInline("***Note:****&#32;see below*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, node := range nodes {
+		var marks []string
+		for _, mark := range node.Marks {
+			marks = append(marks, mark.Type)
+		}
+		got = append(got, fmt.Sprintf("%q %v", node.Text, marks))
+	}
+	want := []string{`"Note:" [emphasis strong]`, `"** see below" [emphasis]`}
+	if strings.Join(got, "; ") != strings.Join(want, "; ") {
+		t.Errorf("ParseInline = %v, want %v", got, want)
+	}
+	for _, line := range got {
+		if line == `" see below" [emphasis]` {
+			t.Errorf("ParseInline still reads %s, goldmark's pairing of the closer's last delimiter", line)
+		}
+	}
+}
