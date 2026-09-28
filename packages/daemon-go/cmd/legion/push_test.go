@@ -272,6 +272,11 @@ func TestPushRunsAPushWhoseCommitsTouchAnotherHandoffInFull(t *testing.T) {
 // decides what legion push decides. This repository's own release bot writes "[skip ci]" subjects,
 // so it is a string a worker reads and copies. The push is refused before anything is pushed, and
 // the branch does not move.
+//
+// The refusal does not depend on what the push decided. A handoff-only push carrying the keyword
+// is refused too, and that row is the one that separates this guard from folding the keyword into
+// the skip decision: there a keyword on a skipping push would agree with it, and the agent's
+// message rather than this command would be what stopped the workflow.
 func TestPushRefusesAHeadWhoseMessageCarriesACIKeyword(t *testing.T) {
 	r := newPushRig(t)
 	r.commit("widget: add the line", map[string]string{"widget.txt": "one\n"})
@@ -279,19 +284,23 @@ func TestPushRefusesAHeadWhoseMessageCarriesACIKeyword(t *testing.T) {
 		t.Fatalf("the code push = %d %q", code, output)
 	}
 	first := r.pushed()
-	for _, message := range []string{
-		"chore: release the widget [skip ci]",
-		"widget: fix the line\n\n[ci skip] while the sandbox is down",
-		"widget: fix the line\n\nNo CI needed [NO CI]",
+	for _, step := range []struct {
+		message, clean string
+		files          map[string]string
+	}{
+		{"chore: release the widget [skip ci]", "widget: fix the line", map[string]string{"widget.txt": "two\n"}},
+		{"widget: fix the line\n\n[ci skip] while the sandbox is down", "widget: fix the line", map[string]string{"widget.txt": "three\n"}},
+		{"widget: fix the line\n\nNo CI needed [NO CI]", "widget: fix the line", map[string]string{"widget.txt": "four\n"}},
+		{"test: record handoff [skip ci]", "test: record handoff", map[string]string{".legion/test.json": "{}\n"}},
 	} {
-		r.commit(message, map[string]string{"widget.txt": message})
+		r.commit(step.message, step.files)
 		code, output := r.push()
 		if code != 1 || !strings.Contains(output, "keyword") || r.pushed() != first {
-			t.Fatalf("the push of %q = %d %q, remote %q; want a refusal leaving %q", message, code, output, r.pushed(), first)
+			t.Fatalf("the push of %q = %d %q, remote %q; want a refusal leaving %q", step.message, code, output, r.pushed(), first)
 		}
-		r.run("describe", "-r", "@-", "-m", "widget: fix the line")
+		r.run("describe", "-r", "@-", "-m", step.clean)
 		if code, output := r.push(); code != 0 {
-			t.Fatalf("the push after the keyword was taken out = %d %q", code, output)
+			t.Fatalf("the push of %q after the keyword was taken out = %d %q", step.message, code, output)
 		}
 		first = r.pushed()
 	}

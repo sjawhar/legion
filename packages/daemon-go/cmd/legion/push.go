@@ -94,7 +94,18 @@ unclassifiable push and carries nothing for - can never be reached by a push thi
 GitHub also starts no workflow for a push whose head message carries [skip ci], [ci skip],
 [no ci], [skip actions] or [actions skip], anywhere in the message rather than only as its last
 line. Whether a push skips is this command's to decide, so a head whose message carries one of
-those is refused before anything is pushed, naming the keyword.
+those is refused before anything is pushed, naming the keyword, whether or not the push skips: a
+keyword on a skipping push would agree with the decision, and then the message rather than this
+command would be what stopped the workflow.
+
+Only @-'s message is read for a keyword, where the paths are read from every commit in the push.
+That is a scope decision, and GitHub's documentation does not settle it: it names the head commit
+for pull_request and says only "the commit message in a push" for push. It was measured instead,
+on a repository whose workflows are on: [push, pull_request] with no branch filter, where the push
+trigger is live on a branch: one push of two commits whose first carried [skip ci] and whose head
+carried none started both push-event runs on the head, as did a control push carrying no keyword
+anywhere. A keyword below the head does not suppress the head's workflows, so reading @- alone is
+what GitHub reads.
 
 GitHub honours the trailer only as the message's last line, so the push describes @- with jj's
 templates.commit_trailers empty (the trailers @- already carries stay above it) and reads the
