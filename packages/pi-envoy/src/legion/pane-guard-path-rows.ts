@@ -785,6 +785,22 @@ export const PATH_ROWS: readonly PathRow[] = [
     dotdot: true,
   },
   {
+    name: "realpath.L.logical.cwd",
+    family: "substitution",
+    role: "probe",
+    // Same as `-s` above, for `-L`: after `cd e`, the physical cwd is the canary home, though
+    // the logical `$PWD` text still reads `e`.
+    command: 'cd e && chmod -R 000 "$(realpath -L ..)"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.L.logical.cwd.inside",
+    family: "substitution",
+    role: "must-allow",
+    command: 'cd in && chmod -R 700 "$(realpath -L ..)/sub"',
+    dotdot: true,
+  },
+  {
     name: "realpath.P.L.lexical",
     family: "substitution",
     role: "probe",
