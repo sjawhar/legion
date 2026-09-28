@@ -362,6 +362,7 @@ describe("scripts a command runs", () => {
       `${set('"$(echo EXIT)"')}; trap - "$(echo INT)"`,
       `a=$(cat); b=$(cat); ${set('"$a"')}; trap - "$b"`,
       `s=$(cat /dev/stdin); ${set('"$s"')}; trap - "$s"`,
+      `${set('"$1"')}; trap - "$2"`,
       `( ${set('"$(echo EXIT)"')}; trap - "$(echo INT)" )`,
       `${set('"$(echo EXIT)"')}; trap - EXIT`,
       `${set("EXIT")}; trap - "$(echo INT)"`,
