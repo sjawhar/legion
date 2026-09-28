@@ -715,6 +715,59 @@ export const PATH_ROWS: readonly PathRow[] = [
     command: 'rm -f "$LEGION_WORKSPACE/$(basename d/in)"',
     dotdot: false,
   },
+  {
+    name: "realpath.s.dotdot.symlink",
+    family: "substitution",
+    role: "probe",
+    // `-s`/`--strip`/`--no-symlinks` expand no symlink at all: bash prints the lexical `..`.
+    command: 'chmod -R 000 "$(realpath -s "$HOME/mine/../keep")"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.strip.dotdot.symlink",
+    family: "substitution",
+    role: "probe",
+    command: 'chmod -R 000 "$(realpath --strip "$HOME/mine/../keep")"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.no-symlinks.dotdot.symlink",
+    family: "substitution",
+    role: "probe",
+    command: 'chmod -R 000 "$(realpath --no-symlinks "$HOME/mine/../keep")"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.L.dotdot.symlink",
+    family: "substitution",
+    role: "probe",
+    // `-L`/`--logical` takes the text's own `..` before following the symlink in front of it.
+    command: 'chmod -R 000 "$(realpath -L "$HOME/mine/../keep")"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.logical.dotdot.symlink",
+    family: "substitution",
+    role: "probe",
+    command: 'chmod -R 000 "$(realpath --logical "$HOME/mine/../keep")"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.physical.dotdot.symlink",
+    family: "substitution",
+    role: "must-allow",
+    // Plain `realpath` is physical, the guard's default: `mine` resolves to `sub`, so the `..`
+    // lands back in the workspace, on a name that does not exist there.
+    command: 'chmod -R 700 "$(realpath "$HOME/mine/../keep")"',
+    dotdot: true,
+  },
+  {
+    name: "realpath.nodotdot.outside",
+    family: "substitution",
+    role: "must-refuse",
+    command: 'chmod -R 000 "$(realpath "$HOME/keep")"',
+    dotdot: false,
+  },
 
   // --- a resolution that fails: each must be unknown, never harmless ---
   {

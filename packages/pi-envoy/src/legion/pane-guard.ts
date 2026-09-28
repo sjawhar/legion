@@ -1265,8 +1265,15 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
   ) {
     return undefined;
   }
+  // realpath, readlink -f and dirname print one line per operand, and an unquoted substitution
+  // splits them into separate words, so with more than one operand the guard cannot tell which
+  // word bash keeps; only a single operand is one value. `basename NAME SUFFIX` is the one
+  // two-operand form GNU defines, and it strips SUFFIX from the printed name.
+  const suffixed = base === "basename" && found.operands.length === 2;
+  if (found.operands.length !== 1 && !suffixed) return undefined;
   const target = literalText(found.operands[0]?.exp);
-  if (target === undefined || st.cwd === undefined) return undefined;
+  const suffix = suffixed ? literalText(found.operands[1]?.exp) : "";
+  if (target === undefined || suffix === undefined || st.cwd === undefined) return undefined;
   // An empty operand names no path: dirname prints `.`, basename nothing, and realpath and
   // readlink fail and print nothing.
   if (target === "") return base === "dirname" ? "." : "";
@@ -1276,9 +1283,43 @@ function substitutionPath(base: string, list: readonly Arg[], st: State): string
   // separator GNU strips (`a//b` is `a/` to Node and `a` to GNU), and one extra separator moves
   // a later concatenation from a sibling of the workspace to a path inside it.
   if (base === "dirname") return gnuDirname(target);
-  if (base === "basename") return gnuBasename(target);
+  if (base === "basename") {
+    const name = gnuBasename(target);
+    return suffix !== "" && name !== suffix && name.endsWith(suffix)
+      ? name.slice(0, -suffix.length)
+      : name;
+  }
   if (base === "readlink" && !list.some((arg) => literalText(arg.exp)?.includes("f")))
     return undefined;
+  if (base === "realpath") {
+    // `-s`/`--strip`/`--no-symlinks` expand no symlink at all: the operand's own text, resolved
+    // lexically, is what bash prints.
+    if (
+      found.options.some(
+        (option) => option === "--strip" || option === "--no-symlinks" || /^-[^-]*s/.test(option)
+      )
+    ) {
+      return path.resolve(st.cwd, target);
+    }
+    // `--relative-to`/`--relative-base` print a path relative to another directory, which this
+    // function does not compute.
+    if (found.options.some((option) => option.startsWith("--relative"))) return undefined;
+    // Bash takes the LAST of `-L` and `-P`, the same rule as `cd`. `-L`/`--logical` resolves the
+    // text's own `..` BEFORE following the symlink in front of it — the reverse of the physical
+    // walk below, which follows each symlink first and takes `..` as the parent of what it found.
+    const mode = found.options
+      .flatMap((option) => {
+        if (option === "--logical") return ["L"];
+        if (option === "--physical") return ["P"];
+        if (!/^-[a-zA-Z]+$/.test(option)) return [];
+        return [...option.slice(1)].filter((letter) => letter === "L" || letter === "P");
+      })
+      .at(-1);
+    if (mode === "L") {
+      const resolved = physical("/", path.resolve(st.cwd, target), true);
+      return "unknown" in resolved ? undefined : resolved.real;
+    }
+  }
   const resolved = physical(st.cwd, target, true);
   return "unknown" in resolved ? undefined : resolved.real;
 }
@@ -2643,7 +2684,8 @@ function refusal(site: Site, detail: string, ctx: Ctx, unresolved = false): Refu
     ? `. Every target is resolved as the kernel resolves it, against ${describeRoots(ctx.roots)}`
     : `, outside ${describeRoots(ctx.roots)}`;
   const hint = unresolved
-    ? "Create the missing path component in an earlier command, then run this command."
+    ? "Make the unresolved path component resolvable in an earlier command — create it, make " +
+      "it readable, or fix a dangling or looping symlink — then run this command."
     : HINT;
   return new Refusal(site.snippet, site.line, `${detail}${where}. ${hint}`);
 }
@@ -3126,7 +3168,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     case "cd": {
       const found = operands(rest, "");
-      if (found.options.some((option) => !/^-[LPe@]+$/.test(option))) {
+      if (found.options.some((option) => !/^-[LPe]+$/.test(option))) {
         outer.cwd = undefined;
         outer.cwdWhy = "`cd` with an option the guard does not model";
         return;

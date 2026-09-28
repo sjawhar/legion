@@ -500,7 +500,7 @@ test("uses basename's first operand and refuses options it does not model", () =
       ompPid: process.pid,
       scratch: fixture.scratch,
     });
-    const command = 'rm -rf "$LEGION_WORKSPACE/$(basename .. x)/home/keep"';
+    const command = 'rm -rf "$LEGION_WORKSPACE/$(basename ..x x)/home/keep"';
     expect(fixtureGuard.bash(command, fixture.workspace, fixtureEnv), command).toBeDefined();
     const run = spawnSync("bash", ["-c", command], { cwd: fixture.workspace, env: fixtureEnv });
     expect(run.status).toBe(0);

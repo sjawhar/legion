@@ -212,7 +212,7 @@ describe("resolution", () => {
   test("tells an unresolvable in-workspace path how to become resolvable", () => {
     const reason = bash("rm -rf out/tmp/../old");
     expect(reason).toContain("cannot know where the `..` after it leads");
-    expect(reason).toContain("Create the missing path component in an earlier command");
+    expect(reason).toContain("Make the unresolved path component resolvable in an earlier command");
     expect(reason).not.toContain("Name a path under $LEGION_WORKSPACE");
   });
 
@@ -310,6 +310,14 @@ describe("resolution", () => {
     expect(bash('d=$(dirname "$HOME/.ssh/id"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
     expect(bash('d="$LEGION_WORKSPACE/$(basename "$HOME/x")"; rm -rf "$d"')).toBeUndefined();
     expect(bash('d=$(readlink -f "$HOME/.ssh"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
+    // More than one operand prints one line each, which an unquoted substitution splits into
+    // several targets: the guard cannot say which it judged, so the value stays unknown.
+    expect(bash('rm -rf $(dirname "$LEGION_WORKSPACE/x" "$HOME/.ssh/id")')).toBeDefined();
+    expect(bash('rm -rf $(realpath -m -- "$LEGION_WORKSPACE/x" "$HOME/.ssh")')).toBeDefined();
+    // GNU `basename /` prints `/`, so this is `$HOME` itself, not a path under the workspace.
+    expect(bash(`chmod -R 000 "$(basename /)\${HOME#/}"`)).toBeDefined();
+    // `cd -@` is an invalid option on Linux: bash stays where it was.
+    expect(bash('cd "$HOME"; cd -@ "$LEGION_WORKSPACE"; rm -f .bashrc')).toBeDefined();
     // A `..` after a component that is not there is never resolved to the path the text reads
     // as: whatever creates that component decides where the `..` leads, so the guard models no
     // path at all and the value stays a command's output (LEGION-355).
