@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
@@ -121,19 +122,16 @@ func legionAppsFrom(logins map[string]string) (*legionApps, error) {
 	if logins == nil {
 		return nil, nil
 	}
-	if len(logins) != 2 {
-		return nil, fmt.Errorf("legionAppLogins names %d Apps, not implement and review", len(logins))
+	if len(logins) != len(appauth.Roles) {
+		return nil, fmt.Errorf("legionAppLogins names %d Apps, not one for each of %v", len(logins), appauth.Roles)
 	}
-	apps := &legionApps{logins: map[string]bool{}}
-	for _, role := range []string{"implement", "review"} {
-		slug := botSlug(logins[role])
-		if !strings.HasSuffix(logins[role], "[bot]") || slug == "" {
+	apps := &legionApps{logins: map[string]bool{}, review: botSlug(logins[string(appauth.Review)])}
+	for _, role := range appauth.Roles {
+		login := logins[string(role)]
+		if !strings.HasSuffix(login, "[bot]") || botSlug(login) == "" {
 			return nil, fmt.Errorf("legionAppLogins names no App login for %s", role)
 		}
-		apps.logins[slug] = true
-		if role == "review" {
-			apps.review = slug
-		}
+		apps.logins[botSlug(login)] = true
 	}
 	return apps, nil
 }

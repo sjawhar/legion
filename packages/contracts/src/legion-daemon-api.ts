@@ -58,6 +58,8 @@ import { LEGION_ROLES } from "./legion-roles";
 export const LEGION_DAEMON_API_VERSION = 9;
 
 const nonEmptyString = z.string().min(1);
+/** A GitHub App's git identity, `<slug>[bot]`, with a slug. */
+const appLogin = z.string().regex(/^[^[\]]+\[bot\]$/);
 const legionRole = z.enum(LEGION_ROLES);
 const requiredUnknown = z.unknown().refine((value) => value !== undefined, {
   message: "Required",
@@ -371,12 +373,7 @@ export const LegionDaemonApi = {
       /** Each Legion role App's login, keyed by its App role: `legion threads resolve` keeps them
        * out of its bot-thread rule and takes the review App's `Accepted:` on a bot's thread;
        * absent when the daemon could not read every one. */
-      legionAppLogins: z
-        .object({
-          implement: z.string().regex(/^[^[\]]+\[bot\]$/),
-          review: z.string().regex(/^[^[\]]+\[bot\]$/),
-        })
-        .optional(),
+      legionAppLogins: z.object({ implement: appLogin, review: appLogin }).optional(),
     }),
   },
   GitCredential: {

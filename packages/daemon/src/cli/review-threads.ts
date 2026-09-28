@@ -161,7 +161,7 @@ function botSlug(login: string): string {
 }
 
 function legionApps(logins: LegionAppLogins | null): LegionApps {
-  if (!logins?.review) return null;
+  if (logins === null) return null;
   return { logins: new Set(Object.values(logins).map(botSlug)), review: botSlug(logins.review) };
 }
 

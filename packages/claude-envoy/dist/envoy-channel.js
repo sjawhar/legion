@@ -37138,6 +37138,7 @@ var LEGION_ROLES = [
 
 // ../contracts/src/legion-daemon-api.ts
 var nonEmptyString = exports_external.string().min(1);
+var appLogin = exports_external.string().regex(/^[^[\]]+\[bot\]$/);
 var legionRole = exports_external.enum(LEGION_ROLES);
 var requiredUnknown = exports_external.unknown().refine((value) => value !== undefined, {
   message: "Required"
@@ -37394,10 +37395,7 @@ var LegionDaemonApi = {
     response: exports_external.object({
       token: nonEmptyString,
       appLogin: exports_external.string().endsWith("[bot]"),
-      legionAppLogins: exports_external.object({
-        implement: exports_external.string().regex(/^[^[\]]+\[bot\]$/),
-        review: exports_external.string().regex(/^[^[\]]+\[bot\]$/)
-      }).optional()
+      legionAppLogins: exports_external.object({ implement: appLogin, review: appLogin }).optional()
     })
   },
   GitCredential: {
