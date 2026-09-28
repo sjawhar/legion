@@ -256,6 +256,10 @@ func retryDelay(attempts int) time.Duration {
 	return delay
 }
 
+// publish publishes event to every destination it has, and returns every destination's error
+// joined. One destination's failure - a role route NATS denies under Dispatch's grant, say - holds
+// back none of the others: each one that succeeds is recorded (publishDestination), so the retry
+// publishes only the ones that failed.
 func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
 	if event.IssueKey == nil && event.ArtifactID == nil && event.Project == "" {
 		return nil
@@ -267,25 +271,20 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	if err := item.Validate(); err != nil {
 		return fmt.Errorf("validate envelope: %w", err)
 	}
-	if err := publishDestination(ctx, deps, event.ID, item, delivered); err != nil {
-		return err
-	}
+	errs := []error{publishDestination(ctx, deps, event.ID, item, delivered)}
 	targeted := (event.Type == "message.created" || event.Type == "message.answered") &&
 		payloadString(event.Payload, "target") != ""
 	if event.Notify && !targeted {
 		if !suppressesCurrentRoute(event.Payload, route) {
-			if err := publishRoute(ctx, deps, event.ID, item, delivered, route); err != nil {
-				return err
-			}
+			errs = append(errs, publishRoute(ctx, deps, event.ID, item, delivered, route))
 		}
-		if err := publishAuthorRoutes(ctx, deps, event.ID, item, event, delivered); err != nil {
-			return err
-		}
+		errs = append(errs, publishAuthorRoutes(ctx, deps, event.ID, item, event, delivered))
 	}
-	if err := publishFollowerRoutes(ctx, deps, event.ID, item, event, delivered); err != nil {
-		return err
-	}
-	return publishPreviousClaimant(ctx, deps, event.ID, item, event, delivered)
+	errs = append(errs,
+		publishFollowerRoutes(ctx, deps, event.ID, item, event, delivered),
+		publishPreviousClaimant(ctx, deps, event.ID, item, event, delivered),
+	)
+	return errors.Join(errs...)
 }
 
 // publishPreviousClaimant tells a session that lost an issue's claim, on its own topic: a
@@ -352,6 +351,7 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 	if err != nil {
 		return err
 	}
+	var errs []error
 	for _, follower := range followers {
 		if event.Actor.SameAs(model.Actor{Kind: "session", ID: follower.SessionID}) {
 			continue
@@ -359,10 +359,10 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 		routed := item
 		routed.Topic = contracts.AgentTopicPrefix + follower.SessionID
 		if err := publishDestination(ctx, deps, eventID, routed, delivered); err != nil {
-			return fmt.Errorf("publish follower route to %q: %w", follower.SessionID, err)
+			errs = append(errs, fmt.Errorf("publish follower route to %q: %w", follower.SessionID, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // publishAuthorRoutes delivers a human comment-thread action directly to the involved
@@ -433,14 +433,15 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		}
 	}
 
+	var errs []error
 	for _, author := range targets {
 		routed := item
 		routed.Topic = contracts.AgentTopicPrefix + author.ID
 		if err := publishDestination(ctx, deps, eventID, routed, delivered); err != nil {
-			return fmt.Errorf("publish author route to %q: %w", author.ID, err)
+			errs = append(errs, fmt.Errorf("publish author route to %q: %w", author.ID, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func loadMessageAuthor(ctx context.Context, deps Deps, messageID string) (model.Actor, bool, error) {

@@ -24,8 +24,8 @@ const roleTopic = "notifications.role.reviewer"
 
 // grantedNATS starts a NATS server whose one nkey user may publish only to allow, and returns the
 // deployed Dispatch server's bus client connected as that user, and a plain connection of the same
-// user that subscribes to the role topic, as the listener's role lane would.
-func grantedNATS(t *testing.T, allow ...string) (*bus.Client, <-chan *natsgo.Msg) {
+// user that tests subscribe through, as the listener's lanes would.
+func grantedNATS(t *testing.T, allow ...string) (*bus.Client, *natsgo.Conn) {
 	t.Helper()
 	seed, public := testnats.User(t)
 	uri := testnats.StartNkeyPublishAllowed(t, public, allow...)
@@ -36,19 +36,26 @@ func grantedNATS(t *testing.T, allow ...string) (*bus.Client, <-chan *natsgo.Msg
 	}
 	t.Cleanup(client.Close)
 
-	subscriber, err := bus.Dial("role-subscriber", []string{uri})
+	subscriber, err := bus.Dial("test-subscriber", []string{uri})
 	if err != nil {
-		t.Fatalf("connect the role subscriber: %v", err)
+		t.Fatalf("connect the subscriber: %v", err)
 	}
 	t.Cleanup(subscriber.Close)
+	return client, subscriber
+}
+
+// subscribe delivers every message on subject to the returned channel, once the server has the
+// subscription.
+func subscribe(t *testing.T, conn *natsgo.Conn, subject string) <-chan *natsgo.Msg {
+	t.Helper()
 	received := make(chan *natsgo.Msg, 8)
-	if _, err := subscriber.ChanSubscribe(roleTopic, received); err != nil {
-		t.Fatalf("subscribe to the role topic: %v", err)
+	if _, err := conn.ChanSubscribe(subject, received); err != nil {
+		t.Fatalf("subscribe to %s: %v", subject, err)
 	}
-	if err := subscriber.Flush(); err != nil {
-		t.Fatalf("flush the role subscription: %v", err)
+	if err := conn.Flush(); err != nil {
+		t.Fatalf("flush the subscription to %s: %v", subject, err)
 	}
-	return client, received
+	return received
 }
 
 func publishedDestinations(t *testing.T, database *store.Store, eventID int64) (destinations []string, attempts int) {
@@ -71,7 +78,8 @@ func TestRunRetriesARoleRouteNATSDenies(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	client, received := grantedNATS(t, "notifications.dispatch.>", "_INBOX.>", "$JS.API.>")
+	client, subscriber := grantedNATS(t, "notifications.dispatch.>", "_INBOX.>", "$JS.API.>")
+	received := subscribe(t, subscriber, roleTopic)
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:reviewer"
@@ -120,10 +128,57 @@ func TestRunRetriesARoleRouteNATSDenies(t *testing.T) {
 	}
 }
 
+// A denied role route holds back none of the event's other destinations: the granted author route
+// of the same event is delivered and recorded on the first attempt, and only the role route is left
+// for the retry.
+func TestRunDeliversTheGrantedRoutesOfAnEventWhoseRoleRouteNATSDenies(t *testing.T) {
+	client, subscriber := grantedNATS(t, "notifications.dispatch.>", "notifications.agent.>", "_INBOX.>", "$JS.API.>")
+	authorTopic := "notifications.agent.writer"
+	authorReceived := subscribe(t, subscriber, authorTopic)
+	roleReceived := subscribe(t, subscriber, roleTopic)
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	route := "role:reviewer"
+	seedIssue(t, database, "T-1", &route)
+	root := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "writer"}, "Draft", nil)
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"), Type: "comment.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.CommentEventPayload{Comment: model.Comment{
+			ID: "reply", IssueKey: new("T-1"), Body: "Reviewed", ReplyTo: &root,
+		}},
+	})
+	stop := run(t, database, client, broker)
+	defer stop()
+
+	waitFor(t, 10*time.Second, "the outbox's first attempt at the event settled", func() bool {
+		_, attempts := publishedDestinations(t, database, event.ID)
+		return attempts > 0 || publishedAt(t, database, event.ID) != nil
+	})
+	destinations, attempts := publishedDestinations(t, database, event.ID)
+	if !slices.Contains(destinations, authorTopic) {
+		t.Fatalf("published_destinations = %v after the first attempt, want the granted author route %s", destinations, authorTopic)
+	}
+	if slices.Contains(destinations, roleTopic) || publishedAt(t, database, event.ID) != nil || attempts != 1 {
+		t.Fatalf("published_destinations = %v, attempts %d, published %v: want the denied role route left for a retry",
+			destinations, attempts, publishedAt(t, database, event.ID))
+	}
+	select {
+	case <-authorReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the author received nothing, though its route is granted")
+	}
+	select {
+	case message := <-roleReceived:
+		t.Fatalf("the role subscriber received %q through a denied publish", message.Data)
+	default:
+	}
+}
+
 // With notifications.role.> granted, the same role route is published once, recorded, and the
 // event marked published.
 func TestRunPublishesAGrantedRoleRoute(t *testing.T) {
-	client, received := grantedNATS(t, "notifications.dispatch.>", "notifications.role.>", "_INBOX.>", "$JS.API.>")
+	client, subscriber := grantedNATS(t, "notifications.dispatch.>", "notifications.role.>", "_INBOX.>", "$JS.API.>")
+	received := subscribe(t, subscriber, roleTopic)
 	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:reviewer"
