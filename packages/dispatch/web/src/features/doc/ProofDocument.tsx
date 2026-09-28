@@ -12,6 +12,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
+import { TruncatedText } from "../../components/TruncatedText";
 import { copyText } from "../../lib/clipboard";
 import {
   badgeMed,
@@ -529,7 +530,7 @@ export function ProofDocument({
             }}
             title={openDecision.question}
           >
-            {openDecision.question}
+            <TruncatedText>{openDecision.question}</TruncatedText>
           </a>
           {openBlockAsks.length > 1 ? (
             <button

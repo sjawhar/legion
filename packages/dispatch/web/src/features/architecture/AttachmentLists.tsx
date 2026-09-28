@@ -8,6 +8,7 @@ import type {
   ArchitectureTreeRetired,
 } from "../../api/types";
 import { StatusPill } from "../../components/Pill";
+import { TruncatedText } from "../../components/TruncatedText";
 import {
   badgeHigh,
   borderDefault,
@@ -235,9 +236,9 @@ function RowHead({ issue }: { issue: ArchitectureTreeIssueRef }): ReactNode {
         to={buildIssuePath({ key: issue.key, kind: "issue" })}
         {...referenceTriggerProps({ key: issue.key, kind: "issue" })}
       >
-        <span className="min-w-0 flex-1 truncate">
+        <TruncatedText className="min-w-0 flex-1">
           {issue.key} · {issue.title}
-        </span>
+        </TruncatedText>
       </Link>
       <StatusPill>{statusText(issue.status)}</StatusPill>
     </div>
