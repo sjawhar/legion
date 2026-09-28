@@ -116,7 +116,7 @@ func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool) *rende
 	// front matter, and with no such line the browser editor's parser, having tried the front
 	// matter to the document's end, reads no list, quote or footnote definition in the rest.
 	if doc.Children[0].Type == "hr" {
-		if front, _ := parseFrontmatterBlock(r.b.Bytes()); front != nil || holdsAContainerTheBrowserDrops(doc) {
+		if front, _, _ := parseFrontmatterBlock(r.b.Bytes()); front != nil || holdsAContainerTheBrowserDrops(doc) {
 			copy(r.b.Bytes(), "***")
 		}
 	}
@@ -126,8 +126,8 @@ func renderBlocks(doc *Node, labels footnoteLabelSet, bareEmptyCode bool) *rende
 // holdsBrowserOnlyShape reports whether markdown, read as Parse reads it, holds a shape this
 // parser reads only as the browser editor's parser does (browserOnlyShape).
 func holdsBrowserOnlyShape(markdown []byte) bool {
-	front, rest := parseFrontmatterBlock(markdown)
-	return browserOnlyShape(blockReader.parse(markdown[rest:], front == nil && opensFrontmatter(markdown))) != ""
+	_, rest, unclosed := parseFrontmatterBlock(markdown)
+	return browserOnlyShape(blockReader.parse(markdown[rest:], unclosed)) != ""
 }
 
 // holdsAContainerTheBrowserDrops reports whether doc holds, at its top level, a block the browser

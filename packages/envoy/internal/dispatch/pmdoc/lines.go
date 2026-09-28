@@ -667,20 +667,14 @@ func insideImage(node ast.Node) bool {
 	return false
 }
 
-// opensFrontmatter reports whether source's first line opens front matter as the browser editor's
-// parser reads it: `---` and any spaces or tabs.
-func opensFrontmatter(source []byte) bool {
-	line, _, _ := bytes.Cut(source, []byte("\n"))
-	return string(bytes.TrimRight(line, " \t")) == "---"
-}
-
 // parseFrontmatterBlock reads the front matter a document opens with in source, as the
 // browser editor's parser does: a first line that is `---` and any spaces or tabs opens it, and
 // the first later line that is the same closes it. The node's text is the lines between, joined
 // with line feeds between plain `---` fences, as that parser stores it. rest is where the
 // document after the closing line begins; a document with no closed front matter has none, and
-// rest is 0.
-func parseFrontmatterBlock(source []byte) (front *Node, rest int) {
+// rest is 0. unclosed reports an opener nothing closes, which that parser tries as front matter to
+// the document's end (blockReader.parse).
+func parseFrontmatterBlock(source []byte) (front *Node, rest int, unclosed bool) {
 	var content []string
 	for start, index := 0, 0; start < len(source); index++ {
 		end := len(source)
@@ -690,17 +684,17 @@ func parseFrontmatterBlock(source []byte) (front *Node, rest int) {
 		line := strings.TrimRight(string(bytes.TrimSuffix(source[start:end], []byte("\n"))), " \t")
 		switch {
 		case index == 0 && line != "---":
-			return nil, 0
+			return nil, 0, false
 		case index > 0 && line == "---":
 			text := "---\n---"
 			if joined := strings.Join(content, "\n"); joined != "" {
 				text = "---\n" + joined + "\n---"
 			}
-			return &Node{Type: "frontmatter", Children: []*Node{{Type: "text", Text: text}}}, end
+			return &Node{Type: "frontmatter", Children: []*Node{{Type: "text", Text: text}}}, end, false
 		case index > 0:
 			content = append(content, string(bytes.TrimSuffix(source[start:end], []byte("\n"))))
 		}
 		start = end
 	}
-	return nil, 0
+	return nil, 0, len(source) > 0
 }

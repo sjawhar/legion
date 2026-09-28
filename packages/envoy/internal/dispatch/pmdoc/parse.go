@@ -187,8 +187,7 @@ func parseUnstamped(markdown string, readFrontmatter bool) (doc *Node, err error
 	unclosedFrontmatter := false
 	if readFrontmatter {
 		var rest int
-		front, rest = parseFrontmatterBlock(source)
-		unclosedFrontmatter = front == nil && opensFrontmatter(source)
+		front, rest, unclosedFrontmatter = parseFrontmatterBlock(source)
 		source = source[rest:]
 	}
 	root := blockReader.parse(source, unclosedFrontmatter)
