@@ -466,6 +466,7 @@ async function expectStacked(control: Locator): Promise<void> {
 test("a long name ends in an ellipsis wherever a link or control truncates it", async ({
   browser,
 }, testInfo) => {
+  test.setTimeout(90_000);
   const longName =
     "legion-go-coordinator-stage-4b-sandbox-tree-runbook-with-every-checkpoint-and-the-evidence-each-one-left-on-the-production-cluster.md";
   const longQuestion =

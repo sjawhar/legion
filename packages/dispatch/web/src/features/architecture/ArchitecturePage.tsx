@@ -589,7 +589,9 @@ function ComponentRow({
                   className={`flex min-h-11 min-w-0 flex-1 items-center py-2 font-medium md:min-h-0 md:py-0 ${textPrimaryOnSurface} ${linkHoverText}`}
                   to={{ search: rowSearch(component.id) }}
                 >
-                  <TruncatedText className="min-w-0 flex-1">{component.title}</TruncatedText>
+                  <TruncatedText className="min-w-0 flex-1" title={component.title}>
+                    {component.title}
+                  </TruncatedText>
                 </Link>
               </div>
             </div>
