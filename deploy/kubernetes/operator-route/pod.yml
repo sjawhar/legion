@@ -1,13 +1,16 @@
-# The Go live harnesses' operator: what an operator puts in runtime.kubernetes.pod to route every
-# Legion pod's model turns through the Hawk model gateway (middleman). Legion knows none of it; it
-# delivers these pieces to every worker pod and the image probe's pod (docs/kubernetes.md,
-# "Operator configuration"). The shape is the one agent-c's admission policies admit for a Legion
-# pod (legion-sandbox-pods, legion-middleman-audience): ServiceAccount legion-worker, exactly one
-# projected serviceAccountToken source, alone in its volume, for audience middleman-legion, lasting
-# at most 3600 s. The ConfigMap named here, legion-operator-route, holds this directory's models.yml
-# (its baseUrl the operator's LEGION_E2E_MODEL_GATEWAY_URL) and overlay.yml. A harness run creates
-# its own copy, legion-operator-route-<project>, before any pod runs, points the pods at it in place
-# of this name, and deletes it after, so runs sharing the namespace never share the route.
+# One operator's `runtime.kubernetes.pod`: what routes every Legion pod's model turns through the
+# Hawk model gateway (middleman). Legion knows none of it; it delivers these pieces to every worker
+# pod and the image probe's pod (docs/kubernetes.md, "Operator configuration"). The shape is the one
+# agent-c's admission policies admit for a Legion pod (legion-sandbox-pods,
+# legion-middleman-audience): ServiceAccount legion-worker, exactly one projected
+# serviceAccountToken source, alone in its volume, for audience middleman-legion, lasting at most
+# 3600 s. Both are cluster-wide, not per-project: a second Legion project in this namespace uses
+# this same ServiceAccount and audience (README.md, "One route or one per project").
+#
+# The ConfigMap named here, legion-operator-route, holds this directory's models.yml and
+# overlay.yml; apply.sh creates it. A live harness run creates its own copy instead,
+# legion-operator-route-<run>, points its pods at that name, and deletes it after, so a run sharing
+# the namespace never touches the durable route.
 env:
   # The operator's settings overlay (overlay.yml), named after Legion's pod baseline, so it
   # outranks the baseline and every repository's .omp/config.yml.

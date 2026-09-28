@@ -347,7 +347,7 @@ Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `
 `config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
 image probe's included, and refused where they name a path or variable of Legion's own or the
 worker image's. `provider_keys` names keys of the providers Secret, which every pod mounts, those
-keys alone, for the shim to export. `scripts/e2e/fixtures/operator-route/` is one operator's: the
+keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is one operator's: the
 Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings
 overlay, and the pod that mounts them; the Stage 4a and 4b proofs run on it, each with its own copy
 of its ConfigMap.
@@ -676,7 +676,7 @@ worker image's; and the top-level `provider_keys` maps each variable Oh My Pi re
 providers Secret, of which every pod then mounts those keys alone, for the shim to export.
 Legion holds no model route: everything a pod's Oh My Pi needs to reach a model — a `models.yml`,
 a settings overlay in `PI_CONFIG_FILES`, a token — is the operator's, through `pod` and
-`provider_keys`. `scripts/e2e/fixtures/operator-route/` is one such operator's (the Go live
+`provider_keys`. `deploy/kubernetes/operator-route/` is one such operator's (the Go live
 harnesses': the Hawk model gateway, keyed by a projected ServiceAccount token). [Operator
 configuration](#operator-configuration) is what an operator gives it.
 
@@ -783,9 +783,12 @@ claim's pod and the image probe's.
   collides with Legion's own is refused at load, naming both: a variable the runtime, the worker
   image's `ENV` or every launch sets, a volume name Legion uses, or a mount at, under or above a path
   Legion mounts, the image owns, or a tool runs from. `legion start --check-config` runs the same
-  check. [`scripts/e2e/fixtures/operator-route/pod.yml`](../scripts/e2e/fixtures/operator-route/pod.yml)
-  is a complete one, the live harnesses': a `models.yml` and a settings overlay from a ConfigMap, and
-  a projected token its key command reads.
+  check. [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is a
+  complete one, the route this cluster runs on and the Go live harnesses prove: a `models.yml` and a
+  settings overlay from a ConfigMap, and a projected token its key command reads. Its
+  `apply.sh` creates the durable ConfigMap `pod.yml` mounts; its README answers whether a second
+  project needs its own ServiceAccount and audience (it does not), and how `pod` and `provider_keys`
+  compose.
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (AGENTC-393 Plan C), so an agent in a pod runs `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback

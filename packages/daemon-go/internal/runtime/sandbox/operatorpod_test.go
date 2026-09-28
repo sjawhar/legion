@@ -51,7 +51,7 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		byBaseline = "the pod baseline sets (internal/podsafety)"
 		byOperator = "runtime.kubernetes.pod.env sets"
 	)
-	fixture, err := config.ReadPodFile(filepath.Join("..", "..", "..", "..", "..", "scripts", "e2e", "fixtures", "operator-route", "pod.yml"))
+	fixture, err := config.ReadPodFile(filepath.Join("..", "..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}

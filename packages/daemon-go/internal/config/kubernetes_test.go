@@ -658,11 +658,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 	}
 }
 
-// operatorRoutePod is the Go live harnesses' operator pod (scripts/e2e/fixtures/operator-route/
-// pod.yml), indented to sit under `runtime.kubernetes.pod`.
+// operatorRoutePod is the operator route the Go live harnesses run on
+// (deploy/kubernetes/operator-route/pod.yml), indented to sit under `runtime.kubernetes.pod`.
 func operatorRoutePod(t *testing.T) string {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "scripts", "e2e", "fixtures", "operator-route", "pod.yml"))
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "deploy", "kubernetes", "operator-route", "pod.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}

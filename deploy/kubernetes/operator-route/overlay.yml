@@ -1,5 +1,5 @@
-# The live harnesses' operator settings (pod.yml names this file in PI_CONFIG_FILES, after Legion's
-# pod baseline): every model turn on the gateway's aliases (models.yml), with nothing to fall back
+# One operator's Oh My Pi settings (pod.yml names this file in PI_CONFIG_FILES, after Legion's pod
+# baseline): every model turn on the gateway's aliases (models.yml), with nothing to fall back
 # to. Oh My Pi falls back from a failing provider without a word, so enabledModels holds every
 # session's own model to the aliases, and each provider a pod could reach without the gateway is
 # disabled, as scripts/e2e/lib/install-model-gateway.sh does for the tmux proofs: Bedrock twice (a
