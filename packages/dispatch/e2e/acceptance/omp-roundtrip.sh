@@ -68,6 +68,11 @@ readonly extension="$pi_envoy_dir/dist/envoy.js"
 readonly session_dir="$(mktemp -d "/tmp/dispatch-omp-${mode,,}-sessions.XXXXXX")"
 readonly work_dir="$(mktemp -d "/tmp/dispatch-omp-${mode,,}-work.XXXXXX")"
 readonly tmux_session="dispatch-i1-${mode,,}-$$"
+# The acceptance runs its own tmux server on a socket in its work directory, so its cleanup can end
+# only the session it started (`tmux kill-session` on the shared default server could end anyone's),
+# and that server takes the environment exported below, where an existing server would keep its own.
+readonly tmux_socket="$work_dir/tmux.sock"
+tmux() { command tmux -S "$tmux_socket" "$@"; }
 
 export DISPATCH_URL DISPATCH_TOKEN ENVOY_URL ENVOY_NATS_URL
 
@@ -201,6 +206,7 @@ readonly -a omp_args=(
   "$prompt"
 )
 printf -v tmux_command '%q ' "${omp_args[@]}"
+printf 'tmux session %s; watch it with: tmux -S %s attach -t %s\n' "$tmux_session" "$tmux_socket" "$tmux_session"
 tmux new-session -d -s "$tmux_session" -c "$work_dir" "$tmux_command"
 
 readonly transcript="$(await_session_file)"

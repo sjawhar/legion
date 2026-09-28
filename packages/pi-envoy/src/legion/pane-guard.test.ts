@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -20,8 +21,8 @@ let env: NodeJS.ProcessEnv;
 const repository = path.resolve(import.meta.dir, "../../../..");
 
 // Where the guard refuses each tracked shell script: the innermost `file:line` its refusal names.
-// It is regenerated with pane-guard-scripts.ts, never edited by hand. A failure has one of two
-// shapes, and they want opposite responses:
+// Every entry is pane-guard-scripts.ts's output, never typed by hand, filed under the comment that
+// says why its script is refused. A failure has one of two shapes, and they want opposite responses:
 //
 // - Entries changed (`Expected - N`, `Received + N`) for files the branch contains: a refusal moved
 //   to another line or file. If the guard or the script changed it on purpose, regenerate;
@@ -35,30 +36,28 @@ const repository = path.resolve(import.meta.dir, "../../../..");
 // is what makes a refusal that moves fail here. The test is not flaky: it is right about a
 // population that changed.
 const EXPECTED_SCRIPT_REFUSALS: Record<string, string> = {
-  ".github/scripts/release-push.sh": ".github/scripts/release-push.sh:103",
-  "packages/claude-envoy/scripts/smoke-channel.sh":
-    "packages/claude-envoy/scripts/smoke-channel.sh:149",
-  "packages/claude-envoy/scripts/smoke-clear-rebind.sh":
-    "packages/claude-envoy/scripts/smoke-clear-rebind.sh:42",
-  "packages/dispatch/e2e/acceptance/omp-roundtrip.sh":
-    "packages/dispatch/e2e/acceptance/omp-roundtrip.sh:76",
+  // Writes or deletes under the operator's home: the dispatch backups, a profile's plugin tree, a
+  // Claude project directory.
   "packages/envoy/deploy/scripts/autodeploy.sh": "packages/envoy/deploy/scripts/autodeploy.sh:145",
+  "packages/pi-envoy/scripts/grant-rig/setup.sh": "packages/pi-envoy/scripts/grant-rig/setup.sh:56",
+  "packages/claude-envoy/scripts/smoke-clear-rebind.sh":
+    "packages/claude-envoy/scripts/smoke-clear-rebind.sh:62",
+  // Deletes the backups `find` lists: a path read from a command's output.
   "packages/envoy/deploy/scripts/autodeploy_test.sh":
     "packages/envoy/deploy/scripts/autodeploy.sh:80",
-  "packages/envoy/deploy/scripts/sync-host.sh": "packages/envoy/deploy/scripts/sync-host.sh:11",
-  "packages/envoy/scripts/verify-cluster.sh": "packages/envoy/scripts/verify-cluster.sh:94",
-  "packages/pi-envoy/scripts/grant-rig/setup.sh": "packages/pi-envoy/scripts/grant-rig/setup.sh:56",
-  "packages/pi-envoy/scripts/smoke-btw.sh": "packages/pi-envoy/scripts/smoke-btw.sh:219",
-  "packages/pi-envoy/scripts/smoke-delivery.sh": "packages/pi-envoy/scripts/smoke-delivery.sh:230",
-  "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
+  // Kills the processes a query selects (`$(run_processes)`, `first_child`), not pids it started.
+  "scripts/e2e/controller-start-tmux.sh": "scripts/e2e/controller-start-tmux.sh:67",
+  // A library run bare, without the arguments every caller passes: bash stops at its argument
+  // check, and the guard, which walks a command whatever a test before it decides, reaches the
+  // paths an empty argument makes (`--control`, `--dest`).
   "scripts/e2e/lib/check-model-route.sh": "scripts/e2e/lib/check-model-route.sh:99",
-  "scripts/e2e/lib/install-model-gateway.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
-  "scripts/e2e/lib/install-plugin-profile.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
-  "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
-  "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
-  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/lib/install-model-gateway.sh:139",
-  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/install-plugin-profile.sh:157",
-  "scripts/sync-envoy-host.sh": "packages/envoy/deploy/scripts/sync-host.sh:11",
+  // Runs the gateway key command it writes, whose `command=(%s)` line takes a value built from
+  // `$(command -v hawk-token)`: a script the guard cannot read. The drivers run it before any pane.
+  "scripts/e2e/lib/install-model-gateway.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage2-tmux-supervision.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage3-4b13b-acceptance.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage3-devbox-workflow.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
+  "scripts/e2e/stage4b-sandbox-tree.sh": "scripts/e2e/lib/install-model-gateway.sh:185",
 };
 
 beforeAll(() => {
@@ -141,6 +140,46 @@ describe("the pane guard's command families", () => {
       expect(bash(`cd ~ && ${build(".bashrc")}`)).toContain(path.join(home, ".bashrc"));
     });
   }
+
+  // A rig's make_omp_home puts the pane's HOME in the run's own /tmp directory, beside its state.
+  for (const [family, build] of Object.entries(FAMILIES)) {
+    test(`${family}: a HOME under /tmp keeps its files, and the run directory holding it is refused whole`, () => {
+      const run = path.join(scratch, "legion-e2e-run");
+      const rigHome = path.join(run, "omp-home");
+      const rigWorkspace = path.join(run, "state", "workspaces", "LEGION-2");
+      mkdirSync(path.join(rigHome, ".ssh"), { recursive: true });
+      const sibling = `${run}2`;
+      mkdirSync(rigWorkspace, { recursive: true });
+      mkdirSync(sibling, { recursive: true });
+      writeFileSync(path.join(rigHome, ".ssh", "id_ed25519"), "key");
+      writeFileSync(path.join(rigHome, ".bashrc"), "profile");
+      writeFileSync(path.join(rigWorkspace, "notes.txt"), "notes");
+      writeFileSync(path.join(sibling, "notes.txt"), "notes");
+      const rigGuard = createPaneGuard({ workspace: rigWorkspace, ompPid: process.pid, scratch });
+      const rigEnv = { ...env, HOME: rigHome, LEGION_WORKSPACE: rigWorkspace };
+      const rig = (command: string): string | undefined =>
+        rigGuard.bash(command, rigWorkspace, rigEnv);
+      try {
+        for (const target of ['"$HOME/.bashrc"', "~/.ssh/id_ed25519", run]) {
+          expect(rig(build(target)), target).toContain("outside the issue workspace");
+        }
+        // The rig's workspace and the pane's own /tmp directories stay writable, a sibling whose
+        // name only starts with the run directory's included; a glob that could reach the run
+        // directory is refused.
+        for (const target of [
+          '"$LEGION_WORKSPACE/notes.txt"',
+          `${scratch}/mine/notes.txt`,
+          `${sibling}/notes.txt`,
+        ]) {
+          expect(rig(build(target)), target).toBeUndefined();
+        }
+        expect(rig(`rm -rf ${scratch}/legion-e2e-r*`)).toContain("a glob over");
+      } finally {
+        rmSync(run, { recursive: true, force: true });
+        rmSync(sibling, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 describe("resolution", () => {
@@ -165,10 +204,185 @@ describe("resolution", () => {
     expect(bash(`rm -rf "\${HOME:-/nowhere}"`)).toContain(home);
   });
 
+  test("keeps a variable unset after unset, apart from empty and from the pane's environment", () => {
+    const ssh = path.join(home, ".ssh");
+    // `-` and `+` test whether a name is set, where `:-` and `:+` test whether it is non-empty.
+    for (const command of [
+      `unset D; rm -rf "\${D-$HOME/.ssh}"`,
+      `D=x; unset D; rm -rf "\${D-$HOME/.ssh}"`,
+      `env -u D rm -rf "\${D-$HOME/.ssh}"`,
+      `unset D; rm -rf "\${D:-$HOME/.ssh}"`,
+      // Unset hides the pane's environment value too, in this shell and in a child.
+      `unset LEGION_WORKSPACE; rm -rf "\${LEGION_WORKSPACE-$HOME/.ssh}"`,
+      `unset LEGION_WORKSPACE; bash -c 'rm -rf "\${LEGION_WORKSPACE-$HOME/.ssh}"'`,
+    ]) {
+      expect(bash(command), command).toContain(ssh);
+    }
+    expect(bash(`D=x; unset D; rm -rf "\${D+$LEGION_WORKSPACE}/.ssh"`)).toContain("(/.ssh)");
+    // An unset name expands to nothing.
+    expect(bash('D="$HOME"; unset D; rm -rf "$LEGION_WORKSPACE/$D"')).toBeUndefined();
+  });
+
+  test("follows every write to a variable, and forgets what a write it cannot read may change", () => {
+    const safe = 'd="$LEGION_WORKSPACE/safe"';
+    const array = 'd=("$LEGION_WORKSPACE/safe")';
+    for (const command of [
+      // A scalar write to an array's name is its element 0.
+      `${array}; printf -v d '%s' "$HOME/.ssh"; rm -rf "\${d[0]}"`,
+      `${array}; declare d="$HOME/.ssh"; rm -rf "\${d[0]}"`,
+      `${array}; read -r d <<< "$HOME/.ssh"; rm -rf "\${d[0]}"`,
+      `${array}; for d in "$HOME/.ssh"; do rm -rf "\${d[0]}"; done`,
+      // An array element or a quoted assignment named to a builtin.
+      `${safe}; printf -v 'd[0]' '%s' "$HOME/.ssh"; rm -rf "$d"`,
+      `${safe}; read -r 'd[0]' <<< "$HOME/.ssh"; rm -rf "$d"`,
+      `${safe}; declare 'd[0]'="$HOME/.ssh"; rm -rf "$d"`,
+      `${safe}; declare "d=$HOME/.ssh"; rm -rf "$d"`,
+      `${safe}; export "d=$HOME/.ssh"; rm -rf "$d"`,
+      // A name the guard cannot read may be any variable, one from the pane's environment too.
+      `${safe}; printf -v "$(cat n)" '%s' "$HOME/.ssh"; rm -rf "$d"`,
+      `${safe}; declare "$(cat n)=$HOME/.ssh"; rm -rf "$d"`,
+      `read -r "$(cat n)" <<< "$HOME"; rm -rf "$LEGION_WORKSPACE/x"`,
+      `${safe}; unset "$(cat n)"; rm -rf "/\${d+$LEGION_WORKSPACE/w}"`,
+      `${safe}; eval "$(cat f)"; rm -rf "$d"`,
+      // `${d:=x}` and `${d=x}` assign the operand.
+      `unset d; : "\${d:=$HOME/.ssh}"; rm -rf "$d"`,
+      `unset d; : "\${d=$HOME/.ssh}"; rm -rf "$d"`,
+      // Arithmetic and `wait -p` assign.
+      `${safe}; (( d = 0 )); rm -rf "/$d"`,
+      `${safe}; : $(( d += 1 )); rm -rf "/$d"`,
+      `${safe}; let d=0; rm -rf "/$d"`,
+      `${safe}; for ((d = 0; d < 1; d++)); do :; done; rm -rf "/$d"`,
+      `${safe}; sleep 1 & wait -p d; rm -rf "/$d"`,
+      // A function's local is the caller's variable again once it returns, and one that is local
+      // on some paths only may be either.
+      `d="$HOME/.ssh"; f() { local d="$LEGION_WORKSPACE/x"; }; f; rm -rf "$d"`,
+      `d="$HOME/.ssh"; f() { declare d; d="$LEGION_WORKSPACE/x"; }; f; rm -rf "$d"`,
+      `${safe}; f() { if [ -n "$Z" ]; then local d; fi; d="$HOME/.ssh"; }; f; rm -rf "$d"`,
+      // A branch that may leave a name unset leaves whether it is set unknown.
+      `if [ -n "$Z" ]; then d=x; fi; rm -rf "/\${d+$LEGION_WORKSPACE/w}"`,
+      `d=x; if [ -n "$Z" ]; then unset d; fi; rm -rf "/\${d+$LEGION_WORKSPACE/w}"`,
+      // `unset -f` removes a function, so its name runs the command again.
+      "rm() { :; }; unset -f rm; rm -rf ~",
+      "rm() { :; }; unset rm; rm -rf ~",
+      // A plain assignment to an array's name keeps its other elements.
+      `d=("$LEGION_WORKSPACE/a" "$HOME/.ssh"); d="$LEGION_WORKSPACE/x"; rm -rf "\${d[@]}"`,
+      // `readonly` refuses a later write, and `-u`, `-l` and `-i` rewrite it.
+      `d="$HOME/.ssh"; readonly d; printf -v d '%s' "$LEGION_WORKSPACE/x"; rm -rf "$d"`,
+      `d="$HOME/.ssh"; if [ -n "$Z" ]; then readonly d; fi; d="$LEGION_WORKSPACE/x"; rm -rf "$d"`,
+      `declare -u d; d="$LEGION_WORKSPACE/x"; rm -rf "$d"`,
+      `declare -i n; n="$LEGION_WORKSPACE"; rm -rf "/$n"`,
+    ]) {
+      expect(bash(command), command).toBeDefined();
+    }
+    // A nameref's writes land in another variable, which the guard does not follow.
+    expect(bash('declare -n r=d; r="$HOME/.ssh"; rm -rf "$d"')).toContain("nameref");
+    for (const command of [
+      `d=("$HOME/.ssh" "$LEGION_WORKSPACE/b"); printf -v d "%s" "$LEGION_WORKSPACE/a"; rm -rf "\${d[0]}"`,
+      'd="$LEGION_WORKSPACE/x"; f() { local d="$HOME/.ssh"; }; f; rm -rf "$d"',
+      `unset d; : "\${d:=$LEGION_WORKSPACE/x}"; rm -rf "$d"`,
+      'n=d; printf -v "$n" "%s" "$LEGION_WORKSPACE/x"; rm -rf "$d"',
+      'f() { local d="$LEGION_WORKSPACE/$1"; rm -rf "$d"; }; f a',
+      'readonly d="$LEGION_WORKSPACE/x"; export d; rm -rf "$d"',
+    ]) {
+      expect(bash(command), command).toBeUndefined();
+    }
+  });
+
+  test("resolves the paths realpath, dirname, basename and readlink -f print", () => {
+    expect(bash('d=$(realpath -m -- "$LEGION_WORKSPACE/a/../b"); rm -rf "$d"')).toBeUndefined();
+    expect(bash('d=$(realpath -m -- "$HOME/a/../.ssh"); rm -rf "$d"')).toContain(
+      path.join(home, ".ssh")
+    );
+    expect(bash('d=$(dirname "$HOME/.ssh/id"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
+    expect(bash('d="$LEGION_WORKSPACE/$(basename "$HOME/x")"; rm -rf "$d"')).toBeUndefined();
+    expect(bash('d=$(readlink -f "$HOME/.ssh"); rm -rf "$d"')).toContain(path.join(home, ".ssh"));
+  });
+
+  test("never resolves git rev-parse --show-toplevel, whose answer config it cannot read decides", () => {
+    const repo = path.join(workspace, "repo");
+    expect(spawnSync("git", ["init", "-q", repo]).status).toBe(0);
+    const bare = path.join(workspace, "bare");
+    expect(spawnSync("git", ["init", "-q", bare]).status).toBe(0);
+    expect(spawnSync("git", ["-C", bare, "config", "core.bare", "true"]).status).toBe(0);
+    const stale = path.join(workspace, "stale");
+    mkdirSync(stale, { recursive: true });
+    writeFileSync(path.join(stale, ".git"), `gitdir: ${path.join(workspace, "moved-away")}\n`);
+    const toplevel = 'rm -rf "$(git rev-parse --show-toplevel)/.ssh"';
+    try {
+      // Git prints the repository here, but a command before it in the same line, or the config it
+      // left, can move the answer (core.worktree), and in the others git prints nothing, so the
+      // path bash deletes is `/.ssh`.
+      for (const [command, cwd] of [
+        [toplevel, repo],
+        [`git config core.worktree "$HOME" && ${toplevel}`, repo],
+        [toplevel, bare],
+        [toplevel, stale],
+        [toplevel, path.join(repo, ".git", "refs")],
+      ] as const) {
+        expect(bash(command, cwd), `${command} in ${cwd}`).toContain("a command's output");
+      }
+    } finally {
+      for (const dir of [repo, bare, stale]) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("evaluates a known value's pattern replacement and removal", () => {
+    expect(bash(`v="$HOME/a"; rm -rf "\${v//$HOME/$LEGION_WORKSPACE}"`)).toBeUndefined();
+    expect(bash(`v="$LEGION_WORKSPACE/a"; rm -rf "\${v/$LEGION_WORKSPACE/$HOME}"`)).toContain(
+      path.join(home, "a")
+    );
+    expect(bash(`v="x:$LEGION_WORKSPACE/a:b"; rm -rf "\${v#*:}"`)).toBeUndefined();
+    expect(bash(`v="x:$HOME/.ssh"; rm -rf "\${v#*:}"`)).toContain(path.join(home, ".ssh"));
+    expect(bash(`v="$HOME/.ssh/x.y.z"; rm -rf "\${v%/*}"`)).toContain(path.join(home, ".ssh"));
+    expect(bash(`v="$HOME/.ssh.tar.gz"; rm -rf "\${v%%.tar*}"`)).toContain(path.join(home, ".ssh"));
+    expect(bash(`v="/a/b$HOME"; rm -rf "\${v##/a/b}"`)).toContain(home);
+    // An unknown value or pattern leaves the result unknown, and so does a replacement holding `&`,
+    // which bash 5.2 replaces with the matched text.
+    expect(bash(`v=$(cat f); rm -rf "\${v//x/y}"`)).toContain(
+      "{v//x/y}` (`$(cat f)` (a command's output))"
+    );
+    expect(bash(`v="$HOME"; rm -rf "\${v//$(cat f)/y}"`)).toContain("{v//$(cat f)/y}`)");
+    expect(bash(`v="$LEGION_WORKSPACE/a"; rm -rf "\${v//a/&}"`)).toContain("{v//a/&}`)");
+    // After `/` or `//`, bash reads a leading `/` as the pattern's first character, where the parser
+    // reads an empty pattern: `${v////x}` replaces every `/` with `x`. That operand, and a pattern
+    // that expands to nothing, are unknown rather than a value left as it was.
+    expect(bash(`v="$LEGION_WORKSPACE/build"; rm -rf "\${v/////home/victim}"`)).toContain(
+      "{v/////home/victim}`)"
+    );
+    expect(bash(`v="$LEGION_WORKSPACE/build"; rm -rf "\${v////x}"`)).toContain("{v////x}`)");
+    expect(bash(`e=; v="$LEGION_WORKSPACE/build"; rm -rf "\${v//$e/x}"`)).toContain("{v//$e/x}`)");
+    // An escaped slash is the pattern's own character, as bash reads it.
+    expect(bash(`v="$LEGION_WORKSPACE/a/b"; rm -rf "/\${v//\\//_}"`)).toContain(
+      `(/${workspace.replaceAll("/", "_")}_a_b)`
+    );
+  });
+
+  test("assigns what printf -v prints, the name joined to the option or apart", () => {
+    for (const option of ["-v d", "-vd"]) {
+      expect(
+        bash(`d="$LEGION_WORKSPACE/x"; printf ${option} '%s' "$HOME/.ssh"; rm -rf "$d"`)
+      ).toContain(path.join(home, ".ssh"));
+      expect(bash(`printf ${option} '%s' "$LEGION_WORKSPACE/b"; rm -rf "$d"`)).toBeUndefined();
+    }
+  });
+
+  test("matches no pattern over text outside ASCII, whose characters depend on the locale", () => {
+    // `?` is one character to bash in a UTF-8 locale and one byte in the C locale, so a value or
+    // pattern outside ASCII is unknown: removal, and a `case` the guard would otherwise decide.
+    expect(bash(`v='📁'"$HOME/.ssh"; rm -rf "\${v#?}"`)).toContain("{v#?}`)");
+    expect(bash(`v='é'"$HOME/.ssh"; rm -rf "\${v#?}"`)).toContain("{v#?}`)");
+    expect(bash(`v='📁'; case "$v" in ?) rm -rf "$HOME/.ssh" ;; *) : ;; esac`)).toContain(
+      path.join(home, ".ssh")
+    );
+    expect(bash(`v=x; case "$v" in é) rm -rf "$HOME/.ssh" ;; *) : ;; esac`)).toContain(
+      path.join(home, ".ssh")
+    );
+  });
+
   test("refuses a target it cannot resolve, and never guesses one", () => {
     expect(bash('read d; rm -rf "$d"')).toContain("read from input");
     expect(bash('rm -rf "$NOT_SET_ANYWHERE"')).toContain("`$NOT_SET_ANYWHERE`");
-    expect(bash('rm -rf "$(git rev-parse --show-toplevel)"')).toContain("a command's output");
+    expect(bash('rm -rf "$(cat target.txt)"')).toContain("a command's output");
     expect(bash('for d in a "$X"; do rm -rf "$d"; done')).toContain("loop variable");
     // A known prefix inside the workspace bounds what follows it.
     expect(bash('rm -rf "$LEGION_WORKSPACE/build/$(date +%s)"')).toBeUndefined();
@@ -271,6 +485,76 @@ describe("resolution", () => {
       command = `for ${name} in ${words}; do ${command}; done`;
     }
     expect(bash(`${command}; rm -rf "$HOME"`)).toContain("walk limit");
+  });
+
+  test("charges one pattern expansion its worst-case matching, and refuses one past the budget", () => {
+    // `//` over the longest value it is evaluated over (512 characters) with a pattern of 772
+    // positions: its worst case is a budget of matching (`globWork`, 131,841 characters stepped
+    // times 780), so it is refused before it runs, though the target would be inside the
+    // workspace. A charge that under-counts the pattern or the value lets it through.
+    const v = `v=${"a".repeat(512)}`;
+    const over = `${"*a".repeat(385)}*b`;
+    expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v//${over}/x}"`)).toContain("walk limit");
+    // A quarter of it is matched, and bash's value is the target.
+    const under = `${"*a".repeat(100)}*b`;
+    expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v//${under}/x}"`)).toBeUndefined();
+    expect(bash(`${v}; rm -rf "/\${v//${under}/x}"`)).toContain(`rm would delete`);
+  });
+
+  test("matches a pattern with any number of stars in time the value and the pattern bound", () => {
+    // A regular expression for `*a*a*a*b` backtracks over a run of `a`s for time polynomial in the
+    // run, the stars its exponent: one of these held the pane for hours.
+    const v = `v=${"a".repeat(512)}`;
+    const stars = "*a*a*a*a*a*a";
+    expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v//${stars}*b/x}"`)).toBeUndefined();
+    expect(bash(`${v}; rm -rf "$LEGION_WORKSPACE/\${v%%${stars}*b}"`)).toBeUndefined();
+    expect(bash(`${v}; rm -rf "/\${v##${stars}}"`)).toContain("rm would delete");
+    // The `case` takes its second item alone: the first does not match, the second does.
+    expect(
+      bash(`${v}; case $v in ${stars}*b) rm -rf ~;; ${stars}) rm -rf "$LEGION_WORKSPACE/x";; esac`)
+    ).toBeUndefined();
+  });
+
+  test("counts a case pattern's matching against the walk budget", () => {
+    // Under the longest value the guard builds, so the match is attempted and charged.
+    const v = `v=${"a".repeat(60_000)}`;
+    expect(
+      bash(`${v}; case $v in ${"*a".repeat(2000)}b) :;; esac; rm -rf "$LEGION_WORKSPACE/x"`)
+    ).toContain("walk limit");
+  });
+
+  test("builds no value longer than it judges: a replacement's output, a doubling", () => {
+    // A replacement of a replacement reaches 134 million characters in a tenth of a second, and
+    // judging each read of it took seconds; past the longest value the guard builds, a value is
+    // unknown, and a refusal names why.
+    const v = `v=${"a".repeat(512)}`;
+    const grown = `${v}; w="\${v//?/$v}"; x="\${v//?/$w}"`;
+    expect(bash(`${grown}; rm -rf "/$x"`)).toContain("longer than");
+    const reads = Array.from({ length: 10 }, () => 'rm -rf "$LEGION_WORKSPACE/$x"').join("; ");
+    expect(bash(`${grown}; ${reads}`)).toBeUndefined();
+    const doubled = `x=aaaa; ${Array.from({ length: 24 }, () => 'x="$x$x"').join("; ")}`;
+    expect(bash(`${doubled}; rm -rf "/$x"`)).toContain("longer than");
+    // `printf -v` assigns what it renders without a join, and an unquoted read scans the value
+    // whole before any join bound applies: 2,000 arguments of 65,536 characters read back as
+    // `$y` took seconds. The first row covers that unquoted-read route and is a timing canary: it
+    // is allowed either way, only slowly without the bound. The second pins `printf -v`'s own
+    // check by the reason only it gives; without it, the join's bound refuses as "a word".
+    const rendered = `b=${"b".repeat(65_536)}; printf -v y '%s' ${Array.from({ length: 2000 }, () => '"$b"').join(" ")}`;
+    expect(bash(`${rendered}; w=$y; rm -rf "$LEGION_WORKSPACE/$w"`)).toBeUndefined();
+    expect(bash(`${rendered}; rm -rf $y`)).toContain("`$y` (printf -v), longer than");
+    // Zero characters doubled 24 times is 16 million pieces the length bound never sees.
+    const pieces = `z=""; ${Array.from({ length: 24 }, () => 'z="$z$z"').join("; ")}`;
+    expect(bash(`${pieces}; rm -rf "/$z"`)).toContain("longer than");
+    const printed = `x=aaaa; ${Array.from({ length: 24 }, () => `printf -v x '%s%s' "$x" "$x"`).join("; ")}`;
+    expect(bash(`${printed}; rm -rf "/$x"`)).toContain("longer than");
+    // A replacement whose output would pass the bound is not built: 80 of them, each 512 times a
+    // 60,000-character replacement, fit the walk budget and would build 2.5 billion characters,
+    // which unquoted the guard scans for splitting.
+    const expansions = Array.from({ length: 80 }, () => `: \${v//?/$r}`).join("; ");
+    const wide = `${v}; r=${"b".repeat(60_000)}; ${expansions}`;
+    expect(bash(`${wide}; rm -rf "$LEGION_WORKSPACE/x"`)).toBeUndefined();
+    // Under the bound, the value is bash's own.
+    expect(bash(`${v}; w="\${v//a/bb}"; rm -rf "/$w"`)).toContain(`(/${"b".repeat(1024)})`);
   });
 
   test("leaves ordinary work alone", () => {
@@ -675,6 +959,153 @@ describe("scripts a command runs", () => {
     expect(bash(`bash ${generated}`)).toBeUndefined();
   });
 
+  test("uses a function's path through a subshell that only sets its umask", () => {
+    const inside = script(
+      "function-umask.sh",
+      'work="$(mktemp -d)"\nheader() { local file="$work/header"; (umask 077 && : > "$file"); printf \'%s\\n\' "$file"; }\npath=$(header)\nrm -f "$path"\n'
+    );
+    expect(bash(`bash ${inside}`)).toBeUndefined();
+    const outside = script(
+      "function-umask-home.sh",
+      'header() { local file="$HOME/header"; (umask 077 && : > "$file"); printf \'%s\\n\' "$file"; }\npath=$(header)\nrm -f "$path"\n'
+    );
+    expect(bash(`bash ${outside}`)).toContain(path.join(home, "header"));
+    // A bare `umask` prints the mask, so it is output the guard cannot know.
+    expect(bash('f() { umask; echo "$LEGION_WORKSPACE/x"; }; rm -rf "$(f)"')).toContain(
+      "a command's output"
+    );
+  });
+
+  test("walks an argument loop over the arguments a script is given", () => {
+    const parser = script(
+      "arguments.sh",
+      'dest=\nwhile [ $# -gt 0 ]; do\n  case "$1" in\n  --dest)\n    dest=$2\n    shift 2\n    ;;\n  -h | --help) exit 0 ;;\n  *)\n    echo "unknown argument: $1" >&2\n    exit 2\n    ;;\n  esac\ndone\nrm -rf "$dest"\n'
+    );
+    expect(bash(`bash ${parser} --dest ${scratch}/mine/out`)).toBeUndefined();
+    // The loop resolves the argument; it does not allow it.
+    expect(bash(`bash ${parser} --dest "$HOME/out"`)).toContain(path.join(home, "out"));
+    // An argument the guard cannot know stays unknown through the loop.
+    expect(bash(`bash ${parser} --dest "$(cat dest.txt)"`)).toContain("a command's output");
+    // A condition over input the guard cannot know leaves the loop's assignments unknown.
+    expect(bash('d=; while read -r line; do d=$line; done < list.txt; rm -rf "$d"')).toContain(
+      "which a branch sets differently"
+    );
+  });
+
+  test("reads a positional parameter past the last argument as empty", () => {
+    const tail = script("positional.sh", 'rm -rf "$1/cache"\n');
+    // `bash <script>` with no arguments: `$1` is empty, so the target is `/cache`.
+    expect(bash(`bash ${tail}`)).toContain("(/cache)");
+    expect(bash(`bash ${tail} ${scratch}/mine`)).toBeUndefined();
+    // So is a pattern expansion of it: `${1#a}`, `${1%b}` and `${1//a/b}` over the empty string.
+    const patterned = script("positional-pattern.sh", `rm -rf "\${1#a}\${1%b}\${1//a/b}/cache"\n`);
+    expect(bash(`bash ${patterned}`)).toContain("(/cache)");
+    // A shell that did not say what its arguments are keeps `$1` unknown.
+    expect(bash('rm -rf "$1/cache"')).toContain("a positional parameter");
+  });
+
+  test("keeps every argument after a shift bash refuses: past the last, or negative", () => {
+    const ssh = path.join(home, ".ssh");
+    // Bash shifts nothing when the count exceeds `$#` or is negative; `$1` is still the first.
+    const overShift = script("over-shift.sh", 'shift 2\nrm -rf "$1"\n');
+    for (const command of [
+      'set -- "$HOME/.ssh" b; shift 3; rm -rf "$1"',
+      'set -- "$HOME/.ssh"; shift 2; rm -rf "$1"',
+      'set -- "$HOME/.ssh" b; shift -1; rm -rf "$1"',
+      'set -- "$HOME/.ssh"; shift 2; rm -rf "$@"',
+      'f() { shift 2; rm -rf "$1"; }; f "$HOME/.ssh"',
+      `bash ${overShift} "$HOME/.ssh"`,
+    ]) {
+      expect(bash(command), command).toContain(ssh);
+    }
+    // A shift within the count still moves the arguments.
+    expect(bash('set -- "$HOME/.ssh" "$LEGION_WORKSPACE/b"; shift; rm -rf "$1"')).toBeUndefined();
+  });
+
+  test("does not count the arguments a word may split into, glob into, or drop", () => {
+    const second = script("second.sh", 'rm -rf "$2"\n');
+    // Unquoted, `$v`, `$(…)`, `$*` and a glob give bash as many arguments as their fields, so a
+    // parameter past the ones the guard saw may still hold a path; it is unknown, never empty.
+    for (const command of [
+      'f() { rm -rf "$2"; }; v="a $HOME/.ssh"; f $v',
+      `v="a $HOME/.ssh"; bash ${second} $v`,
+      'v="a $HOME/.ssh"; set -- $v; rm -rf "$2"',
+      'f() { rm -rf "$2"; }; f $(cat list)',
+      'f() { rm -rf "$2"; }; g() { f $*; }; g "a $HOME/.ssh"',
+      'f() { rm -rf "$2"; }; f ~/*',
+      'f() { [ $# -gt 1 ] && rm -rf "$2"; }; v="a $HOME/.ssh"; f $v',
+    ]) {
+      expect(bash(command), command).toContain("rm would delete");
+    }
+    // An unquoted expansion that is empty is no argument at all, so the next one is `$1`.
+    for (const command of [
+      'f() { rm -rf "$1"; }; e=; f $e "$HOME/.ssh"',
+      'e=; set -- $e "$HOME/.ssh"; rm -rf "$1"',
+    ]) {
+      expect(bash(command), command).toContain(path.join(home, ".ssh"));
+    }
+    // Quoted, each word is one argument, empty or not, except `"$@"` and `"${arr[@]}"`, which are
+    // one per element: none for no element, one empty one for an element that is empty.
+    expect(bash('f() { rm -rf "$1"; }; e=; f "$e" "$HOME/.ssh"')).toBeUndefined();
+    expect(bash('f() { rm -rf "$2"; }; f "$(cat x)"')).toBeUndefined();
+    for (const command of [
+      'set --; f() { rm -rf "$1"; }; f "$@" "$HOME/.ssh"',
+      'set --; set -- "$@" "$HOME/.ssh"; rm -rf "$1"',
+      `arr=(); f() { rm -rf "$1"; }; f "\${arr[@]}" "$HOME/.ssh"`,
+      `arr=(""); f() { rm -rf "$2"; }; f "\${arr[@]}" "$HOME/.ssh"`,
+    ]) {
+      expect(bash(command), command).toContain(path.join(home, ".ssh"));
+    }
+    expect(bash('set --; f() { rm -rf "$1"; }; f "$*" "$HOME/.ssh"')).toBeUndefined();
+    // Stored, `"$@"` of none is the empty string bash assigns, one argument when quoted.
+    for (const command of [
+      'set --; x="$@"; f() { rm -rf "$2"; }; f "$x" "$HOME/.ssh"',
+      `arr=(); x="\${arr[@]}"; f() { rm -rf "$2"; }; f "$x" "$HOME/.ssh"`,
+      'set --; x="$@"; set -- "$x" "$HOME/.ssh"; rm -rf "$2"',
+      'set --; f() { local x="$@"; g "$x" "$HOME/.ssh"; }; g() { rm -rf "$2"; }; f',
+      'set --; export x="$@"; f() { rm -rf "$2"; }; f "$x" "$HOME/.ssh"',
+      `set --; Y[0]="$@"; f() { rm -rf "$2"; }; f "\${Y[@]}" "$HOME/.ssh"`,
+    ]) {
+      expect(bash(command), command).toContain(path.join(home, ".ssh"));
+    }
+    // An array's literal holds the words bash gives it, and a word that may be several leaves the
+    // elements unknown.
+    for (const command of [
+      `set -- "$LEGION_WORKSPACE/w" "$HOME/.ssh"; Y=("$@"); rm -rf "\${Y[1]}"`,
+      `arr=(); Y=("\${arr[@]}" "$HOME/.ssh"); rm -rf "\${Y[0]}"`,
+      `set --; Y=("$@"); f() { rm -rf "$2"; }; f "\${Y[0]}" "$HOME/.ssh"`,
+    ]) {
+      expect(bash(command), command).toContain(path.join(home, ".ssh"));
+    }
+    expect(bash(`S="a b"; Y=($S "$HOME/.ssh"); rm -rf "\${Y[2]}"`)).toContain("rm would delete");
+  });
+
+  test("tests a positional parameter's operator expansion against the argument it holds", () => {
+    const defaulted = script("positional-default.sh", `rm -rf "\${1:-$LEGION_WORKSPACE/build}"\n`);
+    expect(bash(`bash ${defaulted} "$HOME"`)).toContain(home);
+    expect(bash(`f() { rm -rf "\${1:-$LEGION_WORKSPACE/build}"; }; f "$HOME"`)).toContain(home);
+    // With no argument the default is what runs.
+    expect(bash(`bash ${defaulted}`)).toBeUndefined();
+    // A shell that did not say what its arguments are cannot say whether the default applies, nor
+    // whether `$1` is set at all: bash, given none, makes `/${1+x}` the root.
+    for (const operator of [":-", "-", ":+", "+"]) {
+      expect(bash(`rm -rf "/\${1${operator}$LEGION_WORKSPACE/build}"`), operator).toContain(
+        "rm would delete"
+      );
+    }
+  });
+
+  test("does not know the arguments after a shift in a branch it cannot decide", () => {
+    const shifted = script(
+      "shift-branch.sh",
+      'case "$(cat mode.txt)" in a) shift ;; esac\nrm -rf "$1"\n'
+    );
+    expect(bash(`bash ${shifted} ${scratch}/mine/x "$HOME"`)).toContain("a positional parameter");
+    const decided = script("shift-decided.sh", 'case "$1" in --) shift ;; esac\nrm -rf "$1"\n');
+    expect(bash(`bash ${decided} -- ${scratch}/mine/x`)).toBeUndefined();
+    expect(bash(`bash ${decided} -- "$HOME"`)).toContain(home);
+  });
+
   test("refuses every path a function can write to stdout", () => {
     const reason = bash('f() { echo "$HOME"; echo "$LEGION_WORKSPACE/x"; }; rm -rf $(f)');
     expect(reason).toBeDefined();
@@ -742,6 +1173,8 @@ describe("scripts a command runs", () => {
     ).toBeUndefined();
   });
 
+  // `bun packages/pi-envoy/src/legion/pane-guard-walk.ts <script>` lists every refusal a script
+  // meets, where this test sees only the first.
   test("checks every tracked shell script against the documented allow-list", () => {
     expect(trackedScriptRefusals(repository)).toEqual(EXPECTED_SCRIPT_REFUSALS);
   });
@@ -788,6 +1221,115 @@ describe("scripts a command runs", () => {
     expect(bash(`cp /etc/hostname ${file}; bash ${file}`)).toBeUndefined();
     expect(bash(`curl -o ${file} https://example.test; bash ${file}`)).toBeUndefined();
     expect(bash(`echo 'rm -rf ~' > ${file}; bash ${file}`)).toContain(home);
+    // An option changes what `echo` prints, so its output is not the words it was given.
+    for (const option of ["-e", "-n", "-ne", "-E"]) {
+      expect(bash(`echo ${option} 'rm -rf ~' > ${file}; bash ${file}`), option).toContain(
+        "cannot read before running it"
+      );
+    }
+    // An unquoted here-document expands `$`, a backquote and a backslash before one of them or a
+    // newline as bash writes it, so one holding them is text the guard cannot read; with nothing to
+    // expand, it is read as written.
+    expect(bash(`x='rm -rf ~'; cat > ${file} <<EOF\n$x\nEOF\nbash ${file}`)).toContain(
+      "cannot read before running it"
+    );
+    expect(bash(`tee ${file} >/dev/null <<EOF\n$(cat src)\nEOF\nbash ${file}`)).toContain(
+      "cannot read before running it"
+    );
+    expect(bash(`x='rm -rf ~'\nbash <<EOF\n$x\nEOF`)).toContain("cannot read the script");
+    expect(
+      bash(`d="$HOME/.ssh"\npython3 - <<PY\nimport shutil; shutil.rmtree("$d")\nPY`)
+    ).toContain("cannot read the program");
+    expect(bash(`cat > ${file} <<EOF\nrm -rf ~\nEOF\nbash ${file}`)).toContain(home);
+    expect(bash(`bash <<EOF\nrm -rf ~\nEOF`)).toContain(home);
+    expect(bash(`python3 - <<PY\nprint("a\\n")\nPY`)).toBeUndefined();
+  });
+
+  test("reads a script a brace group writes from here-documents and printf before running it", () => {
+    const writer = (value: string): string =>
+      script(
+        "group-writer.sh",
+        `work=$(mktemp -d)\n{\n  cat <<'EOF'\n#!/bin/bash\nEOF\n  printf 'target=%q\\n' ${value}\n  cat <<'EOF'\nrm -rf "$target"\nEOF\n} >"$work/run.sh"\nbash "$work/run.sh"\n`
+      );
+    expect(bash(`bash ${writer('"$work/out"')}`)).toBeUndefined();
+    expect(bash(`bash ${writer('"$HOME/out"')}`)).toContain(path.join(home, "out"));
+    // A value the guard cannot know is code the script holds even under `%q`, whose output form
+    // bash selects by value; the guard does not follow which quoting position the format gives it.
+    expect(bash(`bash ${writer('"$(cat target.txt)"')}`)).toContain(
+      "cannot read before running it"
+    );
+    // A statement whose output it cannot render leaves the script unreadable.
+    const opaque = script(
+      "group-opaque.sh",
+      'work=$(mktemp -d)\n{ cat <<\'EOF\'\n#!/bin/bash\nEOF\n  jq -r .body input.json; } >"$work/run.sh"\nbash "$work/run.sh"\n'
+    );
+    expect(bash(`bash ${opaque}`)).toContain("cannot read before running it");
+  });
+
+  test("reads no script that holds a value it cannot know as code", () => {
+    const f = '"$LEGION_WORKSPACE/f"';
+    const p = "p=$(cat src.txt)";
+    // `%s` and `echo` write a value into the script as it is, so it can carry `;`, a quote or a
+    // newline out of any position: an operand of a command that takes anything, a quote, an
+    // assignment, a comment. `%q` writes a form bash selects by value, and a value holding a newline
+    // selects `$'…'`, which closes a single- or double-quoted position. Read as one unknown word,
+    // each of these was allowed.
+    for (const command of [
+      `p='x'${"#".repeat(70_000)}; { printf '%s' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf '%s' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { echo "$p"; } > ${f}; bash ${f}`,
+      `${p}; printf -v q '%s' "$p"; printf '%s' "$q" > ${f}; bash ${f}`,
+      `${p}; printf '%s' "$p" > ${f}; bash ${f}`,
+      `${p}; { printf 'echo %s\\n' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf 'echo "%s"\\n' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf 'echo "%q"\\n' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf "echo '%q'\\n" "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf 'v=%s\\n' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { printf '# %s\\n' "$p"; } > ${f}; bash ${f}`,
+      `${p}; { echo "echo $p"; } > ${f}; source ${f}`,
+      // A word that may be several arguments moves every value after it to another conversion.
+      `u=$(cat list); printf 'n=%d\\nrm -rf %s\\n' $u "$LEGION_WORKSPACE/x" > ${f}; bash ${f}`,
+    ]) {
+      expect(bash(command), command.slice(0, 80)).toContain("cannot read before running it");
+    }
+    // What it can render is judged line by line.
+    expect(bash(`p='rm -rf ~/.ssh'; { printf '%s' "$p"; } > ${f}; bash ${f}`)).toContain(
+      "line 1 of"
+    );
+    // `%d` writes digits and a sign whatever it is given, so a value it cannot know is one unknown
+    // word there.
+    expect(bash(`${p}; { printf 'echo "%d"\\n' "$p"; } > ${f}; bash ${f}`)).toBeUndefined();
+    expect(bash(`${p}; { printf 'rm -rf /tmp/%d\\n' "$p"; } > ${f}; bash ${f}`)).toContain(
+      "line 1 of"
+    );
+    // A file never run is never read.
+    expect(bash(`printf 'Authorization: Bearer %s\\n' "$(cat token)" > ${f}`)).toBeUndefined();
+  });
+
+  test("reads no script a command writes that is longer than it reads from disk", () => {
+    // Rendering is cheap (the text is concatenated lazily); reading the result is not: a group of
+    // 2,000 `printf` of a 65,536-character value renders 131 MB and held the pane for seconds.
+    const b = `b=${"b".repeat(65_536)}`;
+    const printfs = (n: number) => Array.from({ length: n }, () => `printf '%s' "$b"`).join("; ");
+    const f = '"$LEGION_WORKSPACE/f"';
+    for (const command of [
+      `${b}; { ${printfs(2000)}; } > ${f}; bash ${f}`,
+      `${b}; ${Array.from({ length: 20 }, () => `printf '%s' "$b" >> ${f}`).join("; ")}; bash ${f}`,
+      `${b}; ${Array.from({ length: 20 }, () => `echo "$b" >> ${f}`).join("; ")}; bash ${f}`,
+      // Main already held the pane on these two (14 to 17 s for 8,000 arguments).
+      `${b}; printf '%s' ${Array.from({ length: 100 }, () => '"$b"').join(" ")} > ${f}; bash ${f}`,
+      `${b}; echo ${Array.from({ length: 100 }, () => '"$b"').join(" ")} > ${f}; bash ${f}`,
+    ]) {
+      expect(bash(command), command.slice(0, 120)).toContain("cannot read before running it");
+    }
+    // Up to the size, what it writes is read whole: a dangerous last line of a script just under
+    // the size is refused by its line, not cut off.
+    expect(bash(`${b}; { ${printfs(2)}; } > ${f}; bash ${f}`)).toBeUndefined();
+    const x = `x=${"x".repeat(1000)}`;
+    const lines = Array.from({ length: 1040 }, () => `printf '%s\\n' "$x"`).join("; ");
+    expect(bash(`${x}; { ${lines}; echo 'rm -rf $HOME/.ssh'; } > ${f}; bash ${f}`)).toContain(
+      "line 1041 of"
+    );
   });
 
   test("reads Python and JavaScript scripts for what they evaluate to", () => {
@@ -948,6 +1490,24 @@ describe("signals", () => {
           `pid_file=${pidFile}; sleep 60 & echo "$!" > "$pid_file"; pid="$(<"$pid_file")"; kill "$pid"`
         )
       ).toBeUndefined();
+      // A retry loop that starts the child on every pass: after the loop the variable is `$!` or,
+      // had the loop not run, empty, and either is safe to signal.
+      expect(
+        bash('pid=; for attempt in 1 2 3; do sleep 60 & pid=$!; done; kill -TERM "$pid"')
+      ).toBeUndefined();
+      expect(bash('pid=; if [ -s f ]; then pid=$(cat f); fi; kill -TERM "$pid"')).toContain(
+        "cannot resolve the pid"
+      );
+      // A function reading its pid argument through `${1:-}` still reads the pid it was given.
+      const stop = `stop() { local pid=\${1:-}; [ -n "$pid" ] || return 0; kill -TERM "$pid"; }`;
+      expect(bash(`${stop}; sleep 60 & child=$!; stop "$child"`)).toBeUndefined();
+      expect(bash(`${stop}; stop "$(cat server.pid)"`)).toContain("cannot resolve the pid");
+      // rig.sh's start_process names the pid variable at run time: `printf -v "${name}_pid" '%s' "$!"`.
+      const start = `start() { local name=$1; shift; "$@" & printf -v "\${name}_pid" '%s' "$!"; }`;
+      expect(bash(`${start}; start server sleep 60; kill -TERM "$server_pid"`)).toBeUndefined();
+      expect(bash('printf -v pid \'%s\' "$(cat server.pid)"; kill -TERM "$pid"')).toContain(
+        "cannot resolve the pid"
+      );
       // Allowed without a pid lookup: a job, the shell's own last background job, a probe.
       expect(bash("sleep 60 & kill $!")).toBeUndefined();
       expect(bash('pid=""; kill "$pid"')).toBeUndefined();
