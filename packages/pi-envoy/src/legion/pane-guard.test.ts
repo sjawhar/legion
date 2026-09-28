@@ -259,6 +259,15 @@ describe("resolution", () => {
     );
   });
 
+  test("assigns what printf -v prints, the name joined to the option or apart", () => {
+    for (const option of ["-v d", "-vd"]) {
+      expect(
+        bash(`d="$LEGION_WORKSPACE/x"; printf ${option} '%s' "$HOME/.ssh"; rm -rf "$d"`)
+      ).toContain(path.join(home, ".ssh"));
+      expect(bash(`printf ${option} '%s' "$LEGION_WORKSPACE/b"; rm -rf "$d"`)).toBeUndefined();
+    }
+  });
+
   test("matches no pattern over text outside ASCII, whose characters depend on the locale", () => {
     // `?` is one character to bash in a UTF-8 locale and one byte in the C locale, so a value or
     // pattern outside ASCII is unknown: removal, and a `case` the guard would otherwise decide.

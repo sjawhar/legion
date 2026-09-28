@@ -2244,12 +2244,15 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     case "printf": {
-      const at = literalText(rest[0]?.exp) === "-v" ? 0 : -1;
-      const variable = at === -1 ? undefined : literalText(rest[at + 1]?.exp);
+      // `-v NAME` or `-vNAME`, printf's one option, comes first.
+      const first = literalText(rest[0]?.exp);
+      const joined = first?.startsWith("-v") === true && first.length > 2;
+      const variable =
+        first === "-v" ? literalText(rest[1]?.exp) : joined ? first.slice(2) : undefined;
       if (variable !== undefined) {
         // `printf -v NAME '%s' VALUE` assigns VALUE as it is, a pid of this shell's included;
         // another format assigns what printf renders, known only when every part of it is.
-        const printed = rest.slice(at + 2);
+        const printed = rest.slice(joined ? 1 : 2);
         const [format, value, ...others] = printed;
         if (literalText(format?.exp) === "%s" && value !== undefined && others.length === 0) {
           outer.vars.set(variable, value.exp);
