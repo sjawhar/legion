@@ -12,6 +12,8 @@
 // `docker buildx build --load -t legion-envoy-smoke -f packages/envoy/docker/Dockerfile .`
 // then, in packages/envoy:
 // `ENVOY_SMOKE_IMAGE=legion-envoy-smoke go test -tags smoke -v ./internal/smoke/`
+// The test never rebuilds a named image, so run the build again after changing anything it
+// contains — listener or dispatch source, the contracts schemas, the SPA, or the Dockerfile.
 package smoke
 
 import (

@@ -64,7 +64,7 @@ where the build also reads base images the job pre-pulled.
 A step has the job's budget; a test has its own. Moving the build moves it from a five-minute
 deadline to one measured in hours, and what is left under `-timeout` is only what the test
 exists to exercise. Measured in CI: `TestSmoke` 283.84 s before, 0.98 s after, with the build
-155 s in its own step. On a devbox at load average 80: 5.3–6.2 s with a prebuilt image, 521.6 s
+155 s in its own step. On a devbox at load average 80: 2.2–6.2 s with a prebuilt image, 521.6 s
 when the same test built the image itself.
 
 The bound that remains is deliberate and stated beside the step, with the numbers it came from.

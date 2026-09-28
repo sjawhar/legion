@@ -426,9 +426,9 @@ jobs:
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
       # Testcontainers pulls a missing image when a test first asks for it, and the Docker daemon
       # reports a registry connection reset as an internal error that testcontainers does not
-      # retry, so one reset failed every test sharing that container. Pull every image a test step
-      # starts or builds from here instead (testnats.Image and the smoke image's base images), with
-      # the bounded retry the runner gives its own service images.
+      # retry, so one reset failed every test sharing that container. Pull every image the build
+      # or test steps start or build from here instead (testnats.Image and the smoke image's base
+      # images), with the bounded retry the runner gives its own service images.
       - name: Pull test container images
         run: |
           nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
