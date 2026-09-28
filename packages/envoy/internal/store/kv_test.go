@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2332,4 +2334,114 @@ func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) 
 			}
 		})
 	}
+}
+
+// stallingProxy forwards a NATS connection to target until the client creates the watcher named by
+// trigger and budget bytes of that watcher's scan have reached it, then stops forwarding server
+// bytes while still reading them, so the server never blocks and the client simply stops hearing
+// anything. That is the shape of a relayed link that stops passing traffic mid-scan, and it is
+// what nats.go's idle timer exists for. It returns the URL to connect to.
+func stallingProxy(t *testing.T, target, trigger string, budget int) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			server, err := net.Dial("tcp", target)
+			if err != nil {
+				_ = client.Close()
+				return
+			}
+			var armed atomic.Bool
+			go func() {
+				defer func() { _ = server.Close() }()
+				buf, tail := make([]byte, 32*1024), make([]byte, 0, 2*len(trigger))
+				for {
+					n, err := client.Read(buf)
+					if n > 0 {
+						if !armed.Load() {
+							tail = append(tail, buf[:n]...)
+							if bytes.Contains(tail, []byte(trigger)) {
+								armed.Store(true)
+							} else if len(tail) > len(trigger) {
+								tail = append(tail[:0], tail[len(tail)-len(trigger):]...)
+							}
+						}
+						if _, err := server.Write(buf[:n]); err != nil {
+							return
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
+			go func() {
+				defer func() { _ = client.Close() }()
+				buf, forwarded := make([]byte, 32*1024), 0
+				for {
+					n, err := server.Read(buf)
+					if n > 0 {
+						if !armed.Load() || forwarded < budget {
+							if armed.Load() {
+								forwarded += n
+							}
+							if _, err := client.Write(buf[:n]); err != nil {
+								return
+							}
+						}
+					}
+					if err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return "nats://" + listener.Addr().String()
+}
+
+// The listener's own failure, through real nats.go: a link that stops passing bytes partway
+// through the revision scan must fail Open, not open the registry on the claims that happened to
+// arrive. nats.go's idle timer reports that stall as ErrKeyWatcherTimeout on Error() and then
+// sends the same nil entry a finished scan sends, so a reader that takes the nil for a finished
+// scan restores a snapshot missing most of the bucket, and every claim it misses is a restored
+// holder released a session TTL early. Which error Open reports depends on how it reads the
+// bucket; that it reports one is the contract. The deterministic halves of both endings, including
+// that the timeout is carried, are in TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot.
+// Open's JetStream MaxWait is the timer's window, so this costs that wait once.
+func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
+	names := testBuckets(t)
+	direct, cleanup := connectNATS(t)
+	defer cleanup()
+	js, err := direct.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: names.roles, Storage: natsgo.FileStorage})
+	if err != nil {
+		t.Fatalf("create the role bucket: %v", err)
+	}
+	const claims = 400
+	for i := range claims {
+		putRoleClaim(t, rawRoles, fmt.Sprintf("role-%03d", i), fmt.Sprintf("ses_%03d", i))
+	}
+
+	target := strings.TrimPrefix(sharedTestNATSURI(t), "nats://")
+	stalled := testnats.Connect(t, stallingProxy(t, target, "$JS.API.CONSUMER.CREATE.KV_"+names.roles, 16*1024))
+	defer stalled.Close()
+
+	registry, err := Open(stalled, WithReplicas(1), withTestBuckets(t))
+	if err == nil {
+		t.Cleanup(registry.StopWatch)
+		t.Fatalf("Open succeeded over a link that stopped mid-scan, restoring %d of %d claims; the rest lose their grace", len(registry.restoredRoleRevisions), claims)
+	}
+	t.Logf("Open over a stalled link: %v", err)
 }
