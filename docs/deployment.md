@@ -36,8 +36,20 @@ whitespace alone. A script the command writes and then runs is refused as one th
 read when a value it cannot know is written into it by `printf %s`, `printf %q` or `echo` (bash
 parses the value as code, so a `;`, a quote or a newline in it escapes any position), when `echo`
 takes an option first, or when an unquoted here-document holds text bash expands; `printf %d`
-writes only digits and a sign, so it is read. A shell or interpreter reading such a here-document
-as its program is refused too. A target with no proven path prefix is refused, as is a command the
+writes only digits and a sign, so it is read. It is refused too when the write sits anywhere the
+shell may not have performed it: inside an `if`, `elif` or `else` body, an `&&` or `||`
+right-hand side, a `case` arm the guard cannot decide, a `while`, `until`, `for`, `for ((;;))` or
+`select` body, a handler whose signal may never arrive or that a body the shell may skip
+registered, or one definition of several a name may hold — and inside a command this shell does
+not wait for: a background command, a coprocess, a coprocess-like earlier part of the same
+pipeline, or a process substitution. Whether such a body runs is a fact of the run, so the guard
+cannot decide it and will not assume it; write the script with the write tool first. A write on
+the straight-line path is read as before, and so is one in a subshell, a brace group, a command
+substitution, a called function or an `EXIT` handler this shell certainly registered. The same
+rule governs a file holding a pid that `kill "$(<file)"` reads, except that a body which can only
+replace one pid this shell started with another leaves it signalable. A shell or interpreter
+reading such a here-document as its program is refused too. A target with no proven path prefix
+is refused, as is a command the
 parser reports as malformed. An unknown trailing component under a prefix already proven inside a
 permitted root remains allowed. `pkill`, `killall`, and `fuser -k` are refused outright. For
 `tmux kill-*`, the guard resolves the socket as tmux does

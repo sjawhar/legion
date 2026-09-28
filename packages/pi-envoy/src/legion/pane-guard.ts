@@ -205,6 +205,36 @@ interface Ctx {
   readonly ompPid: number;
   readonly parentOf: (pid: number) => number | undefined;
   readonly steps: { count: number };
+  /** How many bodies the walk has entered that the shell may never enter, or may not have
+   * finished, by the time a later command reads what they wrote (`uncertainly`, `modelWrite`).
+   * Where the walk is, not what the shell holds, so it lives here and not in `State`. */
+  readonly uncertain: { depth: number };
+}
+
+/** Why the guard cannot read what a command wrote to a file. A refusal names it, so an agent
+ * rewrites for the reason that actually fired: one text serving every cause sent it looking for
+ * output it could not render when the write was in a branch, or an append to a file nothing in
+ * the command had written. */
+interface UnknownContents {
+  readonly why: string;
+}
+
+/** What a command wrote to a file: the text, or why the guard cannot know it. */
+type FileContents = string | UnknownContents;
+
+/** What a command wrote to a file before it ran it: its text, or why the guard cannot know it.
+ * Shared by every subshell of one command, and exposing no `set`, so `modelWrite` is the only way
+ * a write is recorded and no later site can record one without the rule that governs it. */
+interface FileModel {
+  has(file: string): boolean;
+  get(file: string): FileContents | undefined;
+}
+
+/** Files this shell wrote with a pid it started, indexed by resolved path. `delete` stays, since
+ * forgetting one only makes the file unknown; `modelPidFile` is the only writer. */
+interface PidFileModel {
+  get(file: string): Expansion | undefined;
+  delete(file: string): boolean;
 }
 
 interface State {
@@ -213,9 +243,7 @@ interface State {
   cwd: string | undefined;
   cwdWhy: string;
   positional: readonly Expansion[] | undefined;
-  /** Files this command writes before it runs them: path to content, or null when the guard
-   * cannot know what was written. Shared by every subshell of one command. */
-  readonly files: Map<string, string | null>;
+  readonly files: FileModel;
   backgroundStarted: boolean;
   /** Inside a shell this command starts (`bash -c`, a script): `$$` is a descendant. */
   readonly nested: boolean;
@@ -228,8 +256,7 @@ interface State {
   argv0: Expansion | undefined;
   /** Every output a function's substitution can emit. `undefined` means it emitted an unknown value. */
   output: readonly Expansion[] | undefined;
-  /** Files this shell wrote with a pid it started, indexed by resolved path. */
-  readonly pidFiles: Map<string, Expansion>;
+  readonly pidFiles: PidFileModel;
   /** Per-element values of shell arrays. */
   readonly arrays: Map<string, Map<string, Expansion>>;
   /** Functions available in this shell, with their definition source for diagnostic locations. */
@@ -266,6 +293,10 @@ interface Trap {
   /** The conditions it handles (`EXIT`, `INT`, …), as `trapSignal` names them. Every handler's
    * body is reachable, so each is walked; the set is what `trap - <signal>` removes. */
   readonly signals: readonly string[];
+  /** Set inside a body the shell may never enter, so the handler itself may never be set, and
+   * even an `EXIT` one may never run (`runSetTraps`). A `merge` that lifts a handler out of a
+   * branch stamps it too, since `AndOr` leaves one in this shell with no merge at all. */
+  readonly uncertainSet?: boolean;
   readonly file: string;
   /** For a handler `merge` lifted out of a branch or loop body: that body's variables, and the
    * values the merge left for them. A handler reads its variables when it runs, so a body's value
@@ -1350,8 +1381,12 @@ function visitParts(parts: readonly WordPart[] | undefined, st: State, ctx: Ctx)
         visitParts(part.parts, st, ctx);
         break;
       case "CommandExpansion":
-      case "ProcessSubstitution":
         walkSubstitution(part.script, part.inner, part.text, st, ctx);
+        break;
+      case "ProcessSubstitution":
+        // `<(…)` and `>(…)` run beside this shell, which does not wait for either, so what one
+        // writes may not be there when the next command reads it.
+        uncertainly(ctx, () => walkSubstitution(part.script, part.inner, part.text, st, ctx));
         break;
       case "ArithmeticExpansion":
         visitArithmetic(part.expression, st, ctx);
@@ -1505,7 +1540,18 @@ function clone(st: State): State {
  * empty or a pid this shell started (`$!` in a retry loop, empty had it not run) stays a pid
  * that is safe to signal. Not merged: `files` and `pidFiles`, which every branch shares; `output`,
  * which each caller compares itself (`outputChanged`); and `runningFunctions`, which only a
- * function's own walk changes. */
+ * function's own walk changes.
+ *
+ * A map every branch shares may only be moved towards unknown inside one. A write recording what
+ * a file holds carries that text out of the branch it sits in, into the one the shell took, so a
+ * write the walk reaches inside a body the shell may never enter, or may not have finished,
+ * records only that the file is unknown (`modelWrite`, `uncertainly`).
+ *
+ * That covers a body the walk ENTERS. It does not cover a body the shell LEAVES early: the guard
+ * models no `return`, `exit`, `break` or `continue`, so a statement after one of them is still on
+ * what the walk calls the straight-line path, and a write there is still recorded as text. That
+ * is the documented residual of this rule, and closing it needs a mechanism of its own rather
+ * than this one. */
 function merge(target: State, branches: readonly State[]): void {
   const names = new Set<string>();
   for (const branch of branches) for (const name of branch.vars.keys()) names.add(name);
@@ -1608,17 +1654,102 @@ function merge(target: State, branches: readonly State[]): void {
   // A handler a branch or loop body sets stays set after it, as bash keeps it. It carries the
   // variables that body left, since the merged state may already have blurred the ones it reads
   // (`t=$(mktemp); trap 'rm -f "$t"' EXIT` in an `if`), beside the values this merge wrote for
-  // them. A removal inside a branch that may not run resets nothing here.
+  // them. A removal inside a branch that may not run resets nothing here. The branch may never
+  // have run, so the handler may never have been set: `uncertainSet` keeps `runSetTraps` from
+  // reading what even an `EXIT` one writes as fact.
+  //
+  // The mirror of that: a handler this shell did set, which a branch may have removed, is kept
+  // for the path where the branch did not run — and may not run on the path where it did, so it
+  // is uncertain from here on for the same reason. One branch holding it is not enough; the
+  // handler stands as fact only where every branch still holds it.
+  //
+  // One lift per branch that holds the handler, not one per handler: each carries the variables
+  // THAT branch left (`handlerVars`), and with a branch per `&&` prefix those differ as soon as a
+  // later prefix reassigns a name the handler reads when it runs. Skipping the second lift as a
+  // duplicate drops the capture that names what the handler would delete. The cost is one walk of
+  // the body per branch holding it, linear in the prefixes.
   const lifted: Trap[] = [];
   let merged: ReadonlyMap<string, Expansion> | undefined;
   for (const branch of branches) {
     for (const trap of branch.traps) {
       if (target.traps.includes(trap)) continue;
       merged ??= new Map(target.vars);
-      lifted.push({ ...trap, vars: handlerVars(trap, branch.vars), merged });
+      lifted.push({ ...trap, vars: handlerVars(trap, branch.vars), merged, uncertainSet: true });
     }
   }
-  target.traps = [...target.traps, ...lifted];
+  target.traps = [
+    ...target.traps.map((trap) =>
+      branches.every((branch) => branch.traps.includes(trap))
+        ? trap
+        : { ...trap, uncertainSet: true }
+    ),
+    ...lifted,
+  ];
+}
+
+/** Walks a body the shell may never enter — a branch, a loop body, a handler for a signal that
+ * may never arrive, one of several definitions a name may hold — or may not have finished when a
+ * later command reads what it wrote: a background command, a coprocess, a part of a pipeline.
+ * Every file modelled inside is unknown afterwards (`modelWrite`).
+ *
+ * Whether the shell takes such a branch is a fact of the run — whether a file exists, what a
+ * `grep` finds, what `uname` prints — so no rule here can decide it, and the model may not assume
+ * either answer. */
+function uncertainly(ctx: Ctx, walk: () => void): void {
+  ctx.uncertain.depth += 1;
+  try {
+    walk();
+  } finally {
+    ctx.uncertain.depth -= 1;
+  }
+}
+
+/** Records the text a command writes to `file`, which a later command of the same command may run
+ * (`runFile`). Inside a body the shell may not have performed (`uncertainly`) the file is unknown
+ * instead: `files` is one map the whole walk shares, and a stale model is worse than none, since
+ * `runFile` prefers the model to what is on disk. A file that is unknown is refused, which is why
+ * a conditional write followed by running the file is refused whether or not the branch runs. */
+function modelWrite(st: State, ctx: Ctx, file: string, content: FileContents): void {
+  (st.files as Map<string, FileContents>).set(
+    file,
+    ctx.uncertain.depth > 0 ? UNCERTAIN_WRITE : content
+  );
+}
+
+/** The reason a write inside a body the shell may not have performed leaves behind, and the two
+ * a rendered write leaves when the guard cannot read what it produced. */
+const UNCERTAIN_WRITE: UnknownContents = {
+  why:
+    "the write is inside a branch, a loop body, a handler, or a command this shell does not wait " +
+    "for, so the guard cannot know the shell performed it",
+};
+const UNRENDERED_WRITE: UnknownContents = {
+  why: "the command writes output the guard cannot render",
+};
+const OVERLONG_WRITE: UnknownContents = {
+  why: `the command writes more than the ${MAX_SCRIPT_BYTES} bytes the guard reads of a script`,
+};
+const UNREAD_FILE: UnknownContents = {
+  why: "the command appends to a file it has not written, whose contents on disk the guard never reads",
+};
+
+/** What `file` holds as a pid after a command wrote it. The command's write always forgets what
+ * the file held, since it is no longer there.
+ *
+ * A write the shell certainly performed then records the pid, when what the command wrote is
+ * one. Inside a body the shell may not have performed, the file holds either what that body
+ * wrote or what it held before, so it records a pid whose number is unknown exactly when both
+ * are pids this shell started — `merge`'s own rule for a variable a branch sets to another of
+ * them — and nothing at all otherwise, where an unknown pid is refused rather than signalled. */
+function modelPidFile(st: State, ctx: Ctx, file: string, pid: Expansion | undefined): void {
+  const model = st.pidFiles as Map<string, Expansion>;
+  const before = model.get(file);
+  model.delete(file);
+  if (ctx.uncertain.depth === 0) {
+    if (pid !== undefined) model.set(file, pid);
+  } else if (pid !== undefined && before !== undefined) {
+    model.set(file, [unknown("a pid a branch or loop body wrote to this file", true)]);
+  }
 }
 
 /** The variables a handler runs with in a shell whose variables are `vars`. For a handler lifted
@@ -1681,21 +1812,31 @@ function subshell(st: State, patch?: Partial<State>): State {
 
 /** Runs the body of every handler this shell set, at its end: each against the state after the
  * shell's last statement, with the variables of the branch that set it where the shell still holds
- * what the merge wrote for them (`handlerVars`), and the pids it expanded (`Trap.pids`) over it. */
+ * what the merge wrote for them (`handlerVars`), and the pids it expanded (`Trap.pids`) over it.
+ * An `EXIT` handler this shell certainly set runs when the shell ends, so what it writes is
+ * written before anything after the shell reads it. Everything else is uncertain: a handler for a
+ * signal runs only if that signal arrives, and a handler set inside a body the shell may never
+ * enter (`Trap.uncertainSet`) may never have been set at all, `EXIT` included. Both matter here
+ * rather than only at the outermost shell, because a subshell and a script this command runs each
+ * run their handlers mid-command, in front of a later read. */
 function runSetTraps(st: State, ctx: Ctx): void {
   for (const trap of st.traps) {
     const vars = new Map([...handlerVars(trap, st.vars), ...(trap.pids ?? [])]);
-    try {
-      runText(
-        trap.text,
-        "the EXIT trap",
-        subshell(st, { source: trap.file, vars }),
-        ctx,
-        trap.site
-      );
-    } catch (error) {
-      locateRefusal(error, trap.file);
-    }
+    const run = () => {
+      try {
+        runText(
+          trap.text,
+          "the EXIT trap",
+          subshell(st, { source: trap.file, vars }),
+          ctx,
+          trap.site
+        );
+      } catch (error) {
+        locateRefusal(error, trap.file);
+      }
+    };
+    if (trap.signals.includes("EXIT") && trap.uncertainSet !== true) run();
+    else uncertainly(ctx, run);
   }
 }
 
@@ -1712,8 +1853,10 @@ const MAX_DECIDED_PASSES = 64;
 function walkLoopAnyPasses(node: While, st: State, ctx: Ctx): void {
   const before = st.output;
   const body = clone(st);
-  walkList(node.clause.commands, body, ctx);
-  walkList(node.body.commands, body, ctx);
+  uncertainly(ctx, () => {
+    walkList(node.clause.commands, body, ctx);
+    walkList(node.body.commands, body, ctx);
+  });
   merge(st, [clone(st), body]);
   if (outputChanged(before, body.output)) st.output = undefined;
 }
@@ -1840,10 +1983,14 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       if (node.background) {
         // `command &` runs in a subshell: nothing it changes (a handler, a variable, the working
         // directory, the arguments) reaches this shell, and the handlers it sets run at its end.
+        // This shell does not wait for it, so what it writes may not be there when the next
+        // command reads it.
         const before = st.output;
         const child = subshell(st);
-        walkNode(node.command, child, ctx, pipeIn);
-        runSetTraps(child, ctx);
+        uncertainly(ctx, () => {
+          walkNode(node.command, child, ctx, pipeIn);
+          runSetTraps(child, ctx);
+        });
         if (outputChanged(before, child.output)) st.output = undefined;
         st.backgroundStarted = true;
         return;
@@ -1851,7 +1998,12 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       if (node.command.type === "BraceGroup") {
         const written = groupOutputFile(node, st, ctx);
         if (written !== undefined) {
-          st.files.set(written, walkRenderingGroup(node.command, st, ctx));
+          modelWrite(
+            st,
+            ctx,
+            written,
+            walkRenderingGroup(node.command, st, ctx) ?? UNRENDERED_WRITE
+          );
           return;
         }
       }
@@ -1868,20 +2020,42 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         for (const command of node.commands) walkNode(command, st, ctx, pipeIn);
         return;
       }
+      // Bash starts every part at once, so a part's write may not be there when a later part
+      // reads it, and the guard walks the parts in order over one shared model.
       const before = st.output;
       const parts: State[] = [];
-      for (const [index, command] of node.commands.entries()) {
-        const part = subshell(st);
-        walkNode(command, part, ctx, index > 0);
-        runSetTraps(part, ctx);
-        parts.push(part);
-      }
+      uncertainly(ctx, () => {
+        for (const [index, command] of node.commands.entries()) {
+          const part = subshell(st);
+          walkNode(command, part, ctx, index > 0);
+          runSetTraps(part, ctx);
+          parts.push(part);
+        }
+      });
       if (parts.some((part) => outputChanged(before, part.output))) st.output = undefined;
       return;
     }
-    case "AndOr":
-      for (const command of node.commands) walkNode(command, st, ctx, pipeIn);
+    case "AndOr": {
+      // `a && b`, `a || b`: the first command runs, and whether each one after it runs is the
+      // exit status of the one before, a fact of the run. So the shell may stop after any of
+      // them, and each prefix is a branch of its own: what `b` left stands in this shell only
+      // where every branch agrees, as an `if` body's does.
+      const [first, ...rest] = node.commands;
+      if (first !== undefined) walkNode(first, st, ctx, pipeIn);
+      if (rest.length === 0) return;
+      const before = st.output;
+      const branches: State[] = [clone(st)];
+      const running = clone(st);
+      uncertainly(ctx, () => {
+        for (const command of rest) {
+          walkNode(command, running, ctx, pipeIn);
+          branches.push(clone(running));
+        }
+      });
+      merge(st, branches);
+      if (branches.some((branch) => outputChanged(before, branch.output))) st.output = undefined;
       return;
+    }
     case "CompoundList":
       walkList(node.commands, st, ctx);
       return;
@@ -1901,9 +2075,11 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       walkList(node.clause.commands, st, ctx);
       const clauseOutput = st.output;
       const then = clone(st);
-      walkList(node.then.commands, then, ctx);
       const otherwise = clone(st);
-      if (node.else !== undefined) walkNode(node.else, otherwise, ctx, pipeIn);
+      uncertainly(ctx, () => {
+        walkList(node.then.commands, then, ctx);
+        if (node.else !== undefined) walkNode(node.else, otherwise, ctx, pipeIn);
+      });
       merge(st, [then, otherwise]);
       if (
         outputChanged(before, clauseOutput) ||
@@ -1926,7 +2102,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         for (const value of known) {
           const body = clone(st);
           assignScalar(body, name, [literal(value as string)]);
-          walkList(node.body.commands, body, ctx);
+          uncertainly(ctx, () => walkList(node.body.commands, body, ctx));
           branches.push(body);
         }
       } else {
@@ -1946,7 +2122,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
         );
         if (node.type === "Select")
           assignScalar(body, "REPLY", [unknown("`$REPLY`, read from input")]);
-        walkList(node.body.commands, body, ctx);
+        uncertainly(ctx, () => walkList(node.body.commands, body, ctx));
         branches.push(body);
       }
       merge(st, branches);
@@ -1959,7 +2135,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       visitArithmetic(node.test, st, ctx);
       visitArithmetic(node.update, st, ctx);
       const body = clone(st);
-      walkList(node.body.commands, body, ctx);
+      uncertainly(ctx, () => walkList(node.body.commands, body, ctx));
       merge(st, [clone(st), body]);
       if (outputChanged(before, body.output)) st.output = undefined;
       return;
@@ -1982,7 +2158,7 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
       for (const item of node.items) {
         for (const word of item.pattern) visitWord(word, st, ctx);
         const body = clone(st);
-        walkList(item.body.commands, body, ctx);
+        uncertainly(ctx, () => walkList(item.body.commands, body, ctx));
         branches.push(body);
       }
       merge(st, branches);
@@ -2001,9 +2177,12 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
     }
     case "Coproc": {
       const before = st.output;
+      // A coprocess runs beside this shell, which does not wait for it.
       const child = subshell(st);
-      walkNode(node.body, child, ctx, false);
-      runSetTraps(child, ctx);
+      uncertainly(ctx, () => {
+        walkNode(node.body, child, ctx, false);
+        runSetTraps(child, ctx);
+      });
       if (outputChanged(before, child.output)) st.output = undefined;
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
       return;
@@ -2071,33 +2250,43 @@ function checkRedirects(
       } else if (command?.name === "printf") {
         content = printfText(command.args, MAX_SCRIPT_BYTES, true) ?? null;
       }
-      st.pidFiles.delete(file);
+      // `echoText` and `printfText` answer null for a write the guard cannot render AND for one
+      // that is merely longer than it reads, so both report `UNRENDERED_WRITE` when the honest
+      // cause is `OVERLONG_WRITE`: `printf '%0999999d%0999999d' 1 1 > f` and a 1.1 MB literal
+      // both say "output the guard cannot render". Measured, and left: telling them apart means
+      // changing what `printfText` returns, and every such write is refused either way, so the
+      // remedy the refusal names is right even where the cause it names is coarse. The
+      // here-document path below does reach `OVERLONG_WRITE`, so that reason is not dead.
       // An append adds to the model of that file, and to nothing else: with no model the file is
       // whatever is on disk, which the guard has not read, so it is unknown and never empty.
       // Taking it as empty left one no-op append (`echo '' >> f`) making the guard read the file
       // as holding only what was appended, a destructive line already there running unseen
-      // (LEGION-349). A model means "a path a rendered write in this command named", wherever the
-      // walk read that write: `files` is shared across regions, so `false && echo ok > f`, and the
-      // same inside `if`, `case`, `while`, `until` or a `for` whose list the guard cannot decide,
-      // seeds one for code the shell never runs. Until LEGION-354 blurs a write the shell may not
-      // reach, this rule holds for a path no rendered write in the command named. Nothing here
-      // asks the filesystem either: a path absent at check time is one an earlier stage of the
-      // same command can fill (`cp evil.sh t; echo hi >> t; bash t`).
-      const before = appends ? (st.files.get(file) ?? null) : "";
-      st.files.set(
+      // (LEGION-349). A model means "a path a rendered write in this command named, on a path the
+      // shell certainly takes": `files` is shared across regions, so `false && echo ok > f`, and
+      // the same inside `if`, `case`, `while`, `until` or a `for` whose list the guard cannot
+      // decide, seeded one for code the shell never runs — those writes now record only that the
+      // file is unknown (`modelWrite`), which an append onto it keeps unknown. Nothing here asks
+      // the filesystem either: a path absent at check time is one an earlier stage of the same
+      // command can fill (`cp evil.sh t; echo hi >> t; bash t`).
+      const before = appends ? (st.files.get(file) ?? UNREAD_FILE) : "";
+      modelWrite(
+        st,
+        ctx,
         file,
-        content === null || before === null ? null : readable(`${before}${content}`)
+        content === null
+          ? UNRENDERED_WRITE
+          : typeof before !== "string"
+            ? before
+            : (readable(`${before}${content}`) ?? OVERLONG_WRITE)
       );
-      if (
+      const pidWritten =
         writes &&
         !appends &&
         command?.name === "echo" &&
         command.args.length === 1 &&
         command.args[0]?.exp.length > 0 &&
-        command.args[0]?.exp.every((piece) => piece.descendantPid)
-      ) {
-        st.pidFiles.set(file, command.args[0].exp);
-      }
+        command.args[0].exp.every((piece) => piece.descendantPid);
+      modelPidFile(st, ctx, file, pidWritten ? command?.args[0]?.exp : undefined);
     }
   }
 }
@@ -2700,15 +2889,18 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
       return;
     }
     // Each definition a branch may have left, and the command where a path left none, runs as a
-    // branch of its own.
-    const runs = callee.map((definition) => {
-      const run = clone(outer);
-      if (definition !== undefined) runFunction(base, definition, rest, run, ctx);
-      else {
-        run.functions.delete(base);
-        dispatch(invocation, run, ctx);
+    // branch of its own: which one the name runs is the branch the shell took.
+    const runs: State[] = [];
+    uncertainly(ctx, () => {
+      for (const definition of callee) {
+        const run = clone(outer);
+        if (definition !== undefined) runFunction(base, definition, rest, run, ctx);
+        else {
+          run.functions.delete(base);
+          dispatch(invocation, run, ctx);
+        }
+        runs.push(run);
       }
-      return run;
     });
     merge(outer, runs);
     return;
@@ -2969,7 +3161,17 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
             return `\${${name}}`;
           })
           .join("");
-        outer.traps = [...outer.traps, { text: handlerText, site, signals: handled, file, pids }];
+        outer.traps = [
+          ...outer.traps,
+          {
+            text: handlerText,
+            site,
+            signals: handled,
+            file,
+            pids,
+            uncertainSet: ctx.uncertain.depth > 0,
+          },
+        ];
       } else if (text === undefined) {
         throw new Refusal(
           site.snippet,
@@ -2977,7 +3179,10 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           `the guard cannot read the handler this \`trap\` sets, \`${handler.text}\` (${handler.exp.find((piece) => piece.kind !== "literal")?.why ?? "a value the guard cannot know"}), so it cannot check what runs when this shell exits; write the handler out, or put it in a function`
         );
       } else if (!text.startsWith("-")) {
-        outer.traps = [...outer.traps, { text, site, signals: handled, file }];
+        outer.traps = [
+          ...outer.traps,
+          { text, site, signals: handled, file, uncertainSet: ctx.uncertain.depth > 0 },
+        ];
       }
       return;
     }
@@ -3141,7 +3346,16 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           // start reading a file `tee` appended to, and the guard does not render what `tee`
           // writes. So `tee -a` onto a file this command wrote, then run, is refused.
           const text = heredoc === undefined ? null : heredocText(heredoc);
-          st.files.set(file, append || text === null ? null : readable(text));
+          modelWrite(
+            st,
+            ctx,
+            file,
+            append
+              ? UNREAD_FILE
+              : text === null
+                ? UNRENDERED_WRITE
+                : (readable(text) ?? OVERLONG_WRITE)
+          );
         }
       }
       return;
@@ -4132,11 +4346,11 @@ function runFile(
   let content: string | undefined;
   if (st.files.has(abs)) {
     const written = st.files.get(abs);
-    if (written === null || written === undefined) {
+    if (written === undefined || typeof written !== "string") {
       throw new Refusal(
         site.snippet,
         site.line,
-        `this command writes ${abs} in a way the guard cannot read before running it (output it cannot render, or more than the ${MAX_SCRIPT_BYTES} bytes it reads of a script); write the script with the write tool first`
+        `this command may write ${abs} in a way the guard cannot read before running it (${written?.why ?? "the guard cannot say what it holds"}); write the script with the write tool first`
       );
     }
     content = written;
@@ -4415,6 +4629,7 @@ export function createPaneGuard(options: PaneGuardOptions): PaneGuard {
     ompPid: options.ompPid,
     parentOf: options.parentOf ?? procParent,
     steps: { count: 0 },
+    uncertain: { depth: 0 },
   });
   const initial = (cwd: string, source: string): State => ({
     vars: new Map(),
