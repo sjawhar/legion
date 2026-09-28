@@ -22,15 +22,18 @@ create table user_agent_read (
 -- login the fragment matches roots on. GET /api/v1/me/agents/state reads it on every page load
 -- and GET /agents/{id}/messages on every conversation list; nothing else on `messages` serves
 -- that predicate, so without it each is a sequential scan of every message ever stored.
-create index messages_direct_roots on messages (lower(author->>'id'))
+create index messages_direct_roots on messages (lower(author->>'id'), target)
   where issue_key is null and in_reply_to is null and target like 'session:%'
     and author->>'kind' = 'user';
 
--- The conversation window's own candidates are every root targeted at one session, which had no
--- index either: the root scan walked every message whose in_reply_to is null. Measured on 1.8M
--- messages with 2,251 conversations for one session, the window query runs in 1.0 s with this
--- index and 1.9 s without it.
+-- The conversation window reads its candidate roots in two indexed branches, unioned: the roots
+-- targeted at one session, and the roots that session's deliveries name. Neither had an index,
+-- and the OR across the two tables the branches replace could not have used one.
 create index messages_session_roots on messages (target) where in_reply_to is null;
+
+-- The window's other branch: the roots a session's own delivery names. message_deliveries is
+-- keyed (message_id, attempt), so a lookup by session had no index at all.
+create index message_deliveries_session on message_deliveries (session_id);
 
 -- Every direct conversation that already exists is read as of this migration. Before it there
 -- was no read mark to count against, so without this every reply ever stored would turn unread

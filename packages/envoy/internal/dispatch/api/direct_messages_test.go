@@ -610,9 +610,13 @@ func TestTheWindowReturnsEveryUnreadConversationBesideTheFiftyMostActive(t *test
 // mixed-case on purpose: with a login whose raw and canonical forms are the same, a call site
 // passing the raw one would pass this test while the window read zero roots.
 func TestTheUnreadCountEqualsWhatTheWindowShowsForEverySession(t *testing.T) {
-	handler, database, root, reply, _ := directConversationFrom(t, "Alice")
+	const login = "Alice"
+	if login == canonicalLogin(login) {
+		t.Fatalf("the fixture login %q is already canonical, or this test stops testing the canonicalization it is named for", login)
+	}
+	handler, database, root, reply, _ := directConversationFrom(t, login)
 	first := decodeBody[model.Message](t, reply("The first answer."))
-	seedConversations(t, database, 2, nil, "Alice", "direct")
+	seedConversations(t, database, 2, nil, login, "direct")
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into messages (issue_key, author, body, target, in_reply_to)
 		select null, '{"kind":"user","id":"Alice"}'::jsonb, 'To another session', 'session:s2', null
@@ -630,7 +634,7 @@ func TestTheUnreadCountEqualsWhatTheWindowShowsForEverySession(t *testing.T) {
 	// outside the fifty most active and comes back only through the window's unread term - the
 	// term whose login the call site supplies.
 	issue := createInteractionIssue(t, handler, "SHARED", "Issue traffic", "seed")
-	seedConversations(t, database, 50, &issue.Key, "Alice", "busier")
+	seedConversations(t, database, 50, &issue.Key, login, "busier")
 	// One conversation read, so a session's counted replies are the ones after its mark.
 	marked := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s2/state", map[string]any{
 		"read_through": time.Now().UTC().Format(time.RFC3339Nano),
@@ -658,9 +662,9 @@ func TestTheUnreadCountEqualsWhatTheWindowShowsForEverySession(t *testing.T) {
 	}
 }
 
-// unreadRepliesShownInWindow counts, in the conversation list a viewer reads, the session's
-// replies to that viewer's own direct messages that are newer than their read mark and Clear -
-// what the Agents page and the live view show them as unread.
+// unreadRepliesShownInWindow counts, in the conversation list a viewer reads, the replies the
+// server marked unread: the session's replies, after the viewer's read mark and Clear, in the
+// conversations the response itself flags - what the Agents page and the live view show as new.
 func unreadRepliesShownInWindow(t *testing.T, handler http.Handler, sessionID string, state userAgentState) int {
 	t.Helper()
 	watermark := time.Time{}
@@ -677,8 +681,8 @@ func unreadRepliesShownInWindow(t *testing.T, handler http.Handler, sessionID st
 	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/"+sessionID+"/messages", nil, "ALICE"))
 	shown := 0
 	for _, read := range window {
-		if read.Message.IssueKey != nil || read.Message.Author.Kind != "user" ||
-			!strings.EqualFold(read.Message.Author.ID, "alice") {
+		// The conversation's own verdict, as the server sends it - no client-side re-derivation.
+		if !read.Unread {
 			continue
 		}
 		for _, reply := range read.Replies {
@@ -688,4 +692,127 @@ func unreadRepliesShownInWindow(t *testing.T, handler http.Handler, sessionID st
 		}
 	}
 	return shown
+}
+
+// The window's top term is the 50 conversations that moved last, where moving is the newest
+// message anywhere in the conversation, not the root's own age: an old question answered a moment
+// ago is the one the Agents page opens on. Ordering or limiting `messages` before the reply walk
+// would make it "the 50 most recently created" and drop this conversation, which is the same
+// defect the unread union fixes, for a conversation the viewer has already read.
+func TestAnOldConversationAnsweredNowIsInsideTheWindow(t *testing.T) {
+	handler, database, root, reply, _ := directConversationFrom(t, "alice")
+	seedConversations(t, database, 50, nil, "bob", "quiet")
+	if _, err := database.Pool.Exec(context.Background(), `
+		delete from messages where body like 'quiet answer%'
+	`); err != nil {
+		t.Fatalf("drop the quiet answers: %v", err)
+	}
+	answer := decodeBody[model.Message](t, reply("Answered now, long after the question."))
+	read := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"read_through": answer.CreatedAt,
+	}, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("mark read: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
+		t.Fatalf("%#v, want the reply read, so only the activity order can keep its conversation in the window", got)
+	}
+
+	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	if len(window) != 50 {
+		t.Fatalf("window = %d conversations, want the 50 that moved last", len(window))
+	}
+	if window[0].Message.ID != root.ID {
+		t.Fatalf("window opens on %s, want %s: the oldest question, answered last", window[0].Message.ID, root.ID)
+	}
+}
+
+// A conversation moves on its newest message wherever it sits: a reply to a reply, deep in the
+// chain, is what brings an old question back to the top. Ranking roots on their own created_at,
+// or on their direct replies alone, would bury it under a newer question nobody has touched.
+func TestAConversationMovesOnActivityDeepInItsChain(t *testing.T) {
+	handler, database, root, reply, _ := directConversationFrom(t, "alice")
+	first := decodeBody[model.Message](t, reply("On it."))
+	newer := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "A newer question nobody has touched.", "delivery": "aside",
+	}, "alice"))
+	// A reply to the reply: the conversation's newest message is two levels down.
+	deep := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "And here is the detail.", "delivery": "aside", "in_reply_to": first.ID,
+	}, "alice")
+	if deep.Code != http.StatusCreated {
+		t.Fatalf("deep reply: status=%d body=%s", deep.Code, deep.Body.String())
+	}
+	deepest := decodeBody[model.Message](t, deep)
+	read := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/agents/s1/state", map[string]any{
+		"read_through": deepest.CreatedAt,
+	}, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("mark read: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if got := unreadReplies(t, handler, "alice", "s1"); got.UnreadReplies != 0 {
+		t.Fatalf("%#v, want everything read, so only the activity order can rank these", got)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `select 1`); err != nil {
+		t.Fatal(err)
+	}
+
+	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice"))
+	if len(window) != 2 || window[0].Message.ID != root.ID || window[1].Message.ID != newer.ID {
+		ids := []string{}
+		for _, read := range window {
+			ids = append(ids, read.Message.ID)
+		}
+		t.Fatalf("window = %v, want [%s (answered deep in its chain) %s]", ids, root.ID, newer.ID)
+	}
+}
+
+// A root the session reaches only through a delivery - targeted at a role rather than at the
+// session - is a conversation the window lists by activity, and never an unread one: it is not a
+// direct message this viewer sent that session. The count and the window agree on that, as they
+// do on everything else.
+func TestADeliveredOnlyConversationIsListedAndCountsNothingUnread(t *testing.T) {
+	const login = "Alice"
+	handler, database, _, _, _ := directConversationFrom(t, login)
+	var rootID string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		values (null, $1::jsonb, 'A role question the session answered', 'role:planner', null)
+		returning id::text
+	`, `{"kind":"user","id":"`+login+`"}`).Scan(&rootID); err != nil {
+		t.Fatalf("seed the role-targeted root: %v", err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into message_deliveries (message_id, attempt, delivery, session_id, state)
+		values ($1::uuid, 1, 'aside', 's1', 'sent')
+	`, rootID); err != nil {
+		t.Fatalf("seed its delivery to s1: %v", err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into messages (issue_key, author, body, target, in_reply_to)
+		values (null, '{"kind":"session","id":"s1"}'::jsonb, 'The session answered it.', 'role:planner', $1::uuid)
+	`, rootID); err != nil {
+		t.Fatalf("seed its reply: %v", err)
+	}
+
+	states := decodeBody[map[string]userAgentState](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/agents/state", nil, "ALICE"))
+	if got := states["s1"].UnreadReplies; got != 0 {
+		t.Fatalf("unread_replies = %d, want 0: a delivered-only root is not a direct message this viewer sent", got)
+	}
+	window := decodeBody[[]messageRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "ALICE"))
+	listed := false
+	for _, read := range window {
+		if read.Message.ID == rootID {
+			listed = true
+			if read.Unread {
+				t.Fatalf("the delivered-only conversation %s is marked unread", rootID)
+			}
+		}
+	}
+	if !listed {
+		t.Fatalf("window of %d conversations does not list the delivered-only conversation %s", len(window), rootID)
+	}
+	if shown := unreadRepliesShownInWindow(t, handler, "s1", states["s1"]); shown != states["s1"].UnreadReplies {
+		t.Fatalf("session s1: unread_replies=%d, window shows %d", states["s1"].UnreadReplies, shown)
+	}
 }

@@ -62,13 +62,7 @@ import { useUserPreference } from "../shell/userPreference";
 
 import { deliveryAttempts } from "./attempts";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
-import {
-  holdsUnreadReply,
-  storeAgentState,
-  unreadRepliesLabel,
-  useMarkRepliesRead,
-  useWatermarkAtOpen,
-} from "./unread";
+import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
@@ -405,13 +399,8 @@ function AgentMessageList({
   // opened is shown, not left behind "Show N older". The watermark stays where it was while the
   // row is open, so marking those replies read does not fold them away from the viewer reading
   // them.
-  const viewer = useQuery(whoAmIQuery()).data;
-  const viewerLogin = viewer?.kind === "user" ? viewer.login : undefined;
-  const watermark = useWatermarkAtOpen(agent.session_id);
-  const olderShown = older.filter(
-    (read) =>
-      watermark !== undefined && holdsUnreadReply(read, agent.session_id, viewerLogin, watermark)
-  );
+  const unreadAtOpen = useUnreadAtOpen(messages.data);
+  const olderShown = older.filter((read) => unreadAtOpen?.has(read.message.id) === true);
   const olderFolded = older.filter((read) => !olderShown.includes(read));
   const rendered =
     newest === undefined ? [] : [newest, ...olderShown, ...(showOlder ? olderFolded : [])];

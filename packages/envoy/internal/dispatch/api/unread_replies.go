@@ -1,11 +1,16 @@
 package api
 
 // unreadDirectRepliesCTE is the one definition of "a reply this login has not read in this
-// session": a session's own reply, anywhere under a direct message this login sent that session
-// (an issue-less message targeted at it, a broadcast's copy included), newer than the later of
-// the login's read mark and Clear for that session. It is the recursive part of a
-// `with recursive` query and ends in the relation `unread_direct_replies(session_id, root_id,
-// reply_id, created_at)`.
+// session": a session's own reply, anywhere under a root this viewer targeted at this session
+// (an issue-less message whose own target is `session:<id>`, a broadcast's copy included), newer
+// than the later of the login's read mark and Clear for that session. That scope is deliberate.
+// A root the session only received a delivery of - one targeted at a role, or at another
+// session - is not a direct message this viewer sent it, so it is never unread for them; the
+// conversation window still lists it by activity, like any other conversation the session is in. It is the recursive part of a
+// `with recursive` query and ends in two relations: `unread_direct_replies(session_id, root_id,
+// reply_id, created_at)`, and the marks it reads them against,
+// `direct_marks(session_id, read_through, cleared_before, at)`, which is also what
+// `GET /api/v1/me/agents/state` answers with.
 //
 // Both endpoints that read it build on this fragment rather than on a predicate of their own:
 // `GET /api/v1/me/agents/state` counts its rows per session (`unread_replies`), and
@@ -19,6 +24,8 @@ package api
 //	    direct messages, which the identity source may spell in any casing)
 //	$2  the caller's raw actor id (keys the Clear, user_agent_state, migration 0033)
 //	$3  one session id to narrow to, or null for every session
+//
+// unreadDirectRepliesArgs builds them, so no call site spells the canonical login itself.
 const unreadDirectRepliesCTE = `
 	direct_roots as (
 		select id as root_id, substr(target, length('session:') + 1) as session_id
@@ -36,6 +43,7 @@ const unreadDirectRepliesCTE = `
 	),
 	direct_marks as (
 		select coalesce(marked.session_id, cleared.session_id) as session_id,
+		       marked.read_through, cleared.cleared_before,
 		       greatest(marked.read_through, cleared.cleared_before) as at
 		from (
 			select session_id, read_through from user_agent_read
@@ -54,3 +62,10 @@ const unreadDirectRepliesCTE = `
 		where direct_thread.author->>'kind' = 'session'
 		  and direct_thread.created_at > coalesce(direct_marks.at, '-infinity'::timestamptz)
 	)`
+
+// unreadDirectRepliesArgs is unreadDirectRepliesCTE's parameter list for one caller: their
+// canonical login, their raw actor id, and the session to narrow to (nil for every session). A
+// query appending its own parameters starts at $4.
+func unreadDirectRepliesArgs(actorID string, sessionID *string) []any {
+	return []any{canonicalLogin(actorID), actorID, sessionID}
+}

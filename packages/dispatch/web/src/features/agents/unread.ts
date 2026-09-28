@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { userAgentStateQuery } from "../../api/queries";
 import type { MessageRead, UserAgentState, UserAgentStates } from "../../api/types";
-import { isViewer } from "../refs/actor";
 
 /** The badge an unread count wears wherever it shows: the navigation, the compact header, and
  *  the agent's row. */
@@ -39,50 +38,25 @@ function newestSessionReply(
   return newest;
 }
 
-/** How far the viewer has read a session's conversation: the later of their read mark and their
- *  Clear. A reply after it is one the server counts unread. */
-function readWatermark(state: UserAgentState | undefined): number {
-  return Math.max(
-    state?.cleared_before === undefined
-      ? Number.NEGATIVE_INFINITY
-      : Date.parse(state.cleared_before),
-    state?.read_through === undefined ? Number.NEGATIVE_INFINITY : Date.parse(state.read_through)
-  );
-}
-
 /**
- * The viewer's read watermark for a session as it stood when the conversation opened, or
- * undefined until the viewer's state has loaded. It does not move while the conversation stays
- * open, so an exchange shown because it held an unread reply stays shown once that reply is
- * marked read.
+ * The conversations the server marked unread when this view opened, by root message id. The
+ * server's own flag is the only unread verdict a view renders (`unreadDirectRepliesCTE` is where
+ * it is defined), and it is frozen here: the view's own read mark clears the flag a moment later,
+ * and an exchange shown because it held an unread reply has to stay shown while the viewer reads
+ * it. Undefined until the conversations have loaded.
  */
-export function useWatermarkAtOpen(sessionId: string): number | undefined {
-  const states = useQuery(userAgentStateQuery());
-  const [frozen, setFrozen] = useState<number | undefined>(undefined);
-  if (frozen === undefined && states.data !== undefined) {
-    const watermark = readWatermark(states.data[sessionId]);
-    setFrozen(watermark);
-    return watermark;
+export function useUnreadAtOpen(
+  exchanges: readonly MessageRead[] | undefined
+): ReadonlySet<string> | undefined {
+  const [frozen, setFrozen] = useState<ReadonlySet<string> | undefined>(undefined);
+  if (frozen === undefined && exchanges !== undefined) {
+    const unread = new Set(
+      exchanges.filter((read) => read.unread === true).map((read) => read.message.id)
+    );
+    setFrozen(unread);
+    return unread;
   }
   return frozen;
-}
-
-/**
- * Whether an exchange holds a reply the server counts unread for the viewer: it is one of the
- * viewer's own direct messages to the session (issue-less, by their login in any casing, as the
- * server matches it) and the session replied in it after `watermark`.
- */
-export function holdsUnreadReply(
-  read: MessageRead,
-  sessionId: string,
-  viewerLogin: string | undefined,
-  watermark: number
-): boolean {
-  if (read.message.issue_key !== null || !isViewer(read.message.author, viewerLogin)) {
-    return false;
-  }
-  const newest = newestSessionReply([read], sessionId);
-  return newest !== undefined && Date.parse(newest) > watermark;
 }
 
 /** Puts the session's state a PUT answered with into the viewer's shared agent-state query, so

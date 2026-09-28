@@ -906,11 +906,12 @@ function exchange(
   id: string,
   body: string,
   createdAt: string,
-  reply?: { body: string; createdAt: string }
+  reply?: { body: string; createdAt: string; unread?: boolean }
 ): MessageRead {
   const root = message(body, { created_at: createdAt, id });
   return {
     message: root,
+    unread: reply?.unread,
     replies:
       reply === undefined
         ? []
@@ -1041,9 +1042,12 @@ test("opening a row shows an older exchange's unread follow-up instead of foldin
     messages: [
       exchange("m3", "Third question", "2026-09-14T03:00:00Z"),
       exchange("m2", "Second question", "2026-09-14T02:00:00Z"),
+      // The server's flag, not the timestamps, is what the row renders: this exchange's reply is
+      // the oldest one on screen and still the unread one.
       exchange("m1", "First question", "2026-09-14T01:00:00Z", {
         body: "First answer, followed up",
-        createdAt: "2026-09-14T04:00:00Z",
+        createdAt: "2026-09-14T00:30:00Z",
+        unread: true,
       }),
     ],
   });
@@ -1059,7 +1063,7 @@ test("opening a row shows an older exchange's unread follow-up instead of foldin
     expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
     await waitFor(() =>
       expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        read_through: "2026-09-14T04:00:00Z",
+        read_through: "2026-09-14T00:30:00Z",
       })
     );
     await waitFor(() =>
@@ -1067,6 +1071,40 @@ test("opening a row shows an older exchange's unread follow-up instead of foldin
     );
     // Read now, and still on screen: marking it read does not fold it away again.
     expect(within(planner).getByText("First answer, followed up")).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// The server decides which conversations hold an unread reply; the row renders that verdict and
+// derives nothing from timestamps. This fixture disagrees with the clock in both directions: the
+// flagged exchange's reply is older than the read mark, and the unflagged one's is newer.
+test("Agents shows the exchanges the server flags unread, whatever their timestamps say", async () => {
+  const page = renderAgents({
+    agentState: {
+      "planner-session": { read_through: "2026-09-14T03:00:00Z", unread_replies: 1 },
+    },
+    messages: [
+      exchange("m3", "Newest question", "2026-09-14T05:00:00Z"),
+      exchange("m2", "Answered after the mark", "2026-09-14T02:00:00Z", {
+        body: "Reply the server calls read",
+        createdAt: "2026-09-14T04:00:00Z",
+      }),
+      exchange("m1", "Answered before the mark", "2026-09-14T01:00:00Z", {
+        body: "Reply the server calls unread",
+        createdAt: "2026-09-14T01:30:00Z",
+        unread: true,
+      }),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    await expect(within(planner).findByText("Reply the server calls unread")).resolves.toBeTruthy();
+    expect(within(planner).queryByText("Reply the server calls read")).toBeNull();
+    expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();

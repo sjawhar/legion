@@ -1614,6 +1614,10 @@ export interface AskFollowersRead {
 export interface MessageRead {
   readonly message: Message;
   readonly replies: Message[];
+  /** `GET /api/v1/agents/{session_id}/messages` only: whether this conversation holds a reply
+   *  the caller has not read. The server's own verdict, from the definition `unread_replies`
+   *  counts; a client never derives it from timestamps. Absent means no. */
+  readonly unread?: boolean;
 }
 
 /**

@@ -32,6 +32,10 @@ type createMessageInput struct {
 type messageRead struct {
 	Message model.Message   `json:"message"`
 	Replies []model.Message `json:"replies"`
+	// Unread is this conversation's own unread verdict for the caller, from the shared
+	// unreadDirectRepliesCTE: the one definition the count reads too, so a client never
+	// re-derives it from timestamps. Only the agent-conversation list sets it.
+	Unread bool `json:"unread,omitempty"`
 }
 
 func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
@@ -562,50 +566,68 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 	// moves forward.
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		with recursive`+unreadDirectRepliesCTE+`,
-		roots as (
-			select m.id::text as id, m.issue_key, m.author, m.body, m.target,
-			       m.in_reply_to::text as in_reply_to, m.created_at,
-			       greatest(m.created_at, activity.latest) as moved,
-			       exists (select 1 from unread_direct_replies u where u.root_id = m.id) as unread
+		-- Two indexed branches rather than one scan with an OR across two tables: the roots
+		-- targeted at this session (messages_session_roots) and the roots one of its deliveries
+		-- names (message_deliveries_session). An OR spanning messages and message_deliveries can
+		-- use neither index, and Postgres reads every root there is.
+		candidates as (
+			select m.id, m.issue_key, m.author, m.body, m.target, m.in_reply_to, m.created_at
 			from messages m
-			cross join lateral (
-				with recursive chain as (
-					select c.id, c.created_at from messages c where c.in_reply_to = m.id
-					union all
-					select c.id, c.created_at from messages c join chain on c.in_reply_to = chain.id
-				)
-				select max(created_at) as latest from chain
-			) activity
-			where m.in_reply_to is null
-			  and (
-				m.target = 'session:' || $3::text
-				or exists (
-					select 1 from message_deliveries d
-					where d.message_id = m.id and d.session_id = $3::text
-				)
-			  )
+			where m.in_reply_to is null and m.target = 'session:' || $3::text
+			union
+			select m.id, m.issue_key, m.author, m.body, m.target, m.in_reply_to, m.created_at
+			from messages m
+			join message_deliveries d on d.message_id = m.id
+			where m.in_reply_to is null and d.session_id = $3::text
+		),
+		-- One walk down every candidate's replies, not one per candidate. A lateral per root
+		-- estimates at the recursive walk's cost times the number of roots, which put the plan
+		-- a million units over jit_above_cost: on production's own data the read spent 780 ms
+		-- compiling and 3 ms running (LEGION-301).
+		descendants as (
+			select candidates.id as root_id, reply.id, reply.created_at
+			from messages reply join candidates on reply.in_reply_to = candidates.id
+			union all
+			select descendants.root_id, reply.id, reply.created_at
+			from messages reply join descendants on reply.in_reply_to = descendants.id
+		),
+		activity as (
+			select root_id, max(created_at) as latest from descendants group by root_id
+		),
+		roots as (
+			select c.id::text as id, c.issue_key, c.author, c.body, c.target,
+			       c.in_reply_to::text as in_reply_to, c.created_at,
+			       greatest(c.created_at, activity.latest) as moved,
+			       unread.root_id is not null as unread
+			from candidates c
+			left join activity on activity.root_id = c.id
+			left join (select distinct root_id from unread_direct_replies) unread
+			  on unread.root_id = c.id
 		),
 		ranked as (
 			select *, row_number() over (order by moved desc, id desc) as rank from roots
 		)
-		select id, issue_key, author, body, target, in_reply_to, created_at
+		select `+messageColumns+`, unread
 		from ranked
 		where rank <= 50 or unread
 		order by moved desc, id desc
-	`, canonicalLogin(actor.ID), actor.ID, sessionID)
+	`, unreadDirectRepliesArgs(actor.ID, &sessionID)...)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	defer rows.Close()
 	roots := []model.Message{}
+	unread := map[string]bool{}
 	for rows.Next() {
-		message, err := scanMessage(rows)
+		var holdsUnread bool
+		message, err := scanMessage(rows, &holdsUnread)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		roots = append(roots, message)
+		unread[message.ID] = holdsUnread
 	}
 	if err := rows.Err(); err != nil {
 		s.writeHandlerError(w, err)
@@ -629,7 +651,7 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 	result := make([]messageRead, 0, len(roots))
 	for _, root := range roots {
 		root.Deliveries = deliveries[root.ID]
-		result = append(result, messageRead{Message: root, Replies: replies[root.ID]})
+		result = append(result, messageRead{Message: root, Replies: replies[root.ID], Unread: unread[root.ID]})
 	}
 	WriteJSON(w, http.StatusOK, result)
 }

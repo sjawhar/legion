@@ -171,29 +171,19 @@ type userAgentState struct {
 // refused.
 const agentStateCutoffSkew = time.Minute
 
-// userAgentStatesQuery reads a viewer's per-session state: every session with a Clear
-// (user_agent_state) or a read mark (user_agent_read), and every session holding a reply the
-// viewer has not read, whose count is the rows of the shared unreadDirectRepliesCTE. Parameters
-// are that fragment's own ($1 canonical login, $2 raw actor id, $3 one session or null).
+// userAgentStatesQuery reads a viewer's per-session state from the shared unreadDirectRepliesCTE
+// alone: `direct_marks` is every session with a Clear (user_agent_state) or a read mark
+// (user_agent_read), and `unread_direct_replies` counted per session is every session holding a
+// reply the viewer has not read. Parameters are the fragment's own (unreadDirectRepliesArgs).
 const userAgentStatesQuery = `
 	with recursive` + unreadDirectRepliesCTE + `,
-	state as (
-		select coalesce(cleared.session_id, marked.session_id) as session_id, cleared.cleared_before, marked.read_through
-		from (
-			select session_id, cleared_before from user_agent_state
-			where login = $2 and ($3::text is null or session_id = $3::text)
-		) cleared
-		full join (
-			select session_id, read_through from user_agent_read
-			where login = $1 and ($3::text is null or session_id = $3::text)
-		) marked on marked.session_id = cleared.session_id
-	),
 	unread as (
 		select session_id, count(*)::int as unread from unread_direct_replies group by session_id
 	)
-	select coalesce(state.session_id, unread.session_id), state.cleared_before, state.read_through,
+	select coalesce(direct_marks.session_id, unread.session_id),
+	       direct_marks.cleared_before, direct_marks.read_through,
 	       coalesce(unread.unread, 0)
-	from state full join unread on unread.session_id = state.session_id
+	from direct_marks full join unread on unread.session_id = direct_marks.session_id
 	order by 1
 `
 
@@ -202,7 +192,7 @@ const userAgentStatesQuery = `
 // login, so one person is one viewer however their identity source spells them; the Clear
 // (user_agent_state, migration 0033) is keyed on the raw actor id.
 func (s *server) loadUserAgentStates(ctx context.Context, login string, sessionID *string) (map[string]userAgentState, error) {
-	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, canonicalLogin(login), login, sessionID)
+	rows, err := s.deps.Store.Pool.Query(ctx, userAgentStatesQuery, unreadDirectRepliesArgs(login, sessionID)...)
 	if err != nil {
 		return nil, err
 	}
