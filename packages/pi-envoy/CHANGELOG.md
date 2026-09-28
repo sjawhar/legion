@@ -80,9 +80,17 @@
 - `trap - <condition>` removes only the conditions it names: `trap - INT` leaves the EXIT handler,
   which bash still runs, and `trap -` naming none resets nothing. Before, any `trap -` dropped every
   handler, so `trap 'rm -rf "$HOME/y"' EXIT; trap - INT` was allowed. A condition the guard cannot
-  read (`"$(…)"`, a variable read from input) could be any: a removal naming one resets nothing, and
-  a handler set for one stays and is walked. A handler the guard cannot read (`trap "$c" EXIT` with
-  `c` from input) is refused, since it cannot check what runs at exit.
+  read (`"$(…)"`, a variable read from input, a positional parameter) could be any: a removal naming
+  one resets nothing, and a handler set for one stays and is walked. A handler whose text the guard
+  cannot read (`trap "$c" EXIT` with `c` from input) is refused, since it cannot check what runs at
+  exit; a double-quoted handler that expanded only pids from `$!` (`trap "kill $pid" EXIT`) reads
+  them back and is judged. A handler the guard can read that runs a command it cannot
+  (`trap 'eval "$c"' EXIT`) is judged as any such command is.
+- A handler set inside an `if`, `case` or loop body stays set after it, as bash keeps it, judged
+  with the variables that body gave it: `if true; then trap 'rm -rf "$HOME/y"' EXIT; fi` was
+  allowed, and `if true; then t=$(mktemp); trap 'rm -f "$t"' EXIT; fi` still is. A backgrounded
+  command (`f &`) is walked in a subshell, so its `trap - EXIT` no longer clears the parent's
+  handler, and nothing else it changes reaches the parent.
 - The guard walks up to 100,000 nodes of one command before refusing it as too large to judge,
   from 10,000. The repository's largest tracked script, Stage 4b's driver, needs about 20,700 to
   reach its first refusal, and 10,000 refused it for size alone. The limit still refuses and never

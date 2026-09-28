@@ -22,10 +22,14 @@
  * A command whose walk visits more than `MAX_WALK_STEPS` nodes is refused, never allowed unread.
  *
  * A `trap` handler's body is judged once, against the state of the shell that set it after that
- * shell's last statement, where bash runs an EXIT handler; a subshell's handlers are judged at the
- * subshell's end. A handler that would be dangerous only at an earlier exit (an `exit` before a
- * later assignment makes its target safe) is not caught: the guard does not model where a shell
- * exits.
+ * shell's last statement, where bash runs an EXIT handler; a subshell's handlers (a substitution,
+ * `( … )`, a pipeline's part, a coprocess, a backgrounded command) are judged at the subshell's
+ * end. A handler set inside a branch or loop body is judged with the variables that body gave it,
+ * since the merged state after the construct may no longer know them. A handler that would be
+ * dangerous only at an earlier exit (an `exit` before a later assignment makes its target safe) is
+ * not caught: the guard does not model where a shell exits. A handler whose text the guard cannot
+ * read is refused; one it can read that runs a command it cannot (`trap 'eval "$c"' EXIT`) is
+ * judged as any such command is, the residual above.
  */
 import {
   closeSync,
@@ -137,6 +141,12 @@ interface Trap {
    * body is reachable, so each is walked; the set is what `trap - <signal>` removes. */
   readonly signals: readonly string[];
   readonly file: string;
+  /** The variables of the branch or loop body that set it, captured when `merge` lifts it out, so
+   * it is judged with the values that body gave them rather than the ones the merge blurs. */
+  readonly vars?: ReadonlyMap<string, Expansion>;
+  /** Names bound to the pids of this shell's children a double-quoted handler expanded when it was
+   * set (`trap "kill $pid" EXIT`), which its text reads back. */
+  readonly pids?: ReadonlyMap<string, Expansion>;
 }
 
 /** A `trap` operand as bash names the condition: case aside, `0` is `EXIT`, and a signal may carry
@@ -927,6 +937,18 @@ function merge(target: State, branches: readonly State[]): void {
     for (const name of branch.exported) target.exported.add(name);
     target.backgroundStarted ||= branch.backgroundStarted;
   }
+  // A handler a branch or loop body sets stays set after it, as bash keeps it. It carries that
+  // body's variables, captured at the innermost merge that lifts it out, since the merged state
+  // may already have blurred the ones it reads (`t=$(mktemp); trap 'rm -f "$t"' EXIT` in an `if`).
+  // A removal inside a branch that may not run resets nothing here.
+  const lifted: Trap[] = [];
+  for (const branch of branches) {
+    for (const trap of branch.traps) {
+      if (target.traps.includes(trap) || lifted.includes(trap)) continue;
+      lifted.push(trap.vars === undefined ? { ...trap, vars: branch.vars } : trap);
+    }
+  }
+  target.traps = [...target.traps, ...lifted];
 }
 
 function lineOf(source: string, pos: number): number {
@@ -970,11 +992,19 @@ function subshell(st: State, patch?: Partial<State>): State {
 }
 
 /** Runs the body of every handler this shell set, at its end: each against the state after the
- * shell's last statement. */
+ * shell's last statement, with the variables of the branch that set it (`Trap.vars`) and the pids
+ * it expanded (`Trap.pids`) over it. */
 function runSetTraps(st: State, ctx: Ctx): void {
   for (const trap of st.traps) {
+    const vars = new Map([...st.vars, ...(trap.vars ?? []), ...(trap.pids ?? [])]);
     try {
-      runText(trap.text, "the EXIT trap", subshell(st, { source: trap.file }), ctx, trap.site);
+      runText(
+        trap.text,
+        "the EXIT trap",
+        subshell(st, { source: trap.file, vars }),
+        ctx,
+        trap.site
+      );
     } catch (error) {
       locateRefusal(error, trap.file);
     }
@@ -1007,8 +1037,18 @@ function walkNode(node: Node, st: State, ctx: Ctx, pipeIn: boolean): void {
   switch (node.type) {
     case "Statement": {
       checkRedirects(node.redirects, undefined, siteOf(node, st), st, ctx);
+      if (node.background) {
+        // `command &` runs in a subshell: nothing it changes (a handler, a variable, the working
+        // directory, the arguments) reaches this shell, and the handlers it sets run at its end.
+        const before = st.output;
+        const child = subshell(st);
+        walkNode(node.command, child, ctx, pipeIn);
+        runSetTraps(child, ctx);
+        if (outputChanged(before, child.output)) st.output = undefined;
+        st.backgroundStarted = true;
+        return;
+      }
       walkNode(node.command, st, ctx, pipeIn);
-      if (node.background) st.backgroundStarted = true;
       return;
     }
     case "Command":
@@ -1680,6 +1720,34 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
           const signals = trap.signals.filter((signal) => !named.includes(signal));
           return signals.length === 0 ? [] : [{ ...trap, signals }];
         });
+      } else if (
+        text === undefined &&
+        handler.exp.every((piece) => piece.kind === "literal" || piece.descendantPid)
+      ) {
+        // A double-quoted handler that expanded only this shell's children's pids when it was set
+        // (`trap "kill $pid" EXIT`): its text reads each pid back from a name bound to it.
+        const pids = new Map<string, Expansion>();
+        const handlerText = handler.exp
+          .map((piece) => {
+            if (piece.kind === "literal") return piece.text;
+            const name = `__legion_guard_trap_pid_${pids.size}`;
+            pids.set(name, [piece]);
+            return `\${${name}}`;
+          })
+          .join("");
+        const signals = readable.map((condition) =>
+          condition === undefined ? UNREADABLE_CONDITION : trapSignal(condition)
+        );
+        outer.traps = [
+          ...outer.traps,
+          {
+            text: handlerText,
+            site,
+            signals: signals.length === 0 ? ["EXIT"] : signals,
+            file: outer.script ?? outer.source,
+            pids,
+          },
+        ];
       } else if (text === undefined) {
         throw new Refusal(
           site.snippet,

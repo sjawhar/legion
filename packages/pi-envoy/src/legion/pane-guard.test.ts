@@ -380,6 +380,55 @@ describe("scripts a command runs", () => {
     expect(bash(`a=EXIT; ${set('"$a"')}; trap - "$a"`)).toBeUndefined();
   });
 
+  test("keeps a handler a branch or loop body sets, judged with that body's variables", () => {
+    const set = `trap 'rm -rf "$HOME/y"' EXIT`;
+    // bash keeps each of these handlers after the construct and runs it at exit.
+    for (const command of [
+      `if true; then ${set}; fi`,
+      `if false; then :; else ${set}; fi`,
+      `if true; then if true; then ${set}; fi; fi`,
+      `for i in 1 2; do ${set}; done`,
+      `for i in $(ls); do ${set}; done`,
+      `for ((i = 0; i < 2; i++)); do ${set}; done`,
+      `while true; do ${set}; break; done`,
+      `while read l; do ${set}; done`,
+      `until false; do ${set}; break; done`,
+      `select x in a b; do ${set}; break; done`,
+      `case a in a) ${set};; esac`,
+      `f() { if true; then ${set}; fi; }; f`,
+      `if true; then t=$HOME; trap 'rm -rf "$t"' EXIT; fi`,
+    ]) {
+      expect(bash(command)).toContain(home);
+    }
+    // The body's own values, not the merged ones: a scratch file the body made is its own.
+    expect(bash(`if true; then t=$(mktemp); trap 'rm -f "$t"' EXIT; fi`)).toBeUndefined();
+    expect(bash(`for i in 1; do d=$(mktemp -d); trap 'rm -rf "$d"' EXIT; done`)).toBeUndefined();
+  });
+
+  test("walks a backgrounded command in a subshell", () => {
+    const cleanup = 'cleanup() { rm -rf "$HOME"; }; trap cleanup EXIT; f() { trap - EXIT; }';
+    // `f &` clears only its own subshell's handler, so the parent's still runs at exit.
+    expect(bash(`${cleanup}; f &`)).toContain(home);
+    expect(bash(`${cleanup}; { trap - EXIT; } &`)).toContain(home);
+    expect(bash(`${cleanup}; trap - EXIT &`)).toContain(home);
+    expect(bash(`${cleanup}; f`)).toBeUndefined();
+    // A `cd` in a background command leaves this shell where it was.
+    expect(bash('f() { cd "$HOME"; }; f & rm -rf .bashrc')).toBeUndefined();
+    expect(bash('f() { cd "$HOME"; }; f; rm -rf .bashrc')).toContain(path.join(home, ".bashrc"));
+    // Nothing a background command assigns reaches this shell…
+    expect(bash('d=$LEGION_WORKSPACE/x; d=$HOME & rm -rf "$d"')).toBeUndefined();
+    // …and the handler it sets runs at its own end.
+    expect(bash(`{ trap 'rm -rf "$HOME/y"' EXIT; } &`)).toContain(home);
+    expect(bash('sleep 60 & p=$!; kill "$p"')).toBeUndefined();
+  });
+
+  test("reads back the pids a double-quoted handler expanded when it was set", () => {
+    expect(bash('sleep 60 & pid=$!; trap "kill $pid" EXIT')).toBeUndefined();
+    expect(bash('sleep 60 & a=$!; sleep 60 & b=$!; trap "kill $a $b" EXIT')).toBeUndefined();
+    expect(bash('x=$(cat); trap "kill $x" EXIT')).toContain("cannot read the handler");
+    expect(bash('sleep 60 & pid=$!; trap "rm -rf $HOME/$pid" EXIT')).toContain(home);
+  });
+
   test("refuses a trap whose handler it cannot read", () => {
     expect(bash('c=$(cat); trap "$c" EXIT')).toContain("cannot read the handler");
     expect(
