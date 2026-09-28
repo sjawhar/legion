@@ -1,6 +1,14 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -810,6 +818,32 @@ export function filterAgents(agents: readonly Agent[], filters: AgentFilters): A
   );
 }
 
+export type ShownSelectionState = "none" | "some" | "all";
+
+/** How much of what the filters show is selected, which is the header checkbox's state and
+ *  count. A selected session the filters hide counts toward neither. */
+export function shownSelection(
+  shown: readonly Agent[],
+  selected: ReadonlySet<string>
+): { selectedShown: number; state: ShownSelectionState } {
+  let selectedShown = 0;
+  for (const agent of shown) if (selected.has(agent.session_id)) selectedShown += 1;
+  const state = selectedShown === 0 ? "none" : selectedShown === shown.length ? "all" : "some";
+  return { selectedShown, state };
+}
+
+/** The header checkbox's click: select every shown session unless all of them already are,
+ *  and otherwise unselect them. Selected sessions the filters hide stay selected either way. */
+export function toggleShown(shown: readonly Agent[], selected: ReadonlySet<string>): Set<string> {
+  const next = new Set(selected);
+  const selectAll = shownSelection(shown, selected).state !== "all";
+  for (const agent of shown) {
+    if (selectAll) next.add(agent.session_id);
+    else next.delete(agent.session_id);
+  }
+  return next;
+}
+
 /** A session a broadcast would leave out, worded the way the server reports it, so the
  *  composer and the create response say the same thing. */
 interface BroadcastExclusionPlan {
@@ -863,19 +897,11 @@ function filterOptions(agents: readonly Agent[]): { machines: string[]; roles: s
 function AgentFilterBar({
   agents,
   filters,
-  listed,
-  onClear,
   onFilters,
-  onSelectAll,
-  selectedCount,
 }: {
   agents: readonly Agent[];
   filters: AgentFilters;
-  listed: readonly Agent[];
-  onClear: () => void;
   onFilters: (filters: AgentFilters) => void;
-  onSelectAll: () => void;
-  selectedCount: number;
 }): ReactNode {
   const { machines, roles } = filterOptions(agents);
   const field = `min-h-11 rounded-lg border px-3 py-2 text-sm ${inputClasses(true)}`;
@@ -916,23 +942,63 @@ function AgentFilterBar({
         type="search"
         value={filters.dir}
       />
-      <button
-        className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-        onClick={onSelectAll}
-        type="button"
-      >
-        Select all ({listed.length})
-      </button>
-      {selectedCount === 0 ? null : (
+    </fieldset>
+  );
+}
+
+/**
+ * The list's select-all checkbox, in a row directly above the rows and aligned with their
+ * checkboxes (the rows' 1 px border plus their 12 px padding). Shown means every row the
+ * filters match, folded sections included. Its state is theirs - unchecked, checked, or mixed
+ * when some are selected - and a click selects all of them unless all already are, and
+ * otherwise unselects them. `Clear selection` empties the whole selection, rows the filters
+ * hide included.
+ */
+function SelectionHeader({
+  onClear,
+  onToggle,
+  selected,
+  shown,
+}: {
+  onClear: () => void;
+  onToggle: () => void;
+  selected: ReadonlySet<string>;
+  shown: readonly Agent[];
+}): ReactNode {
+  const { selectedShown, state } = shownSelection(shown, selected);
+  const checkbox = useRef<HTMLInputElement>(null);
+  const countId = useId();
+  // `indeterminate` is a DOM property with no attribute, so React cannot render it.
+  useLayoutEffect(() => {
+    if (checkbox.current !== null) checkbox.current.indeterminate = state === "some";
+  }, [state]);
+  return (
+    <div className="mb-2 flex min-h-11 flex-wrap items-center gap-x-2 px-[13px] md:min-h-8">
+      <input
+        aria-describedby={countId}
+        aria-label="Select all shown agents"
+        checked={state === "all"}
+        className={`size-4 shrink-0 ${checkboxAccent}`}
+        disabled={shown.length === 0}
+        onChange={onToggle}
+        ref={checkbox}
+        type="checkbox"
+      />
+      <span className={`text-xs ${textMutedOnCanvas}`} id={countId}>
+        {state === "none"
+          ? `${shown.length} shown`
+          : `${selectedShown} of ${shown.length} selected`}
+      </span>
+      {selected.size === 0 ? null : (
         <button
-          className={`min-h-11 rounded-lg px-3 text-sm ${textMutedHoverToSecondary}`}
+          className={`min-h-11 rounded-lg border px-2 text-xs font-medium md:min-h-7 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
           onClick={onClear}
           type="button"
         >
           Clear selection
         </button>
       )}
-    </fieldset>
+    </div>
   );
 }
 
@@ -1130,19 +1196,7 @@ export function AgentsPage(): ReactNode {
         <EmptyState label="Agents empty state" message="No agents are connected." />
       ) : (
         <>
-          <AgentFilterBar
-            agents={agents}
-            filters={filters}
-            listed={listed}
-            onClear={() => setSelected(new Set())}
-            onFilters={setFilters}
-            onSelectAll={() =>
-              setSelected(
-                (current) => new Set([...current, ...listed.map((agent) => agent.session_id)])
-              )
-            }
-            selectedCount={selected.size}
-          />
+          <AgentFilterBar agents={agents} filters={filters} onFilters={setFilters} />
           {selected.size === 0 ? null : (
             <BroadcastComposer
               agents={agents}
@@ -1151,6 +1205,12 @@ export function AgentsPage(): ReactNode {
               selected={selected}
             />
           )}
+          <SelectionHeader
+            onClear={() => setSelected(new Set())}
+            onToggle={() => setSelected((current) => toggleShown(listed, current))}
+            selected={selected}
+            shown={listed}
+          />
           {listed.length === 0 ? (
             <EmptyState
               label="Agents filtered empty state"

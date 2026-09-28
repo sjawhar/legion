@@ -13,7 +13,7 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
-import { orderAgents, partitionAgents } from "./AgentsPage";
+import { orderAgents, partitionAgents, shownSelection, toggleShown } from "./AgentsPage";
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
 // same-mode Retry while an attempt is inside the stream's duplicate window, so a
@@ -1326,18 +1326,59 @@ test("a mode both recipients advertise takes the excluded one back in", async ()
   }
 });
 
-test("a directory filter narrows the listed agents and what Select all ticks", async () => {
+test("the header checkbox reads none, some or all of the shown agents, never the hidden ones", () => {
+  const [planner, reviewer] = agents;
+  const shown = [planner, reviewer];
+  expect(shownSelection(shown, new Set())).toEqual({ selectedShown: 0, state: "none" });
+  // A selection the filters hide is neither counted nor able to make the header mixed.
+  expect(shownSelection(shown, new Set(["hidden-session"]))).toEqual({
+    selectedShown: 0,
+    state: "none",
+  });
+  expect(shownSelection(shown, new Set(["planner-session", "hidden-session"]))).toEqual({
+    selectedShown: 1,
+    state: "some",
+  });
+  expect(shownSelection(shown, new Set(["planner-session", "reviewer-session"]))).toEqual({
+    selectedShown: 2,
+    state: "all",
+  });
+  expect(shownSelection([], new Set(["planner-session"]))).toEqual({
+    selectedShown: 0,
+    state: "none",
+  });
+});
+
+test("the header checkbox adds every shown agent unless all are selected, then removes them, and leaves hidden selections alone", () => {
+  const [planner, reviewer] = agents;
+  const shown = [planner, reviewer];
+  const some = new Set(["planner-session", "hidden-session"]);
+  const all = toggleShown(shown, some);
+  expect([...all].sort()).toEqual(["hidden-session", "planner-session", "reviewer-session"]);
+  expect([...toggleShown(shown, all)]).toEqual(["hidden-session"]);
+});
+
+test("a directory filter narrows the listed agents and what the header checkbox ticks", async () => {
   const page = renderAgents();
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
+    expect(within(region).queryByRole("button", { name: /^Select all/ })).toBeNull();
+    const header = within(region).getByRole("checkbox", {
+      name: "Select all shown agents",
+    }) as HTMLInputElement;
+    expect(within(region).getByText("2 shown")).toBeTruthy();
     fireEvent.change(within(region).getByRole("searchbox", { name: "Directory contains" }), {
       target: { value: "PLANNER" },
     });
     await waitFor(() =>
       expect(within(region).queryByRole("heading", { level: 2, name: "Reviewer" })).toBeNull()
     );
-    fireEvent.click(within(region).getByRole("button", { name: "Select all (1)" }));
+    expect(within(region).getByText("1 shown")).toBeTruthy();
+    fireEvent.click(header);
+    expect(header.checked).toBe(true);
+    expect(header.indeterminate).toBe(false);
+    expect(within(region).getByText("1 of 1 selected")).toBeTruthy();
     const broadcast = within(region).getByRole("region", { name: "Broadcast" });
     expect(
       within(broadcast).getByRole("heading", { name: "Broadcast to 1 of 1 selected" })
@@ -1348,6 +1389,21 @@ test("a directory filter narrows the listed agents and what Select all ticks", a
         .getAllByRole("button")
         .map((chip) => chip.textContent)
     ).toEqual(["Planner ✕"]);
+
+    // Widening the filter shows a row nobody ticked: the header turns mixed.
+    fireEvent.change(within(region).getByRole("searchbox", { name: "Directory contains" }), {
+      target: { value: "" },
+    });
+    await waitFor(() => expect(within(region).getByText("1 of 2 selected")).toBeTruthy());
+    expect(header.checked).toBe(false);
+    expect(header.indeterminate).toBe(true);
+
+    // Clear selection empties the whole selection, the header with it.
+    fireEvent.click(within(region).getByRole("button", { name: "Clear selection" }));
+    expect(header.indeterminate).toBe(false);
+    expect(header.checked).toBe(false);
+    expect(within(region).queryByRole("region", { name: "Broadcast" })).toBeNull();
+    expect(within(region).queryByRole("button", { name: "Clear selection" })).toBeNull();
   } finally {
     page.view.unmount();
     page.restore();

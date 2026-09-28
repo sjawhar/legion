@@ -429,3 +429,88 @@ test("a reconnect picks up a Clear made from another device", async ({ browser }
     await alice.close();
   }
 });
+
+test("the header checkbox selects and clears only the rows the filters show, by pointer and by Space", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the selection rule");
+  // No `last_seen`: the fixture stamps one at seeding time, so none of them ages into Inactive.
+  const session = (id: string, title: string, role: string): FakeSession => ({
+    capabilities: ["aside", "btw"],
+    dir: `/workspaces/${id}`,
+    machine_id: "build-host",
+    roles: [role],
+    session_id: `${id}-session`,
+    title,
+  });
+  await setLiveSessions([
+    session("planner-a", "Planner A", "planner"),
+    session("planner-b", "Planner B", "planner"),
+    session("reviewer", "Reviewer", "reviewer"),
+    session("tester", "Tester", "tester"),
+  ]);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const agents = page.getByRole("region", { name: "Agents" });
+    const header = agents.getByRole("checkbox", { name: "Select all shown agents" });
+    const row = (title: string) =>
+      agents.getByRole("checkbox", { name: `Select ${title} for broadcast` });
+    const chips = page
+      .getByRole("region", { name: "Broadcast" })
+      .getByRole("list", { name: "Selected agents" })
+      .getByRole("button");
+    // Every session is silent, so every row is under the collapsed fold, and the header still
+    // counts them: shown means what the filters match, folded or not.
+    await expect(agents.getByText("4 shown")).toBeVisible();
+    await expect(agents.getByRole("button", { name: /^Select all/ })).toHaveCount(0);
+    await agents.getByRole("button", { name: "No Dispatch activity (4)" }).click();
+
+    // A row ticked under no filter, which the role filter below hides.
+    await row("Reviewer").check();
+    await agents.getByRole("combobox", { name: "Role" }).selectOption("planner");
+    await expect(row("Reviewer")).toHaveCount(0);
+    await expect(agents.getByText("2 shown")).toBeVisible();
+    await expect(header).not.toBeChecked();
+
+    await header.click();
+    await expect(row("Planner A")).toBeChecked();
+    await expect(row("Planner B")).toBeChecked();
+    await expect(header).toBeChecked();
+    await expect(agents.getByText("2 of 2 selected")).toBeVisible();
+    await expect(chips).toHaveText(["Reviewer ✕", "Planner A ✕", "Planner B ✕"]);
+
+    await row("Planner B").uncheck();
+    await expect(header).toBeChecked({ indeterminate: true });
+    await expect(header).toHaveJSProperty("indeterminate", true);
+    await expect(agents.getByText("1 of 2 selected")).toBeVisible();
+
+    // Space on the focused header toggles it like a click: mixed becomes all shown.
+    await header.focus();
+    await page.keyboard.press("Space");
+    await expect(header).toBeChecked();
+    await expect(row("Planner B")).toBeChecked();
+    await expect(agents.getByText("2 of 2 selected")).toBeVisible();
+
+    // Once more clears the shown rows and nothing else: the Reviewer stays selected and named.
+    await page.keyboard.press("Space");
+    await expect(header).not.toBeChecked();
+    await expect(row("Planner A")).not.toBeChecked();
+    await expect(row("Planner B")).not.toBeChecked();
+    await expect(agents.getByText("2 shown")).toBeVisible();
+    await expect(chips).toHaveText(["Reviewer ✕"]);
+
+    await header.click();
+    await expect(chips).toHaveText(["Reviewer ✕", "Planner A ✕", "Planner B ✕"]);
+    await header.click();
+    await expect(chips).toHaveText(["Reviewer ✕"]);
+
+    // Clear selection takes the hidden row too.
+    await agents.getByRole("button", { name: "Clear selection" }).click();
+    await expect(page.getByRole("region", { name: "Broadcast" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
