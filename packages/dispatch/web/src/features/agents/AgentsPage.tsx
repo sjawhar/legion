@@ -34,6 +34,7 @@ import {
   connectionDotConnecting,
   dangerText,
   disclosureButtonText,
+  focusVisibleRing,
   inputClasses,
   linkHoverText,
   linkText,
@@ -61,6 +62,8 @@ import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { closestMatching, roveFocus } from "../shell/roving";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 
@@ -70,6 +73,15 @@ import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "
 import { storeAgentState, unreadRepliesLabel, useMarkRepliesRead, useUnreadAtOpen } from "./unread";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
+
+const AGENT_ROW_ATTRIBUTE = "data-agent-row";
+const AGENT_ROW_SELECTOR = `[${AGENT_ROW_ATTRIBUTE}]`;
+
+/** The agent row that holds keyboard focus itself — not one merely containing a focused control. */
+function focusedAgentRow(): HTMLElement | null {
+  const active = document.activeElement;
+  return active instanceof HTMLElement && active.matches(AGENT_ROW_SELECTOR) ? active : null;
+}
 
 /** The composer's one notice slot: the recipient limit, a refused send or the exclusions, one at
  *  a time. In the compact grid it is one line that scrolls sideways like the chips: between the
@@ -502,10 +514,15 @@ function AgentMessageList({
 function AgentMessageComposer({
   agent,
   onCancelReply,
+  onClose,
   replyTo,
 }: {
   agent: Agent;
   onCancelReply: () => void;
+  /** One level out of the composer: the row it belongs to takes focus. The composer calls it on
+   *  Escape from an untouched draft, on Discard, and once a message has been sent - the same
+   *  hand-off the Inbox makes when an answered card's form goes away. */
+  onClose: () => void;
   replyTo: AgentReply | null;
 }): ReactNode {
   const queryClient = useQueryClient();
@@ -532,6 +549,7 @@ function AgentMessageComposer({
           aria-expanded={issuePickerOpen}
           aria-label="Choose issue"
           className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+          data-agent-issue-picker=""
           onClick={() => setIssuePickerOpen((open) => !open)}
           type="button"
         >
@@ -577,7 +595,7 @@ function AgentMessageComposer({
         }
         key={useDirectChannel ? `session:${agent.session_id}` : `issue:${issueKey}`}
         onCancelReply={onCancelReply}
-        onClose={onCancelReply}
+        onClose={onClose}
         onSent={() => {
           onCancelReply();
           void queryClient.invalidateQueries({
@@ -647,15 +665,22 @@ function AgentRow({
   const [expanded, setExpanded] = useState(false);
   const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
   const detailsId = useId();
+  const rowRef = useRef<HTMLElement>(null);
 
   return (
-    <article className={`rounded-xl border ${card} ${borderDefault}`}>
+    <article
+      className={`rounded-xl border outline-none focus-visible:ring-2 ${card} ${borderDefault} ${focusVisibleRing}`}
+      data-agent-row={agent.session_id}
+      ref={rowRef}
+      tabIndex={-1}
+    >
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-1.5">
         <div className="flex min-w-0 flex-auto flex-wrap items-center gap-x-2 md:flex-nowrap">
           <input
             aria-label={`Select ${label} for broadcast`}
             checked={selected}
             className={`size-4 shrink-0 ${checkboxAccent}`}
+            data-agent-select=""
             onChange={(event) => onSelect(event.target.checked)}
             type="checkbox"
           />
@@ -665,6 +690,7 @@ function AgentRow({
               aria-controls={detailsId}
               aria-expanded={expanded}
               className={`flex min-h-11 max-w-full items-center gap-1 text-left md:min-h-8 ${textPrimaryOnCanvas}`}
+              data-agent-toggle=""
               onClick={() => setExpanded((open) => !open)}
               title={label}
               type="button"
@@ -738,12 +764,15 @@ function AgentRow({
               wording="Waiting on agent"
             />
           )}
-          <PinButton
-            label={pinned ? `Unpin ${label}` : `Pin ${label}`}
-            onClick={onPin}
-            pinned={pinned}
-            title={pinned ? "Unpin agent" : "Pin agent"}
-          />
+          {/* `contents` so the keymap has a handle on the pin without a box in the flex row. */}
+          <span className="contents" data-agent-pin="">
+            <PinButton
+              label={pinned ? `Unpin ${label}` : `Pin ${label}`}
+              onClick={onPin}
+              pinned={pinned}
+              title={pinned ? "Unpin agent" : "Pin agent"}
+            />
+          </span>
         </div>
       </div>
       {expanded ? (
@@ -759,11 +788,14 @@ function AgentRow({
             </span>
           </div>
           <AgentMessageList agent={agent} liveAgents={liveAgents} onReply={setReplyTo} />
-          <AgentMessageComposer
-            agent={agent}
-            onCancelReply={() => setReplyTo(null)}
-            replyTo={replyTo}
-          />
+          <div data-agent-composer="">
+            <AgentMessageComposer
+              agent={agent}
+              onCancelReply={() => setReplyTo(null)}
+              onClose={() => rowRef.current?.focus()}
+              replyTo={replyTo}
+            />
+          </div>
         </div>
       ) : null}
     </article>
@@ -1207,12 +1239,74 @@ export function AgentsPage(): ReactNode {
       return updated;
     });
   };
+  const listRef = useRef<HTMLElement>(null);
+  const rows = () => [
+    ...(listRef.current?.querySelectorAll<HTMLElement>(AGENT_ROW_SELECTOR) ?? []),
+  ];
+  // Both actions that live inside a row's details open it first; the details render in the click's
+  // own commit, so the control they want exists on the next frame.
+  const inOpenRow = (act: (row: HTMLElement) => void) => {
+    const row = focusedAgentRow();
+    if (row === null) return;
+    const toggle = row.querySelector<HTMLElement>("[data-agent-toggle]");
+    if (toggle?.getAttribute("aria-expanded") === "false") toggle.click();
+    requestAnimationFrame(() => act(row));
+  };
+  useKeymapScope("agents");
+  useKeymap("agents", [
+    {
+      id: "next",
+      keys: "j",
+      label: "Next agent",
+      run: () => roveFocus(rows(), closestMatching(document.activeElement, AGENT_ROW_SELECTOR), 1),
+      when: () => rows().length > 0,
+    },
+    {
+      id: "previous",
+      keys: "k",
+      label: "Previous agent",
+      run: () => roveFocus(rows(), closestMatching(document.activeElement, AGENT_ROW_SELECTOR), -1),
+      when: () => rows().length > 0,
+    },
+    {
+      id: "compose",
+      keys: "Enter",
+      label: "Message the focused agent",
+      run: () =>
+        inOpenRow((row) =>
+          row.querySelector<HTMLTextAreaElement>("[data-agent-composer] textarea")?.focus()
+        ),
+      when: () => focusedAgentRow() !== null,
+    },
+    {
+      id: "issue-picker",
+      keys: "i",
+      label: "Pick an issue for the message",
+      run: () =>
+        inOpenRow((row) => row.querySelector<HTMLElement>("[data-agent-issue-picker]")?.click()),
+      when: () => focusedAgentRow() !== null,
+    },
+    {
+      id: "pin",
+      keys: "Shift+P",
+      label: "Pin or unpin the focused agent",
+      run: () => focusedAgentRow()?.querySelector<HTMLElement>("[data-agent-pin] button")?.click(),
+      when: () => focusedAgentRow() !== null,
+    },
+    {
+      id: "select",
+      keys: "x",
+      label: "Select or deselect the focused agent",
+      run: () => focusedAgentRow()?.querySelector<HTMLElement>("[data-agent-select]")?.click(),
+      when: () => focusedAgentRow() !== null,
+    },
+  ]);
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;
   if (isError) return <p className={dangerText}>Could not load agents: {error}</p>;
 
   return (
-    <section aria-label="Agents">
+    <section aria-label="Agents" ref={listRef}>
       <header className={`mb-5 border-b pb-4 ${borderDefault}`}>
         <h1 className={`text-[22px] font-semibold tracking-tight ${textPrimaryOnCanvas}`}>
           Agents

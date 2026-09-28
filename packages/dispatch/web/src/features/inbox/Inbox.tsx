@@ -11,7 +11,9 @@ import { LabelPill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
 import { TruncatedText } from "../../components/TruncatedText";
 import {
+  badgeLow,
   borderDefault,
+  checkboxAccent,
   dangerText,
   focusVisibleRing,
   linkHoverText,
@@ -27,6 +29,7 @@ import {
 } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
 import { CredentialRequestsSection } from "../credentials/CredentialRequestsSection";
+import { badgeSelectBadge, badgeSelectOverlay, badgeSelectWrapper } from "../issue/badge-select";
 import { PriorityControl } from "../issue/PriorityControl";
 import { useIssueAssignee } from "../issue/useIssueAssignee";
 import { actorLabel } from "../refs/actor";
@@ -56,6 +59,8 @@ import {
   SECTION_TITLES,
   sectionOf,
 } from "./sections";
+import { SNOOZE_PRESETS } from "./snooze";
+import { useAskSnoozeMany } from "./useAskSnooze";
 
 function ReplyChip({ children }: { children: ReactNode }): ReactNode {
   return <LabelPill>{children}</LabelPill>;
@@ -139,8 +144,10 @@ function AssignToMe({
 function InboxItem({
   ask,
   assignLive,
+  marked,
   onAnswered,
   onAssignLive,
+  onMark,
   onSnoozeLive,
   onRelease,
   section,
@@ -151,8 +158,12 @@ function InboxItem({
   /** True while this row's "Assign to me" write is in flight or failed, whatever section the
    *  optimistic update put the row in. */
   assignLive: boolean;
+  /** Whether the reader has marked this row for a bulk action. */
+  marked: boolean;
   onAnswered: (id: string) => void;
   onAssignLive: (askId: string, live: boolean) => void;
+  /** Marks or unmarks this row; `x` and the row's own checkbox are the two ways in. */
+  onMark: (askId: string) => void;
   /** The same registration for this row's snooze write; the Inbox keeps a live row rendered
    *  even when its band is folded, so `Snoozing…` and a refusal survive the fold. */
   onSnoozeLive: (askId: string, live: boolean) => void;
@@ -188,6 +199,13 @@ function InboxItem({
           Assign to me is a full-width row inside the right group, so it never draws over the
           issue key - and the reply chip truncates rather than squeezing the title away. */}
       <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <input
+          aria-label={`Select ${owner ?? title}`}
+          checked={marked}
+          className={`size-4 shrink-0 ${checkboxAccent}`}
+          onChange={() => onMark(ask.id)}
+          type="checkbox"
+        />
         <div className="flex min-w-0 grow basis-48 items-baseline gap-2">
           {ask.document === undefined ? (
             owner === null ? (
@@ -305,6 +323,79 @@ function heldRow(
   return movedBetweenTurnSections ? { ask: listed, section: seen.section } : undefined;
 }
 
+/**
+ * The bar above the bands while rows are marked: how many, one snooze for all of them, and the
+ * way out. A pick writes every marked ask through `useAskSnoozeMany`, so the whole set folds into
+ * `Later` in one step, with the same optimistic move and rollback the per-row control makes. The
+ * ids the server took leave the selection; the ones it refused stay marked and are named by a
+ * count, so a second pick retries exactly those.
+ */
+function BulkSnoozeBar({
+  onClear,
+  onSnoozed,
+  selected,
+}: {
+  onClear: () => void;
+  /** The ids the server took, once a pick has settled. */
+  onSnoozed: (snoozed: readonly string[]) => void;
+  selected: readonly string[];
+}): ReactNode {
+  const write = useAskSnoozeMany();
+  const [refused, setRefused] = useState<{ count: number; of: number } | undefined>(undefined);
+  const snooze = (until: string) => {
+    const ids = [...selected];
+    setRefused(undefined);
+    void write.submit(ids, until).then(({ failed }) => {
+      setRefused(failed.length === 0 ? undefined : { count: failed.length, of: ids.length });
+      onSnoozed(ids.filter((id) => !failed.includes(id)));
+    });
+  };
+  return (
+    // A fieldset, like the view switch: the group's name comes from its legend, and `min-w-0`
+    // holds back the UA's `min-inline-size: min-content` so a long refusal wraps inside it.
+    <fieldset
+      className={`flex min-w-0 flex-wrap items-center gap-2 rounded-xl border px-3 py-2 ${borderDefault}`}
+    >
+      <legend className="sr-only">Selected asks</legend>
+      <span className={`text-sm ${textSecondaryOnCanvas}`}>{selected.length} selected</span>
+      <span className={badgeSelectWrapper}>
+        <span aria-hidden="true" className={`${badgeSelectBadge} ${badgeLow.bg} ${badgeLow.text}`}>
+          {write.pending ? "Snoozing…" : "Snooze"}
+        </span>
+        <select
+          aria-label="Snooze selected asks"
+          className={badgeSelectOverlay}
+          data-inbox-bulk-snooze=""
+          onChange={(event) => {
+            const preset = SNOOZE_PRESETS.find((option) => option.id === event.target.value);
+            if (preset !== undefined) snooze(preset.until(new Date()));
+          }}
+          value=""
+        >
+          <option value="">Snooze…</option>
+          {SNOOZE_PRESETS.map((preset) => (
+            <option key={preset.id} value={preset.id}>
+              {preset.label}
+            </option>
+          ))}
+        </select>
+      </span>
+      <button
+        className={`min-h-11 shrink-0 rounded-lg px-2 py-1 text-xs font-medium md:min-h-8 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+        onClick={onClear}
+        type="button"
+      >
+        Clear selection
+      </button>
+      {refused === undefined ? null : (
+        <p className={`basis-full text-sm ${dangerText}`} role="alert">
+          Could not snooze {refused.count} of {refused.of}.
+        </p>
+      )}
+    </fieldset>
+  );
+}
+
 export function Inbox(): ReactNode {
   const { search } = useLocation();
   const navigate = useNavigate();
@@ -353,6 +444,28 @@ export function Inbox(): ReactNode {
       return next;
     });
   }, []);
+  // The rows the reader has marked, by ask id: `x` and the row's own checkbox are the two ways
+  // in, and the bulk bar acts on exactly these. An id the inbox no longer lists drops out, so a
+  // row that is listed again comes back unmarked.
+  const [marked, setMarked] = useState<ReadonlySet<string>>(() => new Set());
+  const onMark = useCallback((askId: string) => {
+    setMarked((current) => {
+      const next = new Set(current);
+      if (!next.delete(askId)) next.add(askId);
+      return next;
+    });
+  }, []);
+  const listedIds = inbox.data?.map((row) => row.id).join(" ");
+  useEffect(() => {
+    if (listedIds === undefined) return;
+    const listed = new Set(listedIds === "" ? [] : listedIds.split(" "));
+    setMarked((current) =>
+      [...current].every((id) => listed.has(id))
+        ? current
+        : new Set([...current].filter((id) => listed.has(id)))
+    );
+  }, [listedIds]);
+  const selected = (inbox.data ?? []).filter((row) => marked.has(row.id)).map((row) => row.id);
   // Later starts folded: its rows are the ones the reader has already dealt with by deferring.
   const [laterOpen, setLaterOpen] = useState(false);
   const listRef = useRef<HTMLElement>(null);
@@ -442,6 +555,39 @@ export function Inbox(): ReactNode {
         }
       },
       when: () => rowAround(document.activeElement) !== null,
+    },
+    {
+      id: "select",
+      keys: "x",
+      label: "Select or deselect the focused ask",
+      run: () => {
+        const askId = focusedRow()?.dataset.inboxRow;
+        if (askId !== undefined) onMark(askId);
+      },
+      when: () => focusedRow() !== null,
+    },
+    {
+      id: "snooze",
+      keys: "h",
+      // One key for both: with rows marked it is the whole selection, otherwise the row in hand.
+      label: "Snooze the focused ask, or every selected ask",
+      run: () => {
+        const picker =
+          selected.length > 0
+            ? listRef.current?.querySelector<HTMLElement>("[data-inbox-bulk-snooze]")
+            : inFocusedRow("[data-inbox-snooze]");
+        picker?.focus();
+      },
+      when: () => selected.length > 0 || inFocusedRow("[data-inbox-snooze]") != null,
+    },
+    {
+      id: "clear-selection",
+      keys: "Escape",
+      // Escape is one level out, and the selection is the outermost thing a row press made:
+      // `back` takes the reader off the row first, and this clears what they marked.
+      label: "Clear the selection",
+      run: () => setMarked(new Set()),
+      when: () => focusedRow() === null && selected.length > 0,
     },
   ]);
 
@@ -567,6 +713,15 @@ export function Inbox(): ReactNode {
       {viewSwitch}
       {chip}
       {agent === undefined ? <BlockedOnYou asks={inView(inbox.data)} /> : null}
+      {selected.length === 0 ? null : (
+        <BulkSnoozeBar
+          onClear={() => setMarked(new Set())}
+          onSnoozed={(snoozed) =>
+            setMarked((current) => new Set([...current].filter((id) => !snoozed.includes(id))))
+          }
+          selected={selected}
+        />
+      )}
       <ul className="space-y-3">
         {sections.flatMap(({ rows, section, shownRows }, index) => [
           <li
@@ -592,9 +747,11 @@ export function Inbox(): ReactNode {
             <InboxItem
               ask={ask}
               assignLive={assigning.has(ask.id)}
+              marked={marked.has(ask.id)}
               key={ask.id}
               onAnswered={recordAnswered}
               onAssignLive={onAssignLive}
+              onMark={onMark}
               onSnoozeLive={onSnoozeLive}
               onRelease={ask.id === held?.ask.id ? release : undefined}
               section={section}

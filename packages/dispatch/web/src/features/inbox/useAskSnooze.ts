@@ -61,3 +61,56 @@ export function useAskSnooze(askId: string): AskSnoozeWrite {
     submit: (until) => mutation.mutate(until),
   };
 }
+
+export interface AskSnoozeManyWrite {
+  /** True while a bulk save is in flight. */
+  pending: boolean;
+  /** Snoozes every id until `until` (RFC3339); resolves with the ids the server refused. */
+  submit: (ids: readonly string[], until: string) => Promise<{ failed: string[] }>;
+}
+
+/**
+ * The bulk form of `useAskSnooze`, over the same route once per ask: the marked rows drop into
+ * `Later` on the pick through the same optimistic write on every inbox cache, and the list
+ * refetches once the whole set has settled. Each ask settles on its own, so a refusal rolls back
+ * that row alone - to the moment it had before, not to null, which would un-snooze a row that
+ * was already deferred - and the ones the server took stay where they landed.
+ */
+export function useAskSnoozeMany(): AskSnoozeManyWrite {
+  const queryClient = useQueryClient();
+  const inboxKey = inboxQuery().queryKey;
+  const mutation = useMutation({
+    mutationFn: async ({ ids, until }: { ids: readonly string[]; until: string }) => {
+      const results = await Promise.allSettled(ids.map((id) => api.snoozeAsk(id, until)));
+      return ids.filter((_id, index) => results[index]?.status === "rejected");
+    },
+    onMutate: async ({ ids, until }) => {
+      await queryClient.cancelQueries({ queryKey: inboxKey });
+      const previous = queryClient.getQueriesData<InboxRow[]>({ queryKey: inboxKey });
+      const marked = new Set(ids);
+      queryClient.setQueriesData<InboxRow[]>({ queryKey: inboxKey }, (current) =>
+        current?.map((row) => (marked.has(row.id) ? { ...row, snoozed_until: until } : row))
+      );
+      return previous;
+    },
+    onSuccess: (failed, _variables, previous) => {
+      if (failed.length === 0) return;
+      const refused = new Set(failed);
+      for (const [key, data] of previous ?? []) {
+        const before = new Map((data ?? []).map((row) => [row.id, row.snoozed_until]));
+        queryClient.setQueryData<InboxRow[]>(key, (current) =>
+          current?.map((row) =>
+            refused.has(row.id) ? { ...row, snoozed_until: before.get(row.id) ?? null } : row
+          )
+        );
+      }
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: inboxKey });
+    },
+  });
+  return {
+    pending: mutation.isPending,
+    submit: async (ids, until) => ({ failed: await mutation.mutateAsync({ ids, until }) }),
+  };
+}
