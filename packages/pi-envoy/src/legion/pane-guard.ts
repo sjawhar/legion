@@ -28,12 +28,14 @@
  * when it was set, and a single-quoted one reads its own when it runs. So a handler set inside a
  * branch or loop body is judged with the variables that body gave it, which the merged state after
  * the construct may no longer know, except a name the shell assigns after the construct, whose new
- * value is the one it reads. A function a branch or loop body defines is every definition a path
- * may have left: a call runs each, and the command of that name where a path defined none. A
- * handler that would be dangerous only at an earlier exit (an `exit` before a later assignment
- * makes its target safe) is not caught: the guard does not model where a shell exits. A handler
- * whose text the guard cannot read is refused; one it can read that runs a command it cannot
- * (`trap 'eval "$c"' EXIT`) is judged as any such command is, the residual above.
+ * value is the one it reads. A later branch that blurs the name expires the capture too, so
+ * `…; fi; if [ -n "$x" ]; then t="$LEGION_WORKSPACE/b"; fi` is refused though both values are safe.
+ * A function a branch or loop body defines is every definition a path may have left: a call runs
+ * each, and the command of that name where a path defined none. A handler that would be dangerous
+ * only at an earlier exit (an `exit` before a later assignment makes its target safe) is not
+ * caught: the guard does not model where a shell exits. A handler whose text the guard cannot read
+ * is refused; one it can read that runs a command it cannot (`trap 'eval "$c"' EXIT`) is judged as
+ * any such command is, the residual above.
  */
 import {
   closeSync,
@@ -1015,7 +1017,10 @@ function merge(target: State, branches: readonly State[]): void {
 /** The variables a handler runs with in a shell whose variables are `vars`. For a handler lifted
  * out of a branch, a name the shell still holds as the merge that lifted it wrote it takes the
  * value that branch left, since the handler runs only on a path where that branch ran; a name
- * assigned since holds its new value, which is the one the handler reads when it runs. */
+ * assigned since holds its new value, which is the one the handler reads when it runs. This capture
+ * exists because a variable keeps one value after a merge, a blur where the branches differ. Giving
+ * variables every candidate a path may have left, as a function name has (`Callee`), would replace
+ * it, and is the direction a further change to the merge model takes. */
 function handlerVars(
   trap: Trap,
   vars: ReadonlyMap<string, Expansion>
