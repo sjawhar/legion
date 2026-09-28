@@ -1245,6 +1245,51 @@ describe("scripts a command runs", () => {
     expect(bash(`python3 - <<PY\nprint("a\\n")\nPY`)).toBeUndefined();
   });
 
+  test("an append to a file it has no model of leaves the file unknown, never empty", () => {
+    // LEGION-349: an append was taken as an empty prefix, so one no-op append to a file the guard
+    // had not read made it believe the file held only what was appended — a one-command bypass for
+    // any content, since the write tool puts it there by a permitted route. The model is the whole
+    // rule: what is on disk at check time is a state an earlier stage of the same command chooses.
+    const existing = script("unread.sh", 'rm -rf "$HOME"\n');
+    const existingPy = script("unread.py", `import shutil\nshutil.rmtree("${home}")\n`);
+    const fresh = path.join(scratch, "mine", "fresh.sh");
+    const copied = path.join(scratch, "mine", "copied.sh");
+    expect(bash(`bash ${existing}`)).toContain(home);
+    for (const [index, command] of [
+      `echo '' >> ${existing}; bash ${existing}`,
+      `echo harmless >> ${existing}; bash ${existing}`,
+      `echo one two three >> ${existing}; bash ${existing}`,
+      `printf '\\n' >> ${existing}; bash ${existing}`,
+      `cat >> ${existing} <<'EOF'\n# note\nEOF\nbash ${existing}`,
+      `cat >> ${existing} <<'EOF'\n# note\nEOF\n. ${existing}`,
+      `echo '' >> ${existing}; . ${existing}`,
+      `echo '' &>> ${existing}; bash ${existing}`,
+      `echo '' >> ${existing}; bash ${existing} "$HOME"`,
+      `echo '' >> ${existingPy}; python3 ${existingPy}`,
+      // A file absent at check time that an earlier stage of the same command fills: asking the
+      // filesystem would have answered the payload's way.
+      `cp ${existing} ${copied}; echo hi >> ${copied}; bash ${copied}`,
+      `echo 'echo hi' >> ${fresh}; bash ${fresh}`,
+    ].entries()) {
+      expect(bash(command), `row ${index}: ${command.slice(0, 60)}`).toContain(
+        "cannot read before running it"
+      );
+    }
+    // An append it can model is still read line by line, not blurred: the file this command wrote.
+    const appended = path.join(scratch, "mine", "appended.sh");
+    expect(
+      bash(`echo 'echo hi' > ${appended}; echo 'echo bye' >> ${appended}; bash ${appended}`)
+    ).toBeUndefined();
+    expect(
+      bash(`echo 'echo hi' > ${appended}; echo 'rm -rf "$HOME"' >> ${appended}; bash ${appended}`)
+    ).toContain(home);
+    // An append that runs nothing is allowed, inside the roots and outside them, and a `>` to a
+    // file with no model still writes a model.
+    expect(bash(`echo hi >> ${existing}`)).toBeUndefined();
+    expect(bash("echo hi >> ~/.bashrc")).toBeUndefined();
+    expect(bash(`echo 'echo hi' > ${fresh}; bash ${fresh}`)).toBeUndefined();
+  });
+
   test("reads a script a brace group writes from here-documents and printf before running it", () => {
     const writer = (value: string): string =>
       script(

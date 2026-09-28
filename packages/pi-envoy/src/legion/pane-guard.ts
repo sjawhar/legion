@@ -24,7 +24,13 @@
  * no value the guard builds is longer than `MAX_VALUE_LENGTH`: past it (a replacement of a
  * replacement, `x="$x$x"` repeated) a value is unknown, since building one held the pane. A script
  * a command writes is read whole up to `MAX_SCRIPT_BYTES`, as one on disk is, and past it is one
- * the guard cannot read (`readable`).
+ * the guard cannot read (`readable`). A `>>` append adds to the model the guard holds of that
+ * file: with no model the file is one it cannot read, never an empty one, or a no-op append would
+ * leave it reading the file as holding only what was appended (LEGION-349). `tee -a` is stricter
+ * and deliberately so: it leaves the file unknown whatever the model, since the guard does not
+ * render what `tee` writes, so appending with `tee -a` to a file this command wrote and then
+ * running it is refused where `>>` is allowed. Neither rule asks the filesystem what a file
+ * holds: at check time that is a state an earlier stage of the same command can choose.
  *
  * Every value the guard produces is known, unset, or unknown, and never one standing in for
  * another: a value it cannot know taken as some harmless concrete one (the empty string, the text
@@ -1952,10 +1958,16 @@ function checkRedirects(
         content = printfText(command.args, MAX_SCRIPT_BYTES, true) ?? null;
       }
       st.pidFiles.delete(file);
-      const before = appends ? st.files.get(file) : "";
+      // An append adds to the model of that file, and to nothing else: with no model the file is
+      // whatever is on disk, which the guard has not read, so it is unknown and never empty.
+      // Taking it as empty left one no-op append (`echo '' >> f`) making the guard read the file
+      // as holding only what was appended, a destructive line already there running unseen
+      // (LEGION-349). Nothing here asks the filesystem: a path absent at check time is one an
+      // earlier stage of the same command can fill (`cp evil.sh t; echo hi >> t; bash t`).
+      const before = appends ? (st.files.get(file) ?? null) : "";
       st.files.set(
         file,
-        content === null || before === null ? null : readable(`${before ?? ""}${content}`)
+        content === null || before === null ? null : readable(`${before}${content}`)
       );
       if (
         writes &&
@@ -2899,6 +2911,10 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
         if (target !== undefined && st.cwd !== undefined) {
           const file = path.resolve(st.cwd, target);
           st.pidFiles.delete(file);
+          // `tee -a` leaves the file unknown whatever the model, which is stricter than the `>>`
+          // rule in `checkRedirects` and stays so on purpose: routing it through that rule would
+          // start reading a file `tee` appended to, and the guard does not render what `tee`
+          // writes. So `tee -a` onto a file this command wrote, then run, is refused.
           const text = heredoc === undefined ? null : heredocText(heredoc);
           st.files.set(file, append || text === null ? null : readable(text));
         }
