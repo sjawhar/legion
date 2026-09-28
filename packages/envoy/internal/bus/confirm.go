@@ -21,12 +21,14 @@ var errPublishUnconfirmed = errors.New("publish not known to have been accepted"
 // publishConfirmed publishes msg on conn with publish, flushes within deadline, and confirms the
 // server accepted it (confirmPublished). A nil error means the server accepted the publish;
 // otherwise the error is nats.go's refusal before sending (refused), a flush that failed or ran out
-// of the window, ErrPublishDenied, or one wrapping errPublishUnconfirmed. publish is
-// (*nats.Conn).PublishMsg; it is a parameter so a test can make the server's answer arrive before
-// publish returns, which is the case the state read before it exists for.
-func (c *Client) publishConfirmed(conn *nats.Conn, msg *nats.Msg, deadline time.Time, publish func(*nats.Conn, *nats.Msg) error) error {
+// of the window, ErrPublishDenied, or one wrapping errPublishUnconfirmed. publish is the bound
+// method conn.PublishMsg (c.Conn.PublishMsg in PublishCoreTo, whose connection is c.Conn), so it
+// publishes on the connection publishConfirmed judges; it is a parameter so a test can make the
+// server's answer arrive before publish returns, which is the case the state read before it exists
+// for.
+func (c *Client) publishConfirmed(conn *nats.Conn, msg *nats.Msg, deadline time.Time, publish func(*nats.Msg) error) error {
 	before := observe(conn)
-	if err := publish(conn, msg); err != nil {
+	if err := publish(msg); err != nil {
 		return c.refused(err, len(msg.Data))
 	}
 	remaining := time.Until(deadline)

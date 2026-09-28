@@ -7,7 +7,7 @@ import (
 )
 
 // User is a fresh nkey user's seed and public key, the public key being what StartNkeyAuthorized
-// and StartNkeyPublishAllowed take.
+// and StartNkeyGranted take.
 func User(t testing.TB) (seed, public string) {
 	t.Helper()
 	user, err := nkeys.CreateUser()

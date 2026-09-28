@@ -239,14 +239,6 @@ func StartNkeyAuthorized(t testing.TB, user string) string {
 	return uri
 }
 
-// StartNkeyPublishAllowed runs a NATS test container as StartNkeyAuthorized does, whose one user
-// may publish only to the subjects allow names (and subscribe to anything): a publish to any other
-// subject is the server's permissions violation, as a per-client grant makes it.
-func StartNkeyPublishAllowed(t testing.TB, user string, allow ...string) string {
-	t.Helper()
-	return StartNkeyGranted(t, user, allow...).URL
-}
-
 // NkeyGrant is a NATS test server, started by StartNkeyGranted, whose one nkey user may publish
 // only to the subjects its grant names; Grant changes the grant.
 type NkeyGrant struct {
@@ -255,8 +247,10 @@ type NkeyGrant struct {
 	ctr  *tcnats.NATSContainer
 }
 
-// StartNkeyGranted runs a NATS test container as StartNkeyPublishAllowed does, and returns it so
-// the test can change the user's grant.
+// StartNkeyGranted runs a NATS test container as StartNkeyAuthorized does, whose one user may
+// publish only to the subjects allow names (and subscribe to anything): a publish to any other
+// subject is the server's permissions violation, as a per-client grant makes it. The test can
+// change the grant.
 func StartNkeyGranted(t testing.TB, user string, allow ...string) *NkeyGrant {
 	t.Helper()
 	ctr, uri := startNkeyConfig(t, publishGrantConfig(user, allow))

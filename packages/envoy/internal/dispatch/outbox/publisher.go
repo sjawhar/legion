@@ -282,7 +282,7 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 // publishDestinations publishes item to each of event's destinations in turn, and returns the
 // first error that ends the attempt; the denials it goes on past are in a.
 func publishDestinations(ctx context.Context, deps Deps, event model.Event, item contracts.Envelope, route *string, a *attempt) error {
-	if err := publishDestination(ctx, deps, event.ID, item, a, "publish event", item.Topic); err != nil {
+	if err := publishDestination(ctx, deps, event.ID, item, a, "publish owner topic", item.Topic); err != nil {
 		return err
 	}
 	targeted := (event.Type == "message.created" || event.Type == "message.answered") &&
@@ -552,7 +552,7 @@ func publishDestination(ctx context.Context, deps Deps, eventID int64, item cont
 		set published_destinations = array_append(published_destinations, $2)
 		where id = $1 and published_at is null and not ($2 = any(published_destinations))
 	`, eventID, item.Topic); err != nil {
-		return fmt.Errorf("%s %q: record published destination %q: %w", label, id, item.Topic, err)
+		return fmt.Errorf("%s %q: record published destination: %w", label, id, err)
 	}
 	a.delivered[item.Topic] = struct{}{}
 	return nil

@@ -230,7 +230,7 @@ func TestPublishConfirmedReadsTheStateBeforeThePublish(t *testing.T) {
 	conn := answeringServer(t, subject, false)
 	client := &Client{Conn: conn}
 	// A publish whose own flush has the server's violation recorded before it returns.
-	answered := func(conn *nats.Conn, msg *nats.Msg) error {
+	answered := func(msg *nats.Msg) error {
 		if err := conn.PublishMsg(msg); err != nil {
 			return err
 		}

@@ -24,7 +24,7 @@ const (
 func grantedClient(t *testing.T) (*bus.Client, *natsgo.Conn) {
 	t.Helper()
 	seed, public := testnats.User(t)
-	uri := testnats.StartNkeyPublishAllowed(t, public, grantedRole, "_INBOX.>")
+	uri := testnats.StartNkeyGranted(t, public, grantedRole, "_INBOX.>").URL
 	t.Setenv("NATS_NKEY_SEED", seed)
 	client, err := bus.Connect([]string{uri})
 	if err != nil {
