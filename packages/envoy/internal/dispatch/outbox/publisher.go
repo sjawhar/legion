@@ -256,11 +256,11 @@ func retryDelay(attempts int) time.Duration {
 	return delay
 }
 
-// publish publishes event to each of its destinations and returns their errors joined. A
-// destination NATS denies (a role route outside Dispatch's grant, say) holds back none of the
-// others; any other failure - one of the connection (a publish not confirmed, a disconnect, a
-// JetStream timeout) or of the store (a failed record write or lookup) - ends the attempt at once,
-// since every destination after it would fail the same way, and the event is retried. Each
+// publish publishes event to each of its destinations. A destination NATS denies (a role route
+// outside Dispatch's grant, say) holds back none of the others: it is left unrecorded, and the
+// denials are returned joined once every destination was tried, so the event is retried. Any other
+// failure, of the connection or of the store, ends the attempt at once, since every destination
+// after it would fail the same way, and is returned joined with the denials before it. Each
 // destination that succeeded is recorded (publishDestination), so the retry publishes only the
 // rest.
 func publish(ctx context.Context, deps Deps, event model.Event, slug string, route *string, delivered map[string]struct{}) error {
@@ -274,77 +274,53 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	if err := item.Validate(); err != nil {
 		return fmt.Errorf("validate envelope: %w", err)
 	}
-	var errs []error
-	// ends records err and reports whether it ends the attempt.
-	ends := func(err error) bool {
-		if err == nil {
-			return false
-		}
-		errs = append(errs, err)
-		return !continuable(err)
-	}
-	if ends(publishDestination(ctx, deps, event.ID, item, delivered)) {
-		return errors.Join(errs...)
+	a := &attempt{delivered: delivered}
+	err = publishDestinations(ctx, deps, event, item, route, a)
+	return errors.Join(append(a.denied, err)...)
+}
+
+// publishDestinations publishes item to each of event's destinations in turn, and returns the
+// first error that ends the attempt; the denials it goes on past are in a.
+func publishDestinations(ctx context.Context, deps Deps, event model.Event, item contracts.Envelope, route *string, a *attempt) error {
+	if err := publishDestination(ctx, deps, event.ID, item, a); err != nil {
+		return err
 	}
 	targeted := (event.Type == "message.created" || event.Type == "message.answered") &&
 		payloadString(event.Payload, "target") != ""
 	if event.Notify && !targeted {
-		if !suppressesCurrentRoute(event.Payload, route) && ends(publishRoute(ctx, deps, event.ID, item, delivered, route)) {
-			return errors.Join(errs...)
-		}
-		if ends(publishAuthorRoutes(ctx, deps, event.ID, item, event, delivered)) {
-			return errors.Join(errs...)
-		}
-	}
-	if !ends(publishFollowerRoutes(ctx, deps, event.ID, item, event, delivered)) {
-		ends(publishPreviousClaimant(ctx, deps, event.ID, item, event, delivered))
-	}
-	return errors.Join(errs...)
-}
-
-// destinationFailure is a failure of one destination alone: NATS denied its subject
-// (bus.ErrPublishDenied). The event's other destinations can still be published.
-type destinationFailure struct{ error }
-
-func (f destinationFailure) Unwrap() error { return f.error }
-
-// continuable reports whether err holds nothing but destination failures, through the wrapping
-// and joining the publish path adds, so that the attempt can go on to the event's other
-// destinations. Any other error ends the attempt.
-func continuable(err error) bool {
-	switch e := err.(type) {
-	case destinationFailure:
-		return true
-	case interface{ Unwrap() []error }:
-		for _, inner := range e.Unwrap() {
-			if !continuable(inner) {
-				return false
+		if !suppressesCurrentRoute(event.Payload, route) {
+			if err := publishRoute(ctx, deps, event.ID, item, a, route); err != nil {
+				return err
 			}
 		}
-		return true
-	case interface{ Unwrap() error }:
-		return continuable(e.Unwrap())
-	default:
-		return false
+		if err := publishAuthorRoutes(ctx, deps, event.ID, item, event, a); err != nil {
+			return err
+		}
 	}
+	if err := publishFollowerRoutes(ctx, deps, event.ID, item, event, a); err != nil {
+		return err
+	}
+	return publishPreviousClaimant(ctx, deps, event.ID, item, event, a)
+}
+
+// attempt is one pass over an event's destinations: the ones already reached, and the denials
+// (bus.ErrPublishDenied) the pass went on past.
+type attempt struct {
+	delivered map[string]struct{}
+	denied    []error
 }
 
 // publishSessionRoutes publishes item to each session's own topic, naming a failure by label and
-// the session. It goes on past a destination failure and stops at a failure that ends the attempt,
-// as publish does.
-func publishSessionRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, delivered map[string]struct{}, sessionIDs []string, label string) error {
-	var errs []error
+// the session.
+func publishSessionRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, a *attempt, sessionIDs []string, label string) error {
 	for _, sessionID := range sessionIDs {
 		routed := item
 		routed.Topic = contracts.AgentSubject(sessionID)
-		if err := publishDestination(ctx, deps, eventID, routed, delivered); err != nil {
-			errs = append(errs, fmt.Errorf("%s to %q: %w", label, sessionID, err))
-			if !continuable(err) {
-				break
-			}
+		if err := publishDestination(ctx, deps, eventID, routed, a); err != nil {
+			return fmt.Errorf("%s to %q: %w", label, sessionID, err)
 		}
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 // publishPreviousClaimant tells a session that lost an issue's claim, on its own topic: a
@@ -352,7 +328,7 @@ func publishSessionRoutes(ctx context.Context, deps Deps, eventID int64, item co
 // no longer lists this session as live) and a release somebody else made. Like the follower
 // routes this ignores Notify — the losing session must hear it whoever acted, and it would
 // otherwise learn only by subscribing to the whole issue.
-func publishPreviousClaimant(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, delivered map[string]struct{}) error {
+func publishPreviousClaimant(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
 	if event.Type != "issue.claimed" && event.Type != "issue.released" {
 		return nil
 	}
@@ -360,7 +336,7 @@ func publishPreviousClaimant(ctx context.Context, deps Deps, eventID int64, item
 	if sessionID == "" || event.Actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) {
 		return nil
 	}
-	return publishSessionRoutes(ctx, deps, eventID, item, delivered, []string{sessionID}, "publish claim change")
+	return publishSessionRoutes(ctx, deps, eventID, item, a, []string{sessionID}, "publish claim change")
 }
 
 // payloadPreviousClaimSession reads the session id out of an event payload's previous claim,
@@ -391,7 +367,7 @@ func payloadPreviousClaimSession(payload any) string {
 // this ignores Notify: an agent's reply on an ask must still reach the other followers,
 // who otherwise learn of it only by subscribing to the whole issue. The event's own actor
 // is skipped, and a topic the route already reached is not published twice.
-func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, delivered map[string]struct{}) error {
+func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
 	var askID string
 	switch event.Type {
 	case "ask.answered", "ask.edited", "ask.resolved":
@@ -412,7 +388,7 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 			sessionIDs = append(sessionIDs, follower.SessionID)
 		}
 	}
-	return publishSessionRoutes(ctx, deps, eventID, item, delivered, sessionIDs, "publish follower route")
+	return publishSessionRoutes(ctx, deps, eventID, item, a, sessionIDs, "publish follower route")
 }
 
 // publishAuthorRoutes delivers a human comment-thread action directly to the involved
@@ -422,7 +398,7 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 // or is the thread's own root author never learns about the human's reply, resolution,
 // reopening, or edit. Ask threads are not walked here: their asker and repliers are the
 // ask's followers (publishFollowerRoutes).
-func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, delivered map[string]struct{}) error {
+func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
 	seen := map[string]bool{}
 	var targets []string
 	consider := func(author model.Actor, found bool) {
@@ -483,7 +459,7 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		}
 	}
 
-	return publishSessionRoutes(ctx, deps, eventID, item, delivered, targets, "publish author route")
+	return publishSessionRoutes(ctx, deps, eventID, item, a, targets, "publish author route")
 }
 
 func loadMessageAuthor(ctx context.Context, deps Deps, messageID string) (model.Actor, bool, error) {
@@ -554,15 +530,16 @@ func publishedDestinationSet(subjects []string) map[string]struct{} {
 // whitespace, as an unbounded document slug or a bearer's session id can make it) is refused the
 // same way however often it is retried, so it is logged, once, and recorded like a publication, and
 // the event goes on to its other destinations. A destination NATS denies (bus.ErrPublishDenied) is
-// a destinationFailure, which publish goes on past; every other error ends the attempt.
-func publishDestination(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, delivered map[string]struct{}) error {
-	if _, ok := delivered[item.Topic]; ok {
+// left unrecorded and its denial added to a, and the attempt goes on; every other error ends it.
+func publishDestination(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, a *attempt) error {
+	if _, ok := a.delivered[item.Topic]; ok {
 		return nil
 	}
 	if err := deps.Publisher.Publish(item); err != nil {
 		switch {
 		case errors.Is(err, bus.ErrPublishDenied):
-			return destinationFailure{err}
+			a.denied = append(a.denied, err)
+			return nil
 		case !errors.Is(err, bus.ErrRefused):
 			return err
 		}
@@ -575,11 +552,11 @@ func publishDestination(ctx context.Context, deps Deps, eventID int64, item cont
 	`, eventID, item.Topic); err != nil {
 		return fmt.Errorf("record published destination %q: %w", item.Topic, err)
 	}
-	delivered[item.Topic] = struct{}{}
+	a.delivered[item.Topic] = struct{}{}
 	return nil
 }
 
-func publishRoute(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, delivered map[string]struct{}, route *string) error {
+func publishRoute(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, a *attempt, route *string) error {
 	if route == nil || *route == "" {
 		return nil
 	}
@@ -595,7 +572,7 @@ func publishRoute(ctx context.Context, deps Deps, eventID int64, item contracts.
 	default:
 		return fmt.Errorf("unsupported route %q", *route)
 	}
-	if err := publishDestination(ctx, deps, eventID, item, delivered); err != nil {
+	if err := publishDestination(ctx, deps, eventID, item, a); err != nil {
 		return fmt.Errorf("publish route %q: %w", *route, err)
 	}
 	return nil

@@ -2,11 +2,14 @@ package outbox
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -14,18 +17,22 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// countingPublisher records every topic it is asked to publish, answering each with fail (nil
-// publishes).
+// countingPublisher records every topic it is asked to publish, answering each with its entry in
+// failTopics, or else with fail (nil publishes).
 type countingPublisher struct {
-	mu     sync.Mutex
-	fail   error
-	topics []string
+	mu         sync.Mutex
+	fail       error
+	failTopics map[string]error
+	topics     []string
 }
 
 func (p *countingPublisher) Publish(item contracts.Envelope) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.topics = append(p.topics, item.Topic)
+	if err, ok := p.failTopics[item.Topic]; ok {
+		return err
+	}
 	return p.fail
 }
 
@@ -100,5 +107,33 @@ func TestAFailedRecordWriteEndsTheAttempt(t *testing.T) {
 	}
 	if destinations, _ := publishedDestinations(t, database, event.ID); len(destinations) != 0 {
 		t.Fatalf("published_destinations = %v, though every record write fails", destinations)
+	}
+}
+
+// An attempt that goes on past a denial and then ends at a connection failure returns both: the
+// denial is not lost behind the error that ended the attempt.
+func TestAnAttemptEndedAfterADenialReturnsBoth(t *testing.T) {
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	event := seedThreeDestinationEvent(t, database, broker)
+	unreachable := errors.New("bus: waiting for NATS to reconnect: context deadline exceeded")
+	publisher := &countingPublisher{failTopics: map[string]error{
+		roleTopic:                    fmt.Errorf("bus: %w to %q", bus.ErrPublishDenied, roleTopic),
+		"notifications.agent.writer": unreachable,
+	}}
+	route := "role:reviewer"
+	// publish reads the payload as the scan decodes it from the row, a JSON object.
+	raw, err := json.Marshal(event.Payload)
+	if err != nil {
+		t.Fatalf("encode payload: %v", err)
+	}
+	event.Payload = nil
+	if err := json.Unmarshal(raw, &event.Payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	err = publish(context.Background(), Deps{Store: database, Publisher: publisher}, event, "", &route, map[string]struct{}{})
+	if !errors.Is(err, bus.ErrPublishDenied) || !errors.Is(err, unreachable) {
+		t.Fatalf("publish returned %v, want the role route's denial and the author route's connection failure", err)
 	}
 }
