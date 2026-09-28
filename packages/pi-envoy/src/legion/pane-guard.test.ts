@@ -532,6 +532,9 @@ describe("resolution", () => {
     expect(bash(`${grown}; ${reads}`)).toBeUndefined();
     const doubled = `x=aaaa; ${Array.from({ length: 24 }, () => 'x="$x$x"').join("; ")}`;
     expect(bash(`${doubled}; rm -rf "/$x"`)).toContain("longer than");
+    // Zero characters doubled 24 times is 16 million pieces the length bound never sees.
+    const pieces = `z=""; ${Array.from({ length: 24 }, () => 'z="$z$z"').join("; ")}`;
+    expect(bash(`${pieces}; rm -rf "/$z"`)).toContain("longer than");
     const printed = `x=aaaa; ${Array.from({ length: 24 }, () => `printf -v x '%s%s' "$x" "$x"`).join("; ")}`;
     expect(bash(`${printed}; rm -rf "/$x"`)).toContain("longer than");
     // A replacement whose output would pass the bound is not built: 80 of them, each 512 times a

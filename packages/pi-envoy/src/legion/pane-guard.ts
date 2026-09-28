@@ -1113,12 +1113,18 @@ function product(left: Piece[][], right: Piece[][]): Piece[][] {
  * on Linux, so a longer value is never one target it resolves, and building values without a bound
  * held the pane: a replacement of a replacement (`${v//?/$w}`) or `x="$x$x"` repeated in one line
  * reached tens of millions of characters in a fraction of a second, and judging each read of one
- * took seconds. Past the bound a value is unknown, and a refusal says why (`overLong`). */
+ * took seconds. The piece bound is its own: `z=""; z="$z$z"` repeated doubles empty pieces the
+ * length bound never sees. A value becomes a target only once a word joins it, and `product` is
+ * that join, so bounding it bounds every target; `patternExpansion` bounds the one producer that
+ * outgrows its inputs before a join (`printf -v`'s text is joined before it is judged too). Past
+ * the bound a value is unknown, and a refusal says why (`overLong`). */
 const MAX_VALUE_LENGTH = 65_536;
 const MAX_VALUE_PIECES = 4_096;
 
 function overLong(what: string): Piece {
-  return unknown(`${what}, longer than the ${MAX_VALUE_LENGTH} characters the guard builds`);
+  return unknown(
+    `${what}, longer than the guard builds (${MAX_VALUE_LENGTH} characters or ${MAX_VALUE_PIECES} pieces)`
+  );
 }
 
 function textLength(pieces: readonly Piece[]): number {
@@ -2627,9 +2633,7 @@ function dispatch(invocation: Invocation, outer: State, ctx: Ctx): void {
                     `\`$${variable ?? "?"}\` (printf -v${cause === undefined ? "" : `: ${cause}`})`
                   ),
                 ]
-              : text.length > MAX_VALUE_LENGTH
-                ? [overLong(`\`$${variable ?? "?"}\` (printf -v)`)]
-                : [literal(text)];
+              : [literal(text)];
         }
         assignByName(outer, variable, assigned, "`printf -v`");
         return;

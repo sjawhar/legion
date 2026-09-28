@@ -295,7 +295,8 @@ starting with `/` after `/` or `//`); text outside ASCII, which bash counts by t
 replacement holding `&`. A pattern is matched by stepping the positions it can reach along the
 value, never by a backtracking regular expression, and its work (the value's length times the
 pattern's) is charged to the walk budget, a `case` item's included. No value the guard builds is
-longer than 65,536 characters (`MAX_VALUE_LENGTH`): a replacement of a replacement or `x="$x$x"`
+longer than 65,536 characters or 4,096 pieces (`MAX_VALUE_LENGTH`, `MAX_VALUE_PIECES`, each pinned
+by a test): a replacement of a replacement or `x="$x$x"`
 repeated reached tens of millions of characters and held the pane on each read, so past the bound
 a value is unknown, and a refusal names the cause. A script a command writes (a rendered brace
 group, `printf` or `echo` into a file, appends) is read whole up to the 1 MiB the guard reads of a
